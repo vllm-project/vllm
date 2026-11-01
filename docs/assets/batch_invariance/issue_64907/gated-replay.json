@@ -1,0 +1,29 @@
+{
+  "layer": 26,
+  "weight_key": "model.language_model.layers.26.linear_attn.norm.weight",
+  "reference_rows": [
+    32,
+    64
+  ],
+  "observed_rows": [
+    96,
+    128
+  ],
+  "x_dtype": "torch.bfloat16",
+  "z_dtype": "torch.bfloat16",
+  "weight_dtype": "torch.bfloat16",
+  "reference_matches_trace": true,
+  "observed_matches_trace": true,
+  "trace_reference_max_abs": 0.0,
+  "inputs_equal": true,
+  "gates_equal": true,
+  "native_equal": false,
+  "native_differing_elements": 1,
+  "native_max_abs": 6.103515625e-05,
+  "fixed_equal": true,
+  "reference_unchanged": true,
+  "native_layouts": [
+    1,
+    2
+  ]
+}

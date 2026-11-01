@@ -1,0 +1,49 @@
+{
+  "original_source_identity": {
+    "vllm": "0.24.0+cu129",
+    "files": {
+      "model_executor/layers/mamba/gdn/base.py": {
+        "original_sha256": "7fec748fc74131f5a45bcaf2644b3fa3a0598fd437d7347f8207ea3644a951c5",
+        "patched_sha256": "bd812d5a9c005897c371be19024f5283be37e576708e641045d0f31f76d2ecf7"
+      },
+      "v1/attention/backends/gdn_attn.py": {
+        "original_sha256": "a76cddf32de48927b44e2db441ff551005f035cd0f3dd36aaa1ae0d3b850dcd2",
+        "patched_sha256": "c501a13be130816b8eed80e89ca477d70861ecd500124df8e2de3e5e5751b97a"
+      },
+      "model_executor/layers/mamba/gdn/qwen_gdn_linear_attn.py": {
+        "original_sha256": "97faa7eeb0c2a3ea0c51330a45c038d8c644c57da52946692168019585c6cee6",
+        "patched_sha256": "a9e72761d4721d07f78f723e1c6e2ee8ea15f8bb24fce29e4e21ecc0098570e9"
+      },
+      "v1/core/sched/scheduler.py": {
+        "original_sha256": "df78076164fe02a63876d7690cefac810f1ba4d8fb58afc15e786c1608064090",
+        "patched_sha256": "996512085477db46a5224f5e06e751730f4eba90e51942ab7c7b1a0ac759b5e9"
+      },
+      "v1/core/kv_cache_coordinator.py": {
+        "original_sha256": "9dd0a647f671b859e3743fbf5ec84cd892fd5754022eef58c5b8c989a4cda97b",
+        "patched_sha256": "acbc631dbbc722cc779b686d30141a018272f3c58fdb994effcbcf774a885421"
+      },
+      "v1/worker/gpu_model_runner.py": {
+        "original_sha256": "d2b8ec101122749e1a2610383d2ab74c5a21605e9d7995eb68192bc769986694",
+        "patched_sha256": "1b326d6b80dca0a8a9482a13319fae2b8e70f49ebe394760646b6099e155e81b"
+      },
+      "v1/sample/ops/topk_topp_sampler.py": {
+        "original_sha256": "35b9a1ffeb1e50b73b0ddd1ffc0f968910ee21cf9cc5455dd879fde547b6ddc1",
+        "patched_sha256": "151a7f38b4339c1ee1389c91aaa4508fe279cef8b75d426c933dceae2c0bb06b"
+      },
+      "model_executor/layers/fla/ops/layernorm_guard.py": {
+        "original_sha256": "d6a2f6545a71b6e1a9eddd83783b1489cc79de18fac6db09192980ad83179995",
+        "patched_sha256": "474fb84c7b0ef5efb649d885ec355930ffd60b0330855be65b58e71a0bd033ce"
+      }
+    }
+  },
+  "upstream_commit_recorded": false,
+  "fixture_origin": "first 9B top-p divergence, scaled_logits and observed masks; no model weights",
+  "fixture_sha256": "f77c42df9f0491601c836130254f29eb26a5ce627d31c414cad2849528395f69",
+  "checkpoint_public_url_and_license_recorded": false,
+  "runtime_sources": "baseline wheel references, not additional modifications",
+  "recorded_gpu_experiment_date": "2026-10-31",
+  "portable_helpers_gpu_rerun": false,
+  "fixture_included_in_public_repository": false,
+  "raw_model_responses_included": false,
+  "publication_scope": "Source patches, helpers, numeric evidence and response digests"
+}

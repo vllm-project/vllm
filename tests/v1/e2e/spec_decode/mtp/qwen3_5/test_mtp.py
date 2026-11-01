@@ -38,7 +38,7 @@ def test_mtp_batch_invariance(
     num_spec_tokens: int,
     vllm_runner,
 ):
-    """MTP must preserve seeded token/logprob outputs when requests are regrouped."""
+    """MTP must preserve complete seeded responses when requests are regrouped."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "0")
@@ -96,18 +96,28 @@ def test_mtp_batch_invariance(
         llm = runner.llm
         assert len(llm.get_tokenizer().encode(manual)) > 1024
 
-        def selected(output):
+        def response(output):
             completion = output.outputs[0]
             tokens = list(completion.token_ids)
             assert completion.logprobs is not None
+            assert len(tokens) == len(completion.logprobs)
             logprobs = [
-                step[token].logprob
-                for token, step in zip(tokens, completion.logprobs, strict=True)
+                {
+                    token: (entry.logprob, entry.rank, entry.decoded_token)
+                    for token, entry in step.items()
+                }
+                for step in completion.logprobs
             ]
-            return tokens, logprobs
+            return (
+                completion.text,
+                tokens,
+                logprobs,
+                completion.finish_reason,
+                completion.stop_reason,
+            )
 
         serial = [
-            selected(
+            response(
                 llm.generate(
                     [prompt],
                     [param],
@@ -119,13 +129,13 @@ def test_mtp_batch_invariance(
         warm_outputs = llm.generate(prompts, params, use_tqdm=False)
         cached_tokens = [warm_outputs[i].num_cached_tokens for i in (0, 2)]
         assert all(count is not None and count > 0 for count in cached_tokens)
-        batched = [selected(output) for output in warm_outputs]
+        batched = [response(output) for output in warm_outputs]
         reversed_batch = [
-            selected(output)
+            response(output)
             for output in llm.generate(prompts[::-1], params[::-1], use_tqdm=False)
         ][::-1]
         cold_batch = [
-            selected(output)
+            response(output)
             for output in llm.generate(
                 prompts,
                 cold_params,

@@ -1,0 +1,53 @@
+{
+  "previous_pr_head": "0f229513edc95753038ff8364f97ccdc4a2881fa",
+  "date_utc": "2026-11-01",
+  "configuration": {
+    "model": "Qwen/Qwen3.5-0.8B-Base",
+    "model_revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+    "hardware": "H100 SM90, TP1",
+    "weights_dtype": "bfloat16",
+    "recurrent_state_dtype": "float32",
+    "model_runner": "MRV2",
+    "execution": "eager",
+    "VLLM_GPU_SYNC_CHECK": "error",
+    "gdn_prefill_backend": "triton",
+    "attention_backend": "FLASH_ATTN"
+  },
+  "sampler_regression": {
+    "test": "tests/v1/sample/test_topk_topp_sampler.py",
+    "selection": "batch_invariant_top_p_ties or random_sample_uses_fp64 or sampler_threads_fp64 or topk_impl_equivalence",
+    "before_fix": "6 stable top-p probes failed, 156 deselected, 29.78s",
+    "after_fix": "9 passed, 153 deselected, 7.40s",
+    "batches": [1, 8, 33],
+    "top_p": 0.75,
+    "vocabulary_size": 4096,
+    "input": "Synthetic equal logits; target top-k disabled; optional heterogeneous top-k=32 neighbours",
+    "expected": "Stable ascending token-index ordering; retain final 3072 token IDs",
+    "limitations": "Synthetic stable ordering regression; not a rerun of the unpublished model-derived tensor fixture."
+  },
+  "full_response_e2e": {
+    "test": "tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py -k batch_invariance",
+    "result": "4 passed, 4 deselected, 164.06s",
+    "mtp_depths": [0, 1, 2, 3],
+    "prompts_per_depth": 4,
+    "max_tokens": 32,
+    "sampling": "temperature=0.6, top_p=0.95, per-request seeds 1000..1003",
+    "compared": ["text", "token_ids", "all returned logprob values, ranks and decoded tokens", "finish_reason", "stop_reason"],
+    "traffic": ["serial cold", "warm batch with observed cache hits", "reverse warm batch", "cold batch"],
+    "zero_tolerance": true,
+    "nonzero_mtp_acceptance_asserted": true,
+    "limitations": "0.8B only; max_num_seqs=2; not the complete issue cache/batch matrix or MTP4."
+  },
+  "uncommitted_state_probe": {
+    "test": "tests/kernels/mamba/test_checkpoint_exporter.py -k gdn_checkpoint_reload",
+    "result": "4 FP32 passed; 4 BF16 failed; 13 deselected; 9.77s",
+    "failure": "Restored BF16 recurrent state produces a different suffix from uninterrupted execution.",
+    "published_as_evidence_only": true,
+    "source_in_evidence_archive": "probe-test_checkpoint_exporter.py",
+    "production_test_suite_modified": false
+  },
+  "prior_quality_and_performance": {
+    "validated_head": "0f229513edc95753038ff8364f97ccdc4a2881fa",
+    "rerun_after_this_sampler_fix": false
+  }
+}

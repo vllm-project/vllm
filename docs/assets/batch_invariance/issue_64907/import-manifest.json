@@ -1,0 +1,21 @@
+{
+  "issue": "https://github.com/vllm-project/vllm/issues/64907",
+  "source_repository": "https://github.com/leechangbing/qwen-gdn-batch-invariant-mtp-repro",
+  "source_commit": "732d1ce35e4ee8aecf6c230c300dfe6de4fba9f3",
+  "historical_runtime": "vLLM 0.24.0+cu129; upstream commit not recorded",
+  "verified_source_files": 38,
+  "totals": {
+    "final_eight_file_groups": 11,
+    "final_eight_file_comparisons": 1984,
+    "final_eight_file_exact": 1984,
+    "historical_all_versions_comparisons": 2112
+  },
+  "not_current_head_validation": true,
+  "archive_sha256": "01ffbbd8596a59f0e8b97f12ecc3c8e3e77effc8da003fc368f8e48d1cb46858",
+  "limitations": [
+    "Raw model responses and model-derived tensor fixtures were not published.",
+    "Experimental 27B checkpoint public provenance and license not recorded.",
+    "Response digests audit observations; they cannot rerun GPU computation.",
+    "Historical fixed-depth equality does not establish cross-depth losslessness."
+  ]
+}

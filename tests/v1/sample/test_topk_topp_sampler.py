@@ -167,6 +167,28 @@ def test_topk_impl_equivalence():
     assert torch.allclose(result1, result2)
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+@pytest.mark.parametrize("batch_size", [1, 8, 33])
+@pytest.mark.parametrize("heterogeneous_k", [False, True])
+def test_batch_invariant_top_p_ties(monkeypatch, batch_size, heterogeneous_k):
+    from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    vocab_size = 4096
+    logits = torch.zeros(batch_size, vocab_size, device=DEVICE_TYPE)
+    p = torch.full((batch_size,), 0.75, device=DEVICE_TYPE)
+    k = None
+    if heterogeneous_k:
+        k = torch.full((batch_size,), 32, dtype=torch.int32, device=DEVICE_TYPE)
+        k[0] = vocab_size
+
+    result = apply_top_k_top_p(logits, k, p)
+    # Equal logits are sorted by token index; discard the lowest quarter.
+    expected = torch.arange(vocab_size, device=DEVICE_TYPE) >= vocab_size // 4
+    assert torch.equal(torch.isfinite(result[0]), expected)
+    assert torch.equal(result[0, expected], torch.zeros_like(result[0, expected]))
+
+
 @pytest.mark.skipif(
     not FLASHINFER_TOPK_TOPP_SUPPORTED,
     reason="Requires CUDA and flashinfer",

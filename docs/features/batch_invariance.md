@@ -144,6 +144,77 @@ Batch invariance at a fixed speculative depth does not establish identical
 sampled outputs across speculative depths or between speculative and
 non-speculative sampling.
 
+### Stable CUDA top-p filtering
+
+In batch-invariant mode, CUDA top-k/top-p filtering uses the PyTorch sorting
+path for every batch size. Sorting is stable: equal logits retain token-index
+order before the ascending cumulative-probability mask is applied. This avoids
+changing the retained token set when a different filtering backend is selected
+for a larger batch or heterogeneous top-k settings. Sorting the full vocabulary
+can cost more than the ordinary Triton filtering path.
+
+### Issue #64907 patch and historical evidence
+
+The [original patch package](../assets/batch_invariance/issue_64907/original-package.tar.gz)
+includes the eight-file wheel patch, repository patch, six component patches,
+reproduction helpers, license, provenance and numeric evidence from
+[issue #64907](https://github.com/vllm-project/vllm/issues/64907).
+It is pinned to source-package commit
+`732d1ce35e4ee8aecf6c230c300dfe6de4fba9f3`; all 38 source-manifest hashes
+were verified before import and again inside the archive.
+See the [import manifest](../assets/batch_invariance/issue_64907/import-manifest.json)
+and [original provenance](../assets/batch_invariance/issue_64907/PROVENANCE.json).
+The archived patches target vLLM 0.24.0+cu129 and are historical references.
+
+| Original component | Integration in this implementation |
+| --- | --- |
+| `01-gdn-batch-invariance` | Superseded by the shared per-request convolution and sigmoid-gated recurrence for prefill, decode and MTP verification. The old speculative gate-index correction is already upstream. |
+| `02-hybrid-prefix-cache` | The current cache coordinator already excludes Mamba groups from the speculative cache margin. Original cache-grid assertions remain archived; complete cache-matrix acceptance is pending. |
+| `03-accepted-count-snapshot` | The legacy CPU snapshot is superseded by MRV2's GPU accepted-count state indexed by permanent request IDs, with gather/scatter during row changes. Integrated rejection/preemption validation is pending. |
+| `04-fixed-gated-norm-layout` | The fixed one-row normalization layout is already present in this branch. |
+| `05-stable-top-p` | Ported to the current sampler: fixed CUDA BI filtering backend and stable equal-logit ordering. |
+| `90-cache-measurement` | Preserved in the downloadable reproduction package. Synchronous scheduler file logging is not part of the serving implementation. |
+
+The [historical validation summary](../assets/batch_invariance/issue_64907/validation-summary.json)
+and [comparison audit](../assets/batch_invariance/issue_64907/comparison-audit.json)
+retain per-comparison response, token and logprob digests, decoding strata and
+cross-depth divergences.
+
+| Historical model | MTP depth: exact fixed-depth comparisons |
+| --- | --- |
+| Qwen3.5-2B | MTP2: 128/128; MTP3: 224/224; MTP4: 224/224 |
+| Qwen3.5-9B | MTP1: 128/128; MTP2/3/4: 224/224 each |
+| Experimental Qwen3.8-27B-FP8 | MTP1/2/3: 128/128 each; MTP4: 224/224 |
+
+The final eight-file experiment totals 1,984/1,984 comparisons in 11 groups.
+An earlier six-file 2B MTP1 run contributes a separate 128/128.
+These are recorded historical observations, not validation of the current
+upstream implementation. Cross-depth sampled comparisons differed; some
+greedy cross-depth logprobs also differed.
+
+The archived [top-p replay](../assets/batch_invariance/issue_64907/top-p-replay.json)
+records two differing retained-mask elements before fixed-backend filtering
+and zero afterward. The [gated-normalization replay](../assets/batch_invariance/issue_64907/gated-replay.json)
+records one differing element, maximum absolute difference
+`6.103515625e-05`, and exact equality with the fixed layout.
+Raw generated responses and model-derived tensor fixtures were not included
+in the public source package. The experimental 27B checkpoint's public
+provenance and license were not recorded, so its results do not establish
+public-checkpoint support. Digest equality cannot independently rerun the
+original GPU computation.
+
+Current integration validation is recorded separately in
+[current-validation.json](../assets/batch_invariance/issue_64907/current-validation.json),
+with [GPU logs and the state probe](../assets/batch_invariance/issue_64907/current-validation.tar.gz).
+The stable top-p probes failed in all six configurations before the sampler
+fix; afterward, nine sampler regressions passed. The real 0.8B LLM regression
+passed MTP0/1/2/3 with exact text, token IDs, every returned top-5 logprob
+entry, finish reason and stop reason across cold/warm and reordered requests.
+This four-request test does not cover the complete issue acceptance matrix.
+The separate checkpoint probe passed four FP32 cases and failed four BF16
+cases after state reload; it is evidence only, and BF16 recurrent state
+remains unsupported.
+
 ## Tested Models
 
 Batch invariance has been tested and verified on the following models:

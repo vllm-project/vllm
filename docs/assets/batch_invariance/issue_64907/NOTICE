@@ -1,0 +1,7 @@
+vLLM-derived source files and patches are licensed under Apache License 2.0.
+Original SPDX and copyright notices are retained in the source/patch material.
+Upstream license: https://github.com/vllm-project/vllm/blob/main/LICENSE
+
+New reproduction helpers and documentation in this repository are provided under Apache-2.0.
+No model weights, raw model responses or model-derived tensor fixtures are distributed.
+This repository is an independent experiment and is not an official vLLM release.

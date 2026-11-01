@@ -234,6 +234,7 @@ steps:
   source_file_dependencies:
     - vllm/v1/spec_decode/
     - vllm/v1/worker/gpu/spec_decode/
+    - vllm/v1/sample/ops/topk_topp_sampler.py
     - vllm/v1/attention/backends/
     - vllm/transformers_utils/configs/speculators/
     - vllm/model_executor/models/qwen3_5_mtp.py

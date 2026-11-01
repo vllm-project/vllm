@@ -1,0 +1,44 @@
+{
+  "inputs_equal": true,
+  "results": [
+    {
+      "mode": "adaptive_backend",
+      "equal": false,
+      "single_matches_observed": true,
+      "batch_matches_observed": true,
+      "different_mask_elements": 2,
+      "differences": [
+        {
+          "token_id": 97032,
+          "token": "这些",
+          "scaled_logit": 23.90625,
+          "single_kept": false,
+          "batch_kept": true
+        },
+        {
+          "token_id": 110431,
+          "token": "目前的",
+          "scaled_logit": 23.90625,
+          "single_kept": true,
+          "batch_kept": false
+        }
+      ]
+    },
+    {
+      "mode": "fixed_pytorch",
+      "equal": true,
+      "single_matches_observed": true,
+      "batch_matches_observed": false,
+      "different_mask_elements": 0,
+      "differences": []
+    },
+    {
+      "mode": "fixed_pytorch_stable",
+      "equal": true,
+      "single_matches_observed": true,
+      "batch_matches_observed": false,
+      "different_mask_elements": 0,
+      "differences": []
+    }
+  ]
+}

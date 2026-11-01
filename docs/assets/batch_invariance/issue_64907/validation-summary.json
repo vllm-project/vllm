@@ -1,0 +1,2229 @@
+{
+  "runs": [
+    {
+      "model": "Qwen3.5-2B",
+      "mtp": 1,
+      "source": "evidence/2b-mtp1/final-validation.json",
+      "status": "passed",
+      "comparisons": 128,
+      "exact": 128,
+      "tokens": 128,
+      "logprobs": 128,
+      "strata": {
+        "greedy": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        },
+        "sampled": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        }
+      },
+      "patch_version": "historical-six-file"
+    },
+    {
+      "model": "Qwen3.5-9B",
+      "mtp": 1,
+      "source": "evidence/larger-mtp1/Qwen3.5-9B/final-validation.json",
+      "status": "passed",
+      "comparisons": 128,
+      "exact": 128,
+      "tokens": 128,
+      "logprobs": 128,
+      "strata": {
+        "greedy": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        },
+        "sampled": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.8-27B-FP8",
+      "mtp": 1,
+      "source": "evidence/larger-mtp1/Qwen3.8-27B-FP8/final-validation.json",
+      "status": "passed",
+      "comparisons": 128,
+      "exact": 128,
+      "tokens": 128,
+      "logprobs": 128,
+      "strata": {
+        "greedy": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        },
+        "sampled": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.5-2B",
+      "mtp": 2,
+      "source": "evidence/mtp234/Qwen3.5-2B/mtp-2/final-validation.json",
+      "status": "passed",
+      "comparisons": 128,
+      "exact": 128,
+      "tokens": 128,
+      "logprobs": 128,
+      "strata": {
+        "greedy": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        },
+        "sampled": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.5-2B",
+      "mtp": 3,
+      "source": "evidence/mtp234/Qwen3.5-2B/mtp-3/final-validation.json",
+      "status": "passed",
+      "comparisons": 224,
+      "exact": 224,
+      "tokens": 224,
+      "logprobs": 224,
+      "strata": {
+        "greedy": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        },
+        "sampled": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.5-2B",
+      "mtp": 4,
+      "source": "evidence/mtp234/Qwen3.5-2B/mtp-4/final-validation.json",
+      "status": "passed",
+      "comparisons": 224,
+      "exact": 224,
+      "tokens": 224,
+      "logprobs": 224,
+      "strata": {
+        "greedy": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        },
+        "sampled": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.5-9B",
+      "mtp": 2,
+      "source": "evidence/mtp234/Qwen3.5-9B/mtp-2/final-validation.json",
+      "status": "passed",
+      "comparisons": 224,
+      "exact": 224,
+      "tokens": 224,
+      "logprobs": 224,
+      "strata": {
+        "greedy": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        },
+        "sampled": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.5-9B",
+      "mtp": 3,
+      "source": "evidence/mtp234/Qwen3.5-9B/mtp-3/final-validation.json",
+      "status": "passed",
+      "comparisons": 224,
+      "exact": 224,
+      "tokens": 224,
+      "logprobs": 224,
+      "strata": {
+        "greedy": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        },
+        "sampled": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.5-9B",
+      "mtp": 4,
+      "source": "evidence/mtp234/Qwen3.5-9B/mtp-4/final-validation.json",
+      "status": "passed",
+      "comparisons": 224,
+      "exact": 224,
+      "tokens": 224,
+      "logprobs": 224,
+      "strata": {
+        "greedy": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        },
+        "sampled": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.8-27B-FP8",
+      "mtp": 2,
+      "source": "evidence/mtp234/Qwen3.8-27B-FP8/mtp-2/final-validation.json",
+      "status": "passed",
+      "comparisons": 128,
+      "exact": 128,
+      "tokens": 128,
+      "logprobs": 128,
+      "strata": {
+        "greedy": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        },
+        "sampled": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.8-27B-FP8",
+      "mtp": 3,
+      "source": "evidence/mtp234/Qwen3.8-27B-FP8/mtp-3/final-validation.json",
+      "status": "passed",
+      "comparisons": 128,
+      "exact": 128,
+      "tokens": 128,
+      "logprobs": 128,
+      "strata": {
+        "greedy": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        },
+        "sampled": {
+          "comparisons": 64,
+          "exact": 64,
+          "tokens": 64,
+          "logprobs": 64
+        }
+      },
+      "patch_version": "final-eight-file"
+    },
+    {
+      "model": "Qwen3.8-27B-FP8",
+      "mtp": 4,
+      "source": "evidence/mtp234/Qwen3.8-27B-FP8/mtp-4/final-validation.json",
+      "status": "passed",
+      "comparisons": 224,
+      "exact": 224,
+      "tokens": 224,
+      "logprobs": 224,
+      "strata": {
+        "greedy": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        },
+        "sampled": {
+          "comparisons": 112,
+          "exact": 112,
+          "tokens": 112,
+          "logprobs": 112
+        }
+      },
+      "patch_version": "final-eight-file"
+    }
+  ],
+  "cross_mtp": [
+    {
+      "model": "Qwen3.5-2B",
+      "left": 2,
+      "right": 3,
+      "strata": {
+        "greedy": {
+          "comparisons": 8,
+          "exact": 5,
+          "tokens": 8,
+          "logprobs": 5
+        },
+        "sampled": {
+          "comparisons": 8,
+          "exact": 0,
+          "tokens": 0,
+          "logprobs": 0
+        }
+      },
+      "records": [
+        {
+          "case": "boundary_1087",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1087",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": true,
+          "logprobs_equal": false,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.07470488548278809
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": true,
+          "logprobs_equal": false,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.09314596652984619
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": true,
+          "logprobs_equal": false,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.07388043403625488
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "short",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "short",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 24,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        }
+      ]
+    },
+    {
+      "model": "Qwen3.5-2B",
+      "left": 2,
+      "right": 4,
+      "strata": {
+        "greedy": {
+          "comparisons": 8,
+          "exact": 5,
+          "tokens": 8,
+          "logprobs": 5
+        },
+        "sampled": {
+          "comparisons": 8,
+          "exact": 0,
+          "tokens": 0,
+          "logprobs": 0
+        }
+      },
+      "records": [
+        {
+          "case": "boundary_1087",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1087",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": true,
+          "logprobs_equal": false,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.07470488548278809
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": true,
+          "logprobs_equal": false,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.09314596652984619
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": true,
+          "logprobs_equal": false,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.07388043403625488
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "short",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "short",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 24,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        }
+      ]
+    },
+    {
+      "model": "Qwen3.5-2B",
+      "left": 3,
+      "right": 4,
+      "strata": {
+        "greedy": {
+          "comparisons": 14,
+          "exact": 14,
+          "tokens": 14,
+          "logprobs": 14
+        },
+        "sampled": {
+          "comparisons": 14,
+          "exact": 0,
+          "tokens": 0,
+          "logprobs": 0
+        }
+      },
+      "records": [
+        {
+          "case": "boundary_1087",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1087",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1119",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1119",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1120",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1120",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1121",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1121",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_559",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_559",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_560",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_560",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_561",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_561",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "short",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "short",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 50,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        }
+      ]
+    },
+    {
+      "model": "Qwen3.5-9B",
+      "left": 2,
+      "right": 3,
+      "strata": {
+        "greedy": {
+          "comparisons": 14,
+          "exact": 14,
+          "tokens": 14,
+          "logprobs": 14
+        },
+        "sampled": {
+          "comparisons": 14,
+          "exact": 0,
+          "tokens": 0,
+          "logprobs": 0
+        }
+      },
+      "records": [
+        {
+          "case": "boundary_1055",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1055",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1056",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1056",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1057",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1057",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1087",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1087",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 23,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 23,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 9,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_527",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_527",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 23,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_528",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_528",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 27,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_529",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_529",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 27,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 31,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 27,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 27,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "short",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "short",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 9,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        }
+      ]
+    },
+    {
+      "model": "Qwen3.5-9B",
+      "left": 2,
+      "right": 4,
+      "strata": {
+        "greedy": {
+          "comparisons": 14,
+          "exact": 14,
+          "tokens": 14,
+          "logprobs": 14
+        },
+        "sampled": {
+          "comparisons": 14,
+          "exact": 0,
+          "tokens": 0,
+          "logprobs": 0
+        }
+      },
+      "records": [
+        {
+          "case": "boundary_1055",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1055",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1056",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1056",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1057",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1057",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1087",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1087",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 9,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_527",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_527",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_528",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_528",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_529",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_529",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "short",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "short",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 13,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        }
+      ]
+    },
+    {
+      "model": "Qwen3.5-9B",
+      "left": 3,
+      "right": 4,
+      "strata": {
+        "greedy": {
+          "comparisons": 14,
+          "exact": 14,
+          "tokens": 14,
+          "logprobs": 14
+        },
+        "sampled": {
+          "comparisons": 14,
+          "exact": 0,
+          "tokens": 0,
+          "logprobs": 0
+        }
+      },
+      "records": [
+        {
+          "case": "boundary_1055",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1055",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 38,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1056",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1056",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 38,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1057",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1057",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 38,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1087",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1087",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 38,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1088",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1089",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 20,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_527",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_527",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_528",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_528",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_529",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_529",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_543",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_544",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_545",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "short",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "short",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 9,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        }
+      ]
+    },
+    {
+      "model": "Qwen3.8-27B-FP8",
+      "left": 2,
+      "right": 3,
+      "strata": {
+        "greedy": {
+          "comparisons": 8,
+          "exact": 8,
+          "tokens": 8,
+          "logprobs": 8
+        },
+        "sampled": {
+          "comparisons": 8,
+          "exact": 0,
+          "tokens": 0,
+          "logprobs": 0
+        }
+      },
+      "records": [
+        {
+          "case": "boundary_1599",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1599",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1600",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1600",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1601",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1601",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_799",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_799",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_800",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_800",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_801",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_801",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "short",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "short",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 10,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        }
+      ]
+    },
+    {
+      "model": "Qwen3.8-27B-FP8",
+      "left": 2,
+      "right": 4,
+      "strata": {
+        "greedy": {
+          "comparisons": 8,
+          "exact": 5,
+          "tokens": 5,
+          "logprobs": 5
+        },
+        "sampled": {
+          "comparisons": 8,
+          "exact": 0,
+          "tokens": 0,
+          "logprobs": 0
+        }
+      },
+      "records": [
+        {
+          "case": "boundary_1599",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1599",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1600",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 35,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1600",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1601",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1601",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 7,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_799",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_799",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_800",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_800",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_801",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_801",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 9,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "short",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "short",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 10,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        }
+      ]
+    },
+    {
+      "model": "Qwen3.8-27B-FP8",
+      "left": 3,
+      "right": 4,
+      "strata": {
+        "greedy": {
+          "comparisons": 8,
+          "exact": 5,
+          "tokens": 5,
+          "logprobs": 5
+        },
+        "sampled": {
+          "comparisons": 8,
+          "exact": 0,
+          "tokens": 0,
+          "logprobs": 0
+        }
+      },
+      "records": [
+        {
+          "case": "boundary_1599",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_1599",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1600",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 35,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1600",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1601",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_1601",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.0,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 6,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_2442",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_799",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_799",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_800",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_800",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "boundary_801",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "boundary_801",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 5,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        },
+        {
+          "case": "short",
+          "temperature": 0.0,
+          "exact": true,
+          "tokens_equal": true,
+          "logprobs_equal": true,
+          "first_different_token_1based": null,
+          "max_selected_logprob_delta_when_tokens_equal": 0.0
+        },
+        {
+          "case": "short",
+          "temperature": 0.8,
+          "exact": false,
+          "tokens_equal": false,
+          "logprobs_equal": false,
+          "first_different_token_1based": 19,
+          "max_selected_logprob_delta_when_tokens_equal": null
+        }
+      ]
+    }
+  ],
+  "totals": {
+    "final_eight_file_groups": 11,
+    "final_eight_file_comparisons": 1984,
+    "final_eight_file_exact": 1984,
+    "historical_all_versions_comparisons": 2112
+  }
+}

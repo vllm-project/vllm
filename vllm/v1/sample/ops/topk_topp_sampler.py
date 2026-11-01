@@ -515,6 +515,10 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
+    if envs.VLLM_BATCH_INVARIANT and current_platform.is_cuda():
+        # Keep the filtering backend and equal-logit ordering fixed across batches.
+        return apply_top_k_top_p_pytorch(logits, k, p)
+
     if HAS_TRITON:
         return apply_top_k_top_p_triton(
             logits, k, p, has_topp_only_rows=has_topp_only_rows
@@ -545,7 +549,9 @@ def apply_top_k_top_p_pytorch(
             # Avoid sorting vocab for top-k only case.
             return apply_top_k_only(logits, k)
 
-    logits_sort, logits_idx = logits.sort(dim=-1, descending=False)
+    logits_sort, logits_idx = logits.sort(
+        dim=-1, descending=False, stable=envs.VLLM_BATCH_INVARIANT
+    )
 
     if k is not None:
         # Apply top-k.

@@ -1,0 +1,12 @@
+{
+  "source_sha256": {
+    "vllm/v1/sample/ops/topk_topp_sampler.py": "b27a30c56e8bcb9276ed45aa1153065fcbf9b6c1729ddf02c32f658807d62e65",
+    "tests/v1/sample/test_topk_topp_sampler.py": "892cccbaeed3a839f99a82f531e2542787f33b29dde6297e5e1f525d6da5e6da",
+    "tests/v1/e2e/spec_decode/mtp/qwen3_5/test_mtp.py": "e78bd4c96966103bb38457a1afb4e27d6adb173030ff3d30e7926d4f9cdd21e0",
+    "tests/kernels/mamba/test_checkpoint_exporter.py": "de535af063d9c07136ece4bf03f53a8a8fd48b4929ab3ef197e95324865fec67"
+  },
+  "model": "Qwen/Qwen3.5-0.8B-Base",
+  "cached_model_revision": "dc7cdfe2ee4154fa7e30f5b51ca41bfa40174e68",
+  "hardware": "H100 SM90, single GPU per process",
+  "runtime": "Python 3.12.15 / torch 2.14.0+cu130 / Triton 3.8.0"
+}
