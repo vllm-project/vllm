@@ -14,7 +14,12 @@ from vllm.utils.torch_utils import nvfp4_split_data_scale, set_random_seed
 
 pytestmark = pytest.mark.skip_global_cleanup
 
-COPYING_DIRECTION = [("cuda", "cpu"), ("cuda", "cuda"), ("cpu", "cuda")]
+CURRENT_PLATFORM_DEVICE = current_platform.device_type
+COPYING_DIRECTION = [
+    (CURRENT_PLATFORM_DEVICE, "cpu"),
+    (CURRENT_PLATFORM_DEVICE, CURRENT_PLATFORM_DEVICE),
+    ("cpu", CURRENT_PLATFORM_DEVICE),
+]
 DTYPES = [torch.bfloat16, torch.float]
 NUM_TOKENS = [42]  # Arbitrary values for testing
 NUM_LAYERS = [1]  # Arbitrary values for testing
@@ -38,7 +43,8 @@ NUM_BLOCKS = [1024, 10000]
 NUM_MAPPINGS = [256]  # Arbitrary values for testing
 SEEDS = [0]
 CUDA_DEVICES = [
-    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+    f"{CURRENT_PLATFORM_DEVICE}:{i}"
+    for i in range(1 if torch.accelerator.device_count() == 1 else 2)
 ]
 
 # We assume fp8 is always enabled for testing.
@@ -762,8 +768,8 @@ def test_swap_blocks(
 
     set_random_seed(seed)
 
-    src_device = device if direction[0] == "cuda" else "cpu"
-    dst_device = device if direction[1] == "cuda" else "cpu"
+    src_device = device if direction[0] == CURRENT_PLATFORM_DEVICE else "cpu"
+    dst_device = device if direction[1] == CURRENT_PLATFORM_DEVICE else "cpu"
 
     src_blocks = random.sample(range(num_blocks), num_mappings)
     # For the same device, mapping must not overlap

@@ -31,3 +31,35 @@ steps:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests && pytest -v -s v1/shutdown'
+
+- label: ":intel: (BMG) Context Parallel (4 GPUs)"
+  key: context-parallel-tests-4-gpus
+  timeout_in_minutes: 60
+  num_devices: 4
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 4+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - .buildkite/intel_jobs/distributed_intel.yaml
+  - vllm/_custom_ops.py
+  - vllm/_xpu_ops.py
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/model_executor/
+  - vllm/platforms/
+  - vllm/v1/
+  - tests/distributed/test_context_parallel.py
+  - tests/models/registry.py
+  - tests/utils.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests && pytest -v -s distributed/test_context_parallel.py'
