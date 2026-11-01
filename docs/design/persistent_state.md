@@ -115,7 +115,11 @@ prompt embeddings); the engine refuses others before preprocessing. Multimodal
 positions are relative to the input's own prompt, since each input replaces it;
 a position outside that prompt is refused as `validation_error`. Rejected
 updates are reported on `EngineCoreOutput.stream_output` without ending the
-session, and leave its slot and deadline unchanged. An admitted session holds
+session, and leave its slot and deadline unchanged. This holds for
+`EngineCore` and `EngineCoreClient` consumers. The output processor that
+`AsyncLLM` and `LLMEngine` use does not read `stream_output` yet: it treats the
+rejection's `ERROR` finish as the end of the request and aborts it, which ends
+the session and frees its slot. An admitted session holds
 its slot from admission, so its inputs drain ahead of queued requests that
 still need a slot, including under `PAUSED_NEW`. An
 engine without persistent state refuses any update that carries
