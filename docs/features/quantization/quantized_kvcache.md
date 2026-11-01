@@ -66,6 +66,62 @@ llm = LLM(
 )
 ```
 
+### FlashInfer prefill cache expansion (SM120)
+
+`flashinfer_prefill_cache_expansion_bytes` is an opt-in optimization for
+long-prompt workloads where native FlashInfer attention is a prefill
+bottleneck. It aims to lower prefill latency and time to first token while
+retaining compact FP8 persistent KV storage and BF16 query precision. It
+defaults to `0` (disabled).
+
+Native attention with BF16 queries and FP8 KV converts cache tiles as it
+processes query tiles. Prefill with many query tokens can repeat that work
+for the same KV data. Expansion gathers referenced page entries into BF16
+scratch once per layer and prefill step, so attention can reuse the converted
+values. The tradeoff is an extra copy and temporary GPU memory. This is most
+promising when repeated conversions cost more than the copy; short prefills,
+mostly cached prompts and workloads limited by other operations may see
+little benefit. The decode path is unchanged.
+
+For example, allow up to 1 GiB of BF16 scratch per live attention metadata
+object on a supported configuration:
+
+```bash
+vllm serve <model> --dtype bfloat16 --kv-cache-dtype fp8 \
+  --attention-backend FLASHINFER \
+  --attention-config '{"flashinfer_prefill_cache_expansion_bytes":1073741824}'
+```
+
+The copy preserves finite E4M3 values exactly; attention still applies the
+original K/V scales. It introduces no additional quantization. BF16 attention
+can use different reductions, so output need not be bit-identical to the
+native FP8 path; check model quality as well as speed before adopting it.
+
+Expansion requires SM120, BF16 queries, E4M3 KV, head dimension 256, HND or NHD
+layout, causal native prefill, and at least 1024 query tokens summed across
+the prefill requests in the metadata batch. DCP, attention
+sinks, batch-invariant mode and full prefill/mixed CUDA graphs retain the
+native path. Unsupported configurations, batches exceeding the budget and
+scratch allocation failures also use native FP8 attention.
+
+The first eligible batch logs
+`Using bounded FP8 cache expansion for native prefill`. Later batches can
+still fall back if they exceed the budget or fail another eligibility check.
+
+The budget accepts 0 through 1073741824 bytes. Eligible metadata allocates a
+fixed-capacity buffer up to the configured budget even if fewer pages are used,
+reducing allocator churn. Concurrent metadata objects own separate buffers,
+so this is not a global memory cap.
+Larger budgets can accommodate more referenced pages, but consume memory
+that could otherwise support serving capacity. Compare prefill latency and
+time to first token against a zero-budget baseline, and check decode latency,
+throughput and concurrent serving capacity under mixed load. Enable it only
+when the measured benefit justifies the memory cost; no universal speedup is
+implied. Set the budget to `0` to disable it. A kernel comparison including
+the gather/cast is available in
+`benchmarks/kernels/benchmark_fp8_prefill_cache.py`; end-to-end serving
+measurements are still needed.
+
 ---
 
 ## Examples
