@@ -148,3 +148,5 @@ Each position then carries the sampled token's logprob and the top-128
 - **Engine-level flag:** `--return-sampling-mask` globally disables the
   FlashInfer fused sampler. All requests pay the cost of the PyTorch sampling
   path, even if they don't need the mask.
+- **Per-request opt-out:** a request with `return_aux_outputs=False` gets no
+  mask; see [Routed Experts](routed_experts.md#return_aux_outputs).
