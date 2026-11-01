@@ -137,6 +137,7 @@ def _builder(
         _kv_cache_dtype_str=kv_cache_dtype,
         # Unsized as during profiling, so the Gluon KV bound stays out of the way.
         _kv_cache_bytes=None,
+        _gluon_fp8_decode_max_batch=0,
         paged_kv_last_page_len=torch.ones(max_decode_rows, dtype=torch.int32),
         paged_kv_indices=torch.empty(1024, dtype=torch.int32),
         paged_kv_indptr=torch.empty(max_decode_rows + 1, dtype=torch.int32),

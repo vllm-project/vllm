@@ -61,6 +61,17 @@ Tests pure decode performance across MLA backends with varying batch sizes and s
 python benchmark.py --config configs/mla_decode.yaml
 ```
 
+### ROCm AITER MLA fp8-KV Decode Kernel
+
+**Question:** For which decode batches should `ROCM_AITER_MLA` read an fp8 KV cache with `mla_gluon` (bf16 query) instead of the asm kernel (fp8 query)?
+
+```bash
+for heads in 1 2 4 8 16 32; do
+    VLLM_ROCM_USE_AITER=1 python benchmark.py --config configs/rocm_aiter_mla_fp8_decode.yaml \
+        --num-q-heads $heads
+done
+```
+
 ### MLA Mixed Batch Benchmark
 
 Tests chunked prefill performance with mixed prefill + decode batches.

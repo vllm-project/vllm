@@ -12,7 +12,7 @@ import torch
 
 from vllm import envs
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
@@ -536,6 +536,30 @@ def _adaptive_varlen_verify_enabled(vllm_config: VllmConfig) -> bool:
     )
 
 
+def _gluon_fp8_decode_max_batch(
+    vllm_config: VllmConfig, num_heads: int, kv_lora_rank: int, qk_rope_head_dim: int
+) -> int:
+    """Largest single-token decode batch that runs mla_gluon instead of the asm
+    kernel on an fp8 KV cache, 0 for none.
+    """
+    if (
+        vllm_config.cache_config.cache_dtype not in ("fp8", "fp8_e4m3")
+        or vllm_config.model_config.dtype != torch.bfloat16
+        or vllm_config.parallel_config.decode_context_parallel_size > 1
+        or vllm_config.speculative_config is not None
+        or kv_lora_rank != 512
+        or qk_rope_head_dim != 64
+        or not _gluon_mla_decode_supported()
+        or (num_heads < 16 and _aiter_mla_small_head_mode() == "asm")
+    ):
+        return 0
+    if num_heads in (1, 2, 4, 8, 16):
+        return 64
+    if num_heads == 32:
+        return 8
+    return 0
+
+
 class AiterMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
@@ -1044,6 +1068,12 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
 
         self._supports_fused_gather = (
             self._kv_cache_dtype_str != "fp8_ds_mla" and on_gfx950()
+        )
+        layer = vllm_config.compilation_config.static_forward_context.get(
+            layer_names[0]
+        )
+        self._gluon_fp8_decode_max_batch = getattr(
+            getattr(layer, "impl", None), "_gluon_fp8_decode_max_batch", 0
         )
         # MLAAttention quantizes decode Q to FP8 before calling this backend
         # whenever the KV cache is FP8 and supports_quant_query_input is true.
@@ -1660,6 +1690,8 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             int(max_qo_len),
             self._kv_cache_dtype_str,
             self._kv_cache_bytes,
+            num_reqs=num_reqs,
+            max_batch=self._gluon_fp8_decode_max_batch,
         )
         use_gluon_verify = AiterMLAHelper.use_gluon_verify(
             self._decode_num_heads,
@@ -2271,18 +2303,19 @@ class AiterMLAHelper:
         max_qo_len: int,
         kv_cache_dtype: str,
         kv_cache_bytes: int | None = None,
+        num_reqs: int = 1,
+        max_batch: int = 0,
     ) -> bool:
+        # fp8 KV takes Gluon only for single-token batches
+        if is_quantized_kv_cache(kv_cache_dtype):
+            if max_qo_len != 1:
+                return False
+            return num_reqs <= max_batch
         # Small-head (<16) single-token decode takes either the Gluon kernel or
         # the padded asm persistent decode, selected by
         # VLLM_ROCM_AITER_MLA_ASM_PADDING and the arch (Gluon is gfx950 only).
         m = AiterMLAHelper._AITER_MIN_MLA_HEADS
         if num_heads >= m or max_qo_len != 1:
-            return False
-        # Gluon's only fp8-KV regime, bh16bn128, is a bf16-query kernel with a
-        # hardcoded scale that asserts batch_size == 1, so it cannot serve a
-        # decode batch. Checked before the mode knob: an explicit "gluon"
-        # request under fp8 would assert immediately.
-        if is_quantized_kv_cache(kv_cache_dtype):
             return False
         mode = _aiter_mla_small_head_mode()
         if mode == "asm":
@@ -2452,6 +2485,15 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             and self.qk_nope_head_dim == 128
             and self.qk_rope_head_dim == 64
         )
+
+        self._gluon_fp8_decode_max_batch = _gluon_fp8_decode_max_batch(
+            get_current_vllm_config(),
+            self._decode_num_heads,
+            self.kv_lora_rank,
+            self.qk_rope_head_dim,
+        )
+        if self._gluon_fp8_decode_max_batch:
+            self.supports_quant_query_input = False
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -3112,7 +3154,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
                 k_pe=None,
                 kv_pe_offset=self.kv_lora_rank,
                 use_2d_view=False,
-                kv_scale=1.0,
+                kv_scale=(
+                    layer._k_scale_float
+                    if is_quantized_kv_cache(self.kv_cache_dtype)
+                    else 1.0
+                ),
                 min_kv_seq_len=decode.min_kv_seq_len,
             )
             return o, None
@@ -3222,7 +3268,12 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
             )
 
         if type(q) is tuple:
-            q = torch.cat(q, dim=-1)
+            if is_quantized_kv_cache(self.kv_cache_dtype):
+                q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
+                    *q, layer._q_scale
+                )
+            else:
+                q = torch.cat(q, dim=-1)
 
         assert isinstance(q, torch.Tensor)
         assert decode.paged_kv_indptr is not None
