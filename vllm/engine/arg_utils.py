@@ -647,6 +647,8 @@ class EngineArgs:
     enforce_eager: bool = ModelConfig.enforce_eager
     disable_custom_all_reduce: bool = ParallelConfig.disable_custom_all_reduce
     enable_shm_tensor_arena: bool = ParallelConfig.enable_shm_tensor_arena
+    shm_tensor_arena_slots: int = ParallelConfig.shm_tensor_arena_slots
+    shm_tensor_arena_slot_mb: int = ParallelConfig.shm_tensor_arena_slot_mb
     language_model_only: bool = MultiModalConfig.language_model_only
     limit_mm_per_prompt: dict[str, int | dict[str, int]] = get_field(
         MultiModalConfig, "limit_per_prompt"
@@ -1325,6 +1327,14 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-shm-tensor-arena",
             **parallel_kwargs["enable_shm_tensor_arena"],
+        )
+        parallel_group.add_argument(
+            "--shm-tensor-arena-slots",
+            **parallel_kwargs["shm_tensor_arena_slots"],
+        )
+        parallel_group.add_argument(
+            "--shm-tensor-arena-slot-mb",
+            **parallel_kwargs["shm_tensor_arena_slot_mb"],
         )
         parallel_group.add_argument(
             "--ubatch-size",
@@ -2599,6 +2609,8 @@ class EngineArgs:
             elastic_ep_max_dp_size=self.elastic_ep_max_dp_size,
             enable_dbo=self.enable_dbo,
             enable_shm_tensor_arena=self.enable_shm_tensor_arena,
+            shm_tensor_arena_slots=self.shm_tensor_arena_slots,
+            shm_tensor_arena_slot_mb=self.shm_tensor_arena_slot_mb,
             ubatch_size=self.ubatch_size,
             dbo_decode_token_threshold=self.dbo_decode_token_threshold,
             dp_sync_interval=self.dp_sync_interval,

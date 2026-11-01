@@ -181,6 +181,8 @@ class MultiprocExecutor(Executor):
                 max_chunk_bytes=max_chunk_bytes,
                 connect_ip=mq_connect_ip,
                 enable_shm_tensor_arena=(self.parallel_config.enable_shm_tensor_arena),
+                shm_tensor_arena_slots=self.parallel_config.shm_tensor_arena_slots,
+                shm_tensor_arena_slot_mb=self.parallel_config.shm_tensor_arena_slot_mb,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
         # Create workers
