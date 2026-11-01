@@ -145,6 +145,12 @@ vllm bench forward \
     --case mix=2048,32*1@4096
 ```
 
+For hybrid attention/recurrent models, verification reserves the recurrent
+state slots for all configured speculative tokens. Every replay restores these
+states and the attention blocks it can overwrite, including packed KV layouts.
+The snapshots consume extra GPU memory, but their restoration is outside the
+measured forward interval.
+
 PCP uses `--prefill-context-parallel-size` with the model runner's supported
 MLA models. Cases describe the global batch per DP rank, before PCP splits it;
 `num_local_tokens`, `num_tokens_after_padding`, and `batch_order` in each rank's
@@ -177,8 +183,10 @@ Use `--exclude-drafter` to measure only the target forward. Verification assumes
 all draft tokens are accepted and uses a fixed bonus token; target sampling and
 rejection sampling are excluded. Both paths use CUDA graphs and restore the
 batch's state before each replay.
-Balanced MoE routing fixtures apply to the target model; the drafter uses its
-model routing, so use real weights when measuring a MoE drafter.
+Synthetic MoE routing fixtures (`--routing balanced` or `--routing zipf`) apply
+to the target model; the drafter uses its model routing, so use real weights
+when measuring a MoE drafter. For the Zipf distribution and its limitations,
+see [Model Forward Benchmark](../benchmarking/cli.md#model-forward-benchmark).
 
 ```bash
 vllm bench forward --model Qwen/Qwen3-1.7B \

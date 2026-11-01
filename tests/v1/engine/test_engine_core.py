@@ -653,6 +653,7 @@ def _cadenced_dp_engine_core(
     """A bare DPEngineCoreProc whose all-reduce is scripted by `results`;
     returns the core and the step numbers at which the all-reduce ran."""
     core = object.__new__(DPEngineCoreProc)
+    core.enable_fault_tolerance = False
     core.dp_group = object()
     core.vllm_config = MagicMock(parallel_config=ParallelConfig())
     core.dp_sync_interval = dp_sync_interval

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,11 +13,14 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 
 use crate::config::LoraModulePath;
+use crate::model_names::ServedModelNames;
 
 const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES";
 
 #[derive(Debug, Error, Macro)]
 pub(crate) enum LoraPathAccessError {
+    #[error("No adapter found for {lora_path}")]
+    NotFound { lora_path: String },
     #[error("{message}")]
     InvalidPath { message: String },
     #[error("{message}")]
@@ -60,9 +64,12 @@ fn validate_lora_path_access(
         ));
     }
 
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|_| invalid_path!("Local LoRA adapter path must exist and be accessible."))?;
+    let canonical_path = path.canonicalize().map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => LoraPathAccessError::NotFound {
+            lora_path: lora_path.to_string(),
+        },
+        _ => invalid_path!("Local LoRA adapter path must exist and be accessible."),
+    })?;
     let canonical_prefixes = allowed_prefixes
         .iter()
         .map(|prefix| {
@@ -115,8 +122,19 @@ impl LoadedLora {
 /// the model name resolves to a dynamic adapter.
 #[derive(Debug, Clone)]
 pub(crate) struct LoraModelResolution {
-    pub model_names: Vec<String>,
+    pub model_names: ServedModelNames,
     pub lora_request: Option<LoraRequest>,
+}
+
+impl LoraModelResolution {
+    /// The `model` reported in responses: the LoRA adapter name when the
+    /// request resolved to one, otherwise the first served model name.
+    pub fn response_model(&self) -> String {
+        self.lora_request
+            .as_ref()
+            .map(|request| request.lora_name.clone())
+            .unwrap_or_else(|| self.model_names.primary().to_string())
+    }
 }
 
 /// Runtime registry for dynamically loaded LoRA adapters.
@@ -197,12 +215,11 @@ impl LoraManager {
     /// snapshot.
     pub async fn resolve_model(
         &self,
-        base_model_names: &[String],
+        base_model_names: ServedModelNames,
         model_name: Option<&str>,
     ) -> LoraModelResolution {
         let adapters = self.adapters.read().await;
-        let mut model_names = base_model_names.to_vec();
-        model_names.extend(adapters.keys().cloned());
+        let model_names = base_model_names.with_names(adapters.keys().cloned());
         let lora_request =
             model_name.and_then(|name| adapters.get(name)).map(LoadedLora::to_request);
 
@@ -347,7 +364,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::validate_lora_path_access;
+    use super::{LoadedLora, LoraManager, LoraPathAccessError, validate_lora_path_access};
+    use crate::model_names::ServedModelNames;
 
     fn temp_lora_dir(test_name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -360,6 +378,33 @@ mod tests {
         ));
         fs::create_dir_all(&path).expect("create temp lora dir");
         path
+    }
+
+    #[tokio::test]
+    async fn resolve_model_selects_adapter_when_any_model_name_is_accepted() {
+        let manager = LoraManager::new();
+        manager.adapters.write().await.insert(
+            "adapter-a".to_string(),
+            LoadedLora {
+                lora_name: "adapter-a".to_string(),
+                lora_int_id: 1,
+                lora_path: "org/adapter-a".to_string(),
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            },
+        );
+        let base = ServedModelNames::new(vec!["base".to_string()]).with_accept_any(true);
+
+        let resolution = manager.resolve_model(base.clone(), Some("adapter-a")).await;
+        assert_eq!(
+            resolution.lora_request.expect("adapter selected").lora_name,
+            "adapter-a"
+        );
+
+        let resolution = manager.resolve_model(base, Some("unknown")).await;
+        assert!(resolution.lora_request.is_none());
+        assert!(resolution.model_names.accepts(Some("unknown")));
+        assert_eq!(resolution.model_names.primary(), "base");
     }
 
     #[test]
@@ -412,6 +457,25 @@ mod tests {
                     .to_str()
                     .expect("utf-8 temp path")
             )
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Python answers a missing adapter with 404 `NotFoundError`, so the
+    /// guard reports a missing path apart from an inaccessible one.
+    #[test]
+    fn lora_path_reports_missing_paths_as_not_found() {
+        let root = temp_lora_dir("missing-path");
+        let missing = root.join("missing-adapter");
+
+        let prefixes = [root.clone()];
+        let error =
+            validate_lora_path_access(missing.to_str().expect("utf-8 temp path"), Some(&prefixes))
+                .expect_err("missing adapter path should be rejected");
+        assert!(
+            matches!(&error, LoraPathAccessError::NotFound { lora_path } if *lora_path == missing.to_str().unwrap()),
+            "{error:?}"
         );
 
         fs::remove_dir_all(root).ok();
