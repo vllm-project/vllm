@@ -870,8 +870,8 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
         return True
 
     def _split_qkv_and_norm(
-        self, qr_kv: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        self, qr_kv: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """Fuse q/kv RMSNorm + per-1x128 fp8 q quant into one aiter kernel.
 
         The shared path norms q and kv in one triton kernel and the wq_b
@@ -890,7 +890,7 @@ class DeepseekV41ROCMAiterMLAAttention(DeepseekV4Attention):
             and self.q_lora_rank % 128 == 0
             and self._wq_b_uses_aiter_block_scaled
         ):
-            return super()._split_qkv_and_norm(qr_kv)
+            return super()._split_qkv_and_norm(qr_kv, positions)
 
         from vllm._aiter_ops import rocm_aiter_ops
 

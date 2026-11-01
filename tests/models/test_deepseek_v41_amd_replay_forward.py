@@ -78,7 +78,11 @@ class _RocmKvInsert:
                 prefix=prefix, kv_cache=cache, block_size=_BLOCK
             ),
             _run_parallel_input_projections=lambda hidden: (hidden, None, None),
-            _split_qkv_and_norm=lambda qr_kv: (None, None, self.kv[: qr_kv.shape[0]]),
+            _split_qkv_and_norm=lambda qr_kv, positions=None: (
+                None,
+                None,
+                self.kv[: qr_kv.shape[0]],
+            ),
         )
         self.last_rows: int | None = None
         self.last_positions: torch.Tensor | None = None

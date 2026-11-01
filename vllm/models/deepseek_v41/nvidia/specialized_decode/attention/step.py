@@ -115,7 +115,7 @@ class AttentionStep:
         out = attn._alloc_attn_out(x.shape[0], x)
         assert isinstance(out, torch.Tensor)
         qr_kv, kv_score, indexer_weights = self._input_projections(x, quant, step)
-        qr, qr_scale, kv = attn._split_qkv_and_norm(qr_kv)
+        qr, qr_scale, kv = attn._split_qkv_and_norm(qr_kv, positions)
         q, index_q, index_q_scale, index_weights = self._prepare(
             qr, kv, qr_scale, kv_score, indexer_weights, positions, step
         )

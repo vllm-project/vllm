@@ -690,7 +690,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         qr_kv, kv_score, indexer_weights = self._run_parallel_input_projections(
             hidden_states
         )
-        qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv)
+        qr, qr_scale, kv = self._split_qkv_and_norm(qr_kv, positions)
 
         self._prepare_and_attn_fn(
             hidden_states,
@@ -709,9 +709,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         skipping wq_b, the indexer's top-k and attention."""
         attn_metadata = get_forward_context().attn_metadata
         qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
-        _, _, kv = self._split_qkv_and_norm(qr_kv)
+        _, _, kv = self._split_qkv_and_norm(qr_kv, positions)
         cache_positions = positions
-        if isinstance(attn_metadata, dict):
+        if isinstance(attn_metadata, dict) and kv is not None:
             # The KV half of _fused_qnorm_rope_kv_insert, bit for bit, without
             # the unused query; same as dspark's _insert_context_kv.
             cache = self.swa_cache_layer.kv_cache
@@ -804,25 +804,53 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         return can_fuse_query_quant(linears)
 
     def _split_qkv_and_norm(
-        self, qr_kv: torch.Tensor
-    ) -> tuple[torch.Tensor | QuantizedActivation, torch.Tensor | None, torch.Tensor]:
+        self, qr_kv: torch.Tensor, positions: torch.Tensor | None = None
+    ) -> tuple[
+        torch.Tensor | QuantizedActivation, torch.Tensor | None, torch.Tensor | None
+    ]:
         """Split the fused q-lora / kv projection and RMSNorm both halves.
 
         Compatible MXFP8 projections share the quantized Q and scales;
         other projection backends consume the normalized Q directly.
+        Given ``positions``, a packed MXFP8 SWA cache takes this step's KV
+        from the norm kernel, and the returned KV is None.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
         if self.q_lora_rank % 32 == 0 and self._can_fuse_query_quant:
             from vllm.models.deepseek_v41.common.ops.query_quant import (
+                Mxfp8KVInsert,
                 fused_q_kv_rmsnorm_quant,
             )
 
+            kv_insert = None
+            cache = self.swa_cache_layer.kv_cache
+            attn_metadata = (
+                get_forward_context().attn_metadata if positions is not None else None
+            )
+            if (
+                isinstance(attn_metadata, dict)
+                and self.kv_mxfp8
+                and not self.use_pcp
+                and cache.dtype == torch.uint8
+            ):
+                swa_metadata = cast(
+                    "DeepseekSparseSWAMetadata",
+                    attn_metadata[self.swa_cache_layer.prefix],
+                )
+                kv_insert = Mxfp8KVInsert(
+                    cache.view(cache.shape[0], -1),
+                    swa_metadata.slot_mapping,
+                    positions,
+                    self.rotary_emb.cos_sin_cache,
+                    swa_metadata.block_size,
+                )
             qr_quant, kv = fused_q_kv_rmsnorm_quant(
                 qr,
                 kv,
                 self.q_norm.weight.data,
                 self.kv_norm.weight.data,
                 self.eps,
+                kv_insert=kv_insert,
             )
             return qr_quant, None, kv
         qr, kv = fused_q_kv_rmsnorm(
@@ -1066,7 +1094,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _fused_qnorm_rope_kv_insert(
         self,
         q: torch.Tensor,
-        kv: torch.Tensor,
+        kv: torch.Tensor | None,
         positions: torch.Tensor,
         attn_metadata: (
             dict[str, AttentionMetadata] | list[dict[str, AttentionMetadata]] | None
@@ -1109,6 +1137,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         cache_dtype = swa_kv_cache.dtype
         slot_mapping = swa_metadata.slot_mapping
         if self.use_pcp:
+            assert kv is not None  # PCP never fuses the insert.
             cache_kv = get_pcp_group().all_gather(kv.contiguous(), dim=0)
             assert swa_metadata.cache_slot_mapping is not None
             assert swa_metadata.cache_positions is not None
@@ -1143,6 +1172,14 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
                 and self.n_local_heads == self.padded_heads
                 else self.padded_heads
             )
+            if kv is None:
+                # _split_qkv_and_norm inserted the KV: prepare Q alone, if at all.
+                if pad_to == 0:
+                    return q
+                kv, slot_mapping = (
+                    q.new_empty(q.shape[0], self.head_dim),
+                    slot_mapping[:0],
+                )
             q_padded = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
                 q,
                 kv,
