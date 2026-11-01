@@ -4,6 +4,7 @@
 import fnmatch
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
+import regex as re
 import torch
 
 from vllm.logger import init_logger
@@ -93,22 +94,6 @@ class QuantKeyMatch(NamedTuple):
         return self.matches
 
 
-def _exclude_module_name(entry: str) -> str:
-    """Map an ``exclude`` entry naming a parameter to its module.
-
-    Quark exports may list excluded parameters (e.g.
-    ``mtp.layers.0.self_attn.q_proj.weight``) next to excluded modules (e.g.
-    ``lm_head``), but layers are matched by module name. ``re:`` patterns are
-    kept as they are.
-    """
-    if entry.startswith("re:"):
-        return entry
-    for suffix in (".weight", ".bias"):
-        if entry.endswith(suffix):
-            return entry.removesuffix(suffix)
-    return entry
-
-
 class QuarkConfig(QuantizationConfig):
     def __init__(
         self,
@@ -122,9 +107,14 @@ class QuarkConfig(QuantizationConfig):
             kv_cache_group = []
         exclude = quant_config.get("exclude")
         if isinstance(exclude, list):
+            # Exclude entries may name parameters ("<module>.weight") rather than
+            # modules; layers are matched by module name.
             quant_config = {
                 **quant_config,
-                "exclude": [_exclude_module_name(entry) for entry in exclude],
+                "exclude": [
+                    e if e.startswith("re:") else re.sub(r"\.(weight|bias)$", "", e)
+                    for e in exclude
+                ],
             }
         self.quant_config = quant_config
         # Copy the class-level default (which a subclass may override, e.g. the

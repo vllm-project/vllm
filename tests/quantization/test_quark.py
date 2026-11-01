@@ -1989,24 +1989,6 @@ def test_quark_exclude_parameter_names_match_modules():
     )
     config.packed_modules_mapping = FUSED_MAPPING
 
-    assert config.quant_config["exclude"] == [
-        "lm_head",
-        "re:model.visual.*",
-        "re:.*\\.norm\\.weight",
-        "mtp.fc",
-        "mtp.norm",
-        "mtp.layers.0.self_attn.q_proj",
-        "mtp.layers.0.self_attn.k_proj",
-        "mtp.layers.0.self_attn.v_proj",
-        "mtp.layers.0.self_attn.o_proj",
-        "mtp.layers.0.self_attn.o_proj",
-        "mtp.layers.0.mlp.gate_proj",
-        "mtp.layers.0.mlp.up_proj",
-        "mtp.layers.0.mlp.down_proj",
-    ]
-    # The checkpoint's own config is left as it is.
-    assert exclude[3] == "mtp.fc.weight"
-
     unquantized = (None, None, UnquantizedLinearMethod)
     for prefix in [
         "lm_head",
@@ -2017,7 +1999,7 @@ def test_quark_exclude_parameter_names_match_modules():
         "mtp.layers.0.mlp.gate_up_proj",
         "mtp.layers.0.mlp.down_proj",
     ]:
-        assert config.get_quant_method_target(prefix, LinearBase) == unquantized
+        assert config.get_quant_method_target(prefix, LinearBase) == unquantized, prefix
 
     quantized = (kMxfp4Static, kMxfp4Dynamic, QuarkLinearMethod)
     for prefix in [
@@ -2025,7 +2007,17 @@ def test_quark_exclude_parameter_names_match_modules():
         "model.layers.0.mlp.gate_up_proj",
         "model.layers.0.mlp.down_proj",
     ]:
-        assert config.get_quant_method_target(prefix, LinearBase) == quantized
+        assert config.get_quant_method_target(prefix, LinearBase) == quantized, prefix
+
+    # Other consumers read the mapped list; regexes and the input are unchanged.
+    assert config.quant_config["exclude"][:5] == [
+        "lm_head",
+        "re:model.visual.*",
+        "re:.*\\.norm\\.weight",
+        "mtp.fc",
+        "mtp.norm",
+    ]
+    assert exclude[3] == "mtp.fc.weight"
 
 
 def test_fused_name_listed_directly_is_skipped():
