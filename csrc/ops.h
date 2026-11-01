@@ -621,6 +621,10 @@ void silu_and_mul_quant(torch::stable::Tensor& out,
                         torch::stable::Tensor& input,
                         torch::stable::Tensor& scale);
 
+void gelu_tanh_and_mul_quant(torch::stable::Tensor& out,
+                             torch::stable::Tensor& input,
+                             torch::stable::Tensor& scale);
+
 void persistent_masked_m_silu_mul_quant(
     const torch::stable::Tensor& input,              // (E, T, 2*H)
     const torch::stable::Tensor& tokens_per_expert,  // (E)
