@@ -11,8 +11,30 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 
 logger = init_logger(__name__)
+
+
+# The 1-stage kernel takes at most 80 tokens. One zero residual per
+# (dtype, device, hidden) is shared by every layer and sliced per batch.
+_AR1S_MAX_TOKENS = 80
+_AR1S_ZEROS: dict = {}
+
+
+def _ar1s_zero(like: torch.Tensor) -> torch.Tensor:
+    key = (like.dtype, like.device, like.shape[-1])
+    buf = _AR1S_ZEROS.get(key)
+    if buf is None:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "latent-MoE 1-stage zero residual was not allocated before capture"
+            )
+        buf = torch.zeros(
+            (_AR1S_MAX_TOKENS, like.shape[-1]), dtype=like.dtype, device=like.device
+        )
+        _AR1S_ZEROS[key] = buf
+    return buf[: like.shape[0]]
 
 
 class ROCmLatentMoERunner(MoERunner):
@@ -79,9 +101,21 @@ class ROCmLatentMoERunner(MoERunner):
         transform = self.routed_output_transform
         assert transform is not None
 
-        latent = tensor_model_parallel_all_reduce(fused_output)
-        if transform.norm is not None:
-            latent = transform.norm(latent)
+        # allreduce + RMSNorm in one kernel (allreduce_fusion_kernel_1stage)
+        # for decode-sized batches. Zero residual matches the previous plain
+        # RMSNorm(allreduce(partial)). Prefill keeps allreduce then RMSNorm.
+        if (
+            transform.norm is not None
+            and fused_output.dim() == 2
+            and fused_output.shape[0] <= _AR1S_MAX_TOKENS
+        ):
+            latent, _ = fused_allreduce_rms_norm(
+                fused_output, _ar1s_zero(fused_output), transform.norm
+            )
+        else:
+            latent = tensor_model_parallel_all_reduce(fused_output)
+            if transform.norm is not None:
+                latent = transform.norm(latent)
 
         shard_size = self._up_proj_shard_size
         shard_start = get_tensor_model_parallel_rank() * shard_size
