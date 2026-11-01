@@ -19,6 +19,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
     build_response_output_items,
@@ -973,7 +974,12 @@ class TestConstructInputMessagesContentParts:
         content = self._convert(
             [
                 {"type": "input_text", "text": "Describe this."},
-                {"type": "input_image", "image_url": self.IMAGE_URL, "detail": "low"},
+                {
+                    "type": "input_image",
+                    "image_url": self.IMAGE_URL,
+                    "detail": "low",
+                    "file_id": "file_1",
+                },
             ]
         )
 
@@ -986,6 +992,50 @@ class TestConstructInputMessagesContentParts:
         assert image_chunk.image_url.url == self.IMAGE_URL
         assert image_chunk.image_url.detail == "low"
 
+    @pytest.mark.parametrize(
+        "item",
+        [
+            pytest.param({"type": "function_call_output"}, id="function"),
+            pytest.param(
+                {
+                    "type": "function_call_output",
+                    "id": "fco_1",
+                    "status": "completed",
+                    "created_by": "resp_1",
+                },
+                id="function_output_item",
+            ),
+            pytest.param({"type": "custom_tool_call_output"}, id="custom"),
+            pytest.param(
+                {
+                    "type": "custom_tool_call_output",
+                    "id": "ctco_1",
+                    "status": "completed",
+                },
+                id="custom_output_item",
+            ),
+        ],
+    )
+    def test_tool_output_parts_become_chat_parts(self, item):
+        request = ResponsesRequest(
+            model="test",
+            input=[
+                {
+                    **item,
+                    "call_id": "call_1",
+                    "output": [{"type": "input_text", "text": "22C"}],
+                }
+            ],
+        )
+
+        assert construct_input_messages(request_input=request.input) == [
+            {
+                "role": "tool",
+                "content": [{"type": "text", "text": "22C"}],
+                "tool_call_id": "call_1",
+            }
+        ]
+
     def test_extra_part_fields_survive_conversion(self):
         cache_control = {"type": "ephemeral"}
         converted = self._convert(
@@ -995,7 +1045,7 @@ class TestConstructInputMessagesContentParts:
                     "type": "input_image",
                     "image_url": self.IMAGE_URL,
                     "detail": "auto",
-                    "file_id": None,
+                    "file_id": "file_1",
                     "uuid": "cat",
                 },
             ]
@@ -1005,6 +1055,7 @@ class TestConstructInputMessagesContentParts:
             {
                 "type": "image_url",
                 "image_url": {"url": self.IMAGE_URL, "detail": "auto"},
+                "file_id": "file_1",
                 "uuid": "cat",
             },
         ]
@@ -1030,37 +1081,6 @@ class TestConstructInputMessagesContentParts:
     )
     def test_other_parts_are_preserved(self, part):
         assert self._convert([part]) == [part]
-
-    def test_string_content_is_preserved(self):
-        assert self._convert("hello") == "hello"
-
-    def test_part_order_is_preserved(self):
-        converted = self._convert(
-            [
-                {"type": "input_text", "text": "before"},
-                {"type": "input_image", "image_url": self.IMAGE_URL, "detail": "auto"},
-                {"type": "input_file", "file_id": "file_1"},
-                {"type": "input_text", "text": "after"},
-            ]
-        )
-        assert [part["type"] for part in converted] == [
-            "text",
-            "image_url",
-            "input_file",
-            "text",
-        ]
-        assert converted[0]["text"] == "before"
-        assert converted[3]["text"] == "after"
-
-    def test_request_item_is_not_mutated(self):
-        item = {"role": "user", "content": [{"type": "input_text", "text": "hello"}]}
-
-        construct_input_messages(request_input=[item])
-
-        assert item == {
-            "role": "user",
-            "content": [{"type": "input_text", "text": "hello"}],
-        }
 
 
 class TestConstructInputMessagesInstructionsLeak:

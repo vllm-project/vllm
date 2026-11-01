@@ -1158,3 +1158,63 @@ async def test_responses_render_content_parts_match_strings_on_mistral(mistral_s
     assert string_render.status_code == 200
     assert parts_render.status_code == 200, parts_render.text
     assert parts_render.json()["token_ids"] == string_render.json()["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call", "output_item"),
+    [
+        pytest.param(
+            {"type": "function_call", "name": "get_weather", "arguments": "{}"},
+            {"type": "function_call_output"},
+            id="function",
+        ),
+        pytest.param(
+            {"type": "function_call", "name": "get_weather", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "id": "fco_1",
+                "status": "completed",
+                "created_by": "resp_1",
+            },
+            id="function_output_item",
+        ),
+        pytest.param(
+            {"type": "custom_tool_call", "name": "run", "input": "date"},
+            {"type": "custom_tool_call_output"},
+            id="custom",
+        ),
+        pytest.param(
+            {"type": "custom_tool_call", "name": "run", "input": "date"},
+            {"type": "custom_tool_call_output", "id": "ctco_1", "status": "completed"},
+            id="custom_output_item",
+        ),
+    ],
+)
+async def test_responses_render_tool_output_parts_match_strings_on_mistral(
+    mistral_server, call, output_item
+):
+    def render_body(output):
+        return {
+            "model": MISTRAL_MODEL_NAME,
+            "input": [
+                {"role": "user", "content": "What is the weather in Paris?"},
+                {**call, "call_id": "abcdef123"},
+                {**output_item, "call_id": "abcdef123", "output": output},
+            ],
+        }
+
+    async with httpx.AsyncClient(
+        base_url=mistral_server.url_for(""), timeout=30.0
+    ) as client:
+        string_render = await client.post(
+            "/v1/responses/render", json=render_body("22C")
+        )
+        parts_render = await client.post(
+            "/v1/responses/render",
+            json=render_body([{"type": "input_text", "text": "22C"}]),
+        )
+
+    assert string_render.status_code == 200
+    assert parts_render.status_code == 200, parts_render.text
+    assert parts_render.json()["token_ids"] == string_render.json()["token_ids"]
