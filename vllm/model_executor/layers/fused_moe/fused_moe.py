@@ -1632,9 +1632,15 @@ def _prepare_expert_assignment(
     # path of the fused_moe_kernel kernel, which reads an expert's weights once
     # per (token, expert) pair. Not for weights in host memory: there every
     # repeated read crosses PCIe, so group each expert's tokens instead.
+    # On integrated/unified-memory GPUs (e.g. GB10 / DGX Spark), naive block
+    # assignment re-reads shared expert weights across multi-token batches,
+    # saturating unified memory bandwidth. Restrict naive assignment to
+    # num_tokens == 1 where no collision occurs.
+    device_idx = topk_ids.device.index if topk_ids.device.index is not None else 0
     naive_block_assignment = (
         expert_map is None
         and not weights_host_resident
+        and (num_tokens == 1 or not current_platform.is_integrated_gpu(device_idx))
         and num_tokens * top_k_num * 4 <= global_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
