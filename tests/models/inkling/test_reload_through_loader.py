@@ -226,3 +226,37 @@ def test_padded_slots_reload_completes_and_keeps_padding():
 
     for param, expected in zip(experts.parameters(), cold):
         assert torch.equal(param.data, expected)
+
+
+def test_lora_sink_experts_reload_takes_new_weights(dist_init):
+    """The LoRA-capable sink experts write through each linear parameter's own
+    ``weight_loader`` (the one a reload wraps), not the module's."""
+
+    def checkpoint(seed: int) -> Checkpoint:
+        gen = torch.Generator().manual_seed(seed)
+        return {
+            "w13_weight": torch.randn(2, 6, 4, generator=gen),
+            "w2_weight": torch.randn(2, 4, 3, generator=gen),
+        }
+
+    def loaded_sink(weights: Checkpoint) -> nn.Module:
+        with set_default_torch_dtype(torch.float32):
+            sink = nvidia_moe.InklingSinkExpertsLinear(n_experts=2, d_model=4, d_mlp=3)
+        for key, weight in weights.items():
+            sink.load_weight(key, weight)
+        return sink
+
+    sink = loaded_sink(checkpoint(0))
+    model = nn.Sequential(sink)
+    record_metadata_for_reloading(model)
+
+    initialize_layerwise_reload(model)
+    for key, weight in checkpoint(1).items():
+        sink.load_weight(key, weight)
+    finalize_layerwise_reload(model, model_config=None)
+
+    want = dict(loaded_sink(checkpoint(1)).named_parameters())
+    got = dict(sink.named_parameters())
+    assert got.keys() == want.keys()
+    for name in want:
+        assert torch.equal(got[name], want[name]), name

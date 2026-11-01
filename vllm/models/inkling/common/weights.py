@@ -24,6 +24,11 @@ def _fill(dst: torch.Tensor, value: float) -> None:
         dst.copy_(torch.full_like(dst, value))
 
 
+def fill(value: float) -> Writer:
+    """Set every element to ``value``, in the parameter's dtype."""
+    return lambda param, _: _fill(param.data, value)
+
+
 def deinterleave_into(slot: int, half: int, pad: float | None = None) -> Writer:
     """Write interleaved [g0, u0, g1, u1, ...] rows as [gate; up] into ``slot``,
     each half ``half`` rows long. Rows past the checkpoint's are padding, set

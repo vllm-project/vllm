@@ -45,6 +45,7 @@ from ..common.weights import (
     copy_into_slots,
     copy_padded,
     deinterleave_into,
+    fill,
     write_loader,
 )
 from ..configs import InklingModelConfig
@@ -404,11 +405,11 @@ class InklingSinkExpertsLinear(nn.Module):
             d_model = weight.shape[-1]
             gate = weight[:, 0::2, :].reshape(-1, d_model).contiguous()
             up = weight[:, 1::2, :].reshape(-1, d_model).contiguous()
-            self.w13.weight_loader(self.w13.weight, gate, 0)
-            self.w13.weight_loader(self.w13.weight, up, 1)
+            self.w13.weight.weight_loader(self.w13.weight, gate, 0)
+            self.w13.weight.weight_loader(self.w13.weight, up, 1)
             return ["w13.weight"]
         w = weight.permute(1, 0, 2).reshape(weight.shape[1], -1).contiguous()
-        self.w2.weight_loader(self.w2.weight, w)
+        self.w2.weight.weight_loader(self.w2.weight, w)
         return ["w2.weight"]
 
     def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:
@@ -586,11 +587,7 @@ class InklingMoE(nn.Module):
             )
             input_scale = getattr(experts, f"{projection}_input_scale")
             input_scale.weight_loader(
-                input_scale,
-                torch.tensor(
-                    amax / _NVFP4_INPUT_SCALE_DENOMINATOR, dtype=torch.float32
-                ),
-                lambda p, w: p.data.copy_(w.expand_as(p.data)),
+                input_scale, weight, fill(amax / _NVFP4_INPUT_SCALE_DENOMINATOR)
             )
             return [f"experts.routed_experts.{projection}_input_scale"]
 

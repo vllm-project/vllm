@@ -230,6 +230,41 @@ def test_moe_loads_channelwise_scale_for_tp(
     assert loaded == [f"experts.routed_experts.{projection}_weight_scale"]
 
 
+@pytest.mark.parametrize(
+    ("key", "param_shape", "checkpoint_shape", "loaded_rows", "loaded_cols"),
+    [
+        ("w13_weight", (2, 12, 4), (2, 8, 4), [0, 1, 2, 3, 6, 7, 8, 9], 4),
+        ("w2_weight", (2, 4, 6), (2, 4, 4), list(range(4)), 4),
+    ],
+)
+def test_amd_unquantized_moe_leaves_padding_to_method(
+    key, param_shape, checkpoint_shape, loaded_rows, loaded_cols
+) -> None:
+    # unquantized AITER counts only the checkpoint's elements and zeroes the
+    # padding itself, so the loader must not write it
+    param = _expert_param(torch.full(param_shape, -7.0))
+    param.weight_loader_numel = 2 * len(loaded_rows) * loaded_cols
+    experts = SimpleNamespace(
+        **{key: param},
+        moe_config=SimpleNamespace(
+            moe_parallel_config=SimpleNamespace(tp_rank=0, tp_size=1)
+        ),
+    )
+    layer = SimpleNamespace(
+        experts=SimpleNamespace(routed_experts=experts),
+        _local_expert_slots=lambda: {0: 0, 1: 1},
+    )
+
+    amd_moe.InklingMoE.load_expert_weight(
+        layer, f"experts.{key}", torch.randn(checkpoint_shape)
+    )
+
+    loaded = torch.zeros(param_shape, dtype=torch.bool)
+    loaded[:, loaded_rows, :loaded_cols] = True
+    assert (param[loaded] != -7.0).all()
+    assert (param[~loaded] == -7.0).all()
+
+
 def test_sink_down_projection_is_packed_during_load(monkeypatch) -> None:
     monkeypatch.setattr(moe, "get_tensor_model_parallel_world_size", lambda: 2)
     monkeypatch.setattr(moe, "get_tensor_model_parallel_rank", lambda: 1)

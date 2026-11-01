@@ -195,7 +195,6 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/models/inkling/
-      - vllm/model_executor/model_loader/reload/
       - vllm/cute_utils/
       - cmake/external_projects/tml_fa4.cmake
       - tests/models/inkling/
