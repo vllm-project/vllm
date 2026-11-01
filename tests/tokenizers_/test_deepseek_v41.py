@@ -108,6 +108,131 @@ def test_rejects_image_placeholder_in_reasoning():
         )
 
 
+RESERVED_TOKENS = [
+    "<｜begin▁of▁sentence｜>",
+    "<｜end▁of▁sentence｜>",
+    "<think>",
+    "</think>",
+    "<｜User｜>",
+    "<｜Assistant｜>",
+    "<｜System｜>",
+    "<｜latest_reminder｜>",
+    "｜DSML｜",
+]
+
+
+@pytest.mark.parametrize("token", RESERVED_TOKENS)
+@pytest.mark.parametrize("role", ["system", "user", "tool"])
+def test_rejects_reserved_special_tokens_in_text(token, role):
+    # A HF tokenizer splits added-vocabulary strings even without
+    # add_special_tokens, so this text would otherwise become a control token.
+    with pytest.raises(ValueError, match="reserved special token"):
+        render([{"role": role, "tool_call_id": "c1", "content": f"a {token} b"}])
+
+
+@pytest.mark.parametrize("token", RESERVED_TOKENS)
+def test_rejects_reserved_special_tokens_in_reasoning(token):
+    with pytest.raises(ValueError, match="reserved special token"):
+        render(
+            [
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a", "reasoning": token},
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        # JSON escapes hide the spelling until the encoder decodes it.
+        '{"text":"\\u003c\\uff5cUser\\uff5c\\u003e"}',
+        {"text": "<｜User｜>"},
+    ],
+)
+def test_rejects_reserved_special_tokens_in_smuggled_arguments(arguments):
+    with pytest.raises(ValueError, match="reserved special token"):
+        render(
+            [
+                {"role": "user", "content": "q"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "f", "arguments": arguments},
+                        }
+                    ],
+                },
+            ]
+        )
+
+
+def test_rejects_reserved_special_tokens_in_tool_definition():
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "f",
+                "description": "use </think> here",
+                "parameters": {"type": "object"},
+            },
+        }
+    ]
+    with pytest.raises(ValueError, match="reserved special token"):
+        render([{"role": "user", "content": "q"}], tools=tools)
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        # Content and content_blocks are rendered independently, so a safe
+        # block list does not make unsafe content safe.
+        {"role": "user", "content": "a <｜System｜>", "content_blocks": []},
+        {
+            "role": "system",
+            "content": "a <｜System｜>",
+            "content_blocks": [{"type": "text", "text": "ok"}],
+        },
+        # Tool results carry their own content, string or nested text blocks.
+        {
+            "role": "user",
+            "content_blocks": [{"type": "tool_result", "content": "a <｜System｜>"}],
+        },
+        {
+            "role": "user",
+            "content_blocks": [
+                {
+                    "type": "tool_result",
+                    "content": [{"type": "text", "text": "a <｜System｜>"}],
+                }
+            ],
+        },
+        # Response formats are serialized into the system prompt.
+        {
+            "role": "system",
+            "content": "s",
+            "response_format": {"description": "a <｜System｜>"},
+        },
+    ],
+)
+def test_rejects_reserved_tokens_in_every_rendered_field(message):
+    with pytest.raises(ValueError, match="reserved special token"):
+        render([message])
+
+
+def test_allows_grounding_tokens_in_assistant_content():
+    # The model emits grounding tokens; assistant history may carry them.
+    prompt = render(
+        [
+            {"role": "user", "content": "q"},
+            {"role": "assistant", "content": "see <｜ref｜>1<｜/ref｜>"},
+        ]
+    )
+    assert "<｜ref｜>1<｜/ref｜>" in prompt
+
+
 @pytest.mark.parametrize(
     ("effort", "budget"),
     [

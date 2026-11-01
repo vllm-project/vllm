@@ -14,7 +14,7 @@ Message normalization and serving controls live in deepseek_v41.py.
 
 import copy
 import json
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 bos_token: str = "<｜begin▁of▁sentence｜>"
 eos_token: str = "<｜end▁of▁sentence｜>"
@@ -180,6 +180,36 @@ def sort_tool_results_by_call_order(
 
 SYSTEM_SP_TOKEN = "<｜System｜>"
 
+# Spellings of the control tokens this encoder writes. A Hugging Face
+# tokenizer splits added-vocabulary strings even with
+# ``add_special_tokens=False``, so text that spells one of these would be
+# tokenized as the token itself. The tokenizer wrapper rejects such text
+# instead of letting client input take over the prompt structure.
+# Grounding tokens (``<｜ref｜>``, ``<｜box｜>``, ``<｜point｜>``, ``<｜polygon｜>``)
+# are deliberately absent: the model emits them, and assistant history may
+# carry them.
+RESERVED_SPECIAL_TOKENS: Tuple[str, ...] = (
+    bos_token,
+    eos_token,
+    thinking_start_token,
+    thinking_end_token,
+    USER_SP_TOKEN,
+    ASSISTANT_SP_TOKEN,
+    SYSTEM_SP_TOKEN,
+    LATEST_REMINDER_SP_TOKEN,
+    dsml_token,
+    IMAGE_PLACEHOLDER,
+)
+
+
+def find_reserved_token(text: str) -> Optional[str]:
+    """Return the first reserved special-token spelling in ``text``, if any."""
+    for token in RESERVED_SPECIAL_TOKENS:
+        if token in text:
+            return token
+    return None
+
+
 tool_calls_block_name: str = " calls"
 tool_call_tag_name: str = " invoke"
 tool_parameter_tag_name: str = " parameter"
@@ -266,14 +296,15 @@ def render_tools(tools: List[Dict[str, Union[str, Dict[str, Any]]]]) -> str:
     )
 
 
-def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
-    """Encode tool call arguments into V4.1 DSML parameter format."""
-    p_dsml_template = (
-        '<{dsml_token}{tool_parameter_tag_name} name="{key}" string="{is_str}">'
-        "{value}</{dsml_token}{tool_parameter_tag_name}>"
-    )
-    P_dsml_strs = []
+def resolve_tool_call_arguments(tool_call: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the mapping whose entries the encoder renders as DSML parameters.
 
+    ``arguments`` is normally a JSON object string. JSON strings, including
+    double-encoded ones, are decoded; anything that does not decode to an
+    object renders as one ``arguments`` string parameter holding the original
+    value. Callers that validate the rendered prompt must use this function so
+    that they inspect the same values the encoder writes.
+    """
     arguments = tool_call["arguments"]
     if not isinstance(arguments, dict):
         # Tolerate JSON strings, including double-encoded ones.
@@ -287,6 +318,18 @@ def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
                 break
         if not isinstance(arguments, dict):
             arguments = {"arguments": tool_call["arguments"]}
+    return arguments
+
+
+def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
+    """Encode tool call arguments into V4.1 DSML parameter format."""
+    p_dsml_template = (
+        '<{dsml_token}{tool_parameter_tag_name} name="{key}" string="{is_str}">'
+        "{value}</{dsml_token}{tool_parameter_tag_name}>"
+    )
+    P_dsml_strs = []
+
+    arguments = resolve_tool_call_arguments(tool_call)
 
     for k, v in arguments.items():
         P_dsml_strs.append(
