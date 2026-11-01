@@ -10754,13 +10754,15 @@ async fn anthropic_text_generation_reports_content_and_stop() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn anthropic_rejects_invalid_model_and_sampling_before_generation() {
-    let mut app = test_app().await;
     for (field, value, status) in [
         ("model", json!("missing-model"), StatusCode::NOT_FOUND),
         ("temperature", json!(-1), StatusCode::BAD_REQUEST),
+        ("temperature", json!(1.5), StatusCode::BAD_REQUEST),
         ("top_p", json!(1.1), StatusCode::BAD_REQUEST),
         ("stop_sequences", json!([""]), StatusCode::BAD_REQUEST),
     ] {
+        let (mut app, _engine_task) =
+            test_app_with_stream_output_specs(default_stream_output_specs()).await;
         let mut request = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 10,
             "messages": [{"role": "user", "content": "Hi"}]});
         request[field] = value;

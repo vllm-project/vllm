@@ -162,22 +162,21 @@ struct ErrorDetail {
 }
 
 fn error_body(error: ApiError) -> ErrorResponse {
-    let (kind, message) = match error {
-        ApiError::InvalidRequest { message, .. } | ApiError::JsonParseError { message } => {
-            ("invalid_request_error", message)
+    let kind = match error {
+        ApiError::InvalidRequest { .. } | ApiError::JsonParseError { .. } => {
+            "invalid_request_error"
         }
-        ApiError::ModelNotFound { model } => (
-            "not_found_error",
-            format!("The model `{model}` does not exist."),
-        ),
-        ApiError::NotFound { message } => ("not_found_error", message),
-        ApiError::Conflict { message } => ("conflict_error", message),
-        ApiError::ServiceUnavailable { message } => ("overloaded_error", message),
-        ApiError::ServerError { message } => ("api_error", message),
+        ApiError::ModelNotFound { .. } | ApiError::NotFound { .. } => "not_found_error",
+        ApiError::Conflict { .. } => "conflict_error",
+        ApiError::ServiceUnavailable { .. } => "overloaded_error",
+        ApiError::ServerError { .. } => "api_error",
     };
     ErrorResponse {
         kind: "error",
-        error: ErrorDetail { kind, message },
+        error: ErrorDetail {
+            kind,
+            message: error.message(),
+        },
     }
 }
 
@@ -219,7 +218,7 @@ pub struct MessagesRequest {
     input: CountTokensRequest,
     #[validate(range(min = 1))]
     max_tokens: u32,
-    #[validate(range(min = 0.0, max = 2.0))]
+    #[validate(range(min = 0.0, max = 1.0))]
     temperature: Option<f32>,
     #[validate(custom(function = "validate_top_p_value"))]
     top_p: Option<f32>,
