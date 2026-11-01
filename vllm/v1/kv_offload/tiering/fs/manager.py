@@ -18,7 +18,7 @@ import functools
 import json
 import os
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING
 
 try:
     from vllm.fs_io_C import batch_lookup as batch_lookup_C
@@ -30,31 +30,17 @@ except ImportError:
 from typing_extensions import override
 
 from vllm.logger import init_logger
-from vllm.v1.kv_offload.base import (
-    Locality,
-    LookupResult,
-    Medium,
-    OffloadingEvent,
-    OffloadKey,
-    ReqContext,
-)
+from vllm.v1.kv_offload.base import OffloadKey, ReqContext
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
 from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
-from vllm.v1.kv_offload.tiering.base import (
-    JobId,
-    JobResult,
-    RequestOffloadingContext,
-    ScheduleEndContext,
-    SecondaryTierManager,
-    TransferJob,
-)
+from vllm.v1.kv_offload.tiering.base import TransferJob
 from vllm.v1.kv_offload.tiering.fs.io import (
     batch_load_block,
     batch_store_block,
     probe_o_direct,
 )
-from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
+from vllm.v1.kv_offload.tiering.pooled import PooledTierManager
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
@@ -83,15 +69,8 @@ class FsAsyncLookupManager(AsyncLookupManager):
         return (os.path.exists(p) for p in paths)
 
 
-class FileSystemTierManager(SecondaryTierManager):
+class FileSystemTierManager(PooledTierManager):
     """Pure-Python disk-backed secondary tier.
-
-    Read-priority threads service load jobs preferentially; write-priority
-    threads service store jobs preferentially.  Both groups can drain either
-    queue, so neither starves.
-
-    submit_store / submit_load are non-blocking: they enqueue tasks and return.
-    get_finished_jobs() polls job completion and returns completed JobResults.
 
     Cross-process sharing:
         KV cache sharing between multiple vLLM instances using the same
@@ -103,8 +82,6 @@ class FileSystemTierManager(SecondaryTierManager):
         and is required to share a cache when using a non-cryptographic
         prefix-caching hash algorithm, which seeds ``NONE_HASH`` randomly.
     """
-
-    medium: ClassVar[Medium] = Medium.STORAGE
 
     def __init__(
         self,
@@ -135,41 +112,16 @@ class FileSystemTierManager(SecondaryTierManager):
 
         """
         super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure_detector
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            n_read_threads,
+            n_write_threads,
+            thread_name_prefix="vllm_kv_py_fs",
+            enable_kv_events=enable_kv_events,
+            locality=locality,
+            backpressure_detector=backpressure_detector,
         )
-        self.locality = Locality(locality) if locality is not None else None
-
-        self.events: list[OffloadingEvent] | None = None
-        if enable_kv_events:
-            if offloading_spec.kv_events_config.enable_kv_cache_events:
-                self.events = []
-            else:
-                logger.warning(
-                    "enable_kv_events is set on secondary tier '%s' but KV "
-                    "cache events are disabled globally; the tier will not "
-                    "emit events.",
-                    tier_type,
-                )
-        # Keys of in-flight store jobs, tracked only when events are enabled.
-        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
-        # Keys of in-flight load (promotion) jobs, so a failed load can mark
-        # its own cached lookup verdicts False (see get_finished_jobs).
-        self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
-        # Block count per in-flight job, used to report transfer_bytes.
-        self._job_block_counts: dict[JobId, int] = {}
-        # Per load job: how many blocks loaded before a failure (partial keep).
-        # Written by the pool worker inside the load task before it raises (so
-        # before task_done publishes the job); read on the scheduler thread in
-        # get_finished_jobs only for job ids the finished queue returned. Under
-        # the GIL that read cannot observe the finished job without the prior
-        # write, so no extra lock is needed (get_finished is itself lock-free).
-        self._load_progress: dict[JobId, int] = {}
-
-        # Extract block size from primary view
-        assert primary_kv_view.strides is not None, (
-            "primary_kv_view.strides cannot be None"
-        )
-        self._block_size: int = primary_kv_view.strides[0]
 
         # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self.file_mapper = FileMapper.from_offloading_spec(
@@ -200,154 +152,30 @@ class FileSystemTierManager(SecondaryTierManager):
                 tier_type,
             )
 
-        self._pool = DualQueueThreadPool(
-            n_read_threads,
-            n_write_threads,
-            thread_name_prefix="vllm_kv_py_fs",
-        )
-
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
-        return RequestOffloadingContext()
-
-    @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
-        result = self._lookup_manager.lookup(key, req_context)
-        if result is None:
-            return LookupResult.RETRY
-        return LookupResult.HIT if result else LookupResult.MISS
-
-    @override
     def submit_store(self, job_metadata: TransferJob) -> None:
-        keys = list(job_metadata.keys)
-        if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = keys
         task = functools.partial(
             batch_store_block,
-            [self.file_mapper.get_file_name(key) for key in keys],
+            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
             self._primary_kv_view,
-            [int(cid) * self._block_size for cid in job_metadata.chunk_ids],
-            self._block_size,
+            self._chunk_offsets(job_metadata),
+            self._block_size_bytes,
             self._use_o_direct,
         )
-        self._job_block_counts[job_metadata.job_id] = len(keys)
-        self._pool.enqueue_store(job_metadata.job_id, 1, [task])
+        self._enqueue_store(job_metadata, task)
 
     @override
     def submit_load(self, job_metadata: TransferJob) -> None:
-        job_id = job_metadata.job_id
-        # Track this load's keys so a failed promotion can mark only its failed
-        # keys as a miss (see get_finished_jobs).
-        keys = list(job_metadata.keys)
-        self._load_job_keys[job_id] = keys
-        self._job_block_counts[job_id] = len(keys)
-        paths = [self.file_mapper.get_file_name(key) for key in keys]
-        offsets = [int(cid) * self._block_size for cid in job_metadata.chunk_ids]
-
-        def load_task() -> None:
-            try:
-                batch_load_block(
-                    paths,
-                    self._primary_kv_view,
-                    offsets,
-                    self._block_size,
-                    self._use_o_direct,
-                )
-            except OSError as exc:
-                # Runs on the pool worker thread. Record how many blocks loaded
-                # before the failure so get_finished_jobs can keep them; this
-                # write precedes task_done, so the scheduler reads it safely
-                # under the GIL once the finished queue hands back this job.
-                num_succeeded = getattr(exc, "num_succeeded", 0)
-                self._load_progress[job_id] = num_succeeded
-                # Surfaces errno (e.g. EMFILE "Too many open files") for both
-                # the C and Python load paths.
-                logger.debug(
-                    "Load of %d blocks for job %s failed at block %d: %s",
-                    len(paths),
-                    job_id,
-                    num_succeeded,
-                    exc,
-                )
-                raise
-
-        self._pool.enqueue_load(job_id, 1, [load_task])
-
-    @override
-    def get_finished_jobs(self) -> Iterable[JobResult]:
-        """Collect finished jobs; a failed promotion marks only its failed keys
-        as a miss here (scheduler thread)."""
-        results = []
-        for job_id, success, transfer_time in self._pool.get_finished():
-            block_count = self._job_block_counts.pop(job_id, 0)
-            transfer_bytes = block_count * self._block_size if block_count else None
-            if self.events is not None:
-                keys = self._store_job_keys.pop(job_id, None)
-                if success and keys:
-                    self.events.append(
-                        OffloadingEvent(
-                            keys=keys,
-                            medium=self.medium,
-                            removed=False,
-                            locality=self.locality,
-                        )
-                    )
-            load_keys = self._load_job_keys.pop(job_id, None)
-            num_succeeded = self._load_progress.pop(job_id, 0)
-            if load_keys is not None and not success:
-                # A batched load stops at the first bad block and reports how
-                # many loaded before it. Those earlier blocks are kept in the
-                # primary tier (reported via successful_keys); only this block
-                # and the ones after it are marked a miss and recomputed.
-                successful = load_keys[:num_succeeded]
-                failed = load_keys[num_succeeded:]
-                self._lookup_manager.mark_miss(failed)
-                results.append(
-                    JobResult(
-                        job_id=job_id,
-                        success=False,
-                        successful_keys=tuple(successful) if successful else None,
-                        transfer_time=transfer_time,
-                        transfer_bytes=transfer_bytes,
-                    )
-                )
-                continue
-            results.append(
-                JobResult(
-                    job_id=job_id,
-                    success=success,
-                    transfer_time=transfer_time,
-                    transfer_bytes=transfer_bytes,
-                )
-            )
-        return results
-
-    @override
-    def take_events(self) -> Iterable[OffloadingEvent]:
-        if self.events is not None:
-            yield from self.events
-            self.events.clear()
-
-    @override
-    def drain_jobs(self) -> None:
-        """Block until all in-flight transfers in the threadpool finish."""
-        self._pool.wait_idle()
-
-    def on_request_finished(self, req_context: ReqContext) -> None:
-        self._lookup_manager.cleanup(req_context.req_id)
-
-    @override
-    def on_schedule_end(self, context: ScheduleEndContext) -> None:
-        self._lookup_manager.flush()
-
-    @override
-    def shutdown(self) -> None:
-        """Release resources held by this tier.
-
-        Shuts down the lookup manager and the thread pool,
-        clearing pending tasks and waiting for active threads to complete.
-        """
-        self._lookup_manager.shutdown()
-        self._pool.shutdown(wait=True)
+        # The raised OSError carries num_succeeded on both the C and Python
+        # paths, and surfaces errno (e.g. EMFILE "Too many open files").
+        task = functools.partial(
+            batch_load_block,
+            [self.file_mapper.get_file_name(key) for key in job_metadata.keys],
+            self._primary_kv_view,
+            self._chunk_offsets(job_metadata),
+            self._block_size_bytes,
+            self._use_o_direct,
+        )
+        self._enqueue_load(job_metadata, task)
