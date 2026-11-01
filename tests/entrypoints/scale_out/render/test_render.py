@@ -1000,13 +1000,8 @@ async def test_messages_render_system_and_multi_turn(client):
 
 
 @pytest.mark.asyncio
-async def test_messages_render_merges_inline_system(client):
-    """Inline system messages merge into the leading system block.
-
-    The model's chat template rejects non-leading system messages, so the
-    /v1/messages server path detects merge_inline_system=True and render must
-    produce the same tokens as the manually pre-merged request.
-    """
+async def test_messages_render_preserves_inline_system_position(client):
+    """System-first fallback keeps inline reminders after the prompt prefix."""
     inline = await client.post(
         "/v1/messages/render",
         json={
@@ -1023,22 +1018,28 @@ async def test_messages_render_merges_inline_system(client):
     )
     assert inline.status_code == 200
 
-    merged = await client.post(
+    preserved = await client.post(
         "/v1/messages/render",
         json={
             "model": MODEL_NAME,
             "max_tokens": 16,
-            "system": "You are a helpful assistant.Be brief.",
+            "system": "You are a helpful assistant.",
             "messages": [
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "Hi! How can I help?"},
-                {"role": "user", "content": "What is 2 + 2?"},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Be brief."},
+                        {"type": "text", "text": "What is 2 + 2?"},
+                    ],
+                },
             ],
         },
     )
-    assert merged.status_code == 200
+    assert preserved.status_code == 200
 
-    assert inline.json()["token_ids"] == merged.json()["token_ids"]
+    assert inline.json()["token_ids"] == preserved.json()["token_ids"]
 
 
 @pytest.mark.asyncio

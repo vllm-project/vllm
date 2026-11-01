@@ -73,6 +73,19 @@ If the model responds correctly, your setup is working. You can now use Claude C
 
 ## Troubleshooting
 
+### Inline system messages and prefix caching
+
+The Anthropic frontend automatically checks whether the model's chat template
+accepts system messages after the first turn. For system-first templates, inline
+system text is converted to user content in place, and adjacent user messages are
+merged. Per-turn reminders therefore stay out of the leading system prompt,
+preserving its unchanged prefix for [prefix caching](../../design/prefix_caching.md).
+Templates that accept inline system messages retain their system roles.
+
+This fallback preserves the text and its position but changes its role framing;
+it does not preserve system-level instruction priority. Tool and reasoning
+behavior still depends on the model and template.
+
 **Connection refused**: Ensure vLLM is running and accessible at the specified URL. Check that the port matches.
 
 **Tool calls not working**: Verify that your model supports tool calling and that you've enabled it with the correct `--tool-call-parser` flag. See [Tool Calling](../../features/tool_calling.md).
