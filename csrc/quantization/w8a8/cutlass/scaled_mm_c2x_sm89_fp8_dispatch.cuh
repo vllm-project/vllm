@@ -35,7 +35,7 @@ struct sm89_fp8_config_default {
 
   template <typename InType, typename OutType,
             template <typename, typename> typename Epilogue,
-            typename... EpilogueArgs>
+            int MainLoopStages = 5, typename... EpilogueArgs>
   static void dispatch(torch::stable::Tensor& out,
                        torch::stable::Tensor const& a,
                        torch::stable::Tensor const& b, EpilogueArgs&&... args) {
@@ -56,7 +56,8 @@ struct sm89_fp8_config_default {
       return vllm::fallback_cutlass_gemm_caller<
           vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
-                                InstructionShape, 5, FP8MathOperator>,
+                                InstructionShape, MainLoopStages,
+                                FP8MathOperator>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     } else if (np2 <= 8192) {
       using TileShape = typename cutlass::gemm::GemmShape<256, 128, 64>;
@@ -73,7 +74,8 @@ struct sm89_fp8_config_default {
       return vllm::fallback_cutlass_gemm_caller<
           vllm::cutlass_2x_gemm<cutlass::arch::Sm89, enable_sm89_to_sm90,
                                 InType, OutType, Epilogue, TileShape, WarpShape,
-                                InstructionShape, 5, FP8MathOperator>,
+                                InstructionShape, MainLoopStages,
+                                FP8MathOperator>,
           FallbackGemm>(out, a, b, std::forward<EpilogueArgs>(args)...);
     }
   }
@@ -375,6 +377,11 @@ inline void cutlass_gemm_sm89_fp8_dispatch(torch::stable::Tensor& out,
     return sm89_fp8_config_M256::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else {
+    // Reduce shared memory for large 128x128 prefill tiles.
+    if (m >= 1024 && b.size(1) >= 4096 && a.size(1) >= 2048) {
+      return sm89_fp8_config_default::dispatch<InType, OutType, Epilogue, 3>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
+    }
     // M in (256, inf)
     return sm89_fp8_config_default::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
