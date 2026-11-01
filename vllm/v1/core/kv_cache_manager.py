@@ -944,6 +944,16 @@ class KVCacheManager:
     def has_unready_checkpoint(self, request: Request) -> bool:
         return self.coordinator.has_unready_checkpoint(request)
 
+    def prepare_same_step_mamba_consumer(
+        self, request_id: str, new_computed_blocks: KVCacheBlocks
+    ) -> None:
+        self.coordinator.prepare_same_step_mamba_consumer(
+            request_id, new_computed_blocks.blocks
+        )
+
+    def cleanup_same_step_mamba_consumer(self, request_id: str) -> None:
+        self.coordinator.cleanup_same_step_mamba_consumer(request_id)
+
     def finalize_partial_tail_offloads(
         self, request: Request
     ) -> list[tuple[int, int, int]]:

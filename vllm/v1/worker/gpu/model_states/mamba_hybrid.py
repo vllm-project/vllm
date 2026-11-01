@@ -390,13 +390,20 @@ class MambaHybridModelState(DefaultModelState):
                 mamba_prefix_producer_indices = torch.from_numpy(producer_indices).to(
                     device=self.device, non_blocking=True
                 )
+                mamba_prefix_producer_indices._cpu_list = producer_indices.tolist()  # type: ignore[attr-defined]
+                mamba_prefix_producer_indices._has_valid = bool(  # type: ignore[attr-defined]
+                    np.any(producer_indices >= 0)
+                )
                 mamba_checkpoint_positions = torch.from_numpy(checkpoint_positions).to(
                     device=self.device, non_blocking=True
                 )
-                mamba_checkpoint_source_block_ids = {
-                    gid: torch.from_numpy(arr).to(device=self.device, non_blocking=True)
-                    for gid, arr in source_block_ids_per_group.items()
-                }
+                mamba_checkpoint_positions._cpu_list = checkpoint_positions.tolist()  # type: ignore[attr-defined]
+                mamba_checkpoint_source_block_ids = {}
+                for gid, arr in source_block_ids_per_group.items():
+                    t = torch.from_numpy(arr).to(device=self.device, non_blocking=True)
+                    t._cpu_list = arr.tolist()  # type: ignore[attr-defined]
+                    t._has_valid = bool(np.any(arr >= 0))  # type: ignore[attr-defined]
+                    mamba_checkpoint_source_block_ids[gid] = t
 
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,

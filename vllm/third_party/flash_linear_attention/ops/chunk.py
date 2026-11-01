@@ -88,7 +88,6 @@ def chunk_gated_delta_rule_fwd(
 
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     @staticmethod
-    @input_guard
     @torch.amp.custom_fwd(device_type="cuda")
     def forward(
         ctx,
@@ -106,6 +105,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         use_qk_l2norm_in_kernel: bool = False,
         core_attn_out: torch.Tensor | None = None,
     ):
+        q, k, v, g, beta = (x.contiguous() for x in (q, k, v, g, beta))
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
             k = l2norm_fwd(k)
