@@ -623,6 +623,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
     _grammar_from_parser: bool = PrivateAttr(default=False)
     """CAUTION: Should only be set by the parser-engine adapter's adjust_request."""
 
+    _tool_parameter_grammar: tuple[str, frozenset[str]] | None = PrivateAttr(
+        default=None
+    )
+    """Structural tag and schema-constrained tools, set only by adjust_request."""
+
     def resolve_reasoning_ended(
         self, parser: "Parser | None", prompt_token_ids: list[int]
     ) -> bool | None:

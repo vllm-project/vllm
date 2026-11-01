@@ -531,6 +531,32 @@ Supported models:
 
 Flags: `--tool-call-parser qwen3_xml`
 
+With `stream: true`, `qwen3_xml` can emit text inside nested array/object
+parameters before the XML parameter closes. Set `strict: true` in the tool's
+`function`, or use `--tool-strict-level parameter`, to enforce its parameter
+schema. This applies to containers whose leaves are strings: each object must
+set `additionalProperties: false` and require every declared property; arrays
+must declare an `items` schema. For example, a `files` array of objects with
+required string `file_path` and `content` properties streams progressively
+without changing the array or splitting it into separate tool calls. Default
+non-strict tools retain buffering; see [Strict Mode](#strict-mode).
+
+The parser enables this path only for parameter constraints attached by the
+server. It retains buffering for unsupported schemas (including references,
+unions and numeric leaves), non-strict tools, disabled structural-tag
+enforcement, and requests combining tool grammar with a separate output format.
+Requests crossing a serialization boundary that drops the server's private
+grammar metadata also retain buffering. Top-level string streaming is unchanged.
+
+Argument deltas are incomplete JSON prefixes. Accumulate the entire call and
+validate it before executing the tool; a truncated stream must not commit a
+partial file batch. This changes when argument text becomes visible, not model
+generation speed or tool execution semantics.
+
+The existing XML delimiter limitation still applies: literal `</parameter>` or
+`<parameter=` inside a JSON string can be interpreted as markup. Such a stream
+can remain incomplete; strict JSON constraints do not escape XML delimiters.
+
 ### MiMo-V2.6 Models (`mimo`)
 
 Supported models:
