@@ -61,6 +61,7 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
     make_block_hash_with_group_id,
+    maybe_convert_block_hash,
 )
 from vllm.v1.core.sched.output import (
     KVConnectorBlockState,
@@ -355,7 +356,7 @@ def _reduce_kv_connector_stats(runner):
 
 def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     scheduler = _make_partial_tail_scheduler()
-    _make_partial_tail_request(scheduler)
+    request = _make_partial_tail_request(scheduler)
     req_status = scheduler._req_status["req"]
     req_status.group_states[0].block_ids[:] = [11, 12]
     req_status.group_states[1].block_ids[:] = [0, 21]
@@ -410,11 +411,15 @@ def test_partial_tail_store_uses_attention_and_recurrent_cow_sources():
     assert full_attention_event.parent_block_hash is not None
 
     recurrent_event = events_by_group[1]
-    assert recurrent_event.block_size == 0
+    assert recurrent_event.block_size == 4
     assert recurrent_event.token_ids == []
     assert recurrent_event.kv_cache_spec_kind == "mamba"
-    assert len(recurrent_event.block_hashes) == 1
-    assert recurrent_event.parent_block_hash is None
+    assert recurrent_event.block_hashes == [
+        maybe_convert_block_hash(request.block_hashes[6])
+    ]
+    assert recurrent_event.parent_block_hash == maybe_convert_block_hash(
+        request.block_hashes[5]
+    )
 
 
 def test_aligned_boundary_store_uses_exact_source_with_partial_tail():
@@ -1473,7 +1478,11 @@ def test_eagle_partial_tail_round_trip_serves_mamba_checkpoint(cow_on_proof_step
         num_external_tokens=24,
     )
     [load_job_id] = scheduler._current_batch_load_jobs
-    assert scheduler._jobs[load_job_id].keys == stored
+    assert scheduler._jobs[load_job_id].keys == (
+        make_offload_key(consumer.block_hashes[3], 0),
+        make_offload_key(consumer.block_hashes[6], 0),
+        make_offload_key(consumer.block_hashes[5], 1),
+    )
 
 
 @pytest.mark.parametrize("host_hit", [False, True])
