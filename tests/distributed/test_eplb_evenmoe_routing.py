@@ -421,15 +421,29 @@ def test_l2_applicability_is_decided_on_the_config_the_run_uses(monkeypatch):
     assert EPLBConfig().l2_algorithm == "ultraep"
 
     # The assembled config of a run that enables EPLB decides. Redundancy
-    # stays zero here, so ultraep -- which only has replicas to choose between
-    # when there are redundant experts -- is switched off.
+    # is explicitly zero here, so ultraep -- which only has replicas to choose
+    # between when there are redundant experts -- is switched off.
     assembled = ParallelConfig(
+        data_parallel_size=2,
+        enable_expert_parallel=True,
+        enable_eplb=True,
+        eplb_config=EPLBConfig(l2_algorithm="ultraep", num_redundant_experts=0),
+    )
+    assert assembled.eplb_config.l2_algorithm == ""
+
+    # Left at the default, the redundancy is only resolved once the model's
+    # expert count is known, so the decision waits for that resolution rather
+    # than reading None as zero.
+    deferred = ParallelConfig(
         data_parallel_size=2,
         enable_expert_parallel=True,
         enable_eplb=True,
         eplb_config=EPLBConfig(l2_algorithm="ultraep"),
     )
-    assert assembled.eplb_config.l2_algorithm == ""
+    assert deferred.eplb_config.l2_algorithm == "ultraep"
+    deferred.compute_eplb_num_redundant_experts(num_logical_experts=256)
+    assert deferred.eplb_config.num_redundant_experts == 0
+    assert deferred.eplb_config.l2_algorithm == ""
 
     # A config that does not enable EPLB has no routing boundary for L2 to sit
     # in and is left alone, silently: this is also what a throwaway instance

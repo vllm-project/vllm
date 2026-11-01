@@ -683,26 +683,12 @@ class ParallelConfig:
         # still zero; gating on enable_eplb keeps such instances quiet, and a
         # run without EPLB has no routing boundary for the policy to sit in.
         if self.enable_eplb and self.eplb_config.l2_algorithm:
-            from vllm.distributed.eplb.evenmoe_runtime import l2_inapplicable_reason
-
-            reason = l2_inapplicable_reason(
-                self.eplb_config.l2_algorithm,
-                self.eplb_config.num_redundant_experts,
-            )
-            if reason is not None:
-                # The reason comes from the balancer: which deployments a
-                # policy can work on is a property of the policy, and a
-                # framework that decides it by assumption will switch off a
-                # policy that had work to do.
-                logger.warning(
-                    "Disabling EvenMoE L2 routing (%r): %s. Routing "
-                    "is unchanged by this -- the policy could only have "
-                    "reproduced it -- but the per-layer routing boundary and "
-                    "any load collective it needed are now skipped.",
-                    self.eplb_config.l2_algorithm,
-                    reason,
-                )
-                self.eplb_config.l2_algorithm = ""
+            # Upstream now leaves num_redundant_experts at None until the
+            # model's expert count is known (compute_eplb_num_redundant_experts
+            # resolves the minimum valid value). A None here is "not decided
+            # yet", not "zero", so the decision waits for that call.
+            if self.eplb_config.num_redundant_experts is not None:
+                self._decide_l2_applicability()
 
         tp = self.tensor_parallel_size
         pcp = self.prefill_context_parallel_size
@@ -720,6 +706,29 @@ class ParallelConfig:
             )
 
         return self
+
+    def _decide_l2_applicability(self) -> None:
+        """Switch off an L2 routing expression the deployment cannot use."""
+        from vllm.distributed.eplb.evenmoe_runtime import l2_inapplicable_reason
+
+        reason = l2_inapplicable_reason(
+            self.eplb_config.l2_algorithm,
+            self.eplb_config.num_redundant_experts,
+        )
+        if reason is not None:
+            # The reason comes from the balancer: which deployments a
+            # policy can work on is a property of the policy, and a
+            # framework that decides it by assumption will switch off a
+            # policy that had work to do.
+            logger.warning(
+                "Disabling EvenMoE L2 routing (%r): %s. Routing "
+                "is unchanged by this -- the policy could only have "
+                "reproduced it -- but the per-layer routing boundary and "
+                "any load collective it needed are now skipped.",
+                self.eplb_config.l2_algorithm,
+                reason,
+            )
+            self.eplb_config.l2_algorithm = ""
 
     def compute_eplb_num_redundant_experts(self, num_logical_experts: int) -> None:
         """Compute and set num_redundant_experts if not explicitly specified.
@@ -754,6 +763,11 @@ class ParallelConfig:
                 num_logical_experts,
                 ep_size,
             )
+            # The L2 decision deferred from __post_init__: now that the
+            # redundancy is known, a replica-routing expression with nothing
+            # to choose between is switched off here instead.
+            if self.eplb_config.l2_algorithm:
+                self._decide_l2_applicability()
 
     def set_dcp_defaults(
         self,
