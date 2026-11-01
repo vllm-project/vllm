@@ -107,7 +107,11 @@ class WorkerBase:
     def get_supported_kv_cache_layouts(self) -> list[str]:
         """Layout names every attention backend supports, most preferred first."""
         backends = get_current_attn_backends(self.vllm_config)
-        return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
+        # Backends may narrow their layouts by config (e.g. FlashInfer's
+        # flashinfer_separate_kv_head_slots), and this runs as a bare RPC.
+        with set_current_vllm_config(self.vllm_config):
+            layouts = get_supported_kv_cache_layouts(backends)
+        return [layout.name for layout in layouts]
 
     def set_kv_cache_layout(
         self, kv_cache_layout: str, cp_kv_cache_interleave_size: int
