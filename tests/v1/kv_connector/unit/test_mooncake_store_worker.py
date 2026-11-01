@@ -3867,7 +3867,7 @@ def test_store_sending_thread_waits_for_hybrid_checkpoint_and_retries(failure):
 @pytest.mark.parametrize("first_exists", [0, 1])
 def test_store_sending_thread_missing_source_keeps_checkpoint(block_ids, first_exists):
     store = MagicMock()
-    store.batch_is_exist.return_value = [first_exists]
+    store.batch_is_exist.return_value = [first_exists, 0]
     store.batch_put_from_multi_buffers.return_value = [256]
     thread = _make_store_sending_thread(store)
 
@@ -3883,6 +3883,22 @@ def test_store_sending_thread_missing_source_keeps_checkpoint(block_ids, first_e
     keys = store.batch_put_from_multi_buffers.call_args.args[0]
     assert len(keys) == 1
     assert keys[0].endswith("@6131")
+    assert thread._saved_offset["req-a"] == 32
+
+
+def test_store_sending_thread_existing_store_key_satisfies_missing_source():
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
+    thread = _make_store_sending_thread(store)
+
+    req = _make_store_req("req-a", [b"a0", b"a1"])
+    req.block_ids = ([1, NULL_BLOCK_ID],)
+    _run_store_req(thread, req)
+
+    keys = store.batch_is_exist.call_args.args[0]
+    assert len(keys) == 2
+    assert keys[1].endswith("@6131")
+    store.batch_put_from_multi_buffers.assert_not_called()
     assert thread._saved_offset["req-a"] == 32
 
 

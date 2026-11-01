@@ -885,7 +885,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
             )
             group_indices: list[int] = []
             store_shard_ids: list[StoreShardId] = []
-            missing_source_blocks = False
+            source_available: list[bool] = []
             for g_idx, db in enumerate(self.token_databases):
                 if not self.group_participates[g_idx]:
                     continue
@@ -911,29 +911,30 @@ class KVCacheStoreSendingThread(KVTransferThread):
                             or not store_mask[mask_idx]
                         ):
                             continue
-                    if block_idx >= len(group_blocks) or (
-                        group_blocks[block_idx] == NULL_BLOCK_ID
-                    ):
-                        missing_source_blocks = True
+                    has_source = block_idx < len(group_blocks) and (
+                        group_blocks[block_idx] != NULL_BLOCK_ID
+                    )
+                    if not has_source:
                         logger.debug(
-                            "Skipping unavailable Mooncake store source block "
+                            "Local source block unavailable; relying on remote "
+                            "existence check for its key "
                             "(req=%s, group=%d, block=%d)",
                             req_id,
                             g_idx,
                             block_idx,
                         )
-                        continue
                     for store_shard_id in db.store_layout.local_shard_ids:
                         starts.append(start)
                         ends.append(end)
                         keys.append(db.store_layout.key_for(store_shard_id, block_hash))
                         group_indices.append(g_idx)
                         store_shard_ids.append(store_shard_id)
+                        source_available.append(has_source)
                         if event_specs is not None:
                             event_specs.append((start, end, g_idx, block_hash))
 
             if not keys:
-                save_completed = not missing_source_blocks
+                save_completed = True
                 return
 
             # Check which blocks already exist (dedup)
@@ -957,6 +958,10 @@ class KVCacheStoreSendingThread(KVTransferThread):
             missing_indices = [
                 i for i, exists in enumerate(exists_states) if exists != 1
             ]
+            missing_source_blocks = any(
+                not source_available[i] for i in missing_indices
+            )
+            missing_indices = [i for i in missing_indices if source_available[i]]
 
             if not missing_indices:
                 save_completed = not missing_source_blocks
