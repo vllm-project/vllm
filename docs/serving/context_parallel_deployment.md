@@ -51,6 +51,18 @@ In short, for decode context parallel, try to increase `-tp` size until you get 
 
 Decode context parallel is supported in vLLM, for both MLA and GQA models. Some attention backends also support the combination of decode context parallel and MTP (multi-token prediction) to further accelerate the decoding phase.
 
+### Invalid DCP configuration
+
+`--decode-context-parallel-size` defaults to `1`. When prefill context
+parallelism is disabled (`--prefill-context-parallel-size 1`), DCP must divide
+`--tensor-parallel-size`. An invalid explicit value fails at configuration
+validation; vLLM does not automatically choose a replacement or fall back.
+
+For example, TP=4 and DCP=3 fails with topology-compatible DCP values
+`[1, 2, 4]` in the error message. These values satisfy the TP divisibility
+constraint only: model and attention backend constraints may further restrict
+them. Choose an explicit value compatible with all constraints and restart.
+
 ## Technical Discussions
 
 The main discussions happen in the `#sig-context-parallel` channel of [vLLM Slack](https://slack.vllm.ai/).
