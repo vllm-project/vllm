@@ -160,6 +160,23 @@ def _build_indptr_from_lengths(lengths: torch.Tensor) -> torch.Tensor:
     return indptr
 
 
+def weight_already_preshuffled(linear: torch.nn.Module) -> bool:
+    """True when the linear's kernel already B-preshuffled ``weight``.
+
+    The hand-shuffles below (fused_wqa_wkv, wo_b, gate_up_proj) must be skipped
+    for those, since shuffle_weight is a permutation rather than an involution.
+    """
+    if getattr(linear, "aiter_bpreshuffled", False):
+        return True
+    return any(
+        getattr(getattr(method, "fp8_linear", None), "preshuffles_weight", False)
+        for method in (
+            getattr(linear, "quant_method", None),
+            getattr(linear, "scheme", None),
+        )
+    )
+
+
 def apply_pre_quantized_block_scaled_mm(
     linear: torch.nn.Module,
     x_fp8: torch.Tensor,
@@ -1116,7 +1133,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
                 ws = _upcast_e8m0_to_fp32(ws).contiguous()
             # Shuffle the weight in place (single weight, no unshuffled copy),
             # unless the linear kernel already B-preshuffled it at load time.
-            if not getattr(linear, "aiter_bpreshuffled", False):
+            if not weight_already_preshuffled(linear):
                 replace_parameter(
                     linear,
                     "weight",
@@ -1306,16 +1323,26 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         return qr_kv, kv_score, indexer_kv_score, indexer_weights
 
     @functools.cached_property
-    def _wq_b_uses_aiter_block_scaled(self) -> bool:
-        """True when both wq_b GEMMs run the aiter block-scaled fp8 kernel.
+    def _wq_b_act_scale_transpose(self) -> bool | None:
+        """Activation-scale byte order every wq_b consumer agrees on, else None.
+
+        None means "do not take the fused norm+quant path". Otherwise the value
+        is the ``transpose_scale`` the producer must pass so that the scale it
+        writes matches what the selected GEMM reads.
 
         Cached: the linear kernels and the aiter env gates are fixed once
         the model is built, so this is evaluated at the first forward
         only.
 
-        The fused norm+quant path is only valid if the quant and GEMM it
-        replaces are exactly the aiter ones; otherwise fall back to the
-        shared path.
+        Two conditions, both necessary:
+
+        * The fused norm+quant path is only valid if the quant and GEMM it
+          replaces are exactly the aiter ones; otherwise fall back to the
+          shared path.
+        * One qr_scale feeds both self.wq_b and self.indexer.wq_b, which have
+          different (N, K) and so can resolve to kernels wanting opposite byte
+          orders. A single producer cannot serve both, so refuse the fast path
+          when they disagree rather than guessing.
         """
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.model_executor.kernels.linear.scaled_mm import (
@@ -1323,16 +1350,31 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         )
 
         if not rocm_aiter_ops.is_linear_fp8_enabled():
-            return False
+            return None
 
         linears = [self.wq_b]
         if self.indexer is not None:
             linears.append(self.indexer.wq_b)
+        layouts: set[bool] = set()
         for linear in linears:
             kernel = getattr(getattr(linear, "quant_method", None), "fp8_linear", None)
             if not isinstance(kernel, Fp8BlockScaledMMLinearKernel):
-                return False
-        return True
+                return None
+            layouts.add(bool(getattr(kernel, "wants_transposed_act_scale", False)))
+        if len(layouts) != 1:
+            logger.warning_once(
+                "DeepSeek-V4 wq_b consumers disagree on activation-scale layout; "
+                "disabling the fused q/kv norm+quant path.",
+                scope="global",
+            )
+            return None
+        transpose_scale = layouts.pop()
+        logger.debug_once(
+            "DeepSeek-V4 wq_b: emitting %s-major activation scales",
+            "column" if transpose_scale else "row",
+            scope="global",
+        )
+        return transpose_scale
 
     def _split_qkv_and_norm(
         self, qr_kv: torch.Tensor
@@ -1349,11 +1391,12 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
         when the aiter linear path is not active.
         """
         qr, kv = qr_kv.split([self.q_lora_rank, self.head_dim], dim=-1)
+        transpose_scale = self._wq_b_act_scale_transpose
         if not (
             qr.dim() == 2
             and qr.shape[0] > 0
             and self.q_lora_rank % 128 == 0
-            and self._wq_b_uses_aiter_block_scaled
+            and transpose_scale is not None
         ):
             return super()._split_qkv_and_norm(qr_kv)
 
@@ -1367,7 +1410,8 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             kv_weight=self.kv_norm.weight.data,
             kv_epsilon=self.eps,
             group_size=128,
-            transpose_scale=False,
+            # Emit the byte order the wq_b GEMMs read.
+            transpose_scale=transpose_scale,
         )
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
