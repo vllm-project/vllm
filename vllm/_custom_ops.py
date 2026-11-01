@@ -2703,6 +2703,7 @@ def grouped_topk(
     routed_scaling_factor: float,
     bias: torch.Tensor,
     scoring_func: int = 0,
+    is_padding: torch.Tensor | None = None,
 ):
     """Perform grouped top-k routing for mixture of experts.
 
@@ -2715,6 +2716,7 @@ def grouped_topk(
         routed_scaling_factor: Scaling factor for routing weights
         bias: Bias tensor (e_score_correction_bias). Always fused in kernel.
         scoring_func: 0=none (no activation), 1=sigmoid
+        is_padding: Optional CUDA token mask; padded rows get zero weights and -1 IDs.
 
     """
     if not (current_platform.is_cuda() or current_platform.is_xpu()):
@@ -2726,6 +2728,20 @@ def grouped_topk(
             scores.new_empty((0, topk), dtype=torch.float32),
             scores.new_empty((0, topk), dtype=torch.int32),
         )
+    # XPU provides its own operator with the original eight-argument schema.
+    if current_platform.is_xpu():
+        if is_padding is not None:
+            raise NotImplementedError("Fused grouped padding is only supported on CUDA")
+        return torch.ops._moe_C.grouped_topk(
+            scores,
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            bias,
+            scoring_func,
+        )
     return torch.ops._moe_C.grouped_topk(
         scores,
         num_expert_group,
@@ -2735,6 +2751,7 @@ def grouped_topk(
         routed_scaling_factor,
         bias,
         scoring_func,
+        is_padding,
     )
 
 
@@ -2750,6 +2767,7 @@ if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "grouped_topk"):
         routed_scaling_factor: float,
         bias: torch.Tensor,
         scoring_func: int = 0,
+        is_padding: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = scores.size(0)
         return (

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Sequence
 
 import pytest
 
@@ -31,7 +31,13 @@ class _DummyCachePolicy(CachePolicy):
     def remove(self, key: OffloadKey) -> None:
         pass
 
-    def touch(self, keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
+    def on_request_finished(
+        self,
+        key_groups: Sequence[Sequence[OffloadKey]],
+        insertion_only_keys: set[OffloadKey],
+        reused_keys: set[OffloadKey],
+        req_context: ReqContext,
+    ) -> None:
         pass
 
     def evict(
