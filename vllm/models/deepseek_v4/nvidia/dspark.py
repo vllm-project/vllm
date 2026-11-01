@@ -51,14 +51,12 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_padding_mask,
     sp_shard,
 )
-from vllm.models.deepseek_v4.common.eplb_util import (
-    DeepseekV4MixtureOfExperts,
-    collect_moe_layers,
-)
+from vllm.models.deepseek_v4.common.eplb_util import collect_moe_layers
 from vllm.models.deepseek_v4.common.mm_preprocess import IMAGE_SENTINEL_BASE_ID
 
 from .model import (
     DeepseekV4DecoderLayer,
+    DeepseekV4MixtureOfExperts,
     DeepseekV4Model,
     DeepseekV4MoE,
     _use_sequence_parallel,

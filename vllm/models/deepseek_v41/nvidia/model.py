@@ -73,15 +73,15 @@ from vllm.models.common.ops.sequence_parallel import (
     sp_reduce_scatter,
     sp_shard,
 )
-from vllm.models.deepseek_v4.common.eplb_util import DeepseekV4MixtureOfExperts
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v4.nvidia.model import (
-    DeepseekV4MoE as DeepseekV4MoEBase,
-)
-from vllm.models.deepseek_v4.nvidia.model import (
+    DeepseekV4MixtureOfExperts,
     MegaGateRoutingMetadata,
     make_deepseek_v4_expert_params_mapping,
     prepare_mega_gate_routing_metadata,
+)
+from vllm.models.deepseek_v4.nvidia.model import (
+    DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
