@@ -127,6 +127,9 @@ class ROLE(Enum):
     NOTINIT = "notinit"
 
 
+MORIIO_HANDSHAKE_VERSION = 1
+
+
 class MoRIIOAgentMetadata(
     msgspec.Struct,
     omit_defaults=True,  # type: ignore[call-arg]
@@ -146,6 +149,11 @@ class MoRIIOAgentMetadata(
     # Tokens per block of each attention layer. Hybrid models size attention
     # blocks to the recurrent-state page, which depends on the TP size.
     attention_block_sizes: dict[str, int] = {}
+    # Handshake compatibility fields (Gap 12).
+    # 0 means legacy/unset (accepted with warning for rolling upgrades).
+    handshake_version: int = MORIIO_HANDSHAKE_VERSION
+    # "read" or "write" — the MoRIIOMode this agent is running in.
+    mode: str = ""
 
 
 class RoleManager:
