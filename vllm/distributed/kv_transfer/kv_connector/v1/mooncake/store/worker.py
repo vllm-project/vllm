@@ -474,6 +474,9 @@ class StoreResidencyEvents:
         self._lock = threading.Lock()
         self._events: list[BlockStored] = []
         self._covered: dict[BlockKey, frozenset[str]] = {}
+        # Store keys of the announced objects, kept only so a rank can remove
+        # what a wipe on another rank could not reach.
+        self._keys: list[str] = []
 
     def record(
         self,
@@ -504,6 +507,7 @@ class StoreResidencyEvents:
             return
         events: list[BlockStored] = []
         block_coverage: dict[BlockKey, frozenset[str]] = {}
+        keys: list[str] = []
         index = 0
         for block in blocks:
             count = len(block.objects)
@@ -530,12 +534,14 @@ class StoreResidencyEvents:
                 kv_cache_spec_sliding_window=sliding_window,
             )
             events.append(event)
+            keys.extend(obj.key for obj in block.objects)
             block_coverage[store_block_key(event)] = frozenset(
                 obj.key.rsplit("@", 1)[0] for obj in block.objects
             )
         with self._lock:
             self._events.extend(events)
             self._covered.update(block_coverage)
+            self._keys.extend(keys)
 
     def retire(self) -> None:
         """Drop buffered reports for objects the Store no longer holds.
@@ -547,6 +553,22 @@ class StoreResidencyEvents:
         with self._lock:
             self._events = []
             self._covered = {}
+            self._keys = []
+
+    def take_retired_keys(self) -> list[str]:
+        """Take the Store keys of the buffered reports and drop the reports.
+
+        A wipe reaches the Store through rank 0 only, so a rank that wrote
+        before it may still hold queued puts and reports for the objects they
+        commit. Its next step takes those keys here, removes the objects they
+        name, and starts the epoch with nothing buffered.
+        """
+        with self._lock:
+            keys = self._keys
+            self._events = []
+            self._covered = {}
+            self._keys = []
+        return keys
 
     def drain(self) -> StoreResidency:
         with self._lock:
@@ -554,6 +576,7 @@ class StoreResidencyEvents:
             covered = self._covered
             self._events = []
             self._covered = {}
+            self._keys = []
         return StoreResidency(events, covered)
 
 
@@ -1068,6 +1091,30 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def retire_residency(self) -> None:
         """Drop buffered reports for objects the Store no longer holds."""
         self.residency_events.retire()
+
+    def retire_epoch(self) -> None:
+        """Make this rank's Store contents match a wipe performed elsewhere.
+
+        Removing the objects the taken reports name covers the writes the
+        wipe's rank-0 channel could not reach. Keys the wipe already removed
+        are skipped, so a successful wipe is not reported as a failure.
+        """
+        keys = self.residency_events.take_retired_keys()
+        if not keys:
+            return
+        present = [
+            key
+            for key, exists in zip(keys, self.store.batch_is_exist(keys))
+            if exists == 1
+        ]
+        if not present:
+            return
+        codes = self.store.batch_remove(present, force=True)
+        failed = sum(1 for code in codes if code != 0)
+        if failed:
+            logger.warning(
+                "Mooncake Store kept %d objects written before the wipe", failed
+            )
 
     def _positional_blocks(
         self,
@@ -2656,6 +2703,19 @@ class MooncakeStoreWorker:
         """Drop reports buffered for objects the Store no longer holds."""
         if self.kv_send_thread is not None:
             self.kv_send_thread.retire_residency()
+
+    def begin_residency_epoch(self) -> None:
+        """Make this rank match the Store wipe a newer epoch announces.
+
+        Runs from ``bind_connector_metadata`` before this step's lookups and
+        saves. Joining the send queue first completes the rank's old-epoch
+        writes, so the objects removed are exactly those it reported.
+        """
+        thread = self.kv_send_thread
+        if thread is None:
+            return
+        thread.request_queue.join()
+        thread.retire_epoch()
 
     @property
     def lookup_key_prefixes(self) -> dict[int, tuple[str, ...]]:

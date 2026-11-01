@@ -361,6 +361,36 @@ def test_worker_methods_delegate_to_store_worker():
     assert invalid_block_ids == {3, 4}
 
 
+def test_binding_a_newer_residency_epoch_retires_what_the_wipe_missed():
+    """The epoch stamp is how a wipe reaches the ranks rank-0's channel cannot,
+    and a rank applies it once, before that step's lookups."""
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreWorker"
+        ) as mock_worker_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.WORKER, kv_cache_config
+        )
+
+    worker = mock_worker_cls.return_value
+    connector.bind_connector_metadata(MooncakeStoreConnectorMetadata(set(), set()))
+    worker.begin_residency_epoch.assert_not_called()
+
+    wiped = MooncakeStoreConnectorMetadata(set(), set(), residency_epoch=1)
+    connector.bind_connector_metadata(wiped)
+    worker.begin_residency_epoch.assert_called_once_with()
+    assert connector._get_connector_metadata() is wiped
+
+    connector.bind_connector_metadata(wiped)
+    worker.begin_residency_epoch.assert_called_once_with()
+
+
 def test_get_transfer_results_delegates_to_store_worker():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
@@ -1172,6 +1202,32 @@ def test_scheduler_reset_store_handles_rpc_exception():
 
     mock_client_cls.return_value.reset.side_effect = RuntimeError("rpc timed out")
     assert sched.reset_store() is False
+
+
+def test_scheduler_metadata_carries_the_epoch_a_wipe_advanced():
+    """Every rank learns about a successful wipe from the metadata it binds;
+    a failed wipe leaves the Store in the old epoch."""
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "scheduler.LookupKeyClient"
+        ) as mock_client_cls,
+    ):
+        sched = scheduler.MooncakeStoreScheduler(vllm_config, kv_cache_config)
+        empty = SchedulerOutput.make_empty()
+        assert sched.build_connector_meta(empty).residency_epoch == 0
+
+        mock_client_cls.return_value.reset.return_value = True
+        assert sched.reset_store() is True
+        assert sched.build_connector_meta(empty).residency_epoch == 1
+
+        mock_client_cls.return_value.reset.return_value = False
+        assert sched.reset_store() is False
+        assert sched.build_connector_meta(empty).residency_epoch == 1
 
 
 def test_lookup_key_client_lookup_prepends_typed_tag():

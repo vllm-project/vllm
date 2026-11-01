@@ -806,6 +806,27 @@ def test_retire_residency_drops_reports_buffered_for_a_wiped_store():
     assert residency.covered == {}
 
 
+def test_retire_epoch_removes_objects_the_wipe_could_not_reach():
+    """A wipe runs through rank 0 only, so every other rank must remove the
+    objects its own old-epoch reports name, then forget those reports."""
+    store = MagicMock()
+    store.batch_is_exist.return_value = [0]
+    store.batch_put_from_multi_buffers.return_value = [256]
+    store.batch_remove.return_value = [0]
+    thread = _make_store_sending_thread(store)
+    thread.enable_kv_event = True
+
+    _run_store_req(thread, _make_event_store_req(16))
+
+    store.batch_is_exist.side_effect = lambda keys: [1] * len(keys)
+    thread.retire_epoch()
+
+    keys = store.batch_remove.call_args.args[0]
+    assert keys
+    assert store.batch_remove.call_args.kwargs == {"force": True}
+    assert thread.drain_residency().events == []
+
+
 def test_tp_shared_receiving_reads_each_local_store_shard():
     from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
 

@@ -482,10 +482,14 @@ class MooncakeStoreConnectorMetadata(KVConnectorMetadata):
         self,
         unfinished_request_ids: set[str],
         preempted_req_ids: set[str],
+        residency_epoch: int = 0,
     ):
         self.requests: list[ReqMeta] = []
         self.unfinished_request_ids = unfinished_request_ids
         self.preempted_req_ids = preempted_req_ids
+        # Bumped after every successful Store wipe; each rank uses it to tell
+        # reports buffered for the wiped Store from reports of the new epoch.
+        self.residency_epoch = residency_epoch
 
     def add_request(self, req_meta: ReqMeta) -> None:
         self.requests.append(req_meta)

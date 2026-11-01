@@ -217,6 +217,10 @@ class MooncakeStoreScheduler:
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
 
+        # Bumped after a successful Store wipe. Every rank receives it through
+        # the connector metadata and retires what the previous epoch left.
+        self._residency_epoch = 0
+
         self._boundary_store_stats = BoundaryStoreStats()
         self._last_boundary_stats_log = time.monotonic()
         self._logged_boundary_drops = 0
@@ -342,6 +346,7 @@ class MooncakeStoreScheduler:
         meta = MooncakeStoreConnectorMetadata(
             self._unfinished_request_ids,
             preempted_ids,
+            residency_epoch=self._residency_epoch,
         )
 
         # Handle new requests
@@ -858,6 +863,7 @@ class MooncakeStoreScheduler:
         try:
             ok = self.client.reset()
             if ok:
+                self._residency_epoch += 1
                 logger.info("Mooncake store reset via remove_all succeeded.")
             else:
                 logger.warning("Mooncake store reset returned NACK from worker.")

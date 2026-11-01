@@ -420,6 +420,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
             self._validate_kv_cache_config(vllm_config, kv_cache_config)
         self._kv_cache_config = kv_cache_config
         self._kv_cache_events: MooncakeStoreKVEvents | None = None
+        # Newest residency epoch this worker has applied. Scheduler role never
+        # binds metadata and keeps it at zero.
+        self._residency_epoch = 0
 
         self.connector_scheduler: MooncakeStoreScheduler | None = None
         self.connector_worker: MooncakeStoreWorker | None = None
@@ -596,6 +599,18 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     def restore_kv_caches(self) -> None:
         assert self.connector_worker is not None
         self.connector_worker.restore_kv_caches()
+
+    def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
+        super().bind_connector_metadata(connector_metadata)
+        if self.connector_worker is None or not isinstance(
+            connector_metadata, MooncakeStoreConnectorMetadata
+        ):
+            return
+        epoch = connector_metadata.residency_epoch
+        if epoch <= self._residency_epoch:
+            return
+        self._residency_epoch = epoch
+        self.connector_worker.begin_residency_epoch()
 
     def start_load_kv(self, forward_context: ForwardContext, **kwargs: Any) -> None:
         assert self.connector_worker is not None
