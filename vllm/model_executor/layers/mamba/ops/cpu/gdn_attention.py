@@ -534,6 +534,18 @@ def _spec_forward(
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
         and int(seq_lens[0].item()) == state_len - (width - 2)
+        # The native kernel requires num_accepted in [1, seqlen]. A valid
+        # shrunken step can have more previous-step acceptances than current
+        # queries, so rows outside the native contract use the fallback.
+        and bool(
+            (
+                (num_accepted[:num_spec_decodes] >= 1)
+                & (num_accepted[:num_spec_decodes] <= int(seq_lens[0].item()))
+                & (num_accepted[:num_spec_decodes] <= state_len - width + 2)
+            )
+            .all()
+            .item()
+        )
     )
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
@@ -558,9 +570,20 @@ def _spec_forward(
             q_i = int(seq_lens[i].item())
             if q_i == 0:
                 continue
+            acc_i = int(num_acc_cpu[i].item())
+            # Acceptance belongs to the previous step, whose query length can
+            # exceed this step's q_i. Clamp only to the stored history window.
+            offset = max(acc_i - 1, 0)
+            max_offset = max(state_len - (width - 1), 0)
+            if offset > max_offset:
+                logger.warning_once(
+                    "GDN CPU spec path: num_accepted=%d exceeds the available "
+                    "history; using the latest valid window",
+                    acc_i,
+                )
+                offset = max_offset
             start = int(seq_starts[i].item())
             slot0 = int(col0[i].item())
-            offset = int(num_acc_cpu[i].item()) - 1
             B = conv_buf[slot0]  # (dim, state_len)
             x_seq = mixed_qkv_spec[start : start + q_i].transpose(0, 1).to(B.dtype)
             prior = B[:, offset : offset + (width - 1)]
@@ -569,9 +592,10 @@ def _spec_forward(
             if silu:
                 out = F.silu(out)
             conv_out[start : start + q_i] = out.transpose(0, 1).to(conv_out.dtype)
-            # Same layout as causal_conv1d_update: the next step reads its
-            # history at column ``num_accepted - 1``.
-            B[:, : width - 2 + q_i] = conv_in[0, :, 1:]
+            if acc_i > 0:
+                # Same layout as causal_conv1d_update: the next step reads its
+                # history at column ``num_accepted - 1``.
+                B[:, : width - 2 + q_i] = conv_in[0, :, 1:]
 
     # ---- 2. Recurrent (multi-slot SSM state) ----
     # Single fused kernel call: it runs the recurrence over each sequence's
