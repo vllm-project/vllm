@@ -229,6 +229,27 @@ class MyQuantMoEMethod(FusedMoEMethodBase):
         ...
 ```
 
+!!! note "Modular vs. monolithic MoE kernels"
+
+    `FusedMoEMethodBase` exposes two execution paths, selected by the
+    `is_monolithic` property, whose base implementation falls back to
+    `False`:
+
+    - **Modular (default)**: routing has already run — the caller passes
+      `topk_weights` and `topk_ids` — and your method implements
+      `apply(self, layer, x, topk_weights, topk_ids, shared_experts,
+      shared_experts_input)`. You only run the expert computation with
+      your quantized weights; `shared_experts` / `shared_experts_input`
+      are the shared-experts module and its input, if the model has any.
+
+    - **Monolithic**: your kernel performs routing internally. Override
+      the `is_monolithic` property to return `True` and implement
+      `apply_monolithic(self, layer, x, router_logits, input_ids=None)`
+      instead of `apply`. The caller hands you the raw `router_logits`
+      (and `input_ids`, for routers that condition on them) and your
+      kernel selects experts and produces the expert outputs in a single
+      fused pass.
+
 See existing implementations like `Fp8MoEMethod` in `vllm/model_executor/layers/quantization/fp8.py` for reference.
 
 ### Using the Plugin
