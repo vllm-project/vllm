@@ -16,6 +16,108 @@ from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 
 
+@pytest.fixture(scope="module")
+def qwen_xml_server():
+    args = [
+        "--dtype",
+        "half",
+        "--enable-auto-tool-choice",
+        "--tool-call-parser",
+        "qwen3_xml",
+        "--max-model-len",
+        "4096",
+        "--max-num-seqs",
+        "2",
+        "--gpu-memory-utilization",
+        "0.2",
+        "--enforce-eager",
+    ] + ROCM_EXTRA_ARGS
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_qwen_xml_streams_nested_file_content(qwen_xml_server):
+    """Real SSE exposes nested code before the complete atomic file batch."""
+    content = "\n".join(f"// line {i}: example content" for i in range(48))
+    expected = {
+        "files": [{"file_path": "/workspace/rtl/example.sv", "content": content}]
+    }
+    parameters = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "files": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 1,
+                "items": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "enum": [expected["files"][0]["file_path"]],
+                        },
+                        "content": {"type": "string", "enum": [content]},
+                    },
+                    "required": ["file_path", "content"],
+                },
+            }
+        },
+        "required": ["files"],
+    }
+    kwargs = {
+        "model": MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": "Create the specified example file using write_file.",
+            }
+        ],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "write_file",
+                    "strict": True,
+                    "parameters": parameters,
+                },
+            }
+        ],
+        "tool_choice": {"type": "function", "function": {"name": "write_file"}},
+        "parallel_tool_calls": False,
+        "temperature": 0,
+        "seed": 0,
+        "max_tokens": 2048,
+        "extra_body": {"chat_template_kwargs": {"enable_thinking": False}},
+    }
+    async with qwen_xml_server.get_async_client() as client:
+        full = await client.chat.completions.create(**kwargs)
+        baseline = full.choices[0].message.tool_calls[0].function.arguments
+        stream = await client.chat.completions.create(**kwargs, stream=True)
+        fragments = []
+        finish_reason = None
+        async for chunk in stream:
+            for choice in chunk.choices:
+                finish_reason = choice.finish_reason or finish_reason
+                for call in choice.delta.tool_calls or []:
+                    if call.function and call.function.arguments:
+                        fragments.append(call.function.arguments)
+    # A forced named tool reports "stop" under the existing API contract.
+    assert finish_reason == "stop"
+    arguments = "".join(fragments)
+    assert json.loads(arguments) == json.loads(baseline) == expected
+    jsonschema.validate(json.loads(arguments), parameters)
+    assert len(fragments) > 2
+    prefix = ""
+    for fragment in fragments[:-1]:
+        prefix += fragment
+        with pytest.raises(json.JSONDecodeError):
+            json.loads(prefix)
+    assert "line 0" in prefix
+
+
 tools = [
     {
         "type": "function",

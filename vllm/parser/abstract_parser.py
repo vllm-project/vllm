@@ -4,6 +4,7 @@
 import contextlib
 import json
 from abc import abstractmethod
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 
@@ -503,6 +504,7 @@ class DelegatingParser(Parser):
     def _apply_structural_tag(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
+        request._tool_parameter_grammar = None
         tool_parser = self._tool_parser
         if tool_parser is None or not request.tools:
             return request
@@ -598,9 +600,24 @@ class DelegatingParser(Parser):
                 scope="local",
             )
 
+        serialized_tag = json.dumps(structural_tag.model_dump())
         request.structured_outputs = StructuredOutputsParams(
-            structural_tag=json.dumps(structural_tag.model_dump()),
+            structural_tag=serialized_tag,
         )
+        if resolved_tools is not None and output_format is None:
+            functions = [getattr(tool, "function", tool) for tool in resolved_tools]
+            names = Counter(getattr(function, "name", None) for function in functions)
+            strict_names = frozenset(
+                name
+                for function in functions
+                if isinstance(name := getattr(function, "name", None), str)
+                and getattr(function, "strict", False) is True
+                and names[name] == 1
+            )
+            request._tool_parameter_grammar = (
+                serialized_tag,
+                strict_names,
+            )
         if isinstance(request, ResponsesRequest):
             request.text = None
         else:

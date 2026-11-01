@@ -880,6 +880,7 @@ steps:
   device: cpu-small
   commands:
   - pytest -v -s tool_parsers
+  - pytest -v -s parser/engine
 
 # Key kept from the former A100 step's mirror for job history and retries.
 - label: ":amd: (MI250) Batch Invariance"
