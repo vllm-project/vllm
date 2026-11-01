@@ -948,11 +948,18 @@ class Platform:
         backend_cls: "type[AttentionBackend]",
     ) -> None:
         """For hybrid attention/mamba models, ensure that the attention page
-        size is >= the mamba page size, and pad the mamba page size to match.
+        size is >= the mamba page size, and pad the mamba page size to match
+        unless the backends only support block-outermost layouts.
         """
         from math import lcm
 
-        from vllm.config.vllm import set_current_vllm_config
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
         from vllm.model_executor.layers.mamba.abstract import (
             get_mamba_prefill_checkpoint_alignment,
         )
@@ -960,7 +967,9 @@ class Platform:
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
+        from vllm.v1.attention.backends.utils import get_supported_kv_cache_layouts
         from vllm.v1.kv_cache_interface import (
+            AttentionSpec,
             FullAttentionSpec,
             MambaSpec,
             MLAAttentionSpec,
@@ -980,6 +989,19 @@ class Platform:
 
         # Compute attention page size for 1 token
         if model_config.use_mla:
+            # Packed MLA row widths depend on the layer's impl (e.g. fp8_ds_mla).
+            # Platforms that register no layers keep the head_size estimate.
+            mla_spec = next(
+                (
+                    layer.get_kv_cache_spec(vllm_config)
+                    for layer in get_layers_from_vllm_config(
+                        vllm_config,
+                        AttentionLayerBase,  # type: ignore[type-abstract]
+                    ).values()
+                    if layer.get_attn_backend().is_mla()
+                ),
+                None,
+            )
             attn_page_size_1_token = MLAAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
@@ -987,6 +1009,11 @@ class Platform:
                 dtype=kv_cache_dtype,
                 cache_dtype_str=cache_config.cache_dtype,
                 kv_quant_mode=kv_quant_mode,
+                state_content_bytes=(
+                    mla_spec.state_content_bytes
+                    if isinstance(mla_spec, AttentionSpec)
+                    else None
+                ),
             ).page_size_bytes
         elif (
             cache_config.cache_dtype.startswith("turboquant_")
@@ -1070,6 +1097,8 @@ class Platform:
 
         # Get kernel block alignment from the backend's supported sizes
         with set_current_vllm_config(vllm_config):
+            backends = cls._find_non_ssm_backends(vllm_config)
+            layouts = get_supported_kv_cache_layouts(backends)
             kernel_block_alignment_size = max(
                 min(
                     s.base if isinstance(s, MultipleOf) else s
@@ -1081,7 +1110,7 @@ class Platform:
             backend_block_alignment = lcm(
                 *(
                     min(s.base if isinstance(s, MultipleOf) else s for s in sizes)
-                    for b in cls._find_non_ssm_backends(vllm_config)
+                    for b in backends
                     if (sizes := b.get_supported_kernel_block_sizes())
                 )
             )
@@ -1120,10 +1149,13 @@ class Platform:
             cache_config.mamba_block_size = cache_config.block_size
 
         # Pad mamba page size to exactly match attention page size
+        # unless block-outermost layouts pack the Mamba states at their own size.
         attn_page_size = cache_config.block_size * attn_page_size_1_token
         assert attn_page_size >= mamba_page_size
 
-        if attn_page_size == mamba_page_size:
+        if attn_page_size == mamba_page_size or all(
+            layout.is_block_outermost for layout in layouts
+        ):
             return
 
         if (

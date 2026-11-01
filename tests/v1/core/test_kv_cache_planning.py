@@ -1271,7 +1271,8 @@ def test_get_kv_cache_configs_attention_free():
     ]
 
 
-def test_packed_groups_glm5_like_hybrid():
+@pytest.mark.parametrize("conv_dim", [6144, 12288])
+def test_packed_groups_glm5_like_hybrid(conv_dim):
     vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=8192))
     vllm_config.cache_config.kv_cache_layout = "BLHNC"
     kpool, block_size = 4, 1024
@@ -1301,7 +1302,7 @@ def test_packed_groups_glm5_like_hybrid():
         )
     for i in range(34):
         kv_cache_spec[f"layers.{i}.kda"] = MambaSpec(
-            shapes=((3, 6144), (16, 128, 128)),
+            shapes=((3, conv_dim), (16, 128, 128)),
             dtypes=(torch.bfloat16, torch.float32),
             block_size=block_size,
         )
@@ -1328,7 +1329,8 @@ def test_packed_groups_glm5_like_hybrid():
     ]
     assert len(attn) == 1 and len(attn[0].layer_names) == 22
     assert len(rings) == 1 and len(rings[0].layer_names) == 11
-    # 11 * (1.18 MB MLA + 34 KB indexer) per block fits 12 fp32-SSM KDA states.
+    # 11 * (1.18 MB MLA + 34 KB indexer) per block fits 12 KDA states of 1.09 MB,
+    # or 11 of 1.12 MB plus one that widens the block and saves a Mamba group.
     assert len(mamba) == 3
     assert sum(len(g.layer_names) for g in mamba) == 34
 
