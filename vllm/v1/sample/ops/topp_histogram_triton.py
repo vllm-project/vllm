@@ -42,7 +42,11 @@ from typing import Any
 
 import torch
 
-from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, _when
+from vllm.model_executor.warmup.jit_warmup import (
+    WarmupChoices,
+    WarmupIntRange,
+    _when,
+)
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     DispatchSpec,
     TritonWarmupTensor,
@@ -77,10 +81,11 @@ _MAX_DISTINCT = 64
 
 _LOG2E = tl.constexpr(1.4426950408889634)
 # Per-row state floats: flag, max, sum_exp, inv_bin_width, first_bin, last_bin,
-# boundary_logit, boundary_index.
+# boundary_logit, boundary_index (int32 bits).
 _RS = tl.constexpr(8)
 
-_WORKSPACE: dict[tuple[torch.device, int, int, int], dict[str, torch.Tensor]] = {}
+# One grow-only scratch workspace per device.
+_WORKSPACE: dict[torch.device, dict[str, torch.Tensor]] = {}
 
 
 def _num_slices(batch_size: int, vocab_size: int, num_sm: int) -> int:
@@ -120,6 +125,22 @@ def _row_range(STATS, row, S: tl.constexpr, NB: tl.constexpr, MAX_RANGE: tl.cons
 def _coarse_bin(x, row_max, inv_w, NB: tl.constexpr):
     b = ((row_max - x) * inv_w).to(tl.int32)
     return tl.minimum(tl.maximum(b, 0), NB - 1)
+
+
+@triton.jit
+def _fine_bin(x, row_max, d_hi, inv_w2, NBF: tl.constexpr):
+    # Distances below row_max, so that no large terms cancel.
+    fb = (((row_max - x) - d_hi) * inv_w2).to(tl.int32)
+    return tl.minimum(tl.maximum(fb, 0), NBF - 1)
+
+
+@triton.jit
+def _max_count(v, cnt, x, valid):
+    """Running (largest valid value, its count), updated with one chunk."""
+    m = tl.max(tl.where(valid, x, -float("inf")))
+    c = tl.sum((valid & (x == m)).to(tl.int32))
+    cnt = tl.where(m > v, c, tl.where(m == v, cnt + c, cnt))
+    return tl.maximum(v, m), cnt
 
 
 @triton.jit
@@ -225,8 +246,14 @@ def _topp_hist_bracket_kernel(
                 0.0,
                 tl.exp2(-(bf + 1.0) * w * _LOG2E) * (1.0 - MARGIN),
             )
-            cu = tl.cumsum(upper, 0)
-            cl = tl.cumsum(c * lower_f, 0)
+            lower = c * lower_f
+            # Per-bin bounds are loose by about w of the mass they sum, too
+            # loose near p = 1. Also bound the mass up to each bin by the
+            # exact total minus the bounds of the bins below it.
+            below_u = tl.cumsum(upper, 0, reverse=True) - upper
+            below_l = tl.cumsum(lower, 0, reverse=True) - lower
+            cu = tl.minimum(tl.cumsum(upper, 0), z * (1.0 + MARGIN) - below_l)
+            cl = tl.maximum(tl.cumsum(lower, 0), z * (1.0 - MARGIN) - below_u)
             first_bin = tl.min(tl.where(cu >= target, b, NB - 1))
             last_bin = tl.min(tl.where(cl >= target, b, NB - 1))
             flag = 1.0
@@ -307,6 +334,7 @@ def _topp_hist_boundary_kernel(
     SLICE_CAP: tl.constexpr,
     FINE_CAP: tl.constexpr,
     CHUNK: tl.constexpr,
+    ROW_CHUNK: tl.constexpr,
     MARGIN: tl.constexpr,
     MAX_DISTINCT: tl.constexpr,
     VOCAB_SIZE: tl.constexpr,
@@ -325,7 +353,7 @@ def _topp_hist_boundary_kernel(
     above = tl.sum(tl.load(ABOVE + row * S + s))
     mode = 1.0
     boundary_x = -float("inf")
-    boundary_i = 2147483647
+    boundary_i = tl.full((), 2147483647, tl.int32)
     if tl.max(counts) > SLICE_CAP:
         # The coarse bracket overflowed the gather scratch (extreme ties or a
         # very flat tail): walk the bracket's distinct values over the row.
@@ -333,7 +361,7 @@ def _topp_hist_boundary_kernel(
         inv_w = tl.load(base + 3)
         lo_bin = first_bin.to(tl.int32)
         hi_bin = last_bin.to(tl.int32)
-        r = tl.arange(0, CHUNK)
+        r = tl.arange(0, ROW_CHUNK)
         prev = float("inf")
         done = 0
         it = 0
@@ -341,20 +369,17 @@ def _topp_hist_boundary_kernel(
             it += 1
             v = -float("inf")
             cnt = 0
-            for i in range(0, VOCAB_SIZE, CHUNK):
+            for i in range(0, VOCAB_SIZE, ROW_CHUNK):
                 x = tl.load(ROW + i + r, mask=i + r < VOCAB_SIZE, other=-float("inf"))
                 b = _coarse_bin(x, row_max, inv_w, NB)
                 inb = (x > -float("inf")) & (b >= lo_bin) & (b <= hi_bin) & (x < prev)
-                v = tl.maximum(v, tl.max(tl.where(inb, x, -float("inf"))))
-            for i in range(0, VOCAB_SIZE, CHUNK):
-                x = tl.load(ROW + i + r, mask=i + r < VOCAB_SIZE, other=-float("inf"))
-                cnt += tl.sum((x == v).to(tl.int32))
+                v, cnt = _max_count(v, cnt, x, inb)
             e = tl.exp2((v - row_max) * _LOG2E)
             if (v == -float("inf")) | (above + cnt * e >= target):
                 need = tl.maximum(target - above, 0.0)
                 kk = tl.minimum(tl.maximum(tl.ceil(need / e).to(tl.int32), 1), cnt)
                 seen = 0
-                for i in range(0, VOCAB_SIZE, CHUNK):
+                for i in range(0, VOCAB_SIZE, ROW_CHUNK):
                     x = tl.load(
                         ROW + i + r, mask=i + r < VOCAB_SIZE, other=-float("inf")
                     )
@@ -372,8 +397,9 @@ def _topp_hist_boundary_kernel(
         if done == 0:
             mode = 2.0  # keep the whole coarse bracket
     else:
-        # Fine bins over the bracket's logit range (x_hi - (last-first+1) w, x_hi].
-        x_hi = row_max - first_bin * w
+        # Fine bins over the bracket: distances [d_hi, d_hi + (last-first+1) w)
+        # below row_max.
+        d_hi = first_bin * w
         w2 = (last_bin - first_bin + 1.0) * w / NBF
         inv_w2 = 1.0 / w2
         k = tl.arange(0, CHUNK)
@@ -385,15 +411,13 @@ def _topp_hist_boundary_kernel(
                 if c0 < nj:
                     m = c0 + k < nj
                     x = tl.load(CAND_X + src + c0 + k, mask=m, other=-float("inf"))
-                    fb = ((x_hi - x) * inv_w2).to(tl.int32)
-                    fb = tl.minimum(tl.maximum(fb, 0), NBF - 1)
+                    fb = _fine_bin(x, row_max, d_hi, inv_w2, NBF)
                     hist += tl.histogram(fb, NBF, mask=m)
         fbin = tl.arange(0, NBF)
         c = hist.to(tl.float32)
         ff = fbin.to(tl.float32)
-        upper = c * tl.exp2(((x_hi - ff * w2) - row_max) * _LOG2E) * (1.0 + MARGIN)
-        lower = c * tl.exp2(((x_hi - (ff + 1.0) * w2) - row_max) * _LOG2E)
-        lower = lower * (1.0 - MARGIN)
+        upper = c * tl.exp2(-(d_hi + ff * w2) * _LOG2E) * (1.0 + MARGIN)
+        lower = c * tl.exp2(-(d_hi + (ff + 1.0) * w2) * _LOG2E) * (1.0 - MARGIN)
         cu = above + tl.cumsum(upper, 0)
         cl = above + tl.cumsum(lower, 0)
         f_first = tl.min(tl.where(cu >= target, fbin, NBF - 1))
@@ -411,8 +435,7 @@ def _topp_hist_boundary_kernel(
                     m = c0 + k < nj
                     x = tl.load(CAND_X + src + c0 + k, mask=m, other=-float("inf"))
                     ix = tl.load(CAND_I + src + c0 + k, mask=m, other=0)
-                    fb = ((x_hi - x) * inv_w2).to(tl.int32)
-                    fb = tl.minimum(tl.maximum(fb, 0), NBF - 1)
+                    fb = _fine_bin(x, row_max, d_hi, inv_w2, NBF)
                     above_fine, above_fine_c = _kahan_add(
                         above_fine,
                         above_fine_c,
@@ -423,7 +446,9 @@ def _topp_hist_boundary_kernel(
                     cand = m & (fb >= f_first) & (fb <= f_last)
                     pos = nf + tl.cumsum(cand.to(tl.int32), 0) - 1
                     ok = cand & (pos < FINE_CAP)
-                    tl.store(fine_row + pos * 2, x.to(tl.int32, bitcast=True), mask=ok)
+                    # +0.0 for -0.0: the sort key must order like the mask's ==.
+                    xk = tl.where(x == 0.0, 0.0, x).to(tl.int32, bitcast=True)
+                    tl.store(fine_row + pos * 2, xk, mask=ok)
                     tl.store(fine_row + pos * 2 + 1, ix, mask=ok)
                     nf += tl.sum(cand.to(tl.int32))
         above += tl.sum(above_fine - above_fine_c)
@@ -438,19 +463,6 @@ def _topp_hist_boundary_kernel(
             while (done == 0) & (it < MAX_DISTINCT):
                 it += 1
                 v = -float("inf")
-                for j in range(S):
-                    nj = tl.load(COUNTS + row * S + j)
-                    src = (row * S + j).to(tl.int64) * SLICE_CAP
-                    for c0 in range(0, SLICE_CAP, CHUNK):
-                        if c0 < nj:
-                            m = c0 + k < nj
-                            x = tl.load(
-                                CAND_X + src + c0 + k, mask=m, other=-float("inf")
-                            )
-                            fb = ((x_hi - x) * inv_w2).to(tl.int32)
-                            fb = tl.minimum(tl.maximum(fb, 0), NBF - 1)
-                            inb = m & (fb >= f_first) & (fb <= f_last) & (x < prev)
-                            v = tl.maximum(v, tl.max(tl.where(inb, x, -float("inf"))))
                 cnt = 0
                 for j in range(S):
                     nj = tl.load(COUNTS + row * S + j)
@@ -461,7 +473,9 @@ def _topp_hist_boundary_kernel(
                             x = tl.load(
                                 CAND_X + src + c0 + k, mask=m, other=-float("inf")
                             )
-                            cnt += tl.sum((m & (x == v)).to(tl.int32))
+                            fb = _fine_bin(x, row_max, d_hi, inv_w2, NBF)
+                            inb = m & (fb >= f_first) & (fb <= f_last) & (x < prev)
+                            v, cnt = _max_count(v, cnt, x, inb)
                 e = tl.exp2((v - row_max) * _LOG2E)
                 if (v == -float("inf")) | (above + cnt * e >= target):
                     # Tokens of value v to keep, in index order: the first kk.
@@ -517,7 +531,7 @@ def _topp_hist_boundary_kernel(
             boundary_x = tl.sum(tl.where(sel, sorted_x, 0.0))
             boundary_i = tl.sum(tl.where(sel, sorted_i, 0))
     tl.store(base + 6, boundary_x)
-    tl.store(base + 7, boundary_i.to(tl.float32))
+    tl.store(base + 7, boundary_i.to(tl.float32, bitcast=True))
     tl.store(base, mode)
 
 
@@ -542,7 +556,7 @@ def _topp_hist_mask_kernel(
     inv_w = tl.load(base + 3)
     last_bin = tl.load(base + 5).to(tl.int32)
     boundary_x = tl.load(base + 6)
-    boundary_i = tl.load(base + 7).to(tl.int32)
+    boundary_i = tl.load(base + 7).to(tl.int32, bitcast=True)
     slice_len = (VOCAB_SIZE + S - 1) // S
     start = (pid % S) * slice_len
     end = tl.minimum(start + slice_len, VOCAB_SIZE)
@@ -562,36 +576,60 @@ def _topp_hist_mask_kernel(
 # --- dispatch + warmup ------------------------------------------------------
 
 
-def _max_sampler_batch_size(vllm_config: Any) -> int:
+def max_sampler_batch_size(vllm_config: Any) -> int:
+    """Largest number of logits rows the sampler masks in one call."""
     return vllm_config.scheduler_config.max_num_seqs * (
         vllm_config.num_speculative_tokens + 1
     )
 
 
-def _warmup_inputs(vllm_config: Any) -> dict[str, Any]:
-    _when(current_platform.is_cuda())
+_SCRATCH_DTYPES = dict(
+    p=torch.float32,
+    stats=torch.float32,
+    hist=torch.int32,
+    zpart=torch.float32,
+    rowstate=torch.float32,
+    above=torch.float32,
+    counts=torch.int32,
+    cand_x=torch.float32,
+    cand_i=torch.int32,
+    fine=torch.int32,
+)
+
+
+def _warmup_case(
+    vllm_config: Any, batch_size: int, logits_stride: int, names: tuple[str, ...]
+) -> dict[str, Any]:
     vocab_size = vllm_config.model_config.get_vocab_size()
-    max_batch = max(MIN_BATCH_SIZE, _max_sampler_batch_size(vllm_config))
-    batch_size: Any = WarmupIntRange(MIN_BATCH_SIZE, max_batch + 1)
-    f32 = torch.float32
-    i32 = torch.int32
-    return dict(
+    case: dict[str, Any] = dict(
         logits=TritonWarmupTensor(
-            f32, shape=(batch_size, vocab_size), strides=(vocab_size, 1)
+            torch.float32, shape=(batch_size, vocab_size), strides=(logits_stride, 1)
         ),
-        p=TritonWarmupTensor(f32),
-        stats=TritonWarmupTensor(f32),
-        hist=TritonWarmupTensor(i32),
-        zpart=TritonWarmupTensor(f32),
-        rowstate=TritonWarmupTensor(f32),
-        above=TritonWarmupTensor(f32),
-        counts=TritonWarmupTensor(i32),
-        cand_x=TritonWarmupTensor(f32),
-        cand_i=TritonWarmupTensor(i32),
-        fine=TritonWarmupTensor(i32),
-        mask_value=float("-inf"),
         num_sm=num_compute_units(),
     )
+    for name in names:
+        case[name] = (
+            float("-inf")
+            if name == "mask_value"
+            else TritonWarmupTensor(_SCRATCH_DTYPES[name])
+        )
+    return case
+
+
+def _warmup_inputs(*names: str) -> Any:
+    """Warmup cases of a launcher taking logits, ``names`` and num_sm."""
+
+    def warmup_inputs(
+        vllm_config: Any, names: tuple[str, ...] = names
+    ) -> dict[str, Any]:
+        _when(current_platform.is_cuda())
+        batch_size: Any = WarmupIntRange(
+            MIN_BATCH_SIZE, max_sampler_batch_size(vllm_config) + 1
+        )
+        logits_stride: Any = WarmupChoices(16, 2)
+        return _warmup_case(vllm_config, batch_size, logits_stride, names)
+
+    return warmup_inputs
 
 
 def _layout(logits: torch.Tensor, num_sm: int) -> tuple[int, int, int]:
@@ -601,7 +639,8 @@ def _layout(logits: torch.Tensor, num_sm: int) -> tuple[int, int, int]:
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_topp_hist_minmax_kernel, warmup_inputs=_warmup_inputs
+    kernel=_topp_hist_minmax_kernel,
+    warmup_inputs=_warmup_inputs("p", "stats"),
 )
 def _launch_minmax(
     logits: torch.Tensor, p: torch.Tensor, stats: torch.Tensor, num_sm: int
@@ -613,7 +652,8 @@ def _launch_minmax(
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_topp_hist_coarse_kernel, warmup_inputs=_warmup_inputs
+    kernel=_topp_hist_coarse_kernel,
+    warmup_inputs=_warmup_inputs("p", "stats", "hist", "zpart"),
 )
 def _launch_coarse(
     logits: torch.Tensor,
@@ -635,7 +675,8 @@ def _launch_coarse(
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_topp_hist_bracket_kernel, warmup_inputs=_warmup_inputs
+    kernel=_topp_hist_bracket_kernel,
+    warmup_inputs=_warmup_inputs("p", "stats", "hist", "zpart", "rowstate"),
 )
 def _launch_bracket(
     logits: torch.Tensor,
@@ -653,7 +694,8 @@ def _launch_bracket(
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_topp_hist_gather_kernel, warmup_inputs=_warmup_inputs
+    kernel=_topp_hist_gather_kernel,
+    warmup_inputs=_warmup_inputs("rowstate", "above", "counts", "cand_x", "cand_i"),
 )
 def _launch_gather(
     logits: torch.Tensor,
@@ -676,7 +718,10 @@ def _launch_gather(
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_topp_hist_boundary_kernel, warmup_inputs=_warmup_inputs
+    kernel=_topp_hist_boundary_kernel,
+    warmup_inputs=_warmup_inputs(
+        "p", "rowstate", "above", "counts", "cand_x", "cand_i", "fine"
+    ),
 )
 def _launch_boundary(
     logits: torch.Tensor,
@@ -698,6 +743,7 @@ def _launch_boundary(
         SLICE_CAP=slice_cap,
         FINE_CAP=FINE_CAPACITY,
         CHUNK=min(slice_cap, 1024),
+        ROW_CHUNK=4096,
         MARGIN=_BOUND_MARGIN,
         MAX_DISTINCT=_MAX_DISTINCT,
         VOCAB_SIZE=logits.shape[1],
@@ -706,7 +752,8 @@ def _launch_boundary(
 
 
 @triton_kernel_dispatcher_with_warmup(
-    kernel=_topp_hist_mask_kernel, warmup_inputs=_warmup_inputs
+    kernel=_topp_hist_mask_kernel,
+    warmup_inputs=_warmup_inputs("rowstate", "mask_value"),
 )
 def _launch_mask(
     logits: torch.Tensor, rowstate: torch.Tensor, mask_value: float, num_sm: int
@@ -726,34 +773,36 @@ def apply_top_p_histogram(
     """Mask ``logits`` ([batch, vocab] fp32, vocab contiguous) to top-p in place.
 
     ``p`` is a [batch] fp32 tensor; rows with p >= 1 are left untouched.
-    No host synchronization: safe to capture in a CUDA graph.
+    No host synchronization, so it can be captured in a CUDA graph. The
+    scratch is grow-only per device: a capture stays valid until a larger batch
+    reallocates it.
     """
     assert logits.ndim == 2 and logits.dtype == torch.float32
     assert logits.stride(1) == 1
     batch_size, vocab_size = logits.shape
     if num_sm is None:
         num_sm = num_compute_units(logits.device.index)
-    slices = _num_slices(batch_size, vocab_size, num_sm)
-    slice_cap = _slice_capacity(slices)
-    key = (logits.device, batch_size, slices, slice_cap)
-    ws = _WORKSPACE.get(key)
-    if ws is None:
-        dev = logits.device
-        programs = batch_size * slices
-        ws = dict(
-            stats=torch.empty(programs * 2, dtype=torch.float32, device=dev),
-            hist=torch.empty(programs * NUM_BINS, dtype=torch.int32, device=dev),
-            zpart=torch.empty(programs, dtype=torch.float32, device=dev),
-            rowstate=torch.empty(batch_size * 8, dtype=torch.float32, device=dev),
-            above=torch.empty(programs, dtype=torch.float32, device=dev),
-            counts=torch.empty(programs, dtype=torch.int32, device=dev),
-            cand_x=torch.empty(programs * slice_cap, dtype=torch.float32, device=dev),
-            cand_i=torch.empty(programs * slice_cap, dtype=torch.int32, device=dev),
-            fine=torch.empty(
-                batch_size * FINE_CAPACITY * 2, dtype=torch.int32, device=dev
-            ),
-        )
-        _WORKSPACE[key] = ws
+    programs = batch_size * _num_slices(batch_size, vocab_size, num_sm)
+    cands = programs * _slice_capacity(programs // batch_size)
+    numels = dict(
+        stats=programs * 2,  # (max, min) per program
+        hist=programs * NUM_BINS,
+        zpart=programs,
+        rowstate=batch_size * _RS.value,
+        above=programs,
+        counts=programs,
+        cand_x=cands,
+        cand_i=cands,
+        fine=batch_size * FINE_CAPACITY * 2,  # (logit bits, index) pairs
+    )
+    ws = _WORKSPACE.setdefault(logits.device, {})
+    for name, numel in numels.items():
+        if name not in ws or ws[name].numel() < numel:
+            ws[name] = torch.empty(
+                next_power_of_2(numel),
+                dtype=_SCRATCH_DTYPES[name],
+                device=logits.device,
+            )
     p = p.to(torch.float32)
     _launch_minmax(logits, p, ws["stats"], num_sm)
     _launch_coarse(logits, p, ws["stats"], ws["hist"], ws["zpart"], num_sm)
@@ -786,3 +835,15 @@ def apply_top_p_histogram(
 
 def reset_workspace() -> None:
     _WORKSPACE.clear()
+
+
+def register_warmups() -> None:
+    for launch in (
+        _launch_minmax,
+        _launch_coarse,
+        _launch_bracket,
+        _launch_gather,
+        _launch_boundary,
+        _launch_mask,
+    ):
+        launch.register_warmup()
