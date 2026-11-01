@@ -143,6 +143,20 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
+def test_cpu_stored_event_carries_request_context():
+    manager = CPUOffloadingManager(
+        num_chunks=1,
+        enable_events=True,
+    )
+    req_context = make_req_context("writer")
+    keys = to_keys([1])
+    assert manager.prepare_store(keys, req_context) is not None
+    manager.complete_store(keys, req_context)
+
+    [event] = manager.take_events()
+    assert event.req_context is req_context
+
+
 def test_cpu_eviction_removed_precedes_stored():
     """An eviction is announced before the store that reuses its capacity."""
     manager = make_cpu_manager(num_chunks=2, enable_events=True)
