@@ -225,25 +225,30 @@ class QKNormRoPEFusionPass(VllmPatternMatcherPass):
             )
             return
 
+        # A model can mix head sizes across layers; skip unsupported ones
+        # instead of aborting the whole pass.
+        supported_geometries: set[tuple[int, int, int]] = set()
         for layer in attn_layers.values():
             if layer.head_size not in SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS:
                 logger.warning_once(
-                    "QK Norm+RoPE fusion not enabled: layer head_size=%d is not "
-                    "supported by fused_qk_norm_rope kernel (supported: %s). "
-                    "Falling back to unfused QK norm + RoPE path.",
+                    "QK Norm+RoPE fusion not enabled for a layer: head_size=%d "
+                    "is not supported by fused_qk_norm_rope kernel "
+                    "(supported: %s). Falling back to the unfused path.",
                     layer.head_size,
                     SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS,
                 )
-                return
-
-        self._attention_geometries = tuple(
-            sorted(
-                {
-                    (layer.head_size, layer.num_heads, layer.num_kv_heads)
-                    for layer in attn_layers.values()
-                }
+                continue
+            supported_geometries.add(
+                (layer.head_size, layer.num_heads, layer.num_kv_heads)
             )
-        )
+        if not supported_geometries:
+            logger.warning_once(
+                "QK Norm+RoPE fusion not enabled: no attention layer has a "
+                "supported head_size (supported: %s).",
+                SUPPORTED_FUSED_QK_NORM_ROPE_HEAD_DIMS,
+            )
+            return
+        self._attention_geometries = tuple(sorted(supported_geometries))
 
         rope_flashinfer_options = (
             [False, True] if RotaryEmbedding.enabled() else [False]
