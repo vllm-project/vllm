@@ -22,9 +22,10 @@ use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
 use crate::metrics::SchedulerStatsRecorder;
-use crate::mock_engine::MockEngineConfig;
+use crate::mock_engine::{MockEngineConfig, default_ready_response};
 use crate::protocol::handshake::{
-    EngineCoreReadyResponse, HandshakeInitMessage, HandshakeParallelConfig, ReadyMessage,
+    EngineCoreReadyResponse, HandshakeInitMessage, HandshakeParallelConfig, PrefixHashConfig,
+    ReadyMessage,
 };
 use crate::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
 use crate::protocol::logprobs::MaybeWireLogprobs;
@@ -37,7 +38,7 @@ use crate::protocol::output::{
     DpControlMessage, DpControlOutput, EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
     RequestBatchOutputs, UtilityCallOutput, decode_engine_core_outputs,
 };
-use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
+use crate::protocol::request::{BlockHash, EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats, UmbpOperation};
 use crate::protocol::tensor::{WireArrayData, WireTensor};
@@ -45,6 +46,7 @@ use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResu
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_hybrid_mock_engine_sockets,
     setup_mock_engine_sockets, setup_mock_engine_with_init, spawn_mock_engine_task,
+    spawn_mock_engine_task_with_ready,
 };
 use crate::transport::ConnectedEngine;
 use crate::{
@@ -184,6 +186,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
                 payload: BTreeMap::from([("key".to_string(), serde_json::json!("value"))]),
             }],
         }),
+        block_hashes: Some(vec![BlockHash(vec![1; 32]), BlockHash(vec![2; 32])]),
         ..EngineCoreRequest::default()
     }
 }
@@ -2336,6 +2339,90 @@ async fn client_decodes_multipart_logprob_outputs() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn client_sends_prompt_block_hashes_for_engine_prefix_hash_config() {
+    init_tracing();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    // The engine's NONE_HASH for `sha256` with the default seed, and the
+    // hashes the Python engine computes for this prompt.
+    let ready_response = EngineCoreReadyResponse {
+        prefix_hash_config: Some(PrefixHashConfig {
+            hash_algo: "sha256".to_string(),
+            hash_block_size: 16,
+            none_hash: BlockHash(
+                hex::decode("066b1e8987e027138e98701c46128929378935f9b6cd1549105ae6b4f0d71198")
+                    .unwrap(),
+            ),
+            num_lookahead_tokens: 0,
+        }),
+        ..default_ready_response()
+    };
+    let edge_tokens = [0, 1, 23, 24, 255, 256, 65535, 65536, 151_645, 0x7fff_ffff];
+    let request = EngineCoreRequest {
+        prompt_token_ids: Some([edge_tokens.repeat(3), vec![7, 8]].concat()),
+        block_hashes: None,
+        ..sample_request()
+    };
+
+    let (shutdown_tx, engine_task) = spawn_mock_engine_task_with_ready(
+        handshake_address.clone(),
+        b"engine-block-hashes".to_vec(),
+        ready_response,
+        move |dealer, push| {
+            Box::pin(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest = rmp_serde::from_slice(&add[1]).unwrap();
+                let hashes = request.block_hashes.expect("prompt block hashes");
+                let hashes = hashes.iter().map(|hash| hex::encode(&hash.0)).collect::<Vec<_>>();
+                assert_eq!(
+                    hashes,
+                    [
+                        "00e88e4087ec88315eb29afe9c001411b274ead7ffbc56e35b824d2c8817b280",
+                        "70de07ec6eed1e78ee32aa5f2c17e7eddda8068507c29e9562b43e0f0a872fe0",
+                    ]
+                );
+
+                send_outputs(
+                    push,
+                    RequestBatchOutputs {
+                        outputs: vec![request_output(
+                            "req-1",
+                            vec![],
+                            Some(EngineCoreFinishReason::Length),
+                        )],
+                        finished_requests: Some(BTreeSet::from(["req-1".to_string()])),
+                        ..Default::default()
+                    }
+                    .into(),
+                )
+                .await;
+            })
+        },
+    );
+
+    let client = connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    )
+    .await;
+
+    let outputs = client.call(request).await.unwrap().into_outputs().collect::<Vec<_>>().await;
+    assert_eq!(outputs.len(), 1);
+    assert!(outputs[0].is_ok());
+
+    let _ = shutdown_tx.send(());
+    engine_task.await.unwrap();
+    client.shutdown().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_sends_large_multimodal_tensor_as_aux_frame() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
@@ -3690,6 +3777,15 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
             "speculative_config": null,
         }))
+    );
+    assert_eq!(
+        ready_response.prefix_hash_config,
+        Some(PrefixHashConfig {
+            hash_algo: "sha256".to_string(),
+            hash_block_size: 16,
+            none_hash: BlockHash((0..32).collect()),
+            num_lookahead_tokens: 1,
+        })
     );
     let kv_events_config = ready_response.kv_events_config.expect("KV events config should decode");
     assert!(kv_events_config.enable_kv_cache_events);
