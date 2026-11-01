@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for the fused EAGLE slot mapping kernel."""
+"""Unit tests for the fused EAGLE kernels."""
 
 import pytest
 import torch
@@ -8,6 +8,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
+    _eagle_prepare_inputs_padded,
     eagle_step_update_slot_mapping_and_metadata,
 )
 
@@ -176,3 +177,29 @@ def test_eagle_step_slot_mapping_kernel_cudagraph_padding():
     # Padding slots should be PADDING_SLOT_ID
     for i in range(batch_size, input_batch_size):
         assert out_slot[i].item() == PADDING_SLOT_ID
+
+
+def test_eagle_prepare_inputs_padded_kernel_no_bonus_row():
+    """For a query of only draft tokens (no bonus-token row) with every draft
+    rejected, the index to sample must stay at the request's first row instead
+    of underflowing into the previous request (or below 0).
+    """
+    device = torch.device(DEVICE_TYPE)
+    # 2 requests, 2 draft tokens each, queries [d1, d2] only.
+    cu_num_draft_tokens = torch.tensor([2, 4], dtype=torch.int32, device=device)
+    valid_sampled_tokens_count = torch.tensor([1, 1], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 2, 4], dtype=torch.int32, device=device)
+    token_indices_to_sample = torch.empty(2, dtype=torch.int32, device=device)
+    num_rejected_tokens = torch.empty(2, dtype=torch.int32, device=device)
+
+    _eagle_prepare_inputs_padded(
+        cu_num_draft_tokens,
+        valid_sampled_tokens_count,
+        query_start_loc,
+        token_indices_to_sample,
+        num_rejected_tokens,
+        2,
+    )
+
+    assert token_indices_to_sample.tolist() == [0, 2]
+    assert num_rejected_tokens.tolist() == [2, 2]
