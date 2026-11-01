@@ -21,6 +21,8 @@ from tests.v1.logits_processors.utils import (
     setup_fake_entrypoint,
 )
 from vllm import LLM, SamplingParams
+from vllm.inputs import TokensPrompt
+from vllm.sampling_params import BeamSearchParams
 from vllm.v1.sample.logits_processor import (
     STR_POOLING_REJECTS_LOGITSPROCS,
     STR_SPEC_DEC_REJECTS_LOGITSPROCS,
@@ -191,6 +193,67 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
         kwargs["logits_processors"] = [DummyLogitsProcessor]
 
     _run_test(kwargs, logitproc_loaded=True)
+
+
+@create_new_process_for_each_test()
+def test_custom_logitsprocs_beam_search(monkeypatch):
+    """A custom logits processor must receive `extra_args` under beam search.
+
+    `BeamSearchParams` had no `extra_args` field and the per-step `SamplingParams`
+    did not carry one, so a processor registered through the `vllm.logits_processors`
+    entry point never saw its arguments when beam search was in play -- with no
+    error. `add_request()` was handed an empty mapping, the processor declined the
+    request, and generation proceeded as if unconfigured.
+
+    What this asserts is that the arguments arrive, which is what the fix provides.
+    It deliberately does not assert that the processor changes the output: beam
+    search selects from the *returned* logprobs, which are computed before logits
+    processors run under the default `logprobs_mode`, so a processor cannot steer
+    beam selection without further configuration. Conflating the two would make
+    this test fail for a reason the fix is not responsible for.
+    """
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    set_random_seed(40)
+
+    target_token = 128
+    seen: list[int | None] = []
+
+    class RecordingLogitsProcessor(DummyLogitsProcessor):
+        """Records the per-request argument the processor is handed."""
+
+        @staticmethod
+        def _get_target_token(params: SamplingParams) -> int | None:
+            value = DummyLogitsProcessor._get_target_token(params)
+            seen.append(value)
+            return value
+
+    llm = LLM(
+        model=MODEL_NAME,
+        gpu_memory_utilization=0.1,
+        logits_processors=[RecordingLogitsProcessor],
+    )
+    tokenizer = llm.get_tokenizer()
+    token_prompts = [
+        TokensPrompt(prompt_token_ids=tokenizer.encode(prompt)) for prompt in prompts
+    ]
+
+    outputs = llm.beam_search(
+        token_prompts,
+        BeamSearchParams(
+            beam_width=2,
+            max_tokens=MAX_TOKENS,
+            temperature=TEMP_GREEDY,
+            extra_args={DUMMY_LOGITPROC_ARG: target_token},
+        ),
+    )
+
+    assert len(outputs) == len(token_prompts)
+    assert seen, "the logits processor was never consulted"
+    assert all(value == target_token for value in seen), (
+        f"processor received {sorted(set(seen))}, expected every request to carry "
+        f"{target_token}; extra_args did not reach the per-step SamplingParams"
+    )
 
 
 @create_new_process_for_each_test()

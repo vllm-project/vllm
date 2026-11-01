@@ -26,6 +26,7 @@ from .utils import (
     BeamSearchInstance,
     BeamSearchOutput,
     BeamSearchSequence,
+    copy_extra_args,
     create_sort_beams_key_function,
     get_beam_search_eos_token_ids,
 )
@@ -119,6 +120,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             watermarking=False,
             detokenize=False,
             skip_clone=True,  # Internal beam search, safe to skip clone
+            extra_args=copy_extra_args(params.extra_args),
         )
         params.configure_logprobs(
             base_sampling_params, self.llm_engine.input_processor.vllm_config
@@ -503,6 +505,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                     else None
                 ),
                 skip_clone=True,
+                extra_args=copy_extra_args(base_params.extra_args),
             )
             result.append((beam_params, allowed_ids))
 
