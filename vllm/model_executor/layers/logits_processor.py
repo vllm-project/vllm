@@ -15,10 +15,9 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
-from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
     VocabParallelEmbedding,
+    is_unquantized_method,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -145,15 +144,19 @@ class LogitsProcessor(PluggableLayer):
                 lm_head, hidden_states, bias=embedding_bias
             )
 
-        # A quant config that excludes lm_head hands out UnquantizedLinearMethod
-        # rather than UnquantizedEmbeddingMethod, so accept both: either way the
-        # weight is plain and `lm_head.weight` can be cast directly.
-        if not isinstance(
-            lm_head.quant_method, (UnquantizedEmbeddingMethod, UnquantizedLinearMethod)
+        # The cast paths below read lm_head.weight directly, so the method
+        # must be unquantized (either method class: an excluded head carries
+        # UnquantizedLinearMethod) AND the weight must still be materialized —
+        # CPU builds may free it after dispatching a fused GEMM
+        # (dispatch_cpu_unquantized_gemm(remove_weight=True)).
+        weight = getattr(lm_head, "weight", None)
+        if not is_unquantized_method(lm_head.quant_method) or (
+            weight is None or weight.ndim != 2
         ):
             raise ValueError(
                 "A head_dtype different from the model dtype is only "
-                "supported for an unquantized lm_head."
+                "supported for an unquantized lm_head with materialized "
+                "weights."
             )
         if (
             self.head_dtype == torch.float32
