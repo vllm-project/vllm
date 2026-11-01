@@ -103,6 +103,16 @@ class StateScheduler(Scheduler):
         self.stream_admissions.expire()
         return super().schedule(throttle_prefills)
 
+    def _holds_kv_blocks(self, request: Request) -> bool:  # type: ignore[override]
+        # A session owns its slot from admission, before any token is computed,
+        # and a replacement prompt restarts at zero computed tokens. Slot
+        # ownership, not computed tokens, decides the holding queue so a session
+        # drains ahead of requests that still need a slot and under PAUSED_NEW.
+        return any(
+            manager.get(request.request_id) is not None
+            for manager in self.state_managers.values()
+        ) or Scheduler._holds_kv_blocks(request)
+
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         # A request whose previous slot is still retiring waits for its fence.
         if any(
@@ -154,10 +164,13 @@ class StateScheduler(Scheduler):
             RequestStatus.FINISHED_STOPPED,
         ):
             raise ValueError("state stream replacement requires a legal park")
+        # add_request refuses misplaced positions before a continuation is
+        # applied or queued, for admitted and ordinary streams alike; the only
+        # callers are add_request and the queue it fills, so this cannot fail.
+        assert not StreamAdmissions.misplaced_multimodal_input(update), (
+            "multimodal position is outside replacement prompt"
+        )
         prompt = list(update.prompt_token_ids or ())
-        for feature in update.mm_features or ():
-            if not 0 <= feature.mm_position.offset < len(prompt):
-                raise ValueError("multimodal position is outside replacement prompt")
         self.encoder_cache_manager.free(session)
         session.prompt_token_ids = prompt
         session._all_token_ids[:] = prompt

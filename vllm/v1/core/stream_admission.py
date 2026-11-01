@@ -27,7 +27,7 @@ from vllm.v1.engine import (
     StreamUpdateRejection,
 )
 from vllm.v1.kv_cache_interface import StateSlotHandle
-from vllm.v1.request import Request, RequestStatus
+from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.state_scheduler import StateScheduler
@@ -155,6 +155,20 @@ class StreamAdmissions:
         )
 
     @staticmethod
+    def misplaced_multimodal_input(
+        request: EngineCoreRequest | Request | StreamingUpdate,
+    ) -> bool:
+        """Whether a multimodal position falls outside the input's own prompt.
+
+        Each stream input replaces the prompt, so positions are relative to it.
+        """
+        num_tokens = len(request.prompt_token_ids or ())
+        return any(
+            not 0 <= feature.mm_position.offset < num_tokens
+            for feature in request.mm_features or ()
+        )
+
+    @staticmethod
     def _unsupported_params(params: SamplingParams | None) -> bool:
         """Sampling features a state stream cannot carry across inputs."""
         extra_args = (params.extra_args or {}) if params is not None else {}
@@ -196,7 +210,16 @@ class StreamAdmissions:
         record = self.sessions.get(request.request_id)
         context = request.stream_admission
         if record is None:
-            return "unknown_admission" if context is not None else None
+            if context is not None:
+                return "unknown_admission"
+            # A stream that was never admitted replaces its prompt the same way.
+            if (
+                request.resumable
+                and request.request_id in self.scheduler.requests
+                and self.misplaced_multimodal_input(request)
+            ):
+                return "validation_error"
+            return None
         if context is None:
             return "identity_mismatch"
         if self.unsupported_input(request):
@@ -206,6 +229,10 @@ class StreamAdmissions:
                 return "input_closed"
             if not request.prompt_token_ids:
                 return "empty_update"
+            # Every refusal precedes the first mutation; the replacement itself
+            # is applied later and must not be able to fail.
+            if self.misplaced_multimodal_input(request):
+                return "validation_error"
             record.status = "live"
             record.deadline = None
             record.deadline_reason = None

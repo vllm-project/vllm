@@ -8757,14 +8757,15 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
     assert request.mm_features[0].data is handle
 
 
-def _state_scheduler(*, log_stats=False):
+def _state_scheduler(*, log_stats=False, num_slots=2):
     from tests.v1.core.utils import create_state_spec, get_kv_cache_configs
 
     base = create_scheduler(max_num_seqs=2, max_model_len=32)
     base.vllm_config.cache_config.kv_cache_layout = "LBNHC"
     spec = create_state_spec()
+    # One page is the null block; the rest are usable slots.
     config = get_kv_cache_configs(
-        base.vllm_config, [{"state": spec}], [3 * spec.page_size_bytes]
+        base.vllm_config, [{"state": spec}], [(num_slots + 1) * spec.page_size_bytes]
     )[0]
     return StateScheduler(
         vllm_config=base.vllm_config,
@@ -8797,9 +8798,9 @@ def _state_output(step, *, acknowledge=True):
     )
 
 
-def _stream_core():
+def _stream_core(*, num_slots=2):
     core = object.__new__(EngineCore)
-    core.scheduler = _state_scheduler()
+    core.scheduler = _state_scheduler(num_slots=num_slots)
     core.request_block_hasher = None
     core.scheduler.stream_admissions.clock = lambda: 100.0
     return core
@@ -8954,7 +8955,7 @@ def test_failed_utility_body_rolls_back_admission(monkeypatch, fault):
         "pool": (manager.block_pool, "get_new_blocks"),
         "free_queue": (manager.block_pool.free_block_queue, "popleft_n"),
         "enqueue": (scheduler, "_enqueue_waiting_request"),
-        "waiting_queue": (scheduler.waiting, "add_request"),
+        "waiting_queue": (scheduler.kv_holding_waiting, "add_request"),
         "insert": (admissions, "_insert_parked_request"),
     }
     tables = {
@@ -9094,7 +9095,7 @@ def test_admit_stream_async_routes_stream_to_calling_client():
     assert request.client_index == 3
 
 
-@pytest.mark.parametrize("change", ["structured", "embeds"])
+@pytest.mark.parametrize("change", ["structured", "embeds", "mm_offset"])
 def test_unsupported_stream_input_refused_before_preprocessing(change):
     from vllm.exceptions import VLLMValidationError
     from vllm.sampling_params import StructuredOutputsParams
@@ -9113,9 +9114,11 @@ def test_unsupported_stream_input_refused_before_preprocessing(change):
         payload.sampling_params = SamplingParams(
             structured_outputs=StructuredOutputsParams(regex="[0-9]+")
         )
-    else:
+    elif change == "embeds":
         payload.prompt_embeds = torch.zeros(3, 4)
-    with pytest.raises(VLLMValidationError, match="Unsupported parameters"):
+    else:
+        payload.mm_features = _stream_mm_chunk(offset=3).mm_features
+    with pytest.raises(VLLMValidationError, match="stream input"):
         core.preprocess_add_request(payload)
     # A refused update must not select or initialize a grammar backend.
     assert manager.backend is None and manager.backend_name is None
@@ -10154,3 +10157,195 @@ def test_state_model_failure_retires_only_matching_live_handle():
     assert replacement.generation > old.generation
     scheduler._complete_state_slots(step, output)
     assert manager.get(failed_id) == replacement
+
+
+def test_admitted_stream_is_not_starved_by_a_request_waiting_for_a_slot():
+    """An admitted session already owns its slot, so an older queued request
+    that cannot get one must not stall the waiting loop ahead of its input."""
+    core = _stream_core(num_slots=1)
+    scheduler = core.scheduler
+    (blocked,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(blocked)
+    assert _admit_stream(core).accepted
+    scheduler.add_request(_stream_chunk(core))
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+    assert blocked.status == RequestStatus.WAITING
+
+
+def test_first_stream_input_drains_under_pause_new():
+    """A never-fed admission holds a slot, so its first input drains while the
+    scheduler admits only requests that already hold KV."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+    scheduler.set_pause_state(PauseState.PAUSED_NEW)
+    assert scheduler.get_num_unfinished_requests() == 0
+    scheduler.add_request(_stream_chunk(core))
+    assert scheduler.get_num_unfinished_requests() == 1
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+
+
+def test_stream_continuation_queued_while_running_keeps_slot_priority():
+    """A continuation that arrives mid-turn replaces the prompt at EOS; the
+    session must stay ahead of requests that still need a slot."""
+    core = _stream_core(num_slots=1)
+    scheduler = core.scheduler
+    assert _admit_stream(core).accepted
+    scheduler.add_request(_stream_chunk(core))
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+    scheduler.add_request(_stream_chunk(core))
+    (blocked,) = create_requests(num_requests=1, num_tokens=4)
+    scheduler.add_request(blocked)
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    scheduler.update_from_output(step, output)
+    assert scheduler.requests["stream"].status == RequestStatus.WAITING
+    step = scheduler.schedule()
+    assert step.num_scheduled_tokens == {"stream": 3}
+    assert blocked.status == RequestStatus.WAITING
+
+
+def _stream_mm_chunk(offset):
+    chunk = _stream_chunk()
+    chunk.mm_features = [
+        MultiModalFeatureSpec(
+            data=MultiModalKwargsItem.dummy(),
+            mm_position=PlaceholderRange(offset=offset, length=1),
+            identifier="image",
+            modality="image",
+        )
+    ]
+    return chunk
+
+
+@pytest.mark.parametrize("while_running", [False, True])
+def test_invalid_multimodal_update_is_rejected_without_ending_session(
+    while_running,
+):
+    """A multimodal position outside the replacement prompt is a correlated
+    rejection; the session, its slot and its deadline are untouched."""
+    from collections import deque
+
+    core = _stream_core()
+    scheduler = core.scheduler
+    admissions = scheduler.stream_admissions
+    assert _admit_stream(core).accepted
+    if while_running:
+        scheduler.add_request(_stream_chunk(core))
+        step = scheduler.schedule()
+    record = dataclasses.replace(admissions.sessions["stream"])
+    deadline = admissions.next_deadline()
+    bad = _stream_mm_chunk(offset=5)
+    bad.client_index = 3
+    scheduler.add_request(bad)
+    client, rejection = scheduler.state_error_outputs[-1]
+    assert client == 3
+    assert rejection.request_id == "stream"
+    assert rejection.finish_reason == FinishReason.ERROR
+    assert rejection.stream_output.rejection == "validation_error"
+    assert admissions.sessions["stream"] == record
+    assert admissions.next_deadline() == deadline
+    if while_running:
+        assert scheduler.requests["stream"].streaming_queue == deque()
+        output = _state_output(step)
+        output.sampled_token_ids = [[7]]
+        scheduler.update_from_output(step, output)
+    session = scheduler.requests["stream"]
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    scheduler.add_request(_stream_chunk(core))
+    assert scheduler.schedule().num_scheduled_tokens == {"stream": 3}
+
+
+@pytest.mark.parametrize("while_running", [False, True])
+def test_invalid_multimodal_continuation_of_ordinary_stream_is_rejected(
+    while_running,
+):
+    """A resumable request that was never admitted replaces its prompt the
+    same way; a misplaced position is refused before replacement or queueing."""
+    scheduler = _state_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=4)
+    req.resumable = True
+    scheduler.add_request(req)
+    step = scheduler.schedule()
+    output = _state_output(step)
+    output.sampled_token_ids = [[EOS_TOKEN_ID]]
+    if not while_running:
+        scheduler.update_from_output(step, output)
+        assert req.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    bad = Request(
+        request_id=req.request_id,
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        mm_features=_stream_mm_chunk(offset=5).mm_features,
+        resumable=True,
+    )
+    bad.client_index = 3
+    scheduler.add_request(bad)
+    client, rejection = scheduler.state_error_outputs[-1]
+    assert client == 3
+    assert rejection.request_id == req.request_id
+    assert rejection.finish_reason == FinishReason.ERROR
+    assert rejection.stream_output.rejection == "validation_error"
+    assert not req.streaming_queue
+    if while_running:
+        scheduler.update_from_output(step, output)
+    assert req.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    good = Request(
+        request_id=req.request_id,
+        prompt_token_ids=[1, 2, 3],
+        sampling_params=req.sampling_params,
+        pooling_params=None,
+        resumable=True,
+    )
+    scheduler.add_request(good)
+    assert scheduler.schedule().num_scheduled_tokens == {req.request_id: 3}
+
+
+def test_ordinary_stream_invalid_continuation_rejected_through_engine_core():
+    """Through preprocessing and EngineCore.add_request, a never-admitted
+    stream's misplaced continuation is a correlated rejection: no terminal
+    output, the parked session stays live, and the next valid input runs."""
+    core = _stream_core()
+    core.mm_receiver_cache = None
+    core.prefix_hash_config = None
+    scheduler = core.scheduler
+
+    def send(payload):
+        request, _ = core.preprocess_add_request(payload)
+        core.add_request(request)
+        return request
+
+    first = _stream_request("plain")
+    first.prompt_token_ids = [1, 2, 3]
+    first.client_index = 3
+    session = send(first)
+    assert session.status == RequestStatus.WAITING
+    step = scheduler.schedule()
+    output = _state_output(step)
+    output.sampled_token_ids = [[7]]
+    scheduler.update_from_output(step, output)
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+
+    bad = _stream_request("plain")
+    bad.prompt_token_ids = [1, 2, 3]
+    bad.mm_features = _stream_mm_chunk(offset=5).mm_features
+    bad.client_index = 3
+    send(bad)
+    client, rejection = scheduler.state_error_outputs[-1]
+    assert client == 3
+    assert rejection.request_id == "plain"
+    assert rejection.finish_reason == FinishReason.ERROR
+    assert rejection.stream_output.rejection == "validation_error"
+    assert scheduler.requests["plain"] is session
+    assert session.status == RequestStatus.WAITING_FOR_STREAMING_REQ
+    assert not session.streaming_queue
+    assert not scheduler.finished_req_ids
+
+    good = _stream_request("plain")
+    good.prompt_token_ids = [4, 5, 6]
+    send(good)
+    assert scheduler.schedule().num_scheduled_tokens == {"plain": 3}

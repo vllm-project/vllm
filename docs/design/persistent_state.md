@@ -42,7 +42,9 @@ A model declares its state by constructing a
   of recomputing it, because the state cannot be rebuilt from tokens.
 - A resumable request parks for its next input only when a turn stops on EOS.
   Any other stop (length, stop token or string) ends the stream. Each new input
-  replaces the request's prompt; the state carries the history.
+  replaces the request's prompt; the state carries the history. Multimodal
+  positions are relative to the input's own prompt, and an input that places
+  one outside it is refused before it is applied or queued.
 
 [examples/features/persistent_state/state_slot_lifecycle.py](../../examples/features/persistent_state/state_slot_lifecycle.py)
 walks one stream through admission, a scheduled step, parking, the release
@@ -109,8 +111,13 @@ Input is then sent as ordinary resumable updates for the same request ID with
 `EngineCoreRequest.stream_admission` set to a `StreamAdmissionContext`;
 setting `input_closed=True`, or sending a non-resumable update, closes input.
 Inputs must keep the admission's restrictions and carry token IDs only (no
-prompt embeddings); the engine refuses others before preprocessing. Rejected updates are
-reported on `EngineCoreOutput.stream_output` without ending the session. An
+prompt embeddings); the engine refuses others before preprocessing. Multimodal
+positions are relative to the input's own prompt, since each input replaces it;
+a position outside that prompt is refused as `validation_error`. Rejected
+updates are reported on `EngineCoreOutput.stream_output` without ending the
+session, and leave its slot and deadline unchanged. An admitted session holds
+its slot from admission, so its inputs drain ahead of queued requests that
+still need a slot, including under `PAUSED_NEW`. An
 engine without persistent state refuses any update that carries
 `stream_admission` as a validation error.
 

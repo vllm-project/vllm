@@ -1215,6 +1215,12 @@ class EngineCore:
             # Before grammar init, so a refused update has no side effects.
             if admissions.unsupported_input(request):
                 raise VLLMValidationError("Unsupported parameters for a stream input")
+            # Only here is a validation error reported as a stream rejection; a
+            # never-admitted stream's continuation is decided by the scheduler.
+            if admissions.misplaced_multimodal_input(request):
+                raise VLLMValidationError(
+                    "Multimodal position outside the stream input's prompt"
+                )
         # Note on thread safety: no race condition.
         # `mm_receiver_cache` is reset at the end of LLMEngine init,
         # and will only be accessed in the input processing thread afterwards.
