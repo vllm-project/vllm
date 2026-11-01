@@ -345,6 +345,7 @@ class InputProcessingContext:
     def _postprocess_output(
         self,
         output: JSONTree,
+        keep_dtype_keys: frozenset[str] = frozenset(),
     ) -> JSONTree:
         # "torch_shm" puts tensors on a torch.multiprocessing queue, which
         # shares device tensors by CUDA IPC handle, so a device-side processor
@@ -371,6 +372,19 @@ class InputProcessingContext:
 
             return tensor
 
+        def _keep_dtype(x: object):
+            if isinstance(x, torch.Tensor) and not x.is_cpu and not keep_on_device:
+                return x.cpu()
+            return x
+
+        if isinstance(output, dict) and keep_dtype_keys:
+            # Leave these fields' float dtype alone (e.g. raw audio waveforms).
+            return {
+                k: json_map_leaves(
+                    _keep_dtype if k in keep_dtype_keys else _postprocess_one, v
+                )
+                for k, v in output.items()
+            }
         return json_map_leaves(_postprocess_one, output)
 
     def get_merged_mm_kwargs(
@@ -404,9 +418,14 @@ class InputProcessingContext:
         hf_processor: Callable[..., BatchFeature] | ProcessorMixin,
         data: Mapping[str, object],
         kwargs: Mapping[str, object] = {},
+        *,
+        keep_dtype_keys: frozenset[str] = frozenset(),
     ) -> BatchFeature:
         """Call `hf_processor` on the prompt `data`
         (text, image, audio...) with configurable options `kwargs`.
+
+        Float outputs are cast to the model dtype, except fields named in
+        `keep_dtype_keys`.
         """
         assert callable(hf_processor)
 
@@ -434,7 +453,7 @@ class InputProcessingContext:
         from transformers.feature_extraction_utils import BatchFeature
 
         if isinstance(output, BatchFeature):
-            output_ = self._postprocess_output(output.data)
+            output_ = self._postprocess_output(output.data, keep_dtype_keys)
             return BatchFeature(output_)  # type: ignore
 
         logger.warning_once(
@@ -444,7 +463,7 @@ class InputProcessingContext:
             type(hf_processor).__name__,
         )
 
-        return self._postprocess_output(output)  # type: ignore
+        return self._postprocess_output(output, keep_dtype_keys)  # type: ignore
 
 
 class BaseProcessingInfo:
