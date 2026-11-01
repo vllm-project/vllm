@@ -1177,10 +1177,7 @@ class TestStreamInvariants:
 
     def test_a_plan_that_keeps_every_entity_in_one_stream_passes(self):
         a, b = _FakeLayer("a"), _FakeLayer("b")
-        _check_streams(
-            [self._chunk(0, 0, a), self._chunk(1, 1, b)],
-            [0, 1],
-        )
+        _check_streams([self._chunk(0, 0, a), self._chunk(1, 1, b)])
 
     def test_owner_and_group_splits_are_left_to_the_plan_builder(self):
         """``_stage_components`` merges every co-owner of a gather group into
@@ -1188,8 +1185,8 @@ class TestStreamInvariants:
         stream, so an owner or a group in two streams cannot come out of the
         builder; the check guards only the module-loading order."""
         a, b = _FakeLayer("a"), _FakeLayer("b")
-        _check_streams([self._chunk(0, 0, a), self._chunk(0, 1, b)], [0, 1])
-        _check_streams([self._chunk(0, 0, a), self._chunk(1, 1, b)], [5, 5])
+        _check_streams([self._chunk(0, 0, a), self._chunk(0, 1, b)])
+        _check_streams([self._chunk(0, 0, a), self._chunk(1, 1, b)])
 
     def test_a_module_in_two_streams_is_refused(self):
         layer = _FakeLayer("a")
@@ -1197,10 +1194,7 @@ class TestStreamInvariants:
             RuntimeError,
             match="module loading 'a' spans stage streams 0 and 1",
         ):
-            _check_streams(
-                [self._chunk(0, 0, layer), self._chunk(1, 1, layer)],
-                [0, 1],
-            )
+            _check_streams([self._chunk(0, 0, layer), self._chunk(1, 1, layer)])
 
 
 class TestSignalCompleteness:
