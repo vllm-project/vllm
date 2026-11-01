@@ -1597,8 +1597,9 @@ class TestFlashInferCuSeqlensPadding:
         assert not torch.equal(got_v[: len(want_v)], want_v)
 
     @pytest.mark.parametrize("flashinfer", [True, False])
-    def test_qwen3_vl_registers_flashinfer_padding(self, flashinfer: bool):
+    def test_qwen3_vl_registers_cu_seqlens_padding(self, flashinfer: bool):
         from vllm.model_executor.models.qwen2_5_vl import (
+            _pad_cumulative_seqlens_buffer,
             _pad_flashinfer_cu_seqlens_buffer,
         )
         from vllm.model_executor.models.qwen3_vl import (
@@ -1619,9 +1620,9 @@ class TestFlashInferCuSeqlensPadding:
         config = Qwen3VLForConditionalGeneration.get_encoder_cudagraph_config(
             cast(Any, model)
         )
-        if flashinfer:
-            assert config.padding_logics == {
-                "cu_seqlens": _pad_flashinfer_cu_seqlens_buffer
-            }
-        else:
-            assert config.padding_logics == {}
+        want = (
+            _pad_flashinfer_cu_seqlens_buffer
+            if flashinfer
+            else _pad_cumulative_seqlens_buffer
+        )
+        assert config.padding_logics == {"cu_seqlens": want}

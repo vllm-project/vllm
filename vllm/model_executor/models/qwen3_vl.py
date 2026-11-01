@@ -145,6 +145,7 @@ from .qwen2_5_vl import (
     Qwen2_5_VLVideoEmbeddingInputs,
     Qwen2_5_VLVideoInputs,
     Qwen2_5_VLVideoPixelInputs,
+    _pad_cumulative_seqlens_buffer,
     _pad_flashinfer_cu_seqlens_buffer,
 )
 from .qwen2_vl import (
@@ -2151,12 +2152,16 @@ class Qwen3VLForConditionalGeneration(
             # FlashInfer packs the q/k/o and v offsets into one cu_seqlens
             # tensor, split at its midpoint. Replays usually pad to a smaller
             # batch bucket than capture, so each half has to be copied into
-            # its own half of the capture buffer.
-            padding_logics=(
-                {"cu_seqlens": _pad_flashinfer_cu_seqlens_buffer}
-                if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER
-                else {}
-            ),
+            # its own half of the capture buffer. Other backends repeat the
+            # last offset so padded sequences have zero length, as in
+            # Qwen2.5-VL.
+            padding_logics={
+                "cu_seqlens": (
+                    _pad_flashinfer_cu_seqlens_buffer
+                    if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER
+                    else _pad_cumulative_seqlens_buffer
+                )
+            },
             out_hidden_size=self.visual.out_hidden_size,
             max_frames_per_video=max_frames,
         )
