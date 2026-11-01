@@ -275,6 +275,39 @@ fn factory_new_registers_phi4_mini_json_by_name() {
 }
 
 #[test]
+fn factory_new_registers_pythonic_parsers_by_name() {
+    // Pythonic parsers are selected explicitly with `--tool-call-parser
+    // pythonic` / `llama4_pythonic`, matching Python; model-name routing for
+    // `llama-4` stays on the JSON parser.
+    let factory = ToolParserFactory::new();
+
+    for name in [names::PYTHONIC, names::LLAMA4_PYTHONIC] {
+        assert!(factory.contains(name));
+        factory.create(name, &[]).unwrap();
+    }
+    assert_eq!(
+        factory.resolve_name_for_model("meta-llama/Llama-4-Scout-17B-16E-Instruct"),
+        Some(names::LLAMA4_JSON)
+    );
+}
+
+#[test]
+fn factory_parses_pythonic_tool_call_list() {
+    let factory = ToolParserFactory::new();
+
+    let mut parser = factory.create(names::PYTHONIC, &[]).unwrap();
+    let mut output = ToolParserOutput::default();
+    parser.parse_into("[get_weather(city='Tokyo', days=3)]", &mut output).unwrap();
+    output.append(parser.finish().unwrap());
+    let output = output.coalesce();
+
+    assert!(output.normal_text().is_empty());
+    assert_eq!(output.calls().len(), 1);
+    assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+    assert_eq!(output.calls()[0].arguments, r#"{"city":"Tokyo","days":3}"#);
+}
+
+#[test]
 fn factory_parses_mimo_parameter_tags() {
     let factory = ToolParserFactory::new();
     for model in ["XiaomiMiMo/MiMo-V2.5", "XiaomiMiMo/MiMo-V2.5-Pro"] {

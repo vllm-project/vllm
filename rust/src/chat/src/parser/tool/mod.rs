@@ -10,10 +10,10 @@ use vllm_tokenizer::DynTokenizer;
 pub use vllm_parser::tool::{
     DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
     DeepSeekV41ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
-    HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MiMoToolParser,
-    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
-    Qwen3CoderToolParser, Qwen3JsonToolParser, SeedOssToolParser, Step5ToolParser, ToolParser,
-    ToolParserError,
+    HermesToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
+    Llama4PythonicToolParser, MiMoToolParser, MinimaxM2ToolParser, MinimaxM3ToolParser,
+    MistralToolParser, Phi4MiniJsonToolParser, PythonicToolParser, Qwen3CoderToolParser,
+    Qwen3JsonToolParser, SeedOssToolParser, Step5ToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -36,11 +36,13 @@ pub mod names {
     pub const KIMI_K2: &str = "kimi_k2";
     pub const LLAMA3_JSON: &str = "llama3_json";
     pub const LLAMA4_JSON: &str = "llama4_json";
+    pub const LLAMA4_PYTHONIC: &str = "llama4_pythonic";
     pub const MIMO: &str = "mimo";
     pub const MINIMAX_M2: &str = "minimax_m2";
     pub const MINIMAX_M3: &str = "minimax_m3";
     pub const MISTRAL: &str = "mistral";
     pub const PHI4_MINI_JSON: &str = "phi4_mini_json";
+    pub const PYTHONIC: &str = "pythonic";
     pub const QWEN3_CODER: &str = "qwen3_coder";
     // The `<tool_call>`-wrapped JSON format of Qwen2.5, QwQ and Qwen3.
     pub const QWEN3_JSON: &str = "qwen3_json";
@@ -87,11 +89,13 @@ impl ToolParserFactory {
             .register_parser::<KimiK2ToolParser>(names::KIMI_K2)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA3_JSON)
             .register_parser::<Llama3JsonToolParser>(names::LLAMA4_JSON)
+            .register_parser::<Llama4PythonicToolParser>(names::LLAMA4_PYTHONIC)
             .register_parser::<MiMoToolParser>(names::MIMO)
             .register_parser::<MinimaxM2ToolParser>(names::MINIMAX_M2)
             .register_parser::<MinimaxM3ToolParser>(names::MINIMAX_M3)
             .register_parser::<MistralToolParser>(names::MISTRAL)
             .register_parser::<Phi4MiniJsonToolParser>(names::PHI4_MINI_JSON)
+            .register_parser::<PythonicToolParser>(names::PYTHONIC)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_CODER)
             .register_parser::<Qwen3CoderToolParser>(names::QWEN3_XML)
             .register_parser::<Qwen3JsonToolParser>(names::QWEN3_JSON)
