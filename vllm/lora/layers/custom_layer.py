@@ -12,7 +12,6 @@ import torch
 from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
-from vllm.distributed import tensor_model_parallel_all_gather
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 
 from .base_linear import BaseLinearLayerWithLoRA
@@ -40,6 +39,19 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
         model_config: PreTrainedConfig | None = None,
     ) -> None:
         super().create_lora_weights(max_loras, lora_config, model_config)
+        if lora_config.fully_sharded_loras:
+            # Each rank's head groups see different inputs, so the shrink can't
+            # be split across ranks: every rank keeps the full LoRA-A.
+            self.lora_a_stacked = (
+                torch.zeros(
+                    max_loras,
+                    1,
+                    lora_config.max_lora_rank,
+                    self.input_size,
+                    dtype=lora_config.lora_dtype,
+                    device=self.device,
+                ),
+            )
         n_groups = cast("DeepseekV4GroupedWoA", self.base_layer).n_local_groups
         lora_b = self.lora_b_stacked[0]
         self.lora_b_stacked = torch.zeros(
@@ -75,13 +87,6 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
         for group, rows in enumerate(lora_b.split(group_size)):
             group_b = self.lora_b_stacked[group][index, 0]
             group_b[: rows.shape[0], : rows.shape[1]].copy_(rows, non_blocking=True)
-
-    def slice_lora_a(self, lora_a: torch.Tensor) -> torch.Tensor:
-        if not self.lora_config.fully_sharded_loras:
-            return lora_a
-        # Fully sharded LoRA keeps a slice of LoRA-A's rank dim on each rank.
-        shard_size = self.lora_a_stacked[0].shape[2]
-        return lora_a[self.tp_rank * shard_size : (self.tp_rank + 1) * shard_size]
 
     def grouped_forward(
         self,
@@ -120,29 +125,14 @@ class DeepseekV4GroupedWoAWithLoRA(ColumnParallelLinearWithLoRA):
             nope_dim=nope_dim,
             rope_dim=rope_dim,
         )
-        shrunk = torch.empty(
-            n_groups,
-            x.shape[0],
-            self.lora_a_stacked[0].shape[2],
-            dtype=torch.float32,
-            device=x.device,
-        )
-        for group in range(n_groups):
-            self.punica_wrapper.add_shrink(
-                shrunk[group : group + 1],
-                x[:, group].contiguous(),
-                self.lora_a_stacked,
-                1.0,
-            )
-        if self.lora_config.fully_sharded_loras and self.tp_size > 1:
-            # Each rank holds a slice of LoRA-A's rank dim.
-            shrunk = tensor_model_parallel_all_gather(shrunk)
         for group in range(n_groups):
             group_output = z[:, group].contiguous()
-            self.punica_wrapper.add_expand(
+            self.punica_wrapper.add_lora_linear(
                 group_output,
-                shrunk[group : group + 1],
+                x[:, group].contiguous(),
+                self.lora_a_stacked,
                 (self.lora_b_stacked[group],),
+                1.0,
                 (o_lora_rank,),
             )
             z[:, group] = group_output
