@@ -10742,6 +10742,8 @@ async fn anthropic_text_generation_reports_content_and_stop() {
         .await;
         engine_task.await.unwrap();
         assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["role"], "assistant");
+        assert!(body.get("message").is_none(), "{body}");
         assert_eq!(body["content"], json!([{"type": "text", "text": text}]));
         assert_eq!(body["stop_reason"], expected);
         assert_eq!(body.get("stop_sequence"), Some(&serde_json::Value::Null));

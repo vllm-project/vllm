@@ -39,21 +39,21 @@ pub struct CountTokensRequest {
 
 impl Normalizable for CountTokensRequest {}
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "role", rename_all = "lowercase", deny_unknown_fields)]
 enum Message {
     User { content: TextContent },
     Assistant { content: TextContent },
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(untagged)]
 enum TextContent {
     Text(String),
     Blocks(Vec<TextBlock>),
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
 enum TextBlock {
     Text { text: String },
@@ -344,8 +344,8 @@ impl<'a> MessagesLlm<'a> {
             options.log_outputs.log(LoggedOutput::Response, &text, Some(&response.token_ids), Some(reason));
         }
         Ok(MessagesResponse {
-            id: request_id, message_type: "message", role: "assistant", model: model.response_model(),
-            content: vec![ResponseBlock::Text { text }], stop_reason: reason, stop_sequence: sequence.map(str::to_owned),
+            id: request_id, message_type: "message", message: Message::Assistant { content: TextContent::Blocks(vec![TextBlock::Text { text }]) }, model: model.response_model(),
+            stop_reason: reason, stop_sequence: sequence.map(str::to_owned),
             usage: usage(response.usage.engine, options.enable_prompt_tokens_details),
             kv_transfer_params: response.kv_transfer_params, ec_transfer_params: response.ec_transfer_params,
         })
@@ -359,9 +359,9 @@ pub(crate) struct MessagesResponse {
     id: String,
     #[serde(rename = "type")]
     message_type: &'static str,
-    role: &'static str,
+    #[serde(flatten)]
+    message: Message,
     model: String,
-    content: Vec<ResponseBlock>,
     stop_reason: &'static str,
     stop_sequence: Option<String>,
     usage: MessagesUsage,
@@ -369,12 +369,6 @@ pub(crate) struct MessagesResponse {
     kv_transfer_params: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ec_transfer_params: Option<serde_json::Value>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ResponseBlock {
-    Text { text: String },
 }
 
 #[derive(serde::Serialize)]
