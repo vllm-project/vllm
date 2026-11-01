@@ -790,7 +790,9 @@ def test_modelopt_nvfp4_moe_dispatches_to_marlin_when_w4a16(
         moe = ModelOptNvFp4FusedMoE(config, MagicMock())
 
     assert moe.use_a16 is expected_use_a16
-    assert moe.ignored_weight_suffixes == (("input_scale",) if expected_use_a16 else ())
+    assert moe.ignored_weight_reload_suffixes == (
+        ("input_scale",) if expected_use_a16 else ()
+    )
     _, kwargs = mock_select.call_args
     assert kwargs["weight_key"] is kNvfp4Static
     if act_key_is_none:
@@ -806,7 +808,7 @@ def test_routed_experts_skip_weights_the_quant_method_ignores(ignored):
     dropped and a layerwise reload sends again."""
     layer = torch.nn.Module()
     layer.layer_name = "model.layers.0.mlp.experts"
-    layer.quant_method = SimpleNamespace(ignored_weight_suffixes=ignored)
+    layer.quant_method = SimpleNamespace(ignored_weight_reload_suffixes=ignored)
     layer.get_expert_mapping = lambda **kwargs: (
         RoutedExperts.build_expert_params_mapping(
             "gate_proj",

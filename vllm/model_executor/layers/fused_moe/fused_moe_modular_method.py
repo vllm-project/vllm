@@ -59,8 +59,8 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         return self.old_quant_method.supports_eplb
 
     @property
-    def ignored_weight_suffixes(self) -> tuple[str, ...]:
-        return self.old_quant_method.ignored_weight_suffixes
+    def ignored_weight_reload_suffixes(self) -> tuple[str, ...]:
+        return self.old_quant_method.ignored_weight_reload_suffixes
 
     @property
     def method_name(self) -> str:

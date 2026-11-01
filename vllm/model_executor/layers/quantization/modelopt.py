@@ -1040,7 +1040,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_input_scale.weight_loader_numel = 0
 
     @property
-    def ignored_weight_suffixes(self) -> tuple[str, ...]:
+    def ignored_weight_reload_suffixes(self) -> tuple[str, ...]:
         # W4A16 drops the (deprecated) input scales after processing; a
         # layerwise reload may send them again.
         return ("input_scale",) if self.use_a16 else ()
