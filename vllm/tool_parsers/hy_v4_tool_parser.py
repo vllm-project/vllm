@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, Any, TypedDict
 import regex as re
 
 import vllm.envs as envs
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
@@ -23,6 +22,7 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.logger import init_logger
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.tool_strict_level import ToolStrictLevel
@@ -104,21 +104,18 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
             round-trips.
 
     """
-    import transformers
-
-    if int(transformers.__version__.split(".")[0]) >= 5:
-        init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
-        think_begin_as_special = init_kwargs.get(
-            "model_specific_special_tokens", {}
-        ).get("think_begin_token", "")
-        if think_begin_as_special:
-            raise RuntimeError(
-                "This checkpoint declares HYV4 structural tokens (think_begin_token"
-                "/toolcalls_begin_token/argkey_begin_token) in "
-                "tokenizer_config.json, which transformers 5 no longer supports. "
-                "Remove those fields and keep the tokens in the tokenizer's own "
-                "token definitions so the suffix can be read from the vocab."
-            )
+    init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
+    think_begin_as_special = init_kwargs.get("model_specific_special_tokens", {}).get(
+        "think_begin_token", ""
+    )
+    if think_begin_as_special:
+        raise RuntimeError(
+            "This checkpoint declares HYV4 structural tokens (think_begin_token"
+            "/toolcalls_begin_token/argkey_begin_token) in "
+            "tokenizer_config.json, which transformers 5 no longer supports. "
+            "Remove those fields and keep the tokens in the tokenizer's own "
+            "token definitions so the suffix can be read from the vocab."
+        )
 
     structural_token_re = re.compile(
         r"<(?:think|tool_calls|tool_call|arg_key|arg_value)(:[^\s>]+)?>"
@@ -808,7 +805,7 @@ class HYV4ToolExtractor:
         # --- scan all fully closed kv pairs ---
         arg_pairs = self.func_args_regex.findall(args_text)
         for key, value in arg_pairs:
-            key = key.strip()
+            # Property names are exact schema keys, including whitespace.
             if key not in self._completed_args:
                 self._completed_args[key] = _parse_value(
                     value, self._streaming_tool_name or "", key, tools
@@ -830,9 +827,7 @@ class HYV4ToolExtractor:
                 ak_start + len(self.arg_key_start_token),
             )
             if ak_end != -1:
-                partial_key = tail[
-                    ak_start + len(self.arg_key_start_token) : ak_end
-                ].strip()
+                partial_key = tail[ak_start + len(self.arg_key_start_token) : ak_end]
                 self._current_arg_key = partial_key
                 self._current_arg_is_string = _is_only_string_type(
                     self._streaming_tool_name or "",

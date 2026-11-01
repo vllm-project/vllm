@@ -83,10 +83,7 @@ directly from the Triton kernel through unified virtual addressing (UVA),
 prefetching on a side CUDA stream so transfers overlap with the compute of
 preceding layers. The freed GPU memory goes to the KV cache.
 
-`cpu_offload` defaults to `true` (on): it follows the
-`VLLM_PLE_CPU_OFFLOAD` environment variable, which also defaults to `true`.
-An explicit `--engram-config` value takes precedence over the environment
-variable.
+`cpu_offload` defaults to `true` (on)
 
 To keep the tables resident on GPU instead (e.g. when host memory is
 scarce):
@@ -96,8 +93,43 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
   --engram-config.cpu_offload false
 ```
 
-or equivalently `VLLM_PLE_CPU_OFFLOAD=0`. CPU offload requires a GPU with UVA
-support; vLLM fails fast when it is unavailable.
+CPU offload requires a GPU with UVA support;
+vLLM fails fast when it is unavailable.
+
+## Disk offload (Qwen4Exp)
+
+`disk_offload` keeps Qwen4Exp PLE tables in the checkpoint files: no table
+is allocated in GPU or pinned host memory, and nothing is copied to an offload
+directory. Each step reads that step's rows from the safetensors files on the
+host. Use it where neither `cpu_offload` nor a resident table fits, for example
+on unified-memory GPUs such as DGX Spark, where pinned host memory comes out of
+the same pool as the weights and the KV cache:
+
+```bash
+vllm serve <qwen4exp-checkpoint> --engram-config '{"disk_offload": true}'
+```
+
+It applies only to Qwen4Exp on CUDA and takes precedence over `cpu_offload`.
+
+Rows are read with `preadv` and copied to fixed device buffers before the
+forward, so CUDA graphs replay unchanged. They stay in the checkpoint format
+(BF16, FP8 or NVFP4) and are decoded on the GPU, so an unquantized table must
+match `--dtype`. Rows that were read recently are served from the OS page
+cache, which is shared by co-located ranks, not counted in the worker's RSS,
+and reclaimed by the kernel under memory pressure.
+
+Costs and limits:
+
+- The read needs the step's token ids, so it waits for the previous step on
+  the GPU, and every TP rank reads all of its rows.
+- A row that is not in the page cache is read from disk. For a fast first
+  request, read the PLE shard files once after the server has started.
+- The checkpoint files must not change while the server runs. Truncation stops
+  the engine with an error naming the file; deleting or renaming is safe.
+- Weight reload and elastic EP are unsupported. Loading fails when tensors are
+  not file-backed safetensors views (`.bin`, runai, `fastsafetensors`,
+  `instanttensor`, or `--safetensors-load-strategy eager`);
+  `--load-format dummy` serves zeros.
 
 ## Data-parallel topologies (DeepSeek V4.1)
 
@@ -118,7 +150,8 @@ vllm serve deepseek-ai/DeepSeek-V4.1-Flash \
 ```
 
 `embedding_across_dp` is not supported with elastic expert parallelism yet.
-Qwen4Exp PLE tables are ETP-sharded instead and honor `cpu_offload` only.
+Qwen4Exp PLE tables are ETP-sharded instead and honor only `cpu_offload` and
+`disk_offload`.
 
 ## Sharing host tables across DP replicas
 
