@@ -1299,7 +1299,7 @@ def test_hetero_block_split_is_declined(worker_cls, local_block, remote_block):
     # (8), the remote logical block (8) and the local logical block (24).
     [2, 5, 8, 9, 13, 16, 17, 21, 24, 25, 29, 32, 33, 41, 48, 49],
 )
-@pytest.mark.parametrize(("mamba", "cached"), [(True, 0), (False, 2)])
+@pytest.mark.parametrize("mamba,cached", [(True, 0), (False, 2)])
 def test_hetero_ppl_with_block_size_ratio(num_tokens, mamba, cached):
     """Both hetero regimes at once: kernel blocks differ (local 8 / remote
     4, block_size_ratio=2) *and* physical_blocks_per_logical differs (3 vs

@@ -287,8 +287,6 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
             and meta.remote.num_tokens is not None
             and different_block_sizes
         ):
-            # Each side pads to its own logical block past the last token, so
-            # pair the lists by that token once, for every read.
             block_size_ratio = self.transfer_topo.block_size_ratio(
                 remote_info.remote_block_size
             )
