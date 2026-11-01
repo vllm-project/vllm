@@ -157,6 +157,10 @@ class DeepseekSparseSWABackend(AttentionBackend):
     def get_name() -> str:
         return "DEEPSEEK_SPARSE_SWA"
 
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return current_platform.is_cuda()
+
     @staticmethod
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [MultipleOf(32)]
@@ -192,6 +196,7 @@ class DeepseekSparseSWAMetadata:
     slot_mapping: torch.Tensor
     block_size: int
     seq_lens: torch.Tensor | None = None  # [num_seqs]
+    seq_lens_cpu: torch.Tensor | None = None  # [num_seqs]
     query_start_loc: torch.Tensor | None = None  # [num_seqs + 1]
     query_start_loc_cpu: torch.Tensor | None = None  # [num_seqs + 1]
 
@@ -750,6 +755,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         return DeepseekSparseSWAMetadata(
             seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens_cpu,
             query_start_loc=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
             block_table=block_table,
