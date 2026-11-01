@@ -442,6 +442,24 @@ class OpenAIServingChat(GenerateBaseServing):
             return self.response_role
         return request.messages[-1]["role"]
 
+    def _get_echo_text(self, conversation: list[ConversationMessage], role: str) -> str:
+        """Return the text to echo for the ``echo`` response field.
+
+        Echoes the content of the last message when its role matches. For
+        multimodal content lists, only the text parts can be represented in
+        the text response, so other parts (e.g. images) are skipped.
+        """
+        if not (
+            conversation
+            and "content" in conversation[-1]
+            and conversation[-1].get("role") == role
+        ):
+            return ""
+        content = conversation[-1]["content"] or ""
+        if not isinstance(content, list):
+            return content
+        return "\n".join(part["text"] for part in content if part.get("type") == "text")
+
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
         """Construct the response :class:`ChatMessage` for the non-streaming path.
 
@@ -638,13 +656,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     # Send response to echo the input portion of the
                     # last message
                     if request.echo:
-                        last_msg_content: str | list[dict[str, str]] = ""
-                        if (
-                            conversation
-                            and "content" in conversation[-1]
-                            and conversation[-1].get("role") == role
-                        ):
-                            last_msg_content = conversation[-1]["content"] or ""
+                        last_msg_content = self._get_echo_text(conversation, role)
 
                         if last_msg_content:
                             for i in range(num_choices):
@@ -1078,15 +1090,7 @@ class OpenAIServingChat(GenerateBaseServing):
             choices.append(choice_data)
 
         if request.echo:
-            last_msg_content: str | list[dict[str, str]] = ""
-            if (
-                conversation
-                and "content" in conversation[-1]
-                and conversation[-1].get("role") == role
-            ):
-                last_msg_content = conversation[-1]["content"] or ""
-            if isinstance(last_msg_content, list):
-                last_msg_content = "\n".join(msg["text"] for msg in last_msg_content)
+            last_msg_content = self._get_echo_text(conversation, role)
 
             for choice in choices:
                 full_message = last_msg_content + (choice.message.content or "")

@@ -3440,3 +3440,92 @@ async def test_non_streaming_finish_reason_matches_tool_calls(
     assert bool(choice.message.tool_calls) == (text != "Hello, how are you?"), (
         "finish_reason must reflect whether tool calls were emitted"
     )
+
+
+_ECHO_CONVERSATION = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "text", "text": "Describe this image:"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "https://example.com/cat.png"},
+            },
+        ],
+    }
+]
+
+
+def _make_echo_request(**kwargs) -> ChatCompletionRequest:
+    return ChatCompletionRequest(
+        model="test-model",
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "Describe this image:"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/cat.png"},
+                    },
+                ],
+            }
+        ],
+        echo=True,
+        add_generation_prompt=False,
+        **kwargs,
+    )
+
+
+@pytest.mark.asyncio
+async def test_echo_with_multimodal_content_non_stream():
+    """echo=True with a multimodal content list must echo only the text
+    parts instead of crashing with a KeyError on non-text parts."""
+    serving = _build_minimal_metrics_serving_chat(False)
+    response = await serving.chat_completion_full_generator(
+        _make_echo_request(),
+        _single_request_output(_make_metrics_request_output()),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=_ECHO_CONVERSATION,
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    )
+    assert not isinstance(response, ErrorResponse)
+    content = response.choices[0].message.content
+    assert content is not None
+    assert content.startswith("Describe this image:")
+    assert "Hello" in content
+
+
+@pytest.mark.asyncio
+async def test_echo_with_multimodal_content_streaming():
+    """echo=True with a multimodal content list must stream the echoed text
+    parts instead of failing DeltaMessage validation mid-stream."""
+    serving = _build_minimal_metrics_serving_chat(False)
+    request = _make_echo_request(stream=True)
+    chunks: list[dict[str, Any]] = []
+    async for line in serving.chat_completion_stream_generator(
+        request,
+        _single_request_output(_make_metrics_request_output()),
+        "chatcmpl-test-id",
+        "test-model",
+        conversation=_ECHO_CONVERSATION,
+        tokenizer=MagicMock(),
+        request_metadata=RequestResponseMetadata(request_id="chatcmpl-test-id"),
+    ):
+        line = line.strip()
+        if not line.startswith("data: "):
+            continue
+        payload = line[len("data: ") :]
+        if payload != "[DONE]":
+            chunks.append(json.loads(payload))
+    assert chunks
+    # The echoed text arrives as a content delta after the role chunk.
+    echo_deltas = [
+        choice["delta"]["content"]
+        for chunk in chunks
+        for choice in chunk.get("choices", [])
+        if choice.get("delta", {}).get("content")
+    ]
+    assert echo_deltas and echo_deltas[0].startswith("Describe this image:")
