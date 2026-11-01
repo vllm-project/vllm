@@ -4,7 +4,7 @@ import asyncio
 import os
 import socket
 import time
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from copy import copy
 from typing import Any
 
@@ -57,6 +57,7 @@ from vllm.utils.collection_utils import as_list
 from vllm.v1.engine import CheckpointState, EngineCoreRequest, PauseMode
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.core_client import EngineCoreClient
+from vllm.v1.engine.detokenizer import ContentFilter
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import (
@@ -427,6 +428,7 @@ class AsyncLLM(EngineClient):
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
         kv_hints: KvHintsEnvelope | None = None,
+        content_filter_factory: Callable[[], ContentFilter] | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
         if self.errored:
@@ -450,7 +452,11 @@ class AsyncLLM(EngineClient):
             )
 
         if isinstance(prompt, AsyncGenerator):
-            if reasoning_ended is not None or reasoning_parser_kwargs is not None:
+            if (
+                reasoning_ended is not None
+                or reasoning_parser_kwargs is not None
+                or content_filter_factory is not None
+            ):
                 raise NotImplementedError
 
             # Streaming input case.
@@ -546,7 +552,14 @@ class AsyncLLM(EngineClient):
         params = request.params
 
         if is_pooling or params.n == 1:
-            await self._add_request(request, prompt_text, None, 0, queue)
+            await self._add_request(
+                request,
+                prompt_text,
+                None,
+                0,
+                queue,
+                content_filter_factory() if content_filter_factory else None,
+            )
             return queue
 
         parent_params = params
@@ -566,7 +579,12 @@ class AsyncLLM(EngineClient):
         try:
             for idx, child_request in enumerate(child_requests):
                 self.output_processor.add_request(
-                    child_request, prompt_text, parent_request, idx, queue
+                    child_request,
+                    prompt_text,
+                    parent_request,
+                    idx,
+                    queue,
+                    content_filter_factory() if content_filter_factory else None,
                 )
 
             for child_request in child_requests:
@@ -585,6 +603,7 @@ class AsyncLLM(EngineClient):
         parent_req: ParentRequest | None,
         index: int,
         queue: RequestOutputCollector,
+        content_filter: ContentFilter | None = None,
     ):
         if parent_req is None and not self.output_processor.has_request(
             request.request_id
@@ -592,7 +611,9 @@ class AsyncLLM(EngineClient):
             self.check_admission(request_id=request.request_id)
 
         # Register locally before the first await so concurrent tasks see this request.
-        self.output_processor.add_request(request, prompt, parent_req, index, queue)
+        self.output_processor.add_request(
+            request, prompt, parent_req, index, queue, content_filter
+        )
 
         # Add the EngineCoreRequest to EngineCore (separate process).
         await self.engine_core.add_request_async(request)
@@ -756,6 +777,7 @@ class AsyncLLM(EngineClient):
         kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        content_filter_factory: Callable[[], ContentFilter] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Main function called by the API server to kick off a request
             * 1) Making an AsyncStream corresponding to the Request.
@@ -798,6 +820,7 @@ class AsyncLLM(EngineClient):
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
                 reasoning_parser_kwargs=reasoning_parser_kwargs,
+                content_filter_factory=content_filter_factory,
             )
 
             # The output_handler task pushes items into the queue.

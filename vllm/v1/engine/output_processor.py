@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, cast
 import numpy as np
 import torch
 
+from vllm.logprobs import SampleLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -31,7 +32,7 @@ from vllm.tracing import (
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
-from vllm.v1.engine.detokenizer import IncrementalDetokenizer
+from vllm.v1.engine.detokenizer import ContentFilter, IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
@@ -238,6 +239,9 @@ class RequestState:
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
+        # Trailing output tokens held back with their text by stop strings
+        self.num_held_tokens = 0
+        self.held_sampling_mask_positions: list[list[int]] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
 
@@ -281,6 +285,7 @@ class RequestState:
         queue: RequestOutputCollector | None,
         log_stats: bool,
         stream_interval: int,
+        content_filter: ContentFilter | None = None,
     ) -> "RequestState":
         remote_prefill_cached_tokens = None
         if sampling_params := request.sampling_params:
@@ -307,6 +312,7 @@ class RequestState:
             detokenizer = IncrementalDetokenizer.from_new_request(
                 tokenizer=tokenizer,
                 request=request,
+                content_filter=content_filter,
             )
             max_tokens_param = sampling_params.max_tokens
             top_p = sampling_params.top_p
@@ -472,6 +478,48 @@ class RequestState:
             metrics=self.stats,
         )
 
+    def _release_held_tokens(
+        self,
+        token_ids: list[int],
+        num_held_tokens: int,
+        finished: bool,
+        delta: bool,
+    ) -> tuple[list[int], SampleLogprobs | None, SamplingMask | None]:
+        assert self.detokenizer is not None
+        assert self.logprobs_processor is not None
+        num_output_tokens = self.detokenizer.num_output_tokens()
+        start, end = 0, num_output_tokens - num_held_tokens
+        if delta:
+            num_sent = len(token_ids) + self.num_held_tokens - num_held_tokens
+            start = max(end - num_sent, 0)
+        self.num_held_tokens = num_held_tokens
+        # SlowIncrementalDetokenizer keeps prompt token ids ahead of the output
+        offset = len(self.detokenizer.token_ids) - num_output_tokens
+        token_ids = self.detokenizer.token_ids[offset + start : offset + end]
+
+        logprobs = self.logprobs_processor.logprobs
+        if logprobs:
+            logprobs = logprobs[start:end]
+
+        sampling_mask = None
+        if (delta or finished) and (
+            self.sampling_mask_chunks or self.held_sampling_mask_positions
+        ):
+            positions = [
+                position
+                for chunk in self.sampling_mask_chunks
+                for position in chunk.to_nested_list()
+            ]
+            if delta:
+                positions = self.held_sampling_mask_positions + positions
+                num_sent_positions = max(len(positions) - num_held_tokens, 0)
+                self.held_sampling_mask_positions = positions[num_sent_positions:]
+                positions = positions[:num_sent_positions]
+                self.sampling_mask_chunks.clear()
+            if positions:
+                sampling_mask = SamplingMask(positions)
+        return token_ids, logprobs, sampling_mask
+
     def _new_completion_output(
         self,
         token_ids: list[int],
@@ -483,31 +531,36 @@ class RequestState:
         finished = finish_reason is not None
         delta = self.output_kind == RequestOutputKind.DELTA
 
-        # Prepare text and token_ids, based on delta mode
-        text = self.detokenizer.get_next_output_text(finished, delta)
-        if not delta:
-            token_ids = self.detokenizer.output_token_ids
-
-        # Prepare logprobs, based on delta mode
-        logprobs = self.logprobs_processor.logprobs
-        if delta and logprobs:
-            num_new_tokens = len(token_ids)
-            # Avoid [-0:], which returns the full accumulated history when a
-            # delta contains no new token IDs. [:0] preserves the concrete
-            # list or FlatLogprobs representation while returning no entries.
-            logprobs = logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
-
-        sampling_mask = None
-        if (delta or finished) and self.sampling_mask_chunks:
-            sampling_mask = SamplingMask(
-                [
-                    position
-                    for chunk in self.sampling_mask_chunks
-                    for position in chunk.to_nested_list()
-                ]
+        text, num_held_tokens = self.detokenizer.get_next_output(finished, delta)
+        if num_held_tokens or self.num_held_tokens:
+            token_ids, logprobs, sampling_mask = self._release_held_tokens(
+                token_ids, num_held_tokens, finished, delta
             )
-            if delta:
-                self.sampling_mask_chunks.clear()
+        else:
+            if not delta:
+                token_ids = self.detokenizer.output_token_ids
+
+            logprobs = self.logprobs_processor.logprobs
+            if delta and logprobs:
+                num_new_tokens = len(token_ids)
+                # Avoid [-0:], which returns the full accumulated history when a
+                # delta contains no new token IDs. [:0] preserves the concrete
+                # list or FlatLogprobs representation while returning no entries.
+                logprobs = (
+                    logprobs[-num_new_tokens:] if num_new_tokens else logprobs[:0]
+                )
+
+            sampling_mask = None
+            if (delta or finished) and self.sampling_mask_chunks:
+                sampling_mask = SamplingMask(
+                    [
+                        position
+                        for chunk in self.sampling_mask_chunks
+                        for position in chunk.to_nested_list()
+                    ]
+                )
+                if delta:
+                    self.sampling_mask_chunks.clear()
 
         # Concatenate routed experts on finish
         routed_experts = None
@@ -667,6 +720,7 @@ class OutputProcessor:
         parent_req: ParentRequest | None = None,
         request_index: int = 0,
         queue: RequestOutputCollector | None = None,
+        content_filter: ContentFilter | None = None,
     ) -> None:
         request_id = request.request_id
         req_state = self.request_states.get(request_id)
@@ -683,6 +737,7 @@ class OutputProcessor:
             queue=queue,
             log_stats=self.log_stats,
             stream_interval=self.stream_interval,
+            content_filter=content_filter,
         )
         self.request_states[request_id] = req_state
         if parent_req:

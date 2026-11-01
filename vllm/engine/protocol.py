@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -26,6 +26,7 @@ from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
+    from vllm.v1.engine.detokenizer import ContentFilter
 
 
 @dataclass
@@ -110,6 +111,7 @@ class EngineClient(ABC):
         kv_hints: KvHintsEnvelope | None = None,
         reasoning_ended: bool | None = None,
         reasoning_parser_kwargs: dict[str, Any] | None = None,
+        content_filter_factory: Callable[[], "ContentFilter"] | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """Generate outputs for a request."""
         ...
