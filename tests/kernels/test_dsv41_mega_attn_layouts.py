@@ -150,3 +150,16 @@ def test_quantized_o_proj_matches_quantized_bf16(tokens, groups):
     o.data.copy_((torch.randn(o.data.shape, device="cuda") * 0.3).to(o.data.dtype))
     graph.replay()
     assert_same(graph_output, projection(False))
+
+
+def test_permute_on_load_owns_its_permutation():
+    """Reload after sleep level 2 must not depend on the caller's ``perm``."""
+    perm = q_fused_permutation(2, HEAD_DIM)
+    checkpoint = torch.arange(perm.numel(), dtype=torch.float32)
+    param = torch.nn.Parameter(torch.empty_like(checkpoint), requires_grad=False)
+    param.weight_loader = default_weight_loader  # type: ignore[attr-defined]
+    permute_on_load(param, perm, 0)
+    expected = checkpoint[perm]
+    perm.fill_(0)
+    param.weight_loader(param, checkpoint)  # type: ignore[attr-defined]
+    torch.testing.assert_close(param.data, expected)
