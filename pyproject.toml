@@ -228,6 +228,10 @@ view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
 stride_bse = "stride_bse"
 
+00abd0p = "00abd0p"
+03ede2p = "03ede2p"
+40daa4p = "40daa4p"
+
 [tool.typos.default.extend-words]
 certifi = "certifi"
 MoNE = "MoNE"

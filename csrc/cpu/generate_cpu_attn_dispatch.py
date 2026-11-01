@@ -157,7 +157,7 @@ def generate_header_file() -> str:
 #endif
 
 #ifdef __aarch64__
-  #include "cpu_attn_neon.hpp"
+  #include "simd/cpu_attn_neon.hpp"
 #endif
 
 #ifdef __s390x__

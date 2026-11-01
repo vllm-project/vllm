@@ -69,8 +69,7 @@ void mla_decode_block_head(
 
 #pragma unroll
     for (int unroll = 0; unroll < HEAD_UNROLL; ++unroll)
-      q_vec[unroll] =
-          qk_vec_type{q_vecs[(i + unroll * HEAD_DIM) / QK_NUM_ELEM]};
+      q_vec[unroll] = q_vecs[(i + unroll * HEAD_DIM) / QK_NUM_ELEM];
 
     for (int block_offset = 0; block_offset < num_tokens; ++block_offset) {
       qk_vec_type k_vec(k_vecs[(block_offset * HEAD_DIM + i) / QK_NUM_ELEM]);
