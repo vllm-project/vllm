@@ -231,9 +231,6 @@ SM90_SKINNY_FP8_MOE_GEMM_PLANS: dict[tuple[int, int], SkinnyFp8GemmPlan] = {
     },
 }
 
-# Token counts above this take the Triton fused MoE path.
-SKINNY_FP8_MOE_MAX_TOKENS = 4
-
 SKINNY_FP8_MOE_GEMM_PLANS_BY_CAPABILITY: dict[
     tuple[int, int], dict[tuple[int, int], SkinnyFp8GemmPlan]
 ] = {

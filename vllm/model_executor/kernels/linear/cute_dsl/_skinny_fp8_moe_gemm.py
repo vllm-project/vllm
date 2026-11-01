@@ -26,7 +26,7 @@ class CuteSkinnyFp8BlockMoeGemm:
     activation row is the pair's token (``p // top_k``, first GEMM of the
     layer); otherwise it is the pair itself (second GEMM). The activation is
     not quantized. Accumulation is FP32 and the output is BF16. A pair whose
-    expert id is negative (padding) gets a zero output row.
+    expert id is negative (padding) or not below ``E`` gets a zero output row.
 
     One CTA computes ``outputs_per_block`` outputs of one pair; the grid is
     ``(N / outputs_per_block, num_pairs)``. Each CTA's threads stride over K in
@@ -75,6 +75,7 @@ class CuteSkinnyFp8BlockMoeGemm:
         gC: cute.Tensor,
         n_per_expert: cutlass.Int32,
         top_k: cutlass.Int32,
+        num_experts: cutlass.Int32,
         stream: CUstream,
     ) -> None:
         num_pairs = cute.size(gC, mode=[0])
@@ -92,7 +93,18 @@ class CuteSkinnyFp8BlockMoeGemm:
             load_cache_mode=cute.nvgpu.LoadCacheMode.STREAMING,
         )
         self.kernel(
-            gA, gB, gS, gIds, gW, gC, n_per_expert, top_k, k, copy_a, copy_b
+            gA,
+            gB,
+            gS,
+            gIds,
+            gW,
+            gC,
+            n_per_expert,
+            top_k,
+            num_experts,
+            k,
+            copy_a,
+            copy_b,
         ).launch(
             grid=[cute.ceil_div(n_per_expert, self.outputs_per_block), num_pairs, 1],
             block=[self.block_size, 1, 1],
@@ -113,6 +125,7 @@ class CuteSkinnyFp8BlockMoeGemm:
         gC: cute.Tensor,
         n_per_expert: cutlass.Int32,
         top_k: cutlass.Int32,
+        num_experts: cutlass.Int32,
         k_extent: cutlass.Int32,
         copy_a: cute.CopyAtom,
         copy_b: cute.CopyAtom,
@@ -161,8 +174,8 @@ class CuteSkinnyFp8BlockMoeGemm:
         )
 
         # A negative expert id marks a pair with no expert (padding in warmup
-        # and profiling runs); its output rows are zero.
-        valid = expert >= 0
+        # and profiling runs); it and any id outside the stack give a zero row.
+        valid = (expert >= 0) & (expert < num_experts)
         if valid:
             num_k_tiles = k_extent // k_tile_size
             for k_tile in cutlass.range(num_k_tiles, unroll=self.k_unroll):

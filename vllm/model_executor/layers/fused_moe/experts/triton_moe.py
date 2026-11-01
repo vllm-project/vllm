@@ -158,19 +158,20 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
+        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
     ) -> tuple[SkinnyGemmConfig, SkinnyGemmConfig] | None:
-        """The grouped skinny kernel configs for this call, or None."""
+        """The grouped skinny kernel configs for this call, or None (then the
+        Triton path runs). Both GEMMs' inputs are checked here so that the
+        kernel wrapper never has to raise."""
         plans = self._skinny_fp8_moe_plans
         if (
             plans is None
             or expert_map is not None
             or self._lora_context is not None
             or apply_router_weight_on_input
-            or hidden_states.dtype != torch.bfloat16
-            or topk_ids.dtype != torch.int32
         ):
             return None
         configs = plans.get(topk_ids.shape[0])
@@ -178,11 +179,25 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             return None
         from vllm.model_executor.kernels.linear.cute_dsl.skinny_fp8_moe_gemm import (
             can_use_skinny_fp8_moe_gemm,
+            weight_fits_skinny_fp8_moe_gemm,
         )
 
         assert self.w1_scale is not None and self.w2_scale is not None
         if not can_use_skinny_fp8_moe_gemm(
-            hidden_states, w1, self.w1_scale, topk_ids, configs[0], a_per_token=True
+            hidden_states,
+            w1,
+            self.w1_scale,
+            topk_ids,
+            configs[0],
+            a_per_token=True,
+            topk_weights=topk_weights,
+        ):
+            return None
+        if not (
+            weight_fits_skinny_fp8_moe_gemm(w2, self.w2_scale, configs[1])
+            and w2.shape[2]
+            == self.adjust_N_for_activation(w1.shape[1], MoEActivation.SILU)
+            and w2.shape[0] == w1.shape[0]
         ):
             return None
         return configs
@@ -461,6 +476,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 hidden_states,
                 w1,
                 w2,
+                topk_weights,
                 topk_ids,
                 expert_map,
                 apply_router_weight_on_input,

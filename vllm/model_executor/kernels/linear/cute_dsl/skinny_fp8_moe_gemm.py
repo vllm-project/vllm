@@ -21,6 +21,30 @@ _A_VECTOR = 8
 _B_VECTOR_WIDTHS = (8, 16)
 
 
+def weight_fits_skinny_fp8_moe_gemm(
+    weight: torch.Tensor, weight_scale: torch.Tensor, config: SkinnyGemmConfig
+) -> bool:
+    """Whether an (E, N, K) FP8 E4M3 expert stack with (E, N / 128, K / 128)
+    FP32 block scales, both contiguous, can run under ``config``."""
+    if weight.dim() != 3 or weight_scale.dim() != 3:
+        return False
+    num_experts, n, k = weight.shape
+    return (
+        config.num_rows == 1
+        and config.static_k is None
+        and config.vector_width in _B_VECTOR_WIDTHS
+        and weight.dtype == torch.float8_e4m3fn
+        and weight_scale.dtype == torch.float32
+        and weight.is_contiguous()
+        and weight_scale.is_contiguous()
+        and tuple(weight_scale.shape)
+        == (num_experts, n // QUANT_BLOCK, k // QUANT_BLOCK)
+        and n % QUANT_BLOCK == 0
+        and n % config.outputs_per_block == 0
+        and k % (config.block_size * config.vector_width) == 0
+    )
+
+
 def can_use_skinny_fp8_moe_gemm(
     a: torch.Tensor,
     weight: torch.Tensor,
@@ -29,40 +53,38 @@ def can_use_skinny_fp8_moe_gemm(
     config: SkinnyGemmConfig,
     *,
     a_per_token: bool,
+    topk_weights: torch.Tensor | None = None,
 ) -> bool:
     """Whether the grouped kernel can run ``config`` on these tensors.
 
     ``weight`` is the (E, N, K) FP8 E4M3 expert stack and ``weight_scale`` its
     (E, N / 128, K / 128) FP32 block scales, both contiguous. ``a`` holds one
-    BF16 row per token (``a_per_token``) or per (token, expert) pair.
+    BF16 row per token (``a_per_token``) or per (token, expert) pair;
+    ``topk_weights``, when given, is FP32 with the shape of ``topk_ids``.
     ``config.num_rows`` must be 1 (one activation row per CTA) and
     ``config.static_k`` is not supported.
     """
-    if a.dim() != 2 or weight.dim() != 3 or weight_scale.dim() != 3:
+    if not weight_fits_skinny_fp8_moe_gemm(weight, weight_scale, config):
         return False
-    if topk_ids.dim() != 2 or topk_ids.dtype != torch.int32:
+    if a.dim() != 2 or topk_ids.dim() != 2 or topk_ids.dtype != torch.int32:
         return False
-    num_experts, n, k = weight.shape
-    num_pairs = topk_ids.numel()
-    a_rows = topk_ids.shape[0] if a_per_token else num_pairs
+    if topk_weights is not None and (
+        topk_weights.dtype != torch.float32 or topk_weights.shape != topk_ids.shape
+    ):
+        return False
+    k = weight.shape[2]
+    a_rows = topk_ids.shape[0] if a_per_token else topk_ids.numel()
     return (
-        config.num_rows == 1
-        and config.static_k is None
-        and config.vector_width in _B_VECTOR_WIDTHS
-        and a.dtype == torch.bfloat16
-        and weight.dtype == torch.float8_e4m3fn
-        and weight_scale.dtype == torch.float32
+        a.dtype == torch.bfloat16
         and a.shape == (a_rows, k)
-        and weight.is_contiguous()
-        and weight_scale.is_contiguous()
         and topk_ids.is_contiguous()
-        and tuple(weight_scale.shape)
-        == (num_experts, n // QUANT_BLOCK, k // QUANT_BLOCK)
-        and n % QUANT_BLOCK == 0
-        and n % config.outputs_per_block == 0
-        and k % (config.block_size * config.vector_width) == 0
         and a_rows_aligned(a, _A_VECTOR)
     )
+
+
+# Stands in for the routing weights when the kernel does not multiply them;
+# only its dtype has to match the compiled signature.
+_NO_WEIGHTS: dict[torch.device, torch.Tensor] = {}
 
 
 class ShapeDynamicSkinnyFp8MoeGemm(CuteDslGemm):
@@ -116,6 +138,7 @@ class ShapeDynamicSkinnyFp8MoeGemm(CuteDslGemm):
             c,
             cutlass.Int32(QUANT_BLOCK),
             cutlass.Int32(1),
+            cutlass.Int32(1),
             self._stream(),
             options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",
         )
@@ -164,19 +187,25 @@ class ShapeDynamicSkinnyFp8MoeGemm(CuteDslGemm):
         """``out[p] = a[row(p)] @ dequant(weight[ids[p]]).T`` for every
         (token, expert) pair ``p``, times ``topk_weights[p]`` when given."""
         if not can_use_skinny_fp8_moe_gemm(
-            a, weight, weight_scale, topk_ids, config, a_per_token=a_per_token
+            a,
+            weight,
+            weight_scale,
+            topk_ids,
+            config,
+            a_per_token=a_per_token,
+            topk_weights=topk_weights,
         ):
             raise ValueError("inputs do not fit the skinny FP8 MoE GEMM config")
         num_experts, n, k = weight.shape
         num_pairs = topk_ids.numel()
         mul_routed_weight = topk_weights is not None
         if mul_routed_weight:
-            assert topk_weights.shape == topk_ids.shape
-            assert topk_weights.dtype == torch.float32
             weights = topk_weights.reshape(num_pairs)
         else:
-            # Unused by the kernel; only its type must match the compiled one.
-            weights = torch.empty(num_pairs, dtype=torch.float32, device=a.device)
+            weights = _NO_WEIGHTS.get(a.device)
+            if weights is None:
+                weights = torch.zeros(1, dtype=torch.float32, device=a.device)
+                _NO_WEIGHTS[a.device] = weights
         key = (config, a_per_token, mul_routed_weight)
         self._compile(key)
         if out is None:
@@ -193,6 +222,7 @@ class ShapeDynamicSkinnyFp8MoeGemm(CuteDslGemm):
             out,
             n,
             topk_ids.shape[1],
+            num_experts,
             self._stream(),
         )
         return out
