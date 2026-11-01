@@ -507,7 +507,7 @@ class InputProcessor:
                 self.renderer.get_eos_token_id(),
             )
             if self.tokenizer is not None:
-                sampling_params.update_from_tokenizer(self.tokenizer)
+                sampling_params.update_from_tokenizer(self.tokenizer, self.model_config)
             if sampling_params.trace_decode_token_ids:
                 self._normalize_trace_replay_params(sampling_params, prompt_len)
         else:
