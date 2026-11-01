@@ -11,7 +11,9 @@ import torch
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.distributed.weight_transfer.nccl_common import (
+        WeightTransferCommunicator,
+    )
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -38,6 +40,7 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     packed_nccl_broadcast_consumer,
     packed_nccl_broadcast_producer,
 )
+from vllm.utils.torch_utils import current_stream
 
 # NCCLWeightTransferInitInfo is re-exported here for convenience; its canonical
 # home is nccl_common, shared with the sparse backend.
@@ -133,7 +136,7 @@ class NCCLWeightTransferEngine(
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
-        self.model_update_group: PyNcclCommunicator | None = None
+        self.model_update_group: WeightTransferCommunicator | None = None
         # Set from the trainer-supplied init info at the handshake; defaults are
         # only for the (unreachable) receive-before-init case.
         self.rank_offset = 1
@@ -240,7 +243,7 @@ class NCCLWeightTransferEngine(
                     dtype = getattr(torch, dtype_name)
                     weight = torch.empty(shape, dtype=dtype, device=self.device)
                     self.model_update_group.broadcast(
-                        weight, src=src, stream=torch.cuda.current_stream()
+                        weight, src=src, stream=current_stream()
                     )
                     self.model.load_weights([(name, weight)])
                     del weight
@@ -282,7 +285,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
         self.packed = packed
         self.packed_buffer_size_bytes = packed_buffer_size_bytes
         self.packed_num_buffers = packed_num_buffers
-        self.model_update_group: PyNcclCommunicator | None = None
+        self.model_update_group: WeightTransferCommunicator | None = None
         # This rank's rank in the transfer group, set by trainer_init.
         self._group_rank = 0
         # Metadata the worker already holds; an unchanged round sends none.
@@ -478,7 +481,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 num_buffers=self.packed_num_buffers,
             )
         else:
-            stream = torch.cuda.current_stream()
+            stream = current_stream()
             for _name, tensor in pairs:
                 # NCCL sends `numel` elements straight from `data_ptr()`, so a
                 # non-contiguous view would ship whatever follows its base
@@ -502,7 +505,7 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
                 device=device,
             )
         else:
-            stream = torch.cuda.current_stream()
+            stream = current_stream()
             for m in meta:
                 weight = torch.empty(m.shape, dtype=m.dtype, device=device)
                 self.model_update_group.broadcast(weight, src=src, stream=stream)
