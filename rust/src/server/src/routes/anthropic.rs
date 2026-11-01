@@ -31,13 +31,13 @@ use vllm_llm::TokenUsage;
 
 #[derive(Debug, Deserialize, Validate)]
 #[serde(deny_unknown_fields)]
-pub struct CountTokensRequest {
+pub struct MessagesInput {
     model: String,
     messages: Vec<Message>,
     system: Option<TextContent>,
 }
 
-impl Normalizable for CountTokensRequest {}
+impl Normalizable for MessagesInput {}
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "role", rename_all = "lowercase", deny_unknown_fields)]
@@ -92,7 +92,7 @@ impl TextContent {
     }
 }
 
-impl CountTokensRequest {
+impl MessagesInput {
     fn into_chat(
         self,
         model: &LoraModelResolution,
@@ -187,7 +187,7 @@ fn error_response(error: ApiError) -> Response {
 pub async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Result<ValidatedJson<CountTokensRequest>, ApiError>,
+    body: Result<ValidatedJson<MessagesInput>, ApiError>,
 ) -> Response {
     let body = match body {
         Ok(body) => body.0,
@@ -215,7 +215,7 @@ struct CountContext {
 #[derive(Debug, Deserialize, Validate)]
 pub struct MessagesRequest {
     #[serde(flatten)]
-    input: CountTokensRequest,
+    input: MessagesInput,
     #[validate(range(min = 1))]
     max_tokens: u32,
     #[validate(range(min = 0.0, max = 1.0))]
@@ -284,7 +284,7 @@ impl<'a> MessagesLlm<'a> {
     }
     pub(crate) async fn count_tokens(
         &self,
-        body: CountTokensRequest,
+        body: MessagesInput,
         context: ResolvedRequestContext,
     ) -> Result<CountTokensResponse, ApiError> {
         let model = self.state.resolve_model_with_loras(Some(&body.model)).await;
