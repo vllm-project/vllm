@@ -29,8 +29,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.utils import (
+    cuda_unquantized_gemm,
     dispatch_unquantized_gemm,
     maybe_pad_weight_avoid_cache_aliasing,
+    maybe_use_skinny_gemm,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -227,6 +229,8 @@ class UnquantizedLinearMethod(LinearMethodBase):
                 layer.weight.data = weight.t().contiguous().t()
         elif current_platform.is_rocm():
             layer.weight.data = maybe_pad_weight_avoid_cache_aliasing(layer.weight.data)
+        elif self._gemm_impl is cuda_unquantized_gemm:
+            maybe_use_skinny_gemm(layer)
 
     def apply(
         self,
