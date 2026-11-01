@@ -382,6 +382,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_):
+        # All members agree on the shape; empty inputs need no GPU kernel.
+        if input_.numel() == 0:
+            return torch.empty_like(input_)
+
         fi_ar_comm = self.fi_ar_comm
         use_fi_ar = (
             fi_ar_comm is not None

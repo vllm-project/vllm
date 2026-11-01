@@ -749,7 +749,12 @@ def graph_allreduce(
         # communicate independently
         num_communication = rank // tp_size + 1
 
-        for sz in test_sizes:
+        empty = torch.empty((0, 768), dtype=torch.bfloat16, device=device)
+        eager_empty = tensor_model_parallel_all_reduce(empty)
+        assert eager_empty is not empty
+        torch.testing.assert_close(eager_empty, empty)
+
+        for sz in [0, *test_sizes]:
             for dtype in [torch.float32, torch.float16, torch.bfloat16]:
                 with graph_capture(device=device) as graph_capture_context:
                     # use integers so result matches NCCL exactly
@@ -768,6 +773,8 @@ def graph_allreduce(
                             out2 = tensor_model_parallel_all_reduce(inp2)
                             dist.all_reduce(inp2, group=group)
                 graph.replay()
+                assert out1 is not inp1
+                assert out2 is not inp2
                 torch.testing.assert_close(out1, inp1)
                 torch.testing.assert_close(out2, inp2)
 
@@ -864,7 +871,9 @@ def test_custom_allreduce_chunked(monkeypatch: pytest.MonkeyPatch, tp_size):
 
 @pytest.mark.parametrize("tp_size", [2])
 @pytest.mark.parametrize("pipeline_parallel_size", [1, 2])
-@pytest.mark.parametrize("test_target", [eager_allreduce, graph_allreduce])
+@pytest.mark.parametrize(
+    "test_target", [eager_allreduce, graph_allreduce], ids=["eager", "graph"]
+)
 def test_custom_allreduce(
     monkeypatch: pytest.MonkeyPatch,
     tp_size,
