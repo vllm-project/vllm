@@ -822,3 +822,107 @@ def test_owners_of_reads_owner_table_or_batch_position():
     assert sharded_owners is sharded.shard_mapping
     assert replicated_owners_np.tolist() == [0, 1, 2, 3, 0]
     assert replicated_owners is None
+
+
+def _make_cpu_sharder(
+    tp_rank: int, tp_size: int, draft_logits: SimpleNamespace | None = None
+) -> BatchSharder:
+    """A BatchSharder with only the request owner fields, which need no Triton."""
+    sharder = object.__new__(BatchSharder)
+    sharder.tp_rank, sharder.tp_size = tp_rank, tp_size
+    sharder.draft_logits = draft_logits  # type: ignore[assignment]
+    return sharder
+
+
+def test_num_local_reqs_follows_request_owners():
+    """Without a sharded draft logits cache, requests go round-robin over
+    batch positions; with one, they go to the rank that cached them."""
+    idx_mapping_np = np.array([5, 2, 7], dtype=np.int32)
+    assert [
+        _make_cpu_sharder(rank, 4).num_local_reqs(idx_mapping_np) for rank in range(4)
+    ] == [1, 1, 1, 0]
+    owners_np = np.array([0, 0, 1, 0, 0, 1, 0, 1], dtype=np.int32)
+    draft_logits = SimpleNamespace(
+        owners_of=lambda idx_mapping_np: (owners_np[idx_mapping_np], None)
+    )
+    assert [
+        _make_cpu_sharder(rank, 2, draft_logits).num_local_reqs(idx_mapping_np)
+        for rank in range(2)
+    ] == [0, 3]
+
+
+@pytest.mark.parametrize("tp_rank", [0, 3])
+def test_dummy_sampler_run_profiles_rank_without_local_reqs(tp_rank: int):
+    """The profile run takes the sampler through sample(), so every rank runs
+    the batch-sharded all-to-all and output gather before the KV cache is
+    sized. A rank that owns no dummy request (rank 3 of 4, 3 requests) must
+    still run its sampler once, because it can own a real request later. The
+    fallback is local: it issues no collective beyond the ones in sample()."""
+    from vllm.v1.worker.gpu import model_runner
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    tp_size, num_reqs, vocab_size, padded_vocab_size = 4, 3, 10, 16
+    num_local_reqs = 1 if tp_rank < num_reqs else 0
+    full_batch = SimpleNamespace(
+        num_reqs=num_reqs,
+        num_draft_tokens=0,
+        idx_mapping_np=np.arange(num_reqs),
+    )
+    one_row_batch = SimpleNamespace(num_reqs=1)
+    local_batch = SimpleNamespace(num_reqs=num_local_reqs, num_draft_tokens=0)
+    batch_sharder = _make_cpu_sharder(tp_rank, tp_size)
+    shard_sampler_inputs = mock.Mock(
+        return_value=(
+            local_batch,
+            torch.zeros(num_reqs, dtype=torch.int64),
+            None,
+            SimpleNamespace(),
+        )
+    )
+    fake_runner = SimpleNamespace(
+        input_buffers=object(),
+        batch_sharder=batch_sharder,
+        model=SimpleNamespace(
+            compute_logits_local=lambda h: h.new_zeros(
+                h.shape[0], padded_vocab_size // tp_size
+            )
+        ),
+        vocab_size=vocab_size,
+        sampler=mock.Mock(),
+        rejection_sampler=None,
+        device=torch.device("cpu"),
+    )
+    fake_runner.sample = GPUModelRunner.sample.__get__(fake_runner)
+    make_dummy = mock.Mock(side_effect=[full_batch, one_row_batch])
+    all_to_all_logits = mock.Mock(
+        side_effect=lambda shard, _: shard.new_zeros(num_local_reqs, padded_vocab_size)
+    )
+    gather_sampler_output = mock.Mock(
+        return_value=SimpleNamespace(num_sampled=None, num_rejected=None)
+    )
+    with (
+        mock.patch.object(batch_sharder, "shard_sampler_inputs", shard_sampler_inputs),
+        mock.patch.object(model_runner.InputBatch, "make_dummy", make_dummy),
+        mock.patch.object(model_runner, "all_to_all_logits", all_to_all_logits),
+        mock.patch.object(model_runner, "gather_sampler_output", gather_sampler_output),
+        mock.patch.object(model_runner.current_platform, "is_cpu", return_value=False),
+    ):
+        GPUModelRunner._dummy_sampler_run(fake_runner, torch.randn(num_reqs, 4))
+
+    # Default pass and warmup-param pass: each runs both collectives.
+    assert all_to_all_logits.call_count == 2
+    assert gather_sampler_output.call_count == 2
+    for call in shard_sampler_inputs.call_args_list:
+        assert call.args == (full_batch, None)
+    assert fake_runner.sampler.add_request.call_count == num_reqs
+    sampled_batches = [c.args[1] for c in fake_runner.sampler.call_args_list]
+    if num_local_reqs:
+        # sample() ran the local sampler in both passes; no fallback.
+        assert make_dummy.call_count == 1
+        assert sampled_batches == [local_batch, local_batch]
+    else:
+        # sample() skipped the local sampler; the fallback runs it on one row.
+        make_dummy.assert_called_with(1, 1, fake_runner.input_buffers)
+        assert sampled_batches == [one_row_batch]
+        logits = fake_runner.sampler.call_args.args[0]
+        assert logits.shape == (1, vocab_size)
