@@ -419,6 +419,14 @@ Supported models:
 
 Flags: `--tool-call-parser deepseek_v31 --chat-template {see_above}`
 
+### DeepSeek-V4.1 Models (`deepseek_v41`)
+
+With `--tool-call-parser deepseek_v41`, output token IDs distinguish genuine DSML markers from copies spelled with ordinary tokens, including inside string arguments. This guard also works without a reasoning parser. Without token IDs, DSML matching remains text-based. In token-ID mode, text between and after tool-call blocks is returned as content.
+
+When auto tool choice is enabled and both `--tool-call-parser deepseek_v41` and `--reasoning-parser deepseek_v41` are selected, one engine parses reasoning and tools together, preserving token provenance across the transition. Text-spelled markers remain text in reasoning too. Requests without tools, or with `tool_choice="none"`, preserve DSML call markup as content instead of dropping it, with or without token IDs. Prompt reasoning-state detection stops at assistant, user and system role boundaries: a prompt that already closes reasoning starts in content, while a closing marker from an earlier turn does not disable reasoning.
+
+Strict required and named tool choices have a remaining limitation: their string-based structural tags can admit markers spelled with ordinary tokens. Such a forced call would remain content under the token-origin guard, rather than become a tool call. This interaction has not been reproduced with constrained model generation. [Token-aware structural tags](https://github.com/vllm-project/vllm/pull/59145) are the intended fix.
+
 ### OpenAI OSS Models (`openai`)
 
 Supported models:

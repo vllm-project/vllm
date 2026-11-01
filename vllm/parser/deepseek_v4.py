@@ -160,7 +160,12 @@ def _dsml_arg_value_extender(
     name, is_str, _, held_back = open_param
     if is_str != "true" or name in names or held_back:
         return None
+    return _dsml_open_value_extender(raw_args, param_start, param_close)
 
+
+def _dsml_open_value_extender(
+    raw_args: str, param_start: str, param_close: str
+) -> ArgValueExtender:
     keep = max(len(param_start), len(param_close)) - 1
     tail = raw_args[-keep:]
 
