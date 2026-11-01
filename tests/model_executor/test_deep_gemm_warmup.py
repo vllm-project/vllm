@@ -181,7 +181,7 @@ def test_fp8_einsum_data_matches_only_fp8_bmm_o_proj() -> None:
     assert deep_gemm_warmup._fp8_einsum_warmup_data(SimpleNamespace()) is None
 
 
-def test_fp8_einsum_relax_m_values_cover_small_m_and_boundaries(monkeypatch) -> None:
+def test_fp8_einsum_relax_m_values_cover_block_m_boundaries(monkeypatch) -> None:
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "relax")
     seen_n = []
 
@@ -198,7 +198,22 @@ def test_fp8_einsum_relax_m_values_cover_small_m_and_boundaries(monkeypatch) -> 
 
     # N for the boundary heuristic is the einsum output width (o_lora_rank).
     assert seen_n == [128]
-    assert m_values == [*range(1, 33), 64, 513, 641, 1025, 2048]
+    assert m_values == sorted({*range(1, 2049, 16), 64, 2048})
+
+
+def test_fp8_einsum_relax_m_values_cover_measured_boundaries(monkeypatch) -> None:
+    """Every M DeepGEMM was measured to switch einsum config at, SM90 and SM100."""
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "relax")
+    monkeypatch.setattr(
+        deep_gemm_warmup, "_generate_optimal_warmup_m_values", lambda *args: []
+    )
+    weight = torch.empty((2, 128, 256), dtype=torch.float8_e4m3fn)
+
+    m_values = set(deep_gemm_warmup._get_fp8_einsum_m_values(weight, 8192))
+
+    sm90 = {1, 17, 33, 65, 129, 257, 513, 641, 1025}
+    sm100 = {1, 33, 65, 81, 97, 129, 161, 193, 641, 2161, *range(225, 482, 32)}
+    assert sm90 | sm100 <= m_values
 
 
 def test_fp8_einsum_full_m_values_cover_every_m(monkeypatch) -> None:

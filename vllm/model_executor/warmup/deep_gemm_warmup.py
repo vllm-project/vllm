@@ -229,6 +229,9 @@ def _deepgemm_fp8_gemm_nt_warmup(
 
 FP8_EINSUM_WARMUP_CACHE: set[tuple] = set()
 
+# Smallest block M DeepGEMM's sm90/sm100 get_layout_candidates enumerates.
+FP8_EINSUM_BLOCK_M_GRANULARITY = 16
+
 
 def _fp8_einsum_warmup_data(
     module: torch.nn.Module,
@@ -275,13 +278,14 @@ def _get_fp8_einsum_m_values(weight: torch.Tensor, max_tokens: int) -> list[int]
 
     DeepGEMM picks the einsum tile config from M at runtime, so every config a
     prefill chunk can land on has to be compiled up front. ``relax`` reuses the
-    ``fp8_gemm_nt`` boundary heuristic with N = the einsum output width and also
-    covers every M <= 32, where small-M configs change fastest.
+    ``fp8_gemm_nt`` boundary heuristic with N = the einsum output width, plus
+    every M a tile boundary can fall on.
     """
     if envs.VLLM_DEEP_GEMM_WARMUP == "relax":
         n = weight.size(1)
         m_values = set(_generate_optimal_warmup_m_values(max_tokens, n, weight.device))
-        m_values.update(range(1, min(32, max_tokens) + 1))
+        # Block-M candidates are 16-multiples, so configs change only at M % 16 == 1.
+        m_values.update(range(1, max_tokens + 1, FP8_EINSUM_BLOCK_M_GRANULARITY))
         return sorted(m for m in m_values if 1 <= m <= max_tokens)
     assert envs.VLLM_DEEP_GEMM_WARMUP == "full", (
         "Expected "
