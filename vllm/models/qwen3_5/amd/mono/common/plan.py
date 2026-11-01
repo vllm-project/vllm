@@ -33,6 +33,10 @@ from dataclasses import dataclass, field, fields
 from enum import Enum
 from pathlib import Path
 
+from vllm.models.qwen3_5.amd.mono.tiling import DEFAULT_GRID
+from vllm.models.qwen3_5.amd.mono.tiling import THREADS as THREADS
+from vllm.models.qwen3_5.amd.mono.tiling import WAVES as WAVES
+
 _SCALARS = (int, float, bool, str, enum.Enum)
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,22 +86,22 @@ def symbol_params(key) -> dict:
 
 # The execution model every mono kernel is written for.
 #
-# One CTA per CU of an MI355X, all of them co-resident -- a spin wait on another
-# CTA can only make progress if that CTA is running, so the runner refuses a GPU
-# with another CU count -- and THREADS threads each.
+# One CTA per CU, all of them co-resident -- a spin wait on another CTA can only
+# make progress if that CTA is running, so the runner refuses a GPU whose CU
+# count has no validated grid -- and THREADS threads each. The grid width is a
+# build parameter (``tiling.resolve_grid``): 256 on MI355X / MI350X, 128 on
+# MI350P. BLOCKS is the MI355X width.
 #
 
-BLOCKS = 256
-THREADS = 512
-WAVES = THREADS // 64
+BLOCKS = DEFAULT_GRID
 LDS_BYTES = 160 * 1024  # a CU's LDS: one CTA's whole
 
 
-def first_task(bid, base):
+def first_task(bid, base, blocks=BLOCKS):
     """CTA ``bid``'s first task of a stage placed from CTA ``base`` (any count of
     CTAs past 0: placements that add task counts run past the grid), then every
-    BLOCKS-th."""
-    return (bid - base % BLOCKS + BLOCKS) % BLOCKS
+    ``blocks``-th."""
+    return (bid - base % blocks + blocks) % blocks
 
 
 # A kernel's mailbox regions laid out in its scratch or peer buffer.

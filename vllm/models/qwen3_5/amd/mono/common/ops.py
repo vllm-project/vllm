@@ -143,6 +143,12 @@ def uniform(v):
     return fx.Int32(rocdl.readfirstlane(T.i32, fx.Int32(v).ir_value()))
 
 
+def plus(v, k):
+    """``v + k`` for a Python int ``k``; ``v`` itself, no op, when ``k`` is 0: a
+    task offset that is 0 in a single-pass build traces nothing."""
+    return v if k == 0 else v + k
+
+
 def _hw_f32(name, x):
     return fx.Float32(
         llvm.call_intrinsic(T.f32, name, [fx.Float32(x).ir_value()], [], [])

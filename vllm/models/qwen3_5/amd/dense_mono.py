@@ -107,7 +107,7 @@ def _unsupported(model, vllm_config) -> str | None:
     """Why these kernels cannot serve this dense model, else None."""
     try:
         from vllm.models.qwen3_5.amd.mono import dense_ffn as D
-        from vllm.models.qwen3_5.amd.mono.common.plan import BLOCKS
+        from vllm.models.qwen3_5.amd.mono.tiling import device_grid
     except ImportError as exc:
         return f"FlyDSL is not available ({exc})"
 
@@ -124,8 +124,12 @@ def _unsupported(model, vllm_config) -> str | None:
         return "needs gfx950"
     if get_pp_group().world_size != 1:
         return "pipeline parallel"
-    if current_platform.num_compute_units() < BLOCKS:
-        return f"fewer than {BLOCKS} compute units (a partitioned GPU)"
+    # One CTA per compute unit, all resident: the grid is the CU count, and
+    # only the widths with a validated stage plan run (256, 128).
+    try:
+        device_grid()
+    except ValueError as exc:
+        return str(exc)
     connector = getattr(vllm_config.kv_transfer_config, "kv_connector", None)
     if connector:
         return f"KV connector {connector}"
@@ -633,6 +637,11 @@ class DenseMono:
         )
         self.k2 = not self.whole_step and _flag("VLLM_ROCM_QWEN38_DENSE_MONO_K2", True)
         self.k1_rows, self.k2_rows = (0, 0) if why else row_caps(self.tp)
+        self.grid = 0
+        if why is None:
+            from vllm.models.qwen3_5.amd.mono.tiling import device_grid
+
+            self.grid = device_grid()
         self._skip_o = False
         self._gdn_step = False
         self._ffn_step = False
@@ -650,10 +659,11 @@ class DenseMono:
                 + why
             )
         logger.info(
-            "Qwen3.8 dense mono row caps at TP%d: K1 %d, K2 %d",
+            "Qwen3.8 dense mono row caps at TP%d: K1 %d, K2 %d; %d CTAs",
             self.tp,
             self.k1_rows,
             self.k2_rows,
+            self.grid,
         )
         self.scratch = None
         self.k1_scratch = None
@@ -669,15 +679,26 @@ class DenseMono:
 
     def _k1_key(self, dense_gdn, s: int, *, first: bool, eps=1e-6, norm_eps=1e-6):
         if self.whole_step:
-            return dense_gdn.K1Build(tokens=s, first=first, eps=eps, norm_eps=norm_eps)
+            return dense_gdn.K1Build(
+                tokens=s, first=first, eps=eps, norm_eps=norm_eps, grid=self.grid
+            )
         return dense_gdn.K1Build(
-            tokens=s, norm_eps=norm_eps, tp=self.tp, normed=True, oproj=self.k1_oproj
+            tokens=s,
+            norm_eps=norm_eps,
+            tp=self.tp,
+            normed=True,
+            oproj=self.k1_oproj,
+            grid=self.grid,
         )
 
     def _k2_key(self, dense_ffn, s: int, eps=1e-6):
         if self.whole_step:
-            return dense_ffn.FfnBuild(tokens=s, eps=eps, shuffled=True, oproj=self.oproj)
-        return dense_ffn.FfnBuild(tokens=s, shuffled=True, tp=self.tp, normed=True)
+            return dense_ffn.FfnBuild(
+                tokens=s, eps=eps, shuffled=True, oproj=self.oproj, grid=self.grid
+            )
+        return dense_ffn.FfnBuild(
+            tokens=s, shuffled=True, tp=self.tp, normed=True, grid=self.grid
+        )
 
     def prepare(self) -> None:
         """After weights load, before the first decode: shuffle a private copy
