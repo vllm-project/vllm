@@ -124,6 +124,11 @@ class ModelState(ABC):
     def remove_request(self, req_id: str) -> None:
         return None
 
+    def note_preempted(self, req_ids: set[str]) -> None:
+        """Called before ``remove_request`` for requests removed by preemption
+        rather than completion."""
+        return None
+
     def apply_staged_writes(self) -> None:
         return None
 
