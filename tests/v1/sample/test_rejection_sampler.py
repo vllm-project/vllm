@@ -135,15 +135,21 @@ def create_sampling_metadata(
 def test_spec_decode_uses_unmasked_logits_only_for_raw_scores(mode):
     device = DEVICE_TYPE
     raw_logits = torch.tensor([[2.0, 1.0, 0.0], [1.0, 2.0, 3.0]], device=device)
-    masked_logits = raw_logits.clone()
-    masked_logits[:, [0, 2]] = -torch.inf
     metadata = SpecDecodeMetadata.make_dummy([[1]], device=raw_logits.device)
     metadata.bonus_logits_indices = torch.tensor([1], device=device, dtype=torch.int32)
     sampling_metadata = create_sampling_metadata(all_greedy=True)
     sampling_metadata.max_num_logprobs = 2
     sampler = RejectionSampler(Sampler(logprobs_mode=mode))
 
-    output = sampler(metadata, None, masked_logits, sampling_metadata, raw_logits)
+    def apply_grammar(logits, logits_indices):
+        logits[:, [0, 2]] = -torch.inf
+
+    if mode == "processed_logprobs":
+        masked_logits = raw_logits.clone()
+        apply_grammar(masked_logits, None)
+        output = sampler(metadata, None, masked_logits, sampling_metadata)
+    else:
+        output = sampler(metadata, None, raw_logits, sampling_metadata, apply_grammar)
 
     torch.testing.assert_close(
         output.sampled_token_ids,

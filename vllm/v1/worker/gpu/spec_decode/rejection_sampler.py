@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from typing import Any
 
 import numpy as np
@@ -264,6 +264,8 @@ class RejectionSampler:
         expanded_idx_mapping: torch.Tensor,
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
+        apply_grammar: Callable[[torch.Tensor, int], None] | None = None,
+        logits_start: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         processed_logits = self.sampler.apply_sampling_params(
             logits,
@@ -274,6 +276,8 @@ class RejectionSampler:
             draft_sampled,
             expanded_local_pos,
             seq_lens_upper_bound_np,
+            apply_grammar=apply_grammar,
+            logits_start=logits_start,
         )
         sampled, num_sampled = rejection_sample(
             processed_logits,
@@ -312,7 +316,7 @@ class RejectionSampler:
         pos: torch.Tensor,
         max_chunk_logits: int,
         logprobs_dims: tuple[int, int] | None,
-        raw_logits: torch.Tensor | None = None,
+        apply_grammar: Callable[[torch.Tensor, int], None] | None = None,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -362,13 +366,13 @@ class RejectionSampler:
                 input_batch.expanded_idx_mapping[lo:hi],
                 input_batch.expanded_local_pos[lo:hi],
                 input_batch.seq_lens_cpu_upper_bound.numpy()[start:end],
+                apply_grammar=apply_grammar,
+                logits_start=lo,
             )
             chunk_logprobs = self._get_logprobs_tensors(
                 sampled,
                 num_sampled,
-                processed_logits
-                if use_processed_logits
-                else (logits[lo:hi] if raw_logits is None else raw_logits[lo:hi]),
+                processed_logits if use_processed_logits else logits[lo:hi],
                 chunk_cu_num_logits,
                 chunk_cu_num_logits_np,
                 input_batch.expanded_idx_mapping[lo:hi],
@@ -426,7 +430,7 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: DraftLogitsCache | None = None,
-        raw_logits: torch.Tensor | None = None,
+        apply_grammar: Callable[[torch.Tensor, int], None] | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -456,7 +460,7 @@ class RejectionSampler:
             pos,
             chunk_logit_limit,
             logprobs_dims,
-            raw_logits,
+            apply_grammar,
         )
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(

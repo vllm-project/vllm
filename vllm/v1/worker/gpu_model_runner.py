@@ -191,7 +191,10 @@ from vllm.v1.spec_decode.ngram_proposer_gpu import (
 from vllm.v1.spec_decode.step3p5 import Step3p5MTPProposer
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.spec_decode.utils import update_num_computed_tokens_for_batch_change
-from vllm.v1.structured_output.utils import apply_grammar_bitmask
+from vllm.v1.structured_output.utils import (
+    apply_grammar_bitmask,
+    prepare_grammar_bitmask,
+)
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.block_table import SlotMappingMode
@@ -3404,7 +3407,8 @@ class GPUModelRunner(
         self,
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
-        raw_logits: torch.Tensor | None = None,
+        apply_grammar: Callable[[torch.Tensor, torch.Tensor | None], None]
+        | None = None,
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -3415,7 +3419,9 @@ class GPUModelRunner(
             return self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
-                raw_logits=raw_logits,
+                apply_grammar=(lambda logits: apply_grammar(logits, None))
+                if apply_grammar is not None
+                else None,
             )
 
         # Update spec_token_ids with real draft tokens from pre step only when
@@ -3430,7 +3436,7 @@ class GPUModelRunner(
             draft_probs,
             logits,
             sampling_metadata,
-            raw_logits=raw_logits,
+            apply_grammar=apply_grammar,
         )
         return sampler_output
 
@@ -4290,20 +4296,23 @@ class GPUModelRunner(
         self.execute_model_state = None
 
         # Apply structured output bitmasks if present.
-        raw_logits = None
+        apply_grammar = None
         if grammar_output is not None:
             sampling_metadata = self.input_batch.sampling_metadata
             if self.sampler.logprobs_mode not in PROCESSED_LOGPROBS_MODES and (
                 sampling_metadata.max_num_logprobs is not None
                 or sampling_metadata.logprob_token_ids
             ):
-                raw_logits = logits.clone()
-            apply_grammar_bitmask(
-                scheduler_output, grammar_output, self.input_batch, logits
-            )
+                apply_grammar = prepare_grammar_bitmask(
+                    scheduler_output, grammar_output, self.input_batch, logits
+                )
+            else:
+                apply_grammar_bitmask(
+                    scheduler_output, grammar_output, self.input_batch, logits
+                )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata, raw_logits)
+            sampler_output = self._sample(logits, spec_decode_metadata, apply_grammar)
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
