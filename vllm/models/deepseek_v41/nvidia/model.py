@@ -863,9 +863,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (decoder_replay_layers.py).
         self.decoder_replay_layers: DecoderReplayLayers | None = None
         self.decoder_replay_start = self.end_layer
-        cut = max(config.kv_source_layer_ids)
+        cut = max(config.kv_source_layer_ids, default=None)
         if (
-            cut < self.end_layer - 1
+            cut is not None
+            # Layers before the cut write the KV it replays from, so they and
+            # the cut itself must run on this rank.
+            and self.start_layer < cut < self.end_layer - 1
             and self._decoder_replay_supported(vllm_config, cut)
             and self.layers[cut].attn.swa_cache_layer.bounded_replay
         ):
@@ -1310,6 +1313,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 "the pipeline stage holding the last KV source layer must also "
                 "hold every layer after it"
             )
+        elif self.layers[cut].attn.compress_ratio > 1:
+            reason = "the last KV source also writes compressed KV"
         elif self.use_sequence_parallel or parallel_config.use_ubatching:
             reason = (
                 "the replay-layer batch shrinks per rank, which sequence and "
