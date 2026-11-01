@@ -76,7 +76,8 @@ def _gather_context_rows(
         LATENT_DIM=kv_lora_rank,
         ROPE_DIM=rope_dim,
         LATENT_BLOCK=triton.next_power_of_2(kv_lora_rank),
-        ROPE_BLOCK=triton.next_power_of_2(rope_dim),
+        # A NoPE layer has no rope part; the mask then skips the one-wide block.
+        ROPE_BLOCK=triton.next_power_of_2(max(rope_dim, 1)),
         BLOCK_ROWS=_BLOCK_ROWS,
         num_warps=4,
     )
@@ -102,7 +103,7 @@ def gather_dcp_context_rows(
     assert row_indices.dim() == 1 and row_indices.is_contiguous()
     assert row_indices.dtype in (torch.int32, torch.int64)
     assert row_indices.device == gathered.device
-    assert 0 < kv_lora_rank < gathered.shape[1]
+    assert 0 < kv_lora_rank <= gathered.shape[1]
     num_rows = row_indices.shape[0]
     rope_dim = gathered.shape[1] - kv_lora_rank
     latent = gathered.new_empty((num_rows, 1, kv_lora_rank))
