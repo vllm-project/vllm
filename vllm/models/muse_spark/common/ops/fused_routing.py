@@ -115,17 +115,18 @@ def _routing_kernel(
     if HAS_EPS:
         score_sum = score_sum + division_eps
     inv_sum_scaled = route_scale / score_sum
+    weights = scores * inv_sum_scaled
     if is_padding is not None:
         padding = tl.load(is_padding + token_id * is_padding_stride)
         ids = tl.where(padding, -1, ids)
-        inv_sum_scaled = tl.where(padding, 0.0, inv_sum_scaled)
+        weights = tl.where(padding, 0.0, weights)
 
     tl.store(
         topk_ids_ptr + token_id * stride_im + slots * stride_ik, ids, mask=slot_mask
     )
     tl.store(
         topk_weights_ptr + token_id * stride_wm + slots * stride_wk,
-        scores * inv_sum_scaled,
+        weights,
         mask=slot_mask,
     )
 

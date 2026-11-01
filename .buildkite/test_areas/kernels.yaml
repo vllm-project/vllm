@@ -560,6 +560,8 @@ steps:
   - csrc/moe/
   - tests/kernels/moe
   - vllm/model_executor/layers/fused_moe/
+  - vllm/models/muse_spark/common/
+  - vllm/models/muse_spark/nvidia/
   - vllm/distributed/device_communicators/
   - vllm/envs.py
   - vllm/config
@@ -578,6 +580,8 @@ steps:
       - csrc/moe/
       - tests/kernels/moe
       - vllm/model_executor/layers/fused_moe/
+      - vllm/models/muse_spark/common/
+      - vllm/models/muse_spark/nvidia/
       - vllm/distributed/device_communicators/
       - vllm/envs.py
       - vllm/config
