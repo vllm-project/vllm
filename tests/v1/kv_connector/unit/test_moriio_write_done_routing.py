@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOMode,
     RemoteAllocInfo,
     ReqMeta,
+    TransferError,
     WriteTask,
     get_port_offset,
 )
@@ -271,6 +272,46 @@ def test_finalize_single_pod_port_uses_global_rank():
 
     _tid, _ip, port, _mtype = worker.moriio_wrapper.sent_notifies[-1]
     assert port == base + get_port_offset(3, 2)
+
+
+def _sealable_write(waiting_for_transfer_complete) -> tuple[Any, Any]:
+    info = RemoteAllocInfo(block_ids=None, decode_dp_rank=3)
+    worker = _fake_worker({"tA": info})
+    worker.moriio_wrapper.waiting_for_transfer_complete = waiting_for_transfer_complete
+    writer = make_moriio_writer(worker)
+    writer._mark_request_done = lambda transfer_id: (  # type: ignore[method-assign]
+        worker.moriio_wrapper.done_req_ids.append(transfer_id)
+    )
+    # Resolves the notify endpoint; the one scheduled layer write is done.
+    writer._execute_write_task(_write_task("tA", "10.0.0.1"))
+    writer._scheduled_writes["tA"] = 1
+    info.writes_done = 1
+    return writer, worker
+
+
+def test_seal_on_forward_thread_never_waits_for_rdma():
+    def waiting_for_transfer_complete(statuses):
+        raise AssertionError("RDMA wait ran on the forward thread")
+
+    writer, worker = _sealable_write(waiting_for_transfer_complete)
+
+    writer.seal_pending_transfers()
+
+    assert worker.moriio_wrapper.sent_notifies == []
+    assert writer._finalize_q.qsize() == 1
+
+
+def test_failed_rdma_write_fails_only_that_request_on_decode():
+    def waiting_for_transfer_complete(statuses):
+        raise TransferError("RDMA transfer timed out after 30s")
+
+    writer, worker = _sealable_write(waiting_for_transfer_complete)
+    writer.seal_pending_transfers()
+
+    writer._finalize_if_complete(*writer._finalize_q.get_nowait())
+
+    assert [n[3] for n in worker.moriio_wrapper.sent_notifies] == ["write_failed"]
+    assert worker.moriio_wrapper.done_req_ids == ["tA"]
 
 
 def test_execute_write_task_writes_every_fanout_target():
