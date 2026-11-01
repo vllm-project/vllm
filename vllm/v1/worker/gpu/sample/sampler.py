@@ -14,6 +14,7 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p,
     flashinfer_sample,
     flashinfer_sampler_supported,
+    start_flashinfer_sampling_module_warmup,
     xpu_sample,
     xpu_sampler_supported,
 )
@@ -88,6 +89,10 @@ class Sampler:
         self.use_flashinfer = (
             not return_sampling_mask and flashinfer_sampler_supported()
         )
+        if self.use_flashinfer:
+            start_flashinfer_sampling_module_warmup(
+                torch.accelerator.current_device_index()
+            )
         # The XPU kernel draws fp32 exponential noise, so it can't honor fp64.
         self.use_xpu_sampler = (
             not return_sampling_mask and not use_fp64_gumbel and xpu_sampler_supported()
