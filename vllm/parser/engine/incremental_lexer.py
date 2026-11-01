@@ -26,6 +26,7 @@ class LexToken:
     terminal: str
     value: str
     token_count: int = 0
+    token_id_spans: tuple[tuple[int, int], ...] = ()
 
 
 class LexerShape:
@@ -97,6 +98,7 @@ class IncrementalLexer:
         self,
         terminals: list[TerminalDef] | LexerShape,
         content_terminal: str = CONTENT_TERMINAL,
+        token_id_guards: Mapping[str, str] | None = None,
     ) -> None:
         if isinstance(terminals, LexerShape):
             shape = terminals
@@ -107,6 +109,9 @@ class IncrementalLexer:
         self.content_terminal = content_terminal
         self.buffer = ""
         self._token_counts: list[int] = []
+        self._token_id_guards = token_id_guards or {}
+        self.require_token_ids = False
+        self._token_id_spans: list[tuple[int, int]] = []
 
         self._literal_strings = shape.literal_strings
         self._max_literal_len = shape.max_literal_len
@@ -118,12 +123,15 @@ class IncrementalLexer:
     def reset(self) -> None:
         self.buffer = ""
         self._token_counts.clear()
+        self._token_id_spans.clear()
+        self.require_token_ids = False
 
     def feed(
         self,
         text: str,
         token_texts: tuple[str, ...] = (),
         token_count: int = 0,
+        token_id_spans: tuple[tuple[int, int], ...] = (),
     ) -> list[LexToken]:
         char_token_counts = self._char_token_counts(text, token_texts, token_count)
         if not self.buffer and self._has_only_literals and self._literal_first_chars:
@@ -131,7 +139,18 @@ class IncrementalLexer:
                 if ch in self._literal_first_chars:
                     break
             else:
-                return [LexToken(self.content_terminal, text, sum(char_token_counts))]
+                return [
+                    LexToken(
+                        self.content_terminal,
+                        text,
+                        sum(char_token_counts),
+                        token_id_spans,
+                    )
+                ]
+        offset = len(self.buffer)
+        self._token_id_spans.extend(
+            (start + offset, end + offset) for start, end in token_id_spans
+        )
         self.buffer += text
         self._token_counts.extend(char_token_counts)
         return self._drain()
@@ -142,7 +161,7 @@ class IncrementalLexer:
             tokens.extend(self._drain(final=True))
         if self.buffer:
             tokens.append(
-                LexToken(self.content_terminal, self.buffer, sum(self._token_counts))
+                self._make_token(self.content_terminal, self.buffer, len(self.buffer))
             )
             self.buffer = ""
             self._token_counts.clear()
@@ -176,10 +195,27 @@ class IncrementalLexer:
             counts[0] = token_count
         return counts
 
-    def _pop_token_count(self, length: int) -> int:
+    def _make_token(self, terminal: str, value: str, length: int) -> LexToken:
         token_count = sum(self._token_counts[:length])
         del self._token_counts[:length]
-        return token_count
+        spans = tuple(
+            (start, end) for start, end in self._token_id_spans if end <= length
+        )
+        self._token_id_spans = [
+            (start - length, end - length)
+            for start, end in self._token_id_spans
+            if start >= length
+        ]
+        return LexToken(terminal, value, token_count, spans)
+
+    def _accept_match(self, terminal: str, literal: str) -> bool:
+        atom = self._token_id_guards.get(terminal)
+        if not self.require_token_ids or atom is None:
+            return True
+        offset = literal.find(atom)
+        if offset < 0:
+            return False
+        return (offset, offset + len(atom)) in self._token_id_spans
 
     def _drain(self, *, final: bool = False) -> list[LexToken]:
         tokens: list[LexToken] = []
@@ -198,7 +234,9 @@ class IncrementalLexer:
                         break
                 if not has_potential:
                     tokens.append(
-                        LexToken(content_terminal, self.buffer, sum(self._token_counts))
+                        self._make_token(
+                            content_terminal, self.buffer, len(self.buffer)
+                        )
                     )
                     self.buffer = ""
                     self._token_counts.clear()
@@ -208,8 +246,10 @@ class IncrementalLexer:
 
             first = self.buffer[0]
             for lit, name in literals_by_first.get(first, ()):
-                if self.buffer.startswith(lit) and (
-                    best_match is None or len(lit) > best_match[2]
+                if (
+                    self.buffer.startswith(lit)
+                    and self._accept_match(name, lit)
+                    and (best_match is None or len(lit) > best_match[2])
                 ):
                     best_match = (name, lit, len(lit))
 
@@ -226,10 +266,10 @@ class IncrementalLexer:
                             break
                     if not longer_match:
                         tokens.append(
-                            LexToken(
+                            self._make_token(
                                 best_match[0],
                                 best_match[1],
-                                self._pop_token_count(best_match[2]),
+                                best_match[2],
                             )
                         )
                         self.buffer = self.buffer[best_match[2] :]
@@ -240,10 +280,10 @@ class IncrementalLexer:
 
             if best_match is not None:
                 tokens.append(
-                    LexToken(
+                    self._make_token(
                         best_match[0],
                         best_match[1],
-                        self._pop_token_count(best_match[2]),
+                        best_match[2],
                     )
                 )
                 self.buffer = self.buffer[best_match[2] :]
@@ -251,19 +291,19 @@ class IncrementalLexer:
                 content_end = self._find_content_boundary()
                 if content_end > 0:
                     tokens.append(
-                        LexToken(
+                        self._make_token(
                             content_terminal,
                             self.buffer[:content_end],
-                            self._pop_token_count(content_end),
+                            content_end,
                         )
                     )
                     self.buffer = self.buffer[content_end:]
                 else:
                     tokens.append(
-                        LexToken(
+                        self._make_token(
                             content_terminal,
                             self.buffer[0],
-                            self._pop_token_count(1),
+                            1,
                         )
                     )
                     self.buffer = self.buffer[1:]

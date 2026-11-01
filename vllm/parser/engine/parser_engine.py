@@ -68,6 +68,8 @@ class ToolCallSlot:
         "_streamed_joined",
         "extend_open_value",
         "open_value_streams",
+        "arg_token_id_spans",
+        "_args_length",
     )
 
     def __init__(self) -> None:
@@ -81,6 +83,8 @@ class ToolCallSlot:
         self._streamed_joined: str | None = ""
         self.extend_open_value: ArgValueExtender | None = None
         self.open_value_streams: bool = False
+        self.arg_token_id_spans: list[tuple[int, int]] | None = None
+        self._args_length = 0
 
     @property
     def args(self) -> str:
@@ -88,7 +92,17 @@ class ToolCallSlot:
             self._args_joined = "".join(self._args_parts)
         return self._args_joined
 
-    def append_args(self, value: str) -> None:
+    def append_args(
+        self, value: str, token_id_spans: tuple[tuple[int, int], ...] = ()
+    ) -> None:
+        if token_id_spans:
+            if self.arg_token_id_spans is None:
+                self.arg_token_id_spans = []
+            self.arg_token_id_spans.extend(
+                (start + self._args_length, end + self._args_length)
+                for start, end in token_id_spans
+            )
+        self._args_length += len(value)
         self._args_parts.append(value)
         self._args_joined = None
 
@@ -872,12 +886,15 @@ class ParserEngine(Parser):
         reasoning_parts: list[str] = []
 
         carried_deferred = self._deferred_content
+        # Token-ID composite parsers keep text between tool calls; text must
+        # not overtake content deferred from an earlier delta.
+        defer_text = bool(carried_deferred) and self._engine._has_composite_ids
         seen_tool_event = False
         suppress = self._suppress_tool_calls
         for event in events:
             match event.type:
                 case EventType.TEXT_CHUNK:
-                    if seen_tool_event:
+                    if seen_tool_event or defer_text:
                         self._deferred_content += event.value
                     else:
                         content_parts.append(event.value)
@@ -907,7 +924,11 @@ class ParserEngine(Parser):
         if len(tool_call_deltas) > 1:
             tool_call_deltas = self._coalesce_tool_call_deltas(tool_call_deltas)
 
-        if self._deferred_content and (not seen_tool_event or not tool_call_deltas):
+        if self._deferred_content and (
+            not seen_tool_event
+            or not tool_call_deltas
+            or (finished and self._engine._has_composite_ids)
+        ):
             # Deferred content carried in from a previous delta precedes this
             # delta's content; content deferred during this call (text after
             # an unpromoted tool event) follows it.
@@ -997,7 +1018,7 @@ class ParserEngine(Parser):
         idx = event.tool_index
         slot = self._tool_slots[idx]
         if event.value:
-            slot.append_args(event.value)
+            slot.append_args(event.value, getattr(event, "token_id_spans", ()))
 
         if not slot.name_sent:
             if slot.name:

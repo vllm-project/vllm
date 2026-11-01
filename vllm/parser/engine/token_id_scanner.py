@@ -5,10 +5,17 @@ pre-lexed terminals and plain text chunks."""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 DROP_TERMINAL = "__DROP__"
+_BYTE_LEVEL_ALPHABET = frozenset(
+    chr(code)
+    for start, end in ((33, 127), (161, 173), (174, 324))
+    for code in range(start, end)
+)
 
 
 @dataclass(slots=True)
@@ -46,6 +53,8 @@ class TokenIDScanner:
         self,
         token_id_to_terminal: dict[int, str],
         tokenizer,
+        *,
+        strict_token_spans: bool = False,
     ) -> None:
         self.token_id_to_terminal = token_id_to_terminal
         self.tokenizer = tokenizer
@@ -54,6 +63,80 @@ class TokenIDScanner:
         self._deferred_prefix_token_counts: list[int] = []
         self._deferred_trailing_token_count = 0
         self._deferred_post_text: str = ""
+        self._strict_token_spans = strict_token_spans
+        self._span_mode = False
+        self._pending_ids: list[int] = []
+        self._pending_text = ""
+        self._byte_level = False
+        self._added_ids: set[int] = set()
+        self._token_byte_lengths: dict[int, int | None] = {}
+        if strict_token_spans:
+            backend = getattr(tokenizer, "backend_tokenizer", None)
+            decoder: Any = getattr(backend, "decoder", None)
+            try:
+                self._byte_level = (
+                    json.loads(decoder.__getstate__()).get("type") == "ByteLevel"
+                )
+                if self._byte_level:
+                    self._added_ids = set(tokenizer.get_added_vocab().values())
+            except (AttributeError, TypeError, ValueError):
+                self._byte_level = False
+
+    def _byte_prefix(self, token_ids: list[int], text: str) -> tuple[int, str] | None:
+        byte_budget = len(text.encode("utf-8"))
+        byte_count = 0
+        prefix_length = 0
+        for tid in token_ids:
+            if tid not in self._token_byte_lengths:
+                length = None
+                try:
+                    if tid in self._added_ids:
+                        length = len(self._decode_token(tid).encode("utf-8"))
+                    else:
+                        piece = self.tokenizer.convert_ids_to_tokens(tid)
+                        # ByteLevel vocab characters each represent one source byte;
+                        # added tokens instead carry their literal UTF-8 spelling.
+                        if isinstance(piece, str) and _BYTE_LEVEL_ALPHABET.issuperset(
+                            piece
+                        ):
+                            length = len(piece)
+                except (AttributeError, TypeError, ValueError, UnicodeError):
+                    pass
+                self._token_byte_lengths[tid] = length
+            length = self._token_byte_lengths[tid]
+            if length is None:
+                prefix = (
+                    self._decode_token(token_ids[0])
+                    if len(token_ids) == 1
+                    else self.tokenizer.decode(token_ids, skip_special_tokens=False)
+                )
+                if prefix and text.startswith(prefix):
+                    return len(token_ids), prefix
+                return None
+            if byte_count + length > byte_budget:
+                break
+            byte_count += length
+            prefix_length += 1
+        # Replacement characters can expand invalid source bytes and hide holdback.
+        if (
+            prefix_length == len(token_ids)
+            and byte_count == byte_budget
+            and "\ufffd" not in text
+        ):
+            return prefix_length, text
+        # A token boundary can bisect a four-byte UTF-8 character. Only the
+        # decoded prefix proves alignment for a partial run or trailing text.
+        for length in range(prefix_length, max(0, prefix_length - 4), -1):
+            prefix = (
+                self._decode_token(token_ids[0])
+                if length == 1
+                else self.tokenizer.decode(
+                    token_ids[:length], skip_special_tokens=False
+                )
+            )
+            if prefix and text.startswith(prefix):
+                return length, prefix
+        return None
 
     def reset(self) -> None:
         """Clear mutable state for reuse. Preserves the token text cache."""
@@ -61,6 +144,79 @@ class TokenIDScanner:
         self._deferred_prefix_token_counts.clear()
         self._deferred_trailing_token_count = 0
         self._deferred_post_text = ""
+        self._span_mode = False
+        self._pending_ids.clear()
+        self._pending_text = ""
+
+    @property
+    def has_pending(self) -> bool:
+        return bool(self._deferred_terminals or self._pending_ids or self._pending_text)
+
+    def _scan_token_spans(
+        self, delta_text: str, delta_token_ids: Sequence[int]
+    ) -> list[LexerInput]:
+        self._pending_ids.extend(delta_token_ids)
+        self._pending_text += delta_text
+        results: list[LexerInput] = []
+        consumed = 0
+        ids = self._pending_ids
+        while consumed < len(ids):
+            tid = ids[consumed]
+            terminal = self.token_id_to_terminal.get(tid)
+            if terminal is not None:
+                text = self._decode_token(tid)
+                if text and self._pending_text.startswith(text):
+                    results.append(PreLexedTerminal(terminal, tid, text))
+                    self._pending_text = self._pending_text[len(text) :]
+                    consumed += 1
+                    continue
+                if terminal == DROP_TERMINAL and not text.startswith(
+                    self._pending_text
+                ):
+                    consumed += 1
+                    continue
+                break
+
+            if not self._pending_text:
+                break
+            end = consumed + 1
+            while end < len(ids) and ids[end] not in self.token_id_to_terminal:
+                end += 1
+            run = ids[consumed:end]
+            if self._byte_level:
+                matched = self._byte_prefix(run, self._pending_text)
+                if matched is None:
+                    break
+                length, text = matched
+                run = run[:length]
+            else:
+                text = (
+                    self._decode_token(run[0])
+                    if len(run) == 1
+                    else self.tokenizer.decode(run, skip_special_tokens=False)
+                )
+            if not self._pending_text.startswith(text):
+                # Detokenizers may withhold text, including incomplete UTF-8.
+                # Match source prefixes only; repeated marker spellings are
+                # never used as positional anchors.
+                for length in range(len(run) - 1, 0, -1):
+                    prefix = self.tokenizer.decode(
+                        run[:length], skip_special_tokens=False
+                    )
+                    if prefix and self._pending_text.startswith(prefix):
+                        run = run[:length]
+                        text = prefix
+                        break
+                else:
+                    break
+            if not text:
+                break
+            results.append(TextChunk(text, token_count=len(run)))
+            consumed += len(run)
+            self._pending_text = self._pending_text[len(text) :]
+        if consumed:
+            del ids[:consumed]
+        return results
 
     def _decode_token(self, token_id: int) -> str:
         if token_id not in self._token_text_cache:
@@ -82,6 +238,9 @@ class TokenIDScanner:
         delta_text: str,
         delta_token_ids: Sequence[int],
     ) -> Sequence[LexerInput]:
+        if self._strict_token_spans and (delta_token_ids or self._span_mode):
+            self._span_mode = True
+            return self._scan_token_spans(delta_text, delta_token_ids)
         prefix_items: list[LexerInput] = []
         effective_text = delta_text
         deferred_trailing_count = 0
@@ -186,6 +345,15 @@ class TokenIDScanner:
         return prefix_items + results
 
     def flush_pending(self) -> list[LexerInput]:
+        if self._span_mode:
+            aligned = self._scan_token_spans("", ())
+            # Unaligned text has no provable token origin. Preserve the text
+            # supplied by the detokenizer without inventing special tokens.
+            if self._pending_text:
+                aligned.append(TextChunk(self._pending_text))
+            self._pending_ids.clear()
+            self._pending_text = ""
+            return aligned
         if not self._deferred_terminals and not self._deferred_post_text:
             return []
         results: list[LexerInput] = []

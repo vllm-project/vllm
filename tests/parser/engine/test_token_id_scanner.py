@@ -9,6 +9,7 @@ import pytest
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
 from vllm.parser.engine.token_id_scanner import (
+    DROP_TERMINAL,
     PreLexedTerminal,
     TextChunk,
     TokenIDScanner,
@@ -394,6 +395,128 @@ _TOOL_START_TID = 102
 _TOOL_END_TID = 103
 _QUOTE_TID = 104
 _TOK = list(range(200, 215))
+
+
+@pytest.fixture
+def strict_tokenizer():
+    from tokenizers import Tokenizer, decoders, models
+    from transformers import TokenizersBackend
+
+    class CountingTokenizer(TokenizersBackend):
+        decoded_ids = 0
+
+        def decode(self, token_ids, *args, **kwargs):
+            self.decoded_ids += len(token_ids)
+            return super().decode(token_ids, *args, **kwargs)
+
+    backend = Tokenizer(
+        models.WordLevel(
+            {"a": 0, "<bos>": 1, "<call>": 2, "ÿ": 3, "b": 4}, unk_token="a"
+        )
+    )
+    backend.decoder = decoders.ByteLevel()
+    return CountingTokenizer(
+        tokenizer_object=backend,
+        bos_token="<bos>",
+        additional_special_tokens=["<call>"],
+    )
+
+
+@pytest.mark.parametrize("bos_text", ["<bos>", ""])
+def test_strict_scanner_distinguishes_delayed_and_omitted_drop(
+    strict_tokenizer, bos_text
+):
+    """A delayed or skipped BOS must not hide the following trusted terminal."""
+    scanner = TokenIDScanner(
+        {1: DROP_TERMINAL, 2: "TOOL_START"},
+        strict_tokenizer,
+        strict_token_spans=True,
+    )
+    assert scanner.scan("", [1, 2, 0]) == []
+    assert scanner.scan(bos_text[:3], []) == []
+    items = list(scanner.scan(bos_text[3:] + "<call>a", []))
+    items.extend(scanner.flush_pending())
+
+    assert [item.terminal for item in items if isinstance(item, PreLexedTerminal)] == (
+        [DROP_TERMINAL, "TOOL_START"] if bos_text else ["TOOL_START"]
+    )
+    assert "".join(item.text for item in items if isinstance(item, TextChunk)) == "a"
+    assert not scanner.has_pending
+
+
+def test_strict_scanner_delayed_text_has_linear_decode_work(strict_tokenizer):
+    """Releasing a held-back tail must not repeatedly decode all pending IDs."""
+    scanner = TokenIDScanner({}, strict_tokenizer, strict_token_spans=True)
+    token_count = 200
+    items: list[TextChunk | PreLexedTerminal] = []
+    for _ in range(token_count):
+        items.extend(scanner.scan("", [0]))
+    for _ in range(token_count):
+        items.extend(scanner.scan("a", []))
+    items.extend(scanner.flush_pending())
+
+    assert "".join(item.text for item in items) == "a" * token_count
+    assert not scanner.has_pending
+    assert strict_tokenizer.decoded_ids <= 3 * token_count
+
+
+@pytest.mark.parametrize("with_terminal", [False, True])
+def test_strict_scanner_reuses_decode_work_for_aligned_runs(
+    strict_tokenizer, with_terminal
+):
+    """Measure decode work, not timing, on full runs and repeated one-token runs."""
+    scanner = TokenIDScanner(
+        {2: "TOOL_START"}, strict_tokenizer, strict_token_spans=True
+    )
+    ids = [0, 2] if with_terminal else [0, 0]
+    text = "a<call>" if with_terminal else "aa"
+    expected = (
+        [TextChunk("a", token_count=1), PreLexedTerminal("TOOL_START", 2, "<call>")]
+        if with_terminal
+        else [TextChunk("aa", token_count=2)]
+    )
+    for _ in range(32):
+        assert scanner.scan(text, ids) == expected
+    assert not scanner.has_pending
+    assert strict_tokenizer.decoded_ids <= 2
+
+
+def test_composite_terminal_variant_without_atom_stays_content():
+    """A variant lacking its required token atom must fail closed, not crash."""
+    from vllm.parser.engine.incremental_lexer import (
+        CONTENT_TERMINAL,
+        IncrementalLexer,
+        LexToken,
+        terminals_from_literals,
+    )
+
+    atom = "｜DSML｜"
+    trusted = f"<{atom} parameter"
+    lexer = IncrementalLexer(
+        terminals_from_literals({"PARAM_START": (trusted, "parameter")}),
+        token_id_guards={"PARAM_START": atom},
+    )
+    lexer.require_token_ids = True
+    assert lexer.feed("parameter") == [LexToken(CONTENT_TERMINAL, "parameter")]
+    spans = ((1, 1 + len(atom)),)
+    assert lexer.feed(trusted, token_id_spans=spans) == [
+        LexToken("PARAM_START", trusted, token_id_spans=spans)
+    ]
+
+
+def test_strict_scanner_invalid_utf8_does_not_hide_held_back_tokens(strict_tokenizer):
+    """U+FFFD expansion must not make a held-back prefix look byte-aligned."""
+    scanner = TokenIDScanner(
+        {2: "TOOL_START"}, strict_tokenizer, strict_token_spans=True
+    )
+    # ByteLevel piece ÿ represents byte 0xFF; its replacement takes three bytes.
+    assert strict_tokenizer.decode([3, 0, 4]) == "\ufffdab"
+    assert scanner.scan("\ufffd", [3, 0, 4]) == [TextChunk("\ufffd", token_count=1)]
+    assert scanner.scan("ab<call>", [2]) == [
+        TextChunk("ab", token_count=2),
+        PreLexedTerminal("TOOL_START", 2, "<call>"),
+    ]
+    assert not scanner.has_pending
 
 
 def _gemma4_vocab() -> dict[str, int]:
