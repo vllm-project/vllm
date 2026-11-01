@@ -68,7 +68,9 @@ def fused_recurrent_kda_fwd(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
-    grid = (NK, NV, N * HV)
+    # CUDA limits grid Y/Z to 65535, so everything goes in X. The V tiles of a
+    # head must stay adjacent so they share its q/k/g loads in L2.
+    grid = (N * HV * NV, NK)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
         k=k,
