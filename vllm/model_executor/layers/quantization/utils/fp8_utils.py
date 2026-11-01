@@ -1584,3 +1584,120 @@ def process_fp8_input_tensor_strategy_moe(
         amax_for_moe_activation_quant(w13_input_scale, enable_eplb),
         amax_for_moe_activation_quant(w2_input_scale, enable_eplb),
     )
+
+
+@triton.jit
+def _dequant_fp8_weight_kernel(
+    w_ptr,
+    s_ptr,
+    out_ptr,
+    numel,
+    D,
+    stride_w_m,
+    stride_w_d,
+    stride_s_m,
+    stride_s_d,
+    CONTIGUOUS_W: tl.constexpr,
+    SCALAR_SCALE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid = tl.program_id(0).to(tl.int64)
+    idx = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = idx < numel
+
+    if CONTIGUOUS_W and SCALAR_SCALE:
+        w = tl.load(w_ptr + idx, mask=mask).to(tl.float32)
+        s = tl.load(s_ptr).to(tl.float32)
+    else:
+        m = idx // D
+        d = idx % D
+        w_offs = idx if CONTIGUOUS_W else (m * stride_w_m + d * stride_w_d)
+        w = tl.load(w_ptr + w_offs, mask=mask).to(tl.float32)
+        if SCALAR_SCALE:
+            s = tl.load(s_ptr).to(tl.float32)
+        else:
+            s_offs = m * stride_s_m + d * stride_s_d
+            s = tl.load(s_ptr + s_offs, mask=mask).to(tl.float32)
+
+    out = (w * s).to(out_ptr.dtype.element_ty)
+    tl.store(out_ptr + idx, out, mask=mask)
+
+
+def dequant_fp8_weight(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    out_dtype: torch.dtype = torch.bfloat16,
+) -> torch.Tensor:
+    """Dequantize a 2D FP8 weight tensor in float32 and cast to ``out_dtype``.
+
+    Runs a single fused Triton kernel in eager mode on FP8-capable CUDA/ROCm
+    GPUs, covering scalar, per-row (``[K]`` or ``[K, 1]``), and per-column/PTPC
+    (``[1, N]``) scale layouts. Under ``torch.compile`` and on other platforms,
+    keeps the PyTorch float32 expression with identical output bits.
+
+    Args:
+        weight: 2D FP8 weight tensor of shape ``[K, N]``.
+        weight_scale: Scalar, per-row, or per-column scale tensor.
+        out_dtype: Output floating-point dtype.
+
+    Returns:
+        Dequantized tensor of shape ``[K, N]`` in ``out_dtype`` with the same
+        stride order as ``weight``.
+
+    """
+    if (
+        weight_scale.numel() > 1
+        and weight_scale.dim() == 1
+        and weight_scale.shape[0] == weight.shape[0]
+    ):
+        weight_scale = weight_scale.unsqueeze(1)
+
+    if (
+        torch.compiler.is_compiling()
+        or not current_platform.is_cuda_alike()
+        or not current_platform.supports_fp8()
+        or not weight.is_cuda
+        or not weight_scale.is_cuda
+        or weight.dtype != current_platform.fp8_dtype()
+        or weight.dim() != 2
+        or weight.numel() == 0
+    ):
+        # Under torch.compile, Inductor fuses this expression into one kernel.
+        return (weight.to(torch.float32) * weight_scale.to(torch.float32)).to(out_dtype)
+
+    K, N = weight.shape
+    scalar_scale = weight_scale.numel() == 1
+    scale_view = weight_scale if scalar_scale else weight_scale.expand(K, N)
+    transposed = weight.stride(0) < weight.stride(1)
+
+    if transposed:
+        w_v = weight.t()
+        stride_s_m = 0 if scalar_scale else scale_view.stride(1)
+        stride_s_d = 0 if scalar_scale else scale_view.stride(0)
+        out_v = torch.empty((N, K), dtype=out_dtype, device=weight.device)
+    else:
+        w_v = weight
+        stride_s_m = 0 if scalar_scale else scale_view.stride(0)
+        stride_s_d = 0 if scalar_scale else scale_view.stride(1)
+        out_v = torch.empty((K, N), dtype=out_dtype, device=weight.device)
+
+    M, D = w_v.shape
+    numel = M * D
+    BLOCK_SIZE = 1024
+    grid = (triton.cdiv(numel, BLOCK_SIZE),)
+    _dequant_fp8_weight_kernel[grid](
+        w_v,
+        weight_scale,
+        out_v,
+        numel,
+        D,
+        w_v.stride(0),
+        w_v.stride(1),
+        stride_s_m,
+        stride_s_d,
+        CONTIGUOUS_W=w_v.is_contiguous(),
+        SCALAR_SCALE=scalar_scale,
+        BLOCK_SIZE=BLOCK_SIZE,
+        num_warps=4,
+    )
+    return out_v.t() if transposed else out_v
