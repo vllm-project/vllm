@@ -352,6 +352,10 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         defer = output is not None and self._uses_post_gemm2_hook(topk_ids.shape[0])
 
         # Invoke kernel.
+        # FlashInfer's UnpackedPrecomputed routing path requires BF16 weights,
+        # while DiffusionGemma produces FP32 routing probabilities.
+        if topk_weights.dtype == torch.float32:
+            topk_weights = topk_weights.to(torch.bfloat16)
         flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
