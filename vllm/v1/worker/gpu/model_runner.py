@@ -1219,12 +1219,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
-        on_requests_finished = getattr(self.speculator, "on_requests_finished", None)
-        if on_requests_finished is not None and finished_req_ids:
-            # Before the slots are freed: drafters with cross-request memory
-            # read the finished requests' token history. Preempted requests
-            # resume with the same tokens and are not passed.
-            on_requests_finished(finished_req_ids)
+        if self.speculator is not None and finished_req_ids:
+            self.speculator.on_requests_finished(finished_req_ids)
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
@@ -1269,10 +1265,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
-                # Drafters with per-slot verification stats reset them.
-                speculator_add_request = getattr(self.speculator, "add_request", None)
-                if speculator_add_request is not None:
-                    speculator_add_request(req_index)
+            if self.speculator is not None:
+                self.speculator.add_request(req_index)
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
