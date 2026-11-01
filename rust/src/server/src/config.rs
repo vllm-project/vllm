@@ -305,14 +305,12 @@ impl FromStr for LoraModulePath {
     }
 }
 
-/// Normalized runtime configuration for the minimal OpenAI-compatible server.
+/// Runtime configuration of the OpenAI-compatible server: model files,
+/// rendering and parsing, listeners, and API behavior. Settings that only apply
+/// when the server drives engine-core itself live in [`EngineCoreConfig`].
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
-pub struct Config {
-    /// Frontend-to-engine transport setup.
-    pub transport_mode: TransportMode,
-    /// Requested frontend-side coordinator behavior.
-    pub coordinator_mode: CoordinatorMode,
+pub struct ServerConfig {
     /// Backend model identifier used for engine-core loading.
     pub model: String,
     /// Model revision on the Hugging Face Hub (branch, tag, or commit SHA).
@@ -364,18 +362,11 @@ pub struct Config {
     /// Maximum number of input items allowed per prompt for each modality.
     /// Unspecified modalities are unlimited.
     pub limit_mm_per_prompt: MmLimitPerPrompt,
-    /// LoRA adapters loaded at startup, in order. Startup fails if any of
-    /// them cannot be loaded.
-    pub lora_modules: Vec<LoraModulePath>,
     /// How to serialize `message.content` for chat-template rendering.
     pub chat_template_content_format: ChatTemplateContentFormatOption,
     /// Optional maximum number of top log probabilities accepted by the
     /// frontend. `None` delegates to the text layer default.
     pub max_logprobs: Option<i32>,
-    /// Minimum number of newly generated tokens batched into each streamed
-    /// output after the first one. Requests can raise it with their own
-    /// `stream_interval`.
-    pub stream_interval: NonZeroU32,
     /// HTTP/API-server behavior switches.
     pub api_server_options: ApiServerOptions,
     /// CORS settings applied to every HTTP response.
@@ -392,42 +383,55 @@ pub struct Config {
     #[serde(skip_serializing)]
     #[educe(Debug(method(fmt_redacted_api_keys)))]
     pub api_keys: Vec<String>,
+    /// Replacement bucket bounds for the core histogram families
+    /// (`--custom-histogram-buckets`); empty keeps the defaults.
+    pub custom_histogram_buckets: CustomHistogramBuckets,
+    /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
+    pub shutdown_timeout: Duration,
+    /// Maximum idle time on a keep-alive HTTP connection before the server
+    /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
+    pub keep_alive_timeout: Duration,
+}
+
+/// How the server connects to engine-core and drives it through an
+/// [`EngineCoreLlm`](vllm_llm::EngineCoreLlm). A server built over a
+/// caller-supplied `Llm` has none of these settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct EngineCoreConfig {
+    /// Frontend-to-engine transport setup.
+    pub transport_mode: TransportMode,
+    /// Requested frontend-side coordinator behavior.
+    pub coordinator_mode: CoordinatorMode,
+    /// LoRA adapters loaded at startup, in order. Startup fails if any of
+    /// them cannot be loaded.
+    pub lora_modules: Vec<LoraModulePath>,
+    /// Minimum number of newly generated tokens batched into each streamed
+    /// output after the first one. Requests can raise it with their own
+    /// `stream_interval`.
+    pub stream_interval: NonZeroU32,
     /// When `true`, suppress periodic stats logging (throughput, queue depth,
     /// cache usage). Engines also stop recording stats, so metrics derived from
     /// engine-reported scheduler stats and request lifecycle events are not
     /// exported.
     pub disable_log_stats: bool,
-    /// Replacement bucket bounds for the core histogram families
-    /// (`--custom-histogram-buckets`); empty keeps the defaults.
-    pub custom_histogram_buckets: CustomHistogramBuckets,
     /// Interval between periodic stats logs (`VLLM_LOG_STATS_INTERVAL`,
     /// default 10s), or `None` to never log while still recording stats.
     pub log_stats_interval: Option<Duration>,
     /// Keep external request IDs as engine-core request IDs instead of adding
     /// a random suffix (`VLLM_DISABLE_REQUEST_ID_RANDOMIZATION`).
     pub disable_request_id_randomization: bool,
-    /// Maximum time to wait for active HTTP/gRPC requests to drain on shutdown.
-    pub shutdown_timeout: Duration,
     /// Whether the caller manages the engine process and shuts it down when
     /// the shutdown token is cancelled. Enables the gRPC `Control.Shutdown` RPC.
     pub manages_engine: bool,
-    /// Maximum idle time on a keep-alive HTTP connection before the server
-    /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
-    pub keep_alive_timeout: Duration,
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
 }
 
-impl Config {
+impl ServerConfig {
     /// Validate frontend configuration that can be checked before engine
     /// startup.
     pub fn validate(&self) -> Result<()> {
-        if self.api_server_options.enable_per_request_metrics && self.disable_log_stats {
-            bail!(
-                "--enable-per-request-metrics requires engine statistics logging; remove --disable-log-stats"
-            );
-        }
         if self.api_server_options.log_outputs.logs_complete()
             && !self.api_server_options.enable_log_requests
         {
@@ -455,8 +459,20 @@ impl Config {
                 max_logprobs
             );
         }
-        self.transport_mode.validate()?;
+        Ok(())
+    }
+}
 
+impl EngineCoreConfig {
+    /// Validate these settings together with the server config they run
+    /// under.
+    pub fn validate(&self, config: &ServerConfig) -> Result<()> {
+        if config.api_server_options.enable_per_request_metrics && self.disable_log_stats {
+            bail!(
+                "--enable-per-request-metrics requires engine statistics logging; remove --disable-log-stats"
+            );
+        }
+        self.transport_mode.validate()?;
         Ok(())
     }
 
