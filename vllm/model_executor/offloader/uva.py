@@ -52,24 +52,35 @@ class UVAOffloader(BaseOffloader):
         self.uva_offloading = (
             is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
+        # Deferred to post_init(): weights are not materialized yet.
+        self._pending_modules: list[tuple[nn.Module, str]] = []
 
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
         prefix: str = "",
     ) -> list[nn.Module]:
-        """Wrap modules with UVA offloading."""
+        """Wrap modules with UVA offloading.
+
+        GGUF weights are uninitialized here and only materialized by
+        ``process_weights_after_loading()``, so offload in ``post_init()``.
+        """
         if prefix:
             prefix = f"{prefix}."
-        modules = [
-            self._maybe_offload_to_cpu(module, prefix) for module in modules_generator
-        ]
+        modules = list(modules_generator)
+        self._pending_modules.extend((module, prefix) for module in modules)
+        return modules
+
+    def post_init(self) -> None:
+        """Offload weights, once materialized."""
+        pending, self._pending_modules = self._pending_modules, []
+        for module, prefix in pending:
+            self._maybe_offload_to_cpu(module, prefix)
         if self.cpu_offload_bytes > 0:
             logger.info(
                 "Total CPU offloaded parameters: %s",
                 format_gib(self.cpu_offload_bytes),
             )
-        return modules
 
     def _maybe_offload_to_cpu(self, module: nn.Module, prefix: str = "") -> nn.Module:
         """Offload module parameters to CPU using UVA if budget allows."""
@@ -92,6 +103,12 @@ class UVAOffloader(BaseOffloader):
                 # we use per-parameter offloading
                 # one module might have some parameters offloaded and some not
                 break
+
+            # Skip params holding no data (e.g. GGUF metadata): nothing to pin, and
+            # a 0-element tensor is never is_pinned(). Use p.data since
+            # p.numel() raises while uninitialized.
+            if p.data.numel() == 0:
+                continue
 
             # Skip parameters an earlier wrap_modules call already offloaded.
             # The UVA path leaves p.device as the accelerator (a view of CPU
