@@ -29,6 +29,7 @@ from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 from vllm.v1.worker.workspace import current_workspace_manager
 
 _GROUPED_KV_CACHE_DTYPES = frozenset(
@@ -431,6 +432,9 @@ class K3DSparkModel(nn.Module):
 
 
 class K3DSparkForCausalLM(nn.Module):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DSparkSpeculatorConfig
+
     has_own_embed_tokens = False
     has_own_lm_head = False
     draft_id_to_target_id = None
