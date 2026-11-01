@@ -9,6 +9,11 @@ forces the fp32 copy in ``apply_sampling_params``, so the first ordinary
 temperature-1.0 request is the first launch with model-dtype logits and pays
 the compilation inside inference. This pre-compiles every specialization the
 sampler path can launch for the configured watermark.
+
+The generic sampler warmup runs the chi-squared and perplexity watermarkers
+on fp32 logits. The perplexity watermarkers convert logits to fp32 before
+any kernel, but chi-squared's bias kernel reads them as they come, so it is
+also warmed here for the model dtype.
 """
 
 from __future__ import annotations
@@ -21,6 +26,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
+    from vllm.v1.watermarking.chi_squared import ChiSquaredWatermarker
     from vllm.v1.watermarking.watermarker import Watermarker
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -61,6 +67,21 @@ def _philox_sampler_keys(watermarker: Watermarker) -> list[int]:
     return [key for key in map(_philox_key, watermarkers) if key is not None]
 
 
+def _philox_chi_squared_watermarker(
+    watermarker: Watermarker,
+) -> ChiSquaredWatermarker | None:
+    """The watermarker when it launches the chi-squared kernels, else None."""
+    from vllm.v1.watermarking.chi_squared import ChiSquaredWatermarker
+    from vllm.v1.watermarking.prfs import PhiloxPRF
+
+    if (
+        isinstance(watermarker, ChiSquaredWatermarker)
+        and type(watermarker.prf) is PhiloxPRF
+    ):
+        return watermarker
+    return None
+
+
 @torch.inference_mode()
 def watermark_sample_warmup(worker: Worker) -> None:
     if getattr(worker.vllm_config, "watermark_config", None) is None:
@@ -87,7 +108,8 @@ def watermark_sample_warmup(worker: Worker) -> None:
     device = worker.device
     try:
         keys = _philox_sampler_keys(sampler.watermarker)
-        if not keys:
+        chi_squared = _philox_chi_squared_watermarker(sampler.watermarker)
+        if not keys and chi_squared is None:
             return
 
         # The sampler passes model-dtype logits through when no logits
@@ -151,5 +173,16 @@ def watermark_sample_warmup(worker: Worker) -> None:
                         use_fp64=use_skip_mask and sampler.use_fp64_gumbel,
                         **(sampling_state if use_skip_mask else {}),
                     )
+            if chi_squared is not None:
+                chi_squared.add_level_bias(
+                    logits,
+                    contexts,
+                    torch.zeros(
+                        (_NUM_WARMUP_TOKENS, chi_squared.num_trials + 1),
+                        dtype=torch.float32,
+                        device=device,
+                    ),
+                    sampling_state["skip_mask"],
+                )
     except Exception:
         logger.warning("Skipping watermark sampler warmup.", exc_info=True)
