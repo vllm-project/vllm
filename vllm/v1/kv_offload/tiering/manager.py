@@ -926,6 +926,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
         trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
         """Prepare chunks to be stored from GPU to primary tier.
@@ -968,7 +969,9 @@ class TieringOffloadingManager(OffloadingManager):
         # Cascading of these newly-stored chunks to ALL secondary tiers
         # happens later in complete_store(), after the GPU→Primary transfer
         # completes.
-        primary_result = self.primary_tier.prepare_store(keys, req_context, trigger)
+        primary_result = self.primary_tier.prepare_store(
+            keys, req_context, trigger=trigger
+        )
 
         if primary_result is None:
             return None
@@ -1053,6 +1056,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
         trigger: StoreTrigger,
         success: bool = True,
     ) -> None:
@@ -1076,7 +1080,9 @@ class TieringOffloadingManager(OffloadingManager):
 
         """
         # Step 1: Complete store in primary tier (makes chunks loadable)
-        self.primary_tier.complete_store(keys, req_context, trigger, success)
+        self.primary_tier.complete_store(
+            keys, req_context, trigger=trigger, success=success
+        )
 
         if success:
             # Step 2: Cascade to ALL secondary tiers

@@ -69,7 +69,7 @@ class StoreTriggerHandler(ABC):
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> PrepareStoreOutput | None:
         """Offer keys to the manager, with the trigger of this handler."""
-        return self._manager.prepare_store(keys, req_context, self.trigger)
+        return self._manager.prepare_store(keys, req_context, trigger=self.trigger)
 
     def _make_store_job(
         self,
