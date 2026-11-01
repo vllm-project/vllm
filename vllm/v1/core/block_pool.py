@@ -199,6 +199,14 @@ class BlockPool:
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
 
+        # Per-group usage accounting, off unless enable_group_usage_tracking()
+        # is called. ``_block_group`` holds the group that last allocated each
+        # block; a block keeps it while cached in the free queue, so a
+        # prefix-cache hit through ``touch`` is charged to the group that
+        # wrote it.
+        self._block_group: list[int] | None = None
+        self._num_used_blocks_by_group: list[int] = []
+
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
     ) -> list[KVCacheBlock] | None:
@@ -703,13 +711,17 @@ class BlockPool:
             # `num_tokens` only applies to the first (primary) insertion.
             self._insert_block_hash(block_hash, dst_block, num_tokens=num_tokens)
 
-    def get_new_blocks(self, num_blocks: int) -> list[KVCacheBlock]:
+    def get_new_blocks(
+        self, num_blocks: int, kv_cache_group_id: int | None = None
+    ) -> list[KVCacheBlock]:
         """Get new blocks from the free block pool.
 
         Note that we do not check block cache in this function.
 
         Args:
             num_blocks: The number of blocks to allocate.
+            kv_cache_group_id: The KV cache group the blocks are allocated
+                for. Only used for per-group usage accounting.
 
         Returns:
             A list of new block.
@@ -737,7 +749,51 @@ class BlockPool:
                 block.ref_cnt += 1
                 if self.metrics_collector:
                     self.metrics_collector.on_block_allocated(block)
+
+        block_group = self._block_group
+        if block_group is not None:
+            if kv_cache_group_id is None:
+                logger.warning_once(
+                    "BlockPool.get_new_blocks called without kv_cache_group_id "
+                    "while group usage tracking is on; these blocks are left "
+                    "out of the per-type KV cache usage."
+                )
+                for block in ret:
+                    block_group[block.block_id] = -1
+            else:
+                for block in ret:
+                    block_group[block.block_id] = kv_cache_group_id
+                self._num_used_blocks_by_group[kv_cache_group_id] += len(ret)
         return ret
+
+    def enable_group_usage_tracking(self, num_groups: int) -> None:
+        """Start counting the blocks held by each KV cache group.
+
+        Must be called before any block is allocated.
+        """
+        assert num_groups > 0
+        assert self.get_num_free_blocks() == self.num_gpu_blocks - 1
+        self._block_group = [-1] * self.num_gpu_blocks
+        self._num_used_blocks_by_group = [0] * num_groups
+
+    def get_num_used_blocks_by_group(self) -> tuple[int, ...] | None:
+        """Number of blocks with ``ref_cnt > 0`` per KV cache group, or None
+        if group usage tracking is disabled."""
+        if self._block_group is None:
+            return None
+        return tuple(self._num_used_blocks_by_group)
+
+    def _on_block_used(self, block: KVCacheBlock) -> None:
+        assert self._block_group is not None
+        group_id = self._block_group[block.block_id]
+        if group_id >= 0:
+            self._num_used_blocks_by_group[group_id] += 1
+
+    def _on_block_released(self, block: KVCacheBlock) -> None:
+        assert self._block_group is not None
+        group_id = self._block_group[block.block_id]
+        if group_id >= 0:
+            self._num_used_blocks_by_group[group_id] -= 1
 
     def _notify_reuse(self, blocks: Iterable[KVCacheBlock]) -> None:
         for block in blocks:
@@ -764,6 +820,8 @@ class BlockPool:
             self._reuse_watchers[block.block_id] = on_reuse
             if block.ref_cnt == 0:
                 released.append(block)
+                if self._block_group is not None:
+                    self._on_block_released(block)
         self.free_block_queue.append_n(released)
 
     def _maybe_evict_cached_block(self, block: KVCacheBlock) -> bool:
@@ -805,6 +863,8 @@ class BlockPool:
             # candidate), so remove it.
             if block.ref_cnt == 0:
                 self.free_block_queue.remove(block)
+                if self._block_group is not None:
+                    self._on_block_used(block)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -834,6 +894,8 @@ class BlockPool:
                 continue
             block.ref_cnt -= 1
             if block.ref_cnt == 0:
+                if self._block_group is not None:
+                    self._on_block_released(block)
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
                     blocks_to_evict_first.append(block)

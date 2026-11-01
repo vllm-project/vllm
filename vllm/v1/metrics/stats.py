@@ -236,6 +236,8 @@ class SchedulerStats:
     current_wave: int = 0
 
     kv_cache_usage: float = 0.0
+    # Usage by KV cache spec kind, hybrid models only.
+    kv_cache_usage_by_type: dict[str, float] | None = None
     iteration_details: SchedulerIterationDetails | None = None
 
     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)

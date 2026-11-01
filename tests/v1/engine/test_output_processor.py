@@ -1266,6 +1266,31 @@ def test_watermark_status_partitions_finished_requests(dummy_test_vectors):
     assert sum(status.values()) == totals["vllm:request_success_total"]["all"]
 
 
+@pytest.mark.parametrize(
+    "usage_by_type",
+    [None, {"full_attention": 0.25, "sliding_window": 0.125}],
+)
+def test_kv_cache_usage_by_type_gauge(dummy_test_vectors, usage_by_type):
+    """The per-type gauge is only emitted for hybrid models."""
+    try:
+        PrometheusStatLogger(dummy_test_vectors.vllm_config).record(
+            scheduler_stats=SchedulerStats(
+                kv_cache_usage=0.375, kv_cache_usage_by_type=usage_by_type
+            ),
+            iteration_stats=None,
+        )
+        reported = {
+            sample.labels["kv_cache_type"]: sample.value
+            for metric in prometheus_client.REGISTRY.collect()
+            for sample in metric.samples
+            if sample.name == "vllm:kv_cache_usage_perc_by_type"
+        }
+    finally:
+        unregister_vllm_metrics()
+
+    assert reported == (usage_by_type or {})
+
+
 @pytest.mark.parametrize("log_stats", [True, False])
 def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
     """Test LoRA request lifecycle tracking through waiting -> running -> finished."""
