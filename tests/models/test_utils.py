@@ -1,10 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
+from types import SimpleNamespace
+
 import pytest
 import regex as re
 import torch
 
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -12,7 +19,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
-    StageLocalTransform,
+    RankLocalTransform,
     WeightsMapper,
     _merge_multimodal_embeddings,
 )
@@ -386,8 +393,8 @@ def test_auto_weights_loader_keeps_other_stages_for_plain_transforms():
     assert torch.equal(module.layers[1].weight, torch.full((2, 2), 3.0))
 
 
-def test_auto_weights_loader_drops_other_stages_before_stage_local_transforms():
-    """A stage-local merge never sees the parts of another stage's weights."""
+def test_auto_weights_loader_drops_other_stages_before_rank_local_transforms():
+    """A rank-local merge never sees the parts of another stage's weights."""
     module = _pp_rank_1_module()
     seen: list[str] = []
 
@@ -401,7 +408,7 @@ def test_auto_weights_loader_drops_other_stages_before_stage_local_transforms():
         for i in range(2)
         for j, half in enumerate((".first", ".second"))
     ]
-    transform = StageLocalTransform(lambda w: _pair_halves(record(w)))
+    transform = RankLocalTransform(lambda w: _pair_halves(record(w)))
 
     loaded = AutoWeightsLoader(module).load_weights(
         weights, mapper=WeightsMapper(weights_transforms=[transform])
@@ -410,3 +417,75 @@ def test_auto_weights_loader_drops_other_stages_before_stage_local_transforms():
     assert loaded == {"layers.1.weight"}
     assert seen == ["layers.1.weight.first", "layers.1.weight.second"]
     assert torch.equal(module.layers[1].weight, torch.tensor([[2.0] * 2, [3.0] * 2]))
+
+
+def _ep_rank_1_experts(
+    num_experts: int, *, enable_eplb: bool = False, use_global_sf: bool = False
+) -> MoERunner:
+    """A MoE layer on expert parallel rank 1 of 2, holding the upper half."""
+    parallel_config = replace(
+        FusedMoEParallelConfig.make_no_parallel(),
+        use_ep=True,
+        ep_size=2,
+        ep_rank=1,
+        enable_eplb=enable_eplb,
+    )
+    experts = RoutedExperts.__new__(RoutedExperts)
+    torch.nn.Module.__init__(experts)
+    experts.moe_config = SimpleNamespace(
+        moe_parallel_config=parallel_config, num_logical_experts=num_experts
+    )
+    experts.quant_config = None
+    experts.quant_method = SimpleNamespace(use_global_sf=use_global_sf)
+    experts.expert_map_manager = ExpertMapManager(
+        max_num_batched_tokens=16,
+        top_k=2,
+        global_num_experts=num_experts,
+        num_redundant_experts=0,
+        num_expert_group=None,
+        moe_parallel_config=parallel_config,
+        placement_strategy="linear",
+        enable_eplb=False,
+    )
+    runner = MoERunner.__new__(MoERunner)
+    torch.nn.Module.__init__(runner)
+    runner.routed_experts = experts
+    return runner
+
+
+def test_auto_weights_loader_drops_other_ranks_experts_before_rank_local_transforms():
+    """A rank-local transform only sees the expert weights this rank loads."""
+    module = torch.nn.Module()
+    module.layers = torch.nn.ModuleList(
+        [PPMissingLayer(), *(torch.nn.Module() for _ in range(3))]
+    )
+    module.layers[1].experts = _ep_rank_1_experts(4)
+    module.layers[2].experts = _ep_rank_1_experts(8, use_global_sf=True)
+    module.layers[3].experts = _ep_rank_1_experts(4, enable_eplb=True)
+    kept = [
+        "layers.1.experts.2.w1.weight",
+        "layers.1.experts.4.w1.weight",  # past the routed experts
+        "layers.1.experts.w13_weight",  # all experts in one tensor
+        "layers.1.shared_experts.0.w1.weight",  # not a MoE layer
+        "layers.2.experts.0.w1.input_scale",  # reduced to a global scale
+        "layers.2.experts.4.w1.weight_scale",
+        "layers.3.experts.0.w1.weight",  # EPLB loads by physical expert ID
+    ]
+    dropped = [
+        "layers.0.experts.2.w1.weight",  # on another pipeline stage
+        "layers.1.experts.1.w1.weight",
+        "layers.1.experts.1.w1.input_scale",
+        "layers.2.experts.3.w1.weight_scale",
+    ]
+    seen: list[str] = []
+
+    def record(weights):
+        seen.extend(name for name, _ in weights)
+        yield from ()
+
+    AutoWeightsLoader(module).load_weights(
+        [(name, torch.zeros(1)) for name in kept + dropped],
+        mapper=WeightsMapper(weights_transforms=[RankLocalTransform(record)]),
+    )
+
+    assert seen == kept
