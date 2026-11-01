@@ -75,6 +75,22 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _mm_executor_workers(config: "VllmConfig") -> int:
+    """Number of workers of the multimodal preprocessing executor.
+
+    One while the multimodal processor cache is enabled: the frontend cache's
+    get_and_update must stay ordered with the engine-core cache (#38418).
+    With the cache disabled there is no order to keep, so the executor uses
+    ``renderer_num_workers`` workers and a burst of multimodal requests is
+    preprocessed in parallel instead of one request at a time.
+    """
+    model_config = config.model_config
+    mm_config = model_config.multimodal_config
+    if mm_config is None or mm_config.mm_processor_cache_gb > 0:
+        return 1
+    return max(1, model_config.renderer_num_workers)
+
+
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 
@@ -120,7 +136,9 @@ class BaseRenderer(ABC, Generic[_T]):
         # Background multimodal warmup task (a future returned by
         # _mm_executor) so it overlaps engine-core initialization while
         # staying serialized with the serving path through the same
-        # single-worker executor. None when no background warmup has been
+        # executor (single-worker while the processor cache is on; with
+        # several workers, warmup() joins it before the server takes
+        # requests). None when no background warmup has been
         # launched (or it has already been joined). Routing the warmup through
         # _mm_executor (max_workers=1) guarantees it can never run
         # concurrently with a serving request inside the numba workqueue
@@ -144,9 +162,10 @@ class BaseRenderer(ABC, Generic[_T]):
         self._executor = _SwappableExecutor(max_workers=pool_workers)
         self._resources.callback(self._executor.shutdown, wait=False)
 
-        # Separate single-worker executor so tokenization never queues behind
-        # MM preprocessing; must stay single-worker per #38418 (P0/P1 order).
-        self._mm_executor = ThreadPoolExecutor(max_workers=1)
+        # Separate executor so tokenization never queues behind MM
+        # preprocessing. Single-worker while the multimodal processor cache is
+        # on (#38418: P0/P1 order); see _mm_executor_workers.
+        self._mm_executor = ThreadPoolExecutor(max_workers=_mm_executor_workers(config))
         self._resources.callback(self._mm_executor.shutdown, wait=False)
 
         # Offload tokenization to the thread pool. The sync
