@@ -28,6 +28,22 @@ from vllm.forward_context import (
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 
 
+def load_replay_wkv_weight(
+    name: str,
+    weight: torch.Tensor,
+    params: dict[str, torch.nn.Parameter],
+) -> str | None:
+    """Load the replay projection from the original checkpoint's WKV shards."""
+    if ".attn.wkv." not in name:
+        return None
+    replay_name = name.replace(".attn.wkv.", ".attn.replay_wkv.")
+    if replay_name not in params:
+        return None
+    param = params[replay_name]
+    param.weight_loader(param, weight, 0)
+    return replay_name
+
+
 @dataclass
 class ReplayBatch:
     """One forward's replay batch; ``run_graph`` is set when it runs in a graph."""
