@@ -5,11 +5,12 @@ import asyncio
 from http import HTTPStatus
 from unittest.mock import AsyncMock, Mock
 
+import httpx
 import openai
 import pytest
 import pytest_asyncio
 import requests
-from fastapi import Request
+from fastapi import FastAPI, Request
 
 from tests.utils import RemoteOpenAIServer
 from vllm import envs
@@ -102,8 +103,9 @@ async def test_check_health(server: RemoteOpenAIServer):
     envs.VLLM_USE_RUST_FRONTEND,
     reason="/ready is not implemented in the Rust frontend",
 )
-async def test_check_ready(server: RemoteOpenAIServer):
-    response = requests.get(server.url_for("ready"), timeout=30)
+@pytest.mark.parametrize("path", ["health/ready", "ready"])
+async def test_check_ready(server: RemoteOpenAIServer, path: str):
+    response = requests.get(server.url_for(path), timeout=30)
 
     assert response.status_code == HTTPStatus.OK
 
@@ -237,10 +239,19 @@ async def test_health_check_engine_dead_error():
     assert response.status_code == 503
 
 
-def test_ready_route_is_registered():
+@pytest.mark.asyncio
+@pytest.mark.parametrize("path", ["/health/ready", "/ready"])
+async def test_ready_route_is_registered(path: str):
     from vllm.entrypoints.serve.instrumentator.health import router
 
-    assert any(route.path == "/ready" for route in router.routes)
+    app = FastAPI()
+    app.state.engine_client = None
+    app.include_router(router)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        response = await client.get(path)
+    assert response.status_code == HTTPStatus.OK
 
 
 @pytest.mark.asyncio
