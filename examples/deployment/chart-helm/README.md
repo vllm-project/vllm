@@ -2,6 +2,28 @@
 
 This directory contains a Helm chart for deploying the vllm application. The chart includes configurations for deployment, autoscaling, resource management, and more.
 
+## Scheduling
+
+Set `affinity` to configure the Pod affinity rules directly. When it is non-empty,
+it is rendered as-is and takes precedence over `gpuModels`. `gpuModels` remains
+available as a legacy fallback: when `affinity` is empty and both NVIDIA GPU
+requests and limits are greater than zero, it creates a required node affinity
+rule for `nvidia.com/gpu.product`. Both settings default to empty.
+
+```yaml
+affinity:
+  podAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app: model-cache
+        topologyKey: kubernetes.io/hostname
+```
+
+GPU-requesting deployments (where both NVIDIA GPU requests and limits are
+greater than zero) continue to set `runtimeClassName: nvidia` independently of
+these affinity settings.
+
 ## Files
 
 - Chart.yaml: Defines the chart metadata including name, version, and maintainers.
