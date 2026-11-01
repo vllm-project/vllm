@@ -1015,10 +1015,18 @@ class DelegatingParser(Parser):
     def _flush_engine_parsers(
         self, delta_message: DeltaMessage | None
     ) -> DeltaMessage | None:
-        """Flush buffered state from engine-based parsers at stream end."""
+        """Flush buffered state from parsers that hold text at stream end."""
         reasoning_ended = self._stream_state.reasoning_ended
         for parser in (self._reasoning_parser, self._tool_parser):
-            if not getattr(parser, "engine_based_streaming", False):
+            if parser is None:
+                continue
+            engine_based = getattr(parser, "engine_based_streaming", False)
+            # Legacy tool parsers can opt in without switching the whole
+            # request onto the engine-based streaming path.
+            flush_on_finish = parser is self._tool_parser and getattr(
+                parser, "flush_streaming_on_finish", False
+            )
+            if not engine_based and not flush_on_finish:
                 continue
             # When reasoning has ended and we transitioned to the tool
             # phase, the reasoning parser's engine may still have buffered
