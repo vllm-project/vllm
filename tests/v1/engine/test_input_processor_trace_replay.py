@@ -60,6 +60,23 @@ def test_normalize_trace_replay_params():
     assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
 
 
+def test_trace_length_overrides_default_max_tokens():
+    params = SamplingParams(trace_decode_token_ids=list(range(20)))
+    assert params.max_tokens == 16
+
+    _normalize(params, prompt_len=3, max_model_len=128)
+
+    assert params.max_tokens == 20
+
+
+def test_trace_length_overrides_explicit_max_tokens():
+    params = SamplingParams(max_tokens=4, trace_decode_token_ids=list(range(20)))
+
+    _normalize(params, prompt_len=3, max_model_len=128)
+
+    assert params.max_tokens == 20
+
+
 def test_trace_longer_than_remaining_context_is_truncated():
     """The trace is staged into a max_model_len-wide row, so it must be cut.
 
