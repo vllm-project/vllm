@@ -287,6 +287,60 @@ def test_dplb_in_flight_request_stays_on_same_engine():
     assert client.engine_inflight[engine] == 1
 
 
+def test_dplb_single_client_routes_to_engine_that_freed_a_slot():
+    """With one client the stale snapshot must not mask a freed slot."""
+    client = _make_dplb_client(num_engines=4)
+    engines = client.core_engines
+    client.engine_inflight.update({engines[0]: 2, engines[1]: 2, engines[3]: 2})
+    # A request on engine 2 just finished; the coordinator's snapshot,
+    # published at the last step boundary, still counts it.
+    client.engine_inflight[engines[2]] = 1
+    client.lb_engines = [[0, 2, 0.0] for _ in range(4)]
+
+    chosen_engine = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+
+    assert chosen_engine == engines[2]
+
+
+def test_dplb_single_client_closed_loop_stays_balanced():
+    """Re-admitting into whichever slot frees up keeps engines level even
+    though the snapshot never catches up."""
+    client = _make_dplb_client(num_engines=4)
+    for _ in range(8):
+        client.get_core_engine_for_request(make_request(SamplingParams(max_tokens=1)))
+
+    engines = client.core_engines
+    # Finish out of routing order so the rotating scan start cannot pick the
+    # right engine by coincidence.
+    for finishing in [2, 0, 3, 1, 1, 2] * 4:
+        # A request finishes and a new one arrives before the next
+        # coordinator snapshot, which still shows every engine at 2.
+        engine = engines[finishing]
+        req_id = next(r for r, e in client.reqs_in_flight.items() if e == engine)
+        del client.reqs_in_flight[req_id]
+        client.engine_inflight[engine] -= 1
+        client.lb_engines = [[0, 2, 0.0] for _ in range(4)]
+
+        new_request = make_request(SamplingParams(max_tokens=1))
+        assert client.get_core_engine_for_request(new_request) == engine
+
+    assert sorted(client.engine_inflight.values()) == [2, 2, 2, 2]
+
+
+def test_dplb_multi_client_still_respects_snapshot():
+    """Other clients' load is only visible through the snapshot."""
+    client = _make_dplb_client(num_engines=3, client_count=2)
+    client.lb_engines = [[0, 4, 0.0], [0, 0, 0.0], [0, 4, 0.0]]
+
+    chosen_engine = client.get_core_engine_for_request(
+        make_request(SamplingParams(max_tokens=1))
+    )
+
+    assert chosen_engine == client.core_engines[1]
+
+
 def test_dplb_burst_round_robins_despite_snapshot_rebinds():
     """A stats snapshot rebind wipes the optimistic lb_engines increments;
     the exact in-flight floor must keep a burst spreading round-robin."""
