@@ -66,25 +66,37 @@ def _silu_and_mul_fp8_dynamic_block(
     assert x.ndim in (2, 3), f"Input must be 2D or 3D, got {x.shape}"
     d = x.shape[-1] // 2
     out_shape = x.shape[:-1] + (d,)
-    x = x.reshape(-1, x.shape[-1])
-    num_tokens = x.shape[0]
+    x_2d = x.reshape(-1, x.shape[-1])
+    num_tokens = x_2d.shape[0]
     num_groups = d // group_size
+    tma_aligned_m = (num_tokens + 3) // 4 * 4
+    scale_shape = out_shape[:-1] + (num_groups,)
+    scale_stride = (
+        (1, tma_aligned_m)
+        if x.ndim == 2
+        else (tma_aligned_m * num_groups, 1, tma_aligned_m)
+    )
 
     result = torch.empty((num_tokens, d), dtype=FP8_DTYPE, device=x.device)
-    scales = torch.empty((num_tokens, num_groups), dtype=torch.float32, device=x.device)
+    scales = torch.empty_strided(
+        (num_tokens, num_groups),
+        (1, tma_aligned_m),
+        dtype=torch.float32,
+        device=x.device,
+    )
 
     torch.ops._C.silu_and_mul_per_block_quant(
         out=result,
-        input=x,
+        input=x_2d,
         scales=scales,
         group_size=group_size,
         scale_ub=None,
-        is_scale_transposed=False,
+        is_scale_transposed=True,
     )
 
     return QuantizedActivation(
         data=result.view(out_shape),
-        scale=scales.view(out_shape[:-1] + (num_groups,)),
+        scale=scales.as_strided(scale_shape, scale_stride),
         orig_dtype=x.dtype,
         orig_shape=out_shape,
         quant_key=quant_key,
