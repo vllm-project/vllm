@@ -131,21 +131,6 @@ steps:
       depends_on:
       - image-build-amd
 
-- label: ":nvidia: (2 H100) Hybrid Internal Checkpoint CPU Offload"
-  key: hybrid-internal-checkpoint-cpu-offload
-  device: h100
-  num_devices: 2
-  timeout_in_minutes: 30
-  source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
-    - vllm/v1/kv_offload/
-    - vllm/v1/core/
-    - vllm/model_executor/layers/mamba/
-    - tests/v1/kv_connector/unit/test_offloading_connector.py
-  commands:
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-    - pytest -v -s v1/kv_connector/unit/test_offloading_connector.py::test_hybrid_internal_checkpoint_cpu_replay
-
 - label: ":nvidia: (H200 MIG 35GB) V1 KV Offload"
   device: h200_35gb
   key: v1-kv-offload

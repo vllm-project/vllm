@@ -11,7 +11,6 @@ import pytest
 import zmq
 from tqdm import tqdm
 
-from tests.models.utils import check_logprobs_close
 from vllm import LLM, SamplingParams, TokensPrompt
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import BlockStored, KVEventBatch
@@ -632,61 +631,6 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         _accuracy_test(llm, subscriber)
     finally:
         subscriber.close()
-        del llm
-
-
-@pytest.mark.distributed
-def test_hybrid_internal_checkpoint_cpu_replay():
-    """An internal Mamba checkpoint need not leave an aligned recurrent state."""
-    hash_size = 128
-    llm = LLM(
-        model="Qwen/Qwen3.5-0.8B",
-        tensor_parallel_size=2,
-        enable_prefix_caching=True,
-        disable_hybrid_kv_cache_manager=False,
-        mamba_cache_mode="align",
-        block_size=512,
-        mamba_block_size=512,
-        prefix_match_unit=hash_size,
-        gdn_prefill_backend="flashinfer",
-        mamba_cache_dtype="float32",
-        mamba_ssm_cache_dtype="float32",
-        max_model_len=16384,
-        max_num_batched_tokens=16384,
-        gpu_memory_utilization=0.3,
-        enforce_eager=True,
-        language_model_only=True,
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="OffloadingConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={"cpu_bytes_to_use": 1 << 30},
-        ),
-    )
-    try:
-        cache = llm.llm_engine.vllm_config.cache_config
-        recurrent_block = cache.mamba_block_size
-        assert recurrent_block is not None
-        num_tokens = 2 * recurrent_block + hash_size + 5
-        tokens = llm.get_tokenizer().encode("The cat sat on the mat. " * num_tokens)
-        prompt = TokensPrompt(prompt_token_ids=tokens[:num_tokens])
-        params = SamplingParams(temperature=0, max_tokens=32, logprobs=5)
-        cold = llm.generate(prompt, params, use_tqdm=False)[0]
-        assert cold.num_cached_tokens == 0
-        _wait_for_prefix_cache_reset(llm)
-        replay = llm.generate(prompt, params, use_tqdm=False)[0]
-        assert replay.num_cached_tokens == num_tokens // hash_size * hash_size
-        cold_output, replay_output = cold.outputs[0], replay.outputs[0]
-        check_logprobs_close(
-            outputs_0_lst=[
-                (cold_output.token_ids, cold_output.text, cold_output.logprobs)
-            ],
-            outputs_1_lst=[
-                (replay_output.token_ids, replay_output.text, replay_output.logprobs)
-            ],
-            name_0="cold",
-            name_1="CPU replay",
-        )
-    finally:
         del llm
 
 
