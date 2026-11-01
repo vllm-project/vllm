@@ -266,6 +266,8 @@ LinearBackend = Literal[
     "xpu_woq",
 ]
 
+LMHeadQuantization = Literal["int4_per_group_32"]
+
 
 RDNAHybridW4A16PrefillDequantMode = Literal["enable", "disable"]
 
@@ -418,6 +420,17 @@ class KernelConfig:
     - "enable": Cache every layer's copy; startup fails if they do not fit in
       the budget
     """
+
+    lm_head_quantization: LMHeadQuantization | None = None
+    """Quantize an unquantized fp16/bf16 lm_head while loading the model, for
+    checkpoints that leave it in full precision. Available options:
+
+    - None: Run the lm_head as loaded
+    - "int4_per_group_32": Asymmetric uint4 weights with one scale and zero
+      point per 32 input channels, on the RDNA hybrid W4A16 kernels (ROCm
+      gfx11/gfx12 only)
+
+    Explicit values raise ValueError when their constraints are not met."""
 
     @field_validator("moe_backend", mode="before")
     @classmethod
