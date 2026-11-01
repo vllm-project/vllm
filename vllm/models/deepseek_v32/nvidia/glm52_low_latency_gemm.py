@@ -28,6 +28,7 @@ from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
 )
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.layers.quantization.fp8_dequant import (
     Fp8DequantLinearMethod,
 )
@@ -413,21 +414,15 @@ def build_glm52_plan(
 
 
 class GLM52LowLatencyLinearMethod(UnquantizedLinearMethod):
-    def __init__(
-        self,
-        plan: dict[int, ResolvedCall],
-        base: Fp8DequantLinearMethod | None = None,
-    ) -> None:
+    def __init__(self, plan: dict[int, ResolvedCall], base: QuantizeMethodBase) -> None:
         super().__init__()
         self._plan = plan
-        # a layer loaded from block-FP8 keeps its post-load dequantization
+        # the replaced method: a layer loaded from block-FP8 keeps its
+        # post-load dequantization
         self._base = base
 
     def process_weights_after_loading(self, layer: nn.Module) -> None:
-        if self._base is None:
-            super().process_weights_after_loading(layer)
-        else:
-            self._base.process_weights_after_loading(layer)
+        self._base.process_weights_after_loading(layer)
 
     def apply(
         self,
@@ -465,10 +460,7 @@ def enable_glm52_low_latency_gemm(
         spec = table.get(tuple(weight.shape))
         if spec is None:
             continue
-        child.quant_method = GLM52LowLatencyLinearMethod(
-            spec.build_plan(),
-            method if isinstance(method, Fp8DequantLinearMethod) else None,
-        )
+        child.quant_method = GLM52LowLatencyLinearMethod(spec.build_plan(), method)
         warmup_configs.update(config for _, config in spec.cute_configs)
 
     _request_warmup(dtype, warmup_configs)

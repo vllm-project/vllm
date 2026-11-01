@@ -692,11 +692,6 @@ def _fused_qkv_rank_rows(
     ]
     if not kv_chunk_rows:
         return torch.cat(q_rows + k_rows + v_rows)
-    if tp_size >= ckpt_tp or ckpt_tp % tp_size or q_per_chunk % block:
-        raise ValueError(
-            "the padded [Q | K V pad] layout requires tp_size a proper divisor "
-            f"below ckpt_tp={ckpt_tp} and whole-block Q rows"
-        )
     # one K V group per checkpoint chunk, each zero-padded to kv_chunk_rows
     kv_rows = []
     for c in range(len(kv_head_ids) // kv_heads_per_chunk):
@@ -857,19 +852,20 @@ def _use_row_scales(layer: LinearBase) -> None:
 
 
 def _load_fused_fp8_qkv(
-    layer: LinearBase,
+    attn: "MiMoV2Attention",
     kind: str,
     tensor: torch.Tensor,
-    geometry: tuple[int, int, int, int],
-    kv_chunk_rows: int,
     tp_rank: int,
     tp_size: int,
     ckpt_tp: int,
 ) -> None:
     """Load the fused checkpoint's fp8 qkv_proj ``weight`` or
-    ``weight_scale_inv`` (``kind``) into this rank's rows, on its own.
-    ``geometry``: (num_heads, num_kv_heads, head_dim, v_head_dim)."""
-    num_heads, num_kv_heads, head_dim, v_head_dim = geometry
+    ``weight_scale_inv`` (``kind``) into this rank's rows of
+    ``attn.qkv_proj``, on its own."""
+    layer, kv_chunk_rows = attn.qkv_proj, attn.kv_chunk_rows
+    num_heads, num_kv_heads = attn.total_num_heads, attn.total_num_kv_heads
+    head_dim, v_head_dim = attn.head_dim, attn.v_head_dim
+    geometry = (num_heads, num_kv_heads, head_dim, v_head_dim)
     block = layer.weight_block_size[0]
     rows = _fused_qkv_rank_rows(
         *geometry, tp_rank, tp_size, ckpt_tp, block, kv_chunk_rows
@@ -883,15 +879,12 @@ def _load_fused_fp8_qkv(
             )
         tensor = _gather_rows(tensor, rows)
     else:
+        # loader state for PWAL (RFC #64418 sec. 5 rule 3 exception): load, never copy
         tensor, layer.requantize_rows = _fused_qkv_row_scales(
             tensor, *geometry, rows, tp_size, ckpt_tp, block, kv_chunk_rows
         )
     param = getattr(layer, kind)
     getattr(param, "weight_loader", default_weight_loader)(param, tensor)
-
-
-def _qkv_geometry(attn: "MiMoV2Attention") -> tuple[int, int, int, int]:
-    return attn.total_num_heads, attn.total_num_kv_heads, attn.head_dim, attn.v_head_dim
 
 
 @support_torch_compile
@@ -1139,11 +1132,9 @@ class MiMoV2Model(nn.Module, EagleModelMixin):
         prefix, kind = name.rsplit(".", 1)
         attn = self.get_submodule(prefix.rsplit(".", 1)[0])
         _load_fused_fp8_qkv(
-            attn.qkv_proj,
+            attn,
             kind,
             tensor,
-            _qkv_geometry(attn),
-            attn.kv_chunk_rows,
             tp_rank,
             tp_size,
             # The fused qkv_proj is pre-sharded for this many ranks.

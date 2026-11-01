@@ -26,6 +26,7 @@ import torch
 
 from vllm.model_executor.layers.linear import (
     LinearBase,
+    MergedColumnParallelLinear,
     ReplicatedLinear,
     UnquantizedLinearMethod,
     register_weight_loader_v2_supported_method,
@@ -36,6 +37,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    FP8_SCALE_SENTINEL,
     create_fp8_scale_parameter,
     validate_fp8_block_shape,
 )
@@ -96,6 +98,7 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
         if "shard_offset" in kwargs:
             start = kwargs["shard_offset"]
             rows = slice(start, start + kwargs["shard_size"])
+        # loader state for PWAL (RFC #64418 sec. 5 rule 3 exception): load, never copy
         self.fp8_rows[rows] = fp8
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
@@ -118,31 +121,20 @@ class Fp8DequantWeightParameter(ModelWeightParameter):
         """Dequantize the FP8 rows in place. Every row then holds runtime
         bytes, so a later reload that leaves this weight out keeps them."""
         runtime = self.data
-        fp8 = self.fp8_view()
+        fp8 = self.fp8_view().view(torch.uint8)
         block_n, block_k = block_size
-        cols = fp8.shape[1]
-        chunk = max(block_n, _DEQUANT_ROWS // block_n * block_n)
-        flags = self.fp8_rows.tolist()
-        start = 0
-        while start < len(flags):
-            if not flags[start]:
-                start += 1
-                continue
-            end = start
-            while end < len(flags) and flags[end] and end - start < chunk:
-                end += 1
-            if start % block_n:
-                raise ValueError(
-                    f"FP8 rows starting at {start} are not aligned to the "
-                    f"{block_n}-row scale blocks"
-                )
-            scale = scale_inv[start // block_n : cdiv(end, block_n)].to(torch.float32)
-            scale = scale.repeat_interleave(block_n, dim=0)[: end - start]
-            scale = scale.repeat_interleave(block_k, dim=1)[:, :cols]
-            # computed before writing: BF16 row i overwrites FP8 row i
-            out = (fp8[start:end].to(torch.float32) * scale).to(runtime.dtype)
-            runtime[start:end].copy_(out)
-            start = end
+        rows = self.fp8_rows.nonzero().flatten().to(runtime.device)
+        blocks = rows // block_n
+        if (scale_inv[blocks] == FP8_SCALE_SENTINEL).any():
+            raise ValueError(
+                "FP8 weight rows were loaded without their weight_scale_inv"
+            )
+        for index in rows.split(_DEQUANT_ROWS):
+            # gathered before writing: BF16 row i overwrites FP8 row i
+            weight = fp8[index].view(torch.float8_e4m3fn).to(torch.float32)
+            scale = scale_inv[index // block_n].to(torch.float32)
+            scale = scale.repeat_interleave(block_k, dim=1)[:, : weight.shape[1]]
+            runtime[index] = (weight * scale).to(runtime.dtype)
         self.fp8_rows.zero_()
 
 
@@ -172,20 +164,12 @@ def _scale_groups(scale: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
 
 
 class Fp8DequantScaleParameter(BlockQuantScaleParameter):
-    """The scale of a replicated weight that accepts any checkpoint scale
-    layout, stored per ``_ANY_LAYOUT_BLOCK`` (see `_scale_groups`). Only for
-    replicated (``disable_tp``) layers: a checkpoint scale is expanded before
-    it is sliced, so it must hold the whole weight's rows."""
+    """The scale of a weight that accepts any checkpoint scale layout, stored
+    per ``_ANY_LAYOUT_BLOCK`` (see `_scale_groups`). Only for a replicated
+    (``disable_tp``) MergedColumnParallelLinear: a checkpoint scale is
+    expanded before it is sliced, so it must hold the whole shard's rows."""
 
     cols: int
-
-    def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
-        loaded_weight = _scale_groups(loaded_weight, self.data.shape[0], self.cols)
-        super().load_column_parallel_weight(loaded_weight)
-
-    def load_replicated_weight(self, loaded_weight: torch.Tensor):
-        loaded_weight = _scale_groups(loaded_weight, self.data.shape[0], self.cols)
-        self._assert_and_load(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
         rows = kwargs["shard_size"]  # weight rows: one scale row per row
@@ -287,9 +271,11 @@ class Fp8DequantLinearMethod(UnquantizedLinearMethod):
             self.weight_block_size,
             weight_loader,
         )
+        # never loaded: `dequantize` rejects FP8 rows whose scale is missing
+        scale.data.fill_(FP8_SCALE_SENTINEL)
         if self.any_scale_layout:
-            if layer.tp_size > 1:
-                raise ValueError("a scale in any layout needs a replicated layer")
+            # the sparse-attention indexer's fused wk_weights_proj
+            assert isinstance(layer, MergedColumnParallelLinear) and layer.tp_size == 1
             scale = Fp8DequantScaleParameter(
                 data=scale.data, input_dim=1, output_dim=0, weight_loader=weight_loader
             )

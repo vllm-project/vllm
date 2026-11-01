@@ -176,6 +176,17 @@ def test_weight_and_scale_in_separate_calls(model_config, scales_first):
     _assert_runtime(model, _expected(ckpt))
 
 
+def test_missing_scale_is_rejected(model_config):
+    """FP8 rows whose scale never arrived are not dequantized with whatever
+    the scale holds."""
+    ckpt = _checkpoint(17)
+    del ckpt["qkv_a.1.weight_scale_inv"]
+    model = _Model()
+    model.load_weights(ckpt.items())
+    with pytest.raises(ValueError, match="without their weight_scale_inv"):
+        process_weights_after_loading(model, model_config, _DEVICE)
+
+
 def test_bf16_checkpoint(model_config):
     """A BF16 checkpoint needs no scales: every parameter counts as loaded."""
     bf16 = _bf16(_checkpoint(3))

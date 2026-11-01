@@ -2149,7 +2149,7 @@ def test_glm5next_attn_loader_accepts_quark_weight_scale():
     assert name == "layers.0.self_attn.o_proj.weight_scale"
 
 
-def test_glm5next_nope_kv_a_padding_per_tensor():
+def test_glm5next_nope_kv_a_padding_block_scale():
     # NoPE checkpoints omit kv_a's RoPE rows: the weight gets zero rows and the
     # scale its extra blocks, each on its own (no weight/scale pairing).
     from transformers import Glm5NextTextConfig

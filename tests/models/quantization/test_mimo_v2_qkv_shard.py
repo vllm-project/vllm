@@ -14,6 +14,8 @@ that every rank gets exactly the weights it should own, for TP sizes below,
 equal to and above ``ckpt_tp`` (the last case replicating KV heads).
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 
@@ -28,6 +30,7 @@ from vllm.model_executor.models.mimo_v2 import (
     _fused_qkv_rank_rows,
     _fused_qkv_row_scales,
     _gather_rows,
+    _process_row_scales,
     _row_scales_to_blocks,
     _split_qkv,
 )
@@ -444,6 +447,67 @@ def test_wrong_chunk_count_is_detected():
     assert _relative_l2(_dequantize(*wrong), expected) > 5 * TOL
 
 
+def test_load_weights_pairs_split_fp8_qkv_proj_and_skips_absent_layers(monkeypatch):
+    """Through ``MiMoV2Model.load_weights``: a layer's fused fp8 ``qkv_proj``
+    weight and scale arriving in separate calls still load; the pair for a
+    layer the instance does not have (checkpoint deeper than
+    ``num_hidden_layers``) is skipped."""
+    from vllm.model_executor.models import mimo_v2
+
+    monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(mimo_v2, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp = GEOMETRIES["ga"]
+    rows_per_chunk = _chunk_rows(num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp)
+    truth = torch.randn(ckpt_tp * rows_per_chunk, COLS)
+    weight, scale = _quantize_chunks(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp
+    )
+
+    attn = torch.nn.Module()
+    attn.total_num_heads, attn.total_num_kv_heads = num_heads, num_kv_heads
+    attn.head_dim, attn.v_head_dim = head_dim, v_head_dim
+    attn.kv_chunk_rows = 0
+    attn.qkv_proj = torch.nn.Module()
+    attn.qkv_proj.weight_block_size = [BLOCK, BLOCK]
+    rows = weight.shape[0]
+    attn.qkv_proj.weight = torch.nn.Parameter(
+        torch.empty(rows, COLS, dtype=FP8_DTYPE), requires_grad=False
+    )
+    attn.qkv_proj.weight_scale_inv = torch.nn.Parameter(
+        torch.empty(rows, scale.shape[1]), requires_grad=False
+    )
+    layer = torch.nn.Module()
+    layer.self_attn = attn
+
+    model = mimo_v2.MiMoV2Model.__new__(mimo_v2.MiMoV2Model)
+    torch.nn.Module.__init__(model)
+    model.layers = torch.nn.ModuleList([layer])
+    model.config = SimpleNamespace(num_key_value_heads=ckpt_tp)
+    monkeypatch.setattr(model, "get_expert_mapping", lambda: [])
+
+    present, absent = "layers.0.self_attn.qkv_proj", "layers.7.self_attn.qkv_proj"
+    loaded = mimo_v2.MiMoV2Model.load_weights(
+        model,
+        [
+            (f"{present}.weight", weight),
+            (f"{absent}.weight", weight),
+            (f"{absent}.weight_scale_inv", scale),
+        ],
+    )
+    loaded |= mimo_v2.MiMoV2Model.load_weights(
+        model, [(f"{present}.weight_scale_inv", scale)]
+    )
+
+    assert loaded == {f"{present}.weight", f"{present}.weight_scale_inv"}
+    _process_row_scales(attn.qkv_proj)
+    expected = _owned_rows(
+        truth, num_heads, num_kv_heads, head_dim, v_head_dim, ckpt_tp, 0, 1
+    )
+    got = _dequantize(attn.qkv_proj.weight.data, attn.qkv_proj.weight_scale_inv.data)
+    assert _relative_l2(got, expected) <= TOL
+
+
 @pytest.mark.parametrize("tp_size", [4, 8])
 def test_requantized_rows_match_the_checkpoint_rows(tp_size):
     """Rows that do not form whole checkpoint blocks are requantized from the
@@ -519,6 +583,9 @@ class _FusedQkv(torch.nn.Module):
         self.geometry = (num_heads, num_kv_heads, head_dim, v_head_dim)
         self.tp_rank, self.tp_size, self.ckpt_tp = tp_rank, tp_size, ckpt_tp
         self.kv_chunk_rows = _fused_qkv_kv_chunk_rows(*self.geometry, tp_size, ckpt_tp)
+        # read by `_load_fused_fp8_qkv`, as on MiMoV2Attention
+        self.total_num_heads, self.total_num_kv_heads = num_heads, num_kv_heads
+        self.head_dim, self.v_head_dim = head_dim, v_head_dim
         config = Fp8Config(
             is_checkpoint_fp8_serialized=True,
             activation_scheme="dynamic",
@@ -555,14 +622,7 @@ class _FusedQkv(torch.nn.Module):
 
         for kind, tensor in weights:
             _load_fused_fp8_qkv(
-                self.qkv_proj,
-                kind,
-                tensor,
-                self.geometry,
-                self.kv_chunk_rows,
-                self.tp_rank,
-                self.tp_size,
-                self.ckpt_tp,
+                self, kind, tensor, self.tp_rank, self.tp_size, self.ckpt_tp
             )
 
 
@@ -606,8 +666,6 @@ def test_weight_and_scale_load_on_their_own(
 ):
     """The weight and its scale arrive in separate calls, in either order;
     the row scales become this rank's shard, as the paired sharding made it."""
-    from vllm.model_executor.models.mimo_v2 import _process_row_scales
-
     tp_rank = tp_size - 1
     model = _FusedQkv(geometry, tp_rank, tp_size)
     ckpt = _fused_qkv_checkpoint(geometry, 0)
