@@ -387,7 +387,7 @@ ENV HF_XET_HIGH_PERFORMANCE=1
 
 # The pin lives below the marker: a bump rebuilds csrc, not the runtime.
 FROM dev AS triton-kernels
-ARG ROCM_TRITON_KERNELS_COMMIT=669b31acc1dd1b3fd93286afd5db67f65d9f7557
+ARG ROCM_TRITON_KERNELS_COMMIT=3ef5021860f07f76820cce2e4c8e92d5e834bf39
 ADD https://codeload.github.com/ROCm/triton/tar.gz/${ROCM_TRITON_KERNELS_COMMIT} \
     /tmp/rocm-triton.tar.gz
 RUN mkdir -p /opt/rocm-triton-kernels \
