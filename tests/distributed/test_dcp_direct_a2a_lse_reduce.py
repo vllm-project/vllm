@@ -368,6 +368,7 @@ def test_mla_dcp_manager_selects_direct_backends(monkeypatch):
     )
     workspace = torch.empty(96, 8)
 
+    assert manager.v_up_proj_combine is None
     assert manager.query_gather == direct_query.gather
     manager.init_kv_gather(workspace, 64)
     gathered_kv, local_kv = torch.empty(4, 8), torch.empty(2, 8)
@@ -453,6 +454,12 @@ def test_mla_dcp_manager_selects_fallback_backends(monkeypatch):
         cp_group=group,
         is_lse_base_on_e=True,
     )
+    assert isinstance(manager.v_up_proj_combine, functools.partial)
+    assert manager.v_up_proj_combine.func is dcp_manager.dcp_a2a_v_up_proj_lse_reduce
+    assert manager.v_up_proj_combine.keywords == {
+        "cp_group": group,
+        "is_lse_base_on_e": True,
+    }
 
 
 @pytest.mark.parametrize(
@@ -500,6 +507,7 @@ def test_mla_dcp_manager_selects_pcp_combine(monkeypatch):
     assert isinstance(manager.combine, functools.partial)
     assert manager.combine.func is dcp_manager.cp_lse_ag_out_ar
     assert manager.query_gather is None
+    assert manager.v_up_proj_combine is None
 
 
 def test_dcp_chunk_workspace_alignment_covers_interleave():
