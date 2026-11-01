@@ -52,7 +52,13 @@ from vllm.inputs import (
 )
 from vllm.logger import init_logger
 from vllm.parser import Parser, ParserManager
-from vllm.renderers import BaseRenderer, ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    BaseRenderer,
+    ChatParams,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -60,6 +66,7 @@ from vllm.renderers.chat_utils import (
     has_non_text_content,
 )
 from vllm.renderers.inputs.preprocess import (
+    extract_prompt_components,
     parse_model_prompt,
     prompt_to_seq,
 )
@@ -165,8 +172,9 @@ class OnlineRenderer:
         exclude_tools_when_tool_choice_none: bool = False,
         tool_parser: str | None = None,
         reasoning_parser: str | None = None,
-        tool_strict_level: str = "auto",
+        tool_strict_level: str | None = None,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        reasoning_effort_map: dict[str, str] | None = None,
         log_error_stack: bool = False,
     ) -> None:
         self.model_config = model_config
@@ -193,6 +201,7 @@ class OnlineRenderer:
         self.default_chat_template_kwargs: dict[str, Any] = (
             default_chat_template_kwargs or {}
         )
+        self.reasoning_effort_map: dict[str, str] = reasoning_effort_map or {}
         self.trust_request_chat_template = trust_request_chat_template
         self.trust_request_mm_kwargs = trust_request_mm_kwargs
 
@@ -216,6 +225,7 @@ class OnlineRenderer:
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.reasoning_effort_map,
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
@@ -419,8 +429,9 @@ class OnlineRenderer:
                 build_harmony_preamble(
                     instructions=instructions,
                     tools=request.tools if with_custom_tools else None,
-                    reasoning_effort=(
-                        request.reasoning.effort if request.reasoning else None
+                    reasoning_effort=map_reasoning_effort(
+                        request.reasoning.effort if request.reasoning else None,
+                        self.reasoning_effort_map,
                     ),
                     with_custom_tools=with_custom_tools,
                     **descriptions,
@@ -561,7 +572,10 @@ class OnlineRenderer:
         # if the model supports it. TODO: Support browsing.
         assert not self.supports_browsing
         assert not self.supports_code_interpreter
-        if (reasoning_effort := request.reasoning_effort) == "none":
+        reasoning_effort = map_reasoning_effort(
+            request.reasoning_effort, self.reasoning_effort_map
+        )
+        if reasoning_effort == "none":
             raise VLLMValidationError(
                 f"Harmony does not support {reasoning_effort=}",
                 parameter="reasoning_effort",
@@ -782,8 +796,11 @@ class OnlineRenderer:
         )
 
         tok_params = request.build_tok_params(self.model_config)
+        build_kwargs: dict[str, Any] = {}
+        if isinstance(request, (ChatCompletionRequest, ResponsesRequest)):
+            build_kwargs["reasoning_effort_map"] = self.reasoning_effort_map
         chat_params = request.build_chat_params(
-            default_template, default_template_content_format
+            default_template, default_template_content_format, **build_kwargs
         ).with_defaults(
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
@@ -844,13 +861,17 @@ class OnlineRenderer:
                         f"but got {type(request).__name__}"
                     )
                     raise NotImplementedError(msg)
-                request = parser(
+                request_parser = parser(
                     tokenizer,
                     request.tools,
                     model_config=self.model_config,
                     chat_template_kwargs=chat_params.chat_template_kwargs,
-                ).adjust_request(
-                    request=request,
                 )
+                prompt_token_ids = extract_prompt_components(
+                    self.model_config, engine_input
+                ).token_ids
+                if prompt_token_ids is not None:
+                    request_parser.set_prompt_token_ids(prompt_token_ids)
+                request = request_parser.adjust_request(request=request)
 
         return conversation, [engine_input]

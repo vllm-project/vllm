@@ -124,6 +124,15 @@ def test_non_pure_decode_batches_use_the_generic_path(
     assert _run(layer, _make_metadata(**meta_kwargs)) == "generic"
 
 
+@pytest.mark.parametrize("gqa_interleaved_layout", [True, False])
+def test_ds_conv_state_uses_the_generic_path(gqa_interleaved_layout: bool) -> None:
+    layer = _make_layer(gqa_interleaved_layout)
+    with patch.object(
+        qwen_gdn_linear_attn, "is_conv_state_dim_first", return_value=True
+    ):
+        assert _run(layer, _make_metadata()) == "generic"
+
+
 def _prefill_reference(q, k, v, g, beta, initial_state, lengths):
     """Independent token-wise recurrence in the layer's [value, key] layout."""
     q, k, v, g, beta, initial_state = (
@@ -178,7 +187,9 @@ def test_rocm_prefill_numerics_and_output_layout(state_dtype, correlated):
             model="Qwen/Qwen3.5-0.8B",
             revision="2fc06364715b967f1860aea9cf38778875588b17",
             max_model_len=1024,
-        )
+        ),
+        # auto picks AITER FlyDSL on gfx942/gfx950; this pins the Triton path.
+        additional_config={"gdn_prefill_backend": "triton"},
     )
     with set_current_vllm_config(config):
         prefill = ChunkGatedDeltaRule()

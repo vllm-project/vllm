@@ -116,19 +116,26 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        self._quantize_weights(layer)
+        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+        self._quantize_weights(layer, w13_weight, w2_weight)
         self._setup_kernel(layer)
+        self.release_requantization_source_weights(layer)
 
         layer._already_called_process_weights_after_loading = True
 
-    def _quantize_weights(self, layer: Module) -> None:
+    def _quantize_weights(
+        self,
+        layer: Module,
+        w13_weight: torch.Tensor | None = None,
+        w2_weight: torch.Tensor | None = None,
+    ) -> None:
+        w13_weight = layer.w13_weight if w13_weight is None else w13_weight
+        w2_weight = layer.w2_weight if w2_weight is None else w2_weight
         moe_tp_size = self.moe.tp_size
         w13, w13_scale, w13_scale_2 = _quantize_moe_weight_to_nvfp4(
-            layer.w13_weight, moe_tp_size
+            w13_weight, moe_tp_size
         )
-        w2, w2_scale, w2_scale_2 = _quantize_moe_weight_to_nvfp4(
-            layer.w2_weight, moe_tp_size
-        )
+        w2, w2_scale, w2_scale_2 = _quantize_moe_weight_to_nvfp4(w2_weight, moe_tp_size)
 
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)

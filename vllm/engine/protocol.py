@@ -19,7 +19,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import CheckpointState, EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.kv_hints import KvHintsEnvelope
@@ -36,7 +36,7 @@ class StreamingInput:
     where inputs are provided via an async generator.
     """
 
-    prompt: EngineInput
+    prompt: PromptType | EngineInput
     sampling_params: SamplingParams | None = None
 
 
@@ -59,6 +59,10 @@ class EngineClient(ABC):
     @property
     @abstractmethod
     def errored(self) -> bool: ...
+
+    @property
+    def should_keep_api_server_alive(self) -> bool:
+        return False
 
     @property
     @abstractmethod
@@ -168,6 +172,7 @@ class EngineClient(ABC):
         *,
         delay_iterations: int | None = None,
         max_iterations: int | None = None,
+        profiler_kwargs: dict[str, Any] | None = None,
     ) -> None:
         """Start profiling with optional per-session overrides."""
         ...
@@ -215,6 +220,22 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def checkpoint_prepare(self, mode: "PauseMode" = "wait") -> str | None:
+        """Drain with `mode`, then release what a checkpoint must not contain.
+        Returns why the engine cannot prepare, with nothing changed, or None."""
+        ...
+
+    @abstractmethod
+    async def checkpoint_restore(self) -> None:
+        """Bring back what preparing released, in the restored process or in place."""
+        ...
+
+    @abstractmethod
+    async def checkpoint_state(self) -> tuple[CheckpointState, str | None]:
+        """Return the checkpoint lifecycle state and the error that failed it."""
+        ...
+
+    @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
         ...
@@ -224,7 +245,6 @@ class EngineClient(ABC):
         self,
         *,
         mode: "PauseMode" = "abort",
-        wait_for_inflight_requests: bool = False,
         clear_cache: bool = True,
     ) -> None:
         """Pause new generation/encoding requests.
@@ -236,7 +256,6 @@ class EngineClient(ABC):
                 - ``"wait"``: Wait for in-flight requests to complete.
                 - ``"keep"``: Freeze requests in queue; they resume on
                   :meth:`resume_generation`.
-            wait_for_inflight_requests: DEPRECATED. Use ``mode="wait"`` instead.
             clear_cache: DEPRECATED. Whether to clear KV and prefix caches
                 after draining.
 
@@ -263,6 +282,12 @@ class EngineClient(ABC):
     ) -> None:
         """Scale the engine."""
         raise NotImplementedError
+
+    async def get_external_elastic_ep_status(
+        self,
+    ) -> dict[str, str | int | None] | None:
+        """Return shared external Elastic EP operation status, if enabled."""
+        return None
 
     async def collective_rpc(
         self,
@@ -296,6 +321,10 @@ class EngineClient(ABC):
         self, init_request: WeightTransferInitRequest
     ) -> None:
         """Initialize weight transfer for RL training."""
+        raise NotImplementedError
+
+    async def shutdown_weight_transfer_engine(self) -> None:
+        """Release the trainer connection without shutting down inference."""
         raise NotImplementedError
 
     async def start_weight_update(self) -> None:
