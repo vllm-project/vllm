@@ -93,6 +93,22 @@ class QuantKeyMatch(NamedTuple):
         return self.matches
 
 
+def _exclude_module_name(entry: str) -> str:
+    """Map an ``exclude`` entry naming a parameter to its module.
+
+    Quark exports may list excluded parameters (e.g.
+    ``mtp.layers.0.self_attn.q_proj.weight``) next to excluded modules (e.g.
+    ``lm_head``), but layers are matched by module name. ``re:`` patterns are
+    kept as they are.
+    """
+    if entry.startswith("re:"):
+        return entry
+    for suffix in (".weight", ".bias"):
+        if entry.endswith(suffix):
+            return entry.removesuffix(suffix)
+    return entry
+
+
 class QuarkConfig(QuantizationConfig):
     def __init__(
         self,
@@ -104,6 +120,12 @@ class QuarkConfig(QuantizationConfig):
         super().__init__()
         if kv_cache_group is None:
             kv_cache_group = []
+        exclude = quant_config.get("exclude")
+        if isinstance(exclude, list):
+            quant_config = {
+                **quant_config,
+                "exclude": [_exclude_module_name(entry) for entry in exclude],
+            }
         self.quant_config = quant_config
         # Copy the class-level default (which a subclass may override, e.g. the
         # DeepSeek-V4 Quark config) so per-instance edits don't mutate the class.
