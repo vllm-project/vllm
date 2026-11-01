@@ -93,6 +93,7 @@ def test_replay_kv_publishes_all_pcp_owners(pcp_size, monkeypatch):
     rotary = SimpleNamespace(cos_sin_cache=torch.empty(0))
     layer = SimpleNamespace(
         use_pcp=pcp_size > 1,
+        replay_wkv=None,
         _run_parallel_input_projections=lambda hidden: (hidden, None, None),
         _split_qkv_and_norm=lambda projected: (None, None, kv),
         swa_cache_layer=SimpleNamespace(

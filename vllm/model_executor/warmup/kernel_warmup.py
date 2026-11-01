@@ -222,6 +222,16 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
         module.autotune_kda_qkvg(model)
 
 
+def _autotune_deepseek_v41_replay_wkv(runner: "GPUModelRunner") -> None:
+    if "vllm.models.deepseek_v41.nvidia.model" not in sys.modules:
+        return
+    from vllm.models.deepseek_v41.nvidia.warmup import autotune_replay_wkv
+
+    autotune_replay_wkv(
+        runner.get_model(), runner.scheduler_config.max_num_batched_tokens
+    )
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
 
@@ -559,6 +569,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 autotune_hisparse_flashinfer_attention(runner)
             if not cache_hit:
                 _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
+            _autotune_deepseek_v41_replay_wkv(runner)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:

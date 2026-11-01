@@ -40,6 +40,9 @@ steps:
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
+  - vllm/models/deepseek_v41/attention.py
+  - vllm/models/common/ops/fused_qk_rmsnorm.py
+  - vllm/models/deepseek_v41/common/ops/query_quant.py
   - vllm/kernels/triton/
   - tests/kernels/test_concat_mla_q.py
   - tests/kernels/test_fused_qk_norm_rope_gate.py
@@ -64,6 +67,8 @@ steps:
       source_file_dependencies:
       - csrc/
       - tests/kernels/core
+      - vllm/models/common/ops/fused_qk_rmsnorm.py
+      - vllm/models/deepseek_v41/common/ops/query_quant.py
       - vllm/kernels/triton/
       - tests/kernels/test_top_k_per_row.py
       - tests/kernels/test_concat_mla_q.py
@@ -180,8 +185,15 @@ steps:
   - vllm/model_executor/kernels/attention/dsa/
   - vllm/model_executor/layers/sparse_mqa_indexer.py
   - tests/model_executor/layers/test_mla_short_prefill_indexer.py
+  - tests/kernels/core/test_fused_q_kv_rmsnorm.py
+  - vllm/models/common/ops/fused_qk_rmsnorm.py
+  - vllm/models/deepseek_v41/common/ops/query_quant.py
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+    - >-
+      pytest -v -s
+      kernels/core/test_fused_q_kv_rmsnorm.py::test_fused_q_kv_rmsnorm_quant_matches_separate
+      kernels/core/test_fused_q_kv_rmsnorm.py::test_quant_kv_only_norm_matches_fused_with_offset_input
     - pytest -v -s kernels/moe/test_deep_gemm_mega_moe.py
     - pytest -v -s models/test_deepseek_v4_mega_moe.py
     # DeepSeek V4.1 sparse MQA logits (MXFP4 and FP8 indexer cache); SM100 only.

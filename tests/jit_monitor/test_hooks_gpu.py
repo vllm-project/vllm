@@ -6,6 +6,7 @@ from unittest import mock
 
 import pytest
 
+from vllm.platforms import current_platform
 from vllm.utils import jit_monitor
 
 try:
@@ -83,3 +84,31 @@ def test_verbose_warning_on_each_new_pointer_alignment():
         _run_add_kernel(1024, offset=1)
     assert w.called
     w_once.assert_not_called()
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA 512-column path")
+def test_kv_only_512_warmup_covers_runtime_strides_and_offsets():
+    """Compile-only warmup must cover runtime tiles and input alignment classes."""
+    from vllm.models.common.ops.fused_qk_rmsnorm import (
+        _kv_rmsnorm_512,
+        fused_kv_rmsnorm,
+    )
+
+    dtype, eps = torch.bfloat16, 1e-6
+    for key in _kv_rmsnorm_512.get_warmup_keys(dtype=dtype, eps=eps):
+        _kv_rmsnorm_512.compile(key)
+    jit_monitor.activate(mode="error", verbose=True)
+    weight = torch.randn(512, device="cuda", dtype=dtype)
+    for n in (1, 3, 4, 5, 128, 129, 2048):
+        for stride in (1, 512, 1792, 1793):
+            storage = torch.randn(n * stride + 513, device="cuda", dtype=dtype)
+            for offset in (0, 1):
+                kv = storage.as_strided((n, 512), (stride, 1), offset)
+                actual = fused_kv_rmsnorm(kv, weight, eps, q_size=1280)
+                x = kv.float()
+                expected = (
+                    x
+                    * torch.rsqrt(x.square().mean(-1, keepdim=True) + eps)
+                    * weight.float()
+                ).to(dtype)
+                torch.testing.assert_close(actual, expected, rtol=1e-2, atol=1e-3)

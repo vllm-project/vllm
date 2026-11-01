@@ -17,6 +17,7 @@ steps:
   - vllm/platforms/
   - vllm/sequence.py
   - vllm/triton_utils/
+  - vllm/models/common/ops/fused_qk_rmsnorm.py
   - vllm/utils/
   - tests/engine
   - tests/test_sequence

@@ -42,8 +42,10 @@ from vllm.model_executor.layers.fused_moe.moe_output import (
 )
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8 import Fp8Config
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -84,7 +86,10 @@ from vllm.models.deepseek_v4.nvidia.model import (
     prepare_mega_gate_routing_metadata,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
-from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
+from vllm.models.deepseek_v41.decoder_replay_layers import (
+    DecoderReplayLayers,
+    load_replay_wkv_weight,
+)
 from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
     DeepseekV4MegaAttnAttention,
 )
@@ -872,6 +877,33 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             assert self.layers[cut].attn.compress_ratio <= 1
             # The last KV source writes every row's KV, then replays.
             self.decoder_replay_start = cut
+            # Per-tensor quantizers can jointly rescale Q and KV. Keep their
+            # fused path, and LoRA's adapted projection, until supported here.
+            if vllm_config.lora_config is None and (
+                self.quant_config is None
+                or (
+                    isinstance(self.quant_config, Fp8Config)
+                    and self.quant_config.weight_block_size is not None
+                )
+            ):
+                attn = self.layers[cut].attn
+                attn.replay_wkv = MergedColumnParallelLinear(
+                    config.hidden_size,
+                    [config.head_dim],
+                    bias=False,
+                    quant_config=self.quant_config,
+                    # Match the fused layer's quantization/ignore rules.
+                    prefix=f"{attn.prefix}.fused_wqa_wkv",
+                    disable_tp=True,
+                )
+                if config.head_dim == 512 and current_platform.is_cuda():
+                    from vllm.models.common.ops.fused_qk_rmsnorm import (
+                        _kv_rmsnorm_512,
+                    )
+
+                    _kv_rmsnorm_512.register_warmup(
+                        dtype=attn.kv_norm.weight.dtype, eps=attn.eps
+                    )
             # The attention metadata keys the replay layers read.
             metadata_prefixes = set()
             for layer in islice(self.layers, cut, self.end_layer):
@@ -1360,6 +1392,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 # Vision weights are loaded by the outer multimodal wrapper.
                 logger.warning_once("Skipping non-text weight: %s", name)
                 continue
+            replay_name = load_replay_wkv_weight(name, loaded_weight, params_dict)
+            if replay_name is not None:
+                loaded_params.add(replay_name)
             if ".shared_experts." in name:
                 if is_pp_missing_parameter(name, self):
                     continue

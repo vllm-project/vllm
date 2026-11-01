@@ -26,7 +26,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
 from vllm.model_executor.layers.sparse_mqa_indexer import SparseMQAIndexer
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
-from vllm.models.common.ops import fused_q_kv_rmsnorm
+from vllm.models.common.ops import fused_kv_rmsnorm, fused_q_kv_rmsnorm
 from vllm.models.common.ops.sequence_parallel import (
     sp_all_gather,
     sp_reduce_scatter,
@@ -376,6 +376,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             prefix=f"{prefix}.fused_wqa_wkv",
             disable_tp=True,  # fused ReplicatedLinear
         )
+        self.replay_wkv: MergedColumnParallelLinear | None = None
         self.q_norm = RMSNorm(self.q_lora_rank, self.eps)
         self.wq_b = ColumnParallelLinear(
             self.q_lora_rank,
@@ -708,12 +709,25 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         """Write only the KV ``forward`` writes (SWA KV, compressed KV, index K),
         skipping wq_b, the indexer's top-k and attention."""
         attn_metadata = get_forward_context().attn_metadata
-        qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
-        _, _, kv = self._split_qkv_and_norm(qr_kv)
+        if self.replay_wkv is None:
+            qr_kv, kv_score, _ = self._run_parallel_input_projections(hidden_states)
+            _, _, kv = self._split_qkv_and_norm(qr_kv)
+        else:
+            kv, kv_score, _ = self._run_parallel_projections(
+                hidden_states, kv_only=True
+            )
+            norm_kv = fused_kv_rmsnorm
+            if self.q_lora_rank % 32 == 0 and self._can_fuse_query_quant:
+                from vllm.models.deepseek_v41.common.ops.query_quant import (
+                    fused_kv_rmsnorm as norm_kv,
+                )
+
+            kv = norm_kv(
+                kv, self.kv_norm.weight.data, self.eps, q_size=self.q_lora_rank
+            )
         cache_positions = positions
         if isinstance(attn_metadata, dict):
-            # The KV half of _fused_qnorm_rope_kv_insert, bit for bit, without
-            # the unused query; same as dspark's _insert_context_kv.
+            # Use the same KV RoPE/cache insertion as full attention and DSpark.
             cache = self.swa_cache_layer.kv_cache
             swa_metadata = cast(
                 "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
@@ -991,12 +1005,26 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
+        return self._run_parallel_projections(hidden_states)
+
+    def _replay_wkv_gemm(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        assert self.replay_wkv is not None
+        num_tokens = hidden_states.shape[0]
+        if self.shard_fused_wqa_wkv and num_tokens >= _SHARD_FUSED_WQA_WKV_MIN_TOKENS:
+            kv, _ = self.replay_wkv(sp_shard(hidden_states))
+            return sp_all_gather(kv)[:num_tokens]
+        kv, _ = self.replay_wkv(hidden_states)
+        return kv
+
+    def _run_parallel_projections(
+        self, hidden_states: torch.Tensor, *, kv_only: bool = False
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         aux_streams = self.aux_stream_list
         if aux_streams is not None:
             aux_streams = aux_streams[:2]
 
-        # fused_wqa_wkv (heaviest) on default; the two lighter input GEMMs on
-        # aux streams 0/1 when their owning module exists. ln_events[0] is the
+        # Q+KV (or replay KV only) on default; the lighter input GEMMs on
+        # aux streams 0/1 when needed. ln_events[0] is the
         # fan-out start event; ln_events[1..2] are per-aux done events. The
         # v4.1 indexer derives K from the kv-source compressor's latent, so
         # unlike v4.0 there is no indexer K GEMM over hidden_states here.
@@ -1015,7 +1043,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
             aux_fns[0] = compressor_kv_score
 
-        if self.indexer is not None:
+        if self.indexer is not None and not kv_only:
             indexer = self.indexer
 
             def indexer_weights_proj() -> torch.Tensor:
@@ -1026,7 +1054,11 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             aux_fns[1] = indexer_weights_proj
 
         qr_kv, (kv_score, indexer_weights) = execute_in_parallel(
-            lambda: self._fused_wqa_wkv_gemm(hidden_states),
+            lambda: (
+                self._replay_wkv_gemm(hidden_states)
+                if kv_only
+                else self._fused_wqa_wkv_gemm(hidden_states)
+            ),
             aux_fns,
             self.ln_events[0],
             self.ln_events[1:3],
