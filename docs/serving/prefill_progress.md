@@ -42,6 +42,17 @@ Pending external KV remains charged as work until transfer completion. Cache
 credit is updated after admission, transfer completion and invalidation;
 historical first-prefill statistics do not override a recomputation cycle.
 
+A request may report `QUEUED` before its first cache lookup is complete. In
+that case `cache_accounting_final` is false and a zero cached-token count does
+not mean the prefix will miss: unconfirmed cache is still charged as work.
+Once the request is admitted and usable cache is accounted for, a later
+snapshot includes the confirmed credit. A consumer may retain its own cache
+estimate while handling the initial unresolved `QUEUED` state, but that is a
+routing heuristic: cache can be evicted between the estimate and admission,
+so it can underestimate the work. The consumer must still track sequence and
+freshness, and account for later snapshots that report preemption,
+invalidation, or failed KV transfers; they can legitimately increase work.
+
 All requests processed in one scheduler step share the same sampling timestamp.
 Their outputs use the existing `EngineCoreOutputs` batch on the engine-to-frontend
 transport. The gRPC API still uses one stream per request; it does not combine
