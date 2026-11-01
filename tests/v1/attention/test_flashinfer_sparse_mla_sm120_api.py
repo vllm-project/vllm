@@ -66,7 +66,7 @@ def test_v32_glm_sm120_backend_accepts_glm_block_size(
 
 def test_sm120_dsv4_capability_checks_exact_dispatch_shape(monkeypatch) -> None:
     fake_module = SimpleNamespace(
-        _DECODE_DSV4_DISPATCH=frozenset({(32, 128), (32, 192)})
+        _DECODE_DSV4_DISPATCH=frozenset({(32, 128), (32, 192), (32, 256)})
     )
     monkeypatch.setattr(fi_utils, "has_flashinfer_sparse_mla_sm120", lambda: True)
     monkeypatch.setattr(fi_utils, "_get_submodule", lambda _name: fake_module)
@@ -74,8 +74,8 @@ def test_sm120_dsv4_capability_checks_exact_dispatch_shape(monkeypatch) -> None:
 
     assert fi_utils.has_flashinfer_sparse_mla_sm120_config(32, 128)
     assert fi_utils.has_flashinfer_sparse_mla_sm120_config(32, 192)
-    assert not fi_utils.has_flashinfer_sparse_mla_sm120_config(32, 256)
-    assert not fi_utils.has_flashinfer_sparse_mla_sm120_config(16, 192)
+    assert fi_utils.has_flashinfer_sparse_mla_sm120_config(32, 256)
+    assert not fi_utils.has_flashinfer_sparse_mla_sm120_config(16, 256)
 
     fi_utils.has_flashinfer_sparse_mla_sm120_config.cache_clear()
 
@@ -85,10 +85,20 @@ def test_sm120_dsv4_required_topk_tracks_dspark_width() -> None:
         attention_config=SimpleNamespace(use_non_causal=False),
         speculative_config=SimpleNamespace(num_speculative_tokens=5),
     )
+    non_causal_no_spec = SimpleNamespace(
+        attention_config=SimpleNamespace(use_non_causal=True),
+        speculative_config=None,
+    )
     dspark = SimpleNamespace(
         attention_config=SimpleNamespace(use_non_causal=True),
         speculative_config=SimpleNamespace(num_speculative_tokens=5),
     )
+    dspark_wide = SimpleNamespace(
+        attention_config=SimpleNamespace(use_non_causal=True),
+        speculative_config=SimpleNamespace(num_speculative_tokens=65),
+    )
 
     assert _required_sm120_sparse_topk(causal, 128) == 128
+    assert _required_sm120_sparse_topk(non_causal_no_spec, 128) == 128
     assert _required_sm120_sparse_topk(dspark, 128) == 192
+    assert _required_sm120_sparse_topk(dspark_wide, 128) == 256
