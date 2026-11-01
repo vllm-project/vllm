@@ -309,15 +309,19 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
             )
             if ple_dim is not None and ple_dim > 0:
                 embed = self.language_model.model.embed_tokens
-                self.per_layer_embeddings = torch.zeros(
-                    vllm_config.scheduler_config.max_num_batched_tokens,
-                    config.text_config.num_hidden_layers,
-                    ple_dim,
-                    device=next(embed.parameters()).device,
-                    dtype=vllm_config.model_config.dtype,
+                self.register_buffer(
+                    "per_layer_embeddings",
+                    torch.zeros(
+                        vllm_config.scheduler_config.max_num_batched_tokens,
+                        config.text_config.num_hidden_layers,
+                        ple_dim,
+                        device=next(embed.parameters()).device,
+                        dtype=vllm_config.model_config.dtype,
+                    ),
+                    persistent=False,
                 )
             else:
-                self.per_layer_embeddings = None
+                self.register_buffer("per_layer_embeddings", None, persistent=False)
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
