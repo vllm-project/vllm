@@ -301,6 +301,17 @@ class KVCacheSpec:
         """
         return cdiv(max_len, self.block_size)
 
+    def max_num_blocks(self, vllm_config: VllmConfig) -> int | None:
+        """An upper bound on the blocks in the KV cache pool, including the
+        null block, or None (the default) for no bound.
+
+        A spec that returns a bound opts in to three planning rules: the pool
+        holds at most that many blocks unless `num_gpu_blocks_override` is set,
+        an override larger than the profiled memory is refused, and profiling
+        allocates exactly that many blocks, whatever the override.
+        """
+        return None
+
     def copy_with_new_block_size(self, block_size: int) -> Self:
         """Create a new KVCacheSpec from self but replacing the block size."""
         return replace(self, block_size=block_size)
@@ -1346,6 +1357,14 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
         )
         return next(iter(widths))
 
+    def max_num_blocks(self, vllm_config: VllmConfig) -> int | None:
+        bounds = [
+            bound
+            for spec in self.kv_cache_specs.values()
+            if (bound := spec.max_num_blocks(vllm_config)) is not None
+        ]
+        return min(bounds, default=None)
+
     @classmethod
     def is_uniform_type(cls, kv_cache_specs: dict[str, KVCacheSpec]) -> bool:
         """Whether all layers have the same type of KV cache spec.
@@ -1693,6 +1712,18 @@ class PersistentStateSpec(KVCacheSpec):
         # A persistent page is one resident slot, never a token-history bound.
         del vllm_config
         return self.page_size_bytes
+
+    def max_num_blocks(self, vllm_config: Any) -> int | None:
+        # One slot per running request, plus the null block.
+        return vllm_config.scheduler_config.max_num_seqs + 1
+
+    @classmethod
+    def merge(cls, specs: list[PersistentStateSpec]) -> PersistentStateSpec:
+        # The spec is immutable; sharing it keeps the initializer objects, whose
+        # copies (e.g. of a functools.partial) would not compare equal.
+        if any(spec != specs[0] for spec in specs[1:]):
+            raise AssertionError("All persistent-state layers must be the same.")
+        return specs[0]
 
     def copy_with_new_block_size(self, block_size: int) -> PersistentStateSpec:
         if block_size != 1:

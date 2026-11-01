@@ -5,7 +5,6 @@ import itertools
 from collections import defaultdict
 from collections.abc import Callable, Hashable, Iterable, Sequence
 from contextlib import ExitStack
-from copy import copy
 from dataclasses import dataclass, replace
 from itertools import groupby, product
 from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
@@ -1049,45 +1048,39 @@ def _extrapolate_full_graph_memory(mem_samples: list[int], total_graphs: int) ->
 def _init_minimal_kv_cache_for_profiling(runner: "GPUModelRunner") -> None:
     """Allocate the smallest KV cache that still lets every graph be captured."""
     from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-    from vllm.v1.core.kv_cache_planning import get_kv_cache_groups_from_builder
+    from vllm.v1.core.kv_cache_planning import (
+        get_kv_cache_groups_from_builder,
+        get_max_num_blocks,
+    )
 
     kv_cache_spec = runner.get_kv_cache_spec()
-    from vllm.v1.kv_cache_interface import PersistentStateSpec
-
-    if any(isinstance(spec, PersistentStateSpec) for spec in kv_cache_spec.values()):
-        from vllm.v1.core.kv_cache_planning import (
-            get_global_kv_cache_groups,
-            get_kv_cache_configs,
-        )
-
-        budget = sum(spec.page_size_bytes for spec in kv_cache_spec.values()) * (
-            runner.max_num_reqs + 1
-        )
-        profiling_config = copy(runner.vllm_config)
-        profiling_config.cache_config = copy(runner.cache_config)
-        profiling_config.cache_config.num_gpu_blocks_override = None
-        minimal_config = get_kv_cache_configs(
-            profiling_config,
-            [kv_cache_spec],
-            [budget],
-            get_global_kv_cache_groups(profiling_config, [kv_cache_spec]),
-        )[0]
-        runner.initialize_kv_cache(minimal_config, is_profiling=True)
-        runner.cache_config.num_gpu_blocks = minimal_config.num_blocks
-        return
-
     builder = get_kv_cache_config_builder(runner.vllm_config)
     kv_cache_groups = get_kv_cache_groups_from_builder(
         builder, runner.vllm_config, kv_cache_spec
     )
-    # At least one block per sequence is required to capture the graphs.
-    min_blocks = (
-        min(runner.max_num_reqs, runner.compilation_config.max_cudagraph_capture_size)
-        or 1
-    )
-    minimal_config = builder.get_kv_cache_config_from_groups(
-        runner.vllm_config, kv_cache_groups, num_blocks=min_blocks
-    )
+    cache_config = runner.vllm_config.cache_config
+    override = cache_config.num_gpu_blocks_override
+    max_num_blocks = get_max_num_blocks(runner.vllm_config, kv_cache_groups)
+    if max_num_blocks is not None:
+        # A bounded pool (persistent state) profiles at its runtime bound,
+        # whatever block count the override later sets.
+        min_blocks = max_num_blocks
+        cache_config.num_gpu_blocks_override = None
+    else:
+        # At least one block per sequence is required to capture the graphs.
+        min_blocks = (
+            min(
+                runner.max_num_reqs,
+                runner.compilation_config.max_cudagraph_capture_size,
+            )
+            or 1
+        )
+    try:
+        minimal_config = builder.get_kv_cache_config_from_groups(
+            runner.vllm_config, kv_cache_groups, num_blocks=min_blocks
+        )
+    finally:
+        cache_config.num_gpu_blocks_override = override
 
     runner.initialize_kv_cache(minimal_config, is_profiling=True)
     runner.cache_config.num_gpu_blocks = minimal_config.num_blocks
