@@ -19,6 +19,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import triton
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -26,7 +27,10 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
-from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.attention.ops.triton_decode_attention import (
+    GROUPED_BLOCK_H,
+    decode_attention_fwd,
+)
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.worker.workspace import (
     current_workspace_manager,
@@ -48,6 +52,51 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
     ideal_splits = triton.next_power_of_2(max(1, max_seq_len // _MIN_WORK_PER_SPLIT))
     max_splits = sm_count * _SPLIT_OCCUPANCY_MULTIPLIER
     return min(ideal_splits, max_splits)
+
+
+# Shared memory of one stage-1 program on the 512 + 64 latent tile (62 KiB with
+# bf16 KV, rounded up); GPUs below twice this per block fit one per SM.
+_STAGE1_SHARED_MEMORY_BYTES = 64 * 1024
+# Several head tiles with more programs per split than this run faster in
+# several waves at long context.
+_ONE_WAVE_MAX_PROGRAMS_PER_SPLIT = 4
+
+
+def _decode_programs_per_split(num_rows: int, num_heads: int) -> int:
+    return max(1, num_rows) * cdiv(num_heads, GROUPED_BLOCK_H)
+
+
+def _supports_one_wave_cap(
+    kv_lora_rank: int, qk_rope_head_dim: int, shared_memory_per_block: int
+) -> bool:
+    return (
+        kv_lora_rank == 512
+        and qk_rope_head_dim == 64
+        and shared_memory_per_block < 2 * _STAGE1_SHARED_MEMORY_BYTES
+    )
+
+
+def _num_decode_kv_splits(
+    max_seq_len: int,
+    num_reqs: int,
+    num_rows: int,
+    num_heads: int,
+    sm_count: int,
+    one_wave_sm_count: int | None,
+) -> int:
+    num_kv_splits = _compute_num_kv_splits(max_seq_len, sm_count)
+    # A batch shares one split count, so a one-wave count sized for its shape
+    # would starve its longest request; only a lone request is capped.
+    if one_wave_sm_count is None or num_reqs != 1:
+        return num_kv_splits
+    programs_per_split = _decode_programs_per_split(num_rows, num_heads)
+    if (
+        cdiv(num_heads, GROUPED_BLOCK_H) > 1
+        and programs_per_split > _ONE_WAVE_MAX_PROGRAMS_PER_SPLIT
+    ):
+        return num_kv_splits
+    one_wave_splits = max(1, one_wave_sm_count // programs_per_split)
+    return min(num_kv_splits, 1 << (one_wave_splits.bit_length() - 1))
 
 
 def _reserve_attn_logits_workspace(
@@ -149,6 +198,7 @@ class TritonMLABackend(MLACommonBackend):
 
 
 class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    _one_wave_sm_count: int | None = None
     can_return_lse_for_decode: bool = True
     supports_dcp: bool = True
 
@@ -229,6 +279,17 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self.supports_quant_query_input = False
 
         self._sm_count = current_platform.num_compute_units()
+        # The stage-1 shared memory estimate holds for 16-bit KV only.
+        if current_platform.is_cuda() and not is_quantized_kv_cache(
+            self.kv_cache_dtype
+        ):
+            props = torch.cuda.get_device_properties()
+            if _supports_one_wave_cap(
+                self.kv_lora_rank,
+                self.qk_rope_head_dim,
+                props.shared_memory_per_block_optin,
+            ):
+                self._one_wave_sm_count = props.multi_processor_count
         self._vllm_config = get_current_vllm_config()
 
     def reserve_workspace(self) -> None:
@@ -268,8 +329,13 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if envs.VLLM_BATCH_INVARIANT:
             num_kv_splits = 1
         else:
-            num_kv_splits = _compute_num_kv_splits(
-                attn_metadata.max_seq_len, self._sm_count
+            num_kv_splits = _num_decode_kv_splits(
+                attn_metadata.max_seq_len,
+                attn_metadata.decode.seq_lens.shape[0],
+                B,
+                q_num_heads,
+                self._sm_count,
+                self._one_wave_sm_count,
             )
 
         # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
