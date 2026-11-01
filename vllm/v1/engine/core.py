@@ -2418,16 +2418,6 @@ class EngineCoreProc(EngineCore):
         eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
         self.output_queue.put_nowait((client_index, eco))
 
-    def _send_abort_outputs_to_client(
-        self, req_ids: list[str], client_index: int
-    ) -> None:
-        self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ABORT)
-
-    def _send_error_outputs_to_client(
-        self, req_ids: list[str], client_index: int
-    ) -> None:
-        self._send_finish_outputs_to_client(req_ids, client_index, FinishReason.ERROR)
-
     def _send_rejected_add_output(
         self,
         request: EngineCoreRequest | Request,
@@ -2452,7 +2442,7 @@ class EngineCoreProc(EngineCore):
         )
         eco = EngineCoreOutputs(
             engine_index=engine_index,
-            finished_requests=[request.request_id] if context is None else None,
+            finished_requests={request.request_id} if context is None else None,
             outputs=[output],
         )
         self.output_queue.put_nowait((request.client_index, eco))
@@ -2478,7 +2468,7 @@ class EngineCoreProc(EngineCore):
                     for request in requests.values()
                 ]
                 eco = EngineCoreOutputs(
-                    finished_requests=list(requests), outputs=outputs
+                    finished_requests=set(requests), outputs=outputs
                 )
                 self.output_queue.put_nowait((client_index, eco))
 

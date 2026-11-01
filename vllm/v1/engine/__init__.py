@@ -259,11 +259,12 @@ class EngineCoreRequest(
 
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
-    stream_admission: StreamAdmissionContext | None = None
 
     # Prompt block hashes computed by the frontend with the engine's
     # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
     block_hashes: list[bytes] | None = None
+
+    stream_admission: StreamAdmissionContext | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:

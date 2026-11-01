@@ -21,9 +21,11 @@ A model declares its state by constructing a
 - The KV cache layout must be state-only: exactly one cache group containing one
   persistent-state layer. Mixing persistent state with attention or Mamba cache
   groups is refused at startup.
-- The KV cache memory budget is divided into state slots of `page_size_bytes`
-  each. Each request holds exactly one slot from first schedule until it is
-  released; slots are never shared, prefix-cached, or swapped.
+- The KV cache memory budget is divided into state pages of `page_size_bytes`
+  each, at most `max_num_seqs + 1`; one page is the reserved null block and the
+  rest are slots. `--num-gpu-blocks-override` sets the page count directly,
+  within the budget. Each request holds exactly one slot from first schedule
+  until it is released; slots are never shared, prefix-cached, or swapped.
 - Each allocation is identified by a `StateSlotHandle` (engine epoch, slot,
   generation). The generation increases on every reuse, so a stale handle can
   never address a recycled slot. A new generation starts from the descriptors'
@@ -37,6 +39,28 @@ A model declares its state by constructing a
 - A resumable request parks for its next input only when a turn stops on EOS.
   Any other stop (length, stop token or string) ends the stream. Each new input
   replaces the request's prompt; the state carries the history.
+
+[examples/features/persistent_state/state_slot_lifecycle.py](../../examples/features/persistent_state/state_slot_lifecycle.py)
+walks one stream through admission, a scheduled step, parking, the release
+fence, and slot reuse on the CPU, with a synthetic spec and no model weights.
+
+## Model hooks
+
+A persistent-state model uses these Model Runner V2 hooks:
+
+- `ModelState.initialize_state_slots(bindings)` is called after the KV cache is
+  allocated, with the `StateSlotBindings` that map a request's current handle
+  to its state views. Override it to register auxiliary state-writing streams.
+- `ModelState.prepare_step(scheduler_output, *, dummy_run, is_profile)` is
+  called at the start of each `execute_model`, so the model can tell profiling
+  and dummy runs from scheduled steps.
+- A model class that sets `supports_persistent_state = True` also gets
+  `prepare_step` on the dummy and profiling runs that happen before its state
+  slots are bound. Without it, `prepare_step` runs only once slots exist.
+- An optional `prepare_execution_memory()` method on the model is called once
+  at the start of `profile_run`, before KV cache memory is measured. Allocate
+  long-lived execution buffers there, such as workspaces or captured graphs, so
+  they are counted before the remaining memory is divided into state pages.
 
 ## Release fence
 

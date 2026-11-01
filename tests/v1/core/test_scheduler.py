@@ -9709,7 +9709,7 @@ def test_ordinary_deferred_free_stops_at_first_pending_fence():
 
 
 @pytest.mark.parametrize("capacity", [1, 4096])
-def test_stream_admission_owner_epoch_recovers_from_review_exhaustion(capacity):
+def test_stream_admission_sequence_limit_is_per_owner_epoch(capacity):
     """INT64_MAX decisions cannot exhaust another owner or a renewed epoch."""
     from vllm.v1.engine import StreamAdmissionId
 

@@ -32,6 +32,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.outputs import AsyncModelRunnerOutput
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_runner import ExecuteModelState, GPUModelRunner
@@ -1013,11 +1014,13 @@ def test_state_cleanup_is_fenced_through_real_runner(monkeypatch, lose_ack):
         runner, "_merge_ec_connector_no_forward", lambda _, output: output
     )
     pending = runner.execute_model(cleanup)
+    assert isinstance(pending, AsyncModelRunnerOutput)
     assert events.index("cleanup") < events.index("record")
     assert events[-2:] == ["join", "record"]
     assert manager.num_free_slots == 1
     output = pending.get_output()
     assert events[-1] == "wait"
+    assert output.state_completion is not None
     assert output.state_completion.cleanup_handles == cleanup.state_cleanup_handles
     if lose_ack:
         output.state_completion = None
@@ -1026,7 +1029,9 @@ def test_state_cleanup_is_fenced_through_real_runner(monkeypatch, lose_ack):
         assert scheduler.has_requests()
         cleanup = scheduler.schedule()
         assert not cleanup.finished_req_ids
-        output = runner.execute_model(cleanup).get_output()
+        pending = runner.execute_model(cleanup)
+        assert isinstance(pending, AsyncModelRunnerOutput)
+        output = pending.get_output()
         assert events.count("cleanup") == 1
     scheduler.update_from_output(cleanup, output)
     assert manager.num_free_slots == 2
@@ -1049,12 +1054,14 @@ def test_state_cleanup_is_fenced_through_real_runner(monkeypatch, lose_ack):
             slots.views["state"].view(req.request_id, old)
 
     monkeypatch.setattr(runner, "add_requests", add_requests)
-    result = runner.execute_model(rebind).get_output()
+    pending = runner.execute_model(rebind)
+    assert isinstance(pending, AsyncModelRunnerOutput)
+    result = pending.get_output()
+    assert result.state_completion is not None
     assert result.state_completion.handles == rebind.state_slot_handles
     assert events.count("cleanup") == 1
 
 
-@pytest.mark.persistent_state_gpu
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_state_completion_cuda_delayed_auxiliary_write(monkeypatch):
     """An output copy cannot acknowledge or recycle an unfinished state writer."""
