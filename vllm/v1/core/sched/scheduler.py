@@ -5,6 +5,7 @@ import time
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import replace
+from functools import partial
 from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -39,6 +40,7 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+from vllm.v1.core.kv_cache_priority import apply_g1_priority
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
@@ -62,6 +64,9 @@ from vllm.v1.kv_cache_interface import (
     get_mamba_prefill_checkpoint_position,
     is_mamba_prefill_checkpoint_valid,
 )
+from vllm.v1.kv_hints.actions import CopyTo, SetPriority
+from vllm.v1.kv_hints.copy_to import apply_copy_to
+from vllm.v1.kv_hints.dispatch import KvHintDispatcher
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import (
     KV_FETCH_COMPLETED_WAITING,
@@ -367,6 +372,21 @@ class Scheduler(SchedulerInterface):
                 self.cache_config.enable_mamba_shared_prefix_checkpoint
             ),
         )
+        self.kv_hint_dispatcher = KvHintDispatcher()
+        self.kv_hint_dispatcher.register(
+            "vllm.set_priority",
+            "1.0",
+            SetPriority,
+            partial(apply_g1_priority, self.kv_cache_manager),
+            when="successful_completion",
+        )
+        self.kv_hint_dispatcher.register(
+            "vllm.copy_to",
+            "1.0",
+            CopyTo,
+            partial(apply_copy_to, self.connector),
+            when="ingress",
+        )
         # Mamba managers already account for their speculative state blocks.
         num_spec_decode_tokens = (
             1 + self.num_spec_tokens + self.num_lookahead_tokens
@@ -381,6 +401,20 @@ class Scheduler(SchedulerInterface):
         # Bind after construction so connectors can access the cache manager.
         if self.connector is not None:
             self.connector.bind_kv_cache_manager(self.kv_cache_manager)
+            bind_gpu_block_pool = getattr(self.connector, "bind_gpu_block_pool", None)
+            if bind_gpu_block_pool is not None:
+                bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+            self._prefetch_connector = (
+                self.connector
+                if hasattr(self.connector, "take_prefetch_completions")
+                else None
+            )
+        else:
+            self._prefetch_connector = None
+
+        from vllm.v1.agent_hint.session_index import SessionPrefixIndex
+
+        self.session_prefix_index = SessionPrefixIndex()
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
@@ -2933,6 +2967,8 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if request.kv_hints is not None:
+                self.kv_hint_dispatcher.dispatch(request)
             if request.resumable:
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
@@ -3023,6 +3059,12 @@ class Scheduler(SchedulerInterface):
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
 
+        self.kv_hint_dispatcher.finish(
+            request,
+            successful=request.status
+            in (RequestStatus.FINISHED_STOPPED, RequestStatus.FINISHED_LENGTH_CAPPED),
+        )
+
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)
         self._inflight_prefills.discard(request)
@@ -3044,6 +3086,27 @@ class Scheduler(SchedulerInterface):
         self.finished_req_ids.add(request_id)
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
+
+        if request.session_id:
+            try:
+                blocks = self.kv_cache_manager.get_blocks(request.request_id)
+                hashes = [
+                    (
+                        b.block_hash.hex()
+                        if isinstance(b.block_hash, bytes)
+                        else str(b.block_hash)
+                    )
+                    for group in blocks.blocks
+                    for b in group
+                    if b.block_hash is not None
+                ]
+                self.session_prefix_index.record(request.session_id, hashes)
+            except Exception as e:
+                logger.warning(
+                    "session_prefix_index update failed: session_id=%s error=%s",
+                    request.session_id,
+                    e,
+                )
 
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
@@ -3555,9 +3618,24 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             self.connector.update_connector_output(kv_connector_output)
 
+        # Report request-free prefetch completions (I-V13): publication into
+        # the prefix cache is observable through the normal KV events; this
+        # drain only keeps the connector's completion list bounded and logs.
+        if self._prefetch_connector is not None:
+            for completion in self._prefetch_connector.take_prefetch_completions():
+                logger.debug(
+                    "KV hint prefetch %s: %s (published=%d, already_cached=%d)",
+                    completion.prefetch_id,
+                    completion.status.name,
+                    completion.num_blocks_published,
+                    completion.num_blocks_already_cached,
+                )
+
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
+            if req_id.startswith("__kv_prefetch_"):
+                continue
             assert req_id in self.requests
             req = self.requests[req_id]
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:

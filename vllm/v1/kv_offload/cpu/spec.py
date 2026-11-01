@@ -21,6 +21,7 @@ from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetric
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.transfer_backend import get_kv_transfer_backend
 
 # Split the shared region into this many shm files so workers pre-fault them
 # in parallel (page-cache inserts are serialized per file).
@@ -217,10 +218,15 @@ class CPUOffloadingSpec(OffloadingSpec):
     @override
     def get_worker(self, kv_caches: CanonicalKVCaches) -> OffloadingWorker:
         if not self._worker:
-            if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+            if (
+                not current_platform.is_cuda_alike()
+                and not current_platform.is_xpu()
+                and get_kv_transfer_backend() is None
+            ):
                 raise Exception(
                     "CPU Offloading is currently only supported on CUDA-alike "
-                    "and XPU GPUs"
+                    "and XPU GPUs, or platforms with a registered "
+                    "KVTransferBackend"
                 )
             self._worker = self.create_worker(kv_caches)
 

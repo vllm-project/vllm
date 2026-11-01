@@ -6,7 +6,7 @@
 import time
 from typing import Annotated, Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 import vllm.envs as envs
 from vllm.config import ModelConfig
@@ -38,6 +38,7 @@ from vllm.sampling_params import (
 )
 from vllm.utils import random_uuid
 from vllm.utils.collection_utils import is_list_of
+from vllm.v1.kv_hints import kv_hints_from_wire
 
 logger = init_logger(__name__)
 
@@ -249,6 +250,23 @@ class CompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+
+    kv_hints: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Orchestrator-provided KV hints envelope; see "
+            "`vllm/v1/kv_hints/README.md` for the wire schema. Malformed "
+            "envelopes are rejected at the API boundary, while malformed "
+            "individual actions are skipped by the engine's dispatcher."
+        ),
+    )
+
+    @field_validator("kv_hints")
+    @classmethod
+    def _validate_kv_hints(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        if value is not None:
+            kv_hints_from_wire(value)
+        return value
 
     ec_transfer_params: dict[str, Any] | None = Field(
         default=None,

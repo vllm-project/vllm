@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from functools import cached_property
 from typing import Any
 
@@ -35,6 +35,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     OffloadPromMetrics,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.prefetch import (
+    PrefetchCompletion,
+    PrefetchSubmitOutcome,
+    PrefetchSubmitResult,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
 )
@@ -43,8 +48,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+from vllm.v1.core.kv_cache_utils import BlockHash
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
@@ -107,6 +114,47 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
             self.connector_worker.shutdown()
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
+
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        # Only the scheduler role allocates destination blocks.
+        connector_scheduler = getattr(self, "connector_scheduler", None)
+        bind = getattr(connector_scheduler, "bind_gpu_block_pool", None)
+        if bind is not None:
+            bind(gpu_block_pool)
+
+    def request_free_prefetch(
+        self, block_hashes: Sequence[BlockHash]
+    ) -> PrefetchSubmitResult:
+        """Load offloaded KV for a prefix with no request attached.
+
+        See `OffloadingConnectorScheduler.request_free_prefetch`. Returns
+        UNSUPPORTED outside the scheduler role.
+        """
+        request_free_prefetch = getattr(
+            getattr(self, "connector_scheduler", None),
+            "request_free_prefetch",
+            None,
+        )
+        if request_free_prefetch is None:
+            return PrefetchSubmitResult(
+                PrefetchSubmitOutcome.UNSUPPORTED,
+                num_blocks_requested=len(block_hashes),
+            )
+        return request_free_prefetch(block_hashes)
+
+    def take_prefetch_completions(self) -> list[PrefetchCompletion]:
+        """Completions of accepted prefetches since the last call.
+
+        See `OffloadingConnectorScheduler.take_prefetch_completions`.
+        """
+        take_prefetch_completions = getattr(
+            getattr(self, "connector_scheduler", None),
+            "take_prefetch_completions",
+            None,
+        )
+        if take_prefetch_completions is None:
+            return []
+        return take_prefetch_completions()
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         assert self.connector_worker is not None
