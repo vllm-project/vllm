@@ -35,7 +35,7 @@ def _make_config(
     )
 
 
-def _resolve_on_rocm(config, *, kernels_available: bool = True):
+def _resolve_on_rocm(config, *, kernels_available: bool = True, mi3xx: bool = True):
     with (
         patch.object(
             qwen_gdn_linear_attn.current_platform, "is_rocm", return_value=True
@@ -45,6 +45,7 @@ def _resolve_on_rocm(config, *, kernels_available: bool = True):
             "is_gdn_flydsl_prefill_available",
             return_value=kernels_available,
         ),
+        patch("vllm.platforms.rocm.on_mi3xx", return_value=mi3xx),
     ):
         return _resolve_gdn_prefill_backend(config)
 
@@ -72,16 +73,38 @@ def test_resolve_aiter_flydsl_gdn_prefill_backend(
     assert active == expected
 
 
-def test_kda_style_model_cannot_select_flydsl():
+@pytest.mark.parametrize(
+    "mi3xx,kernels_available,head_k_dim,expected",
+    [
+        (True, True, 128, "aiter_flydsl"),
+        (False, True, 128, "triton"),
+        (True, False, 128, "triton"),
+        (True, True, 64, "triton"),
+    ],
+)
+def test_auto_defaults_to_aiter_flydsl(
+    mi3xx: bool, kernels_available: bool, head_k_dim: int, expected: str
+):
+    """Under auto, FlyDSL is the default only where it was validated and the
+    model and build can serve it; everything else stays on Triton."""
+    config = _make_config(backend="auto", head_k_dim=head_k_dim)
+
+    assert _resolve_on_rocm(
+        config, kernels_available=kernels_available, mi3xx=mi3xx
+    ) == ("auto", expected)
+
+
+@pytest.mark.parametrize("backend", ["aiter_flydsl", "auto"])
+def test_kda_style_model_cannot_select_flydsl(backend: str):
     """Kimi K3 KDA reports head dims through linear_attn_config, not these.
 
     Its builder overrides _build_chunk_metadata, which the AITER path skips,
     so this pins the reason the two never meet: the resolver turns the model
     down before the builder is ever constructed.
     """
-    config = _make_config(head_k_dim=None, head_v_dim=None)
+    config = _make_config(backend=backend, head_k_dim=None, head_v_dim=None)
 
-    assert _resolve_on_rocm(config) == ("aiter_flydsl", "triton")
+    assert _resolve_on_rocm(config) == (backend, "triton")
 
 
 @pytest.mark.parametrize("on_rocm", [True, False], ids=["kernels_missing", "not_rocm"])
@@ -109,15 +132,16 @@ def test_explicit_aiter_flydsl_fails_closed(on_rocm: bool):
 
 
 def _flydsl_prefill_unavailable() -> bool:
-    return (
-        not current_platform.is_rocm()
-        or not rocm_aiter_ops.is_gdn_flydsl_prefill_available()
-    )
+    if not current_platform.is_rocm():
+        return True
+    from vllm.platforms.rocm import on_mi3xx
+
+    return not on_mi3xx() or not rocm_aiter_ops.is_gdn_flydsl_prefill_available()
 
 
 @pytest.mark.skipif(
     _flydsl_prefill_unavailable(),
-    reason="needs ROCm with the AITER FlyDSL GDN prefill kernels installed",
+    reason="needs gfx942/gfx950 with the AITER FlyDSL GDN prefill kernels installed",
 )
 @pytest.mark.parametrize(
     "state_dtype", [torch.float32, torch.bfloat16], ids=["fp32_state", "bf16_state"]

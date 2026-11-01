@@ -22,6 +22,7 @@ from vllm.v1.hisparse.types import (
     ACTIVE_TAIL_PAGES,
     SparseKVOffloadCommand,
     SparseKVPageTransfer,
+    SparseKVResidencyUpdate,
     SparseKVRowMirror,
 )
 from vllm.v1.kv_cache_interface import (
@@ -65,6 +66,10 @@ class _HiSparseRequestState:
     unpinned_pages: set[int] = field(default_factory=set)
     # Prefix pages whose GPU copies are adopted after the admitting allocation.
     pages_to_adopt: int = 0
+    # The worker holds this request's residency for every page below
+    # synced_pages, except the stale pages changed since it was sent.
+    synced_pages: int = 0
+    stale_pages: set[int] = field(default_factory=set)
 
 
 @dataclass
@@ -86,9 +91,10 @@ class HiSparseCoordinator:
     GPU-resident pages are a write-back cache of the host tier. Once a page's
     host copy is durable and its owner can read from host (it has, or has
     asked for, a hot region), the page's allocation reference is released with
-    ``BlockPool.unpin_blocks``: the block stays in the block table and keeps
-    being read, but the pool counts it as free and may hand it out, at which
-    point the owner's page is nulled and its block table republished.
+    ``BlockPool.unpin_blocks``: the block keeps being read, but the pool counts
+    it as free and may hand it out, at which point the owner stops reading it.
+    Residency changes reach the worker through ``take_residency_updates``, not
+    the block table, which stays append-only.
     """
 
     def __init__(
@@ -98,9 +104,12 @@ class HiSparseCoordinator:
         max_model_len: int,
         *,
         num_reprefillable_tokens: int,
+        import_step_tokens: int = 0,
     ) -> None:
         self.managers = managers
         self.max_model_len = max_model_len
+        # Spec decode step tokens an import needs beyond its sequence.
+        self.import_step_tokens = import_step_tokens
         self.num_reprefillable_tokens = num_reprefillable_tokens
         groups = kv_cache_config.kv_cache_groups
 
@@ -167,7 +176,14 @@ class HiSparseCoordinator:
         self._retained_copies: dict[int, tuple[KVCacheBlock, KVCacheBlock]] = {}
         # request -> prefix length an external load is still filling in.
         self._pending_imports: dict[str, int] = {}
-        self.block_table_updates: set[str] = set()
+        # request -> full-sequence host pages of an admitted import. A waiting
+        # import holds host pages and is never preempted, so the pages it has
+        # yet to allocate stay reserved against later admissions.
+        self._import_pages: dict[str, int] = {}
+        self._import_reservations: dict[str, int] = {}
+        self._num_reserved_import_pages = 0
+        # The import the admission gate last sized, kept for its allocation.
+        self._sized_import: tuple[str, int] | None = None
         # Requests whose resident pages were all non-null when last scanned.
         # Pages only become null at admission or import (before the first
         # scan) and when the pool reuses an unpinned page (_lose_page).
@@ -269,7 +285,8 @@ class HiSparseCoordinator:
                 if manager.adopt_resident_page(request_id, host_idx, block):
                     manager.block_pool.touch([block])
                     state.pinned_clean.add(host_idx)
-                    self.block_table_updates.add(request_id)
+                    if host_idx < state.synced_pages:
+                        state.stale_pages.add(host_idx)
 
     def _record_copies(self, request_id: str, num_computed_tokens: int) -> None:
         """Index the GPU copies of just-published host blocks for later hits."""
@@ -342,14 +359,11 @@ class HiSparseCoordinator:
     ) -> list[KVCacheBlock] | None:
         blocks: list[KVCacheBlock] = []
         for manager in self.resident_managers:
-            req_blocks = manager.req_to_blocks.get(request_id)
-            if (
-                req_blocks is None
-                or page_idx >= len(req_blocks) - ACTIVE_TAIL_PAGES
-                or req_blocks[page_idx].is_null
-            ):
+            num_pages = len(manager.req_to_blocks.get(request_id, ()))
+            block = manager.get_resident_page(request_id, page_idx)
+            if page_idx >= num_pages - ACTIVE_TAIL_PAGES or block is None:
                 return None
-            blocks.append(req_blocks[page_idx])
+            blocks.append(block)
         return blocks
 
     def _unpin_page(
@@ -392,16 +406,15 @@ class HiSparseCoordinator:
         if state is None:
             return
         for manager in self.resident_managers:
-            blocks = manager.req_to_blocks.get(request_id)
-            if blocks is None or page_idx >= len(blocks) or blocks[page_idx].is_null:
+            block = manager.drop_resident_page(request_id, page_idx)
+            if block is None:
                 continue
-            block = blocks[page_idx]
-            blocks[page_idx] = manager._null_block
             owners = self._owners.get(block.block_id)
             if owners is not None:
                 owners.discard((request_id, page_idx))
         state.unpinned_pages.discard(page_idx)
-        self.block_table_updates.add(request_id)
+        if page_idx < state.synced_pages:
+            state.stale_pages.add(page_idx)
         for hot_manager in self.hot_managers:
             hot_manager.require_hot(request_id)
 
@@ -538,6 +551,39 @@ class HiSparseCoordinator:
         """Note a prefix an external load is populating in host pages."""
         self._resident_requests.discard(request_id)
         self._pending_imports[request_id] = num_tokens
+        if self._sized_import is not None and self._sized_import[0] == request_id:
+            self._import_pages[request_id] = self._sized_import[1]
+        self._sized_import = None
+
+    def size_import(self, request_id: str, num_pages: int) -> None:
+        """Note the full-sequence host pages of an import being admitted.
+
+        The admission gate runs in the same ``allocate_slots`` call as the
+        allocation, so the next ``record_pending_host_import`` is this
+        request's if it is admitted; a size left by a rejected admission is
+        discarded.
+        """
+        self._sized_import = (request_id, num_pages)
+
+    @property
+    def reserved_import_pages(self) -> int:
+        """Host pages admitted imports still need for their sequence."""
+        return self._num_reserved_import_pages
+
+    def update_import_reservation(self, request_id: str, num_held_pages: int) -> None:
+        pages = self._import_pages.get(request_id)
+        if pages is None:
+            return
+        self._set_import_reservation(request_id, max(pages - num_held_pages, 0))
+        if num_held_pages >= pages:
+            del self._import_pages[request_id]
+
+    def _set_import_reservation(self, request_id: str, num_pages: int) -> None:
+        self._num_reserved_import_pages += num_pages - self._import_reservations.pop(
+            request_id, 0
+        )
+        if num_pages > 0:
+            self._import_reservations[request_id] = num_pages
 
     def finish_host_import(self, request_id: str, *, failed: bool) -> None:
         num_tokens = self._pending_imports.pop(request_id, None)
@@ -627,11 +673,10 @@ class HiSparseCoordinator:
         mirrors: list[SparseKVRowMirror] = []
         for request_id, num_computed_tokens, num_scheduled_tokens in requests:
             host_blocks = self.host_manager.req_to_blocks.get(request_id)
-            resident_blocks = [
-                manager.req_to_blocks.get(request_id)
+            if host_blocks is None or any(
+                request_id not in manager.req_to_blocks
                 for manager in self.resident_managers
-            ]
-            if host_blocks is None or any(blocks is None for blocks in resident_blocks):
+            ):
                 continue
             token_position = num_computed_tokens
             end_position = token_position + num_scheduled_tokens
@@ -644,14 +689,12 @@ class HiSparseCoordinator:
                 # window only ever moves forward, so dropping them here would
                 # leave their host rows permanently stale.
                 source_starts = []
-                for blocks in resident_blocks:
-                    assert blocks is not None
-                    if page_idx >= len(blocks) or blocks[page_idx].is_null:
+                for manager in self.resident_managers:
+                    block = manager.get_resident_page(request_id, page_idx)
+                    if block is None:
                         break
-                    source_starts.append(
-                        blocks[page_idx].block_id * block_size + row_offset
-                    )
-                if len(source_starts) != len(resident_blocks):
+                    source_starts.append(block.block_id * block_size + row_offset)
+                if len(source_starts) != len(self.resident_managers):
                     token_position += num_rows
                     continue
                 host_block_idx = page_idx
@@ -693,21 +736,53 @@ class HiSparseCoordinator:
             if any(
                 block.is_null
                 for manager in self.resident_managers
-                for block in manager.req_to_blocks.get(request_id, ())
+                for block in manager.get_residency_row(request_id)
             ):
                 return False
             self._resident_requests.add(request_id)
         return True
 
-    def take_block_table_updates(self) -> dict[str, tuple[list[int], ...]]:
-        updates = {
-            request_id: tuple(
-                [block.block_id for block in manager.req_to_blocks.get(request_id, [])]
-                for manager in self.managers
+    def take_residency_updates(
+        self, request_ids: Iterable[str]
+    ) -> dict[str, SparseKVResidencyUpdate]:
+        """Resident block ids the worker lacks for the scheduled requests:
+        stale pages plus pages appended since the last update.
+
+        Requests that are not scheduled keep their changes until they are:
+        only a scheduled request's residency is read.
+        """
+        updates: dict[str, SparseKVResidencyUpdate] = {}
+        if not self.resident_managers:
+            return updates
+        first = self.resident_managers[0]
+        for request_id in request_ids:
+            state = self._get_request_state(request_id)
+            num_pages = len(first.req_to_blocks.get(request_id, ()))
+            start = state.synced_pages
+            if not state.stale_pages and start >= num_pages:
+                continue
+            stale_pages = sorted(state.stale_pages)
+            block_ids: list[list[int]] = []
+            for manager in self.resident_managers:
+                null_block_id = manager.block_pool.null_block.block_id
+                group_block_ids = [
+                    null_block_id if block is None else block.block_id
+                    for block in (
+                        manager.get_resident_page(request_id, page_idx)
+                        for page_idx in stale_pages
+                    )
+                ]
+                group_block_ids.extend(
+                    block.block_id
+                    for block in manager.get_residency_row(request_id, start)
+                )
+                block_ids.append(group_block_ids)
+            updates[request_id] = SparseKVResidencyUpdate(
+                pages=[*stale_pages, *range(start, num_pages)],
+                block_ids=tuple(block_ids),
             )
-            for request_id in self.block_table_updates
-        }
-        self.block_table_updates.clear()
+            state.stale_pages.clear()
+            state.synced_pages = num_pages
         return updates
 
     def build_offload_command(self) -> SparseKVOffloadCommand | None:
@@ -822,6 +897,8 @@ class HiSparseCoordinator:
         """Detach the request; its clean pages stay readable copies in the pool."""
         self._resident_requests.discard(request_id)
         self._pending_imports.pop(request_id, None)
+        self._import_pages.pop(request_id, None)
+        self._set_import_reservation(request_id, 0)
         state = self.request_states.pop(request_id, None)
         if state is None:
             return
@@ -846,9 +923,7 @@ class HiSparseCoordinator:
             # planned, so its copies do not prove that the KV was computed.
             state.publication = None
         for manager in self.resident_managers:
-            blocks = manager.req_to_blocks.get(request_id)
-            if not blocks:
-                continue
+            blocks = manager.get_residency_row(request_id)
             # Tail first, so a prefix loses its tail pages before its head.
             for page_idx in reversed(range(len(blocks))):
                 block = blocks[page_idx]
@@ -865,11 +940,13 @@ class HiSparseCoordinator:
                     manager.block_pool.unpin_blocks([block], self._on_block_reused)
                 else:
                     continue
-                blocks[page_idx] = manager._null_block
+                manager.drop_resident_page(request_id, page_idx)
 
 
 def get_hisparse_coordinator(
     kv_cache_manager: "KVCacheManager",
+    *,
+    import_step_tokens: int | None = None,
 ) -> HiSparseCoordinator:
     """Return the coordinator shared by a KV cache manager's HiSparse groups.
 
@@ -881,12 +958,14 @@ def get_hisparse_coordinator(
         coordinator = getattr(manager, "coordinator", None)
         if coordinator is not None:
             assert isinstance(coordinator, HiSparseCoordinator)
+            assert import_step_tokens in (None, coordinator.import_step_tokens)
             return coordinator
     coordinator = HiSparseCoordinator(
         kv_cache_manager.kv_cache_config,
         managers,
         kv_cache_manager.max_model_len,
         num_reprefillable_tokens=kv_cache_manager.coordinator.num_reprefillable_tokens,
+        import_step_tokens=import_step_tokens or 0,
     )
     if coordinator.host_manager is None:
         raise ValueError("No HiSparse cache group is configured.")
