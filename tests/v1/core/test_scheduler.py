@@ -9302,7 +9302,7 @@ def test_stream_deadline_scheduler_abort_output_and_occupied_counts():
         "live": 0,
         "parked": 0,
         "draining": 0,
-        "awaiting_fence": 0,
+        "retiring": 0,
     }
     assert scheduler.make_stats().stream_occupied == admissions.occupied()
     scheduler.add_request(_stream_chunk(core, closed=True))
@@ -9311,7 +9311,7 @@ def test_stream_deadline_scheduler_abort_output_and_occupied_counts():
     scheduler.update_from_output(step, _state_output(step))
     admissions.clock = lambda: 140.0
     cleanup = scheduler.schedule()
-    assert admissions.occupied()["awaiting_fence"] == 1
+    assert admissions.occupied()["retiring"] == 1
     outputs = scheduler.update_from_output(cleanup, _state_output(cleanup))
     assert outputs[0].outputs[0].finish_reason == FinishReason.ABORT
     assert not any(admissions.occupied().values())

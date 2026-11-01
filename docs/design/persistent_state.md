@@ -151,7 +151,10 @@ following is configured:
 When persistent state is enabled, `SchedulerStats` carries:
 
 - `stream_occupied`: slots by session state (`never_fed`, `live`, `parked`,
-  `draining`, `awaiting_fence`).
+  `draining`, `retiring`). A `retiring` slot belongs to a finished session
+  (normal finish, abort or deadline expiry). It keeps occupying capacity,
+  including while quarantined, until the worker acknowledges the release
+  fence for its last scheduled step; it is then freed and no longer counted.
 - `stream_refusals`: admission refusals by reason.
 - `stream_expiries`: expired sessions by deadline (`never_fed`, `parked_idle`,
   `draining`).

@@ -245,7 +245,7 @@ class StreamAdmissions:
 
     def occupied(self) -> dict[str, int]:
         counts = dict.fromkeys(
-            ("never_fed", "live", "parked", "draining", "awaiting_fence"), 0
+            ("never_fed", "live", "parked", "draining", "retiring"), 0
         )
         for request in self.scheduler.requests.values():
             if self.manager.get(request.request_id) is not None:
@@ -260,5 +260,5 @@ class StreamAdmissions:
                     )
                 )
                 counts[status] += 1
-        counts["awaiting_fence"] = len(self.scheduler.state_retirements)
+        counts["retiring"] = len(self.scheduler.state_retirements)
         return counts
