@@ -347,6 +347,35 @@ class RoutedExperts(PluggableLayer):
         """Map global expert ID to local expert ID."""
         return self.expert_map_manager.map_global_to_local(expert_id)
 
+    def make_expert_weight_filter(self) -> Callable[[str, int], bool] | None:
+        """Make a filter that takes a checkpoint weight name and the expert ID
+        in it, and returns False if `weight_loader` skips that weight because
+        another expert parallel rank holds the expert.
+
+        Returns None if the filter would keep every weight. Under EPLB,
+        checkpoint names hold logical expert IDs, but `weight_loader` takes
+        the physical IDs of their replicas.
+        """
+        if (
+            not self.use_ep
+            or self.moe_config.moe_parallel_config.enable_eplb
+            or (
+                self.quant_config is not None
+                and self.quant_config.get_name() == "gpt_oss_mxfp4"
+            )
+        ):
+            return None
+        quant_method = self._weight_loading_quant_method()
+        nonlocal_experts = {
+            expert_id
+            for expert_id in range(self.moe_config.num_logical_experts)
+            if self._map_global_expert_id_to_local_expert_id(expert_id) == -1
+        }
+        return lambda weight_name, expert_id: (
+            expert_id not in nonlocal_experts
+            or self._is_global_sf_weight(quant_method, weight_name)
+        )
+
     #
     # Weight Loading Methods
     #
@@ -661,6 +690,33 @@ class RoutedExperts(PluggableLayer):
         # _to_scalar's reshape(()) would reject the size-2 weight_shape.
         param_data[expert_id] = loaded_weight
 
+    def _weight_loading_quant_method(self) -> FusedMoEMethodBase:
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+
+        # In case online MOE re-quantization is used, loading is handled
+        # by the original quant method.
+        if (
+            isinstance(self.quant_method, OnlineMoEMethodBase)
+            and self.quant_method.requantization_source is not None
+        ):
+            assert isinstance(
+                self.quant_method.requantization_source, FusedMoEMethodBase
+            )
+            return self.quant_method.requantization_source
+        return self.quant_method
+
+    @staticmethod
+    def _is_global_sf_weight(
+        quant_method: FusedMoEMethodBase, weight_name: str
+    ) -> bool:
+        # A global scale needs the input scales of all experts on every rank.
+        return (
+            getattr(quant_method, "use_global_sf", False)
+            and "input_scale" in weight_name
+        )
+
     @overload
     def weight_loader(
         self,
@@ -704,22 +760,7 @@ class RoutedExperts(PluggableLayer):
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
-        from vllm.model_executor.layers.quantization.online.moe_base import (
-            OnlineMoEMethodBase,
-        )
-
-        base_quant_method = self.quant_method
-
-        # In case online MOE re-quantization is used, loading is handled
-        # by the original quant method.
-        if (
-            isinstance(base_quant_method, OnlineMoEMethodBase)
-            and base_quant_method.requantization_source is not None
-        ):
-            assert isinstance(
-                base_quant_method.requantization_source, FusedMoEMethodBase
-            )
-            base_quant_method = base_quant_method.requantization_source
+        base_quant_method = self._weight_loading_quant_method()
 
         quant_method_name = base_quant_method.__class__.__name__
         global_expert_id = expert_id
@@ -743,10 +784,7 @@ class RoutedExperts(PluggableLayer):
         )
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
 
-        use_global_sf = (
-            getattr(base_quant_method, "use_global_sf", False)
-            and "input_scale" in weight_name
-        )
+        use_global_sf = self._is_global_sf_weight(base_quant_method, weight_name)
 
         if expert_id == -1 and not use_global_sf:
             # Failed to load this param since it's not local to this rank
