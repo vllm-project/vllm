@@ -13,6 +13,40 @@ from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_
 logger = init_logger(__name__)
 
 
+def dequant_mxfp4_experts(weight: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Decode packed E2M1 experts with per-32 E8M0 scales to BF16.
+
+    Process one expert at a time to bound the intermediate FP32 storage.
+    This is a load-time conversion and works without accelerator kernels.
+    """
+    lut = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6],
+        dtype=torch.float32,
+        device=weight.device,
+    )
+    num_experts, output_size, packed_input_size = weight.shape
+    result = torch.empty(
+        num_experts,
+        output_size,
+        packed_input_size * 2,
+        dtype=torch.bfloat16,
+        device=weight.device,
+    )
+    for expert_id in range(num_experts):
+        raw = weight[expert_id].view(torch.uint8)
+        values = torch.empty(
+            output_size,
+            packed_input_size * 2,
+            dtype=torch.float32,
+            device=weight.device,
+        )
+        values[:, ::2] = lut[(raw & 0x0F).to(torch.int64)]
+        values[:, 1::2] = lut[(raw >> 4).to(torch.int64)]
+        decoded_scale = scale[expert_id].view(torch.float8_e8m0fnu).float()
+        result[expert_id] = values * decoded_scale.repeat_interleave(32, dim=-1)
+    return result
+
+
 def should_use_gfx1250_mx_scale_swizzle() -> bool:
     if not current_platform.is_rocm():
         return False
