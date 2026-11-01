@@ -368,6 +368,20 @@ def construct_chat_messages_with_tool_call(
     return messages
 
 
+def _to_chat_content_part(part: dict[str, Any]) -> dict[str, Any]:
+    part_type = part.get("type")
+    if part_type in ("input_text", "output_text"):
+        return {**part, "type": "text"}
+    if part_type == "input_image" and isinstance(url := part.get("image_url"), str):
+        image_url = {"url": url}
+        # Chat image parts reject the Responses-only "original" detail.
+        if (detail := part.get("detail")) in ("auto", "low", "high"):
+            image_url["detail"] = detail
+        extra_fields = {k: v for k, v in part.items() if k not in ("detail", "file_id")}
+        return {**extra_fields, "type": "image_url", "image_url": image_url}
+    return part
+
+
 def _construct_message_from_response_item(
     item: ResponseInputOutputItem,
     prev_msg: ChatCompletionMessageParam | None = None,
@@ -494,7 +508,13 @@ def _construct_message_from_response_item(
                     return None
             return {"role": "assistant", "content": text}
     if isinstance(item, dict) and "role" in item:
-        return item  # type: ignore[return-value]
+        content = item.get("content")
+        if not isinstance(content, list):
+            return item  # type: ignore[return-value]
+        return {  # type: ignore[return-value]
+            **item,
+            "content": [_to_chat_content_part(part) for part in content],
+        }
     item_type = item.get("type") if isinstance(item, dict) else item.type
     raise VLLMValidationError(
         f"Unsupported input item type: {item_type}",
