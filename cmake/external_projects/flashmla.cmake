@@ -18,8 +18,8 @@ if(FLASH_MLA_SRC_DIR)
 else()
   FetchContent_Declare(
         flashmla
-        GIT_REPOSITORY https://github.com/simon-veitner-redhat/FlashMLA
-        GIT_TAG d1e68dcfdab48c2abcf500b456b474e8c0d8f396
+        GIT_REPOSITORY https://github.com/vllm-project/FlashMLA
+        GIT_TAG 847ef308bb7a6828c8117301f5a5a84a095a90e8
         GIT_PROGRESS TRUE
         CONFIGURE_COMMAND ""
         BUILD_COMMAND ""
