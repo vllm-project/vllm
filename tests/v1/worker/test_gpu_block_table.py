@@ -327,6 +327,34 @@ def test_dummy_request_slot_mapping_is_pad():
     assert dummy[0].tolist() == [PAD_SLOT_ID] * 3
 
 
+def test_padded_tokens_get_pad_slots_after_longer_batch():
+    """Slots past the real tokens must be PAD, not left over from a longer batch,
+    or CUDA-graph padding tokens write into live KV cache entries."""
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[4],
+        max_num_reqs=1,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[2],
+        device=device,
+    )
+    block_tables.append_block_ids(req_index=0, new_block_ids=([5, 6],), overwrite=True)
+    block_tables.apply_staged_writes()
+    idx_mapping = torch.zeros(1, dtype=torch.int32, device=device)
+    positions = torch.arange(8, dtype=torch.int64, device=device)
+
+    def compute_slots(num_tokens: int) -> list[int]:
+        return block_tables.compute_slot_mappings(
+            idx_mapping,
+            torch.tensor([0, num_tokens], dtype=torch.int32, device=device),
+            positions,
+            num_tokens_padded=8,
+        )[0].tolist()
+
+    assert compute_slots(8) == list(range(20, 28))
+    assert compute_slots(3) == [20, 21, 22] + [PAD_SLOT_ID] * 5
+
+
 def test_gather_block_tables_nulls_blocks_below_sliding_window():
     """Entries wholly below the window of a request's first scheduled token
     may point at blocks the sliding-window manager already freed and reused;
