@@ -18,6 +18,7 @@ from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_current_vllm_config,
+    set_current_vllm_config,
 )
 from vllm.config.compilation import DynamicShapesType
 from vllm.logger import init_logger
@@ -92,8 +93,9 @@ class TorchCompileWithNoGuardsWrapper:
         compile_prefix: str = "",
         is_encoder: bool = False,
     ) -> None:
+        from vllm.compilation.backends import VllmBackend
+
         self.compiled = False
-        self._compile_prefix = compile_prefix
         self._is_encoder = is_encoder
 
         vllm_config = get_current_vllm_config()
@@ -110,6 +112,9 @@ class TorchCompileWithNoGuardsWrapper:
             prefix=compile_prefix,
             is_encoder=is_encoder,
             use_aot_compile=self._allow_aot_compile,
+        )
+        self._compile_prefix = (
+            backend.prefix if isinstance(backend, VllmBackend) else compile_prefix
         )
         options = {}
 
@@ -357,8 +362,9 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
     compilation_config.local_cache_dir = ""
 
     model.__class__.forward.__code__ = model.original_code_object()
-    TorchCompileWithNoGuardsWrapper.__init__(
-        model,
-        compile_prefix=model._compile_prefix,
-        is_encoder=model._is_encoder,
-    )
+    with set_current_vllm_config(model.vllm_config):
+        TorchCompileWithNoGuardsWrapper.__init__(
+            model,
+            compile_prefix=model._compile_prefix,
+            is_encoder=model._is_encoder,
+        )
