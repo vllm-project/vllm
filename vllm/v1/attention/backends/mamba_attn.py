@@ -726,21 +726,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
     ) -> M:
         return self._update_state_indices(metadata, blk_table)
 
-    def _get_state_indices(
-        self, blk_table: torch.Tensor, seq_lens: torch.Tensor
-    ) -> torch.Tensor:
-        state_indices = getattr(self, "mamba_aligned_state_indices", None)
-        if state_indices is not None:
-            return state_indices
-        return mamba_get_block_table_tensor(
-            blk_table,
-            seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
-        )
-
     def _update_state_indices(self, metadata: M, blk_table: torch.Tensor) -> M:
-        state_indices_tensor = self._get_state_indices(blk_table, metadata.seq_lens)
+        aligned_state_indices = getattr(self, "mamba_aligned_state_indices", None)
+        if aligned_state_indices is not None:
+            state_indices_tensor = aligned_state_indices[: metadata.num_reqs]
+        else:
+            state_indices_tensor = mamba_get_block_table_tensor(
+                blk_table,
+                metadata.seq_lens,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
+            )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
 

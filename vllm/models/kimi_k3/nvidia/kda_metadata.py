@@ -668,7 +668,9 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
         spec_request_indices: torch.Tensor | None,
         num_computed_tokens: torch.Tensor | None,
     ) -> KimiK3KDAMetadata:
-        """Add this KV cache group's state indices to the batch-level metadata."""
+        """Add this group's state indices, FULL graph staging, RecoverSSM commit
+        and checkpoint to the batch-level ``metadata`` that groups with the same
+        spec and builder share. Group-specific fields go here."""
         num_prefills = metadata.num_prefills
         num_decodes = metadata.num_decodes
         num_spec_decodes = metadata.num_spec_decodes

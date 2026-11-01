@@ -596,10 +596,9 @@ def test_cross_group_build_recoverssm_checkpoint(monkeypatch: pytest.MonkeyPatch
         "num_decode_draft_tokens_cpu": torch.tensor([-1, -1, 2], dtype=torch.int32),
         "num_accepted_tokens": torch.ones(batch.batch_size, dtype=torch.int32),
     }
-    cache: dict = {}
     first_common = create_common_attn_metadata(
         batch, BLOCK_SIZE, DEVICE, arange_block_indices=True
-    ).replace(is_prefilling=torch.tensor([True, True, False]), _cross_group_cache=cache)
+    ).replace(is_prefilling=torch.tensor([True, True, False]), _cross_group_cache={})
     second_common = first_common.replace(
         block_table_tensor=first_common.block_table_tensor + 100
     )

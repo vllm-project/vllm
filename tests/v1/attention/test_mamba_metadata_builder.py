@@ -84,7 +84,6 @@ def test_mamba_single_token_prompt_runs_as_prefill():
 def test_cross_group_build(builder_cls, num_spec, num_prefills, mamba_cache_mode):
     """Share batch metadata while keeping state indices and FULL buffers local."""
     config = _make_vllm_config(48, 4, num_speculative_tokens=num_spec, block_size=16)
-    config.use_v2_model_runner = True
     config.cache_config.mamba_cache_mode = mamba_cache_mode
     config.model_config.get_mamba_chunk_size = lambda: 16
     spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
