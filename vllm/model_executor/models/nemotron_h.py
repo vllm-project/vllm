@@ -139,10 +139,12 @@ class NemotronHMoE(nn.Module):
         quant_config: QuantizationConfig | None = None,
         parallel_config: ParallelConfig | None = None,
         prefix: str = "",
+        top_k: int | None = None,
     ):
         super().__init__()
         assert parallel_config is not None
         self.tp_size = get_tensor_model_parallel_world_size()
+        self.top_k = get_moe_top_k(config, top_k)
         self.routed_scaling_factor = config.routed_scaling_factor
 
         self.ep_group = get_ep_group().device_group
@@ -229,7 +231,7 @@ class NemotronHMoE(nn.Module):
         self.experts = FusedMoEFactory(
             shared_experts=self.shared_experts,
             num_experts=config.n_routed_experts,
-            top_k=config.num_experts_per_tok,
+            top_k=self.top_k,
             hidden_size=self.moe_hidden_size,
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
@@ -354,6 +356,7 @@ class NemotronHMoEDecoderLayer(nn.Module):
             quant_config=quant_config,
             parallel_config=parallel_config,
             prefix=f"{prefix}.mixer",
+            top_k=getattr(config, "moe_top_k", None),
         )
 
         self.norm = RMSNorm(config.hidden_size, eps=config.layer_norm_epsilon)
@@ -545,6 +548,43 @@ class NemotronHAttentionDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+class NemotronHSkippedLayer(nn.Module):
+    """Placeholder for a layer listed in `config.skip_layers`.
+
+    Holds no weights or cache state and passes the residual stream through.
+    """
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        **kwargs,
+    ):
+        return hidden_states, residual
+
+
+def get_moe_top_k(config: NemotronHConfig, top_k: int | None) -> int:
+    if top_k is None:
+        return config.num_experts_per_tok
+    # Grouped routing only picks experts from the top `topk_group` groups.
+    n_group = getattr(config, "n_group", None) or 1
+    topk_group = getattr(config, "topk_group", None) or n_group
+    max_top_k = config.n_routed_experts * topk_group // n_group
+    if not 1 <= top_k <= max_top_k:
+        raise ValueError(f"moe_top_k={top_k} must be in [1, {max_top_k}]")
+    return top_k
+
+
+def get_skip_layers(config: NemotronHConfig) -> frozenset[int]:
+    skip_layers = frozenset(int(i) for i in getattr(config, "skip_layers", None) or ())
+    num_layers = len(config.hybrid_override_pattern)
+    if any(not 0 <= i < num_layers for i in skip_layers):
+        raise ValueError(f"skip_layers must be in [0, {num_layers}): {skip_layers}")
+    if len(skip_layers) == num_layers:
+        raise ValueError("skip_layers cannot skip every layer")
+    return skip_layers
+
+
 ALL_DECODER_LAYER_TYPES = {
     "M": NemotronHMambaDecoderLayer,
     "-": NemotronHMLPDecoderLayer,
@@ -588,12 +628,24 @@ class NemotronHModel(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.embed_tokens",
         )
 
-        self.has_moe = "E" in config.hybrid_override_pattern
-
         layer_types = decoder_layer_types or ALL_DECODER_LAYER_TYPES
+        self.skip_layers = get_skip_layers(config)
+        self.has_moe = any(
+            t == "E" and i not in self.skip_layers
+            for i, t in enumerate(config.hybrid_override_pattern)
+        )
+        if (
+            self.skip_layers or getattr(config, "moe_top_k", None) is not None
+        ) and vllm_config.aux_output_config.enable_return_routed_experts:
+            raise NotImplementedError(
+                "skip_layers and moe_top_k are not supported with "
+                "enable_return_routed_experts"
+            )
 
         def get_layer(prefix: str):
             layer_idx = int(prefix.rsplit(".", 1)[1])
+            if layer_idx in self.skip_layers:
+                return NemotronHSkippedLayer()
             layer_type = config.hybrid_override_pattern[layer_idx]
             if layer_type not in layer_types:
                 raise ValueError(
@@ -613,6 +665,11 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             len(config.hybrid_override_pattern), get_layer, prefix=f"{prefix}.layers"
         )
+        if set(range(self.start_layer, self.end_layer)) <= self.skip_layers:
+            raise ValueError(
+                f"skip_layers skips every layer of this pipeline stage "
+                f"[{self.start_layer}, {self.end_layer})"
+            )
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -662,6 +719,15 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
         return hidden_states
+
+    def _set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        # Aux index i is the output of layer i - 1.
+        if skipped := sorted(i for i in layers if i - 1 in self.skip_layers):
+            raise ValueError(
+                f"Speculative decoding reads hidden states after skipped "
+                f"layers {[i - 1 for i in skipped]}; remove them from skip_layers."
+            )
+        super()._set_aux_hidden_state_layers(layers)
 
     def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
         return weight_name.startswith("mtp.")
@@ -916,5 +982,10 @@ class NemotronHForCausalLM(
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(
+            self,
+            ignore_unexpected_prefixes=[
+                f"model.layers.{i}." for i in self.model.skip_layers
+            ],
+        )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
