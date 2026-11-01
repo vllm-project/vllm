@@ -254,6 +254,7 @@ def test_expert_load_binding_preserves_placement_and_capture(
     stats = ExpertLoadStats.create(config, model, torch.device("cpu"))
     if collect:
         assert stats is not None
+        assert module.router.expert_load_stats is not None
         assert (
             module.router.expert_load_stats.counts.data_ptr() == stats.counts.data_ptr()
         )

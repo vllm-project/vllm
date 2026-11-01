@@ -5,6 +5,7 @@ import json
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import Mock
 
 import numpy as np
@@ -17,6 +18,7 @@ from vllm.distributed.expert_load import (
     _record_expert_load,
     owned_token_span,
 )
+from vllm.platforms import current_platform
 from vllm.v1.worker.expert_load_stats import ExpertLoadReporter, ExpertLoadStats
 
 
@@ -113,7 +115,7 @@ def test_reporter_keeps_iteration_layers_separate_and_resets_summary(tmp_path):
 
 
 def test_slow_writer_slot_cannot_be_reused():
-    stats = object.__new__(ExpertLoadStats)
+    stats: Any = object.__new__(ExpertLoadStats)
     stats.current = None
     pending: list[Future[None]] = [Future(), Future()]
     stats.slots = [SimpleNamespace(future=f, iterations=[9]) for f in pending]
@@ -145,9 +147,8 @@ def test_cumulative_summary_retains_counts_without_changing_trace_rows():
 
 @pytest.mark.parametrize("operation", ["mkdir", "open"])
 def test_writer_errors_disable_file_export_without_failing_serving(
-    tmp_path, monkeypatch, caplog, operation
+    tmp_path, monkeypatch, caplog_vllm, operation
 ):
-    caplog.set_level("INFO", logger="vllm.v1.worker.expert_load_stats")
     reporter = ExpertLoadReporter(
         ExpertLoadStatsConfig(enabled=True, output_dir=str(tmp_path)),
         [2],
@@ -158,7 +159,7 @@ def test_writer_errors_disable_file_export_without_failing_serving(
     records = reporter.consume(counts, counts[None][:0], [], 1, 0, True)
     failed_write = Mock(side_effect=OSError("disk full"))
     monkeypatch.setattr(Path, operation, failed_write)
-    stats = object.__new__(ExpertLoadStats)
+    stats: Any = object.__new__(ExpertLoadStats)
     stats.current = None
     with ThreadPoolExecutor(max_workers=1) as writer:
         future = writer.submit(reporter.write, records)
@@ -169,11 +170,11 @@ def test_writer_errors_disable_file_export_without_failing_serving(
     reporter.write(records)
     failed_write.assert_called_once()
     assert reporter.export_errors == 1
-    assert caplog.text.count("JSONL export disabled") == 1
+    assert caplog_vllm.text.count("JSONL export disabled") == 1
     next_records = reporter.consume(counts, counts[None][:0], [], 2, 0, True)
     assert next_records[0]["assignments"] == 64
     assert "export_errors" not in next_records[0]
-    assert "1 export errors" in caplog.text
+    assert "1 export errors" in caplog_vllm.text
 
 
 def test_summary_logging_is_bounded_and_keeps_vectors_in_jsonl(tmp_path, monkeypatch):
@@ -212,7 +213,7 @@ def test_summary_logging_is_bounded_and_keeps_vectors_in_jsonl(tmp_path, monkeyp
 def test_record_context_excludes_inactive_and_zero_token_calls(
     active, num_tokens, record
 ):
-    stats = object.__new__(ExpertLoadStats)
+    stats: Any = object.__new__(ExpertLoadStats)
     stats.active = active
     stats.begin, stats.end = Mock(), Mock()
     execute = Mock(return_value="output")
@@ -222,7 +223,7 @@ def test_record_context_excludes_inactive_and_zero_token_calls(
 
 
 def test_failed_forward_disarms_recording():
-    stats = object.__new__(ExpertLoadStats)
+    stats: Any = object.__new__(ExpertLoadStats)
     stats.active = True
     stats.begin, stats.end = Mock(), Mock()
     stats.num_valid_tokens = torch.tensor(3)
@@ -237,7 +238,7 @@ def test_failed_forward_disarms_recording():
 def test_activation_discards_warmup_counts_and_summary(monkeypatch):
     from vllm.v1.worker import expert_load_stats as stats_module
 
-    stats = object.__new__(ExpertLoadStats)
+    stats: Any = object.__new__(ExpertLoadStats)
     stats.config = ExpertLoadStatsConfig(enabled=True)
     stats.counts = torch.ones((1, 64), dtype=torch.int64)
     stats.summary = torch.full_like(stats.counts, 9)
@@ -263,7 +264,7 @@ def test_trace_sampling_and_limit_do_not_skip_summary_steps(
 ):
     import vllm.v1.worker.expert_load_stats as stats_module
 
-    stats = object.__new__(ExpertLoadStats)
+    stats: Any = object.__new__(ExpertLoadStats)
     stats.config = ExpertLoadStatsConfig(
         enabled=True,
         trace=trace,
@@ -291,7 +292,7 @@ def test_trace_sampling_and_limit_do_not_skip_summary_steps(
 def test_full_export_queue_drops_trace_only(monkeypatch):
     import vllm.v1.worker.expert_load_stats as stats_module
 
-    stats = object.__new__(ExpertLoadStats)
+    stats: Any = object.__new__(ExpertLoadStats)
     stats.config = ExpertLoadStatsConfig(enabled=True, trace=True, output_dir="unused")
     stats.iteration, stats.summary_begin, stats.dropped = 0, 1, 0
     stats.counts = torch.zeros((1, 3), dtype=torch.int64)
@@ -307,7 +308,7 @@ def test_full_export_queue_drops_trace_only(monkeypatch):
     assert finish.call_args.args[2] is None
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("num_valid", [0, 1, 4, 5])
 @pytest.mark.parametrize("span", [(0, 5, 0), (1, 4, 0), (0, 3, 3), (0, 0, 0)])
 @pytest.mark.parametrize("num_experts", [3, 32, 64, 96, 256])
@@ -346,7 +347,7 @@ def test_gpu_histogram_masks_padding_invalid_and_unowned_tokens(
     torch.testing.assert_close(counts.cpu(), expected)
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 def test_gpu_graph_replay_reads_live_valid_count_and_exports(tmp_path):
     config = ExpertLoadStatsConfig(
         enabled=True,
@@ -391,6 +392,7 @@ def test_gpu_graph_replay_reads_live_valid_count_and_exports(tmp_path):
         graph.replay()
         stats.end()
     stats.close()
+    assert stats.reporter.path is not None
     records = [
         json.loads(line) for line in stats.reporter.path.read_text().splitlines()
     ]
@@ -401,7 +403,7 @@ def test_gpu_graph_replay_reads_live_valid_count_and_exports(tmp_path):
     assert summary[0]["counts"] == [2, 3, 3] + [0] * 61
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("record_eplb", [False, True])
 def test_gpu_eplb_fusion_preserves_mapping_and_sampling(record_eplb, monkeypatch):
     from vllm.model_executor.layers.fused_moe.router.base_router import (
