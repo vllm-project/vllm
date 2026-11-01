@@ -448,6 +448,7 @@ steps:
   - tests/models/test_beam_numerics.py
   - tests/models/transformers/fusers/
   - tests/models/transformers/test_dynamic_rope.py
+  - tests/models/transformers/test_dynamic_arg_dims.py
   - tests/model_executor/layers/test_activation.py
   - tests/models/test_language_model_cache_is_weak.py
   - tests/models/deepseek_v32/test_sequence_parallel.py
@@ -467,6 +468,7 @@ steps:
       models/test_qwen3_5.py
       models/transformers/fusers/
       models/transformers/test_dynamic_rope.py
+      models/transformers/test_dynamic_arg_dims.py
       model_executor/layers/test_activation.py
       models/test_language_model_cache_is_weak.py
       models/deepseek_v32/test_sequence_parallel.py
