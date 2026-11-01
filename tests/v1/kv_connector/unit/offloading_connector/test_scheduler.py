@@ -2128,7 +2128,7 @@ def test_abort_before_hit_uses_placeholder_then_later_hit_heals_removal(
     [event] = runner.connector_scheduler.take_events()
     assert isinstance(event, BlockRemoved)
     assert event.medium == MEDIUM_CPU
-    assert len(event.block_hashes) == 2
+    assert len(event.block_hashes) == 1
     assert key not in tracker._pending_event_metadata
 
 
@@ -2488,6 +2488,7 @@ def test_req_context_counts_live_until_request_finished(registered):
     scheduler = object.__new__(OffloadingConnectorScheduler)
     scheduler.config = SimpleNamespace(kv_group_configs=())
     scheduler.manager = MagicMock(spec=OffloadingManager)
+    scheduler._events_tracker = SimpleNamespace(on_new_request=lambda *_: None)
     scheduler._step_region = None
     scheduler._req_status = {}
 

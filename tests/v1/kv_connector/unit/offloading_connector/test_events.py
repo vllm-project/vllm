@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
+from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -47,6 +48,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+from vllm.v1.request import Request
 
 _CPU_MEDIUM = Medium.CPU
 _FULL_ATTENTION_EVENT_SPEC = OffloadingEventGroupSpec(
@@ -353,6 +355,73 @@ def test_take_events_forwards_locality_to_remove():
     assert events[0].locality == "LOCAL"
 
 
+def test_store_uses_request_context_and_removal_uses_chunk_key():
+    block_hashes = [_hash(i) for i in range(4)]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(1, 17)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+    group_config = _group_config(block_size=4, blocks_per_chunk=2)
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(block_hashes[1], group_config.group_idx)
+    context.set_offload_key_position(key, 8)
+    tracker = _tracker()
+    tracker.on_new_request(context, request, (group_config,))
+
+    [stored] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key], medium=Medium.CPU, removed=False, req_context=context
+            )
+        ]
+    )
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
+    assert stored.token_ids == list(range(1, 9))
+    assert stored.block_size == 4
+
+    [removed] = tracker.take_events(
+        [OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True)]
+    )
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == [_wire_hash(block_hashes[1])]
+
+
+def test_mamba_store_uses_request_context():
+    block_hashes = [_hash(i) for i in range(4)]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(1, 17)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+    group_config = _group_config(
+        group_idx=1, block_size=8, tokens_per_hash=4, mamba=True
+    )
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(block_hashes[3], group_config.group_idx)
+    context.set_offload_key_position(key, 16)
+    tracker = _tracker()
+    tracker.on_new_request(context, request, (group_config,))
+
+    [stored] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key], medium=Medium.CPU, removed=False, req_context=context
+            )
+        ]
+    )
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(block_hashes[3])]
+    assert stored.parent_block_hash == _wire_hash(block_hashes[1])
+    assert stored.token_ids == []
+    assert stored.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
+
+
 def test_take_events_publishes_routable_block_stored():
     block_size = 4
     tracker = _tracker()
@@ -457,7 +526,6 @@ def test_lookup_promotion_factor_gt_1_store_and_remove():
     stored = list(tracker.take_events([_stored_event(keys)]))
     assert len(stored) == 2
 
-    expected_hashes = []
     for chunk_idx, event in enumerate(stored):
         assert isinstance(event, BlockStored)
         expected_chunk_hashes = [
@@ -474,14 +542,13 @@ def test_lookup_promotion_factor_gt_1_store_and_remove():
             assert event.parent_block_hash is None
         else:
             assert event.parent_block_hash == _wire_hash(_hash(blocks_per_chunk - 1))
-        expected_hashes.extend(expected_chunk_hashes)
 
     assert len(tracker._pending_event_metadata) == 2
 
     removed = list(tracker.take_events([_removed_event(keys)]))
     assert len(removed) == 1
     assert isinstance(removed[0], BlockRemoved)
-    assert removed[0].block_hashes == expected_hashes
+    assert removed[0].block_hashes == [_wire_hash(_hash(1)), _wire_hash(_hash(3))]
     assert removed[0].medium == _CPU_MEDIUM.value
     assert removed[0].group_idx == 0
     assert not tracker._pending_event_metadata
@@ -658,13 +725,13 @@ def test_primary_removal_preserves_metadata_for_same_batch_kvcr_store(
 
     hashes = [_wire_hash(_hash(2)), _wire_hash(_hash(3))]
     assert isinstance(removed, BlockRemoved)
-    assert removed.block_hashes == hashes
+    assert removed.block_hashes == [hashes[-1]]
     assert stored.block_size == 64
     assert stored.token_ids == list(range(129, 257))
     assert stored.parent_block_hash == _wire_hash(_hash(1))
     assert stored.block_hashes == hashes
     assert stored.ownership == "kvcr"
-    assert final_removal.block_hashes == hashes
+    assert final_removal.block_hashes == [hashes[-1]]
 
     # Nothing holds a residency now, so the payload is gone.
     [after_eviction] = tracker.take_events([_stored_event([key], ownership="kvcr")])
@@ -830,10 +897,7 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
     )
     removed = list(tracker.take_events([_removed_event([key])]))
     assert len(removed) == 1
-    assert removed[0].block_hashes == [
-        _wire_hash(_hash(0)),
-        _wire_hash(_hash(1)),
-    ]
+    assert removed[0].block_hashes == [_wire_hash(_hash(1))]
 
     stored = list(tracker.take_events([_stored_event([key])]))
     assert len(stored) == 1
@@ -842,10 +906,7 @@ def test_pending_cpu_removal_consumes_hit_backfill_until_next_hit():
 
     tracker.record_lookup(lookup_req, group_config, 0, key)
     removed = list(tracker.take_events([_removed_event([key])]))
-    assert removed[0].block_hashes == [
-        _wire_hash(_hash(0)),
-        _wire_hash(_hash(1)),
-    ]
+    assert removed[0].block_hashes == [_wire_hash(_hash(1))]
 
 
 @pytest.mark.parametrize(
@@ -893,8 +954,8 @@ def test_take_events_groups_removed_hashes_by_kv_group():
     assert len(removed) == 2
     by_group = {event.group_idx: event.block_hashes for event in removed}
     assert by_group == {
-        0: [_wire_hash(_hash(0)), _wire_hash(_hash(1))],
-        1: [_wire_hash(_hash(10)), _wire_hash(_hash(11))],
+        0: [_wire_hash(_hash(1))],
+        1: [_wire_hash(_hash(11))],
     }
 
 
