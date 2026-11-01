@@ -393,6 +393,7 @@ def causal_conv1d_fn(
     null_block_id: int = NULL_BLOCK_ID,
     metadata=None,
     validate_data=False,
+    num_programs: int | None = None,
 ):
     """Support varlen + continuous batching when x is 2D tensor.
 
@@ -433,6 +434,10 @@ def causal_conv1d_fn(
         for example: cache_indices = [pad_slot_id, 1, 20, pad_slot_id]
         in this case, the kernel will not process entries at
         indices 0 and 3
+    num_programs: int
+        static grid size for CUDA graph capture (needs `metadata`); it must
+        cover the batch, and the extra programs read PAD_SLOT_ID from
+        `metadata.batch_ptr` and exit
     out: same shape as `x`
     """
     if isinstance(activation, bool) and activation:
@@ -476,6 +481,9 @@ def causal_conv1d_fn(
     stride_istate_token = 0
     num_cache_lines = 0
     BLOCK_M = 8
+    if num_programs is not None:
+        assert metadata is not None
+        assert metadata.nums_dict[BLOCK_M]["tot"] <= num_programs <= batch_ptr.numel()
     if conv_states is not None:
         # extensions to support vLLM:
         # 1. conv_states is used to replaced initial_states
@@ -582,7 +590,7 @@ def causal_conv1d_fn(
 
     def grid(META):
         return (
-            num_program(META, args),
+            num_program(META, args) if num_programs is None else num_programs,
             triton.cdiv(dim, META["BLOCK_N"]),
         )
 
