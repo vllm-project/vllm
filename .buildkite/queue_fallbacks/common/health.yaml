@@ -1,0 +1,5 @@
+- health:
+    pipeline: queue-health
+    token_secret: QUEUE_FALLBACK_BUILDKITE_API_TOKEN
+    max_age: 30m
+    pipelines: [ci]

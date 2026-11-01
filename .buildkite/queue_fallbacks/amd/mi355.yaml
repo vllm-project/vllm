@@ -1,0 +1,8 @@
+- device: mi355_dpx
+  fallbacks: [mi355_1, mi300_1]
+- device: mi355_1
+  fallbacks: [mi355_dpx, mi300_1]
+- device: mi355_2
+  fallbacks: [mi300_2]
+- device: mi355_8
+  fallbacks: [mi300_8]
