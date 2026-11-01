@@ -84,7 +84,13 @@ def _qk_norm_rope_kernel(
     KV_CACHE,
     SLOTS,
     NUM_SLOTS,
+    Q_SCALE,
+    K_SCALE,
+    V_SCALE,
     WRITE_CACHE: tl.constexpr,
+    FP8_Q: tl.constexpr,
+    FP8_KV: tl.constexpr,
+    FP8_MAX: tl.constexpr,
     V_STRIDE: tl.constexpr,
     CACHE_BLOCK_STRIDE: tl.constexpr,
     CACHE_HEAD_STRIDE: tl.constexpr,
@@ -117,7 +123,7 @@ def _qk_norm_rope_kernel(
             total = tl.sum(x * x, 1)
         y = x * tl.rsqrt(total / DIM + EPS)[:, None]
         y = y * tl.load(QW + c, c < DIM, 0).to(tl.float32)[None, :]
-        out = OQ + (token[:, None] * Q_HEADS + head) * DIM
+        out = (token[:, None] * Q_HEADS + head) * DIM
     else:
         h = head - Q_HEADS
         x = tl.load(K + token[:, None] * K_STRIDE + h * DIM + c[None, :], mask, 0).to(
@@ -130,7 +136,7 @@ def _qk_norm_rope_kernel(
             total = tl.sum(x * x, 1)
         y = x * tl.rsqrt(total / DIM + EPS)[:, None]
         y = y * tl.load(KW + c, c < DIM, 0).to(tl.float32)[None, :]
-        out = OK + (token[:, None] * K_HEADS + h) * DIM
+        out = (token[:, None] * K_HEADS + h) * DIM
     y = y.to(Q.dtype.element_ty).to(tl.float32)
     if ROTARY:
         half: tl.constexpr = ROTARY // 2
@@ -163,7 +169,16 @@ def _qk_norm_rope_kernel(
             p = tl.load(POS + token, token < M, 0).to(tl.float32) + 1
             scale = libdevice.exp(0.1 * libdevice.log1p(p / 2048.0))
             y = y * scale[:, None]
-    tl.store(out + c[None, :], y, mask)
+    if head < Q_HEADS:
+        if FP8_Q:
+            q = y.to(Q.dtype.element_ty).to(tl.float32)
+            q = q * tl.div_rn(1.0, tl.load(Q_SCALE))
+            q = tl.maximum(tl.minimum(q, FP8_MAX), -FP8_MAX)
+            tl.store(OQ + out + c[None, :], q, mask)
+        else:
+            tl.store(OQ + out + c[None, :], y, mask)
+    else:
+        tl.store(OK + out + c[None, :], y, mask)
     if WRITE_CACHE and head >= Q_HEADS:
         slot = tl.load(SLOTS + token, token < NUM_SLOTS, -1).to(tl.int64)
         cache_mask = mask & (token[:, None] < NUM_SLOTS) & (slot[:, None] >= 0)
@@ -173,12 +188,20 @@ def _qk_norm_rope_kernel(
             + (head - Q_HEADS) * CACHE_HEAD_STRIDE
             + c[None, :]
         )
-        tl.store(KV_CACHE + address, y, cache_mask)
         value = tl.load(
             V + token[:, None] * V_STRIDE + (head - Q_HEADS) * DIM + c[None, :],
             cache_mask,
             0,
         )
+        if FP8_KV:
+            y = y.to(V.dtype.element_ty).to(tl.float32)
+            y = tl.div_rn(y, tl.load(K_SCALE))
+            y = tl.clamp(y, -FP8_MAX, FP8_MAX, propagate_nan=tl.PropagateNan.ALL)
+            value = tl.div_rn(value.to(tl.float32), tl.load(V_SCALE))
+            value = tl.clamp(
+                value, -FP8_MAX, FP8_MAX, propagate_nan=tl.PropagateNan.ALL
+            )
+        tl.store(KV_CACHE + address, y, cache_mask)
         tl.store(KV_CACHE + address + DIM, value, cache_mask)
 
 
@@ -198,13 +221,23 @@ def beam_qk_norm_rope(
     value: torch.Tensor | None = None,
     kv_cache: torch.Tensor | None = None,
     slot_mapping: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Round norm before position transforms and optionally insert BF16 K/V."""
+    """Round norm before position transforms; optionally insert K/V and quantize Q."""
+    fp8_kv = kv_cache is not None and kv_cache.dtype == torch.float8_e4m3fn
     if kv_cache is not None:
         assert value is not None and slot_mapping is not None
-        assert kv_cache.dtype == q.dtype == torch.bfloat16
+        assert kv_cache.dtype in (q.dtype, torch.float8_e4m3fn)
+        assert q.dtype == value.dtype == torch.bfloat16
         assert kv_cache.ndim == 4 and kv_cache.stride(-1) == 1
-    q_out, k_out = torch.empty_like(q), torch.empty_like(k)
+        assert not fp8_kv or (k_scale is not None and v_scale is not None)
+    assert q_scale is None or q.dtype == torch.bfloat16
+    q_out = torch.empty_like(
+        q, dtype=torch.float8_e4m3fn if q_scale is not None else q.dtype
+    )
+    k_out = torch.empty_like(k)
     q_heads, k_heads = q.shape[-1] // head_dim, k.shape[-1] // head_dim
     if q.shape[0]:
         if rotary_dim or q.shape[0] < 512:
@@ -227,7 +260,13 @@ def beam_qk_norm_rope(
             kv_cache,
             slot_mapping,
             slot_mapping.numel() if slot_mapping is not None else 0,
+            q_scale,
+            k_scale,
+            v_scale,
             kv_cache is not None,
+            q_scale is not None,
+            fp8_kv,
+            torch.finfo(torch.float8_e4m3fn).max,
             value.stride(0) if value is not None else 0,
             kv_cache.stride(0) if kv_cache is not None else 0,
             kv_cache.stride(1) if kv_cache is not None else 0,
@@ -248,3 +287,31 @@ def beam_qk_norm_rope(
             enable_fp_fusion=False,
         )
     return q_out, k_out
+
+
+def supports_fused_kv_insert(attn: torch.nn.Module) -> bool:
+    """Whether the fused kernel can write this KV cache: BF16 or per-tensor FP8."""
+    if attn.dtype != torch.bfloat16:
+        return False
+    if attn.kv_cache_torch_dtype == torch.bfloat16:
+        return True
+    if attn.kv_cache_dtype not in ("fp8", "fp8_e4m3"):
+        return False
+    scales = [attn._k_scale, attn._v_scale]
+    if attn.query_quant is not None:
+        scales.append(attn._q_scale)
+    return all(scale.numel() == 1 for scale in scales)
+
+
+def fused_kv_insert_kwargs(
+    attn: torch.nn.Module, slot_mapping: torch.Tensor
+) -> dict[str, torch.Tensor]:
+    """Cache arguments for the fused kernel, with scales when the cache is FP8."""
+    kwargs = {"kv_cache": attn.kv_cache, "slot_mapping": slot_mapping}
+    if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
+        kwargs["kv_cache"] = attn.kv_cache.view(torch.float8_e4m3fn)
+        kwargs["k_scale"] = attn._k_scale
+        kwargs["v_scale"] = attn._v_scale
+        if attn.query_quant is not None:
+            kwargs["q_scale"] = attn._q_scale
+    return kwargs

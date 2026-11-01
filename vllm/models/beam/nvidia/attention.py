@@ -23,7 +23,12 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.transformers_utils.configs.beam import BeamConfig
 from vllm.v1.attention.backend import AttentionType
 
-from .attention_ops import beam_output_gate, beam_qk_norm_rope
+from .attention_ops import (
+    beam_output_gate,
+    beam_qk_norm_rope,
+    fused_kv_insert_kwargs,
+    supports_fused_kv_insert,
+)
 from .layernorm import RMSNorm
 from .projection import (
     packed_projection,
@@ -146,6 +151,7 @@ class BeamAttention(nn.Module):
             self.attn.attn_backend.get_name() in ("FLASH_ATTN", "FLASHINFER")
             and self.attn.impl.dcp_world_size == 1
             and self.attn.kv_sharing_target_layer_name is None
+            and supports_fused_kv_insert(self.attn)
         )
         self.low_latency_projection = False
 
@@ -177,16 +183,13 @@ class BeamAttention(nn.Module):
             gate, _ = self.output_gate_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        kv_cache, slot_mapping = None, None
-        if (
-            self.fuse_kv_insert
-            and self.attn.kv_cache.dtype == q.dtype == torch.bfloat16
-        ):
+        insert: dict[str, torch.Tensor] = {}
+        if self.fuse_kv_insert:
             slots = get_forward_context().slot_mapping
             if isinstance(slots, dict):
                 slot_mapping = slots.get(self.attn.layer_name)
                 if slot_mapping is not None:
-                    kv_cache = self.attn.kv_cache
+                    insert = fused_kv_insert_kwargs(self.attn, slot_mapping)
 
         rope = self.rotary_emb
         q, k = beam_qk_norm_rope(
@@ -202,13 +205,14 @@ class BeamAttention(nn.Module):
             rope.is_neox_style if rope is not None else True,
             ssmax=self.disable_rope,
             value=v,
-            kv_cache=kv_cache,
-            slot_mapping=slot_mapping,
+            **insert,
         )
 
         # Both backends read the populated cache when K/V are omitted.
         attn_output = (
-            self.attn(q, k, v) if kv_cache is None else self.attn(q, None, None)
+            self.attn(q, None, None, output_dtype=v.dtype)
+            if insert
+            else self.attn(q, k, v)
         )
         attn_output = beam_output_gate(
             attn_output,
