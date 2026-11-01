@@ -8,7 +8,11 @@ from typing import ClassVar
 import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config import (
+    VllmConfig,
+    get_current_vllm_config_or_none,
+    get_layers_from_vllm_config,
+)
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
@@ -31,6 +35,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
+from vllm.v1.attention.backends import rocm_aiter_triton_fp8_prefill as _fp8_prefill
 from vllm.v1.attention.backends.utils import (
     split_decodes_prefills_and_extends,
 )
@@ -1043,6 +1048,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 "cross-attention."
             )
 
+        vllm_config = get_current_vllm_config_or_none()
+        self._prefill_attn = _fp8_prefill.prefill_attn(
+            vllm_config is not None
+            and vllm_config.attention_config.use_prefill_query_quantization,
+            head_size,
+            kv_cache_dtype,
+        )
+
     def _get_kv_cache_descales(
         self,
         layer: AttentionLayer,
@@ -1151,7 +1164,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 v_scale,
             )
             return
-        out, lse = rocm_aiter_ops.flash_attn_varlen_func(
+        out, lse = self._prefill_attn(
             q=query,
             k=key,
             v=value,
@@ -1199,10 +1212,12 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 total_tokens=total_token_per_batch[chunk_idx],
             )
 
-            suf_out, suf_lse = rocm_aiter_ops.flash_attn_varlen_func(
+            # Rows past total_tokens are stale or uninitialised.
+            n_ctx = total_token_per_batch[chunk_idx]
+            suf_out, suf_lse = self._prefill_attn(
                 q=query,
-                k=key_fetched,
-                v=value_fetched,
+                k=key_fetched[:n_ctx],
+                v=value_fetched[:n_ctx],
                 cu_seqlens_q=cu_seqlens_q,
                 cu_seqlens_k=cu_seqlens_kv[chunk_idx],
                 max_seqlen_q=max_seqlen_q,
@@ -1351,7 +1366,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
             prefill_key = key[num_decode_tokens + num_extend_tokens :]
             prefill_value = value[num_decode_tokens + num_extend_tokens :]
 
-            rocm_aiter_ops.flash_attn_varlen_func(
+            self._prefill_attn(
                 q=prefill_query,
                 k=prefill_key,
                 v=prefill_value,
