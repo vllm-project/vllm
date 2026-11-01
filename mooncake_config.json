@@ -1,0 +1,1 @@
+{"metadata_server": "http://metadata/endpoint", "protocol": "tcp", "master_server_address": "10.0.0.7:50051"}

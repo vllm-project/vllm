@@ -308,12 +308,15 @@ class MooncakeStoreScheduler:
 
         self.load_specs[request.request_id].can_load = True
 
+    @property
+    def _can_process_cached(self) -> bool:
+        return self.kv_role != "kv_consumer" or self.save_decode_cache
+
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         """Build connector metadata for this scheduler step."""
         is_consumer = self.kv_role == "kv_consumer"
-        can_process_cached = not is_consumer or self.save_decode_cache
 
         for finished_req_id in scheduler_output.finished_req_ids:
             self.client.discard(finished_req_id)
@@ -380,7 +383,7 @@ class MooncakeStoreScheduler:
 
         # Handle cached (running, or MRV1 resumed-from-preemption) requests
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        if can_process_cached:
+        if self._can_process_cached:
             for i, req_id in enumerate(cached_reqs.req_ids):
                 new_block_ids = cached_reqs.new_block_ids[i]
                 if new_block_ids:
@@ -512,7 +515,7 @@ class MooncakeStoreScheduler:
         if (
             block_state is not None
             and block_state.boundary_state_offloads
-            and can_process_cached
+            and self._can_process_cached
         ):
             self._handle_boundary_state_offloads(
                 block_state.boundary_state_offloads, meta
@@ -607,7 +610,7 @@ class MooncakeStoreScheduler:
         partial_tail_offloads: list[tuple[int, int, int]],
     ) -> bool:
         """Queue and pin a finish-time tail for the next connector step."""
-        if self.kv_role == "kv_consumer" or not partial_tail_offloads:
+        if not partial_tail_offloads or not self._can_process_cached:
             return False
         tracker = self._request_trackers.get(request.request_id)
         if tracker is None or not any(block_ids):
@@ -618,7 +621,9 @@ class MooncakeStoreScheduler:
                 "Partial-tail offloads for one request must share a boundary"
             )
         boundary_tokens = next(iter(boundaries))
-        if boundary_tokens > tracker.prefill_end_tokens:
+        if not self.save_decode_cache and boundary_tokens > tracker.prefill_end_tokens:
+            # Without decode saves every other group stops saving at
+            # ``prefill_end_tokens``, so a mamba-only key past it is dead weight.
             return False
 
         mamba_puts: list[BoundaryPut] = []
