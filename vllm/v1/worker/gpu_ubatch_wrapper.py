@@ -22,7 +22,11 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.v1.worker.ubatch_utils import create_sm_control_context
+from vllm.v1.worker.ubatch_utils import (
+    create_blas_handles,
+    create_sm_control_context,
+    find_model_streams,
+)
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
@@ -91,6 +95,7 @@ class UBatchWrapper:
         self.device = device
         self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
+        self._model_streams: list[torch.cuda.Stream] | None = None
 
     @property
     def graph_pool(self):
@@ -144,10 +149,12 @@ class UBatchWrapper:
         def _capture_ubatch_thread(results, ubatch_metadata):
             torch.accelerator.set_device_index(self.device)
             ubatch_context = ubatch_metadata.context
-            with torch.cuda.stream(ubatch_context.compute_stream):
-                _ = torch.cuda.current_blas_handle()
-            with torch.cuda.stream(ubatch_context.comm_stream):
-                _ = torch.cuda.current_blas_handle()
+            if self._model_streams is None:
+                self._model_streams = find_model_streams(model)
+            streams = [ubatch_context.compute_stream, ubatch_context.comm_stream]
+            create_blas_handles(
+                streams + self._model_streams, self.vllm_config.model_config.dtype
+            )
             with ubatch_context:
                 model_output = model(
                     input_ids=ubatch_metadata.input_ids,
