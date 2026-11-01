@@ -6,5 +6,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.base
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_compute import (  # noqa: E501
     OnComputeStoreHandler,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.on_handoff import (  # noqa: E501
+    OnHandoffStoreHandler,
+)
 
-__all__ = ["OnComputeStoreHandler", "StoreTriggerHandler"]
+__all__ = [
+    "OnHandoffStoreHandler",
+    "OnComputeStoreHandler",
+    "StoreTriggerHandler",
+]

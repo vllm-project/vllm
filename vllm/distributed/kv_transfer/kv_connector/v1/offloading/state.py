@@ -116,6 +116,11 @@ class SchedulerOffloadConfig(NamedTuple):
     num_hash_lookahead_tokens: int = 0
 
     @property
+    def supports_handoff(self) -> bool:
+        """Whether the KV cache manager can hand off state blocks."""
+        return any(cfg.requires_cow_source for cfg in self.kv_group_configs)
+
+    @property
     def partial_tail_block_size(self) -> int:
         if not self.supports_partial_tail:
             return 0
