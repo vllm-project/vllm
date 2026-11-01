@@ -397,6 +397,38 @@ def test_moe_splitting_ops_deepep_ht_inductor_partition():
     ]
 
 
+def test_agrs_disables_cudagraphs_for_multi_rank_data_parallelism():
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        splitting_ops=["vllm::unified_attention_with_output"],
+    )
+    VllmConfig(
+        parallel_config=ParallelConfig(
+            all2all_backend="allgather_reducescatter",
+            data_parallel_size=2,
+        ),
+        compilation_config=compilation_config,
+    )
+    assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+
+
+def test_agrs_keeps_cudagraphs_without_data_parallelism():
+    compilation_config = CompilationConfig(
+        mode=CompilationMode.VLLM_COMPILE,
+        cudagraph_mode=CUDAGraphMode.PIECEWISE,
+        splitting_ops=["vllm::unified_attention_with_output"],
+    )
+    VllmConfig(
+        parallel_config=ParallelConfig(
+            all2all_backend="allgather_reducescatter",
+            data_parallel_size=1,
+        ),
+        compilation_config=compilation_config,
+    )
+    assert compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+
+
 def test_should_split():
     import torch
 
