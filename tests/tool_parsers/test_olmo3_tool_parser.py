@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import ast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -65,6 +66,15 @@ ESCAPED_STRING_FUNCTION_OUTPUT = (
 ESCAPED_STRING_FUNCTION_CALL = FunctionCall(
     name="get_weather",
     arguments='{"city": "Martha\'s Vineyard", "metric": "\\"cool units\\""}',
+)
+CLOSING_TAG_IN_STRING_FUNCTION_OUTPUT = (
+    "write_file(path='README.md', "
+    "content='Calls are wrapped in <function_calls>...</function_calls>.')"
+)
+CLOSING_TAG_IN_STRING_FUNCTION_CALL = FunctionCall(
+    name="write_file",
+    arguments='{"path": "README.md", '
+    '"content": "Calls are wrapped in <function_calls>...</function_calls>."}',
 )
 
 
@@ -170,6 +180,25 @@ TEST_CASES = [
     ),
     pytest.param(
         True,
+        f"<function_calls>{CLOSING_TAG_IN_STRING_FUNCTION_OUTPUT}</function_calls>",
+        [CLOSING_TAG_IN_STRING_FUNCTION_CALL],
+        id="closing_tag_in_string_streaming",
+    ),
+    pytest.param(
+        False,
+        f"<function_calls>{CLOSING_TAG_IN_STRING_FUNCTION_OUTPUT}</function_calls>",
+        [CLOSING_TAG_IN_STRING_FUNCTION_CALL],
+        id="closing_tag_in_string_nonstreaming",
+    ),
+    pytest.param(
+        False,
+        f"<function_calls>{CLOSING_TAG_IN_STRING_FUNCTION_OUTPUT}\n"
+        f"{SIMPLE_FUNCTION_OUTPUT}</function_calls>",
+        [CLOSING_TAG_IN_STRING_FUNCTION_CALL, SIMPLE_FUNCTION_CALL],
+        id="closing_tag_in_string_parallel_nonstreaming",
+    ),
+    pytest.param(
+        True,
         f"<function_calls>{SIMPLE_FUNCTION_OUTPUT}\n{MORE_TYPES_FUNCTION_OUTPUT}</function_calls>",
         [SIMPLE_FUNCTION_CALL, MORE_TYPES_FUNCTION_CALL],
         id="parallel_calls_streaming",
@@ -225,6 +254,68 @@ def test_streaming_tool_call_with_large_steps(default_tokenizer: TokenizerLike):
     assert reconstructor.tool_calls[0].function == SIMPLE_FUNCTION_CALL
     assert reconstructor.tool_calls[1].function == PARAMETERLESS_FUNCTION_CALL
     assert reconstructor.tool_calls[2].function == EMPTY_LIST_FUNCTION_CALL
+
+
+def test_streaming_closing_tag_in_string_split_after_tag(
+    default_tokenizer: TokenizerLike,
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    # The first delta ends with a "</function_calls>" that is inside a string.
+    model_output_deltas = [
+        "<function_calls>write_file(path='README.md', "
+        "content='Calls are wrapped in <function_calls>...</function_calls>",
+        ".')</function_calls>",
+    ]
+
+    reconstructor = run_tool_extraction_streaming(
+        tool_parser, model_output_deltas, assert_one_tool_per_delta=False
+    )
+
+    assert reconstructor.other_content == ""
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function == CLOSING_TAG_IN_STRING_FUNCTION_CALL
+
+
+def test_deeply_nested_tool_call_falls_back_to_content(
+    default_tokenizer: TokenizerLike,
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    # Too deep for ast.parse, which raises MemoryError instead of SyntaxError.
+    model_output = "<function_calls>f(a=" + "-" * 7000 + "1)</function_calls>"
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser, model_output, streaming=False
+    )
+
+    assert content == model_output
+    assert len(tool_calls) == 0
+
+
+def test_many_closing_tags_in_string_parse_count_is_bounded(
+    default_tokenizer: TokenizerLike,
+):
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+    # An unterminated string full of fake closing tags. Trying each one
+    # would parse the body thousands of times.
+    model_output = "<function_calls>f(a='" + "x</function_calls>" * 5000
+
+    with patch(
+        "vllm.tool_parsers.olmo3_tool_parser.ast.parse", wraps=ast.parse
+    ) as mock_parse:
+        content, tool_calls = run_tool_extraction(
+            tool_parser, model_output, streaming=False
+        )
+
+    assert content == model_output
+    assert len(tool_calls) == 0
+    # The candidate search, plus at most one parse in extract_tool_calls.
+    assert mock_parse.call_count <= tool_parser.MAX_CLOSING_TAG_CANDIDATES + 1
 
 
 @pytest.mark.parametrize("streaming", [False])
