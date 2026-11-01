@@ -129,3 +129,41 @@ def test_opt_out_ignores_existing_direct_cache_index(tmp_path, monkeypatch):
         assert manager.load(MagicMock(), [], 0, compile_range) is None
         load.assert_not_called()
     assert index.read_text() == "old index must not be read"
+
+
+def test_failed_save_keeps_previous_cache_index(tmp_path, monkeypatch):
+    """A save that fails while writing must keep the previous index loadable."""
+    import errno
+
+    from vllm.compilation.backends import CompilerManager
+    from vllm.config import CompilationConfig, CompilationMode
+    from vllm.config.utils import Range
+    from vllm.envs import disable_envs_cache
+
+    monkeypatch.setenv("VLLM_USE_STANDALONE_COMPILE", "1")
+    disable_envs_cache()
+    manager = CompilerManager(
+        CompilationConfig(mode=CompilationMode.VLLM_COMPILE), use_aot_compile=True
+    )
+    manager.initialize_cache(str(tmp_path))
+    entry = {"graph_handle": ("key", "path"), "cache_key": "key"}
+    manager.cache[(Range(1, 8), 0, manager.compiler.name)] = entry
+    manager.is_cache_updated = True
+    manager.save_to_file()
+    saved = dict(manager.cache)
+    manager.cache[(Range(9, 16), 0, manager.compiler.name)] = entry
+    real_open = open
+
+    def open_on_full_disk(*args, **kwargs):
+        file = real_open(*args, **kwargs)
+        file.write = MagicMock(side_effect=OSError(errno.ENOSPC, "disk full"))
+        return file
+
+    with (
+        patch("builtins.open", side_effect=open_on_full_disk),
+        pytest.raises(OSError, match="disk full"),
+    ):
+        manager.save_to_file()
+    manager.initialize_cache(str(tmp_path))
+    assert manager.cache == saved
+    assert [p.name for p in tmp_path.iterdir()] == ["vllm_compile_cache.py"]
