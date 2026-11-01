@@ -43,6 +43,7 @@ Slack="https://slack.vllm.ai/"
 vllm = "vllm.entrypoints.cli.main:main"
 
 [project.entry-points."vllm.general_plugins"]
+uno = "vllm.v1.worker.gpu.spec_decode.uno_config:register"
 lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
 lora_hf_hub_resolver = "vllm.plugins.lora_resolvers.hf_hub_resolver:register_hf_hub_resolver"
 

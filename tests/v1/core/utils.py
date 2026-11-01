@@ -6,6 +6,7 @@ import torch
 from tests.v1.kv_connector.unit.utils import MockKVConfig
 from vllm.config import (
     CacheConfig,
+    DeviceConfig,
     DiffusionConfig,
     ECTransferConfig,
     KVTransferConfig,
@@ -88,6 +89,7 @@ def create_scheduler(
     cache_aware_admission_threshold: float = 0.5,
     prefill_schedule_interval: int = 1,
     scheduling_policy: SchedulerPolicy = "fcfs",
+    device: str = "auto",
     diffusion_canvas_length: int | None = None,
     scheduler_cls: type[Scheduler] | None = None,
     lora_config: LoRAConfig | None = None,
@@ -190,6 +192,19 @@ def create_scheduler(
             spec_kwargs["method"] = speculative_method
             spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
             spec_kwargs["prompt_lookup_min"] = 1
+        if speculative_method == "uno":
+            from vllm.v1.worker.gpu.spec_decode.uno_config import register
+
+            register()
+            spec_kwargs.update(
+                model=None,
+                speculator_options={"uno_lora_path": "test-adapter"},
+                target_model_config=model_config,
+                target_parallel_config=ParallelConfig(
+                    pipeline_parallel_size=pipeline_parallel_size,
+                    data_parallel_size=data_parallel_size,
+                ),
+            )
         speculative_config = SpeculativeConfig(**spec_kwargs)
 
     ec_transfer_config = (
@@ -208,9 +223,13 @@ def create_scheduler(
         model_config.hf_config.canvas_length = diffusion_canvas_length
         diffusion_config = DiffusionConfig(canvas_length=diffusion_canvas_length)
 
+    if speculative_method == "uno" and lora_config is None:
+        lora_config = LoRAConfig(max_lora_rank=128, max_loras=2)
+
     vllm_config = VllmConfig(
         scheduler_config=scheduler_config,
         model_config=model_config,
+        device_config=DeviceConfig(device=device),
         cache_config=cache_config,
         parallel_config=ParallelConfig(
             pipeline_parallel_size=pipeline_parallel_size,
