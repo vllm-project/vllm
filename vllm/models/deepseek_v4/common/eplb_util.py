@@ -8,6 +8,7 @@ from typing import Any
 import torch.nn as nn
 
 from vllm.config import ModelConfig
+from vllm.model_executor.models.interfaces import MixtureOfExperts
 
 
 def dspark_draft_supports_eplb(draft_model_config: ModelConfig) -> bool:
@@ -48,3 +49,40 @@ def collect_moe_layers(
 
     moe_model.num_moe_layers = len(moe_model.moe_layers)
     moe_model.extract_moe_parameters(example_moe)
+
+
+class DeepseekV4MixtureOfExperts(MixtureOfExperts):
+    moe_mlp_layers: list[Any]
+
+    def extract_moe_parameters(self, example_moe: Any) -> None:
+        if example_moe is None:
+            self.num_moe_layers = 0
+            self.num_expert_groups = 0
+            self.num_logical_experts = 0
+            self.num_physical_experts = 0
+            self.num_local_physical_experts = 0
+            self.num_routed_experts = 0
+            self.num_shared_experts = 0
+            self.num_redundant_experts = 0
+            return
+        self.num_logical_experts = example_moe.n_logical_experts
+        self.num_physical_experts = example_moe.n_physical_experts
+        self.num_local_physical_experts = example_moe.n_local_physical_experts
+        self.num_routed_experts = example_moe.n_routed_experts
+        self.num_shared_experts = example_moe.n_shared_experts
+        self.num_redundant_experts = example_moe.n_redundant_experts
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        assert self.num_local_physical_experts == num_local_physical_experts
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
+        for moe in self.moe_mlp_layers:
+            moe.n_local_physical_experts = num_local_physical_experts
+            moe.n_physical_experts = num_physical_experts
+            moe.n_redundant_experts = self.num_redundant_experts
+            moe.experts.update_expert_map()

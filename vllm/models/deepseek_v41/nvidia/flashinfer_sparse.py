@@ -9,6 +9,12 @@ import torch
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
+from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
+    _get_flashinfer_dsv4_workspace,
+    _packed_block_span,
+    _pad_to_supported_q_heads,
+    _required_sm120_sparse_topk,
+)
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.common.ops import (
@@ -33,71 +39,11 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
-from vllm.v1.attention.backends.mla.compressor_utils import (
-    get_dspark_swa_index_width,
-)
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
 from vllm.v1.kv_cache_interface import KVCacheSpec
 
 if TYPE_CHECKING:
     from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWAMetadata
-
-_FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
-_flashinfer_dsv4_workspace_by_device: dict[torch.device, torch.Tensor] = {}
-
-
-def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
-    workspace = _flashinfer_dsv4_workspace_by_device.get(device)
-    if workspace is None:
-        workspace = torch.zeros(
-            _FLASHINFER_DSV4_WORKSPACE_BUFFER_SIZE,
-            dtype=torch.uint8,
-            device=device,
-        )
-        _flashinfer_dsv4_workspace_by_device[device] = workspace
-    return workspace
-
-
-def _packed_block_span(pool: torch.Tensor) -> int:
-    """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
-    block_size for unpacked KV, larger when packed (#44577). Raises if not
-    token-aligned."""
-    block_stride = pool.stride(0)
-    token_stride = pool.stride(-2)
-    if block_stride % token_stride != 0:
-        raise NotImplementedError(
-            "FLASHINFER_MLA_SPARSE_DSV4 packed KV requires the per-block stride "
-            f"({block_stride}) to be a multiple of the per-token stride "
-            f"({token_stride}); this layout is not supported yet."
-        )
-    return block_stride // token_stride
-
-
-# Sparse MLA h_q counts accepted natively (flashinfer>=0.6.14, #3545).
-_SPARSE_MLA_SUPPORTED_Q_HEADS = (8, 16, 32, 64, 128)
-
-
-def _pad_to_supported_q_heads(num_heads: int) -> int:
-    for supported in _SPARSE_MLA_SUPPORTED_Q_HEADS:
-        if num_heads <= supported:
-            return supported
-    raise ValueError(
-        f"DeepseekV4 FlashInfer MLA Sparse does not support {num_heads} heads "
-        "(sparse MLA kernel requires h_q in {8, 16, 32, 64, 128})."
-    )
-
-
-def _required_sm120_sparse_topk(vllm_config: VllmConfig, window_size: int) -> int:
-    """Return the SM120 DSV4 SWA specialization needed by this model."""
-    if not vllm_config.attention_config.use_non_causal:
-        return window_size
-    speculative_config = vllm_config.speculative_config
-    if speculative_config is None:
-        return window_size
-    return get_dspark_swa_index_width(
-        window_size,
-        speculative_config.num_speculative_tokens,
-    )
 
 
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4SparseMLABackend):
