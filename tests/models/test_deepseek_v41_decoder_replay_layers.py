@@ -101,6 +101,40 @@ def test_run_gathers_states():
     assert outputs[0][1:173].abs().sum() == 0
 
 
+def test_layer_before_replay_finalizes_moe_in_replay_steps():
+    """The replay batch gathers rows of the encoder output, so in its steps the
+    last encoder layer finalizes its MoE, even for batches that would defer it."""
+    from types import SimpleNamespace
+
+    from vllm.models.deepseek_v41.nvidia.model import DeepseekV4Model
+
+    calls = []
+
+    def layer(idx):
+        def forward(hidden_states, *args, finalize_moe=False, **kwargs):
+            calls.append((idx, finalize_moe))
+            return (hidden_states,) * 5 + (None,)
+
+        return forward
+
+    replay = SimpleNamespace(replay_batch=None)
+    model = SimpleNamespace(
+        layers=[layer(i) for i in range(4)],
+        decoder_replay_start=2,
+        decoder_replay_layers=replay,
+        aux_hidden_state_layers=set(),
+        use_sequence_parallel=False,
+        _mega_gate_metadata=lambda input_ids: None,
+    )
+    x = torch.zeros(3, HIDDEN, device=DEVICE)
+    for replay_batch, finalized in ((None, False), (object(), True)):
+        replay.replay_batch = replay_batch
+        calls.clear()
+        DeepseekV4Model._run_layers(model, range(2), x, x, None, x, x, x, x, {})
+        DeepseekV4Model._run_layers(model, range(2, 4), x, x, None, x, x, x, x, {})
+        assert calls == [(0, False), (1, finalized), (2, False), (3, False)]
+
+
 def test_no_replay_batch_runs_the_whole_batch():
     seen = {}
 
@@ -145,6 +179,24 @@ def test_piecewise_graphs_break_out_by_size():
     with override_forward_context(_graph_context(576)):
         assert not layers.uses_replay_batch()  # a replay batch alone does not break out
     write_batch_kv.assert_called_once_with(*states)
+
+
+def test_default_replay_capture_sizes_reach_one_row(monkeypatch):
+    """Prefill chunks far from their prompt's end replay one row each, so the
+    default sizes start at 1 rather than at the window."""
+    monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
+    compilation = CompilationConfig(max_cudagraph_capture_size=512)
+    cfg = MagicMock(compilation_config=compilation, speculative_config=None)
+    cfg.use_cumem_cudagraph_pool = False
+    cfg.scheduler_config = MagicMock(max_num_seqs=8, max_num_batched_tokens=1024)
+    cfg.cache_config.use_kda_recoverssm = False
+    cfg.model_config.hf_config = MagicMock(hc_mult=HC, hidden_size=HIDDEN)
+    cfg.model_config.dtype = torch.float32
+    cfg.kernel_config.moe_backend = "auto"
+    layers = DecoderReplayLayers(128, MagicMock(), MagicMock(), set(), "swa")
+    manager = DecoderReplayCudaGraphManager(cfg, DEVICE, layers)
+    sizes = manager.compilation_config.cudagraph_capture_sizes
+    assert sizes == [1, 2, 4, 8, 16, 32, 64, 128, 256, 384, 512]
 
 
 @pytest.mark.parametrize(

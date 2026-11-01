@@ -101,11 +101,13 @@ def _input_batch(
     device_query_lens: list[int] | None = None,
     num_tokens_after_padding: int | None = None,
     max_query_len: int | None = None,
+    prefill_len: list[int] | None = None,
+    computed: list[int] | None = None,
 ) -> InputBatch:
     num_reqs, num_tokens = len(query_lens), sum(query_lens)
     num_padded = num_tokens_after_padding or num_tokens
     batch = InputBatch.make_dummy(num_reqs, num_tokens, InputBuffers(16, 1024, DEVICE))
-    return replace(
+    batch = replace(
         batch,
         num_tokens=num_tokens,
         num_tokens_after_padding=num_padded,
@@ -126,6 +128,13 @@ def _input_batch(
         is_padding=torch.arange(num_padded, device=DEVICE) >= num_tokens,
         max_query_len=max_query_len,
     )
+    if prefill_len is not None:
+        batch = replace(
+            batch,
+            prefill_len_np=np.array(prefill_len, dtype=np.int32),
+            num_computed_prefill_tokens_np=np.array(computed, dtype=np.int32),
+        )
+    return batch
 
 
 def _slot_mappings(num_tokens: int) -> torch.Tensor:
@@ -497,7 +506,9 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    layers = SimpleNamespace(
+        window=WINDOW, replay_batch=None, metadata_prefixes=set(), trim_threshold=None
+    )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     groups = SimpleNamespace(
         kv_cache_groups=[
@@ -553,3 +564,74 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     assert is_padding[len(REPLAY_ROWS) :].all()
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+
+
+# The fixture has no replay graphs, so the reach is max_num_batched_tokens (1024)
+# plus the window: a chunk ending 1152 or more tokens before its prompt's end is far.
+FAR_PROMPT, NEAR_PROMPT = 2000, 1200
+
+
+def test_far_prefill_chunk_replays_one_row(state):
+    """A chunk far from its prompt's end replays its last row, which reads only
+    itself; a chunk within reach of the end keeps its window."""
+    batch = _input_batch(
+        [200, 200, 1],
+        [200, 200, 500],
+        [True, True, False],
+        prefill_len=[FAR_PROMPT, NEAR_PROMPT, 0],
+        computed=[0, 0, 0],
+    )
+    replay, build = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None
+    assert replay.rows.tolist() == [199, *range(400 - WINDOW, 400), 400]
+    assert build.replay_start.tolist() == [199, 200 - WINDOW, 0]
+
+
+def test_chunks_after_one_row_chunk_read_nothing_it_skipped(state):
+    """The rows a one-row chunk skipped hold no replay-layer KV: every later chunk
+    whose window reaches them starts its window after them and takes the replay
+    batch even when nothing trims."""
+    prompt = 1400  # the first chunk is far from the prompt's end, the rest are not
+
+    def chunk(start, length):
+        end = start + length
+        batch = _input_batch(
+            [length], [end], [True], prefill_len=[prompt], computed=[start]
+        )
+        return _prepare(state, batch, CUDAGraphMode.NONE)
+
+    replay, _ = chunk(0, 200)
+    assert replay.rows.tolist() == [199]
+    # Short chunks keep the floor until the window no longer reaches row 199.
+    for start, length in ((200, 100), (300, 1), (301, 26)):
+        replay, build = chunk(start, length)
+        assert replay is not None and replay.rows.tolist() == list(range(length))
+        assert build.replay_start.tolist() == [200]
+    assert chunk(327, 100) == (None, None)
+
+
+def test_eager_forward_while_a_chunk_reaches_skipped_rows(state):
+    """A step that would keep the whole batch runs eager while a chunk's window
+    reaches rows a one-row chunk skipped; at the trim threshold it takes the
+    replay batch anyway."""
+    first = _input_batch([200], [200], [True], prefill_len=[5000], computed=[0])
+    replay, _ = _prepare(state, first, CUDAGraphMode.NONE)
+    assert replay.rows.tolist() == [199]
+    state.decoder_replay_layers.trim_threshold = 768
+
+    def needs_eager(num_scheduled, computed=200):
+        n = len(num_scheduled)
+        return state.needs_eager_forward(
+            num_tokens=int(sum(num_scheduled)),
+            idx_mapping=np.arange(n),
+            is_prefilling=np.array([True] + [False] * (n - 1)),
+            num_computed_prefill_tokens=np.array([computed] + [0] * (n - 1)),
+            num_scheduled_tokens=np.array(num_scheduled),
+            prefill_len=np.full(n, 5000),
+        )
+
+    assert needs_eager([300, 1, 1])
+    assert not needs_eager([900, 1, 1])
+    assert needs_eager([400, 400])  # uniform: may take a FULL graph
+    assert needs_eager([300, 1, 1], computed=200 + WINDOW - 2)
+    assert not needs_eager([300, 1, 1], computed=200 + WINDOW - 1)
