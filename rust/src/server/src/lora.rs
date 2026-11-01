@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::io;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -12,11 +13,14 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 
 use crate::config::LoraModulePath;
+use crate::model_names::ServedModelNames;
 
 const RUNTIME_LORA_ALLOWED_PATH_PREFIXES_ENV: &str = "VLLM_RUNTIME_LORA_ALLOWED_PATH_PREFIXES";
 
 #[derive(Debug, Error, Macro)]
 pub(crate) enum LoraPathAccessError {
+    #[error("No adapter found for {lora_path}")]
+    NotFound { lora_path: String },
     #[error("{message}")]
     InvalidPath { message: String },
     #[error("{message}")]
@@ -60,9 +64,12 @@ fn validate_lora_path_access(
         ));
     }
 
-    let canonical_path = path
-        .canonicalize()
-        .map_err(|_| invalid_path!("Local LoRA adapter path must exist and be accessible."))?;
+    let canonical_path = path.canonicalize().map_err(|error| match error.kind() {
+        io::ErrorKind::NotFound => LoraPathAccessError::NotFound {
+            lora_path: lora_path.to_string(),
+        },
+        _ => invalid_path!("Local LoRA adapter path must exist and be accessible."),
+    })?;
     let canonical_prefixes = allowed_prefixes
         .iter()
         .map(|prefix| {
@@ -83,18 +90,57 @@ fn validate_lora_path_access(
     Ok(Some(canonical_path.to_string_lossy().into_owned()))
 }
 
+/// A LoRA adapter registered under a public model name.
+///
+/// Holds what identifies the loaded adapter, not the request that loaded it:
+/// per-load options such as `load_inplace` stay on that load, so the engine
+/// requests built from the registry never carry them.
+#[derive(Debug, Clone)]
+pub(crate) struct LoadedLora {
+    pub lora_name: String,
+    pub lora_int_id: u64,
+    pub lora_path: String,
+    pub base_model_name: Option<String>,
+    pub is_3d_lora_weight: bool,
+}
+
+impl LoadedLora {
+    /// The engine request that selects this adapter.
+    fn to_request(&self) -> LoraRequest {
+        LoraRequest {
+            lora_name: self.lora_name.clone(),
+            lora_int_id: self.lora_int_id,
+            lora_path: self.lora_path.clone(),
+            base_model_name: self.base_model_name.clone(),
+            load_inplace: false,
+            is_3d_lora_weight: self.is_3d_lora_weight,
+        }
+    }
+}
+
 /// Snapshot of the currently served model names plus the requested LoRA, if
 /// the model name resolves to a dynamic adapter.
 #[derive(Debug, Clone)]
 pub(crate) struct LoraModelResolution {
-    pub model_names: Vec<String>,
+    pub model_names: ServedModelNames,
     pub lora_request: Option<LoraRequest>,
+}
+
+impl LoraModelResolution {
+    /// The `model` reported in responses: the LoRA adapter name when the
+    /// request resolved to one, otherwise the first served model name.
+    pub fn response_model(&self) -> String {
+        self.lora_request
+            .as_ref()
+            .map(|request| request.lora_name.clone())
+            .unwrap_or_else(|| self.model_names.primary().to_string())
+    }
 }
 
 /// Runtime registry for dynamically loaded LoRA adapters.
 pub(crate) struct LoraManager {
     /// Dynamically loaded LoRA adapters keyed by public model name, in load order.
-    requests: RwLock<IndexMap<String, LoraRequest>>,
+    adapters: RwLock<IndexMap<String, LoadedLora>>,
     /// Monotonic adapter id allocator. LoRA ids are one-indexed.
     id_counter: AtomicU64,
     /// Serialize dynamic LoRA registry updates around engine utility calls.
@@ -154,28 +200,28 @@ pub(crate) enum UnloadLoraError {
 impl LoraManager {
     pub fn new() -> Self {
         Self {
-            requests: RwLock::new(IndexMap::new()),
+            adapters: RwLock::new(IndexMap::new()),
             id_counter: AtomicU64::new(0),
             update_lock: Mutex::new(()),
         }
     }
 
     /// Snapshot loaded LoRA adapters in load order.
-    pub async fn served_lora_requests(&self) -> Vec<LoraRequest> {
-        self.requests.read().await.values().cloned().collect()
+    pub async fn served_loras(&self) -> Vec<LoadedLora> {
+        self.adapters.read().await.values().cloned().collect()
     }
 
     /// Resolve the requested model against one consistent LoRA registry
     /// snapshot.
     pub async fn resolve_model(
         &self,
-        base_model_names: &[String],
+        base_model_names: ServedModelNames,
         model_name: Option<&str>,
     ) -> LoraModelResolution {
-        let requests = self.requests.read().await;
-        let mut model_names = base_model_names.to_vec();
-        model_names.extend(requests.keys().cloned());
-        let lora_request = model_name.and_then(|name| requests.get(name).cloned());
+        let adapters = self.adapters.read().await;
+        let model_names = base_model_names.with_names(adapters.keys().cloned());
+        let lora_request =
+            model_name.and_then(|name| adapters.get(name)).map(LoadedLora::to_request);
 
         LoraModelResolution {
             model_names,
@@ -190,7 +236,7 @@ impl LoraManager {
         base_model_names: &[String],
         mut module: LoraModulePath,
         load_inplace: bool,
-    ) -> Result<LoraRequest, LoadLoraError> {
+    ) -> Result<LoadedLora, LoadLoraError> {
         let allowed_prefixes = runtime_lora_allowed_path_prefixes();
         if let Some(canonical_path) =
             validate_lora_path_access(&module.path, allowed_prefixes.as_deref())?
@@ -208,7 +254,7 @@ impl LoraManager {
         engine_core_client: &EngineCoreClient,
         base_model_names: &[String],
         module: &LoraModulePath,
-    ) -> Result<LoraRequest, LoadLoraError> {
+    ) -> Result<LoadedLora, LoadLoraError> {
         self.register(engine_core_client, base_model_names, module.clone(), false).await
     }
 
@@ -218,7 +264,7 @@ impl LoraManager {
         base_model_names: &[String],
         module: LoraModulePath,
         load_inplace: bool,
-    ) -> Result<LoraRequest, LoadLoraError> {
+    ) -> Result<LoadedLora, LoadLoraError> {
         let LoraModulePath {
             name: lora_name,
             path: lora_path,
@@ -235,25 +281,27 @@ impl LoraManager {
         if base_model_names.iter().any(|name| name == &lora_name) {
             return Err(LoadLoraError::BaseModelName { lora_name });
         }
-        let requests = self.requests.read().await;
-        let existing_lora_int_id = requests.get(&lora_name).map(|request| request.lora_int_id);
+        let adapters = self.adapters.read().await;
+        let existing_lora_int_id = adapters.get(&lora_name).map(|adapter| adapter.lora_int_id);
         if !load_inplace && existing_lora_int_id.is_some() {
             return Err(LoadLoraError::AlreadyLoaded { lora_name });
         }
 
         let lora_int_id = existing_lora_int_id
             .unwrap_or_else(|| self.id_counter.fetch_add(1, Ordering::Relaxed) + 1);
-        let lora_request = LoraRequest {
+        let adapter = LoadedLora {
             lora_name: lora_name.clone(),
             lora_int_id,
             lora_path,
             base_model_name,
-            tensorizer_config_dict: None,
-            load_inplace,
             is_3d_lora_weight,
         };
-        drop(requests);
+        drop(adapters);
 
+        let lora_request = LoraRequest {
+            load_inplace,
+            ..adapter.to_request()
+        };
         let loaded = engine_core_client.add_lora(&lora_request).await.map_err(|source| {
             LoadLoraError::Engine {
                 lora_name: lora_name.clone(),
@@ -263,8 +311,8 @@ impl LoraManager {
         if !loaded {
             return Err(LoadLoraError::NotLoaded { lora_name });
         }
-        self.requests.write().await.insert(lora_name, lora_request.clone());
-        Ok(lora_request)
+        self.adapters.write().await.insert(lora_name, adapter.clone());
+        Ok(adapter)
     }
 
     /// Remove one dynamic LoRA adapter from the engine and public model
@@ -274,40 +322,39 @@ impl LoraManager {
         engine_core_client: &EngineCoreClient,
         lora_name: &str,
         requested_lora_int_id: Option<u64>,
-    ) -> Result<LoraRequest, UnloadLoraError> {
+    ) -> Result<LoadedLora, UnloadLoraError> {
         let _guard = self.update_lock.lock().await;
-        let lora_request = self.requests.read().await.get(lora_name).cloned().ok_or_else(|| {
+        let adapter = self.adapters.read().await.get(lora_name).cloned().ok_or_else(|| {
             UnloadLoraError::NotFound {
                 lora_name: lora_name.to_string(),
             }
         })?;
 
         if let Some(actual) = requested_lora_int_id
-            && actual != lora_request.lora_int_id
+            && actual != adapter.lora_int_id
         {
             return Err(UnloadLoraError::IntIdMismatch {
                 lora_name: lora_name.to_string(),
-                expected: lora_request.lora_int_id,
+                expected: adapter.lora_int_id,
                 actual,
             });
         }
 
         let removed =
-            engine_core_client
-                .remove_lora(lora_request.lora_int_id)
-                .await
-                .map_err(|source| UnloadLoraError::Engine {
-                    lora_name: lora_request.lora_name.clone(),
+            engine_core_client.remove_lora(adapter.lora_int_id).await.map_err(|source| {
+                UnloadLoraError::Engine {
+                    lora_name: adapter.lora_name.clone(),
                     source,
-                })?;
+                }
+            })?;
         if !removed {
             return Err(UnloadLoraError::NotRemoved {
-                lora_name: lora_request.lora_name,
-                lora_int_id: lora_request.lora_int_id,
+                lora_name: adapter.lora_name,
+                lora_int_id: adapter.lora_int_id,
             });
         }
 
-        Ok(self.requests.write().await.shift_remove(lora_name).unwrap_or(lora_request))
+        Ok(self.adapters.write().await.shift_remove(lora_name).unwrap_or(adapter))
     }
 }
 
@@ -317,7 +364,8 @@ mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use super::validate_lora_path_access;
+    use super::{LoadedLora, LoraManager, LoraPathAccessError, validate_lora_path_access};
+    use crate::model_names::ServedModelNames;
 
     fn temp_lora_dir(test_name: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -330,6 +378,33 @@ mod tests {
         ));
         fs::create_dir_all(&path).expect("create temp lora dir");
         path
+    }
+
+    #[tokio::test]
+    async fn resolve_model_selects_adapter_when_any_model_name_is_accepted() {
+        let manager = LoraManager::new();
+        manager.adapters.write().await.insert(
+            "adapter-a".to_string(),
+            LoadedLora {
+                lora_name: "adapter-a".to_string(),
+                lora_int_id: 1,
+                lora_path: "org/adapter-a".to_string(),
+                base_model_name: None,
+                is_3d_lora_weight: false,
+            },
+        );
+        let base = ServedModelNames::new(vec!["base".to_string()]).with_accept_any(true);
+
+        let resolution = manager.resolve_model(base.clone(), Some("adapter-a")).await;
+        assert_eq!(
+            resolution.lora_request.expect("adapter selected").lora_name,
+            "adapter-a"
+        );
+
+        let resolution = manager.resolve_model(base, Some("unknown")).await;
+        assert!(resolution.lora_request.is_none());
+        assert!(resolution.model_names.accepts(Some("unknown")));
+        assert_eq!(resolution.model_names.primary(), "base");
     }
 
     #[test]
@@ -382,6 +457,25 @@ mod tests {
                     .to_str()
                     .expect("utf-8 temp path")
             )
+        );
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    /// Python answers a missing adapter with 404 `NotFoundError`, so the
+    /// guard reports a missing path apart from an inaccessible one.
+    #[test]
+    fn lora_path_reports_missing_paths_as_not_found() {
+        let root = temp_lora_dir("missing-path");
+        let missing = root.join("missing-adapter");
+
+        let prefixes = [root.clone()];
+        let error =
+            validate_lora_path_access(missing.to_str().expect("utf-8 temp path"), Some(&prefixes))
+                .expect_err("missing adapter path should be rejected");
+        assert!(
+            matches!(&error, LoraPathAccessError::NotFound { lora_path } if *lora_path == missing.to_str().unwrap()),
+            "{error:?}"
         );
 
         fs::remove_dir_all(root).ok();

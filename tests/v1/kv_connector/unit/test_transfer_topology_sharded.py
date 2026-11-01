@@ -29,7 +29,7 @@ def _make_topology(
         is_mla=False,
         is_mamba=False,
         total_num_kv_heads=total_num_kv_heads,
-        attn_backends=[_FakeAttentionBackend],
+        attn_backends=[_FakeAttentionBackend],  # type: ignore[list-item]
     )
 
 

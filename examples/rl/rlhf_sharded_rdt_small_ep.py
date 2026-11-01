@@ -31,7 +31,7 @@ sharding no rank stores every expert, and the inference side gets real EP from
 and a real trainer cannot: each rank BUILDS the whole model before
 ``fully_shard`` splits it (fine for a tiny config, so nothing here streams a
 checkpoint), and iteration all-gathers every parameter, so ownership stays
-uniform. Serving only the experts a rank holds (``held_names``) is where a real
+uniform. Serving only the experts a rank holds (``ParamMeta.owners``) is where a real
 trainer earns its keep and is deliberately out of scope.
 
 Model naming is load-bearing: names are mapped onto checkpoint keys one-to-one,

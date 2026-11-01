@@ -17,13 +17,13 @@ from vllm.model_executor.layers.attention.mla_attention import (
     QueryLenSupport,
 )
 from vllm.platforms.interface import DeviceCapability
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
 )
+from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:

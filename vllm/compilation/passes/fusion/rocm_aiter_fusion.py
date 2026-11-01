@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     ScaleDesc,
     kFp8Dynamic128Sym,
+    kStaticTensorScale,
 )
 from vllm.platforms import current_platform
 
@@ -561,6 +562,140 @@ class AiterRMSNormGatedFp8GroupQuantPattern(AiterRMSNormQuantPattern):
         )
 
 
+class AiterRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
+    """This pattern fuses rms_norm & aiter static per-tensor fp8 quant
+    into an aiter fused_rms_fp8_per_tensor_static_quant op.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_fused_rms_fp8_per_tensor_static_quant_op()
+
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        symmetric: bool = True,
+    ) -> None:
+        key = FusedRMSQuantKey(
+            fused_add=False,
+            quant=QuantKey(
+                dtype=quant_dtype, scale=kStaticTensorScale, symmetric=symmetric
+            ),
+        )
+
+        super().__init__(epsilon, key)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            result_rms = torch.ops.vllm_ir.rms_norm(input, weight, self.epsilon)
+            result, scale = self.quant_matcher(result_rms, scale)
+
+            return result, scale
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            result = self.FUSED_OP(
+                x=input,
+                weight=weight,
+                epsilon=self.epsilon,
+                scale=scale,
+                quant_dtype=self.quant_dtype,
+            )
+
+            # The static scale is an input, so it passes through unchanged.
+            return result, scale
+
+        inputs = [
+            self.empty(5, 16),  # input
+            self.empty(16),  # weight
+            self.empty_f32(1, 1),  # scale
+        ]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            inputs,
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
+class AiterFusedAddRMSNormStaticQuantPattern(AiterRMSNormQuantPattern):
+    """This pattern fuses fused_add_rms_norm & aiter static per-tensor fp8
+    quant into an aiter fused_add_rms_fp8_per_tensor_static_quant op.
+    """
+
+    FUSED_OP = rocm_aiter_ops.get_fused_add_rms_fp8_per_tensor_static_quant_op()
+
+    def __init__(
+        self,
+        epsilon: float,
+        quant_dtype: torch.dtype,
+        symmetric: bool = True,
+    ) -> None:
+        key = FusedRMSQuantKey(
+            fused_add=True,
+            quant=QuantKey(
+                dtype=quant_dtype, scale=kStaticTensorScale, symmetric=symmetric
+            ),
+        )
+
+        super().__init__(epsilon, key)
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result_rms, residual_out = torch.ops.vllm_ir.fused_add_rms_norm(
+                input, residual, weight, self.epsilon
+            )
+            result, scale = self.quant_matcher(result_rms, scale)
+
+            return result, residual_out, scale
+
+        def replacement(
+            input: torch.Tensor,
+            weight: torch.Tensor,
+            residual: torch.Tensor,
+            scale: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            result = self.FUSED_OP(
+                x=input,
+                residual=residual,
+                weight=weight,
+                epsilon=self.epsilon,
+                scale=scale,
+                quant_dtype=self.quant_dtype,
+            )
+
+            # The static scale is an input, so it passes through unchanged.
+            return result[0], result[1], scale
+
+        inputs = [
+            self.empty(5, 16),  # input
+            self.empty(16),  # weight
+            self.empty(5, 16),  # residual
+            self.empty_f32(1, 1),  # scale
+        ]
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            inputs,
+            pm.fwd_only,
+            pm_pass,
+        )
+
+
 class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
     """This pass fuses aiter rms_norm & vllm/aiter quant custom ops
     into a fused rms_norm_quant op.
@@ -598,7 +733,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
 
             gated_norm_shapes.add((num_v_heads // layer.tp_size, head_v_dim))
 
-        # RDNA4 uses native quant ops and supports only Triton replacements.
+        # RDNA uses native quant ops and supports only Triton replacements.
         match_aiter_quant_op = not rocm_aiter_ops.is_rdna_aiter_enabled()
 
         # Make sure fused add patterns are before simple rms norm,
@@ -629,6 +764,14 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             AiterFusedAddRMSFp8GroupQuantPattern(
                 epsilon, FP8_DTYPE, GroupShape(1, 128), match_aiter_quant_op
             ).register(self.patterns)
+
+            # Fuse aiter rms_norm + aiter static per-tensor fp8 quant
+            AiterRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
+
+            # Fuse aiter fused_add_rms_norm + aiter static per-tensor fp8 quant
+            AiterFusedAddRMSNormStaticQuantPattern(epsilon, FP8_DTYPE).register(
+                self.patterns
+            )
 
             # When quant_fp8 custom ops are disabled, both AITER and native
             # quant matchers trace through QuantFP8's native implementation.
@@ -661,7 +804,7 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             # an aiter version that includes the GDN triton kernel renames.
             if gated_norm_shapes and (
                 rocm_aiter_ops.are_gdn_triton_kernels_available()
-                or rocm_aiter_ops.is_rdna_gdn_triton_kernels_available()
+                or rocm_aiter_ops.are_rdna_gdn_triton_kernels_available()
             ):
                 for num_heads, head_dim in gated_norm_shapes:
                     if head_dim != 128:
@@ -690,6 +833,8 @@ class RocmAiterRMSNormQuantFusionPass(VllmPatternMatcherPass):
             AiterFusedAddRMSNormDynamicQuantPattern,
             AiterRMSFp8GroupQuantPattern,
             AiterFusedAddRMSFp8GroupQuantPattern,
+            AiterRMSNormStaticQuantPattern,
+            AiterFusedAddRMSNormStaticQuantPattern,
             DoubleAiterRMSFp8GroupQuantPattern,
             DoubleAiterRMSFp8GroupQuantViewPattern,
             AiterRMSNormGatedFp8GroupQuantPattern,

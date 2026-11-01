@@ -442,21 +442,6 @@ def attn_uses_seqlens(attn_implementation: str) -> bool:
     return attn_implementation == "eager_v2"
 
 
-def prepare_seqlens_for_attention(
-    attn_implementation: str,
-    cu_seqlens: torch.Tensor,
-    *,
-    eager_fallback: str = "eager",
-) -> list[int] | None:
-    """Return per-segment lengths when the resolved backend needs ``seqlens``."""
-    resolved = resolve_attn_implementation(
-        attn_implementation, eager_fallback=eager_fallback
-    )
-    if attn_uses_seqlens(resolved):
-        return torch.diff(cu_seqlens).tolist()
-    return None
-
-
 def apply_vision_attention_residual(
     attn: nn.Module,
     norm: nn.Module,
@@ -497,7 +482,6 @@ __all__ = [
     "attn_uses_seqlens",
     "build_vision_attention",
     "prepare_rotary_pos_emb_vision",
-    "prepare_seqlens_for_attention",
     "resolve_attn_implementation",
     "rotate_half",
     "vision_attention_params_from_config",

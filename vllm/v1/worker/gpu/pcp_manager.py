@@ -20,8 +20,23 @@ from vllm.v1.worker.gpu.input_batch import (
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class PCPBatchMetadata:
+    """Per-step metadata of a PCP rank-local batch."""
+
+    # Unpadded token count before PCP partitioning. Under adaptive verification,
+    # this can be smaller than the sum of global_query_lens_np.
+    global_num_tokens: int
+    # [num_reqs], aligned with local request segments; requests may repeat.
+    global_query_lens_np: np.ndarray
+    global_seq_lens_cpu_upper_bound_np: np.ndarray
+    # [num_reqs_after_padding], set only under PCP+DCP.
+    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -160,25 +175,12 @@ class PCPManager:
         if vllm_config.lora_config is not None:
             raise NotImplementedError("MRV2 PCP does not support LoRA yet.")
         speculative_config = vllm_config.speculative_config
-        if speculative_config is not None:
-            if speculative_config.use_dspark():
-                dcp_size = parallel_config.decode_context_parallel_size
-                if (
-                    dcp_size not in (1, pcp_size)
-                    and speculative_config.draft_model_config.use_mla
-                ):
-                    raise NotImplementedError(
-                        "MRV2 PCP DSpark requires DCP=1 or DCP=PCP; got "
-                        f"DCP={dcp_size}, PCP={pcp_size}."
-                    )
-            elif (
-                speculative_config.method != "mtp"
-                or speculative_config.use_multi_module_mtp()
-            ):
-                raise NotImplementedError(
-                    "MRV2 PCP only supports DSpark or single-module MTP "
-                    "speculative decoding."
-                )
+        if speculative_config is not None and (
+            reason := speculative_config.speculator_config.pcp_unsupported_reason(
+                parallel_config
+            )
+        ):
+            raise NotImplementedError(reason)
         cudagraph_mode = vllm_config.compilation_config.cudagraph_mode
         is_sparse_mla = hasattr(model_config.hf_text_config, "index_topk")
         if parallel_config.decode_context_parallel_size > 1 and not is_sparse_mla:
@@ -189,10 +191,12 @@ class PCPManager:
             is_sparse_mla
             and parallel_config.decode_context_parallel_size == 1
             and cudagraph_mode != CUDAGraphMode.NONE
+            and getattr(model_config.hf_text_config, "model_type", None)
+            not in ("deepseek_v32", "glm_moe_dsa")
         ):
             raise NotImplementedError(
-                "MRV2 sparse MLA PCP does not support CUDA graphs yet. "
-                "Set -cc.cudagraph_mode=NONE."
+                "MRV2 sparse MLA PCP supports CUDA graphs only for DeepSeek-V3.2 "
+                "and GLM-5.2/5.3. Set -cc.cudagraph_mode=NONE."
             )
         if (
             cudagraph_mode.has_full_cudagraphs()
@@ -688,7 +692,16 @@ class PCPManager:
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=torch.from_numpy(seq_lens_cpu_upper_bound_np),
             dcp_local_seq_lens=None,
-            dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
+            pcp=PCPBatchMetadata(
+                global_num_tokens=global_batch.num_tokens,
+                global_query_lens_np=num_scheduled_tokens[
+                    local_to_global_batch_req_idx_np
+                ],
+                global_seq_lens_cpu_upper_bound_np=global_batch.seq_lens_cpu_upper_bound.numpy()[
+                    local_to_global_batch_req_idx_np
+                ],
+                dcp_local_seq_lens_cpu_upper_bound=dcp_local_seq_lens_cpu_upper_bound,
+            ),
             num_computed_tokens_np=local_start_pos_np,
             prefill_len_np=local_prefill_len_np,
             num_computed_prefill_tokens_np=local_num_computed_prefill_tokens_np,
@@ -853,6 +866,25 @@ class PCPManager:
         )
         self.draft_prefill_batch = None
         return last_hidden_states, hidden_states
+
+    def sync_drafts(
+        self,
+        draft_tokens: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        draft_logits: "DraftLogitsCache | None",
+    ) -> None:
+        """Broadcast PCP rank 0's drafts and draft logits.
+
+        Replicated drafts are not bitwise identical across PCP ranks, but every
+        rank must verify the same proposal and distribution.
+        """
+        pcp_group = get_pcp_group()
+        pcp_group.broadcast(draft_tokens, src=0)
+        if draft_logits is not None:
+            # Draft logits are indexed by persistent request slots.
+            logits = draft_logits.values[idx_mapping]
+            pcp_group.broadcast(logits, src=0)
+            draft_logits.values[idx_mapping] = logits
 
     def restore_for_sampling(
         self, hidden_states: torch.Tensor, aux_hidden_states: list[torch.Tensor] | None

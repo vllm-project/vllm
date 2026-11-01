@@ -25,6 +25,8 @@ The derender step needs more than the engine's `token_ids`. It also consumes the
 
 All derender endpoints also accept an optional `prompt_token_ids` (the `token_ids` of the `GenerateRequest` returned by `/render`). It's used to seed detokenization from the end of the prompt, the same way the engine does. Without it, the first output token is decoded as if it started a new sequence. On SentencePiece tokenizers (Llama-2, Phi-3) that drops its leading space compared to `/v1/chat/completions` and `/v1/completions`. If it's omitted, derender falls back to the generate response's `prompt_token_ids` (set when the `GenerateRequest` has `return_token_ids`), then to decoding without prompt context.
 
+`/render` copies the request's `return_token_ids` onto the `GenerateRequest`. When it's set, derender returns `token_ids` and the generate response's `prompt_token_ids`, as `/v1/chat/completions` and `/v1/completions` do. The caller supplied `prompt_token_ids` is never echoed back since it may be only a suffix of the prompt.
+
 Seeding only reads the last few IDs (7 today), so a suffix of the prompt is enough and a long prompt doesn't need to travel back to derender. The exception is streaming chat with a tool or reasoning parser configured. There the parser also reads `prompt_token_ids` to decide whether the prompt left reasoning open and it can look back to any point in the prompt. In this case, send the full list (see [Streaming cost](#streaming-cost)).
 
 ## API Reference
@@ -87,9 +89,21 @@ The derenderer builds its tool and reasoning parsers from its own server flags p
 - Start the render server with the same `--tool-call-parser`, `--reasoning-parser`, `--enable-auto-tool-choice`, `--chat-template` and `--default-chat-template-kwargs` you'd give `vllm serve` for this model. If `/render` and `/derender` run on different servers, give both the same values.
 - Send the full `chat_request` that went to `/render`, not just `messages` and `tools`. Fields like `chat_template_kwargs`, `reasoning_effort`, `tool_choice` and `include_reasoning` change how the output is parsed.
 
+`/derender` decodes with the flags in `chat_request` which can differ from what the engine ran with. For parsers whose `adjust_request` changes decoding, use [`output_mode: "derender"`](token_in_token_out.md#derender) on `/inference/v1/generate`. It parses the engine's own text and matches coupled chat.
+
 A mismatch doesn't fail. The parser just splits `reasoning`, `content` and `tool_calls` differently from what `vllm serve` would return.
 
-`/v1/completions/derender` only detokenizes. It never runs tool or reasoning parsers, the same as `/v1/completions` on `vllm serve`. From `completion_request` it reads `skip_special_tokens`, and `logprobs` and `logprob_token_ids` to cut `top_logprobs` the way `/v1/completions` does.
+`/v1/completions/derender` only detokenizes. It never runs tool or reasoning parsers, the same as `/v1/completions` on `vllm serve`. From `completion_request` it reads `skip_special_tokens`, the stop fields (see [Stop strings and stop tokens](#stop-strings-and-stop-tokens)), and `logprobs` and `logprob_token_ids` to cut `top_logprobs` the way `/v1/completions` does.
+
+## Stop strings and stop tokens
+
+Generate returns every token, including the one that stopped generation, so derender trims the text the way the engine's detokenizer does:
+
+- **Stop token.** With `finish_reason: "stop"`, the last token is left out of the text when it is the `stop_reason` token id, or when `stop_reason` is `null`, an EOS id of the model or one of the request's `stop_token_ids`. EOS ids don't count with `ignore_eos`. `include_stop_str_in_output` keeps the token.
+- **Stop string.** Non-streaming only. The text is cut at the `stop_reason` string or  when generate reports none at the first of the request's `stop` strings that ends past the first `min_tokens` tokens. `include_stop_str_in_output` keeps the string.
+- **`stop_reason`.** Passed through from generate. When it is `null`, derender reports the stop string or token id it found which is what older generate servers that don't report `stop_reason` need. It stays `null` for the primary EOS, as on `vllm serve`.
+
+`token_ids` and `logprobs` are not trimmed. With a parser configured, stop strings are matched on text that keeps special tokens, so a stop string that overlaps a special token can cut differently from `vllm serve`.
 
 ## Streaming
 
@@ -104,8 +118,9 @@ The server keeps no state between calls. Everything the next call needs is in `s
 - **Send the same context on every call.** `chat_request` and `prompt_token_ids` aren't kept between calls, so they go with every chunk including the usage chunk. Both are required when a tool or reasoning parser is configured. `prompt_token_ids` is the `token_ids` of the `GenerateRequest` returned by `/render`.
 - **Send `prompt_token_ids` on the first chunk, even without a parser.** It seeds detokenization so the first token's leading space matches the coupled endpoint (see [Request format](#request-format)). Later chunks already carry that context in `stream_state`.
 - **Don't forward `[DONE]`.** It marks the end of the generate stream and isn't a chunk.
+- **`stop` strings are rejected.** A `chat_request` or `completion_request` with `stop` strings gets a `400` because text already sent can't be cut when a stop string completes in a later chunk. Use non-streaming derender or `output_mode: "text"` on `/inference/v1/generate` where the engine holds stop strings back. The stop token is still left out of the final chunk's text (see [Stop strings and stop tokens](#stop-strings-and-stop-tokens)).
 
-`/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction. Generate returns every top-k candidate the engine produced; derender keeps the ones the coupled endpoint would, with the same helpers: the first `top_logprobs` on chat (all of them for `top_logprobs=-1`) and the first `logprobs + 1` on completions (all of them for `logprobs=-1`). It reads those values from `chat_request` / `completion_request`, so without the original request, or with one that does not ask for logprobs, it returns every candidate. Requests that use `logprob_token_ids` get no output logprobs from generate (their `sampling_params.logprobs` is unset), so derender has none to return for them either. Streaming derender does the same per chunk on the plain detokenization path (see [Streaming state and logprobs](#streaming-state-and-logprobs)). The parser path doesn't resolve them yet and drops them.
+`/inference/v1/generate` returns `GenerateLogProbs` with integer `token_id`s (the generate server has no tokenizer), and derender turns those into `ChatCompletionLogProbs` / `CompletionLogProbs`, filling `token` and `bytes` from the tokenizer with the usual U+FFFD byte-fallback correction. Generate returns every top-k candidate the engine produced; derender keeps the ones the coupled endpoint would, with the same helpers: the first `top_logprobs` on chat (all of them for `top_logprobs=-1`) and the first `logprobs + 1` on completions (all of them for `logprobs=-1`). It reads those values from `chat_request` / `completion_request`, so without the original request, or with one that does not ask for logprobs, it returns every candidate. Requests that use `logprob_token_ids` get no output logprobs from generate (their `sampling_params.logprobs` is unset), so derender has none to return for them either. Streaming derender does the same per chunk on both the plain detokenization path and the parser path (see [Streaming state and logprobs](#streaming-state-and-logprobs)). As on `/v1/chat/completions`, a request with `include_reasoning: false` and a parser configured gets no logprobs at all, batch or streaming, since the decoded logprob tokens would reveal the hidden reasoning.
 
 ## Streaming cost
 
@@ -129,7 +144,7 @@ Streaming derender is stateless on the server side: all mutable state lives in t
 - `logprob_context_token_ids`: the trailing sampled token IDs (at most 4) from previous chunks, used to seed byte-fallback (U+FFFD) correction so multi-byte characters whose tokens split across chunk boundaries still resolve to real strings
 - `logprob_text_offset`: the cumulative emitted text length, so `text_offset` in completion streaming logprobs stays absolute across chunks instead of restarting at 0
 
-When a streamed `GenerateTokensStreamChoice` carries `logprobs`, the integer `token_id`s are decoded per chunk and the resolved logprobs are attached to the corresponding streamed choice. For chat it is as `ChatCompletionLogProbs` and for completions it is converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`.
+When a streamed `GenerateTokensStreamChoice` carries `logprobs`, the integer `token_id`s are decoded per chunk and the resolved logprobs are attached to the corresponding streamed choice. For chat it is as `ChatCompletionLogProbs` and for completions it is converted to the flat `CompletionLogProbs` lists. Chunks without `logprobs` produce choices with `logprobs: null`. On the parser path the chunk's logprobs are attached to whatever delta the parser emits for that chunk (reasoning, content or a tool call delta, or an empty delta while the parser is still buffering markup), which is what the coupled endpoint does; replay never touches them, since each chunk's `logprobs` cover exactly that chunk's tokens.
 
 ## Example
 

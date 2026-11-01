@@ -39,8 +39,10 @@ except ImportError:
 
 try:
     from torchcodec.decoders import AudioDecoder
-except (ImportError, RuntimeError) as exc:
-    # RuntimeError: torchcodec is installed but the system ffmpeg is missing.
+except (ImportError, RuntimeError, OSError) as exc:
+    # torchcodec may fail to import when it is not installed (ImportError),
+    # the system ffmpeg is missing (RuntimeError), or its native library
+    # cannot be loaded (OSError).
     AudioDecoder = None  # type: ignore[assignment]
     _torchcodec_import_exc: BaseException | None = exc
 else:

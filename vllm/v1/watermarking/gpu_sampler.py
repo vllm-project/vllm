@@ -58,6 +58,7 @@ class GPUWatermarkSampler(Sampler):
         pos: torch.Tensor,
         top_k: torch.Tensor | None,
         top_p: torch.Tensor | None,
+        has_topp_only_rows: bool,
         use_fused_sampler: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         enabled = self.watermarking.np[idx_mapping_np] & (
@@ -71,10 +72,13 @@ class GPUWatermarkSampler(Sampler):
                 pos,
                 top_k,
                 top_p,
+                has_topp_only_rows,
                 use_fused_sampler,
             )
 
-        processed_logits = apply_top_k_top_p(processed_logits, top_k, top_p)
+        processed_logits = apply_top_k_top_p(
+            processed_logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
+        )
         contexts = self._get_contexts(expanded_idx_mapping)
         repeated_contexts = None
         if self.deduplicate_contexts != "none":
@@ -108,11 +112,14 @@ class GPUWatermarkSampler(Sampler):
         )
         sampled = output.token_ids
         output_logits = output.logits
-        sampled = torch.where(
-            temperatures == 0,
-            processed_logits.argmax(dim=-1),
-            sampled,
-        )
+        # Expanded rows each copy a request's temperature, so checking the
+        # request temperatures covers all expanded rows
+        if self.sampling_states.any_greedy(idx_mapping_np):
+            sampled = torch.where(
+                temperatures == 0,
+                processed_logits.argmax(dim=-1),
+                sampled,
+            )
         return sampled, output_logits
 
     def _get_repeated_contexts(

@@ -220,6 +220,9 @@ class KimiK3ForConditionalGeneration(
     def compute_logits(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
         return self.language_model.compute_logits(hidden_states)
 
+    def get_model_state_cls(self) -> type:
+        return self.language_model.get_model_state_cls()
+
     def copy_inputs_before_cuda_graphs(self, input_buffers, **kwargs):
         return self.language_model.mamba_cache.copy_inputs_before_cuda_graphs(
             input_buffers, **kwargs
@@ -249,3 +252,8 @@ class KimiK3ForConditionalGeneration(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        # The loader calls only the root model's hook; forward it so the text
+        # model's MLA layers build their folded q_b_proj / W_UK weight.
+        self.language_model.process_weights_after_loading()

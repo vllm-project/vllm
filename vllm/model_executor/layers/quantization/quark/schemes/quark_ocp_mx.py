@@ -15,6 +15,9 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp6_linear_kernel,
     init_mxfp8_linear_kernel,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
@@ -149,8 +152,6 @@ class QuarkOCP_MX(QuarkScheme):
         return 70
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
-
         self.ocp_mx_linear.process_weights_after_loading(layer)
 
     def create_weights(
@@ -248,6 +249,8 @@ class QuarkOCP_MX(QuarkScheme):
             self.ocp_mx_linear = init_mxfp8_linear_kernel(
                 weight_shape=layer.weight.shape
             )
+            if current_platform.is_rocm():
+                expose_input_quant_key(layer, self.ocp_mx_linear)
         else:
             raise NotImplementedError(
                 "No OCP MX linear kernel for weight_quant_key="

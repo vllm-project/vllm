@@ -29,7 +29,6 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     DeepseekV32IndexerMetadataBuilder,
     DeepseekV41IndexerBackend,
-    dsa_indexer_uses_fp4,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -106,12 +105,6 @@ class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder)
             raise ValueError(
                 f"{prefix} requires a two-level (candidate block) indexer model "
                 "such as DeepSeek-V4.1."
-            )
-        if not dsa_indexer_uses_fp4(vllm_config):
-            raise ValueError(
-                f"{prefix} requires the MXFP4 indexer cache "
-                "(attention_config.indexer_kv_dtype='mxfp4'): the sparse kernels "
-                "take UE8M0-packed granularity-32 scales."
             )
         if not (
             current_platform.is_cuda()
