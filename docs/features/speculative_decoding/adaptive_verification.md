@@ -59,7 +59,7 @@ Set `enable_adaptive_verification: false` to verify the full block for every req
 
 ## Tuning the cost profile
 
-Step costs are profiled against a synthetic KV context, 8192 tokens by default. Deployments serving much longer contexts may want to raise it so the profiled step reads a more realistic amount of cache (this matters a bit less for sparse attention models like DeepSeek-v4 since the cheap indexer is the main cost that scales with context length).
+Step costs are profiled against a synthetic KV context, 8192 tokens by default. FULL graph profiling replays retain this context when preparing attention metadata. Deployments serving much longer contexts may want to raise it so the profiled step reads a more realistic amount of cache (this matters a bit less for sparse attention models like DeepSeek-v4 since the cheap indexer is the main cost that scales with context length).
 
 ```bash
 export VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN=131072
