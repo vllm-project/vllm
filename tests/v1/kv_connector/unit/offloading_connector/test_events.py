@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.utils import create_vllm_config
+from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -47,6 +48,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
+from vllm.v1.request import Request
 
 _CPU_MEDIUM = Medium.CPU
 _FULL_ATTENTION_EVENT_SPEC = OffloadingEventGroupSpec(
@@ -351,6 +353,80 @@ def test_take_events_forwards_locality_to_remove():
     assert len(events) == 1
     assert isinstance(events[0], BlockRemoved)
     assert events[0].locality == "LOCAL"
+
+
+def test_store_uses_request_context_and_removal_uses_saved_metadata():
+    block_hashes = [_hash(i) for i in range(4)]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(1, 17)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+    group_config = _group_config(block_size=4, blocks_per_chunk=2)
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(block_hashes[1], group_config.group_idx)
+    context.set_offload_key_position(key, 8)
+    tracker = _tracker()
+    tracker.on_new_request(context, request, (group_config,))
+    tracker.record_store(request, group_config, 0, key)
+    # The request context must win over an existing snapshot.
+    tracker._pending_event_metadata[key].token_ids = ()
+
+    [stored] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key],
+                medium=Medium.CPU,
+                removed=False,
+                removal_expected=True,
+                req_context=context,
+            )
+        ]
+    )
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
+    assert stored.token_ids == list(range(1, 9))
+    assert stored.block_size == 4
+
+    [removed] = tracker.take_events(
+        [OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True)]
+    )
+    assert isinstance(removed, BlockRemoved)
+    assert removed.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
+
+
+def test_mamba_store_uses_request_context():
+    block_hashes = [_hash(i) for i in range(4)]
+    request = Request(
+        request_id="request",
+        prompt_token_ids=list(range(1, 17)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hashes=block_hashes,
+    )
+    group_config = _group_config(
+        group_idx=1, block_size=8, tokens_per_hash=4, mamba=True
+    )
+    context = ReqContext(req_id=request.request_id)
+    key = make_offload_key(block_hashes[3], group_config.group_idx)
+    context.set_offload_key_position(key, 16)
+    tracker = _tracker()
+    tracker.on_new_request(context, request, (group_config,))
+
+    [stored] = tracker.take_events(
+        [
+            OffloadingEvent(
+                keys=[key], medium=Medium.CPU, removed=False, req_context=context
+            )
+        ]
+    )
+    assert isinstance(stored, BlockStored)
+    assert stored.block_hashes == [_wire_hash(block_hashes[3])]
+    assert stored.parent_block_hash == _wire_hash(block_hashes[1])
+    assert stored.token_ids == []
+    assert stored.kv_cache_spec_kind == KVCacheSpecKind.MAMBA.value
 
 
 def test_take_events_publishes_routable_block_stored():

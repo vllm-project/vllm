@@ -2488,6 +2488,7 @@ def test_req_context_counts_live_until_request_finished(registered):
     scheduler = object.__new__(OffloadingConnectorScheduler)
     scheduler.config = SimpleNamespace(kv_group_configs=())
     scheduler.manager = MagicMock(spec=OffloadingManager)
+    scheduler._events_tracker = SimpleNamespace(on_new_request=lambda *_: None)
     scheduler._step_region = None
     scheduler._req_status = {}
 

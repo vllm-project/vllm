@@ -1302,6 +1302,9 @@ class OffloadingConnectorScheduler:
         except Exception:
             del self._req_status[request.request_id]
             raise
+        self._events_tracker.on_new_request(
+            req_context, request, self.config.kv_group_configs
+        )
 
     def get_num_new_matched_tokens(
         self,

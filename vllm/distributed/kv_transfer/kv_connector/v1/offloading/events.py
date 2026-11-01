@@ -3,14 +3,11 @@
 """Self-describing KV cache events for the offloading connector.
 
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
-so its raw events carry no token ids, parent hash, or block size.
-:class:`OffloadingEventsTracker` snapshots each chunk's full ``BlockStored``
-payload while the ``Request`` is alive and publishes stores as block-granular
-payloads: a chunk event may carry multiple constituent per-block hashes, and
-evictions fan out to the same hashes. Chunks overlapping a non-chunk-aligned
-shared prefix re-announce the shared hashes once per chunk; consumers are
-expected to deduplicate (reference-count) repeated store/remove announcements
-of the same hash. Opt-in via
+so its raw events carry no token ids, parent hash, or block size. For complete
+chunks, :class:`OffloadingEventsTracker` builds ``BlockStored`` from the
+originating request carried by the raw event. A store may describe multiple
+blocks, and removals still expand to those block hashes using captured
+metadata. Partial tails also use captured metadata. Opt-in via
 ``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
 KV cache events are enabled. See the PR description for the full design.
 
@@ -24,6 +21,7 @@ Windowed attention groups keep the legacy placeholder payload.
 """
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import msgspec
@@ -53,6 +51,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingEvent,
     OffloadingKVEventsConfig,
     OffloadKey,
+    ReqContext,
     get_offload_block_hash,
     get_offload_group_idx,
 )
@@ -114,6 +113,14 @@ class _OffloadEventMetadata(
     active_residencies: int
 
 
+@dataclass(slots=True)
+class _RequestEventContext:
+    """Request data used to describe complete offloaded chunks."""
+
+    request: Request
+    group_configs: dict[int, "GroupOffloadConfig"]
+
+
 def describes_group(group_config: "GroupOffloadConfig") -> bool:
     """Whether the tracker builds self-describing payloads for this group.
 
@@ -148,7 +155,7 @@ def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
 
 
 class OffloadingEventsTracker:
-    """Tracks offloaded chunks' KV event payloads from store to eviction.
+    """Builds complete stores from request context and expands removals.
 
     The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
     :meth:`record_lookup` for allocated primary-tier hits while the ``Request`` is
@@ -174,6 +181,46 @@ class OffloadingEventsTracker:
         self._residency_bits: dict[tuple[Medium, str | None], int] = {
             (Medium.CPU, None): _PRIMARY_RESIDENCY_BIT
         }
+
+    def on_new_request(
+        self,
+        req_context: ReqContext,
+        request: Request,
+        group_configs: tuple["GroupOffloadConfig", ...],
+    ) -> None:
+        """Retain the request for complete-chunk store events."""
+        if self.self_describing_enabled:
+            req_context.set_state(
+                _RequestEventContext(
+                    request=request,
+                    group_configs={
+                        config.group_idx: config for config in group_configs
+                    },
+                )
+            )
+
+    def _metadata_for(
+        self, req_context: ReqContext, key: OffloadKey
+    ) -> _OffloadEventMetadata | None:
+        state = req_context.get_state(_RequestEventContext)
+        if state is None:
+            return None
+        group_config = state.group_configs.get(get_offload_group_idx(key))
+        boundary = req_context.get_offload_key_position(key)
+        if (
+            group_config is None
+            or not describes_group(group_config)
+            or boundary is None
+            or boundary % group_config.tokens_per_chunk != 0
+        ):
+            return None
+        request = state.request
+        if request.resumable or (request.kv_transfer_params or {}).get(
+            "_p_side_truncated"
+        ):
+            return None
+        chunk_idx = boundary // group_config.tokens_per_chunk - 1
+        return self._build_event_metadata(request, group_config, chunk_idx)
 
     def record_store(
         self,
@@ -446,9 +493,8 @@ class OffloadingEventsTracker:
         )
 
     def _take_stored_event(self, event: OffloadingEvent) -> Iterable[KVCacheEvent]:
-        # Metadata is read, NOT popped: the entry must survive until the
-        # eviction event so BlockRemoved can fan out to the same hashes.
-        # Events are self-contained (own parent), so key order is free.
+        # Complete chunks use the originating request. Retained metadata still
+        # covers partial tails until their request-context path moves in C.
         locality = event.locality.value if event.locality is not None else None
         residency_bit = 0
         if event.removal_expected:
@@ -456,7 +502,17 @@ class OffloadingEventsTracker:
                 (event.medium, event.ownership), 1 << len(self._residency_bits)
             )
         for key in event.keys:
-            meta = self._pending_event_metadata.get(key)
+            meta = (
+                self._metadata_for(event.req_context, key)
+                if self.self_describing_enabled and event.req_context is not None
+                else None
+            )
+            saved_meta = self._pending_event_metadata.get(key)
+            # Temporary fallback for partial tails and request-less stores.
+            # Remove it when those paths use request context as well.
+            meta = meta if meta is not None else saved_meta
+            if saved_meta is not None and event.removal_expected:
+                saved_meta.active_residencies |= residency_bit
             if meta is None:
                 if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.
@@ -472,7 +528,6 @@ class OffloadingEventsTracker:
                 )
                 continue
 
-            meta.active_residencies |= residency_bit
             yield BlockStored(
                 block_hashes=list(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
@@ -504,16 +559,15 @@ class OffloadingEventsTracker:
         residency_mask = ~self._residency_bits.get((event.medium, event.ownership), 0)
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
+            if meta is not None:
+                meta.active_residencies &= residency_mask
             if event.metadata_only:
-                if meta is not None:
-                    meta.active_residencies &= residency_mask
                 continue
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
                 )
-                meta.active_residencies &= residency_mask
             else:
                 if self.self_describing_enabled:
                     logger.warning_once(
