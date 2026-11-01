@@ -8,6 +8,7 @@ and distributed execution with various TP/PP configurations.
 
 import errno
 import gc
+import os
 import socket
 import threading
 from types import SimpleNamespace
@@ -111,6 +112,34 @@ def _detached_rank0_worker() -> ray_executor_v2.RayWorkerProc:
     worker = ray_executor_v2.RayWorkerProc.__new__(ray_executor_v2.RayWorkerProc)
     worker._parallel_config = SimpleNamespace(world_size=1)
     return worker
+
+
+def test_initialize_worker_refreshes_aiter_toggles(monkeypatch):
+    """The AITER toggles cached at import follow the driver's env."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr(ray_executor_v2.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(ray_executor_v2.WorkerProc, "__init__", lambda self, **kw: None)
+    # The actor imported vLLM under the raylet's env, without the toggle.
+    monkeypatch.delenv("VLLM_ROCM_USE_AITER", raising=False)
+    rocm_aiter_ops.refresh_env_variables()
+    worker = ray_executor_v2.RayWorkerProc.__new__(ray_executor_v2.RayWorkerProc)
+    worker._init_kwargs = {}
+    try:
+        assert not rocm_aiter_ops._AITER_ENABLED
+        with patch.dict(os.environ):
+            worker.initialize_worker(
+                local_rank=0,
+                env_vars={},
+                distributed_init_method="tcp://127.0.0.1:0",
+                driver_env_vars={"VLLM_ROCM_USE_AITER": "1"},
+            )
+            # Check the cached flag directly: the public predicates also
+            # probe the GPU arch, which a CPU-only test cannot do.
+            assert rocm_aiter_ops._AITER_ENABLED
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
 
 
 def _assert_port_held(port: int):
