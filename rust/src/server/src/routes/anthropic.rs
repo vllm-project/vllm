@@ -93,7 +93,7 @@ impl TextContent {
 }
 
 impl MessagesInput {
-    fn into_chat(
+    fn into_chat_request(
         self,
         model: &LoraModelResolution,
         ctx: ResolvedRequestContext,
@@ -205,10 +205,10 @@ pub async fn count_tokens(
 #[derive(serde::Serialize)]
 pub(crate) struct CountTokensResponse {
     input_tokens: usize,
-    context_management: CountContext,
+    context_management: ContextManagement,
 }
 #[derive(serde::Serialize)]
-struct CountContext {
+struct ContextManagement {
     original_input_tokens: usize,
 }
 
@@ -230,7 +230,7 @@ pub struct MessagesRequest {
 impl Normalizable for MessagesRequest {}
 
 impl MessagesRequest {
-    fn into_chat(
+    fn into_chat_request(
         self,
         model: &LoraModelResolution,
         ctx: ResolvedRequestContext,
@@ -238,7 +238,7 @@ impl MessagesRequest {
         if self.stream == Some(true) {
             return Err(invalid_request!("Streaming Messages is not supported yet"));
         }
-        let mut request = self.input.into_chat(model, ctx)?;
+        let mut request = self.input.into_chat_request(model, ctx)?;
         request.sampling_params.max_tokens = Some(self.max_tokens);
         request.sampling_params.temperature = self.temperature;
         request.sampling_params.top_p = self.top_p;
@@ -288,7 +288,7 @@ impl<'a> MessagesLlm<'a> {
         context: ResolvedRequestContext,
     ) -> Result<CountTokensResponse, ApiError> {
         let model = self.state.resolve_model_with_loras(Some(&body.model)).await;
-        let request = body.into_chat(&model, context)?;
+        let request = body.into_chat_request(&model, context)?;
         let text = self
             .state
             .chat
@@ -305,7 +305,7 @@ impl<'a> MessagesLlm<'a> {
             .map_err(|error| text_submit_error("count_tokens failed", error))?;
         Ok(CountTokensResponse {
             input_tokens: tokens.len(),
-            context_management: CountContext {
+            context_management: ContextManagement {
                 original_input_tokens: tokens.len(),
             },
         })
@@ -316,7 +316,7 @@ impl<'a> MessagesLlm<'a> {
         context: ResolvedRequestContext,
     ) -> Result<MessagesResponse, ApiError> {
         let model = self.state.resolve_model_with_loras(Some(&body.input.model)).await;
-        let request = body.into_chat(&model, context)?;
+        let request = body.into_chat_request(&model, context)?;
         validate_max_output_tokens(
             "max_tokens",
             request.sampling_params.max_tokens,
