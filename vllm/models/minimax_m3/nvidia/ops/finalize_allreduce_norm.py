@@ -28,6 +28,7 @@ from cutlass._mlir.dialects import llvm
 from cutlass.cute.runtime import make_fake_compact_tensor
 from cutlass.cutlass_dsl import T, dsl_user_op
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.model_executor.layers.fused_moe.moe_output import (
@@ -725,8 +726,10 @@ _fused_moe_finalize: FinalizeAllReduceGemmaRMSNormMxfp8 | None = None
 
 def supports_fused_moe_finalize(vllm_config: VllmConfig) -> bool:
     """Whether to build the fused MoE finalize kernel: tensor parallel without
-    expert parallel, a BF16 model on SM100-family GPUs, and NVLink multicast on
-    every TP rank. Every TP rank calls it; the multicast check is collective.
+    expert parallel, a BF16 model on SM100-family GPUs, NVLink multicast on
+    every TP rank, and no batch invariance (the fused path rounds differently
+    from the one above its token cap). Every TP rank calls it; the multicast
+    check is collective.
     """
     from vllm.distributed.device_communicators.custom_all_reduce import (
         _all_ranks_true,
@@ -734,7 +737,8 @@ def supports_fused_moe_finalize(vllm_config: VllmConfig) -> bool:
     )
 
     if (
-        get_tensor_model_parallel_world_size() <= 1
+        envs.VLLM_BATCH_INVARIANT
+        or get_tensor_model_parallel_world_size() <= 1
         or vllm_config.parallel_config.enable_expert_parallel
         or not current_platform.is_cuda()
         or not current_platform.is_device_capability_family(100)
