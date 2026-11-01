@@ -509,7 +509,7 @@ def _create_async_pp_scheduler(
     # Emulate PP at the scheduler level; constructing with
     # pipeline_parallel_size>1 requires that many visible GPUs. Drive with
     # queue_size=pp_size+1 (V2 async PP runs pp_size+1 concurrent batches).
-    scheduler.pp_size = pp_size
+    scheduler.decode_stagger = pp_size
     scheduler.use_pp = pp_size > 1
     return scheduler
 

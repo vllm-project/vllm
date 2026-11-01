@@ -193,12 +193,6 @@ class WorkerBase:
         """Should be called immediately after execute_model iff it returned None."""
         raise NotImplementedError
 
-    def get_cache_block_size_bytes(self) -> int:
-        """Return the size of a single cache block, in bytes. Used in
-        speculative decoding.
-        """
-        raise NotImplementedError
-
     def add_lora(self, lora_request: LoRARequest) -> bool:
         raise NotImplementedError
 
