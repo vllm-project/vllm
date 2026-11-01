@@ -726,6 +726,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and hasattr(self.kv_b_proj, "weight")
             and self.kv_b_proj.weight.dtype == torch.bfloat16
         )
+        # Replaces the bf16 W_UK bmm, the q concat + fp8 quant and the head
+        # padding, so only the torch.bmm path qualifies.
+        self.is_aiter_fused_decode_query_enabled = (
+            rocm_aiter_ops.is_mla_enabled()
+            and not self.is_aiter_triton_fp8_bmm_enabled
+            and not self.is_aiter_triton_fp4_bmm_enabled
+            and not self.is_amx_bmm_enabled
+            and self.q_pad_num_heads is None
+        )
 
         # Attributes for forward_impl method
         self._vllm_config = get_current_vllm_config()
@@ -1050,7 +1059,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_pe_padded.copy_(mqa_q_pe)
                 mqa_q_pe = mqa_pe_padded
 
-            if self.is_aiter_triton_fp4_bmm_enabled:
+            fused_q_heads = self._fused_decode_query_num_heads(
+                attn_metadata, fp8_attention
+            )
+            if fused_q_heads is not None:
+                mqa_q = rocm_aiter_ops.fused_bf16_bmm_cat_quant_pad_mla(
+                    mqa_q_nope, self.W_UK_T, mqa_q_pe, self._q_scale, fused_q_heads
+                )
+            elif self.is_aiter_triton_fp4_bmm_enabled:
                 mqa_ql_nope = rocm_aiter_ops.batched_gemm_a16wfp4(
                     mqa_q_nope,
                     self.W_K,
@@ -1104,14 +1120,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     mqa_ql_nope = mqa_q_nope.new_empty((B, N, L))
                     torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope.transpose(0, 1))
 
-            if fp8_attention and self.impl.supports_quant_query_input:
-                assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
-                assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
-                mqa_q = self._decode_concat_quant_fp8_op(
-                    mqa_ql_nope, mqa_q_pe, self._q_scale
-                )
-            else:
-                mqa_q = (mqa_ql_nope, mqa_q_pe)
+            if fused_q_heads is None:
+                if fp8_attention and self.impl.supports_quant_query_input:
+                    assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+                    assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+                    mqa_q = self._decode_concat_quant_fp8_op(
+                        mqa_ql_nope, mqa_q_pe, self._q_scale
+                    )
+                else:
+                    mqa_q = (mqa_ql_nope, mqa_q_pe)
             # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
             if self.impl.dcp_world_size > 1:
                 assert self.dcp_manager is not None
@@ -1400,6 +1417,24 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
         return spec
+
+    def _fused_decode_query_num_heads(
+        self, attn_metadata: "MLACommonMetadata", fp8_attention: bool
+    ) -> int | None:
+        """Head count of the padded fp8 query AITER's fused W_UK absorb + concat +
+        quant + head padding builds for this decode step, or None to run the
+        unfused ops."""
+        if not (
+            self.is_aiter_fused_decode_query_enabled
+            and fp8_attention
+            and self.impl.supports_quant_query_input
+            and self.impl.dcp_world_size == 1
+            and rocm_aiter_ops.is_fused_bf16_bmm_cat_quant_pad_mla_tuned(
+                self.num_heads, self.kv_lora_rank, self.qk_nope_head_dim
+            )
+        ):
+            return None
+        return self.impl.decode_query_padded_num_heads(attn_metadata)  # type: ignore[attr-defined]
 
     def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
         # Convert from (B, N, L) to (N, B, L)
