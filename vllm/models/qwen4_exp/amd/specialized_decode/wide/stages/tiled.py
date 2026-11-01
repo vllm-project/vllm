@@ -1,0 +1,472 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Batch-tiled GEMMs on the bf16 matrix unit (after FlyTape's ``blocks/tiled``).
+
+A CTA computes ``C[token, row] = sum_k X[token, k] * W[row, k]`` for 64 x
+``mtiles`` weight rows (16-row tiles, one a wave per ``mtiles`` step) over a
+slice of K and every row of the step. Activations stream through LDS in
+``CHUNK``-wide K steps shared by the four waves, double buffered; weights go
+from global memory straight to the A operand registers, ``DEPTH`` chunks
+ahead. The step's rows are the N dimension of ``v_mfma_f32_16x16x32_bf16``:
+``ceil(S / 16)`` token tiles reuse each weight load, and the staged
+activations never grow past two chunks.
+
+The MFMA operand ABI (explicit, it is the instruction's): lane ``l`` of a wave
+holds weight row ``l % 16`` and, for K slice ``m`` (0..3) of a chunk, the 8
+K elements at ``koff(m, l // 16)``; its accumulator of token tile ``t`` holds
+rows ``4 (l // 16) + e`` (e = 0..3) of token ``16 t + l % 16``. A weight
+source picks ``koff`` so a lane's loads are contiguous in its format: bf16
+rows take ``32 m + 8 g`` (a load instruction's four lanes of a row read 64
+contiguous bytes), MXFP4 rows ``32 g + 8 m`` (a lane's one 16-byte load is
+its 32 K values). The B operand is read from LDS at the same ``koff``.
+
+A split-K plan (``SplitK``) cuts a GEMM too narrow to fill the grid along K;
+its partials ``[split, token, row]`` (f32) are summed in split order by a
+later phase or by the row group's last arriving unit (``fold``).
+"""
+
+from __future__ import annotations
+
+import flydsl.expr as fx
+from flydsl.expr import const_expr, range_constexpr, rocdl
+from flydsl.expr.typing import T
+
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.grid import (
+    TraceInvariant,
+    fold_arrive,
+)
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import (
+    CM_DEV,
+    CM_NT,
+    ld,
+    ld_i32x4,
+    lds_ld,
+    lds_st,
+    mfma_bf16,
+    st,
+    traced,
+    zeros,
+)
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import THREADS, WAVES
+
+LANES = 64
+TILE = 16
+SLICES = 4  # MFMA K slices of a chunk
+CHUNK = 128  # K elements a staged step
+ROWS = WAVES * TILE  # weight rows a CTA covers per weight tile step
+XSTRIDE = CHUNK // 2 + 4  # LDS row stride in i32 words: 16 pad bytes stagger the banks
+DEPTH = 2  # chunks of loads in flight (FlyTape: 2 beats 1 and 3 at B128)
+UNROLL = 4  # K chunks up to which the chunk loop is unrolled
+
+
+def token_tiles(rows: int) -> int:
+    return -(-rows // TILE)
+
+
+def stage_words(rows: int) -> int:
+    """i32 words of a GEMM's LDS stage: two chunk buffers of every padded row."""
+    return 2 * token_tiles(rows) * TILE * XSTRIDE
+
+
+def i32(v) -> fx.Int32:
+    return fx.Int32(v)
+
+
+# --------------------------------------------------------------------------
+# weight sources (the A operand)
+# --------------------------------------------------------------------------
+
+
+class Bf16Weights(TraceInvariant):
+    """A bf16 ``[rows, cols]`` row-major matrix at byte address ``addr``."""
+
+    def __init__(self, addr, rows: int, cols: int, cm: int = CM_NT):
+        self.addr, self.rows, self.cols, self.cm = fx.Int64(addr), rows, cols, cm
+
+    @staticmethod
+    def koff(m, g):
+        return i32(32 * m) + g * i32(8)
+
+    def issue(self, row, chunk, g):
+        """The lane's four 16-byte loads of chunk ``chunk``; a row past ``rows``
+        reads the last row, a column past ``cols`` loads as zero."""
+        row = (row < i32(self.rows)).select(row, i32(self.rows - 1))
+        out = []
+        for m in range(SLICES):
+            k = chunk * i32(CHUNK) + self.koff(m, g)
+            at = (row * i32(self.cols) + k) // i32(2)  # i32 words
+            if self.cols % CHUNK:
+                live = k < i32(self.cols)
+                w = ld_i32x4(self.addr, live.select(at, i32(0)), self.cm)
+                out.append(live.select(w, zeros(4, fx.Int32)))
+            else:
+                out.append(ld_i32x4(self.addr, at, self.cm))
+        return out
+
+    @staticmethod
+    def operands(loaded):
+        return [fx.Vector(w).bitcast(fx.BFloat16) for w in loaded]
+
+
+class Fp4Weights(TraceInvariant):
+    """An MXFP4 ``[rows, cols]`` matrix (e2m1, one E8M0 scale per 32 K) decoded to
+    bf16 operands in registers. ``shuffled``: AITER's ASM-GEMM layout (data
+    through ``shuffle_weight(layout=(16, 16))``, scales through
+    ``e8m0_shuffle``); else the Triton FP4 GEMM's (data row-major ``[rows,
+    cols / 2]``, scales transposed ``[cols / 32, rows]``)."""
+
+    def __init__(
+        self, addr, scale, rows: int, cols: int, shuffled: bool, cm: int = CM_NT
+    ):
+        if cols % CHUNK:
+            raise ValueError(f"MXFP4 K {cols} is not whole {CHUNK}-column steps")
+        self.addr, self.scale = fx.Int64(addr), fx.Int64(scale)
+        self.rows, self.cols, self.shuffled, self.cm = rows, cols, shuffled, cm
+        self.scale_cols = (cols // 32 + 7) // 8 * 8  # e8m0_shuffle pads K / 32 to 8
+
+    @staticmethod
+    def koff(m, g):
+        return g * i32(32) + i32(8 * m)
+
+    def _data_word(self, row, chunk, g):
+        if self.shuffled:
+            # a 16-row group's 16-byte K pieces as [piece][row % 16][16 B]
+            at = (
+                (row // i32(TILE)) * i32(TILE * self.cols // 2)
+                + (chunk * i32(4) + g) * i32(256)
+                + (row % i32(TILE)) * i32(16)
+            )
+            return at // i32(4)
+        return (
+            row * i32(self.cols // 2) + chunk * i32(CHUNK // 2) + g * i32(16)
+        ) // i32(4)
+
+    def _scale_byte(self, row, kb):
+        if self.shuffled:
+            r32, a, b = row // i32(32), (row // i32(16)) % i32(2), row % i32(16)
+            c8, d, f = kb // i32(8), (kb // i32(4)) % i32(2), kb % i32(4)
+            return (
+                (((r32 * i32(self.scale_cols // 8) + c8) * i32(4) + f) * i32(16) + b)
+                * i32(2)
+                + d
+            ) * i32(2) + a
+        return kb * i32(self.rows) + row
+
+    def issue(self, row, chunk, g):
+        row = (row < i32(self.rows)).select(row, i32(self.rows - 1))
+        data = ld_i32x4(self.addr, self._data_word(row, chunk, g), self.cm)
+        code = ld(
+            self.scale, self._scale_byte(row, chunk * i32(4) + g), fx.Uint8, cm=self.cm
+        )
+        return [data, code]
+
+    @staticmethod
+    def operands(loaded):
+        data, code = loaded
+        scale = (fx.Int32(code) << i32(23)).bitcast(fx.Float32)
+        out = []
+        for m in range(SLICES):
+            pairs = []
+            for byte in range(4):
+                p = rocdl.cvt_scalef32_pk_bf16_fp4(
+                    T.vec(2, T.bf16),
+                    fx.Int32(data[m]).ir_value(),
+                    scale.ir_value(),
+                    byte,
+                )
+                pairs.append(fx.Vector(p).bitcast(fx.Int32)[0])
+            out.append(fx.Vector.from_elements(pairs, fx.Int32).bitcast(fx.BFloat16))
+        return out
+
+
+# --------------------------------------------------------------------------
+# activation sources (the B operand, staged through LDS)
+# --------------------------------------------------------------------------
+
+
+class Source(TraceInvariant):
+    """Activations ``X[token, k]``: ``issue(token, k)`` returns the raw loads of 8
+    elements (as stored, no arithmetic), ``convert(raw)`` their 8 bf16 as four
+    packed i32 words. ``fill`` issues a chunk a K step ahead and ``put``
+    converts after the step's MFMAs, so the wait for the loads lands behind the
+    matrix work. Default: a bf16 ``[tokens, ld]`` matrix at ``addr``."""
+
+    def __init__(self, addr=None, ld_elems: int = 0, cm: int = CM_DEV):
+        self.addr, self.ld, self.cm = (
+            (None if addr is None else fx.Int64(addr)),
+            ld_elems,
+            cm,
+        )
+
+    def issue(self, token, k):
+        return [ld_i32x4(self.addr, (token * i32(self.ld) + k) // i32(2), self.cm)]
+
+    def convert(self, raw):
+        return raw[0]
+
+
+class Gemm(TraceInvariant):
+    """The staged-activation K loop for one step width ``rows`` (the tokens).
+    ``page``: the LDS stage (``stage_words(rows)`` i32 words), ``k_total``: K
+    when it is not a multiple of ``CHUNK`` (activations past it stage as 0)."""
+
+    def __init__(
+        self, page, rows: int, tid, k_total=None, mtiles: int = 1, depth: int = DEPTH
+    ):
+        self.page = page
+        self.batch = rows
+        self.tiles = token_tiles(rows)
+        self.tid = i32(tid)
+        self.lane = self.tid % i32(LANES)
+        self.group = self.lane // i32(TILE)
+        self.mtiles = mtiles
+        self.depth = depth
+        self.k_total = k_total if k_total is not None and k_total % CHUNK else None
+
+    # staging: thread v of a token tile round holds token v // 16, columns
+    # 8 (v % 16) .. + 7 of the chunk
+    def fill(self, source, chunk):
+        out = []
+        for t in range(self.tiles):
+            v = i32(t * THREADS) + self.tid
+            token = v // i32(CHUNK // 8)
+            if (t + 1) * THREADS // (CHUNK // 8) > self.batch:
+                token = (token < i32(self.batch)).select(token, i32(self.batch - 1))
+            k = chunk * i32(CHUNK) + (v % i32(CHUNK // 8)) * i32(8)
+            if self.k_total is None:
+                out.append(source.issue(token, k))
+            else:
+                live = k < i32(self.k_total)
+                out.append(list(source.issue(token, live.select(k, i32(0)))) + [live])
+        return out
+
+    def put(self, buf, items, source):
+        for t in range(self.tiles):
+            v = i32(t * THREADS) + self.tid
+            at = (buf * i32(self.tiles * TILE) + v // i32(CHUNK // 8)) * i32(
+                XSTRIDE
+            ) + (v % i32(CHUNK // 8)) * i32(4)
+            item = items[t]
+            if self.k_total is None:
+                words = source.convert(item)
+            else:
+                words = item[-1].select(
+                    fx.Vector(source.convert(item[:-1])), zeros(4, fx.Int32)
+                )
+            lds_st(self.page + at, fx.Vector(words))
+
+    def operand(self, buf, t, m, koff):
+        at = (
+            (buf * i32(self.tiles) + i32(t)) * i32(TILE) + self.lane % i32(TILE)
+        ) * i32(XSTRIDE) + koff(m, self.group) // i32(2)
+        return lds_ld(self.page + at, 4).bitcast(fx.BFloat16)
+
+    def operands(self, buf, t, koff):
+        return [self.operand(buf, t, m, koff) for m in range(SLICES)]
+
+    def multiply(self, buf, a, acc, weights):
+        """``acc`` plus the chunk in LDS buffer ``buf`` times the weight
+        operands ``a`` ([mtile][slice]); token tile ``t + 1``'s B operands are
+        read while tile ``t``'s MFMAs run."""
+        acc = [list(r) for r in acc]
+        ops = self.operands(buf, 0, weights.koff)
+        for t in range(self.tiles):
+            ahead = (
+                self.operands(buf, t + 1, weights.koff) if t + 1 < self.tiles else None
+            )
+            for m in range(SLICES):
+                for mt in range(self.mtiles):
+                    acc[mt][t] = mfma_bf16(a[mt][m], ops[m], acc[mt][t])
+            ops = ahead
+        return acc
+
+    def stage(self, source, weights, rows, first, count: int, i):
+        """The activation and weight loads of chunk ``first + min(i, count - 1)``."""
+        chunk = first + (i < i32(count)).select(i, i32(count - 1))
+        return self.fill(source, chunk), [
+            weights.issue(r, chunk, self.group) for r in rows
+        ]
+
+    def run(self, source, weights, rows, first, count: int):
+        """Accumulate chunks ``first .. first + count`` (a trace-time count) into
+        one accumulator per (weight tile, token tile); ``rows``: the lane's
+        weight row of each weight tile."""
+        if count <= UNROLL:
+            return self._unrolled(source, weights, rows, first, count)
+        return _gemm_loop(self, source, weights, rows, first, count)
+
+    def _unrolled(self, source, weights, rows, first, count: int):
+        depth = min(self.depth, count)
+        acc = [[zeros(4) for _ in range(self.tiles)] for _ in range(self.mtiles)]
+        staged = [
+            self.stage(source, weights, rows, first, count, i32(i))
+            for i in range(depth)
+        ]
+        self.put(i32(0), staged[0][0], source)
+        fx.barrier()
+        for c in range(count):
+            if c + depth < count:
+                staged.append(
+                    self.stage(source, weights, rows, first, count, i32(c + depth))
+                )
+            a = [weights.operands(w) for w in staged[c][1]]
+            acc = self.multiply(i32(c % 2), a, acc, weights)
+            if c + 1 < count:
+                self.put(i32(1 - c % 2), staged[c + 1][0], source)
+            fx.barrier()
+        return acc
+
+
+@traced
+def _gemm_loop(gemm, source, weights, rows, first, count):
+    """``Gemm.run`` for a long K: chunk ``c + depth`` issued while chunk ``c``
+    multiplies; the last ``depth`` iterations re-issue the last chunk."""
+    depth = gemm.depth
+    acc = [[zeros(4) for _ in range(gemm.tiles)] for _ in range(gemm.mtiles)]
+    staged = [
+        gemm.stage(source, weights, rows, first, count, i32(i)) for i in range(depth)
+    ]
+    a = staged[0][1]
+    gemm.put(i32(0), staged[0][0], source)
+    ring_xs = [s[0] for s in staged[1:]]
+    ring_a = [s[1] for s in staged[1:]]
+    fx.barrier()
+    for c in range(i32(0), i32(count), i32(1)):
+        new_xs, new_a = gemm.stage(source, weights, rows, first, count, c + i32(depth))
+        buf = c % i32(2)
+        acc = gemm.multiply(buf, [weights.operands(w) for w in a], acc, weights)
+        gemm.put(i32(1) - buf, (ring_xs + [new_xs])[0], source)
+        fx.barrier()
+        a = (ring_a + [new_a])[0]
+        ring_xs = (ring_xs + [new_xs])[1:]
+        ring_a = (ring_a + [new_a])[1:]
+    return acc
+
+
+# --------------------------------------------------------------------------
+# split-K plans and their epilogues
+# --------------------------------------------------------------------------
+
+
+class SplitK(TraceInvariant):
+    """A GEMM of ``rows`` weight rows over ``k`` columns cut into ``splits`` K
+    slices, one unit per (row group, slice); a row group is ``ROWS * mtiles``
+    rows. Partials index rows from 0 with stride ``padded``."""
+
+    def __init__(self, rows: int, k: int, splits: int, mtiles: int = 1):
+        chunks = -(-k // CHUNK)
+        if chunks % splits:
+            raise ValueError(f"{chunks} K chunks do not split {splits} ways")
+        self.rows, self.k, self.splits, self.mtiles = rows, k, splits, mtiles
+        self.unit_rows = ROWS * mtiles
+        self.groups = -(-rows // self.unit_rows)
+        self.per = chunks // splits
+        self.padded = self.groups * self.unit_rows
+
+    @property
+    def units(self) -> int:
+        return self.groups * self.splits
+
+    def partial_words(self, tokens: int) -> int:
+        return self.splits * tokens * self.padded
+
+
+def unit_rows(plan, unit, tid):
+    """(group, split, the wave's first row a weight tile, the lane's row a
+    weight tile) of ``unit``."""
+    wave, lane = tid // i32(LANES), tid % i32(LANES)
+    group, split = unit % i32(plan.groups), unit // i32(plan.groups)
+    firsts = [
+        group * i32(plan.unit_rows) + (i32(mt * WAVES) + wave) * i32(TILE)
+        for mt in range(plan.mtiles)
+    ]
+    return group, split, firsts, [f + lane % i32(TILE) for f in firsts]
+
+
+@traced
+def gemm_units(bid, workers, gemm, source, weights, plan, epilogue, after=None):
+    """Run every unit of ``plan`` over the grid: CTA ``bid`` takes units
+    ``bid, bid + workers, ...``. ``epilogue(unit, split, first_row, lane, acc)``
+    finishes a weight tile's accumulators; ``after(group, split)``, when given,
+    runs once a unit behind all waves' epilogues (CTA-uniform)."""
+    for unit in range(bid, i32(plan.units), workers):
+        group, split, firsts, rows = unit_rows(plan, unit, gemm.tid)
+        acc = gemm.run(source, weights, rows, split * i32(plan.per), plan.per)
+        for mt in range_constexpr(plan.mtiles):
+            epilogue(unit, split, firsts[mt], gemm.lane, acc[mt])
+        if const_expr(after is not None):
+            after(group, split)
+
+
+def partial_epilogue(gemm, plan, part):
+    """Each unit's accumulators to ``part[(split, token, row)]`` (f32, device
+    scope)."""
+
+    @traced
+    def epilogue(unit, split, first_row, lane, acc):
+        for t in range_constexpr(gemm.tiles):
+            token = i32(t * TILE) + lane % i32(TILE)
+            row = first_row + lane // i32(TILE) * i32(4)
+            if token < i32(gemm.batch):
+                st(
+                    part,
+                    (split * i32(gemm.batch) + token) * i32(plan.padded) + row,
+                    acc[t],
+                    cm=CM_DEV,
+                )
+
+    return epilogue
+
+
+def sum_partials4(part, plan, tokens: int, token, row):
+    """Rows ``row .. row + 3`` of ``token`` summed over the splits in split
+    order; every split's 16-byte load is issued before the first add."""
+    loads = [
+        ld(
+            part,
+            (i32(s * tokens) + token) * i32(plan.padded) + row,
+            fx.Float32,
+            4,
+            cm=CM_DEV,
+        )
+        for s in range(plan.splits)
+    ]
+    total = [loads[0][e] for e in range(4)]
+    for s in range(1, plan.splits):
+        total = [total[e] + loads[s][e] for e in range(4)]
+    return total
+
+
+def fold(g, gemm, plan, part, counter0, finish, done=None):
+    """Split-K units whose row group's last arriving unit sums the group's
+    partials and finishes them: ``finish(group, first_row, lane, acc)`` with the
+    summed accumulators of each weight tile, in the epilogue's layout, then
+    ``done(group)`` (CTA-uniform, when given). Returns the (epilogue, after)
+    pair of ``gemm_units``; ``counter0`` is the first of the plan's ``groups``
+    fold counters."""
+    epilogue = partial_epilogue(gemm, plan, part)
+
+    @traced
+    def after(group, split):
+        if fold_arrive(g, counter0 + group, plan.splits):
+            wave, lane = gemm.tid // i32(LANES), gemm.tid % i32(LANES)
+            for mt in range_constexpr(plan.mtiles):
+                first = group * i32(plan.unit_rows) + (i32(mt * WAVES) + wave) * i32(
+                    TILE
+                )
+                row = first + lane // i32(TILE) * i32(4)
+                acc = []
+                for t in range_constexpr(gemm.tiles):
+                    token = i32(t * TILE) + lane % i32(TILE)
+                    token = (token < i32(gemm.batch)).select(token, i32(gemm.batch - 1))
+                    acc.append(
+                        fx.Vector.from_elements(
+                            sum_partials4(part, plan, gemm.batch, token, row),
+                            fx.Float32,
+                        )
+                    )
+                finish(group, first, lane, acc)
+            if const_expr(done is not None):
+                done(group)
+
+    return epilogue, after

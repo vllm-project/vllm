@@ -1,0 +1,90 @@
+# Qwen3.8-Flash-Next specialized decode (wide)
+
+`--monokernel` on MI355X/gfx950 runs each pure decode step of 32 to 128 rows
+of Qwen3.8-Flash-Next (`amd/Qwen3.8-Flash-Next-Quark-MXFP4`) at TP2 as one
+persistent FlyDSL launch per decoder layer (`runtime/decode.py`,
+`wide/layer.py`):
+
+| layer | launches | phases |
+| --- | --- | --- |
+| GDN (36) | `gdn` | [stats] attn mix, GDN projection + conv, gated delta rule + gated norm, out_proj + all-reduce + combine, MLP mix, router, routing + MXFP4 quantization, experts, MoE combine + all-reduce + combine |
+| QSA (12) | `qsa_front`, vLLM's QSA, `qsa_back` | attn mix → x; vLLM's qkv_proj and QSA attention (indexer, paged KV); gated o_proj + all-reduce + combine and the MLP half |
+
+The embedding, the PLE layer, the final mixer, the head and sampling stay
+vLLM's. Steps with fewer rows, prefill and mixed steps run vLLM's forward. The
+kernels are built for the deployment's CUDA graph capture sizes in 32-128
+(multiples of 8).
+
+The design follows FlyTape's batch-128 decode (expert-major fused W4A4 MoE,
+batch-tiled MFMA GEMMs with split-K folded by the last arriver, the line-based
+in-kernel TP exchange, the striped grid barrier) in vLLM's execution model:
+one launch per layer on vLLM's buffers, weights and caches in place, no
+multi-step device loop.
+
+## Supported
+
+- TP2 on dedicated, unpartitioned GPUs (256 CUs, one CTA per CU), Model
+  Runner V2, FULL CUDA graphs for decode (PIECEWISE steps run vLLM's forward);
+- pure decode of 32-128 rows (graph padding rows are inert: their GDN state
+  slot is the null block);
+- the checkpoint's shapes (`wide/layout.py`, `SHAPES`) and formats: online
+  MXFP4 GDN projections (`--quantization-config.targets` for
+  `linear_attn.in_proj_qkv`, `in_proj_z`, `out_proj`) on either AITER FP4
+  GEMM layout (ASM: shuffled; Triton: row-major, transposed scales),
+  `AITER_MXFP4_MXFP4` experts with `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`
+  (the shared expert is routed expert 512; gate and up padded to any multiple
+  of 128 rows), a BF16 conv state and an FP32 recurrent state with
+  `--no-enable-prefix-caching`.
+
+## Refusals
+
+Default-deny, in three stages, each reporting every reason in one error
+(`runtime/__init__.py`, `runtime/guards.py`): the config (TP other than 2,
+PP, DP, EP, EPLB, DCP, PCP, DBO, HC/MoE sequence parallelism, LoRA, KV
+connectors, routed-expert capture, speculative decoding, sleep mode, CPU
+weight offload, weight updates, GDN prefix caching, other GDN cache dtypes,
+an unfused shared expert, the V1 runner, `STOCK_TORCH_COMPILE`, other model
+shapes, no capture size in 32-128, a platform other than unpartitioned
+gfx950); the loaded model (every layer's modules, quantization methods,
+weight layouts and shapes); the GDN caches at every bind (dtypes, shapes,
+dense slots). The TP ranks agree on every stage.
+
+## Numerics
+
+The stock path's rounding points are kept: bf16 multi-stream state, bf16
+gated-residual GEMM outputs, bf16 router logits, MXFP4 MoE activations and
+intermediate with AITER's scale rule, bf16 GDN projection outputs and core
+output. Two differences are deliberate: the online-MXFP4 dense projections
+run W4A16 (the weights decoded to bf16 in registers; stock quantizes the
+activations to MXFP4 too), and the all-reduces are exact bf16 sums in rank
+order (stock uses QuickReduce INT4).
+
+## Failure
+
+Every in-kernel wait (grid barrier, TP exchange line) gives up after 10 s:
+the CTA records it in the rank's health words, raises the rank's flag on the
+output rank and sets FAILED, so the launch runs to its end.
+`runtime/guards.FailStop` reads FAILED after every step and the ranks raise
+together every 16 steps.
+
+## Code
+
+- `runtime/`: config refusals and widths (`__init__`), step routing
+  (`routing`), model and cache refusals and `FailStop` (`guards`), the per-rank
+  launch state and the layer launches (`layers`), the executor (`decode`), peer
+  memory (`peer`, as the Kimi-K3 decode's).
+- `wide/`: the build key, ABI and scratch layout (`layer`), the shapes
+  (`layout`), the health words (`abi`); `common/`: device primitives (`ops`),
+  the grid barrier and fold counters (`grid`), build keys (`plan`);
+  `stages/`: the batch-tiled GEMM (`tiled`), the gated residual (`hc`), the
+  gated delta net (`gdn`), the MoE (`moe`), MXFP4 activations (`mx`), the TP
+  exchange (`exchange`).
+
+`VLLM_QWEN4_EXP_DECODE_TRACE=1` builds every launch with per-phase clock
+stamps (`Launcher.trace`, `wide.layer.phase_names`) for profiling.
+
+## Toolchain
+
+FlyDSL comes in through AITER; measured with FlyDSL 0.4.0.
+`tests/models/qwen4_exp/amd_specialized_decode/` checks each stage against a
+float64 reference with the stock rounding points.
