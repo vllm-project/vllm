@@ -82,7 +82,7 @@ In most cases, users only need to specify --file to parse the desired benchmark 
 | ---------------------- | ------------------ | ----------------------- | ----------------------------------------------------------------------------------------------------- |
 | `--file`               | `str` (appendable) | *None*                  | Input JSON result file(s). Can be specified multiple times to compare multiple benchmark outputs.     |
 | `--debug`              | `bool`             | `False`                 | Enables debug mode. When set, prints all available information to aid troubleshooting and validation. |
-| `--plot` / `--no-plot` | `bool`             | `True`                  | Controls whether performance plots are generated. Use `--no-plot` to disable graph generation.        |
+| `--plot` / `--no-plot` | `bool`             | `returned`                  | Controls whether performance plots are generated. Use `--no-plot` to disable graph generation.        |
 | `--xaxis`              | `str`              | `# of max concurrency.` | Column name used as the X-axis in comparison plots (for example, concurrency or batch size).          |
 | `--latency`            | `str`              | `p99`                   | Latency aggregation method used for TTFT/TPOT. Supported values: `median` or `p99`.                   |
 | `--ttft-max-ms`        | `float`            | `3000.0`                | Reference upper bound (milliseconds) for TTFT plots, typically used to visualize SLA thresholds.      |
