@@ -49,6 +49,8 @@ def _initial_padding_value(t: torch.Tensor) -> float:
         return 0
     one = torch.ones(1).to(t.dtype).view(torch.uint8).to(t.device)
     raw = t.detach().reshape(-1).view(torch.uint8).view(-1, t.element_size())
+    if not bool((raw[0] == one).all()):  # skips the scan for most weights
+        return 0
     chunk = 1 << 26
     for start in range(0, raw.shape[0], chunk):
         if not bool((raw[start : start + chunk] == one).all()):
