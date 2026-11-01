@@ -1322,6 +1322,25 @@ def test_tensor_arena_registry_is_weak_and_survives_shutdown():
     writer_mq.shutdown()
 
 
+def test_message_queue_tensor_arena_sizing():
+    """The arena takes its size from the queue's arguments (ParallelConfig
+    shm_tensor_arena_slots / shm_tensor_arena_slot_mb), and a reader attaches
+    with the writer's size."""
+    writer_mq = MessageQueue(
+        n_reader=1,
+        n_local_reader=1,
+        enable_shm_tensor_arena=True,
+        shm_tensor_arena_slots=16,
+        shm_tensor_arena_slot_mb=2,
+    )
+    reader_mq = MessageQueue.create_from_handle(writer_mq.export_handle(), rank=0)
+    for arena in (writer_mq.tensor_arena, reader_mq.tensor_arena):
+        assert arena.n_slots == 16
+        assert arena.slot_bytes == 2 << 20
+    reader_mq.shutdown()
+    writer_mq.shutdown()
+
+
 def test_create_from_handle_tolerates_arena_attach_failure():
     """If a reader's `ShmTensorArena.__init__` can't attach to the writer's
     segment (`FileNotFoundError`, e.g. deserialized on a different node),
