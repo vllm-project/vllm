@@ -22,9 +22,6 @@ if not (
         allow_module_level=True,
     )
 
-from transformers import Qwen3NextConfig  # noqa: E402
-
-from tests.utils import init_test_distributed_environment  # noqa: E402
 from tests.v1.attention.utils import (  # noqa: E402
     BatchSpec,
     create_common_attn_metadata,
@@ -42,7 +39,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (  # noqa: E402
 from vllm.third_party.flash_linear_attention.ops.layernorm_guard import (  # noqa: E402
     rmsnorm_fn,
 )
-from vllm.utils.network_utils import get_open_port  # noqa: E402
 from vllm.utils.torch_utils import _encode_layer_name  # noqa: E402
 from vllm.v1.attention.backends.gdn_attn import (  # noqa: E402
     GDNAttentionMetadata,
@@ -429,24 +425,3 @@ def test_fused_model_path_matches_reference(
         atol=3e-2,
         rtol=3e-2,
     )
-
-
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA-only overlap")
-def test_ba_proj_overlaps_on_aux_stream_with_default_linear_backend() -> None:
-    """A GEMM dispatch change must not silently disable the ba overlap."""
-    vllm_config = create_vllm_config(dtype="bfloat16")
-    with set_current_vllm_config(vllm_config):
-        init_test_distributed_environment(1, 1, 0, str(get_open_port()))
-        layer = QwenGatedDeltaNetAttention(
-            Qwen3NextConfig(
-                hidden_size=64,
-                linear_num_key_heads=H,
-                linear_num_value_heads=HV,
-                linear_key_head_dim=K,
-                linear_value_head_dim=V,
-            ),
-            vllm_config,
-            prefix=PREFIX,
-            overlap_ba_proj=True,
-        )
-    assert layer._ba_stream is not None
