@@ -110,23 +110,56 @@ def _parse_element(text: str, pos: int, depth: int) -> tuple[str, _Element, int]
     return name, children, pos
 
 
+def _recover_untagged_param(
+    raw_args: str, pos: int
+) -> tuple[str, str, int] | None:
+    """Try to recover a parameter whose opening tag was elided by the model.
+
+    Only recovers when the closing tag appears before any opening tag,
+    i.e. the model truly skipped the opener rather than emitting junk
+    before a well-formed element.
+    """
+    close_idx = raw_args.find(ELEMENT_END_START, pos)
+    if close_idx < 0:
+        return None
+    open_idx = raw_args.find(ELEMENT_START, pos)
+    if 0 <= open_idx < close_idx:
+        return None
+    name_start = close_idx + len(ELEMENT_END_START)
+    name_end = raw_args.find(">", name_start)
+    if name_end <= name_start:
+        return None
+    name = raw_args[name_start:name_end]
+    if not name.strip() or "/" in name:
+        return None
+    value = raw_args[pos:close_idx]
+    return name, value, name_end + 1
+
+
 def _parse_invoke_params(raw_args: str) -> list[tuple[str, _Element]]:
     """Parse the parameter elements of one ``<invoke>`` body.
 
-    Parsing stops at the first malformed or unterminated element, keeping the
-    parameters before it.
+    When the model elides an opening tag (emitting ``value]<]minimax[>[</name>``
+    instead of ``]<]minimax[>[<name>value]<]minimax[>[</name>``), the leading
+    text is recovered as that parameter's value so later well-formed elements
+    are not lost.
     """
     params: list[tuple[str, _Element]] = []
     pos = 0
     while True:
         while pos < len(raw_args) and raw_args[pos].isspace():
             pos += 1
-        if not raw_args.startswith(ELEMENT_START, pos):
+        if raw_args.startswith(ELEMENT_START, pos):
+            element = _parse_element(raw_args, pos, depth=1)
+            if element is None:
+                return params
+            name, value, pos = element
+            params.append((name, value))
+            continue
+        recovered = _recover_untagged_param(raw_args, pos)
+        if recovered is None:
             return params
-        element = _parse_element(raw_args, pos, depth=1)
-        if element is None:
-            return params
-        name, value, pos = element
+        name, value, pos = recovered
         params.append((name, value))
 
 
