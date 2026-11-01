@@ -47,9 +47,7 @@ def _make_speculative_config(enforce_eager, target_enforce_eager):
 
     # The draft ModelConfig is built in the speculator config class, which
     # imports it from ``vllm.config`` at call time; patch it there.
-    with patch(
-        "vllm.config.ModelConfig", return_value=draft
-    ) as model_config_cls:
+    with patch("vllm.config.ModelConfig", return_value=draft) as model_config_cls:
         config = SpeculativeConfig(
             model="draft",
             method="dspark",
