@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import array
 import contextlib
+import functools
 import os
 import random
 import sys
@@ -402,10 +403,7 @@ def common_broadcastable_dtype(dtypes: Collection[torch.dtype]):
     """Get the common `dtype` where all of the other `dtypes` can be
     cast to it without losing any information.
     """
-    return max(
-        dtypes,
-        key=lambda dtype: sum(is_lossless_cast(dt, dtype) for dt in dtypes),
-    )
+    return functools.reduce(torch.promote_types, dtypes)
 
 
 def _generate_random_fp8(
