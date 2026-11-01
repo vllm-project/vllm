@@ -348,7 +348,34 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         # the input video. We enlarge max_position_embeddings to 4 times to get
         # a larger the cos and sin cache. Models whose positions never exceed
         # the token count pass `positions_factor=1`.
-        self.cache_max_position_num = max_position_embeddings * positions_factor
+        #
+        # Note that get_rope() passes `original_max_position_embeddings` as
+        # `max_position_embeddings` for scaling rope types (yarn/longrope), so
+        # this base is the PRE-scaling window while positions can still reach
+        # the full served window (`max_model_len`, i.e. original * factor for
+        # YaRN-scaled deployments). The unconditional 4x headroom removed in
+        # #59853 was implicitly covering that gap for any scaling factor <= 4;
+        # floor the cache on the engine's own position bound instead, which is
+        # exact for every (model, rope type, served window) combination and
+        # changes nothing for native-window serving.
+        served_window = 0
+        try:
+            from vllm.config import get_current_vllm_config
+
+            vllm_config = get_current_vllm_config()
+            # Same resolution as mrope_positions_factor(): a drafter gets the
+            # target's positions, so its cache must cover the target's window.
+            spec = vllm_config.speculative_config
+            model_config = (
+                (spec and spec.target_model_config) or vllm_config.model_config
+            )
+            served_window = int(model_config.max_model_len or 0)
+        except Exception:
+            # No engine context (unit tests constructing rope directly).
+            pass
+        self.cache_max_position_num = max(
+            max_position_embeddings * positions_factor, served_window
+        )
         super().__init__(
             head_size,
             rotary_dim,
