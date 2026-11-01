@@ -92,6 +92,7 @@ from vllm.model_executor.offloader import (
 from vllm.model_executor.warmup.jit_warmup import JitWarmupRegistry
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.multimodal.gpu_ipc_memory import release_cuda_ipc_proxies
 from vllm.multimodal.inputs import (
     BatchedTensorInputs,
     MultiModalKwargsItem,
@@ -1186,6 +1187,9 @@ class GPUModelRunner(
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
             req_state = self.requests.pop(req_id, None)
+            # Only ranks that run the encoder count as CUDA-IPC pool consumers.
+            if req_state is not None and get_pp_group().is_first_rank:
+                release_cuda_ipc_proxies(req_state.mm_features)
             self._on_request_state_removed(req_id, req_state)
             self.num_prompt_logprobs.pop(req_id, None)
         self.late_interaction_runner.on_requests_finished(
@@ -2957,6 +2961,14 @@ class GPUModelRunner(
             )
             logger.debug("Finish execute for mm hash %s", mm_hash)
 
+        # Release only after the whole step: the sequential video path above
+        # reconstructs each video a second time.
+        scheduled_encoder_inputs = scheduler_output.scheduled_encoder_inputs
+        release_cuda_ipc_proxies(
+            self.requests[req_id].mm_features[mm_input_id]
+            for req_id, encoder_input_ids in scheduled_encoder_inputs.items()
+            for mm_input_id in encoder_input_ids
+        )
         return encoder_outputs
 
     def _get_encoder_output_from_cache(self, mm_hash: str) -> torch.Tensor | None:

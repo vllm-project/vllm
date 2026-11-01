@@ -348,10 +348,14 @@ class InputProcessingContext:
     ) -> JSONTree:
         # "torch_shm" puts tensors on a torch.multiprocessing queue, which
         # shares device tensors by CUDA IPC handle, so a device-side processor
-        # can hand `pixel_values` straight to the worker. Every other transport
-        # serializes host bytes, so the result has to be copied back first.
-        keep_on_device = (
-            self.model_config.get_multimodal_config().mm_tensor_ipc == "torch_shm"
+        # can hand `pixel_values` straight to the worker.
+        # "cuda_ipc_pool" likewise keeps tensors on device through a persistent
+        # CUDA IPC pool and supports TP > 1.
+        # Every other transport serializes host bytes, so the result has
+        # to be copied back first.
+        keep_on_device = self.model_config.get_multimodal_config().mm_tensor_ipc in (
+            "torch_shm",
+            "cuda_ipc_pool",
         )
 
         def _postprocess_one(x: object):
