@@ -894,19 +894,6 @@ class TieringOffloadingManager(OffloadingManager):
         return self.primary_tier.prepare_load(keys, req_context)
 
     @override
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """Mark chunks as recently used in all tiers.
-
-        Args:
-            keys: Chunks to mark as recently used.
-            req_context: Per-request context.
-
-        """
-        self.primary_tier.touch(keys, req_context)
-        for tier in self.secondary_tiers:
-            tier.touch(keys, req_context)
-
-    @override
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """Mark chunks as done loading from primary tier to GPU.
 
