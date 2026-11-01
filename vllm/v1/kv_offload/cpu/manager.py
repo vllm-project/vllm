@@ -241,10 +241,6 @@ class CPUOffloadingManager(OffloadingManager):
         return self._get_load_store_spec(keys, chunks)
 
     @override
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        self._policy.touch(keys, req_context)
-
-    @override
     def complete_load(
         self, keys: Collection[OffloadKey], req_context: ReqContext
     ) -> None:
