@@ -249,6 +249,12 @@ class SchedulerInterface(ABC):
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError
 
+    def has_prefill_work(self) -> bool:
+        """Returns True if a prefill could be scheduled now: a request is
+        waiting to be admitted, or a running request is part-way through its
+        prompt. Used to gate prefills across data-parallel ranks."""
+        return self.get_request_counts()[1] > 0
+
     def get_kv_cache_usage(self) -> float:
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
