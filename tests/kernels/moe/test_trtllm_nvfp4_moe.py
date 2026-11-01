@@ -136,12 +136,13 @@ def _make_trtllm_fp4_moe_kernel(
 
 
 ACTIVATION_CASES = [
-    pytest.param(MoEActivation.SILU, MoEActivation.SILU, None, False, id="silu"),
+    pytest.param(MoEActivation.SILU, MoEActivation.SILU, None, False, 8, id="silu"),
     pytest.param(
         MoEActivation.SILU,
         MoEActivation.SILU,
         None,
         True,
+        8,
         id="silu_per_token",
     ),
     pytest.param(
@@ -149,14 +150,16 @@ ACTIVATION_CASES = [
         SILU_WITH_CLAMP,
         _SWIGLU_LIMIT,
         False,
+        8,
         id="silu_clamp",
     ),
-    pytest.param(MoEActivation.SITU, SITU, None, False, id="situ"),
+    pytest.param(MoEActivation.SITU, SITU, None, False, 8, id="situ"),
     pytest.param(
         MoEActivation.RELU2_NO_MUL,
         MoEActivation.RELU2_NO_MUL,
         None,
         False,
+        8,
         id="relu2_no_mul",
     ),
     pytest.param(
@@ -164,18 +167,30 @@ ACTIVATION_CASES = [
         MoEActivation.RELU2_NO_MUL,
         None,
         True,
+        8,
         id="relu2_no_mul_per_token",
     ),
-    pytest.param(MoEActivation.GELU, MoEActivation.GELU, None, False, id="gelu"),
+    pytest.param(MoEActivation.GELU, MoEActivation.GELU, None, False, 8, id="gelu"),
+    # Llama4 applies its top-1 router weight before the SiLU experts.
+    pytest.param(
+        MoEActivation.SILU, MoEActivation.SILU, None, False, 1, id="silu_input_routing"
+    ),
+    pytest.param(
+        MoEActivation.SILU,
+        MoEActivation.SILU,
+        None,
+        True,
+        1,
+        id="silu_per_token_input_routing",
+    ),
 ]
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [128])
-@pytest.mark.parametrize("topk", [8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize(
-    "activation,torch_activation,swiglu_limit,per_token_activation",
+    "activation,torch_activation,swiglu_limit,per_token_activation,topk",
     ACTIVATION_CASES,
 )
 @torch.inference_mode()
@@ -306,18 +321,26 @@ def test_trtllm_fp4_moe_no_graph(
                 trtllm_experts.fused_experts.g1_scale_c, quant_config.a2_gscale
             )
 
-        trtllm_output = trtllm_experts.apply(
-            hidden_states=a,
-            w1=w1_q,
-            w2=w2_q,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=activation,
-            global_num_experts=e,
-            expert_map=None,
-            apply_router_weight_on_input=False,
-        )
-        assert isinstance(trtllm_output, torch.Tensor)
+        def run_experts(
+            hidden_states: torch.Tensor,
+            router_weights: torch.Tensor,
+            on_input: bool = False,
+        ) -> torch.Tensor:
+            result = trtllm_experts.apply(
+                hidden_states=hidden_states,
+                w1=w1_q,
+                w2=w2_q,
+                topk_weights=router_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=on_input,
+            )
+            assert isinstance(result, torch.Tensor)
+            return result
+
+        trtllm_output = run_experts(a, topk_weights)
 
         # Reference: round-trip activations and weights through FP4
         # quant/dequant so the comparison isolates kernel/activation behavior
@@ -382,6 +405,14 @@ def test_trtllm_fp4_moe_no_graph(
             )
             assert cosine > 0.99
         torch.testing.assert_close(torch_output, trtllm_output, atol=2e-1, rtol=2e-1)
+
+        if topk == 1:
+            # A power-of-two weight makes the two input-scaling paths identical.
+            input_weights = torch.full_like(topk_weights, 0.5)
+            expected = run_experts(a * 0.5, torch.ones_like(topk_weights))
+            actual = run_experts(a, input_weights, on_input=True)
+            assert torch.count_nonzero(expected) > 0
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
 
 @torch.inference_mode()
