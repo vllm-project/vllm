@@ -201,13 +201,13 @@ def _local_max_sumexp_kernel(
 
     offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < vocab_size
-    logits = (
+    logits = tl.div_rn(
         tl.load(
             logits_ptr + token_idx * logits_stride + offsets,
             mask=mask,
             other=float("-inf"),
-        ).to(tl.float32)
-        / temp
+        ).to(tl.float32),
+        temp,
     )
     block_max, block_sumexp = _compute_max_and_sumexp(logits)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, block_max)
