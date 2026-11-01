@@ -419,6 +419,7 @@ class OffloadingManager(ABC):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
         trigger: StoreTrigger,
         success: bool = True,
     ):

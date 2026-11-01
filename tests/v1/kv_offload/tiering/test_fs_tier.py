@@ -984,7 +984,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         manager.on_new_request(_CTX)
         assert manager.prepare_store(keys, _CTX, StoreTrigger.ON_COMPUTE) is not None
         manager.complete_store(
-            keys, _CTX, StoreTrigger.ON_COMPUTE
+            keys, _CTX, trigger=StoreTrigger.ON_COMPUTE
         )  # cascades to the fs tier
 
         events: list[OffloadingEvent] = []

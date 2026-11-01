@@ -3000,7 +3000,9 @@ def _producer_with_cpu_hit(
             tiering.primary_tier.prepare_store([key], seed_ctx, StoreTrigger.ON_COMPUTE)
             is not None
         )
-        tiering.primary_tier.complete_store([key], seed_ctx, StoreTrigger.ON_COMPUTE)
+        tiering.primary_tier.complete_store(
+            [key], seed_ctx, trigger=StoreTrigger.ON_COMPUTE
+        )
     return consumer, tiering
 
 

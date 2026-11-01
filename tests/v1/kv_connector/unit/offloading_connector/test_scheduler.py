@@ -236,7 +236,7 @@ def test_swa_offload_window_covers_unaligned_hit(
     store = manager.prepare_store(ready, state.req_context, StoreTrigger.ON_COMPUTE)
     assert store is not None and not store.evicted_keys
     manager.complete_store(
-        store.keys_to_store, state.req_context, StoreTrigger.ON_COMPUTE
+        store.keys_to_store, state.req_context, trigger=StoreTrigger.ON_COMPUTE
     )
     if left_state == "pending":
         assert (
@@ -639,7 +639,7 @@ def test_partial_tail_lookup_delays_duplicate_inflight_load():
     )
     assert stored is not None
     manager.complete_store(
-        stored.keys_to_store, first_state.req_context, StoreTrigger.ON_COMPUTE
+        stored.keys_to_store, first_state.req_context, trigger=StoreTrigger.ON_COMPUTE
     )
 
     assert scheduler.get_num_new_matched_tokens(first, 16) == (12, True)
@@ -2610,7 +2610,7 @@ def test_stores_pass_the_trigger_to_prepare_and_complete(request_runner):
         prepared.append(trigger)
         return generate_store_output(keys)
 
-    def complete_store(keys, req_context, trigger, success=True):
+    def complete_store(keys, req_context, *, trigger, success=True):
         completed.append(trigger)
 
     runner.manager.prepare_store.side_effect = prepare_store
@@ -3578,7 +3578,7 @@ def test_swa_load_does_not_wait_for_unusable_pending_suffix(
     )
     assert ready is not None
     manager.complete_store(
-        ready.keys_to_store, state.req_context, StoreTrigger.ON_COMPUTE
+        ready.keys_to_store, state.req_context, trigger=StoreTrigger.ON_COMPUTE
     )
     pending = manager.prepare_store(
         swa[3:4], state.req_context, StoreTrigger.ON_COMPUTE

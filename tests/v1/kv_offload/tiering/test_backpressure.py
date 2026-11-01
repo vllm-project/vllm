@@ -278,7 +278,9 @@ class TestBackpressure:
         self._start_request(ctx)
         result = self.manager.prepare_store(keys, ctx, StoreTrigger.ON_COMPUTE)
         assert result is not None
-        self.manager.complete_store(keys, ctx, StoreTrigger.ON_COMPUTE, success=True)
+        self.manager.complete_store(
+            keys, ctx, trigger=StoreTrigger.ON_COMPUTE, success=True
+        )
 
     def _simulate_on_schedule_end(self):
         ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
@@ -445,7 +447,7 @@ class TestBackpressure:
         # Force-submit since pressure is on (cascade would skip).
         for k in keys2:
             self.primary.prepare_store([k], _CTX, StoreTrigger.ON_COMPUTE)
-            self.primary.complete_store([k], _CTX, StoreTrigger.ON_COMPUTE)
+            self.primary.complete_store([k], _CTX, trigger=StoreTrigger.ON_COMPUTE)
         job_meta = self.manager.create_store_job(keys2, _CTX)
         job_meta.submit_time = time.monotonic() - mid_latency_s(len(keys2))
         self.tier.submit_store(job_meta)

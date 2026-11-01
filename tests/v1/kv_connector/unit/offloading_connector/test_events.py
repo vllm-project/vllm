@@ -722,7 +722,7 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
         assert event.token_ids == req.all_token_ids
         assert event.block_hashes == [_wire_hash(_hash(0))]
 
-    primary.complete_store([key], ctx, StoreTrigger.ON_COMPUTE, success=success)
+    primary.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=success)
     events = list(tracker.take_events(primary.take_events()))
     if success:
         assert primary.lookup(key, ctx) is LookupResult.HIT
@@ -749,7 +749,7 @@ def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
     ctx = ReqContext(req_id="shared-prefix")
     primary.prepare_store([ready_key], ctx, StoreTrigger.ON_COMPUTE)
     tracker.record_store(ready_req, group, 0, ready_key)
-    primary.complete_store([ready_key], ctx, StoreTrigger.ON_COMPUTE)
+    primary.complete_store([ready_key], ctx, trigger=StoreTrigger.ON_COMPUTE)
     [stored] = tracker.take_events(primary.take_events())
     assert stored.block_hashes == [_wire_hash(_hash(0)), _wire_hash(_hash(1))]
 
@@ -761,7 +761,9 @@ def test_failed_pending_chunk_does_not_remove_shared_ready_prefix():
         )
         is None
     )
-    primary.complete_store([failed_key], ctx, StoreTrigger.ON_COMPUTE, success=False)
+    primary.complete_store(
+        [failed_key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=False
+    )
     assert list(tracker.take_events(primary.take_events())) == []
     assert primary.lookup(ready_key, ctx) is LookupResult.HIT
     assert ready_key in tracker._pending_event_metadata
@@ -787,7 +789,9 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
             is None
         )
         if attempt == 0:
-            primary.complete_store([key], ctx, StoreTrigger.ON_COMPUTE, success=False)
+            primary.complete_store(
+                [key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=False
+            )
     # Drain the old failure only after the retry captured its metadata.
     old_cleanup = list(tracker.take_events(primary.take_events()))
     [inventory] = tracker.take_events(
@@ -797,7 +801,7 @@ def test_failed_pending_retry_preserves_replacement_metadata(success):
     assert inventory.token_ids == req.all_token_ids
     assert old_cleanup == []
     assert primary.lookup(key, ctx) is LookupResult.HIT_PENDING
-    primary.complete_store([key], ctx, StoreTrigger.ON_COMPUTE, success=success)
+    primary.complete_store([key], ctx, trigger=StoreTrigger.ON_COMPUTE, success=success)
     events = list(tracker.take_events(primary.take_events()))
     assert len(events) == int(success)
     assert key in tracker._pending_event_metadata

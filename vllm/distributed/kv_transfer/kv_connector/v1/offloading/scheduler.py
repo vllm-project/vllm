@@ -1424,7 +1424,7 @@ class OffloadingConnectorScheduler:
                 self.manager.complete_store(
                     job_status.keys,
                     req_status.req_context,
-                    job_status.trigger,
+                    trigger=job_status.trigger,
                     success=not job_status.failed,
                 )
             else:

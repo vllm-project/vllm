@@ -379,6 +379,7 @@ class CPUOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
         trigger: StoreTrigger,
         success: bool = True,
     ) -> None:

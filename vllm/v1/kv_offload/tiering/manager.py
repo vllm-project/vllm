@@ -1053,6 +1053,7 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         keys: Collection[OffloadKey],
         req_context: ReqContext,
+        *,
         trigger: StoreTrigger,
         success: bool = True,
     ) -> None:
@@ -1076,7 +1077,9 @@ class TieringOffloadingManager(OffloadingManager):
 
         """
         # Step 1: Complete store in primary tier (makes chunks loadable)
-        self.primary_tier.complete_store(keys, req_context, trigger, success)
+        self.primary_tier.complete_store(
+            keys, req_context, trigger=trigger, success=success
+        )
 
         if success:
             # Step 2: Cascade to ALL secondary tiers
