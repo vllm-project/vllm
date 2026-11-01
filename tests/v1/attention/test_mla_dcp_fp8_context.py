@@ -53,8 +53,8 @@ def _bits(t: torch.Tensor) -> torch.Tensor:
     [1.0, 0.37, 300.0, pytest.param(2.0**-120, id="subnormal-products")],
 )
 # The dequantizing cache gather takes rows of 320, 512 or 576 values; 448 + 64
-# has a latent width that is not a power of two.
-@pytest.mark.parametrize("dims", [(512, 64), (448, 64)])
+# has a latent width that is not a power of two and 512 + 0 is a NoPE layer.
+@pytest.mark.parametrize("dims", [(512, 64), (448, 64), (512, 0)])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize("num_rows", [0, 1, 33, 1000])
 def test_gather_dcp_context_rows_dequantizes_like_the_cache_gather(

@@ -18,10 +18,6 @@ import torch
 
 from tests.utils import multi_gpu_only
 from vllm.platforms import current_platform
-from vllm.v1.attention.ops.mla_dcp_context import (
-    _gather_context_rows,
-    gather_dcp_context_rows,
-)
 
 _KV_LORA_RANK = 512
 _QK_ROPE = 64
@@ -48,11 +44,14 @@ def _bits(t: torch.Tensor) -> torch.Tensor:
 
 @pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="requires GPU")
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
-@pytest.mark.parametrize("dims", [(512, 64), (384, 48)])
+@pytest.mark.parametrize("dims", [(512, 64), (384, 48), (512, 0)])
 @pytest.mark.parametrize("num_rows", [0, 1, 33, 1000])
 @pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
 def test_gather_dcp_context_rows_copies_rows(num_rows, dims, dtype, index_dtype):
-    """The gather equals indexing the latent and rope parts of the rows."""
+    """The gather equals indexing the latent and rope parts of the rows, also
+    for NoPE MLA layers, which have no rope part."""
+    from vllm.v1.attention.ops.mla_dcp_context import gather_dcp_context_rows
+
     kv_lora_rank, rope_dim = dims
     generator = torch.Generator(device="cuda").manual_seed(num_rows)
     gathered = torch.randn(
@@ -84,11 +83,19 @@ def test_gather_dcp_context_rows_copies_rows(num_rows, dims, dtype, index_dtype)
         (current_platform.fp8_dtype(), torch.float16),
     ],
 )
-def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype, out_dtype):
+@pytest.mark.parametrize("rope_dim", [_QK_ROPE, 0])
+def test_gather_dcp_context_rows_warmup_covers_the_context_loop(
+    dtype, out_dtype, rope_dim
+):
     """The JIT warmup compiles the variant that the context loop launches: rows
     of the all-gather part of the workspace, int64 row indices taken at any
     offset into the batch's indices, any number of rows and, for fp8 rows, the
     layer's 0-dim k_scale."""
+    from vllm.v1.attention.ops.mla_dcp_context import (
+        _gather_context_rows,
+        gather_dcp_context_rows,
+    )
+
     kernel = _gather_context_rows.kernel
 
     def compiled_variants() -> set:
@@ -96,7 +103,7 @@ def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype, out_dtype
 
     kernel.device_caches.clear()
     _gather_context_rows.warmup(
-        dtype=dtype, kv_lora_rank=_KV_LORA_RANK, rope_dim=_QK_ROPE, out_dtype=out_dtype
+        dtype=dtype, kv_lora_rank=_KV_LORA_RANK, rope_dim=rope_dim, out_dtype=out_dtype
     )
     torch.accelerator.synchronize()
     warmed = compiled_variants()
@@ -104,7 +111,7 @@ def test_gather_dcp_context_rows_warmup_covers_the_context_loop(dtype, out_dtype
 
     workspace_rows, dcp_world_size = 1024, 4
     workspace = torch.zeros(
-        (workspace_rows + workspace_rows // dcp_world_size, _ENTRY),
+        (workspace_rows + workspace_rows // dcp_world_size, _KV_LORA_RANK + rope_dim),
         dtype=dtype,
         device="cuda",
     )
@@ -147,6 +154,7 @@ def test_dcp_manager_registers_the_context_row_gather_warmup(
     MLADCPManager while the model is built, so the manager registers the row
     gather variants the chunked-context loop may launch with the JIT warmup."""
     from vllm.v1.attention.ops import dcp
+    from vllm.v1.attention.ops.mla_dcp_context import _gather_context_rows
 
     register = MagicMock()
     monkeypatch.setattr(_gather_context_rows, "register_warmup", register)
