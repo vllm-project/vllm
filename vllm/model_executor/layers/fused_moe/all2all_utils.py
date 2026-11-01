@@ -42,6 +42,7 @@ from vllm.utils.import_utils import (
     has_mori,
     has_nixl_ep,
 )
+from vllm.utils.math_utils import cdiv
 
 if TYPE_CHECKING:
     from flashinfer.fused_moe import QuantFormat
@@ -188,16 +189,43 @@ def maybe_roundup_layer_hidden_size(
     return hidden_size
 
 
+def _mori_ubatch_max_tokens(max_num_tokens: int, num_ubatches: int) -> int:
+    """Most tokens a later DBO microbatch holds on one rank.
+
+    DBO cuts each rank's padded N <= max_num_tokens tokens at multiples of
+    N // n (n = num_ubatches), or of q * (N // (q * n)) for uniform q-token
+    queries, so a later microbatch holds fewer than N / n + (n - 1) * q.
+    """
+    if num_ubatches <= 1:
+        return max_num_tokens
+    spec_config = get_current_vllm_config().speculative_config
+    q = 1
+    if spec_config is not None and spec_config.num_speculative_tokens:
+        q += spec_config.num_speculative_tokens
+    bound = cdiv(max_num_tokens, num_ubatches) + (num_ubatches - 1) * q
+    return min(max_num_tokens, bound)
+
+
 def _make_mori_epv2_ops(
     all2all_manager: Any, all_to_all_args: dict[str, Any]
 ) -> list[Any]:
-    """One MORI EPv2 op per DBO microbatch, or a single op without DBO."""
+    """One MORI EPv2 op per DBO microbatch, or a single op without DBO.
+
+    Microbatch 0's op also serves unsplit steps and keeps the full size; the
+    later ones are sized to a microbatch's share.
+    """
     from vllm.v1.worker.ubatch_utils import get_num_ubatches
 
     num_ops = get_num_ubatches(get_current_vllm_config().parallel_config)
-    return [
-        all2all_manager.get_handle({**all_to_all_args, "ubatch_id": i})
-        for i in range(num_ops)
+    later_args = {
+        **all_to_all_args,
+        "max_num_inp_token_per_rank": _mori_ubatch_max_tokens(
+            all_to_all_args["max_num_inp_token_per_rank"], num_ops
+        ),
+    }
+    return [all2all_manager.get_handle({**all_to_all_args, "ubatch_id": 0})] + [
+        all2all_manager.get_handle({**later_args, "ubatch_id": i})
+        for i in range(1, num_ops)
     ]
 
 
