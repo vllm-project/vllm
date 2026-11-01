@@ -128,14 +128,26 @@ class Sampler:
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
         return num_logprobs, max_token_ids
 
+    def needs_processing(self, idx_mapping_np: np.ndarray) -> bool:
+        """Whether any of the given requests needs its logits processed."""
+        return bool(np.any(self.needs_logits_processing[idx_mapping_np]))
+
+    def can_process_logits_in_place(self, idx_mapping_np: np.ndarray) -> bool:
+        """Whether the given requests' logits are processed and no returned
+        logprobs read the raw logits, so the processing may overwrite them."""
+        return self.needs_processing(idx_mapping_np) and (
+            self.logprobs_mode in PROCESSED_LOGPROBS_MODES
+            or self.get_logprobs_dims(idx_mapping_np) is None
+        )
+
     def __call__(
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
         logits_writable: bool = False,
     ) -> SamplerOutput:
-        """``logits_writable``: ``logits`` is this step's scratch tensor, which
-        sampling may modify in place."""
+        """``logits_writable``: sampling may process ``logits`` in place (see
+        ``can_process_logits_in_place``)."""
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping = input_batch.idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
@@ -161,10 +173,7 @@ class Sampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
             return_logprobs=logprobs_dims is not None,
-            logits_writable=logits_writable
-            and (
-                logprobs_dims is None or self.logprobs_mode in PROCESSED_LOGPROBS_MODES
-            ),
+            logits_writable=logits_writable,
         )
 
         if self.trace_replay_state is not None:
@@ -242,7 +251,7 @@ class Sampler:
     ) -> torch.Tensor:
         """``logits_writable``: the caller does not read ``logits`` afterwards,
         so FP32 logits are processed in place instead of copied."""
-        if not np.any(self.needs_logits_processing[idx_mapping_np]):
+        if not self.needs_processing(idx_mapping_np):
             return logits
 
         if not (logits_writable and logits.dtype == torch.float32):

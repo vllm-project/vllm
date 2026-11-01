@@ -171,7 +171,6 @@ from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
-    MAX_CHUNK_BYTES,
     RejectionSampler,
     get_max_chunk_logits,
 )
@@ -349,8 +348,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.rejection_sampler: RejectionSampler | None = None
         # The target model's logits processors, whose TP gather can write the
         # FP32 logits the stock samplers would otherwise copy (see
-        # _compute_logits). Empty when a custom sampler is used.
-        self.fp32_logits_processors: list[LogitsProcessor] = []
+        # _compute_logits). None when a custom sampler is used.
+        self.fp32_logits_processors: list[LogitsProcessor] | None = None
         self.batch_sharder: BatchSharder | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
@@ -524,26 +523,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     **sampler_kwargs,
                 )
             custom = self.model_state.custom_sampler(self.sampler)
-            if not custom:
-                self.fp32_logits_processors = [
-                    m for m in self.model.modules() if isinstance(m, LogitsProcessor)
-                ]
-
             if custom:
                 assert draft_logits is None or draft_logits.row_mapping is None, (
                     "A custom rejection sampler cannot read batch-sharded draft logits"
                 )
                 self.vllm_config._check_supports_watermarking(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
-            elif self.speculative_config is not None:
-                self.rejection_sampler = RejectionSampler(
-                    self.sampler,
-                    self.speculative_config,
-                    self.device,
-                    watermark_key=speculative_target_watermark_key(
-                        self.vllm_config.watermark_config
-                    ),
-                )
+            else:
+                self.fp32_logits_processors = [
+                    m for m in self.model.modules() if isinstance(m, LogitsProcessor)
+                ]
+                if self.speculative_config is not None:
+                    self.rejection_sampler = RejectionSampler(
+                        self.sampler,
+                        self.speculative_config,
+                        self.device,
+                        watermark_key=speculative_target_watermark_key(
+                            self.vllm_config.watermark_config
+                        ),
+                    )
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
@@ -1743,6 +1741,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 grammar_output.grammar_bitmask,
             )
 
+        # The stock samplers may process the logits, this step's scratch
+        # tensor, in place. A custom sampler is called without the keyword.
+        sampler_kwargs: dict[str, bool] = {}
+        if self.fp32_logits_processors is not None:
+            assert self.sampler is not None
+            sampler_kwargs["logits_writable"] = (
+                self.sampler.can_process_logits_in_place(input_batch.idx_mapping_np)
+            )
+
         sampler_output: SamplerOutput | None
         if input_batch.num_reqs == 0:
             # This rank owns no requests this step. It contributes an
@@ -1750,11 +1757,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output = None
         elif input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
-            sampler_output = self.sampler(
-                logits,
-                input_batch,
-                logits_writable=bool(self.fp32_logits_processors),
-            )
+            sampler_output = self.sampler(logits, input_batch, **sampler_kwargs)
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
@@ -1764,7 +1767,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
-                logits_writable=bool(self.fp32_logits_processors),
+                **sampler_kwargs,
             )
 
         if shard_metadata is not None:
@@ -1791,28 +1794,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> torch.Tensor:
         """The target logits of ``sample_hidden_states``.
 
-        When any request needs logits processing, the sampler casts the logits
-        to FP32 before processing them. The TP gather then writes FP32 itself
-        (exact), so the sampler processes them in place instead of copying.
+        When the sampler would copy the logits to FP32 and may process them in
+        place, the TP gather writes FP32 itself (exact) and the copy is saved.
         """
         sampler = self.sampler
-        num_rows = sample_hidden_states.shape[0]
-        fp32 = (
-            sampler is not None
-            and self.fp32_logits_processors
-            and num_rows * self.vocab_size * 4 <= MAX_CHUNK_BYTES
-            and bool(
-                np.any(sampler.needs_logits_processing[input_batch.idx_mapping_np])
-            )
-        )
-        if not fp32:
+        processors = self.fp32_logits_processors
+        if (
+            sampler is None
+            or not processors
+            or sample_hidden_states.shape[0] > get_max_chunk_logits(self.vocab_size)
+            or not sampler.can_process_logits_in_place(input_batch.idx_mapping_np)
+        ):
             return self.model_state.compute_sample_logits(sample_hidden_states)
-        for processor in self.fp32_logits_processors:
+        for processor in processors:
             processor.gather_out_dtype = torch.float32
         try:
             return self.model_state.compute_sample_logits(sample_hidden_states)
         finally:
-            for processor in self.fp32_logits_processors:
+            for processor in processors:
                 processor.gather_out_dtype = None
 
     def postprocess_sampled(

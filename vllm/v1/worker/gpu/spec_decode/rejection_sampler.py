@@ -326,11 +326,6 @@ class RejectionSampler:
     ]:
         cu_num_logits_np = input_batch.cu_num_logits_np
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
-        # Verification may process the logits in place unless the raw logits
-        # feed the returned logprobs.
-        logits_writable = logits_writable and (
-            logprobs_dims is None or use_processed_logits
-        )
         num_reqs = input_batch.num_reqs
 
         if logits.shape[0] <= max_chunk_logits:
@@ -437,8 +432,8 @@ class RejectionSampler:
         draft_logits: DraftLogitsCache | None = None,
         logits_writable: bool = False,
     ) -> SamplerOutput:
-        """``logits_writable``: ``logits`` is this step's scratch tensor, which
-        verification may modify in place."""
+        """``logits_writable``: verification may process ``logits`` in place
+        (see ``Sampler.can_process_logits_in_place``)."""
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
