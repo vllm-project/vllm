@@ -148,8 +148,8 @@ logger = init_logger(__name__)
 
 # Largest batch whose MoE top-k finalize is fused into the next all-reduce +
 # input norm + MXFP8 quantization at TP4; larger batches finalize in the MoE.
-# The one-shot all-reduce's traffic grows with the batch, so the cap is the
-# largest decode batch it was measured to win at.
+# The one-shot all-reduce's traffic grows with the batch; above the cap its
+# gain over the regular path was measured to vanish.
 FUSED_MOE_FINALIZE_MAX_TOKENS = 128
 
 
