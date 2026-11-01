@@ -7,6 +7,7 @@ import concurrent.futures
 import fnmatch
 import glob
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -50,6 +51,7 @@ from vllm.model_executor.model_loader.ep_weight_filter import (
 from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.transformers_utils.repo_utils import hf_api, hf_fs
+from vllm.utils.cpu_resource_utils import get_available_memory
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -966,27 +968,6 @@ def _get_checkpoints_size_bytes(files: list[str]) -> int:
     return sum(os.path.getsize(f) for f in files)
 
 
-def _get_available_ram_bytes() -> int:
-    """Return available RAM, honoring cgroup limits."""
-    import psutil
-
-    host_available = psutil.virtual_memory().available
-
-    from vllm.utils.cpu_resource_utils import (
-        get_cgroup_memory_limit,
-        get_cgroup_memory_usage,
-    )
-
-    cgroup_limit = get_cgroup_memory_limit()
-    if cgroup_limit is None:
-        return host_available
-    cgroup_usage = get_cgroup_memory_usage()
-    cgroup_available = (
-        cgroup_limit if cgroup_usage is None else max(0, cgroup_limit - cgroup_usage)
-    )
-    return min(host_available, cgroup_available)
-
-
 def _get_fs_type(files: list[str]) -> str:
     """Get the filesystem type of the first file in *files* (Linux only)."""
     if not files:
@@ -1136,7 +1117,7 @@ def safetensors_weights_iterator(
     fs_type = _get_fs_type(sorted_files)
     is_net_fs = fs_type in ("nfs", "nfs4", "lustre")
     total_bytes = _get_checkpoints_size_bytes(sorted_files)
-    avail_bytes = _get_available_ram_bytes()
+    avail_bytes = get_available_memory()
     ram_threshold_pct = 90
     fits_in_ram = total_bytes <= (ram_threshold_pct / 100.0) * avail_bytes
     fs_name = fs_type.upper() if fs_type else "unknown"
@@ -1293,10 +1274,13 @@ def runai_safetensors_weights_iterator(
             else "cpu"
         )
 
+        # runai-model-streamer<0.17.0 has no `owned` and reuses its buffers
+        owned = "owned" in inspect.signature(streamer.stream_files).parameters
         streamer.stream_files(
             hf_weights_files,
             device=device,
             is_distributed=is_distributed,
+            **({"owned": True} if owned else {}),
         )
         total_tensors = sum(
             len(tensors_meta)
@@ -1313,7 +1297,7 @@ def runai_safetensors_weights_iterator(
         )
 
         for name, tensor in tensor_iter:
-            yield name, tensor.clone()
+            yield name, tensor if owned else tensor.clone()
 
 
 def fastsafetensors_weights_iterator(
@@ -1524,6 +1508,12 @@ def multi_thread_pt_weights_iterator(
             state = future.result()
             yield from state.items()
             del state
+
+
+def finalize_model_weights(model: torch.nn.Module) -> None:
+    """Run once after a full load or reload: the model-level post-load hook."""
+    if hasattr(model, "process_weights_after_loading"):
+        model.process_weights_after_loading()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:

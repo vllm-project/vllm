@@ -147,6 +147,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
                 hf_image_size,
                 scale_res,
                 patch_size,
+                downsample_mode=image_processor.downsample_mode,
                 allow_upscale=True,
             )
             source_tokens = best_size[0] * best_size[1] // tokens_per_patch
@@ -156,6 +157,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
             hf_image_size,
             scale_res,
             patch_size,
+            downsample_mode=image_processor.downsample_mode,
         )
         source_tokens = best_resize[0] * best_resize[1] // tokens_per_patch
 
@@ -164,6 +166,7 @@ class MiniCPMOcrProcessingInfo(MiniCPMV4_6ProcessingInfo):
             grids,
             scale_res,
             patch_size,
+            downsample_mode=image_processor.downsample_mode,
             allow_upscale=True,
         )
         patch_h = refine_size[0] // grids[0]
