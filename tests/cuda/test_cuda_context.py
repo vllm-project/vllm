@@ -192,5 +192,97 @@ def test_has_device_capability_comparisons(monkeypatch):
         NvmlCudaPlatform.get_device_capability.cache_clear()
 
 
+@pytest.fixture
+def nvml_warnings(monkeypatch):
+    from vllm.logger import _print_warning_once
+    from vllm.platforms.cuda import pynvml
+
+    names = ["Model A", "Model A", "Model B"]
+    failures: dict[str, Exception] = {}
+    seen = []
+
+    def query(index, operation):
+        if operation == "handle":
+            seen.append(index)
+        if index == 1 and operation in failures:
+            raise failures[operation]
+        return index if operation == "handle" else names[index]
+
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+    monkeypatch.delenv("CUDA_DEVICE_ORDER", raising=False)
+    monkeypatch.setattr(pynvml, "nvmlInit", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlShutdown", lambda: None)
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetCount", lambda: len(names))
+    monkeypatch.setattr(
+        pynvml, "nvmlDeviceGetHandleByIndex", lambda i: query(i, "handle")
+    )
+    monkeypatch.setattr(pynvml, "nvmlDeviceGetName", lambda i: query(i, "name"))
+    # Keep deduplication enabled so unhashable NVML errors cannot go unnoticed.
+    _print_warning_once.cache_clear()
+    try:
+        yield names, failures, seen
+    finally:
+        _print_warning_once.cache_clear()
+
+
+@pytest.mark.parametrize("operation", [None, "handle", "name"])
+@pytest.mark.parametrize(
+    "last_name,order,expected_warning",
+    [
+        ("Model A", None, False),
+        ("Model B", None, True),
+        ("Model B", "PCI_BUS_ID", False),
+    ],
+)
+def test_log_warnings_preserves_readable_device_warning(
+    monkeypatch,
+    nvml_warnings,
+    caplog_vllm,
+    operation,
+    last_name,
+    order,
+    expected_warning,
+):
+    """An excluded bad GPU must not hide or fabricate GPU ordering warnings."""
+    from vllm.platforms.cuda import NvmlCudaPlatform, pynvml
+
+    names, failures, seen = nvml_warnings
+    names[-1] = last_name
+    expected = []
+    if operation is not None:
+        error = pynvml.NVMLError(pynvml.NVML_ERROR_UNKNOWN)
+        failures[operation] = error
+        expected.append(f"Failed to query NVML device 1: {error}")
+    if order is not None:
+        monkeypatch.setenv("CUDA_DEVICE_ORDER", order)
+    if expected_warning:
+        readable = names if operation is None else [names[0], names[2]]
+        expected.append(
+            "Detected different devices in the system: "
+            f"{', '.join(readable)}. Please make sure to set "
+            "`CUDA_DEVICE_ORDER=PCI_BUS_ID` to avoid unexpected behavior."
+        )
+
+    NvmlCudaPlatform.log_warnings()
+    NvmlCudaPlatform.log_warnings()
+
+    assert caplog_vllm.messages == expected
+    assert seen == [0, 1, 2] * 2
+
+
+@pytest.mark.parametrize("operation", ["handle", "name"])
+def test_log_warnings_propagates_non_nvml_failure(nvml_warnings, operation):
+    from vllm.platforms.cuda import NvmlCudaPlatform
+
+    _, failures, _ = nvml_warnings
+    error = RuntimeError(f"{operation} programming error")
+    failures[operation] = error
+
+    with pytest.raises(RuntimeError) as exc_info:
+        NvmlCudaPlatform.log_warnings()
+
+    assert exc_info.value is error
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
