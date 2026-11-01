@@ -8,6 +8,9 @@ vLLM contains pre-compiled C++ and CUDA (12.9) binaries.
 
 - GPU: compute capability 7.5 or higher (e.g., T4, RTX20xx, A100, L4, H100, B200, etc.)
 
+!!! warning "GTX 16-series FP16 performance"
+    GTX 16-series GPUs report compute capability 7.5 but, unlike T4 and RTX 20-series GPUs, do not have Tensor Cores. On these GPUs, small-batch FP16 matrix multiplication can be substantially slower than FP32, causing poor batched decoding performance. Because `--dtype auto` can select FP16, benchmark `--dtype float32` if batched throughput is unexpectedly low. This limitation is specific to GTX 16-series GPUs without Tensor Cores and does not apply to all compute capability 7.5 devices. See [vLLM issue #54950](https://github.com/vllm-project/vllm/issues/54950) and [PyTorch issue #195716](https://github.com/pytorch/pytorch/issues/195716) for measurements and upstream tracking.
+
 --8<-- [end:requirements]
 --8<-- [start:set-up-using-python]
 
