@@ -31,10 +31,10 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
 from vllm.models.deepseek_v4.common.ops.cache_utils import (
-    _hf_config_int,
-    _remap_flashinfer_index,
-    _scheduler_config_int,
+    hf_config_int,
     quantize_and_insert_k_kernel,
+    remap_flashinfer_index,
+    scheduler_config_int,
 )
 from vllm.platforms import current_platform
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
@@ -907,7 +907,7 @@ def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     model_config = getattr(vllm_config, "model_config", None)
     hf_config = getattr(model_config, "hf_config", None)
     compress_ratios = get_compress_ratios(hf_config) or [0]
-    topk = _hf_config_int(vllm_config, "index_topk", 0)
+    topk = hf_config_int(vllm_config, "index_topk", 0)
     return zip_inputs(
         *(
             dict(compress_ratio=ratio, topk=topk if ratio > 0 else 0, topk_width=topk)
@@ -1050,10 +1050,10 @@ class CombineTopkSwaIndicesKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if _scheduler_config_int(vllm_config, "max_num_batched_tokens", 0) <= 0:
+        if scheduler_config_int(vllm_config, "max_num_batched_tokens", 0) <= 0:
             return []
 
-        window_size = _hf_config_int(vllm_config, "sliding_window", 128)
+        window_size = hf_config_int(vllm_config, "sliding_window", 128)
         return self._trace_dispatch(self.dispatch)(
             _combine_topk_swa_warmup_inputs(vllm_config),
             _COMBINE_TOPK_SWA_POINTER_INPUTS,
@@ -1333,7 +1333,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
                 mask=mask,
                 other=-1,
             )
-            values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
+            values = remap_flashinfer_index(values, swa_block_size, swa_block_span)
             tl.store(
                 sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
                 values,
@@ -1367,7 +1367,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
                 values = block_numbers * compressed_block_size + block_offsets
                 values = tl.where(is_valid, values, -1)
                 compressed_len += tl.sum((is_valid & token_valid).to(tl.int32), axis=0)
-            values = _remap_flashinfer_index(
+            values = remap_flashinfer_index(
                 values, compressed_block_size, compressed_block_span
             )
             tl.store(
@@ -1422,7 +1422,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         block_offsets = pos_offset % swa_block_size
         slot_ids = block_numbers * swa_block_size + block_offsets
         slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-        slot_ids = _remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
+        slot_ids = remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
         tl.store(
             sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
             slot_ids,
@@ -1449,7 +1449,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         block_offsets = local_idx % compressed_block_size
         slot_ids = block_numbers * compressed_block_size + block_offsets
         slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
-        slot_ids = _remap_flashinfer_index(
+        slot_ids = remap_flashinfer_index(
             slot_ids, compressed_block_size, compressed_block_span
         )
         tl.store(

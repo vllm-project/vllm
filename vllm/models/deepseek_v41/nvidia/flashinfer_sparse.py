@@ -10,10 +10,10 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
-    _get_flashinfer_dsv4_workspace,
-    _packed_block_span,
-    _pad_to_supported_q_heads,
-    _required_sm120_sparse_topk,
+    get_flashinfer_dsv4_workspace,
+    packed_block_span,
+    pad_to_supported_q_heads,
+    required_sm120_sparse_topk,
 )
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -220,7 +220,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        return _pad_to_supported_q_heads(num_heads)
+        return pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -405,8 +405,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             else None
         )
         if cached_sparse is None:
-            swa_block_span = _packed_block_span(swa_k_cache)
-            compressed_block_span = _packed_block_span(compressed_kv_cache)
+            swa_block_span = packed_block_span(swa_k_cache)
+            compressed_block_span = packed_block_span(compressed_kv_cache)
             sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
                 decode_swa_indices,
                 decode_compressed_indices,
@@ -495,7 +495,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
             padded_query[:, : query.shape[1], :] = query
             query = padded_query
 
-        workspace = _get_flashinfer_dsv4_workspace(q.device)
+        workspace = get_flashinfer_dsv4_workspace(q.device)
         query_start_loc = swa_metadata.query_start_loc
         query_start_loc_cpu = swa_metadata.query_start_loc_cpu
         assert query_start_loc is not None and query_start_loc_cpu is not None
@@ -576,7 +576,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     @staticmethod
     def _get_workspace(device: torch.device) -> torch.Tensor:
-        return _get_flashinfer_dsv4_workspace(device)
+        return get_flashinfer_dsv4_workspace(device)
 
     @staticmethod
     def _as_sparse_cache(kv_cache: torch.Tensor) -> torch.Tensor:
@@ -588,7 +588,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
 
     @classmethod
     def get_padded_num_q_heads(cls, num_heads: int) -> int:
-        return _pad_to_supported_q_heads(num_heads)
+        return pad_to_supported_q_heads(num_heads)
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -597,7 +597,7 @@ class DeepseekV4FlashInferSM120Attention(DeepseekV4Attention):
         super().__init__(vllm_config, *args, **kwargs)
         from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120_config
 
-        required_topk = _required_sm120_sparse_topk(vllm_config, self.window_size)
+        required_topk = required_sm120_sparse_topk(vllm_config, self.window_size)
         if not has_flashinfer_sparse_mla_sm120_config(self.padded_heads, required_topk):
             raise RuntimeError(
                 "FLASHINFER_MLA_SPARSE_DSV4 on SM120 requires a FlashInfer "

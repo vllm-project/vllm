@@ -31,7 +31,7 @@ from vllm.utils.flashinfer import flashinfer_trtllm_batch_decode_sparse_mla_dsv4
 
 from ...flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
-    _get_flashinfer_dsv4_workspace,
+    get_flashinfer_dsv4_workspace,
 )
 
 logger = init_logger(__name__)
@@ -400,7 +400,7 @@ class SparseMlaDecode:
             query=query,
             swa_kv_cache=swa_k_cache,
             compressed_kv_cache=compressed_kv_cache,
-            workspace_buffer=_get_flashinfer_dsv4_workspace(q.device),
+            workspace_buffer=get_flashinfer_dsv4_workspace(q.device),
             sparse_indices=sparse_indices[:num_tokens],
             sparse_topk_lens=decode_topk_lens,
             seq_lens=decode_seq_lens,
