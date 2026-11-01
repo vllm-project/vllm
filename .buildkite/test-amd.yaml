@@ -2710,6 +2710,8 @@ steps:
   - vllm/v1/attention/
   - vllm/distributed/
   - vllm/_aiter_ops.py
+  - vllm/config/
+  - vllm/envs.py
   - tests/compile/passes/
   - tests/compile/correctness_e2e/test_attn_quant.py
   - vllm/model_executor/kernels/linear/
@@ -2721,6 +2723,8 @@ steps:
     tests/compile/passes/test_fusion_attn.py
     tests/compile/passes/test_silu_mul_quant_fusion.py
     tests/compile/passes/test_silu_mul_quant_manual_fusion.py
+    tests/compile/passes/test_rocm_aiter_act_mul_mxfp4_fusion.py
+    tests/compile/passes/test_rocm_aiter_mxfp4_fusion_gating.py
   - pytest -v -s tests/compile/correctness_e2e/test_attn_quant.py
 
 - label: ":amd: (MI355 DPX) Fusion E2E FP8 Config Sweep"

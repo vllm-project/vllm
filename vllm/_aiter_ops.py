@@ -40,6 +40,15 @@ _FP8_E4M3_DTYPES = {
 }
 KB = 1024
 MB = 1024 * KB
+# The largest M (token count) at which the act+MXFP4 fusion saves nothing. At M <= this
+# value, with a tuned preshuffled config for the shape, the `activation` branch of
+# gemm_with_dynamic_quant (vllm/model_executor/kernels/linear/mxfp4/aiter.py) splits the
+# activation back out, whichever GEMM then runs. A rewritten asm GEMM always has that
+# config: use_asm_gemm needs both is_asm_fp4_gemm_tuned and
+# is_triton_gemm_afp4wfp4_presh_ws_tuned (the use_asm_gemm assignment in the same file).
+# So the compile ranges split here when the pass is registered
+# (act_mxfp4_pass_registered).
+MXFP4_PRESHUFFLE_MAX_M = 64
 
 
 def _is_fp8_e4m3_tensor(t: torch.Tensor | None) -> bool:
@@ -5256,6 +5265,27 @@ class rocm_aiter_ops:
             state_indices=state_indices,
             has_initial_state=has_initial_state,
         )
+
+
+def act_mxfp4_pass_registered(fuse_act_quant: bool) -> bool:
+    """Whether the act+MXFP4 activation-quant fusion pass is registered.
+
+    This is the one rule for it: the pass manager registers the pass when it holds, and
+    VllmConfig splits the compile ranges at MXFP4_PRESHUFFLE_MAX_M exactly when it holds.
+    It needs AITER enabled, the pass config's ``fuse_act_quant``, the opt-in env flag
+    VLLM_ROCM_USE_AITER_FP4_ACT_QUANT_FUSION, and a gfx950, the only architecture with the
+    asm MXFP4 GEMM the pass rewrites. The default optimization level sets
+    ``fuse_act_quant``, so the env flag is what keeps a default start unchanged.
+    """
+    if not (
+        rocm_aiter_ops.is_enabled()
+        and fuse_act_quant
+        and envs.VLLM_ROCM_USE_AITER_FP4_ACT_QUANT_FUSION
+    ):
+        return False
+    from vllm.platforms.rocm import on_gfx950
+
+    return on_gfx950()
 
 
 rocm_aiter_ops.register_ops_once()
