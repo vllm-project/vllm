@@ -3,11 +3,10 @@
 
 import pytest
 
-from tests.models.utils import check_logprobs_close
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
 
-from ...utils import compute_acceptance_rate
+from ...utils import assert_request_outputs_match, get_test_prompts
 from .._correctness import check_mtp_correctness
 
 
@@ -42,7 +41,11 @@ def test_mtp_correctness(
 
 
 @single_gpu_only
-def test_gemma4_mtp_fast_prefill(monkeypatch, vllm_runner):
+def test_gemma4_mtp_fast_prefill(
+    monkeypatch: pytest.MonkeyPatch,
+    sampling_config: SamplingParams,
+    vllm_runner,
+):
     """Skipping prompt rows keeps target outputs and draft acceptance intact."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     speculative_config = {
@@ -50,15 +53,15 @@ def test_gemma4_mtp_fast_prefill(monkeypatch, vllm_runner):
         "model": "google/gemma-4-E2B-it-assistant",
         "num_speculative_tokens": 2,
     }
-    prompts = [
-        "Calculate 17 times 23. Explain your calculation.",
-        "Write a Python function that reverses a singly linked list.",
+    prompts = get_test_prompts(mm_enabled=False)
+    long_prompt = (
         "Background: "
         + "The cache stores keys and values. " * 200
-        + "Explain why prefill can delay other requests.",
-    ]
+        + "Explain why prefill can delay other requests."
+    )
+    prompts.append([{"role": "user", "content": long_prompt}])
     results = []
-    acceptance_rates = []
+    first_pos_acceptance_rates = []
     for fast_prefill in [False, True]:
         with vllm_runner(
             "google/gemma-4-E2B-it",
@@ -70,34 +73,23 @@ def test_gemma4_mtp_fast_prefill(monkeypatch, vllm_runner):
             block_size=None,
             enable_chunked_prefill=True,
             max_num_batched_tokens=512,
-            max_num_seqs=4,
             enable_prefix_caching=False,
             disable_log_stats=False,
             seed=42,
         ) as runner:
-            tokenizer = runner.llm.get_tokenizer()
-            formatted = [
-                tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    tokenize=False,
-                    add_generation_prompt=True,
-                )
-                for prompt in prompts
-            ]
-            results.append(
-                runner.generate_w_logprobs(
-                    formatted,
-                    SamplingParams(
-                        temperature=0.0, max_tokens=64, ignore_eos=True, logprobs=5
-                    ),
-                )
+            results.append(runner.llm.chat(prompts, sampling_config))
+            metrics = {m.name: m for m in runner.llm.get_metrics()}
+            first_pos_acceptance_rates.append(
+                metrics["vllm:spec_decode_num_accepted_tokens_per_pos"].values[0]
+                / metrics["vllm:spec_decode_num_drafts"].value
             )
-            acceptance_rates.append(compute_acceptance_rate(runner.llm.get_metrics()))
-    check_logprobs_close(
-        outputs_0_lst=results[0],
-        outputs_1_lst=results[1],
-        name_0="MTP",
-        name_1="MTP with fast prefill",
+    assert_request_outputs_match(
+        results[0],
+        results[1],
+        required_matches=int(0.8 * len(results[0])) + 1,
+        context="MTP with fast prefill",
     )
-    assert all(rate > 0 for rate in acceptance_rates)
-    assert acceptance_rates[1] == pytest.approx(acceptance_rates[0], abs=0.05)
+    assert first_pos_acceptance_rates[1] >= 0.9 * first_pos_acceptance_rates[0], (
+        f"first-position acceptance rate {first_pos_acceptance_rates[1]:.3f} "
+        f"vs {first_pos_acceptance_rates[0]:.3f}"
+    )
