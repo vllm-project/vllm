@@ -629,6 +629,132 @@ def _per_token_group_quant_fp8_colmajor(
     tl.store(y_s_ptr, y_s)
 
 
+@triton.jit
+def _per_token_group_quant_fp8_row(
+    x_ptr,
+    q_ptr,
+    s_ptr,
+    s_stride_row,
+    s_stride_col,
+    eps,
+    fp8_min,
+    fp8_max,
+    H: tl.constexpr,
+    GROUP: tl.constexpr,
+):
+    """One program per row: load the whole row once, compute every group's
+    scale in registers, write the row back in one coalesced store.
+
+    Reproduces torch.ops._C.per_token_group_fp8_quant bit-for-bit: fp32 absmax
+    floored at eps, IEEE round-to-nearest division (plain `/` may compile to an
+    approximate divide), round-to-nearest-satfinite fp8 conversion.
+    """
+    row = tl.program_id(0)
+    offs = tl.arange(0, H)
+    x = tl.load(x_ptr + row * H + offs).to(tl.float32)
+    g = tl.reshape(x, (H // GROUP, GROUP))
+    amax = tl.maximum(tl.max(tl.abs(g), axis=1), eps)
+    scale = tl.math.div_rn(amax, fp8_max)
+    y = tl.math.div_rn(g, scale[:, None])
+    y = tl.minimum(tl.maximum(y, fp8_min), fp8_max)
+    tl.store(q_ptr + row * H + offs, tl.reshape(y, (H,)).to(q_ptr.dtype.element_ty))
+    gi = tl.arange(0, H // GROUP)
+    tl.store(s_ptr + row * s_stride_row + gi * s_stride_col, scale)
+
+
+# Below this many tokens the CUDA kernel's lower launch cost wins; above it
+# the row kernel's full-width loads win (1.6-1.8x at prefill sizes on H200).
+_ROW_QUANT_MIN_TOKENS = 2048
+
+
+def _row_quant_eligible(x: torch.Tensor, group_size: int) -> bool:
+    H = x.shape[-1]
+    return (
+        x.dim() == 2
+        and x.is_contiguous()
+        and H % group_size == 0
+        and (H & (H - 1)) == 0  # tl.arange needs a power of two
+        and group_size <= H <= 8192
+    )
+
+
+def _per_token_group_fp8_quant_row(
+    x: torch.Tensor,
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    group_size: int,
+    eps: float,
+    fp8_min: float,
+    fp8_max: float,
+    scale_ue8m0: bool,
+    column_major_scales: bool,
+    tma_aligned_scales: bool,
+) -> None:
+    """Drop-in for torch.ops._C.per_token_group_fp8_quant on CUDA.
+
+    Dispatches to the row kernel at large token counts and falls back to the
+    CUDA kernel otherwise. The branch lives inside the opaque op, so
+    torch.compile never traces a data-dependent condition.
+    """
+    if (
+        scale_ue8m0
+        or x.shape[0] < _ROW_QUANT_MIN_TOKENS
+        or not _row_quant_eligible(x, group_size)
+    ):
+        torch.ops._C.per_token_group_fp8_quant(
+            x,
+            x_q,
+            x_s,
+            group_size,
+            eps,
+            fp8_min,
+            fp8_max,
+            scale_ue8m0,
+            column_major_scales,
+            tma_aligned_scales,
+        )
+        return
+    _per_token_group_quant_fp8_row[(x.shape[0],)](
+        x,
+        x_q,
+        x_s,
+        x_s.stride(0),
+        x_s.stride(1),
+        eps,
+        fp8_min,
+        fp8_max,
+        H=x.shape[-1],
+        GROUP=group_size,
+        num_warps=8,
+    )
+
+
+def _per_token_group_fp8_quant_row_fake(
+    x: torch.Tensor,
+    x_q: torch.Tensor,
+    x_s: torch.Tensor,
+    group_size: int,
+    eps: float,
+    fp8_min: float,
+    fp8_max: float,
+    scale_ue8m0: bool,
+    column_major_scales: bool,
+    tma_aligned_scales: bool,
+) -> None:
+    return None
+
+
+if current_platform.is_cuda():
+    from vllm.utils.torch_utils import direct_register_custom_op
+
+    direct_register_custom_op(
+        op_name="per_token_group_fp8_quant_row",
+        op_func=_per_token_group_fp8_quant_row,
+        mutates_args=["x_q", "x_s"],
+        fake_impl=_per_token_group_fp8_quant_row_fake,
+    )
+
+
 def per_token_group_quant_fp8(
     x: torch.Tensor,
     group_size: int,
@@ -705,6 +831,24 @@ def per_token_group_quant_fp8(
     if (
         current_platform.is_cuda_alike() or current_platform.is_xpu()
     ) and x.is_contiguous():
+        if current_platform.is_cuda():
+            # Size-dispatching wrapper around the _C op: identical signature
+            # and bitwise-identical outputs, but takes the Triton row kernel
+            # at large token counts. Fusion pattern matchers key on this op
+            # (see compilation/passes/fusion QUANT_OPS).
+            torch.ops.vllm.per_token_group_fp8_quant_row(
+                x,
+                x_q,
+                x_s,
+                group_size,
+                eps,
+                fp8_min,
+                fp8_max,
+                use_ue8m0,
+                column_major_scales,
+                tma_aligned_scales,
+            )
+            return x_q, x_s
         torch.ops._C.per_token_group_fp8_quant(
             x,
             x_q,
