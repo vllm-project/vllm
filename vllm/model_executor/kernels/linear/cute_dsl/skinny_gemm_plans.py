@@ -218,16 +218,16 @@ SM90_SKINNY_FP8_MOE_GEMM_PLANS: dict[tuple[int, int], SkinnyFp8GemmPlan] = {
         2: SkinnyGemmConfig(1, 32, 32),
         4: SkinnyGemmConfig(1, 32, 16, vector_width=16),
     },
-    # Qwen3-30B-A3B experts: gate_up (2 x 768, 2048), down (2048, 768).
+    # Qwen3-30B-A3B experts: gate_up (2 x 768, 2048), down (2048, 768). With
+    # 128 experts, 4 tokens already share enough experts that the Triton path
+    # (one weight read per expert) is faster in the model, so stop at 2.
     (1536, 2048): {
         1: SkinnyGemmConfig(1, 64, 8),
         2: SkinnyGemmConfig(1, 32, 16, vector_width=16),
-        4: SkinnyGemmConfig(1, 32, 8, vector_width=16),
     },
     (2048, 768): {
         1: SkinnyGemmConfig(1, 32, 8),
         2: SkinnyGemmConfig(1, 32, 16),
-        4: SkinnyGemmConfig(1, 32, 8),
     },
 }
 
