@@ -2720,6 +2720,29 @@ class VllmConfig:
                         compile_range_end,
                     )
 
+        # The act+MXFP4 fusion pass applies only above MXFP4_PRESHUFFLE_MAX_M tokens,
+        # so split there whenever the pass is registered (its is_applicable_for_range).
+        # The outer check also keeps the vllm._aiter_ops import out of configs without
+        # fuse_act_quant.
+        if compilation_config.pass_config.fuse_act_quant:
+            from vllm._aiter_ops import (
+                MXFP4_PRESHUFFLE_MAX_M,
+                act_mxfp4_pass_registered,
+            )
+
+            if act_mxfp4_pass_registered(compilation_config.pass_config.fuse_act_quant):
+                if (
+                    compile_range_end is not None
+                    and compile_range_end > MXFP4_PRESHUFFLE_MAX_M
+                ):
+                    computed_compile_ranges_endpoints.append(MXFP4_PRESHUFFLE_MAX_M)
+                else:
+                    logger.debug(
+                        "Max num batched tokens not above %d, act+mxfp4 quant "
+                        "fusion applies to no compile range.",
+                        MXFP4_PRESHUFFLE_MAX_M,
+                    )
+
         if compilation_config.compile_ranges_endpoints is not None:
             for x in compilation_config.compile_ranges_endpoints:
                 assert isinstance(x, int)

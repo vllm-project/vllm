@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import torch
-import torch.nn.functional as F
 
 import vllm.envs as envs
-from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+from vllm._aiter_ops import (
+    MXFP4_PRESHUFFLE_MAX_M,
+    is_aiter_found_and_supported,
+    rocm_aiter_ops,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp4Dynamic,
@@ -43,15 +46,25 @@ if is_aiter_found_and_supported():
     from vllm.utils.torch_utils import direct_register_custom_op
 
     def _act_and_mul(x: torch.Tensor, activation: str) -> torch.Tensor:
+        # One fused vLLM kernel per call instead of an eager activation and multiply.
+        # The kernel reads x as dense [tokens, 2d]; contiguous() is a no-op when it is.
+        x = x.contiguous()
         d = x.shape[-1] // 2
-        gate, up = x[..., :d], x[..., d:]
+        out = x.new_empty((*x.shape[:-1], d))
+        # The _C ops are registered by the vllm._custom_ops import that
+        # vllm/_aiter_ops.py performs, which this module imports at the top.
+        # Same activation-to-kernel mapping as apply_moe_activation in
+        # vllm/model_executor/layers/fused_moe/activation.py. The direct calls skip its
+        # per-call shape checks, which this hot path does not need.
         if activation == "silu":
-            return F.silu(gate) * up
-        if activation == "gelu":
-            return F.gelu(gate) * up
-        if activation == "gelu_tanh":
-            return F.gelu(gate, approximate="tanh") * up
-        raise ValueError(f"unsupported activation {activation!r}")
+            torch.ops._C.silu_and_mul(out, x)
+        elif activation == "gelu":
+            torch.ops._C.gelu_and_mul(out, x)
+        elif activation == "gelu_tanh":
+            torch.ops._C.gelu_tanh_and_mul(out, x)
+        else:
+            raise ValueError(f"unsupported activation {activation!r}")
+        return out
 
     def gemm_with_dynamic_quant(
         x: torch.Tensor,
@@ -84,10 +97,11 @@ if is_aiter_found_and_supported():
         if activation is not None:
             assert x_scales is None, "activation and x_scales are exclusive"
             if rocm_use_aiter_fp4_asm_gemm and not (
-                M <= 64 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
+                M <= MXFP4_PRESHUFFLE_MAX_M
+                and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
             ):
                 import aiter
-                from aiter.ops.triton.activation import act_mul_and_mxfp4_quant
+                from aiter.ops.triton.fusions.activation import act_mul_and_mxfp4_quant
 
                 x_q, x_s = act_mul_and_mxfp4_quant(x, activation, shuffle=True)
                 x = x_q.view(aiter.dtypes.fp4x2)
@@ -97,7 +111,7 @@ if is_aiter_found_and_supported():
         if rocm_use_aiter_fp4_asm_gemm:
             # The preshuffle kernel's tuned configs split K in some M buckets.
             if (
-                M <= 64
+                M <= MXFP4_PRESHUFFLE_MAX_M
                 and not envs.VLLM_BATCH_INVARIANT
                 and rocm_aiter_ops.is_triton_gemm_afp4wfp4_presh_ws_tuned(N, K)
             ):

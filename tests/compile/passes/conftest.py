@@ -33,8 +33,6 @@ def rocm_aiter_fusion():
 
     if not is_aiter_found_and_supported():
         pytest.skip("ROCm with AITER only")
-    # Registers torch.ops.vllm.gemm_with_dynamic_quant, which the toy graphs call.
-    import vllm.model_executor.kernels.linear.mxfp4.aiter  # noqa: F401
     from vllm.compilation.passes.fusion import rocm_aiter_fusion as fusion_module
 
     return fusion_module
