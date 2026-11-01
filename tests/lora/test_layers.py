@@ -2038,6 +2038,95 @@ def test_grouped_o_projection_applies_each_tokens_adapter(
         )
 
 
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA grouped projection")
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_grouped_o_projection_fully_sharded_applies_full_lora_a(
+    default_vllm_config, dist_init, tp_rank
+):
+    """Each TP rank's head groups see different inputs, so fully sharded LoRA
+    must apply the full LoRA-A to the rank's own groups."""
+    from vllm.models.deepseek_v4.common.grouped_wo_a import DeepseekV4GroupedWoA
+    from vllm.models.deepseek_v4.common.ops.fused_inv_rope_fp8_quant import (
+        fused_inv_rope_fp8_quant,
+    )
+
+    torch.manual_seed(0)
+    tp_size, groups, tokens, columns, outputs, rank = 2, 4, 17, 256, 128, 8
+    local_groups = groups // tp_size
+    config = LoRAConfig(
+        max_loras=2,
+        max_lora_rank=rank,
+        lora_dtype=torch.bfloat16,
+        fully_sharded_loras=True,
+    )
+    with (
+        patch(
+            "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank",
+            return_value=tp_rank,
+        ),
+        patch(
+            "vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size",
+            return_value=tp_size,
+        ),
+        torch.device("cuda"),
+        torch.inference_mode(),
+    ):
+        base = DeepseekV4GroupedWoA(
+            columns,
+            groups * outputs,
+            n_groups=groups,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            return_bias=False,
+        )
+        base.weight.copy_(torch.randn_like(base.weight) / columns**0.5)
+        layer = from_layer(base, 2, config, [])
+        punica = get_punica_wrapper(
+            tokens, tokens, base.weight.device, lora_config=config
+        )
+        layer.set_mapping(punica)
+        ids = [i % 3 for i in range(tokens)]
+        punica.update_metadata(LoRAMapping(ids, [1], is_prefill=True), [1, 2], 3, 128)
+        o = torch.randn(tokens, local_groups * 2, 128, dtype=torch.bfloat16)
+        positions = torch.arange(tokens)
+        angles = torch.randn(tokens, 32)
+        cache = torch.cat((angles.cos(), angles.sin()), dim=1)
+        kwargs = dict(
+            n_groups=local_groups,
+            heads_per_group=2,
+            nope_dim=64,
+            rope_dim=64,
+            o_lora_rank=outputs,
+            einsum_recipe=(1, 128, 128),
+            tma_aligned_scales=False,
+        )
+        expected = base.grouped_forward(o, positions, cache, **kwargs)
+        x, _ = fused_inv_rope_fp8_quant(
+            o,
+            positions,
+            cache,
+            local_groups,
+            2,
+            nope_dim=64,
+            rope_dim=64,
+            quantize=False,
+        )
+        local_outputs = local_groups * outputs
+        rows = slice(tp_rank * local_outputs, (tp_rank + 1) * local_outputs)
+        for slot in range(2):
+            a = torch.randn(rank, columns, dtype=torch.bfloat16) / columns**0.5
+            b = torch.randn(groups * outputs, rank, dtype=torch.bfloat16) / 8
+            layer.set_lora(slot, a, b)
+            delta = torch.bmm(
+                F.linear(x, a).transpose(0, 1),
+                b[rows].view(local_groups, outputs, rank).transpose(1, 2),
+            ).transpose(0, 1)
+            active = torch.tensor([value == slot + 1 for value in ids])
+            expected[active] += delta[active]
+        actual = layer.grouped_forward(o, positions, cache, **kwargs)
+        torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
+
+
 def test_dsv4_rope_quant_is_off_with_lora():
     """RopeQuant writes only FP8 attention output, which wo_a's adapter can't use."""
     from vllm.config import VllmConfig
