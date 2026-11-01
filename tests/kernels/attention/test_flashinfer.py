@@ -463,6 +463,7 @@ def test_flashinfer_prefill_with_paged_kv(
         num_kv_heads,
         head_size,
         block_size,
+        causal=True,
         window_left=sliding_window - 1 if sliding_window is not None else -1,
         q_data_type=dtype,
         kv_data_type=dtype,
@@ -486,7 +487,7 @@ def test_flashinfer_prefill_with_paged_kv(
         sliding_window=sliding_window,
     )
     (
-        torch.testing.assert_close(output, ref_output, atol=5e-2, rtol=1e-2),
+        torch.testing.assert_close(output, ref_output, atol=1e-2, rtol=1e-2),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
 
@@ -573,6 +574,7 @@ def test_flashinfer_prefill_with_paged_fp8_kv(
         num_kv_heads,
         head_size,
         block_size,
+        causal=True,
         q_data_type=dtype,
         kv_data_type=kv_cache_dtype,
         logits_soft_cap=soft_cap,
