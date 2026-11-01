@@ -5,8 +5,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
-from types import MethodType
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import torch
 
@@ -63,10 +62,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config, Fp8MoEMethod
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.csf_scales import (
-    CSF_SCALE_ENCODINGS,
-    decode_csf_scale,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     trtllm_nvfp4_hidden_alignment,
 )
@@ -87,6 +82,10 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_nvfp4_moe_weights,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    CSF_SCALE_ENCODINGS,
+    csf_weights_transform,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     FP4_DTYPE,
@@ -111,6 +110,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
     ChannelQuantScaleParameter,
@@ -127,21 +127,12 @@ from vllm.platforms import current_platform
 from vllm.utils.b12x import B12X_BLOCK_CODECS
 from vllm.utils.math_utils import cdiv
 
-if TYPE_CHECKING:
-    from vllm.model_executor.models.utils import WeightsMapper
-
 logger = init_logger(__name__)
 
 # ``FP8_PB_WO`` is ModelOpt's canonical 2D block-FP8 name. Early composed
 # Qwen3.8-Flash-Next checkpoints used ``FP8_BLOCK_SCALES`` for the same tensor
 # layout, so retain it as a checkpoint-compatibility alias.
 _BLOCK_FP8_MOE_ALGOS = ("FP8_PB_WO", "FP8_BLOCK_SCALES")
-
-# Shards of vLLM's fused projections, for configs that list the shard names.
-_FUSED_PROJECTION_SHARDS = {
-    "qkv_proj": ("q_proj", "k_proj", "v_proj"),
-    "gate_up_proj": ("gate_proj", "up_proj"),
-}
 
 # Single source of truth for the ModelOpt linear algos.
 #
@@ -275,7 +266,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
 
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         if len(self.exclude_modules) > 0:
             # This is a workaround for the weights remapping issue:
             # https://github.com/vllm-project/vllm/issues/28072
@@ -750,6 +741,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         group_size: int = 16,
         *,
         quantization_args: QuantizationConfigArgs | None = None,
+        weight_scale_encoding: str | None = None,
     ) -> None:
         if exclude_modules is None:
             exclude_modules = []
@@ -760,6 +752,14 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         self.moe_activation_override: QuantKey | None = (
             moe_spec.activation if moe_spec is not None else None
         )
+        if weight_scale_encoding is not None and (
+            weight_scale_encoding not in CSF_SCALE_ENCODINGS
+        ):
+            raise ValueError(
+                f"unsupported weight_scale_encoding: {weight_scale_encoding}"
+            )
+        # CSF weight_scale_encoding of the checkpoint's block scales, if any.
+        self.weight_scale_encoding = weight_scale_encoding
         if is_checkpoint_nvfp4_serialized:
             self.group_size = group_size
             self.kv_cache_quant_algo = kv_cache_quant_algo
@@ -776,6 +776,15 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_fp4"
+
+    def get_checkpoint_weight_mapper(self) -> WeightsMapper:  # type: ignore[override]
+        """Pair CSF scale streams, on top of the usual name mappings."""
+        mapper = super().get_checkpoint_weight_mapper()
+        encoding = self.weight_scale_encoding
+        if encoding is None:
+            return mapper
+        transform = csf_weights_transform((encoding,))
+        return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half, torch.float8_e4m3fn]
@@ -825,6 +834,11 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
         if group_size is None:
             group_size = 16  # Default value
 
+        weight_scale_encoding = original_config.get("weight_scale_encoding")
+        quantization = original_config.get("quantization")
+        if weight_scale_encoding is None and isinstance(quantization, dict):
+            weight_scale_encoding = quantization.get("weight_scale_encoding")
+
         # For FP4, these fields are required
         if is_checkpoint_nvfp4_serialized and "quantization" in original_config:
             # Check if required fields are present in the quantization config
@@ -846,6 +860,7 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
             exclude_modules,
             group_size,
             quantization_args=original_config.get("_online_quantization_args"),
+            weight_scale_encoding=weight_scale_encoding,
         )
 
 
@@ -863,13 +878,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         self,
         quant_config: ModelOptNvFp4Config,
         moe_config: FusedMoEConfig,
-        scale_encoding: str | None = None,
     ) -> None:
         super().__init__(moe_config)
         self.quant_config = quant_config
-        # CSF weight_scale_encoding of the checkpoint's block scales, if any.
-        self.scale_encoding = scale_encoding
-        self._csf_parts: dict[tuple[str, int, str], dict[str, torch.Tensor]] = {}
         self.use_a16 = quant_config.quant_method == "W4A16_NVFP4"
         # Whether the selected backend reads the activation input scales.
         self.uses_input_scales = True
@@ -1004,25 +1015,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
 
-        # CSF checkpoints store each block-scale matrix as several streams.
-        # Empty params receive them, and the scales load once all have arrived.
-        if self.scale_encoding is not None:
-            for scale_name in ("w13_weight_scale", "w2_weight_scale"):
-                for stream in CSF_SCALE_ENCODINGS[self.scale_encoding][0]:
-                    stream_param = torch.nn.Parameter(
-                        torch.empty(0, dtype=torch.uint8), requires_grad=False
-                    )
-                    set_weight_attrs(
-                        stream_param,
-                        {
-                            "weight_loader": self._csf_stream_loader(
-                                layer, scale_name, stream
-                            ),
-                            "weight_loader_target": scale_name,
-                        },
-                    )
-                    layer.register_parameter(f"{scale_name}_{stream}", stream_param)
-
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
         )
@@ -1073,56 +1065,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         ):
             set_weight_attrs(param, {"dummy_weight_value": value})
 
-    def _csf_stream_loader(
-        self, layer: RoutedExperts, scale_name: str, stream: str
-    ) -> Callable:
-        encoding = self.scale_encoding
-        assert encoding is not None
-        # The quant method keeps the scale params in its MoE quant config, so
-        # the loader must not close over it.
-        csf_parts = self._csf_parts
-
-        def csf_stream_loader(
-            layer: RoutedExperts,
-            param: torch.nn.Parameter,
-            loaded_weight: torch.Tensor,
-            weight_name: str,
-            shard_id: str,
-            expert_id: int,
-            return_success: bool = False,
-        ) -> bool | None:
-            if layer._map_global_expert_id_to_local_expert_id(expert_id) == -1:
-                return False if return_success else None
-            key = (scale_name, expert_id, shard_id)
-            parts = csf_parts.setdefault(key, {})
-            parts[stream] = loaded_weight
-            if len(parts) < len(CSF_SCALE_ENCODINGS[encoding][0]):
-                return True if return_success else None
-            # The decoded matrix matches the uncompressed checkpoint, so the
-            # scale's own loader applies the usual TP split to it, and wrappers
-            # such as layerwise reload see a regular scale load.
-            del csf_parts[key]
-            scale = getattr(layer, scale_name)
-            return scale.weight_loader(
-                scale,
-                decode_csf_scale(encoding, parts),
-                weight_name.removesuffix(f"_{stream}"),
-                shard_id,
-                expert_id,
-                return_success,
-            )
-
-        # Bound to the layer rather than closed over, so the reload metadata
-        # can drop the reference to the layer.
-        return MethodType(csf_stream_loader, layer)
-
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
-        if self._csf_parts:
-            raise ValueError(
-                f"Missing {self.scale_encoding} scale streams for "
-                f"{len(self._csf_parts)} expert matrices"
-            )
         if is_weights_pre_processed():
             if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
                 raise RuntimeError(
@@ -1790,50 +1734,18 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
 
-    def get_checkpoint_weight_mapper(self) -> "WeightsMapper":  # type: ignore[override]
-        """Rename CSF scale streams to the params of the MoE method."""
-        from vllm.model_executor.models.utils import WeightsMapper
-
+    def get_checkpoint_weight_mapper(self) -> WeightsMapper:  # type: ignore[override]
+        """Pair CSF scale streams, on top of the usual name mappings."""
+        mapper = super().get_checkpoint_weight_mapper()
         encodings = {
-            info.get("weight_scale_encoding") for info in self.quantized_layers.values()
+            encoding
+            for info in self.quantized_layers.values()
+            if (encoding := info.get("weight_scale_encoding")) is not None
         }
-        return super().get_checkpoint_weight_mapper() | WeightsMapper(
-            orig_to_new_suffix={
-                f".weight_scale.{stream}": f".weight_scale_{stream}"
-                for encoding in CSF_SCALE_ENCODINGS.keys() & encodings
-                for stream in CSF_SCALE_ENCODINGS[encoding][0]
-            }
-        )
-
-    def _resolve_scale_encoding(self, prefix: str) -> str | None:
-        """weight_scale_encoding of the quantized_layers entries under prefix."""
-        encodings = {
-            info.get("weight_scale_encoding")
-            for candidate in self._quantized_layer_prefix_candidates(prefix)
-            for key, info in self.quantized_layers.items()
-            if key == candidate or key.startswith(candidate + ".")
-        }
-        if len(encodings) > 1:
-            raise ValueError(f"Mixed weight_scale_encoding under {prefix}: {encodings}")
-        return next(iter(encodings), None)
-
-    def _reject_scale_encoding(self, prefix: str) -> None:
-        """Only the MoE method registers the CSF stream params, so reject an
-        encoding on any other layer, including the shards of a fused one."""
-        base, _, proj = prefix.rpartition(".")
-        shards = (
-            *self.packed_modules_mapping.get(proj, ()),
-            *_FUSED_PROJECTION_SHARDS.get(proj, ()),
-        )
-        for name in (prefix, *(f"{base}.{shard}" for shard in shards)):
-            for candidate in self._quantized_layer_prefix_candidates(name):
-                if self.quantized_layers.get(candidate, {}).get(
-                    "weight_scale_encoding"
-                ):
-                    raise ValueError(
-                        "weight_scale_encoding is only supported on routed "
-                        f"experts, got one on {candidate}"
-                    )
+        if not encodings:
+            return mapper
+        transform = csf_weights_transform(encodings)
+        return mapper | WeightsMapper(weights_transforms=[transform])
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         return [torch.bfloat16, torch.half]
@@ -1994,7 +1906,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         # 4. Parent-prefix fallback for fused projections whose config lists
         # shard names instead of vLLM's packed module name.
-        shard_names = _FUSED_PROJECTION_SHARDS.get(proj_name)
+        fused_projection_shards = {
+            "qkv_proj": ("q_proj", "k_proj", "v_proj"),
+            "gate_up_proj": ("gate_proj", "up_proj"),
+        }
+        shard_names = fused_projection_shards.get(proj_name)
         if shard_names is not None:
             for candidate in self._quantized_layer_prefix_candidates(prefix):
                 parent_dot = candidate.rsplit(".", 1)[0] + "."
@@ -2036,9 +1952,6 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         """Return quantize-method based on layer."""
-        if not isinstance(layer, RoutedExperts):
-            self._reject_scale_encoding(prefix)
-
         # KV-cache quantization
         if isinstance(layer, Attention):
             if self.kv_cache_quant_method:
@@ -2092,13 +2005,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.nvfp4_config,
                     moe_config=layer.moe_config,
-                    scale_encoding=self._resolve_scale_encoding(prefix),
                 )
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.w4a16_nvfp4_config,
                     moe_config=layer.moe_config,
-                    scale_encoding=self._resolve_scale_encoding(prefix),
                 )
             if quant_algo == "MXFP8":
                 return ModelOptMxFp8FusedMoE(
@@ -2109,7 +2020,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
 
         return None
 
-    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: WeightsMapper):
         super().apply_vllm_mapper(hf_to_vllm_mapper)
         if self.quantized_layers:
             self.quantized_layers = hf_to_vllm_mapper.apply_dict(self.quantized_layers)

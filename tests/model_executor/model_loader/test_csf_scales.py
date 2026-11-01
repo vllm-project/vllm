@@ -1,23 +1,27 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import gc
-import weakref
-from types import SimpleNamespace
-from unittest.mock import MagicMock
-
 import numpy as np
 import pytest
 import torch
 
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptMixedPrecisionConfig,
-    ModelOptNvFp4FusedMoE,
+    ModelOptNvFp4Config,
 )
-from vllm.model_executor.layers.quantization.utils.csf_scales import decode_csf_scale
-from vllm.model_executor.model_loader.reload.layerwise import (
-    record_metadata_for_reloading,
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    CSF_SCALE_ENCODINGS,
+    csf_weights_transform,
+    decode_csf_scale,
 )
+from vllm.model_executor.models.utils import WeightsMapper
+
+
+def _mapper(encodings, **mappings) -> WeightsMapper:
+    return WeightsMapper(
+        weights_transforms=[csf_weights_transform(encodings)],
+        **mappings,
+    )
 
 
 def _encode(scales: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -85,11 +89,17 @@ def _encode_32x2(raw: np.ndarray) -> dict[str, torch.Tensor]:
     }
 
 
-def _raw_scales(shape: tuple[int, int]) -> torch.Tensor:
-    torch.manual_seed(0)
+def _raw_scales(shape: tuple[int, int], seed: int = 0) -> torch.Tensor:
+    torch.manual_seed(seed)
     raw = torch.randint(0x30, 0x40, shape, dtype=torch.uint8)
     raw.view(-1)[torch.randperm(raw.numel())[:64]] = 0x7E  # out-of-window bytes
     return raw
+
+
+def _encode_scales(encoding: str, raw: torch.Tensor) -> dict[str, torch.Tensor]:
+    if encoding == "csf":
+        return _encode(raw.view(torch.float8_e4m3fn))
+    return _encode_32x2(raw.numpy())
 
 
 @pytest.mark.parametrize("shape", [(640, 160), (2560, 40)])
@@ -148,19 +158,88 @@ def test_invalid_csf_32x2_streams_are_rejected(stream, index, value):
         decode_csf_scale("csf_32x2_v1", streams)
 
 
-def _mixed_config(
-    encoding: str, layer: str = "model.layers.0.mlp.experts"
-) -> ModelOptMixedPrecisionConfig:
+@pytest.mark.parametrize("encoding", list(CSF_SCALE_ENCODINGS))
+def test_transform_decodes_interleaved_stream_sets(encoding):
+    raws = {
+        name: _raw_scales((64, 4), seed)
+        for name, seed in (("a.weight_scale", 1), ("b.weight_scale", 2))
+    }
+    streams = {name: _encode_scales(encoding, raw) for name, raw in raws.items()}
+    weight = torch.zeros(1)
+    # Stream order permuted within each set, sets interleaved, and a
+    # non-CSF tensor in the middle.
+    arrivals = [("a.weight", weight)]
+    for (sa, ta), (sb, tb) in zip(
+        reversed(list(streams["a.weight_scale"].items())),
+        reversed(list(streams["b.weight_scale"].items())),
+    ):
+        arrivals.append((f"b.weight_scale.{sb}", tb))
+        arrivals.append((f"a.weight_scale.{sa}", ta))
+
+    transform = _mapper((encoding,), orig_to_new_suffix={".weight_scale": ".scale"})
+    out = list(transform.apply(iter(arrivals)))
+
+    # b's last stream arrives one slot before a's, so b decodes first, and
+    # the decoded canonical names flow through the name mapping.
+    assert [name for name, _ in out] == ["a.weight", "b.scale", "a.scale"]
+    assert out[0][1] is weight
+    expected = (raws["b.weight_scale"], raws["a.weight_scale"])
+    for (_, tensor), raw in zip(out[1:], expected):
+        assert torch.equal(tensor.view(torch.uint8), raw)
+
+
+@pytest.mark.parametrize("encoding", list(CSF_SCALE_ENCODINGS))
+def test_transform_rejects_unpaired_stream(encoding):
+    raw = _raw_scales((64, 4))
+    streams = _encode_scales(encoding, raw)
+    stream, tensor = next(iter(streams.items()))
+    mapper = _mapper((encoding,))
+    with pytest.raises(ValueError, match="without a partner"):
+        list(mapper.apply(iter([(f"e.weight_scale.{stream}", tensor)])))
+
+
+def test_transform_rejects_mixed_encodings():
+    raw = _raw_scales((64, 4))
+    fixed = _encode(raw.view(torch.float8_e4m3fn))["nvfp4_csf_fixed"]
+    bases = _encode_32x2(raw.numpy())["csf32_bases"]
+    mapper = _mapper(("csf", "csf_32x2_v1"))
+    with pytest.raises(ValueError, match="Mixed CSF"):
+        list(
+            mapper.apply(
+                iter(
+                    [
+                        ("e.weight_scale.nvfp4_csf_fixed", fixed),
+                        ("e.weight_scale.csf32_bases", bases),
+                    ]
+                )
+            )
+        )
+
+
+def test_transform_passes_other_tensors_through_untouched():
+    mapper = _mapper(("csf", "csf_32x2_v1"))
+    tensors = [
+        ("e.weight", torch.zeros(2)),
+        ("e.weight_scale", torch.zeros(2)),  # canonical scale: not a stream
+        ("e.weight_scale_2", torch.zeros(1)),
+        ("e.weight_scale_csf32_codes", torch.zeros(1)),  # mapper-era spelling
+    ]
+
+    out = list(mapper.apply(iter(tensors)))
+
+    assert [name for name, _ in out] == [name for name, _ in tensors]
+    assert all(t1 is t2 for (_, t1), (_, t2) in zip(out, tensors))
+
+
+def _mixed_config(encoding: str | None) -> ModelOptMixedPrecisionConfig:
+    recipe = {"quant_algo": "NVFP4"}
+    if encoding is not None:
+        recipe["weight_scale_encoding"] = encoding
     config = ModelOptMixedPrecisionConfig.from_config(
         {
             "quantization": {
                 "quant_algo": "MIXED_PRECISION",
-                "quantized_layers": {
-                    layer: {
-                        "quant_algo": "NVFP4",
-                        "weight_scale_encoding": encoding,
-                    }
-                },
+                "quantized_layers": {"model.layers.0.mlp.experts": recipe},
             }
         }
     )
@@ -168,85 +247,45 @@ def _mixed_config(
     return config
 
 
-def test_config_maps_csf_streams_to_method_params():
-    config = _mixed_config("csf_32x2_v1")
+def _has_transform(config) -> bool:
+    mapper = config.get_checkpoint_weight_mapper()
+    return len(mapper.weights_transforms) > 0
 
-    mapped = config.get_checkpoint_weight_mapper()._map_name(
-        "model.layers.0.mlp.experts.3.up_proj.weight_scale.csf32_codes"
-    )
 
-    assert mapped == "model.layers.0.mlp.experts.3.up_proj.weight_scale_csf32_codes"
-    assert config._resolve_scale_encoding("model.layers.0.mlp.experts") == (
-        "csf_32x2_v1"
-    )
+def test_mixed_config_gates_the_weights_transform():
+    assert not _has_transform(_mixed_config(None))
+    assert _has_transform(_mixed_config("csf"))
+    assert _has_transform(_mixed_config("csf_32x2_v1"))
     with pytest.raises(ValueError, match="weight_scale_encoding"):
         _mixed_config("csf_64x1")
 
-    # Only the MoE method loads the streams: a parent of the experts is fine,
-    # but a linear, or one shard of a fused linear, must not be encoded.
-    assert config.get_quant_method(torch.nn.Linear(1, 1), "model.layers.0.mlp") is None
-    config = _mixed_config("csf", "model.layers.0.self_attn.k_proj")
-    config.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
-    for prefix in ("k_proj", "qkv_proj"):
-        with pytest.raises(ValueError, match="routed experts"):
-            config.get_quant_method(
-                torch.nn.Linear(1, 1), f"model.layers.0.self_attn.{prefix}"
-            )
-    # Excluding the layer must not skip the check.
-    config.exclude_modules = ["model.layers.0.self_attn.k_proj"]
-    with pytest.raises(ValueError, match="routed experts"):
-        config.get_quant_method(
-            torch.nn.Linear(1, 1), "model.layers.0.self_attn.k_proj"
-        )
+
+def _fp4_config(extra: dict) -> ModelOptNvFp4Config:
+    quantization = {
+        "quant_algo": "NVFP4",
+        "group_size": 16,
+        "kv_cache_quant_algo": None,
+        "exclude_modules": [],
+        **extra,
+    }
+    config = ModelOptNvFp4Config.from_config({"quantization": quantization})
+    assert isinstance(config, ModelOptNvFp4Config)
+    return config
 
 
-def test_stream_params_load_decoded_scale_once_streams_arrive(monkeypatch):
-    for name, value in (("rank", 0), ("world_size", 1)):
-        monkeypatch.setattr(
-            f"vllm.model_executor.parameter.get_tensor_model_parallel_{name}",
-            lambda value=value: value,
-        )
-    method = object.__new__(ModelOptNvFp4FusedMoE)
-    method.scale_encoding = "csf"
-    method._csf_parts = {}
-    method.quant_config = SimpleNamespace(
-        is_checkpoint_nvfp4_serialized=True, group_size=16
-    )
-    method.moe = SimpleNamespace(is_act_and_mul=True)
-    method.use_global_sf = False
-    layer = torch.nn.Module()
-    layer._map_global_expert_id_to_local_expert_id = lambda e: e - 1
-    method.create_weights(layer, 1, 64, 32, torch.bfloat16, weight_loader=None)
-    # Reload wraps the scale's loader after create_weights; streams must use it.
-    scale_loader = layer.w2_weight_scale.weight_loader = MagicMock(return_value=True)
-    raw = _raw_scales((32, 4))
+def test_plain_nvfp4_config_gates_the_weights_transform():
+    assert not _has_transform(_fp4_config({}))
+    assert _has_transform(_fp4_config({"weight_scale_encoding": "csf"}))
+    with pytest.raises(ValueError, match="weight_scale_encoding"):
+        _fp4_config({"weight_scale_encoding": "csf_64x1"})
+
+
+def test_hook_mapper_decodes_checkpoint_stream():
+    raw = _raw_scales((64, 4))
     streams = _encode(raw.view(torch.float8_e4m3fn))
+    mapper = _mixed_config("csf").get_checkpoint_weight_mapper()
 
-    for expert_id in (0, 1):
-        for stream in ("nvfp4_csf_fixed", "nvfp4_csf_exceptions"):
-            param = getattr(layer, f"w2_weight_scale_{stream}")
-            assert param.weight_loader_target == "w2_weight_scale"
-            loaded = param.weight_loader(
-                param,
-                streams[stream],
-                f"e.w2_weight_scale_{stream}",
-                "w2",
-                expert_id,
-                return_success=True,
-            )
-            assert loaded is (expert_id == 1)
+    out = dict(mapper.apply((f"e.weight_scale.{s}", t) for s, t in streams.items()))
 
-    (param, scale, name, shard_id, expert_id, _), _ = scale_loader.call_args
-    assert scale_loader.call_count == 1 and not method._csf_parts
-    assert param is layer.w2_weight_scale
-    assert (name, shard_id, expert_id) == ("e.w2_weight_scale", "w2", 1)
-    assert torch.equal(scale.view(torch.uint8), raw)
-
-    # The quant method reaches the layer through its MoE quant config, so the
-    # stream loaders must not keep it alive from the reload metadata.
-    layer.quant_method, method.moe_quant_config = method, layer
-    record_metadata_for_reloading(layer)
-    layer_ref = weakref.ref(layer)
-    del layer, method
-    gc.collect()
-    assert layer_ref() is None
+    assert list(out) == ["e.weight_scale"]
+    assert torch.equal(out["e.weight_scale"].view(torch.uint8), raw)
