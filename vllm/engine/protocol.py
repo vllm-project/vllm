@@ -25,6 +25,11 @@ from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceR
 from vllm.v1.kv_hints import KvHintsEnvelope
 
 if TYPE_CHECKING:
+    from vllm.distributed.elastic_ep.external_elastic_ep import (
+        ExternalElasticEPResizeRequest,
+        ExternalElasticEPScaleStatus,
+        ExternalElasticEPSubmission,
+    )
     from vllm.v1.engine import PauseMode
 
 
@@ -278,14 +283,25 @@ class EngineClient(ABC):
         ...
 
     async def scale_elastic_ep(
-        self, new_data_parallel_size: int, drain_timeout: int = 300
-    ) -> None:
+        self,
+        new_data_parallel_size: int,
+        drain_timeout: int = 300,
+        operation_id: str | None = None,
+        expected_instance_id: str | None = None,
+    ) -> "ExternalElasticEPScaleStatus | None":
         """Scale the engine."""
+        raise NotImplementedError
+
+    async def submit_elastic_ep(
+        self,
+        request: "ExternalElasticEPResizeRequest",
+    ) -> "ExternalElasticEPSubmission":
+        """Accept one client's externally managed resize participation."""
         raise NotImplementedError
 
     async def get_external_elastic_ep_status(
         self,
-    ) -> dict[str, str | int | None] | None:
+    ) -> "ExternalElasticEPScaleStatus | None":
         """Return shared external Elastic EP operation status, if enabled."""
         return None
 

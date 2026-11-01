@@ -16,6 +16,12 @@ from vllm.config.profiler import (
     validate_profile_iteration_bounds,
     validate_profile_prefix,
 )
+from vllm.distributed.elastic_ep.external_elastic_ep import (
+    ExternalElasticEPResizeRequest,
+    ExternalElasticEPScaleConflict,
+    ExternalElasticEPScaleStatus,
+    ExternalElasticEPSubmission,
+)
 from vllm.distributed.weight_transfer.base import (
     WeightTransferInitRequest,
     WeightTransferUpdateRequest,
@@ -143,6 +149,14 @@ class AsyncLLM(EngineClient):
 
         self.vllm_config = vllm_config
         self._elastic_ep_lock = asyncio.Lock()
+        self._elastic_ep_submission_lock = asyncio.Lock()
+        self._elastic_ep_submission_task: asyncio.Task[None] | None = None
+        self._elastic_ep_submission_request: ExternalElasticEPResizeRequest | None = (
+            None
+        )
+        self._elastic_ep_receipt: asyncio.Future[ExternalElasticEPSubmission] | None = (
+            None
+        )
         self.model_config = vllm_config.model_config
         self.scheduler_config = vllm_config.scheduler_config
         self.observability_config = vllm_config.observability_config
@@ -306,6 +320,8 @@ class AsyncLLM(EngineClient):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown, cleaning up the background proc and IPC."""
         shutdown_prometheus()
+        if submission := getattr(self, "_elastic_ep_submission_task", None):
+            cancel_task_threadsafe(submission)
 
         if renderer := getattr(self, "renderer", None):
             renderer.shutdown()
@@ -1311,15 +1327,156 @@ class AsyncLLM(EngineClient):
                 set_scaling_elastic_ep(False)
             raise
 
+    async def submit_elastic_ep(
+        self,
+        request: ExternalElasticEPResizeRequest,
+    ) -> ExternalElasticEPSubmission:
+        """Accept this client's participation without waiting for the collective."""
+        parallel = self.vllm_config.parallel_config
+        if not (parallel.enable_elastic_ep and parallel.data_parallel_external_lb):
+            raise ValueError("Bounded submission requires external Elastic EP.")
+        async with self._elastic_ep_submission_lock:
+            task = self._elastic_ep_submission_task
+            if task is not None and not task.done():
+                if request != self._elastic_ep_submission_request:
+                    raise ExternalElasticEPScaleConflict(
+                        "Another local resize request is unresolved."
+                    )
+                receipt = self._elastic_ep_receipt
+            else:
+                receipt = asyncio.get_running_loop().create_future()
+                receipt.add_done_callback(self._consume_receipt_exception)
+                self._elastic_ep_receipt = receipt
+                self._elastic_ep_submission_request = request
+                self._elastic_ep_submission_task = asyncio.create_task(
+                    self._execute_submitted_resize(request, receipt),
+                    name=f"elastic-ep-{request.operation_id}",
+                )
+                self._elastic_ep_submission_task.add_done_callback(
+                    self._log_submission_failure
+                )
+        assert receipt is not None
+        return await asyncio.wait_for(asyncio.shield(receipt), timeout=5)
+
+    @staticmethod
+    def _consume_receipt_exception(
+        receipt: asyncio.Future[ExternalElasticEPSubmission],
+    ) -> None:
+        if not receipt.cancelled():
+            receipt.exception()
+
+    @staticmethod
+    def _log_submission_failure(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error(
+                "External Elastic EP execution could not retain its outcome",
+                exc_info=error,
+            )
+
+    async def _execute_submitted_resize(
+        self,
+        request: ExternalElasticEPResizeRequest,
+        acknowledgment: asyncio.Future[ExternalElasticEPSubmission],
+    ) -> None:
+        try:
+            receipt = await self.engine_core.accept_external_elastic_ep_request(request)
+        except asyncio.CancelledError:
+            acknowledgment.cancel()
+            raise
+        except Exception as error:
+            acknowledgment.set_exception(error)
+            return
+        if receipt.started or receipt.finished:
+            acknowledgment.set_result(receipt)
+            return
+        try:
+            await self.engine_core.record_external_elastic_ep_participation(
+                request.operation_id
+            )
+            acknowledgment.set_result(receipt)
+            await self.scale_elastic_ep(
+                request.new_data_parallel_size,
+                request.drain_timeout,
+                request.operation_id,
+                request.expected_instance_id,
+            )
+        except BaseException as error:
+            if not acknowledgment.done():
+                acknowledgment.set_exception(error)
+            await self.engine_core.record_external_elastic_ep_participation(
+                request.operation_id,
+                error=str(error) or type(error).__name__,
+            )
+            if not isinstance(error, Exception):
+                raise
+            logger.exception("External Elastic EP participation failed")
+        else:
+            await self.engine_core.record_external_elastic_ep_participation(
+                request.operation_id, finished=True
+            )
+
     async def scale_elastic_ep(
-        self, new_data_parallel_size: int, drain_timeout: int = 300
-    ):
+        self,
+        new_data_parallel_size: int,
+        drain_timeout: int = 300,
+        operation_id: str | None = None,
+        expected_instance_id: str | None = None,
+    ) -> ExternalElasticEPScaleStatus | None:
         """Scale the elastic EP data parallel size."""
+        status = await self.engine_core.validate_external_elastic_ep_request(
+            new_data_parallel_size,
+            operation_id,
+            expected_instance_id,
+        )
+        if status is None and (
+            operation_id is not None or expected_instance_id is not None
+        ):
+            raise ValueError(
+                "Operation identifiers require external Elastic EP scaling."
+            )
+        if (
+            operation_id is not None
+            and status is not None
+            and status.operation_id == operation_id
+            and status.terminal
+        ):
+            return status
+        if operation_id is not None and self._elastic_ep_lock.locked():
+            if status is not None and status.operation_id == operation_id:
+                return status
+            raise ExternalElasticEPScaleConflict(
+                "Another external Elastic EP request is active on this rank."
+            )
+        if get_elastic_ep_rank_retired():
+            raise ExternalElasticEPScaleConflict(
+                "This data-parallel rank is retired and cannot start another resize."
+            )
+
         async with self._elastic_ep_lock:
-            await self._scale_elastic_ep(new_data_parallel_size, drain_timeout)
+            status = await self.engine_core.validate_external_elastic_ep_request(
+                new_data_parallel_size,
+                operation_id,
+                expected_instance_id,
+            )
+            if (
+                operation_id is not None
+                and status is not None
+                and status.operation_id == operation_id
+                and status.terminal
+            ):
+                return status
+            await self._scale_elastic_ep(
+                new_data_parallel_size,
+                drain_timeout,
+                operation_id,
+            )
+        return await self.get_external_elastic_ep_status()
 
     async def _scale_elastic_ep(
-        self, new_data_parallel_size: int, drain_timeout: int
+        self,
+        new_data_parallel_size: int,
+        drain_timeout: int,
+        operation_id: str | None,
     ) -> None:
         parallel_config = self.vllm_config.parallel_config
         old_data_parallel_size = parallel_config.data_parallel_size
@@ -1330,7 +1487,10 @@ class AsyncLLM(EngineClient):
             )
             return
 
-        await self.engine_core.prepare_elastic_ep(new_data_parallel_size)
+        await self.engine_core.prepare_elastic_ep(
+            new_data_parallel_size,
+            operation_id,
+        )
 
         # recreate stat loggers
         if new_data_parallel_size > old_data_parallel_size and self.log_stats:
@@ -1381,7 +1541,7 @@ class AsyncLLM(EngineClient):
 
     async def get_external_elastic_ep_status(
         self,
-    ) -> dict[str, str | int | None] | None:
+    ) -> ExternalElasticEPScaleStatus | None:
         return await self.engine_core.get_external_elastic_ep_status()
 
     async def handle_fault(

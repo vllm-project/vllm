@@ -4,6 +4,7 @@
 import asyncio
 import contextlib
 import enum
+import hashlib
 import uuid
 from dataclasses import dataclass
 from threading import Event, Thread
@@ -45,6 +46,64 @@ class ExternalElasticEPScalePhase(str, enum.Enum):
     COMMITTING = "committing"
     FAILED = "failed"
     COMPLETED = "completed"
+
+
+class ExternalElasticEPScaleConflict(RuntimeError):
+    pass
+
+
+class ExternalElasticEPInstanceMismatch(ExternalElasticEPScaleConflict):
+    pass
+
+
+class _ExternalElasticEPTopology(msgspec.Struct):
+    effective_dp_size: int
+    topology_known: bool
+
+
+class ExternalElasticEPResizeRequest(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    operation_id: str
+    expected_instance_id: str
+    base_topology_token: str
+    new_data_parallel_size: int
+    drain_timeout: int
+
+
+class ExternalElasticEPSubmission(msgspec.Struct, frozen=True):  # type: ignore[call-arg]
+    request: ExternalElasticEPResizeRequest
+    first_rank: int
+    local_size: int
+    started: bool = False
+    finished: bool = False
+    error: str | None = None
+
+
+class ExternalElasticEPScaleStatus(msgspec.Struct):
+    instance_id: str
+    operation_id: str | None
+    epoch: str | None
+    phase: ExternalElasticEPScalePhase
+    requested_data_parallel_size: int | None
+    effective_data_parallel_size: int
+    topology_known: bool
+    error: str | None
+    asynchronous_submission: bool = True
+    topology_token: str = ""
+    local_submission: ExternalElasticEPSubmission | None = None
+
+    @property
+    def active(self) -> bool:
+        return self.phase in (
+            ExternalElasticEPScalePhase.PREPARING,
+            ExternalElasticEPScalePhase.COMMITTING,
+        )
+
+    @property
+    def terminal(self) -> bool:
+        return self.phase in (
+            ExternalElasticEPScalePhase.COMPLETED,
+            ExternalElasticEPScalePhase.FAILED,
+        )
 
 
 @dataclass
@@ -205,6 +264,7 @@ class _PreparedExternalElasticEPScale:
 class ExternalElasticEPScaleCoordinator:
     def __init__(self, client: "DPAsyncMPClient") -> None:
         self.client = client
+        self.instance_id = uuid.uuid4().hex
         self.active_reconfig_store: tuple[str, int] | None = None
         # Keep the previous rank-0 TCPStore server alive while the next scale
         # operation publishes bootstrap metadata through it. Overwriting
@@ -214,6 +274,7 @@ class ExternalElasticEPScaleCoordinator:
         self.reconfig_store_ref: Any | None = None
         self.active_epoch: str | None = None
         self.prepared_scale: _PreparedExternalElasticEPScale | None = None
+        self._submission: ExternalElasticEPSubmission | None = None
 
     @staticmethod
     def key(*parts: str | int) -> str:
@@ -313,18 +374,50 @@ class ExternalElasticEPScaleCoordinator:
             return None
         return store.get(error_key).decode()
 
-    def get_status(self) -> dict[str, str | int | None]:
-        store = self._get_reconfig_store()
+    def _read_topology(self, store: Any, epoch: str) -> _ExternalElasticEPTopology:
+        key = self.key(epoch, "topology")
+        if not store.check([key]):
+            raise RuntimeError("External Elastic EP topology snapshot is unavailable.")
+        return msgspec.msgpack.decode(store.get(key), type=_ExternalElasticEPTopology)
+
+    def _publish_topology(
+        self, store: Any, epoch: str, effective_dp_size: int, topology_known: bool
+    ) -> None:
+        store.set(
+            self.key(epoch, "topology"),
+            msgspec.msgpack.encode(
+                _ExternalElasticEPTopology(effective_dp_size, topology_known)
+            ),
+        )
+
+    def _read_status(self, store: Any) -> ExternalElasticEPScaleStatus:
+        parallel_config = self.client.vllm_config.parallel_config
+        effective_dp_size = parallel_config.data_parallel_size
         current_epoch_key = self.key("current_epoch")
         if not store.check([current_epoch_key]):
-            return {
-                "phase": ExternalElasticEPScalePhase.IDLE.value,
-                "epoch": None,
-                "error": None,
-                "requested_data_parallel_size": None,
-            }
+            return ExternalElasticEPScaleStatus(
+                instance_id=self.instance_id,
+                operation_id=None,
+                epoch=None,
+                phase=ExternalElasticEPScalePhase.IDLE,
+                requested_data_parallel_size=None,
+                effective_data_parallel_size=effective_dp_size,
+                topology_known=True,
+                error=None,
+            )
 
         epoch = store.get(current_epoch_key).decode()
+        operation_id_key = self.key(epoch, "operation_id")
+        operation_id = (
+            store.get(operation_id_key).decode()
+            if store.check([operation_id_key])
+            else epoch
+        )
+        bootstrap = msgspec.msgpack.decode(
+            store.get(self.key(epoch, "bootstrap")),
+            type=ReconfigureDistributedRequest,
+        )
+        requested_dp_size = bootstrap.new_data_parallel_size
         error = self._get_error(store, epoch)
         if error is not None:
             phase = ExternalElasticEPScalePhase.FAILED
@@ -336,19 +429,173 @@ class ExternalElasticEPScaleCoordinator:
             )
         else:
             phase = ExternalElasticEPScalePhase.IDLE
-        requested_dp_size = None
-        bootstrap_key = self.key(epoch, "bootstrap")
-        if store.check([bootstrap_key]):
-            bootstrap = msgspec.msgpack.decode(
-                store.get(bootstrap_key), type=ReconfigureDistributedRequest
+        # Completion is published after the effective topology, so read it first.
+        topology = self._read_topology(store, epoch)
+        return ExternalElasticEPScaleStatus(
+            instance_id=self.instance_id,
+            operation_id=operation_id,
+            epoch=epoch,
+            phase=phase,
+            requested_data_parallel_size=requested_dp_size,
+            effective_data_parallel_size=topology.effective_dp_size,
+            topology_known=topology.topology_known,
+            error=error,
+        )
+
+    def get_status(self) -> ExternalElasticEPScaleStatus:
+        store = self._get_reconfig_store()
+        committed_key = self.key("committed_epoch")
+        committed = (
+            store.get(committed_key) if store.check([committed_key]) else b"initial"
+        )
+        status = self._read_status(store)
+        after = store.get(committed_key) if store.check([committed_key]) else b"initial"
+        if committed != after:
+            raise RuntimeError(
+                "External Elastic EP topology changed during observation."
             )
-            requested_dp_size = bootstrap.new_data_parallel_size
-        return {
-            "phase": phase.value,
-            "epoch": epoch,
-            "error": error,
-            "requested_data_parallel_size": requested_dp_size,
-        }
+        submission = self._submission
+        # Rotate on acceptance as well as commit: an old request must stay stale
+        # after a safe successor replaces the single retained local receipt.
+        accepted = submission.request.operation_id if submission is not None else ""
+        status.topology_token = hashlib.sha256(
+            self.instance_id.encode() + b":" + committed + b":" + accepted.encode()
+        ).hexdigest()
+        status.local_submission = submission
+        return status
+
+    def accept_request(
+        self,
+        request: ExternalElasticEPResizeRequest,
+    ) -> ExternalElasticEPSubmission:
+        for value in (
+            request.operation_id,
+            request.expected_instance_id,
+            request.base_topology_token,
+        ):
+            if not isinstance(value, str) or not value.strip() or len(value) > 256:
+                raise ValueError(
+                    "Resize identities and base token must contain 1–256 characters."
+                )
+        if (
+            type(request.new_data_parallel_size) is not int
+            or type(request.drain_timeout) is not int
+            or request.drain_timeout <= 0
+        ):
+            raise ValueError("Resize size and drain timeout must be positive integers.")
+        previous = self._submission
+        if (
+            previous is not None
+            and previous.request.operation_id == request.operation_id
+        ):
+            if previous.request != request:
+                raise ExternalElasticEPScaleConflict(
+                    "Operation ID has a different immutable request."
+                )
+            return previous
+        if previous is not None and not previous.finished:
+            raise ExternalElasticEPScaleConflict(
+                "Local resize participation is still unresolved."
+            )
+        status = self.validate_request(
+            request.new_data_parallel_size,
+            request.operation_id,
+            request.expected_instance_id,
+        )
+        if status.operation_id == request.operation_id and status.terminal:
+            raise ExternalElasticEPScaleConflict(
+                "The completed operation has no matching local submission receipt."
+            )
+        if request.base_topology_token != status.topology_token:
+            raise ExternalElasticEPScaleConflict("Resize base topology token is stale.")
+        parallel = self.client.vllm_config.parallel_config
+        if parallel.data_parallel_rank >= status.effective_data_parallel_size:
+            raise ExternalElasticEPScaleConflict(
+                "This client's local rank range is retired "
+                "and cannot start another resize."
+            )
+        maximum = parallel.elastic_ep_max_dp_size
+        if not 0 < request.new_data_parallel_size <= maximum:
+            raise ValueError(f"Data parallel size must be within [1, {maximum}].")
+        self._calculate_num_redundant_experts(
+            status.effective_data_parallel_size, request.new_data_parallel_size
+        )
+        first, end = (
+            parallel.data_parallel_rank,
+            parallel.data_parallel_rank + parallel.data_parallel_size_local,
+        )
+        if first < request.new_data_parallel_size < end:
+            raise ValueError(
+                "Resize cannot split an existing client's local rank range."
+            )
+        self._submission = ExternalElasticEPSubmission(
+            request=request,
+            first_rank=parallel.data_parallel_rank,
+            local_size=parallel.data_parallel_size_local,
+        )
+        return self._submission
+
+    def record_participation(
+        self, operation_id: str, *, finished: bool = False, error: str | None = None
+    ) -> None:
+        submission = self._submission
+        if submission is None or submission.request.operation_id != operation_id:
+            raise ExternalElasticEPScaleConflict("No matching accepted request.")
+        self._submission = msgspec.structs.replace(
+            submission,
+            started=True,
+            finished=finished,
+            error=error,
+        )
+
+    def validate_request(
+        self,
+        new_data_parallel_size: int,
+        operation_id: str | None,
+        expected_instance_id: str | None,
+    ) -> ExternalElasticEPScaleStatus:
+        submission = self._submission
+        if (
+            submission is not None
+            and not submission.finished
+            and operation_id != submission.request.operation_id
+        ):
+            raise ExternalElasticEPScaleConflict(
+                "Local resize participation is still unresolved."
+            )
+        status = self.get_status()
+        if (
+            expected_instance_id is not None
+            and expected_instance_id != self.instance_id
+        ):
+            raise ExternalElasticEPInstanceMismatch(
+                "External Elastic EP runtime instance changed; "
+                f"expected {expected_instance_id}, found {self.instance_id}."
+            )
+        if status.operation_id == operation_id and operation_id is not None:
+            if status.requested_data_parallel_size != new_data_parallel_size:
+                raise ExternalElasticEPScaleConflict(
+                    f"Operation {operation_id} already targets data parallel size "
+                    f"{status.requested_data_parallel_size}."
+                )
+            return status
+        if not status.topology_known:
+            raise ExternalElasticEPScaleConflict(
+                "External Elastic EP topology is unknown after a failed operation; "
+                "restart or recover the runtime before scaling again."
+            )
+        if (
+            operation_id is None
+            and status.active
+            and status.requested_data_parallel_size == new_data_parallel_size
+        ):
+            return status
+        if status.active:
+            raise ExternalElasticEPScaleConflict(
+                f"Operation {status.operation_id} is already active for data "
+                f"parallel size {status.requested_data_parallel_size}."
+            )
+        return status
 
     def _set_phase(
         self, store: Any, epoch: str, phase: ExternalElasticEPScalePhase
@@ -359,6 +606,7 @@ class ExternalElasticEPScaleCoordinator:
         self,
         store: Any,
         requested_new_dp_size: int,
+        operation_id: str | None = None,
         timeout_s: float = 300,
     ) -> tuple[str, ReconfigureDistributedRequest]:
         """Wait for rank 0 to publish matching scale bootstrap metadata.
@@ -377,24 +625,56 @@ class ExternalElasticEPScaleCoordinator:
                 epoch = store.get(current_epoch_key).decode()
                 if epoch != previous_epoch:
                     error = self._get_error(store, epoch)
-                    if error is not None:
-                        self.active_epoch = epoch
-                        raise RuntimeError(error)
-
                     bootstrap_key = self.key(epoch, "bootstrap")
-                    if store.check([bootstrap_key]):
-                        bootstrap = msgspec.msgpack.decode(
+                    bootstrap = (
+                        msgspec.msgpack.decode(
                             store.get(bootstrap_key),
                             type=ReconfigureDistributedRequest,
                         )
+                        if store.check([bootstrap_key])
+                        else None
+                    )
+                    current_operation_id_key = self.key(epoch, "operation_id")
+                    current_operation_id = (
+                        store.get(current_operation_id_key).decode()
+                        if store.check([current_operation_id_key])
+                        else epoch
+                    )
+                    if (
+                        operation_id is not None
+                        and operation_id == current_operation_id
+                        and bootstrap is not None
+                        and bootstrap.new_data_parallel_size != requested_new_dp_size
+                    ):
+                        raise ExternalElasticEPScaleConflict(
+                            f"Operation {operation_id} already targets data parallel "
+                            f"size {bootstrap.new_data_parallel_size}."
+                        )
+                    if error is not None:
+                        if operation_id is None or operation_id == current_operation_id:
+                            self.active_epoch = epoch
+                            raise RuntimeError(error)
+                        if not self._read_topology(store, epoch).topology_known:
+                            raise ExternalElasticEPScaleConflict(
+                                "External Elastic EP topology is unknown after a "
+                                "failed operation; restart or recover the runtime "
+                                "before scaling again."
+                            )
+                    elif bootstrap is not None:
                         prepared_key = self.key(epoch, "prepared")
                         completed = store.check([self.key(epoch, "completed")])
-                        if bootstrap.new_data_parallel_size != requested_new_dp_size:
+                        request_matches = (
+                            operation_id is None or operation_id == current_operation_id
+                        ) and (
+                            bootstrap.new_data_parallel_size == requested_new_dp_size
+                        )
+                        if not request_matches:
                             if store.check([prepared_key]) and not completed:
-                                raise RuntimeError(
-                                    "A different external Elastic EP scaling "
-                                    "operation is already in progress for target "
-                                    f"dp size {bootstrap.new_data_parallel_size}."
+                                raise ExternalElasticEPScaleConflict(
+                                    "External Elastic EP operation "
+                                    f"{current_operation_id} is already active for "
+                                    "data parallel size "
+                                    f"{bootstrap.new_data_parallel_size}."
                                 )
                         elif store.check([prepared_key]):
                             return epoch, bootstrap
@@ -412,12 +692,18 @@ class ExternalElasticEPScaleCoordinator:
         store: Any,
         cur_data_parallel_size: int,
         new_data_parallel_size: int,
+        operation_id: str | None,
     ) -> tuple[str, ReconfigureDistributedRequest]:
         from vllm.utils.network_utils import get_open_ports_list
 
         current_epoch_key = self.key("current_epoch")
         if store.check([current_epoch_key]):
             current_epoch = store.get(current_epoch_key).decode()
+            if not self._read_topology(store, current_epoch).topology_known:
+                raise ExternalElasticEPScaleConflict(
+                    "External Elastic EP topology is unknown after a failed "
+                    "operation; restart or recover the runtime before scaling again."
+                )
             current_error = self._get_error(store, current_epoch)
             if current_error is None and not store.check(
                 [self.key(current_epoch, "completed")]
@@ -428,6 +714,7 @@ class ExternalElasticEPScaleCoordinator:
 
         ip, coord_store_port = self._setup_reconfig_bootstrap()
         epoch = uuid.uuid4().hex
+        operation_id = operation_id or epoch
         master_ports = get_open_ports_list(5)
         bootstrap = ReconfigureDistributedRequest(
             new_data_parallel_size=new_data_parallel_size,
@@ -444,12 +731,31 @@ class ExternalElasticEPScaleCoordinator:
         stores = [store]
         if self.reconfig_store_ref is not None:
             stores.append(self.reconfig_store_ref)
+        committed_key = self.key("committed_epoch")
+        committed = (
+            store.get(committed_key) if store.check([committed_key]) else b"initial"
+        )
         for target_store in stores:
+            target_store.set(committed_key, committed)
             target_store.set(bootstrap_key, bootstrap_payload)
+            target_store.set(self.key(epoch, "operation_id"), operation_id.encode())
+            self._publish_topology(target_store, epoch, cur_data_parallel_size, True)
             self._set_phase(target_store, epoch, ExternalElasticEPScalePhase.PREPARING)
             # Publish the epoch only after its metadata is ready for readers.
             target_store.set(current_epoch_key, epoch.encode())
         return epoch, bootstrap
+
+    def _publish_completed(
+        self,
+        stores: tuple[Any, ...],
+        epoch: str,
+        effective_dp_size: int,
+    ) -> None:
+        for store in stores:
+            self._publish_topology(store, epoch, effective_dp_size, True)
+            store.set(self.key("committed_epoch"), epoch.encode())
+            self._set_phase(store, epoch, ExternalElasticEPScalePhase.COMPLETED)
+            store.set(self.key(epoch, "completed"), b"1")
 
     def _start_scale_up_handshake_server(
         self,
@@ -655,7 +961,10 @@ class ExternalElasticEPScaleCoordinator:
             backoff_step = await self._sleep_with_backoff(backoff_step)
 
     async def prepare(
-        self, cur_data_parallel_size: int, new_data_parallel_size: int
+        self,
+        cur_data_parallel_size: int,
+        new_data_parallel_size: int,
+        operation_id: str | None = None,
     ) -> None:
         from vllm.distributed.utils import get_cached_tcp_store_client
 
@@ -701,6 +1010,7 @@ class ExternalElasticEPScaleCoordinator:
                     control_store,
                     cur_data_parallel_size,
                     new_data_parallel_size,
+                    operation_id,
                 )
                 control_store.set(
                     self.key(epoch, "num_redundant_experts"),
@@ -716,7 +1026,9 @@ class ExternalElasticEPScaleCoordinator:
                 control_store.set(self.key(epoch, "prepared"), b"1")
             else:
                 epoch, bootstrap = await self._wait_for_bootstrap(
-                    control_store, new_data_parallel_size
+                    control_store,
+                    new_data_parallel_size,
+                    operation_id,
                 )
                 num_redundant_experts = int(
                     control_store.get(self.key(epoch, "num_redundant_experts")).decode()
@@ -797,6 +1109,9 @@ class ExternalElasticEPScaleCoordinator:
         try:
             await self._wait_for_commit_ready(prepared)
             for store in (prepared.control_store, prepared.reconfig_store):
+                self._publish_topology(
+                    store, prepared.epoch, prepared.cur_data_parallel_size, False
+                )
                 self._set_phase(
                     store, prepared.epoch, ExternalElasticEPScalePhase.COMMITTING
                 )
@@ -825,13 +1140,11 @@ class ExternalElasticEPScaleCoordinator:
             )
             if prepared.dp_rank == 0:
                 await self._wait_for_all_old_ranks(prepared)
-                completed_key = self.key(prepared.epoch, "completed")
-                prepared.control_store.set(completed_key, b"1")
-                prepared.reconfig_store.set(completed_key, b"1")
-                for store in (prepared.control_store, prepared.reconfig_store):
-                    self._set_phase(
-                        store, prepared.epoch, ExternalElasticEPScalePhase.COMPLETED
-                    )
+                self._publish_completed(
+                    (prepared.control_store, prepared.reconfig_store),
+                    prepared.epoch,
+                    bootstrap.new_data_parallel_size,
+                )
 
             if remaining:
                 self._update_parallel_config(bootstrap, prepared.num_redundant_experts)

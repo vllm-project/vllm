@@ -171,6 +171,78 @@ For further details on derenderer APIs, please refer to [this page](derenderer.m
 - `/scale_elastic_ep` - Trigger scaling operations
 - `/is_scaling_elastic_ep` - Check if scaling is in progress
 
+### External scaling operation status
+
+With external DP load balancing, `POST /scale_elastic_ep` accepts optional
+`operation_id` and `expected_instance_id` fields:
+
+```json
+{
+  "new_data_parallel_size": 4,
+  "drain_timeout": 120,
+  "operation_id": "resize-42",
+  "expected_instance_id": "<instance_id from this rank's status>"
+}
+```
+
+Send the same operation ID and target to every existing rank, using each rank's
+own instance ID. The orchestrator still launches joiners and controls routing.
+`POST /is_scaling_elastic_ep` reports the latest operation's ID, epoch, phase,
+requested and effective DP sizes, topology certainty, and error.
+
+Replaying the latest operation with the same target returns its active or terminal
+status without repeating the resize. A conflicting target or operation, or a stale
+instance precondition, returns HTTP 409. A target already equal to the current DP
+size remains a no-op; status describes the last actual resize. This API retains
+only the latest operation, so controllers must finish reconciling it before
+starting another.
+
+When `topology_known` is false, the effective size is the last known size.
+Further operations are rejected; replaying the failed operation remains available
+for observation. Restart the runtime before issuing another resize. Inference
+admission remains closed after commit failure, while health and status remain
+queryable. These fields do not provide an engine recovery mechanism.
+
+### Bounded external scaling submission
+
+Use `POST /submit_elastic_ep` when your orchestrator must return before joining
+engines start or a collective finishes. This opt-in route requires externally
+managed Elastic EP; synchronous `/scale_elastic_ep` and Ray callers keep their
+existing behavior.
+
+Read `POST /is_scaling_elastic_ep` on each existing client and retain its
+`instance_id` and opaque `topology_token`. Send the same operation and target to
+every existing client, with that client's original instance and token:
+
+```json
+{
+  "operation_id": "resize-42",
+  "expected_instance_id": "<this client's instance_id>",
+  "base_topology_token": "<this client's topology_token>",
+  "new_data_parallel_size": 4,
+  "drain_timeout": 120
+}
+```
+
+HTTP 202 acknowledges only this client's participation, not delivery to its
+peers or completed membership. Native execution continues independently of the
+HTTP connection. Status exposes the retained `local_submission`, including the
+owned `first_rank`/`local_size`, execution progress and error. Observe collective
+completion and every client's finished receipt, then check inference readiness.
+Serving readiness remains engine/runtime-owned, not an orchestrator grant.
+
+After a timeout or lost response, replay the identical body with its original
+instance and token. A terminal replay returns HTTP 200; conflicting reuse or a
+stale new request returns HTTP 409. One client's refusal does not establish that
+the collective was rejected. Pending or uncertain participation cannot be
+superseded. The latest receipt remains observable for the API process lifetime
+until a safe successor is accepted; tokens change on acceptance and commit, so
+delayed old requests cannot start again after that successor. A process restart
+changes its instance and requires external recovery.
+
+A retired client rejects new operations without replacing its retained retirement
+receipt. Status and identical replay of that retirement remain available.
+
 ## Process Checkpoint APIs
 
 For external checkpoint/restore orchestrators, available with `--enable-sleep-mode`. Preparing drains the engine and releases its KV cache and other external state, any number of times. Until `/checkpoint/restore`, new requests get a retryable error and `/health` still returns 200, as while asleep. `--checkpoint-prepare-on-startup` prepares each engine once it starts.
