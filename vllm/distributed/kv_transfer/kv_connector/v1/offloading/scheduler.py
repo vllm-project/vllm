@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
 from collections import Counter
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Collection, Iterable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from typing import Any, NamedTuple
@@ -35,7 +35,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers import (
     OnComputeStoreHandler,
-    StoreJobsOutput,
     StoreTriggerHandler,
 )
 from vllm.logger import init_logger
@@ -48,12 +47,14 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
+    LoadStoreSpec,
     Locality,
     LookupResult,
     Medium,
     OffloadingManager,
     OffloadingSpec,
     OffloadKey,
+    PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
     ScheduleEndContext,
@@ -174,6 +175,48 @@ def _create_req_context(
     )
 
 
+class _StoreJobSink:
+    """The store-job intake of one handler in one scheduler step."""
+
+    def __init__(
+        self, scheduler: "OffloadingConnectorScheduler", trigger: StoreTrigger
+    ):
+        self._scheduler = scheduler
+        self._trigger = trigger
+        self.jobs: dict[int, TransferJob] = {}
+
+    def prepare_store(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> PrepareStoreOutput | None:
+        output = self._scheduler.manager.prepare_store(keys, req_context, self._trigger)
+        if output is None:
+            self._scheduler._connector_stats.increase_counter(
+                _ConnectorMetricName.ALLOCATION_FAILURE
+            )
+        return output
+
+    def add_job(
+        self,
+        req_id: ReqId,
+        keys: Collection[OffloadKey],
+        src_spec: GPULoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+        *,
+        fenced_block_ids: list[int] | None = None,
+        deferred_fence_block_ids: list[int] | None = None,
+    ) -> None:
+        job_id = self._scheduler._track_store_job(
+            req_id,
+            keys,
+            trigger=self._trigger,
+            fenced_block_ids=fenced_block_ids,
+            deferred_fence_block_ids=deferred_fence_block_ids,
+        )
+        self.jobs[job_id] = TransferJob(
+            req_id=req_id, src_spec=src_spec, dst_spec=dst_spec
+        )
+
+
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
@@ -261,7 +304,7 @@ class OffloadingConnectorScheduler:
 
         self._store_handlers: dict[StoreTrigger, StoreTriggerHandler] = {
             StoreTrigger.ON_COMPUTE: OnComputeStoreHandler(
-                self.config, self.manager, self._events_tracker
+                self.config, self._events_tracker
             )
         }
 
@@ -1180,45 +1223,54 @@ class OffloadingConnectorScheduler:
                         ):
                             group_state.block_ids[j] = 0
 
-    def _add_store_jobs(self, output: StoreJobsOutput) -> dict[int, TransferJob]:
-        """Give each store job of a handler a job ID, and track it."""
-        if output.num_allocation_failures:
-            self._connector_stats.increase_counter(
-                _ConnectorMetricName.ALLOCATION_FAILURE,
-                output.num_allocation_failures,
-            )
-        store_jobs: dict[int, TransferJob] = {}
-        for job, job_status in output.jobs:
-            req_status = self._req_status[job_status.req_id]
-            job_id = self._generate_job_id()
-            # a store can only be issued when no load is pending.
-            if req_status.transfer_jobs:
-                any_jid = next(iter(req_status.transfer_jobs))
-                any_job = self._job_statuses[any_jid]
-                assert any_job.is_store or any_job.is_sync_load
-            req_status.transfer_jobs.add(job_id)
+    def _track_store_job(
+        self,
+        req_id: ReqId,
+        keys: Collection[OffloadKey],
+        *,
+        trigger: StoreTrigger,
+        fenced_block_ids: list[int] | None,
+        deferred_fence_block_ids: list[int] | None,
+    ) -> int:
+        """Give a store job a job ID, track it, and return the ID."""
+        job_status = TransferJobStatus(
+            req_id=req_id,
+            pending_count=self.config.num_workers,
+            keys=tuple(dict.fromkeys(keys)),
+            is_store=True,
+            deferred_fence_block_ids=deferred_fence_block_ids,
+            fenced_block_ids=fenced_block_ids,
+            trigger=trigger,
+        )
+        job_id = self._generate_job_id()
+        req_status = self._req_status[req_id]
+        # a store can only be issued when no load is pending.
+        if req_status.transfer_jobs:
+            any_jid = next(iter(req_status.transfer_jobs))
+            any_job = self._job_statuses[any_jid]
+            assert any_job.is_store or any_job.is_sync_load
+        req_status.transfer_jobs.add(job_id)
 
-            # Watch sliding window blocks as they may get evicted
-            # before the request finishes
-            for bid in job_status.fenced_block_ids or ():
+        # Watch sliding window blocks as they may get evicted
+        # before the request finishes
+        for bid in job_status.fenced_block_ids or ():
+            self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
+
+        self._job_statuses[job_id] = job_status
+        logger.debug(
+            "Request %s offloading %d chunks (job %d)",
+            job_status.req_id,
+            len(job_status.keys),
+            job_id,
+        )
+
+        if req_status.req.is_finished():
+            # Register non-sliding-window blocks for flush detection.
+            for bid in job_status.deferred_fence_block_ids or ():
                 self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
-
-            self._job_statuses[job_id] = job_status
-            store_jobs[job_id] = job
-            logger.debug(
-                "Request %s offloading %d chunks (job %d)",
-                job_status.req_id,
-                len(job_status.keys),
-                job_id,
-            )
-
-            if req_status.req.is_finished():
-                # Register non-sliding-window blocks for flush detection.
-                for bid in job_status.deferred_fence_block_ids or ():
-                    self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
-                    if bid in self._current_batch_allocated_block_ids:
-                        self._current_batch_jobs_to_flush.add(job_id)
-        return store_jobs
+                if bid in self._current_batch_allocated_block_ids:
+                    self._current_batch_jobs_to_flush.add(job_id)
+        return job_id
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -1286,9 +1338,9 @@ class OffloadingConnectorScheduler:
 
         store_jobs: dict[int, TransferJob] = {}
         for handler in self._store_handlers.values():
-            store_jobs |= self._add_store_jobs(
-                handler.build_store_jobs(scheduler_output, self._req_status)
-            )
+            sink = _StoreJobSink(self, handler.trigger)
+            handler.build_store_jobs(scheduler_output, self._req_status, sink)
+            store_jobs |= sink.jobs
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
             store_jobs=store_jobs,

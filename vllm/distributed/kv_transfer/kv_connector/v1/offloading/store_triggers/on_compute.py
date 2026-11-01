@@ -16,7 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.state import (
     SchedulerOffloadConfig,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.base import (  # noqa: E501
-    StoreJobsOutput,
+    StoreJobSink,
     StoreTriggerHandler,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.store_triggers.common import (  # noqa: E501
@@ -27,7 +27,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
-    OffloadingManager,
     OffloadPolicy,
     StoreTrigger,
 )
@@ -43,10 +42,9 @@ class OnComputeStoreHandler(StoreTriggerHandler):
     def __init__(
         self,
         config: SchedulerOffloadConfig,
-        manager: OffloadingManager,
         events_tracker: OffloadingEventsTracker,
     ):
-        super().__init__(config, manager, events_tracker)
+        super().__init__(config, events_tracker)
         self._cow_source_groups = frozenset(
             group_config.group_idx
             for group_config in config.kv_group_configs
@@ -60,15 +58,10 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         self,
         scheduler_output: SchedulerOutput,
         req_states: Mapping[ReqId, RequestOffloadState],
-    ) -> StoreJobsOutput:
-        partial = self._build_partial_tail_store_jobs(scheduler_output, req_states)
-        chunks = self._build_chunk_store_jobs(scheduler_output, req_states)
-        return StoreJobsOutput(
-            jobs=partial.jobs + chunks.jobs,
-            num_allocation_failures=(
-                partial.num_allocation_failures + chunks.num_allocation_failures
-            ),
-        )
+        sink: StoreJobSink,
+    ) -> None:
+        self._build_partial_tail_store_jobs(scheduler_output, req_states, sink)
+        self._build_chunk_store_jobs(scheduler_output, req_states, sink)
 
     @override
     def on_load_scheduled(
@@ -137,8 +130,8 @@ class OnComputeStoreHandler(StoreTriggerHandler):
         self,
         handoffs: dict[str, list[tuple[int, int, int]]],
         req_states: Mapping[ReqId, RequestOffloadState],
-    ) -> StoreJobsOutput:
-        output = StoreJobsOutput()
+        sink: StoreJobSink,
+    ) -> None:
         num_groups = len(self._config.kv_group_configs)
         config_idx_by_group = {
             config.group_idx: idx
@@ -163,9 +156,8 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                     continue
 
                 key = req_status.register_boundary_key(group_idx, boundary)
-                store_output = self._prepare_store([key], req_status.req_context)
+                store_output = sink.prepare_store([key], req_status.req_context)
                 if store_output is None:
-                    output.num_allocation_failures += 1
                     continue
                 if not store_output.keys_to_store:
                     continue
@@ -176,18 +168,16 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 block_indices[config_idx] = (
                     boundary // group_config.tokens_per_block - 1
                 )
-                output.jobs.append(
-                    self._make_store_job(
-                        req_id,
-                        [key],
-                        GPULoadStoreSpec(
-                            [block_id],
-                            group_sizes=group_sizes,
-                            block_indices=block_indices,
-                        ),
-                        store_output.store_spec,
-                        fenced_block_ids=[block_id],
-                    )
+                sink.add_job(
+                    req_id,
+                    [key],
+                    GPULoadStoreSpec(
+                        [block_id],
+                        group_sizes=group_sizes,
+                        block_indices=block_indices,
+                    ),
+                    store_output.store_spec,
+                    fenced_block_ids=[block_id],
                 )
                 self._events_tracker.record_store(
                     req,
@@ -195,21 +185,21 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                     boundary // group_config.tokens_per_chunk - 1,
                     key,
                 )
-        return output
 
     def _build_partial_tail_store_jobs(
         self,
         scheduler_output: SchedulerOutput,
         req_states: Mapping[ReqId, RequestOffloadState],
-    ) -> StoreJobsOutput:
+        sink: StoreJobSink,
+    ) -> None:
         block_state = scheduler_output.kv_connector_block_state
         handoffs = block_state.boundary_state_offloads if block_state else None
         if not handoffs:
-            return StoreJobsOutput()
+            return
 
-        output = self._build_aligned_boundary_store_jobs(handoffs, req_states)
+        self._build_aligned_boundary_store_jobs(handoffs, req_states, sink)
         if not self._config.supports_partial_tail:
-            return output
+            return
 
         partial_tail_block_size = self._config.partial_tail_block_size
         max_eagle_proof_margin = self._config.max_eagle_proof_margin
@@ -284,9 +274,8 @@ class OnComputeStoreHandler(StoreTriggerHandler):
             ]
             assert all(block_id != 0 for block_id in block_ids)
 
-            store_output = self._prepare_store(keys, req_status.req_context)
+            store_output = sink.prepare_store(keys, req_status.req_context)
             if store_output is None:
-                output.num_allocation_failures += 1
                 continue
             if not store_output.keys_to_store:
                 continue
@@ -308,29 +297,25 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 block_indices[group_idx] = block_idx
             source_blocks = [block_ids[group_idx] for group_idx in accepted_groups]
 
-            output.jobs.append(
-                self._make_store_job(
-                    req_id,
-                    store_output.keys_to_store,
-                    GPULoadStoreSpec(
-                        source_blocks,
-                        group_sizes=group_sizes,
-                        block_indices=block_indices,
-                    ),
-                    store_output.store_spec,
-                    fenced_block_ids=source_blocks,
-                )
+            sink.add_job(
+                req_id,
+                store_output.keys_to_store,
+                GPULoadStoreSpec(
+                    source_blocks,
+                    group_sizes=group_sizes,
+                    block_indices=block_indices,
+                ),
+                store_output.store_spec,
+                fenced_block_ids=source_blocks,
             )
-
-        return output
 
     def _build_chunk_store_jobs(
         self,
         scheduler_output: SchedulerOutput,
         req_states: Mapping[ReqId, RequestOffloadState],
-    ) -> StoreJobsOutput:
+        sink: StoreJobSink,
+    ) -> None:
         blocks_per_chunk = self._config.blocks_per_chunk
-        output = StoreJobsOutput()
         for req_id in chain(
             scheduler_output.num_scheduled_tokens,
             scheduler_output.finished_req_ids or (),
@@ -353,9 +338,8 @@ class OnComputeStoreHandler(StoreTriggerHandler):
                 self._advance_stored_idx(req_status, num_offloadable_tokens)
                 continue
 
-            store_output = self._prepare_store(new_offload_keys, req_status.req_context)
+            store_output = sink.prepare_store(new_offload_keys, req_status.req_context)
             if store_output is None:
-                output.num_allocation_failures += 1
                 logger.warning("Request %s: cannot store chunks", req_id)
                 continue
 
@@ -418,19 +402,15 @@ class OnComputeStoreHandler(StoreTriggerHandler):
 
             # the non-sliding window blocks will be watched only
             # when the request finishes
-            output.jobs.append(
-                self._make_store_job(
-                    req_id,
-                    ordered_keys_to_store,
-                    GPULoadStoreSpec(
-                        src_block_ids,
-                        group_sizes=group_sizes,
-                        block_indices=block_indices,
-                    ),
-                    store_output.store_spec,
-                    fenced_block_ids=fenced_block_ids or None,
-                    deferred_fence_block_ids=deferred_fence_block_ids,
-                )
+            sink.add_job(
+                req_id,
+                ordered_keys_to_store,
+                GPULoadStoreSpec(
+                    src_block_ids,
+                    group_sizes=group_sizes,
+                    block_indices=block_indices,
+                ),
+                store_output.store_spec,
+                fenced_block_ids=fenced_block_ids or None,
+                deferred_fence_block_ids=deferred_fence_block_ids,
             )
-
-        return output

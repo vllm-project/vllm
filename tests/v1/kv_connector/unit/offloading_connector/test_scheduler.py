@@ -377,18 +377,20 @@ def _partial_tail_store_jobs(
     scheduler: OffloadingConnectorScheduler, scheduler_output: Any
 ) -> dict[int, TransferJob]:
     handler = _on_compute(scheduler)
-    return scheduler._add_store_jobs(
-        handler._build_partial_tail_store_jobs(scheduler_output, scheduler._req_status),
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
+    handler._build_partial_tail_store_jobs(
+        scheduler_output, scheduler._req_status, sink
     )
+    return sink.jobs
 
 
 def _store_jobs(
     scheduler: OffloadingConnectorScheduler, scheduler_output: Any
 ) -> dict[int, TransferJob]:
     handler = _on_compute(scheduler)
-    return scheduler._add_store_jobs(
-        handler._build_chunk_store_jobs(scheduler_output, scheduler._req_status)
-    )
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
+    handler._build_chunk_store_jobs(scheduler_output, scheduler._req_status, sink)
+    return sink.jobs
 
 
 def _reduce_kv_connector_stats(runner):
@@ -512,13 +514,11 @@ def test_aligned_boundary_store_maps_sparse_group_id_to_dense_transfer_slot():
     )
 
     handler = _on_compute(scheduler)
-    jobs = scheduler._add_store_jobs(
-        handler._build_aligned_boundary_store_jobs(
-            {"req": [(1, 98, 16)]}, scheduler._req_status
-        ),
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
+    handler._build_aligned_boundary_store_jobs(
+        {"req": [(1, 98, 16)]}, scheduler._req_status, sink
     )
-
-    [job] = jobs.values()
+    [job] = sink.jobs.values()
     assert isinstance(job.src_spec, GPULoadStoreSpec)
     assert job.src_spec.group_sizes == [1]
     assert job.src_spec.block_indices == [0]
@@ -790,12 +790,11 @@ def test_sparse_group_miss_registers_shared_prefix_junction():
     scheduler.manager.prepare_store.side_effect = (
         lambda keys, req_context, trigger: generate_store_output(keys)
     )
-    jobs = scheduler._add_store_jobs(
-        _on_compute(scheduler)._build_aligned_boundary_store_jobs(
-            {"req": [(1, 77, 16)]}, scheduler._req_status
-        )
+    sink = scheduler_module._StoreJobSink(scheduler, StoreTrigger.ON_COMPUTE)
+    _on_compute(scheduler)._build_aligned_boundary_store_jobs(
+        {"req": [(1, 77, 16)]}, scheduler._req_status, sink
     )
-    [job_id] = jobs
+    [job_id] = sink.jobs
     stored.update(scheduler._job_statuses[job_id].keys)
 
     scheduler._req_status["req"].transfer_jobs.clear()
@@ -2637,7 +2636,7 @@ class _RecordingStoreHandler(OnComputeStoreHandler):
 
 def _install_recording_handler(runner) -> _RecordingStoreHandler:
     sched = runner.connector_scheduler
-    handler = _RecordingStoreHandler(sched.config, sched.manager, sched._events_tracker)
+    handler = _RecordingStoreHandler(sched.config, sched._events_tracker)
     sched._store_handlers[StoreTrigger.ON_COMPUTE] = handler
     return handler
 
@@ -3567,7 +3566,7 @@ def test_swa_load_does_not_wait_for_unusable_pending_suffix(
     manager = CPUOffloadingManager(num_chunks=16)
     sched.manager = manager
     sched._store_handlers[StoreTrigger.ON_COMPUTE] = OnComputeStoreHandler(
-        sched.config, manager, sched._events_tracker
+        sched.config, sched._events_tracker
     )
     runner.new_request(token_ids=list(range(17)))
     state = sched._req_status["0"]
@@ -3729,7 +3728,7 @@ def test_loads_do_not_populate_fence_index(request_runner):
 
 def test_no_store_job_while_a_load_is_pending(request_runner):
     """A request with a load in flight gets no store job in later steps, so
-    _add_store_jobs never sees a store next to a pending load."""
+    _track_store_job never sees a store next to a pending load."""
     runner = request_runner(
         blocks_per_chunk=3,
         block_size=4,

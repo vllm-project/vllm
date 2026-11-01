@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Collection, Mapping
-from dataclasses import dataclass, field
-from typing import ClassVar
+from typing import ClassVar, Protocol
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
-    TransferJob,
-    TransferJobStatus,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventsTracker,
@@ -21,7 +18,6 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LoadStoreSpec,
-    OffloadingManager,
     OffloadKey,
     PrepareStoreOutput,
     ReqContext,
@@ -29,21 +25,40 @@ from vllm.v1.kv_offload.base import (
 )
 
 
-@dataclass
-class StoreJobsOutput:
-    """The store jobs of one handler in one scheduler step."""
+class StoreJobSink(Protocol):
+    """The scheduler's store-job intake for one handler, in one step.
 
-    # The scheduler gives each job its ID, in this order.
-    jobs: list[tuple[TransferJob, TransferJobStatus]] = field(default_factory=list)
-    # Number of prepare_store calls that returned None.
-    num_allocation_failures: int = 0
+    The sink carries the trigger of its handler, so a handler cannot stamp a
+    job with the wrong cause. The scheduler gives each job its ID and tracks
+    it.
+    """
+
+    def prepare_store(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> PrepareStoreOutput | None:
+        """Offer keys to the manager, with the trigger of this handler."""
+        ...
+
+    def add_job(
+        self,
+        req_id: ReqId,
+        keys: Collection[OffloadKey],
+        src_spec: GPULoadStoreSpec,
+        dst_spec: LoadStoreSpec,
+        *,
+        fenced_block_ids: list[int] | None = None,
+        deferred_fence_block_ids: list[int] | None = None,
+    ) -> None:
+        """Make a store job, and let the scheduler track it."""
+        ...
 
 
 class StoreTriggerHandler(ABC):
     """Makes the store jobs of one StoreTrigger.
 
-    The handler offers chunks to the manager and describes the store jobs. The
-    scheduler gives the jobs their IDs, tracks them, and completes them.
+    The handler offers chunks to the manager through the sink, and describes
+    the store jobs. The scheduler gives the jobs their IDs, tracks them, and
+    completes them.
 
     Handlers are isolated. A handler does not know of other handlers, and its
     result does not depend on which handlers run, or on their order. A handler
@@ -57,52 +72,10 @@ class StoreTriggerHandler(ABC):
     def __init__(
         self,
         config: SchedulerOffloadConfig,
-        manager: OffloadingManager,
         events_tracker: OffloadingEventsTracker,
     ):
         self._config = config
-        # A handler offers chunks only through _prepare_store.
-        self._manager = manager
         self._events_tracker = events_tracker
-
-    def _prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
-    ) -> PrepareStoreOutput | None:
-        """Offer keys to the manager, with the trigger of this handler."""
-        return self._manager.prepare_store(keys, req_context, self.trigger)
-
-    def _make_store_job(
-        self,
-        req_id: ReqId,
-        keys: Collection[OffloadKey],
-        src_spec: GPULoadStoreSpec,
-        dst_spec: LoadStoreSpec,
-        fenced_block_ids: list[int] | None = None,
-        deferred_fence_block_ids: list[int] | None = None,
-    ) -> tuple[TransferJob, TransferJobStatus]:
-        """Make a store job, and the status that tracks it.
-
-        Args:
-            req_id: the request that owns the blocks.
-            keys: the keys that the job stores.
-            src_spec: the GPU blocks to read.
-            dst_spec: where the manager stores the blocks.
-            fenced_block_ids: the source blocks to fence from job creation.
-            deferred_fence_block_ids: the source blocks to fence after the
-                request finishes.
-
-        """
-        job = TransferJob(req_id=req_id, src_spec=src_spec, dst_spec=dst_spec)
-        job_status = TransferJobStatus(
-            req_id=req_id,
-            pending_count=self._config.num_workers,
-            keys=tuple(dict.fromkeys(keys)),
-            is_store=True,
-            deferred_fence_block_ids=deferred_fence_block_ids,
-            fenced_block_ids=fenced_block_ids,
-            trigger=self.trigger,
-        )
-        return job, job_status
 
     def on_load_scheduled(
         self,
@@ -161,14 +134,13 @@ class StoreTriggerHandler(ABC):
         self,
         scheduler_output: SchedulerOutput,
         req_states: Mapping[ReqId, RequestOffloadState],
-    ) -> StoreJobsOutput:
+        sink: StoreJobSink,
+    ) -> None:
         """Offer the chunks of this trigger to the manager, and make the jobs.
 
         Args:
             scheduler_output: the output of the current scheduler step.
             req_states: the state of each tracked request.
-
-        Returns:
-            The new store jobs, in the order of their job IDs.
+            sink: the intake for the store jobs of this step.
 
         """
