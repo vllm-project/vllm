@@ -64,6 +64,8 @@ CHECK_IMPORTS = {
             "tests/distributed/test_shm_broadcast.py",
             "tests/distributed/test_weight_transfer.py",
             "vllm/utils/hashing.py",
+            # Entries hold executable object code from trusted writers.
+            "vllm/utils/cute_dsl_aot_cache.py",
             "tests/multimodal/media/test_base.py",
             "tests/tokenizers_/test_hf.py",
             "tests/utils_/test_hashing.py",
