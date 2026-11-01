@@ -13,6 +13,7 @@ import torch
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import is_breakable_cudagraph_enabled
 from vllm.config import VllmConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
@@ -474,7 +475,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         num_accepted_tokens: torch.Tensor | None = None,
         num_decode_draft_tokens_cpu: torch.Tensor | None = None,
         fast_build: bool = False,
+        cudagraph_mode: CUDAGraphMode | None = None,
     ) -> GDNAttentionMetadata:
+        """``cudagraph_mode`` is the batch's runtime mode, if the caller knows
+        it. A FULL replay never reads the capture buffers, so a FULL batch
+        skips staging them. PIECEWISE capture builds its metadata with mode
+        NONE, so NONE still stages."""
         m = common_attn_metadata
 
         query_start_loc = m.query_start_loc
@@ -855,9 +861,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         if self.captures_mixed_batches:
-            attn_metadata = self._stage_capture_buffers(
-                attn_metadata, m, non_spec_query_start_loc_cpu
-            )
+            if cudagraph_mode != CUDAGraphMode.FULL:
+                attn_metadata = self._stage_capture_buffers(
+                    attn_metadata, m, non_spec_query_start_loc_cpu
+                )
         elif num_prefills > 0:
             attn_metadata = self._stage_mixed_batch(attn_metadata)
         return attn_metadata
@@ -1094,10 +1101,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             checkpoint=checkpoint,
         )
         if self.captures_mixed_batches:
-            values = self._capture_values(metadata)
-            metadata = self._stage_capture_fields(
-                metadata, {name: values[name] for name in STATE_INDEX_FIELDS}
-            )
+            # build() staged no capture buffers for a FULL batch.
+            if m.capture_buffers is not None:
+                values = self._capture_values(metadata)
+                metadata = self._stage_capture_fields(
+                    metadata, {name: values[name] for name in STATE_INDEX_FIELDS}
+                )
         elif m.num_prefills > 0:
             metadata = self._stage_mixed_batch(metadata, STATE_INDEX_FIELDS)
         return metadata

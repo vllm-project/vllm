@@ -187,6 +187,7 @@ def _build(
     batch_spec: BatchSpec,
     num_decode_draft_tokens: list[int] | None = None,
     block_table: torch.Tensor | None = None,
+    cudagraph_mode: CUDAGraphMode | None = None,
 ) -> GDNAttentionMetadata:
     """Build GDN attention metadata, optionally with spec-decode kwargs."""
     common = create_common_attn_metadata(batch_spec, BLOCK_SIZE, DEVICE)
@@ -200,7 +201,12 @@ def _build(
         kwargs["num_accepted_tokens"] = torch.ones(
             batch_spec.batch_size, dtype=torch.int32, device=DEVICE
         )
-    return builder.build(common_prefix_len=0, common_attn_metadata=common, **kwargs)
+    return builder.build(
+        common_prefix_len=0,
+        common_attn_metadata=common,
+        cudagraph_mode=cudagraph_mode,
+        **kwargs,
+    )
 
 
 @pytest.mark.parametrize(
@@ -826,6 +832,60 @@ def test_capture_buffers_hold_any_batch(update_block_table: bool, mamba_cache_mo
         assert torch.all(meta.batch_ptr[num_programs:] == PAD_SLOT_ID)
         assert meta.nums_dict is not None
         assert meta.nums_dict[8]["tot"] == num_programs
+
+
+@pytest.mark.parametrize(
+    "cudagraph_mode, staged",
+    [
+        (None, True),
+        (CUDAGraphMode.PIECEWISE, True),
+        (CUDAGraphMode.FULL, False),
+        (CUDAGraphMode.NONE, True),
+    ],
+)
+def test_capture_buffers_skipped_for_full(cudagraph_mode, staged):
+    """A FULL batch leaves the capture buffers untouched, in build() and in
+    update_block_table(), and keeps the batch's own metadata. NONE must still
+    stage: PIECEWISE capture builds its metadata with mode NONE."""
+    from vllm.v1.attention.backends.gdn_attn import (
+        CAPTURE_PAD_VALUES,
+        STATE_INDEX_FIELDS,
+    )
+
+    builder, group_builder, reference_builder = (
+        _create_gdn_builder(num_speculative_tokens=2, num_speculative_blocks=2)
+        for _ in range(3)
+    )
+    for each_builder in (builder, group_builder, reference_builder):
+        each_builder.vllm_config.cache_config.mamba_cache_mode = "none"
+    builder.captures_mixed_batches = group_builder.captures_mixed_batches = True
+    batches = {**MIXED_BATCHES, **DECODE_BATCHES}
+    for name, (seq_lens, query_lens, draft_tokens) in batches.items():
+        batch = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
+        block_table = torch.randint(1, 1000, (batch.batch_size, 3), dtype=torch.int32)
+        before = {k: builder.mixed_batch_buffers[k].clone() for k in CAPTURE_PAD_VALUES}
+        group_before = {
+            k: group_builder.mixed_batch_buffers[k].clone() for k in STATE_INDEX_FIELDS
+        }
+        meta = _build(builder, batch, draft_tokens, block_table, cudagraph_mode)
+        meta = group_builder.update_block_table(meta, block_table, torch.empty(0))
+        assert (meta.capture_buffers is not None) == staged, name
+        if staged:
+            continue
+        # build() keeps a prefill batch's own chunk and conv1d program
+        # metadata in the other buffers.
+        for field in CAPTURE_PAD_VALUES:
+            buffer = builder.mixed_batch_buffers[field]
+            assert torch.equal(buffer, before[field]), (name, field)
+        for field in STATE_INDEX_FIELDS:
+            buffer = group_builder.mixed_batch_buffers[field]
+            assert torch.equal(buffer, group_before[field]), (name, field)
+        reference = _build(reference_builder, batch, draft_tokens, block_table)
+        for field in ("non_spec_query_start_loc", "spec_query_start_loc"):
+            expected, actual = getattr(reference, field), getattr(meta, field)
+            assert (expected is None) == (actual is None), (name, field)
+            if expected is not None:
+                assert torch.equal(actual, expected), (name, field)
 
 
 @pytest.mark.parametrize(
