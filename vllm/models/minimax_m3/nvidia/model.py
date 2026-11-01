@@ -13,6 +13,7 @@ The MiniMax-M3-preview config selects a single set of branches:
 """
 
 from collections.abc import Iterable
+from typing import TYPE_CHECKING, cast
 
 import torch
 from torch import nn
@@ -128,6 +129,7 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
+from vllm.models.minimax_m3.nvidia.indexer_msa import resolve_index_k_shard
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -138,6 +140,9 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     get_kv_quant_mode,
 )
+
+if TYPE_CHECKING:
+    from vllm.models.minimax_m3.nvidia.indexer_msa import MiniMaxM3IndexerMSAMetadata
 
 logger = init_logger(__name__)
 
@@ -778,7 +783,16 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.total_idx_heads = sparse_cfg["sparse_num_index_heads"]
         self.num_idx_heads = self.num_kv_heads
         self.idx_head_dim = sparse_cfg["sparse_index_dim"]
-        self.index_q_size = self.num_idx_heads * self.idx_head_dim
+        vllm_config = get_current_vllm_config()
+        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
+            "bf16"
+        )
+        self.index_k_shard = resolve_index_k_shard(
+            vllm_config,
+            self.total_idx_heads,
+            self.indexer_kv_dtype,
+            sparse_cfg["sparse_topk_blocks"],
+        )
 
         # Single fused projection: q, k, v, index_q, index_k in one GEMM.
         self.qkv_proj = MinimaxM3QKVParallelLinearWithIndexer(
@@ -791,7 +805,9 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            replicate_index_q=self.index_k_shard > 1,
         )
+        self.index_q_size = self.qkv_proj.num_index_heads * self.idx_head_dim
         # reduce_results=False: the attention all-reduce is fused with the
         # following post_attention_layernorm (GemmaRMSNorm) in the decoder layer
         # via fused_allreduce_gemma_rms_norm.
@@ -827,7 +843,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         self.index_rotary_emb = self.rotary_emb
 
         # Attention-backend wiring.
-        vllm_config = get_current_vllm_config()
         self.layer_name = f"{prefix}.attn"
         self.kv_cache_dtype = (
             cache_config.cache_dtype if cache_config is not None else "auto"
@@ -841,12 +856,6 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         set_default_quant_scales(self, register_buffer=True)
         # The fused insert quantizes k/v into NVFP4 pages with these scales.
         self.use_nvfp4_kv = get_kv_quant_mode(self.kv_cache_dtype).is_nvfp4
-        # Indexer side-cache dtype, mirroring --kv-cache-dtype for the main
-        # cache (--attention-config '{"indexer_kv_dtype": ...}').
-        self.indexer_kv_dtype = vllm_config.attention_config.resolve_indexer_kv_dtype(
-            "bf16"
-        )
-
         # Shared top-k buffer: the indexer writes the selected blocks into it and
         # the attend impl reads them back (so nothing crosses the eager break as a
         # Python value, which would freeze at capture).
@@ -886,6 +895,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
             cache_config=cache_config,
             indexer_kv_dtype=self.indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
+            index_k_shard=self.index_k_shard,
         )
 
         # Register the main K/V cache so the KV-cache manager allocates it.
@@ -1010,6 +1020,17 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
         index_slot_mapping = fwd_slot_mapping[self.indexer.index_cache.prefix]
+        prefetch_index_history = False
+        if self.indexer.index_cache.tp_shard > 1:
+            attn_metadata = get_forward_context().attn_metadata
+            assert isinstance(attn_metadata, dict)
+            index_md = cast(
+                "MiniMaxM3IndexerMSAMetadata",
+                attn_metadata[self.indexer.index_cache.prefix],
+            )
+            assert index_md.index_slot_mapping is not None
+            index_slot_mapping = index_md.index_slot_mapping
+            prefetch_index_history = index_md.decode is not None
         # FlashInfer autotunes the GEMMs its dummy runs call: take the unfused
         # path there so qkv_proj is tuned for the M < 512 fallback.
         if isinstance(hidden_states, QuantizedActivation):
@@ -1063,7 +1084,7 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 eps,
                 self.index_q_norm.weight,
                 self.index_k_norm.weight,
-                self.num_idx_heads,
+                self.qkv_proj.num_index_heads,
                 main_slot_mapping,
                 index_slot_mapping,
                 self.kv_cache,
@@ -1077,6 +1098,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 kv_k_scale=self._k_scale if self.use_nvfp4_kv else None,
                 kv_v_scale=self._v_scale if self.use_nvfp4_kv else None,
                 write_qkv=not q_is_fp8,
+                # CP scoring reads step metadata before waiting for this writer.
+                enable_pdl=not prefetch_index_history,
             )
 
         output = torch.empty((num_tokens, self.q_size), dtype=dtype, device=device)
