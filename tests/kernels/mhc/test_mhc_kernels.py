@@ -52,6 +52,64 @@ from vllm.utils.torch_utils import set_random_seed
 DEVICE = current_platform.device_type
 
 
+@pytest.mark.parametrize("width", [4096, 16384])
+def test_hc_prenorm_triton_batch_invariant(width):
+    from vllm.model_executor.kernels.mhc.triton import (
+        hc_prenorm_gemm_batch_invariant as hc_prenorm,
+    )
+
+    torch.manual_seed(42)
+    x = torch.randn((7, width), device=DEVICE, dtype=torch.bfloat16)
+    fn = torch.randn((24, width), device=DEVICE)
+    mixes, sq = hc_prenorm(x, fn)
+    reference = x.double() @ fn.double().T
+    torch.testing.assert_close(mixes[0].double(), reference, atol=1e-4, rtol=1e-5)
+    torch.testing.assert_close(
+        sq[0].double(), x.double().square().sum(-1), atol=0.002, rtol=1e-6
+    )
+    for i in (0, 3, 6):
+        single_mix, single_sq = hc_prenorm(x[i : i + 1], fn)
+        assert torch.equal(single_mix[0, 0], mixes[0, i])
+        assert torch.equal(single_sq[0, 0], sq[0, i])
+
+
+def test_mhc_fused_post_pre_batch_invariant(monkeypatch):
+    from vllm.model_executor.kernels.mhc.tilelang import mhc_fused_post_pre_tilelang
+
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    torch.manual_seed(3)
+    x = torch.randn((129, 4096), dtype=torch.bfloat16, device=DEVICE)
+    residual = torch.randn((129, 4, 4096), dtype=torch.bfloat16, device=DEVICE)
+    post = torch.rand((129, 4, 1), device=DEVICE)
+    comb = torch.rand((129, 4, 4), device=DEVICE)
+    fn = torch.randn((24, 16384), device=DEVICE) * 0.01
+    scale = torch.ones(3, device=DEVICE)
+    base = torch.zeros(24, device=DEVICE)
+    norm = torch.ones(4096, dtype=torch.bfloat16, device=DEVICE)
+    reference = None
+    for n in (1, 17, 129):
+        outputs = mhc_fused_post_pre_tilelang(
+            x[:n],
+            residual[:n],
+            post[:n],
+            comb[:n],
+            fn,
+            scale,
+            base,
+            1e-6,
+            1e-6,
+            1e-6,
+            2.0,
+            20,
+            norm_weight=norm,
+        )
+        if reference is None:
+            reference = outputs
+        else:
+            for output, expected in zip(outputs, reference):
+                assert torch.equal(output[0], expected[0])
+
+
 @pytest.mark.parametrize(
     "tp,ep,hidden,hc,multicast,expected",
     [
