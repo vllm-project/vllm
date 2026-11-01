@@ -448,14 +448,7 @@ def ba_loads(c):
 def stage_qkvz(c, ops, p=0, nxt=None):
     """The CTA's groups of pass ``p``: the two K halves in order -> bf16 PROJ;
     ``nxt()`` (the next pass's loads, returned) once the MFMAs are issued."""
-    s, tid, lane, wave, red, bid = (
-        c["S"],
-        c["tid"],
-        c["lane"],
-        c["wave"],
-        c["red"],
-        c["bid"],
-    )
+    s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     acc = D.gu_mfmas(c, ops[0], ops[1], [wave % 2 * Q_HALF + i for i in range(Q_HALF)])
     ops_n = None
     if const_expr(nxt is not None):
@@ -463,19 +456,34 @@ def stage_qkvz(c, ops, p=0, nxt=None):
     fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
     gpu.barrier()
     geo = c["G"]
-    if tid < geo.qg_pass * ROWS * s:
-        q = tid // (ROWS * s)
-        rem = tid % (ROWS * s)
-        t = rem // ROWS
-        r = rem % ROWS
-        v = bf16_round(row_sum(red, r, t, waves=(2 * q, 2 * q + 1)))
-        c["put"](
-            c["proj"],
-            t * geo.qkvz + plus(geo.qg_cta * bid + q, p * geo.qg_pass) * ROWS + r,
-            v,
-        )
+    n = geo.qg_pass * ROWS * s
+    if const_expr(geo.qkvz_out_rounds(s) == 1):
+        if tid < n:
+            qkvz_put(c, tid, p)
+    else:
+        # more outputs than threads (TP2 on 128 CTAs above 8 rows)
+        for i in range_constexpr(geo.qkvz_out_rounds(s)):
+            if tid + THREADS * i < n:
+                qkvz_put(c, tid + THREADS * i, p)
     gpu.barrier()
     return ops_n
+
+
+@traced
+def qkvz_put(c, u, p):
+    """Output ``u`` (group, token, row) of pass ``p``: the two K halves summed in
+    order -> bf16 -> PROJ."""
+    s, red, bid, geo = c["S"], c["red"], c["bid"], c["G"]
+    q = u // (ROWS * s)
+    rem = u % (ROWS * s)
+    t = rem // ROWS
+    r = rem % ROWS
+    v = bf16_round(row_sum(red, r, t, waves=(2 * q, 2 * q + 1)))
+    c["put"](
+        c["proj"],
+        t * geo.qkvz + plus(geo.qg_cta * bid + q, p * geo.qg_pass) * ROWS + r,
+        v,
+    )
 
 
 def run_qkvz(c, ops):

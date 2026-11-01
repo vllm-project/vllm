@@ -224,6 +224,28 @@ def test_qkvz_groups_once(grid, tp):
     )
     _once(got, range(geo.qkvz // T.ROWS))
     assert 2 * geo.qg_pass <= T.WAVES and geo.ba_ctas <= grid <= T.THREADS
+    # a pass's outputs, THREADS a round, each (group, token, row) once
+    for s in range(1, T.max_tokens(tp) + 1):
+        n = geo.qg_pass * T.ROWS * s
+        rounds = geo.qkvz_out_rounds(s)
+        outs = Counter(
+            u
+            for i in range(rounds)
+            for u in range(T.THREADS * i, T.THREADS * (i + 1))
+            if u < n
+        )
+        _once(outs, range(n))
+        assert rounds == 1 or grid < 256
+
+
+def test_qkvz_output_rounds():
+    """One round wherever #61573 ran (256 CTAs); two at TP2 on 128 CTAs above
+    8 rows, where 4 groups x 16 rows x S outnumber the 512 threads."""
+    for tp in T.TP_SIZES:
+        geo = T.Geo(tp, 256)
+        assert {geo.qkvz_out_rounds(s) for s in range(1, T.max_tokens(tp) + 1)} == {1}
+    assert T.Geo(1, 128).qkvz_out_rounds(8) == 1
+    assert [T.Geo(2, 128).qkvz_out_rounds(s) for s in (8, 9, 16)] == [1, 2, 2]
 
 
 def _task_of(geo, s, b, k):

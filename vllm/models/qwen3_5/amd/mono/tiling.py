@@ -327,6 +327,11 @@ class Geo(NamedTuple):
     def qkvz_passes(self) -> int:
         return self.qg_cta // self.qg_pass
 
+    def qkvz_out_rounds(self, s: int) -> int:
+        """Thread rounds of a pass's outputs (group, token, row) at S rows: 1 on
+        256 CTAs; 2 at TP2 on 128 CTAs above 8 rows (4 groups x 16 rows x S)."""
+        return _cdiv(self.qg_pass * ROWS * s, THREADS)
+
     @property
     def ba_ctas(self) -> int:
         """CTAs of in_proj_ba: its groups x K eighths (48 at TP1, 24 at TP2)."""
