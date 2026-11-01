@@ -104,15 +104,16 @@ def unsupported(vllm_config) -> list[str]:
         # the kernels read one batch's attention metadata per step
         (pc.use_ubatching, "DBO (dual-batch overlap)"),
         (vllm_config.lora_config is not None, "LoRA"),
-        # MoRIIO consumers finish loads before execution, without per-layer hooks.
+        # MoRIIO and Mooncake consumers finish loads before execution, without
+        # per-layer hooks.
         (
             kv is not None
             and (
-                kv.kv_connector != "MoRIIOConnector"
+                kv.kv_connector not in ("MoRIIOConnector", "MooncakeConnector")
                 or kv.kv_connector_module_path is not None
                 or kv.kv_role != "kv_consumer"
             ),
-            "KV transfer connectors other than a MoRIIO consumer",
+            "KV transfer connectors other than a MoRIIO or Mooncake consumer",
         ),
         (
             vllm_config.aux_output_config.enable_return_routed_experts,
