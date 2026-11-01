@@ -31,7 +31,8 @@ TP8 on MI355X with all 256 CUs, decode context parallel 1 or 8, speculative
 decoding with at most 7 speculative tokens, Model Runner V2, BF16 conv / FP32
 recurrent KDA states.
 
-KV transfer support is limited to built-in MoRIIO READ and WRITE consumers.
+KV transfer support is limited to built-in MoRIIO READ and WRITE consumers and
+the built-in Mooncake consumer.
 Keep the producer on `decode_backend=auto` and use matching cache layouts.
 
 If you request the specialized decode for anything else, startup fails with one

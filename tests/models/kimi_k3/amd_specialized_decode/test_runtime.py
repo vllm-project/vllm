@@ -193,6 +193,15 @@ def test_moriio_consumer_is_supported(supported_vllm_config, read_mode, backend)
     assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
 
 
+def test_mooncake_consumer_is_supported(supported_vllm_config):
+    supported_vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="MooncakeConnector",
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"mooncake_protocol": "rdma"},
+    )
+    assert specialized_decode_config(supported_vllm_config) == DecodeConfig(q=8)
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -201,6 +210,8 @@ def test_moriio_consumer_is_supported(supported_vllm_config, read_mode, backend)
         {"kv_connector_module_path": "custom.connector"},
         {"kv_role": "kv_producer"},
         {"kv_role": "kv_both"},
+        {"kv_connector": "MooncakeConnector", "kv_role": "kv_producer"},
+        {"kv_connector": "MooncakeConnector", "kv_role": "kv_both"},
     ],
 )
 def test_unsupported_kv_transfer_is_refused(supported_vllm_config, overrides):
