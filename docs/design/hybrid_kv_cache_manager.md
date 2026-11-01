@@ -131,13 +131,17 @@ Some architectures (e.g., Bamba, Jamba, Minimax) interleave standard attention l
 The current algorithm is:
 
 1. Increase the `block_size` of attention layers until
+
     $$
     \text{block_size} \times \text{kv_hidden_size}_{\text{att}} \ge \text{state_size}_{\text{mamba}}
     $$
+
 2. Pad the mamba state per layer to
+
     $$
     \text{block_size} \times \text{kv_hidden_size}_{\text{att}}
     $$
+
 3. Apply the grouping strategy in case 3.
 
 !!! note
