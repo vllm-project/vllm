@@ -109,8 +109,8 @@ from ..common.engram import (
 )
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 from .ops.mhc import (
-    MHC_OVERLAP_MAX_TOKENS,
     init_mhc_all_reduce,
+    mhc_overlap_max_tokens,
     mhc_pre_delayed_overlap,
     mhc_shifted_post_pre,
     supports_mhc_all_reduce,
@@ -169,12 +169,12 @@ class DeepseekV4MoE(DeepseekV4MoEBase):
             experts_cls is TrtLlmMxfp4ExpertsModular
             and self.experts.routed_scaling_factor == 1.0
         ):
-            moe_config.defer_moe_finalize(MHC_OVERLAP_MAX_TOKENS)
+            moe_config.defer_moe_finalize(mhc_overlap_max_tokens())
             if moe_config.use_deferred_moe_finalize:
                 logger.info_once(
                     "DSV4.1 mHC: MoE top-k finalize fused into the all-reduce for "
                     "up to %d tokens.",
-                    MHC_OVERLAP_MAX_TOKENS,
+                    mhc_overlap_max_tokens(),
                 )
 
     def defers_finalize(self, num_tokens: int) -> bool:
@@ -424,7 +424,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                         max_tokens=(
                             max_tokens
                             if split_mode == "fused"
-                            else min(max_tokens, MHC_OVERLAP_MAX_TOKENS)
+                            else min(max_tokens, mhc_overlap_max_tokens())
                         ),
                         hidden_size=self.hidden_size,
                         rms_eps=self.rms_norm_eps,
@@ -508,7 +508,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         mhc_stream = self.mhc_stream
         if mhc_stream is not None and (
             in_piecewise_cudagraph()
-            or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+            or not 0 < positions.shape[0] <= mhc_overlap_max_tokens()
             or not torch.cuda.is_current_stream_capturing()
         ):
             # Use overlap only in FULL graphs; eager warmup initializes Mega mHC.
