@@ -1450,6 +1450,12 @@ class MambaManager(SingleTypeKVCacheManager):
         # Mamba checkpoints follow Eagle's global replay boundary.
         self.drop_eagle_checkpoint_block = False
         self.cached_blocks_this_step: set[BlockHashWithGroupId] = set()
+        # ``CacheConfig.evict_superseded_mamba_states``, set by
+        # ``KVCacheManager``.
+        self.evict_superseded_states = False
+        # {req_id: {block_id: block_hash}} of the cached states each request
+        # resumed from, kept across preemption.
+        self._hit_states: dict[str, dict[int, BlockHashWithGroupId]] = {}
         if self.mamba_cache_mode == "align":
             # Mapping from request ID to the index of the block
             # allocated in the previous step
@@ -1688,6 +1694,25 @@ class MambaManager(SingleTypeKVCacheManager):
                 )
             )
         )
+
+    def add_local_computed_blocks(
+        self,
+        request_id: str,
+        new_computed_blocks: Sequence[KVCacheBlock],
+        num_local_computed_tokens: int,
+        num_external_computed_tokens: int,
+    ) -> None:
+        super().add_local_computed_blocks(
+            request_id,
+            new_computed_blocks,
+            num_local_computed_tokens,
+            num_external_computed_tokens,
+        )
+        if self.evict_superseded_states and new_computed_blocks:
+            hit = new_computed_blocks[-1]
+            if hit.block_hash is not None:
+                hits = self._hit_states.setdefault(request_id, {})
+                hits[hit.block_id] = hit.block_hash
 
     def get_num_blocks_to_allocate(
         self,
@@ -1967,6 +1992,36 @@ class MambaManager(SingleTypeKVCacheManager):
                 if entry[0] != request_id
             ]
         return super().pop_blocks_for_free(request_id)
+
+    def evict_superseded_states_first(self, request: Request) -> None:
+        """Evict first the states a finished request resumed from that a
+        deeper cached state on its own tokens supersedes, e.g. the previous
+        turn's state once a conversation's next turn has cached its own.
+        """
+        hits = self._hit_states.pop(request.request_id, None)
+        if not hits:
+            return
+        blocks = self.block_pool.blocks
+        hit_blocks = [blocks[i] for i, h in hits.items() if blocks[i].block_hash == h]
+        if not hit_blocks:
+            return
+        _, latest = self.find_longest_cache_hit(
+            block_hashes=request.block_hashes,
+            max_length=request.num_tokens,
+            kv_cache_group_ids=[self.kv_cache_group_id],
+            block_pool=self.block_pool,
+            kv_cache_spec=self.kv_cache_spec,
+            drop_eagle_block=False,
+            alignment_tokens=self.cache_hit_alignment_tokens,
+        )
+        # States up to a shared-prefix junction can serve other requests.
+        self.block_pool.prioritize_eviction(
+            block
+            for block in hit_blocks
+            if request.shared_prefix_boundary
+            < (block.block_hash_num_tokens or 0)
+            < latest
+        )
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """Get the number of tokens whose mamba state are not needed anymore. Mamba only

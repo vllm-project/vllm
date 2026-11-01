@@ -198,6 +198,9 @@ class BlockPool:
         # Callbacks for blocks released with ``unpin_blocks`` whose contents
         # are still being read until the pool reuses them.
         self._reuse_watchers: dict[int, Callable[[KVCacheBlock], None]] = {}
+        # Referenced cached blocks that ``free_blocks`` puts at the front of
+        # the free queue; see ``prioritize_eviction``.
+        self._evict_first_block_ids: set[int] = set()
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -631,6 +634,7 @@ class BlockPool:
         self,
         block: KVCacheBlock,
     ) -> list[BlockHashWithGroupId]:
+        self._evict_first_block_ids.discard(block.block_id)
         block_hashes: list[BlockHashWithGroupId] = []
         if block.block_hash is not None:
             block_hashes.append(block.block_hash)
@@ -806,6 +810,7 @@ class BlockPool:
             if block.ref_cnt == 0:
                 self.free_block_queue.remove(block)
             block.ref_cnt += 1
+            self._evict_first_block_ids.discard(block.block_id)
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
 
@@ -825,6 +830,7 @@ class BlockPool:
         # Identify blocks with hash (LRU cache) and without it (never match APC)
         blocks_to_evict_last = []
         blocks_to_evict_first = []
+        cached_blocks_to_evict_first = []
         other_pools: dict[BlockPool, list[KVCacheBlock]] = {}
         for block in ordered_blocks:
             if block.is_null:  # never pooled; its ref_cnt is not maintained
@@ -837,16 +843,41 @@ class BlockPool:
                 if block.block_hash is None or not self.enable_caching:
                     # LIFO reuse of non-cached blocks for better GPU locality.
                     blocks_to_evict_first.append(block)
+                elif block.block_id in self._evict_first_block_ids:
+                    self._evict_first_block_ids.remove(block.block_id)
+                    cached_blocks_to_evict_first.append(block)
                 else:
                     # FIFO reuse of cached blocks for LRU eviction behavior.
                     blocks_to_evict_last.append(block)
 
-        # Blocks to reuse first are prepended to the front of the free queue.
+        # Blocks to reuse first are prepended to the front of the free queue,
+        # non-cached ones in front of cached ones.
+        self.free_block_queue.prepend_n(cached_blocks_to_evict_first)
         self.free_block_queue.prepend_n(blocks_to_evict_first)
         # Blocks to reuse last are appended to the end of the free queue.
         self.free_block_queue.append_n(blocks_to_evict_last)
         for pool, blocks in other_pools.items():
             pool.free_blocks(blocks)
+
+    def prioritize_eviction(self, blocks: Iterable[KVCacheBlock]) -> None:
+        """Make cached blocks the next eviction candidates, keeping their hashes.
+
+        Free blocks move to the front of the free queue now; referenced blocks
+        go there when their last reference is freed, unless a prefix-cache hit
+        touches them first.
+
+        Args:
+            blocks: Distinct cached blocks of this pool.
+
+        """
+        free_blocks = []
+        for block in blocks:
+            if block.ref_cnt == 0:
+                self.free_block_queue.remove(block)
+                free_blocks.append(block)
+            else:
+                self._evict_first_block_ids.add(block.block_id)
+        self.free_block_queue.prepend_n(free_blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.

@@ -147,6 +147,7 @@ class KVCacheManager:
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
         enable_mamba_shared_prefix_checkpoint: bool = False,
+        evict_superseded_mamba_states: bool = False,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -195,6 +196,10 @@ class KVCacheManager:
             for manager in self.coordinator.single_type_managers:
                 if isinstance(manager, MambaManager):
                     manager.shared_prefix_checkpoint = True
+        self.evict_superseded_mamba_states = evict_superseded_mamba_states
+        for manager in self.coordinator.single_type_managers:
+            if isinstance(manager, MambaManager):
+                manager.evict_superseded_states = evict_superseded_mamba_states
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
         self.retained_hit_group_ids = tuple(
@@ -634,6 +639,7 @@ class KVCacheManager:
             request: The request to free the blocks.
 
         """
+        self._evict_superseded_mamba_states_first(request)
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
@@ -668,7 +674,15 @@ class KVCacheManager:
             The request's blocks in allocation order.
 
         """
+        self._evict_superseded_mamba_states_first(request)
         return self.coordinator.pop_blocks_for_free(request.request_id)
+
+    def _evict_superseded_mamba_states_first(self, request: Request) -> None:
+        # A preempted request resumes from its states.
+        if self.evict_superseded_mamba_states and request.is_finished():
+            for manager in self.coordinator.single_type_managers:
+                if isinstance(manager, MambaManager):
+                    manager.evict_superseded_states_first(request)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """Evict blocks from the prefix cache by their block IDs.
