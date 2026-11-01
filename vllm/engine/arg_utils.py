@@ -778,6 +778,8 @@ class EngineArgs:
     monokernel: bool = get_field(KernelConfig, "monokernel")
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
+    pp_group_cls: str = ParallelConfig.pp_group_cls
+    pipeline_stage_rank: int | None = ParallelConfig.pipeline_stage_rank
 
     profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
 
@@ -1374,6 +1376,10 @@ class EngineArgs:
         parallel_group.add_argument("--worker-cls", **parallel_kwargs["worker_cls"])
         parallel_group.add_argument(
             "--worker-extension-cls", **parallel_kwargs["worker_extension_cls"]
+        )
+        parallel_group.add_argument("--pp-group-cls", **parallel_kwargs["pp_group_cls"])
+        parallel_group.add_argument(
+            "--pipeline-stage-rank", **parallel_kwargs["pipeline_stage_rank"]
         )
         parallel_group.add_argument(
             "--enable-fault-tolerance", **parallel_kwargs["enable_fault_tolerance"]
@@ -2615,6 +2621,8 @@ class EngineArgs:
             distributed_executor_backend=self.distributed_executor_backend,
             worker_cls=self.worker_cls,
             worker_extension_cls=self.worker_extension_cls,
+            pp_group_cls=self.pp_group_cls,
+            pipeline_stage_rank=self.pipeline_stage_rank,
             decode_context_parallel_size=self.decode_context_parallel_size,
             dcp_comm_backend=self.dcp_comm_backend,
             dcp_q_replicate=self.dcp_q_replicate,
@@ -2925,9 +2933,13 @@ class EngineArgs:
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
         if self.pipeline_parallel_size > 1:
-            supports_pp = getattr(
-                self.distributed_executor_backend, "supports_pp", False
-            )
+            backend = self.distributed_executor_backend
+            if isinstance(backend, str) and "." in backend:
+                # The import path of a custom Executor subclass.
+                from vllm.utils.import_utils import resolve_obj_by_qualname
+
+                backend = resolve_obj_by_qualname(backend)
+            supports_pp = getattr(backend, "supports_pp", False)
             if not supports_pp and self.distributed_executor_backend not in (
                 ParallelConfig.distributed_executor_backend,
                 "ray",

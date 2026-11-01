@@ -331,6 +331,21 @@ class ParallelConfig:
     device and distributed initialization but before model loading, and
     `destroy_worker_extension(self)`, called (best-effort) before the worker
     shuts down."""
+    pp_group_cls: str = ""
+    """The full name of a `GroupCoordinator` subclass used for the pipeline
+    parallel group instead of `GroupCoordinator`. It is constructed with the
+    same arguments and lets an out-of-tree plugin provide its own transport
+    for the tensors passed between pipeline stages (e.g. by overriding
+    `isend_tensor_dict` / `irecv_tensor_dict`). Empty uses the default."""
+    pipeline_stage_rank: int | None = None
+    """Run only this pipeline stage (0-based) of `pipeline_parallel_size`
+    stages in this vLLM instance, with the other stages in other instances.
+    The torch.distributed world then spans this stage only (its size does not
+    include `pipeline_parallel_size`), and the PP group, which connects the
+    stages, comes from `pp_group_cls`. The executor that drives the stages is
+    supplied with `distributed_executor_backend` (a custom Executor; the
+    built-in ones expect all stages in this instance). None (default) runs
+    all stages in this instance."""
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
@@ -578,6 +593,32 @@ class ParallelConfig:
                 self.all2all_backend,
             )
             self.all2all_backend = "allgather_reducescatter"
+
+        if self.pipeline_stage_rank is not None:
+            if not 0 <= self.pipeline_stage_rank < self.pipeline_parallel_size:
+                raise ValueError(
+                    f"pipeline_stage_rank ({self.pipeline_stage_rank}) must be "
+                    f"in [0, pipeline_parallel_size={self.pipeline_parallel_size})"
+                )
+            if not self.pp_group_cls:
+                raise ValueError(
+                    "pipeline_stage_rank requires pp_group_cls: the PP group "
+                    "connects stages that run in other instances."
+                )
+            backend = self.distributed_executor_backend
+            if backend is None or backend in (
+                "mp",
+                "ray",
+                "uni",
+                "external_launcher",
+            ):
+                raise ValueError(
+                    "pipeline_stage_rank requires a custom executor in "
+                    "distributed_executor_backend (an Executor subclass or its "
+                    "import path) that drives the stages in other instances; "
+                    f"got {backend!r}. The built-in executors expect every "
+                    "pipeline stage in this instance."
+                )
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
@@ -1032,6 +1073,7 @@ class ParallelConfig:
             "distributed_executor_backend",
             "worker_cls",
             "worker_extension_cls",
+            "pp_group_cls",
             "_api_process_count",
             "_api_process_rank",
             # NUMA binding is per-rank host-side memory locality; it does
@@ -1058,6 +1100,9 @@ class ParallelConfig:
             * self.tensor_parallel_size
             * self.prefill_context_parallel_size
         )
+        if self.pipeline_stage_rank is not None:
+            # The other pipeline stages run in other instances.
+            self.world_size //= self.pipeline_parallel_size
 
         if self.distributed_executor_backend == "external_launcher":
             logger.info("Using external launcher for distributed inference.")
