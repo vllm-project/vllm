@@ -34,6 +34,88 @@ The FP8 types typically supported in hardware have two distinct representations,
     [`KernelConfig`](../../../cli/serve.md#kernelconfig) in the CLI
     reference and shown by `vllm serve --help=KernelConfig`.
 
+## Native Triton per-token FP8 on ROCm
+
+On ROCm GPUs with native FP8 support, `--linear-backend triton` selects the
+native Triton backend for dynamic per-token activation scales and per-channel
+weight scales. It supports BF16 and FP16 output. With the default
+`--linear-backend auto`, this backend is considered after higher-priority
+compatible ROCm backends and before Torch RowWise.
+
+```bash
+vllm serve RedHatAI/gemma-4-12B-it-FP8-Dynamic \
+  --language-model-only --max-model-len 32768 \
+  --max-num-batched-tokens 8192 --linear-backend triton
+```
+
+Tuning files are optional. FP8-capable RDNA GPUs use a hardware-aware launch
+heuristic when no tuned configuration applies. The Radeon AI PRO R9700 BF16
+tuning tables apply measured configurations only at their exact token counts;
+intermediate counts and entries without a reliable measured gain retain the
+heuristic. Here, token count means the rows processed by the current linear
+operation, including any graph padding, rather than the full context length.
+
+### Reproducing per-token FP8 tuning
+
+`benchmarks/kernels/benchmark_w8a8_per_token_fp8.py` tunes per-token FP8 GEMMs
+with BF16 output on FP8-capable RDNA GPUs. Select a model workload from
+`benchmarks/kernels/weight_shapes.py`, its tensor-parallel size, and the GPUs
+to use as parallel tuning workers. The script uses matrix dimensions and TP
+split information only; model configuration and weights are not loaded.
+Expert kernels are separate.
+
+```bash
+uv run --no-project --python .venv/bin/python .venv/bin/python \
+  benchmarks/kernels/benchmark_w8a8_per_token_fp8.py \
+  --model RedHatAI/gemma-4-12B-it-FP8-Dynamic \
+  --tp-size 1 --gpus 0 1 --save-path ./fp8-configs
+```
+
+`--tp-size` (alias `-tp`) describes the model's tensor parallelism and defaults
+to 1. It is independent of the number of tuning workers. Standard catalog entries
+divide the recorded TP axis; layouts requiring other partitioning use explicit
+per-TP matrix shapes from `TP_WEIGHT_SHAPES`.
+`--gpus` defaults to all visible GPUs; selected GPUs must be the same model.
+
+To cover TP2 as well, run the same command with `--tp-size 2`:
+
+```bash
+uv run --no-project --python .venv/bin/python .venv/bin/python \
+  benchmarks/kernels/benchmark_w8a8_per_token_fp8.py \
+  --model RedHatAI/gemma-4-12B-it-FP8-Dynamic \
+  --tp-size 2 --gpus 0 1 --save-path ./fp8-configs
+```
+
+This example has six unique shapes at each TP size, with eleven shapes in their
+union. The benchmark also accepts the existing Llama, Mistral, Qwen, and other
+matrix workloads in the shared catalog. Add new matrix workloads to that file.
+
+Staged search is the default: 232 base tile/warp/stage choices plus installed
+configurations and the heuristic tile, refinement of the best four choices,
+then seven shuffled paired rounds for eight finalists against the installed
+config and production heuristic. A winner must reduce median latency by more
+than 2% and 0.15 microseconds and win at least five rounds. Selected results pass
+full Torch and sampled FP32 checks on two input seeds. Token counts are fixed
+at powers of two from 1 through 32768.
+Shapes outside the specialized heuristic's layout requirements use the same
+shared-kernel fallback as serving. Only the Torch reference is zero-padded when
+its alignment requirements demand it; timed operands retain their actual shapes.
+
+`--save-path` writes runtime-compatible JSON tables directly into that directory,
+with full rankings, paired timings, matrix workloads, reference tables, and
+source hashes under `measurements/`. Each worker owns complete shape tables,
+so parallel workers do not overwrite each other's results. Omit `--save-path`
+to print results without writing tuning output files. Review generated tables
+before copying them into `vllm/model_executor/layers/quantization/utils/configs`.
+
+The search uses hot operands and captured graphs. It excludes activation
+quantization, attention, and TP communication; fresh winners can vary with
+measurement conditions. Validate candidates against the existing tables and
+heuristic with representative weight working sets before replacing profiles.
+The reported tables also underwent independent runtime validation after the
+search. These commands repeat the search procedure, not whole-model serving
+measurements or byte-identical historical results.
+
 ## Installation
 
 To produce performant FP8 quantized models with vLLM, you'll need to install the [llm-compressor](https://github.com/vllm-project/llm-compressor/) library:

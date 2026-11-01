@@ -19,6 +19,44 @@ def is_weak_contiguous(x: torch.Tensor):
 
 
 @triton.jit
+def _scaled_mm_tile_coords(
+    pid,
+    M,
+    N,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    GROUP_M: tl.constexpr,
+    N_STRIPE: tl.constexpr,
+):
+    tl.static_assert(GROUP_M >= 1, "GROUP_M must be positive")
+    tl.static_assert(N_STRIPE >= 0, "N_STRIPE must be nonnegative")
+    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
+
+    if N_STRIPE > 0:
+        num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+        stripe_span = num_pid_m * N_STRIPE
+        stripe_id = pid // stripe_span
+        first_n = stripe_id * N_STRIPE
+        stripe_width = tl.minimum(N_STRIPE, num_pid_n - first_n)
+        stripe_pid = pid % stripe_span
+        pid_m = stripe_pid // stripe_width
+        pid_n = first_n + stripe_pid % stripe_width
+    elif GROUP_M > 1:
+        num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
+        num_pid_in_group = GROUP_M * num_pid_n
+        group_id = pid // num_pid_in_group
+        first_pid_m = group_id * GROUP_M
+        group_size_m = tl.minimum(num_pid_m - first_pid_m, GROUP_M)
+        pid_in_group = pid % num_pid_in_group
+        pid_m = first_pid_m + pid_in_group % group_size_m
+        pid_n = pid_in_group // group_size_m
+    else:
+        pid_m = pid // num_pid_n
+        pid_n = pid % num_pid_n
+    return pid_m, pid_n
+
+
+@triton.jit
 def scaled_mm_kernel(
     a_ptr,
     b_ptr,
@@ -43,13 +81,13 @@ def scaled_mm_kernel(
     BLOCK_SIZE_SCALE_B: tl.constexpr,
     USE_TD: tl.constexpr = False,
     B_T: tl.constexpr = False,
+    GROUP_M: tl.constexpr = 1,
+    N_STRIPE: tl.constexpr = 0,
+    UNMASKED_LOADS: tl.constexpr = False,
 ):
-    pid = tl.program_id(axis=0)
-
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-
-    pid_m = pid // num_pid_n
-    pid_n = pid % num_pid_n
+    pid_m, pid_n = _scaled_mm_tile_coords(
+        tl.program_id(axis=0), M, N, BLOCK_SIZE_M, BLOCK_SIZE_N, GROUP_M, N_STRIPE
+    )
 
     accumulator_dtype = ACCUMULATOR_DTYPE
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=accumulator_dtype)
@@ -124,10 +162,10 @@ def scaled_mm_kernel(
         else:
             masks_k = offsets_k < K
             masks_a = masks_am[:, None] & masks_k[None, :]
-            a = tl.load(a_ptrs, mask=masks_a)
+            a = tl.load(a_ptrs) if UNMASKED_LOADS else tl.load(a_ptrs, mask=masks_a)
 
             masks_b = masks_k[:, None] & masks_bn[None, :]
-            b = tl.load(b_ptrs, mask=masks_b)
+            b = tl.load(b_ptrs) if UNMASKED_LOADS else tl.load(b_ptrs, mask=masks_b)
 
         # Accumulate results.
         accumulator = tl.dot(a, b, accumulator, out_dtype=accumulator_dtype)
@@ -164,12 +202,49 @@ def scaled_mm_kernel(
     # Save output
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)
-    offs_cm = offs_cm.to(tl.int64)
-    offs_cn = offs_cn.to(tl.int64)
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
     tl.store(c_ptrs, c, mask=c_mask)
+
+
+def _get_scaled_mm_launch_policy(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    tile_shape: tuple[int, int, int],
+    use_td: bool,
+    group_m: int,
+    n_stripe: int,
+    unmasked_loads: bool,
+) -> tuple[int, int, bool]:
+    """Validate requested scheduling against the actual operand layout and tiles."""
+    if (group_m == 1 and n_stripe == 0 and not unmasked_loads) or use_td:
+        return 1, 0, False
+    M, K = input.shape
+    N = weight.shape[1]
+    if input.stride() != (K, 1) or weight.stride() != (1, K):
+        return 1, 0, False
+
+    block_m, block_n, block_k = tile_shape
+    num_pid_m, num_pid_n = triton.cdiv(M, block_m), triton.cdiv(N, block_n)
+    max_pid = 2**31 - 1
+    if group_m * num_pid_n > max_pid:
+        group_m = 1
+    if n_stripe and num_pid_m * max(num_pid_n, n_stripe) > max_pid:
+        n_stripe = 0
+    if n_stripe:
+        group_m = 1
+
+    unmasked_loads = (
+        unmasked_loads
+        and input.element_size() == weight.element_size() == 1
+        and input.data_ptr() % 16 == 0
+        and weight.data_ptr() % 16 == 0
+        and K % 16 == 0
+        and block_k % 16 == 0
+        and M % block_m == N % block_n == K % block_k == 0
+    )
+    return group_m, n_stripe, unmasked_loads
 
 
 # input   - [M, K]
@@ -179,13 +254,18 @@ def triton_scaled_mm(
     weight: torch.Tensor,
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
-    out_dtype: type[torch.dtype],
+    out_dtype: torch.dtype,
     bias: torch.Tensor | None = None,
     block_size_m: int = 32,
     block_size_n: int = 32,
     block_size_k: int = 32,
     use_heuristic=True,
     use_td: bool | None = None,
+    num_warps: int = 4,
+    num_stages: int | None = None,
+    group_m: int = 1,
+    n_stripe: int = 0,
+    unmasked_loads: bool = False,
 ) -> torch.Tensor:
     M, K = input.shape
     N = weight.shape[1]
@@ -204,6 +284,9 @@ def triton_scaled_mm(
     assert bias is None or bias.is_floating_point()
     assert is_weak_contiguous(input)
     assert is_weak_contiguous(weight)
+
+    # Scale addressing in the kernel assumes consecutive elements.
+    scale_a, scale_b = scale_a.contiguous(), scale_b.contiguous()
 
     grid = lambda META: (
         triton.cdiv(M, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
@@ -227,7 +310,7 @@ def triton_scaled_mm(
     else:
         tile_shape = (block_size_m, block_size_n, block_size_k)
 
-    block_size_m, block_size_n, block_size_k = tile_shape
+        block_size_m, block_size_n, block_size_k = tile_shape
 
     block_size_sa = 1 if has_scalar(scale_a) else block_size_m
     block_size_sb = 1 if has_scalar(scale_b) else block_size_n
@@ -253,8 +336,20 @@ def triton_scaled_mm(
         set_triton_allocator(input.device)
         _TD_ALLOCATOR_DEVICES.add(input.device)
 
+    if group_m != 1 or n_stripe != 0 or unmasked_loads:
+        group_m, n_stripe, unmasked_loads = _get_scaled_mm_launch_policy(
+            input,
+            weight,
+            (block_size_m, block_size_n, block_size_k),
+            use_td,
+            group_m,
+            n_stripe,
+            unmasked_loads,
+        )
+
     # A = input, B = weight, C = result
     # A = M x K, B = K x N, C = M x N
+    launch_options = {} if num_stages is None else {"num_stages": num_stages}
     scaled_mm_kernel[grid](
         input,
         weight,
@@ -279,6 +374,11 @@ def triton_scaled_mm(
         BLOCK_SIZE_SCALE_B=block_size_sb,
         USE_TD=use_td,
         B_T=b_t,
+        GROUP_M=group_m,
+        N_STRIPE=n_stripe,
+        UNMASKED_LOADS=unmasked_loads,
+        num_warps=num_warps,
+        **launch_options,
     )
 
-    return result.to(out_dtype)
+    return result

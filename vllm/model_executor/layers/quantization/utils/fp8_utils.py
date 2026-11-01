@@ -6,6 +6,7 @@ import functools
 import json
 import os
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -919,6 +920,65 @@ def _w8a8_triton_block_scaled_mm(
     c_ptrs = C + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
+
+
+def get_w8a8_per_token_fp8_config_filename(
+    N: int, K: int, device_name: str, input_dtype: torch.dtype, out_dtype: torch.dtype
+) -> str:
+    return (
+        f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8_per_token,"
+        f"input_dtype={str(input_dtype).removeprefix('torch.')},"
+        f"out_dtype={str(out_dtype).removeprefix('torch.')}.json"
+    )
+
+
+@functools.lru_cache
+def get_w8a8_per_token_fp8_configs(
+    N: int, K: int, device_name: str, input_dtype: torch.dtype, out_dtype: torch.dtype
+) -> dict[int, dict[str, int]] | None:
+    """Load measured W8A8 per-token configs from the shared tuning directory."""
+    json_file_name = get_w8a8_per_token_fp8_config_filename(
+        N, K, device_name, input_dtype, out_dtype
+    )
+    config_file_path = Path(__file__).resolve().parent / "configs" / json_file_name
+    if not config_file_path.exists():
+        return None
+    with config_file_path.open() as f:
+        logger.info(
+            "Using configuration from %s for W8A8 per-token FP8 kernel.",
+            config_file_path,
+        )
+        configs = {int(m): config for m, config in json.load(f).items()}
+    for config in configs.values():
+        assert config.get("GROUP_M", 1) >= 1, "GROUP_M must be positive"
+        assert config.get("N_STRIPE", 0) >= 0, "N_STRIPE must be nonnegative"
+    return configs
+
+
+def get_w8a8_per_token_fp8_config(
+    M: int, N: int, K: int, input_dtype: torch.dtype, out_dtype: torch.dtype
+) -> dict[str, int] | None:
+    configs = get_w8a8_per_token_fp8_configs(
+        N, K, get_device_name_as_file_name(), input_dtype, out_dtype
+    )
+    # Partial decode tuning must not override unmeasured prefill sizes.
+    if not configs or not min(configs) <= M <= max(configs):
+        return None
+    config = configs.get(M)
+    if config is None:
+        config = configs[min(configs, key=lambda m: abs(m - M))]
+    if config.get("USE_HEURISTIC", False) or (
+        M not in configs and config.get("EXACT_M", False)
+    ):
+        return None
+    if M not in configs:
+        # Scheduling choices were measured only at their exact M, unlike tiles.
+        config = {
+            key: value
+            for key, value in config.items()
+            if key not in ("GROUP_M", "N_STRIPE", "UNMASKED_LOADS")
+        }
+    return config
 
 
 @functools.lru_cache
