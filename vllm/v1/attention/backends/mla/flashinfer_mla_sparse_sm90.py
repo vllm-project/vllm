@@ -51,6 +51,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MLAAttentionImpl,
     MultipleOf,
+    max_decode_query_len,
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
@@ -61,7 +62,7 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     flat_kv_row_view,
     triton_convert_req_index_to_global_index,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheSpec
 
 _FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 _WORKSPACE_BYTES = 128 * 1024 * 1024
@@ -427,6 +428,14 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
     """Reuse the common sparse metadata (req ids, topk buffer access)."""
 
     metadata_cls = FlashInferMLASparseSM90Metadata
+
+    @classmethod
+    def get_varlen_cudagraph_max_query_len(
+        cls,
+        vllm_config: VllmConfig,
+        kv_cache_spec: KVCacheSpec,
+    ) -> int | None:
+        return max_decode_query_len(vllm_config)
 
     def __init__(
         self,
