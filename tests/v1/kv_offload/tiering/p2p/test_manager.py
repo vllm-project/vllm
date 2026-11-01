@@ -721,6 +721,19 @@ def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
 
 
 class TestOnRequestFinished:
+    def test_finished_inflight_load_does_not_leak_failed_id(self):
+        mgr, peer = _build_paired_managers()
+        params = _remote_prefiller_kv_params("B", 2, kv_request_id="req-finish")
+        ctx = _req_context(params)
+        mgr.on_new_request(ctx)
+        job = _job_metadata(7, kv_params=params)
+        mgr.submit_load(job)
+        mgr.on_request_finished(ctx)
+        results = list(mgr.get_finished_jobs())
+        assert len(results) == 1 and results[0].job_id == 7
+        assert not results[0].success
+        assert mgr._failed_req_ids == set()
+
     def _make_with_failed(self) -> P2PSecondaryTierManager:
         mgr = _make_manager()
         mgr._failed_req_ids = {"req-1"}
@@ -2022,16 +2035,24 @@ class TestPollOnce:
         assert mgr._kv_to_session["req-fast"] is sess
         assert sess.stores_added == []
 
-    def test_failed_load_records_kv_request_id(self):
-        """A LoadResult(success=False) from session.poll() must add its
-        kv_request_id to _failed_req_ids so future lookups return MISS."""
+    @pytest.mark.parametrize("request_finished", [False, True])
+    def test_failed_load_records_kv_request_id(self, request_finished):
+        """An unfinished failed load records its id so future lookups return MISS.
+        Finished requests still complete jobs without retaining their ids."""
         mgr = _make_manager()
         peer = "10.0.0.1:8000"
         sess = _FakeSession(
             peer_id=peer,
             alive=True,
             connected=True,
-            loads=[LoadResult(job_id=5, kv_request_id="req-5", success=False)],
+            loads=[
+                LoadResult(
+                    job_id=5,
+                    kv_request_id="req-5",
+                    success=False,
+                    request_finished=request_finished,
+                )
+            ],
         )
         mgr._sessions[peer] = sess
 
@@ -2044,7 +2065,7 @@ class TestPollOnce:
         mgr._poll_once()
 
         assert mgr._finished_jobs == [JobResult(job_id=5, success=False)]
-        assert "req-5" in mgr._failed_req_ids
+        assert ("req-5" in mgr._failed_req_ids) is not request_finished
 
 
 # ---------------------------------------------------------------------------
