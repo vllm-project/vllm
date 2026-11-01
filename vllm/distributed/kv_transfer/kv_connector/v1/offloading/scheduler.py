@@ -1205,12 +1205,13 @@ class OffloadingConnectorScheduler:
                 ends = new_block_ids_end.get(req_id)
                 for i, grp_idx in enumerate(self._sliding_window_groups):
                     group_state = req_status.group_states[grp_idx]
+                    first_live_idxs = (
+                        handler.first_live_chunk_idx(req_status, grp_idx)
+                        for handler in self._store_handlers.values()
+                    )
                     start = (
                         min(
-                            (
-                                handler.first_pending_chunk_idx(req_status, grp_idx)
-                                for handler in self._store_handlers.values()
-                            ),
+                            (idx for idx in first_live_idxs if idx is not None),
                             default=0,
                         )
                         * blocks_per_chunk

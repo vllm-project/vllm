@@ -1941,13 +1941,13 @@ def test_store_jobs_wait_for_missing_offload_key(request_runner):
     on_compute = _on_compute(runner.connector_scheduler)
     jobs = _store_jobs(runner.connector_scheduler, scheduler_output)
     assert len(jobs) == 1
-    assert on_compute.first_pending_chunk_idx(req_status, 0) == 1
+    assert on_compute.first_live_chunk_idx(req_status, 0) == 1
 
     req.block_hashes.append(missing_hash)
     req_status.update_offload_keys()
     jobs = _store_jobs(runner.connector_scheduler, scheduler_output)
     assert len(jobs) == 1
-    assert on_compute.first_pending_chunk_idx(req_status, 0) == 2
+    assert on_compute.first_live_chunk_idx(req_status, 0) == 2
 
 
 def test_scheduler_reports_lookup_sync_delay(request_runner):
@@ -4337,7 +4337,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     on_compute = _on_compute(runner.connector_scheduler)
     for req_status in runner.connector_scheduler._req_status.values():
         for idx in range(len(req_status.group_states)):
-            assert on_compute.first_pending_chunk_idx(req_status, idx) > 0
+            assert on_compute.first_live_chunk_idx(req_status, idx) > 0
 
     # Reset the cache
     runner.connector_scheduler.reset_cache()
@@ -4363,7 +4363,7 @@ def test_reset_cache(request_runner, async_scheduling: bool):
     # that post-reset stores restart from block 0.
     for req_status in runner.connector_scheduler._req_status.values():
         for idx in range(len(req_status.group_states)):
-            assert on_compute.first_pending_chunk_idx(req_status, idx) == 0
+            assert on_compute.first_live_chunk_idx(req_status, idx) == 0
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
