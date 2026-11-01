@@ -107,15 +107,10 @@ class StandaloneARSpeculator(DraftModelSpeculator):
     ) -> nn.Module:
         spec = self.speculative_config
         assert spec is not None
-        cache_config = self.vllm_config.cache_config
-        if spec.kv_cache_dtype is not None:
-            cache_config = replace(cache_config, cache_dtype=spec.kv_cache_dtype)
-
         draft_vllm_config = replace(
-            self.vllm_config,
+            spec.apply_draft_overrides(self.vllm_config),
             model_config=self.draft_model_config,
             quant_config=None,
-            cache_config=cache_config,
             parallel_config=replace(
                 spec.draft_parallel_config,
                 rank=self.vllm_config.parallel_config.rank,
