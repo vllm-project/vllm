@@ -2806,6 +2806,13 @@ class NixlBaseConnectorWorker:
             raise NotImplementedError(
                 "DCP region pulls require matching logical and physical block sizes"
             )
+        # DCP shards tokens across ranks at the logical block size, and reads
+        # pair blocks by logical position.
+        if (self.dcp_size > 1 or remote_dcp_size > 1) and (
+            self.block_size * self._physical_blocks_per_logical_kv_block
+            != nixl_agent_meta.block_size * remote_physical_per_logical
+        ):
+            raise NotImplementedError("DCP requires matching P/D logical block sizes")
         if (
             self._has_mamba
             and remote_physical_per_logical
@@ -3070,7 +3077,7 @@ class NixlBaseConnectorWorker:
     def post_process_device_kv_on_receive(
         self,
         block_size_ratio: int,
-        block_ids_list: list[tuple[int, list[int], int]],
+        block_ids_list: list[tuple[int, list[int], range]],
         convert: bool = True,
     ):
         """Post process device kv cache after receiving from remote.
@@ -3087,7 +3094,7 @@ class NixlBaseConnectorWorker:
         clipped, either by remote-block pairing (block-size ratio) or by the
         hetero-ppl front trim in ``_apply_prefix_caching``. Those blocks were
         excluded from the scheduler's alloc-time KV zeroing (which would race
-        the RDMA write), so everything past the covered range is zeroed here.
+        the RDMA write), so everything outside the covered range is zeroed here.
         Stale bytes would otherwise surface as garbage or NaNs once decode
         grows into the untransferred tail.
         """
@@ -3125,12 +3132,16 @@ class NixlBaseConnectorWorker:
                 for name in self.kv_cache_config.transfer_groups[group].layer_names
             ]
             # Blocks the transfer didn't write: the token tail of the last
-            # partially covered block, then everything beyond it.
+            # partially covered block, then everything beyond it, and the token
+            # head of the first one, then everything before it.
             covered_blocks, sub_blocks_in_last = divmod(
-                covered_sub_blocks, block_size_ratio
+                covered_sub_blocks.stop, block_size_ratio
             )
             first_stale = covered_blocks + (1 if sub_blocks_in_last else 0)
-            has_stale = first_stale < len(block_ids)
+            head_blocks, sub_blocks_in_head = divmod(
+                covered_sub_blocks.start, block_size_ratio
+            )
+            has_stale = head_blocks > 0 or first_stale < len(block_ids)
             indices = None
             if convert or has_stale:
                 indices = async_tensor_h2d(block_ids, attn_caches[0].device, torch.long)
@@ -3154,9 +3165,14 @@ class NixlBaseConnectorWorker:
                     sub_block_tokens = cache.shape[2] // block_size_ratio
                     zero_from = sub_blocks_in_last * sub_block_tokens
                     cache[last_block_id, :, zero_from:].zero_()
+            if sub_blocks_in_head:
+                for cache in attn_caches:
+                    sub_block_tokens = cache.shape[2] // block_size_ratio
+                    zero_to = sub_blocks_in_head * sub_block_tokens
+                    cache[block_ids[head_blocks], :, :zero_to].zero_()
             if has_stale:
                 assert indices is not None
-                stale_ids = indices[first_stale:]
+                stale_ids = torch.cat((indices[:head_blocks], indices[first_stale:]))
                 for cache in attn_caches:
                     cache.index_fill_(0, stale_ids, 0)
 
@@ -3318,11 +3334,17 @@ class NixlBaseConnectorWorker:
                 for g, local_group in enumerate(meta.local_physical_block_ids):
                     if not local_group or _is_ssm_spec(self._group_spec_types[g]):
                         continue
-                    # Number of remote-sized sub-blocks the transfer covered;
-                    # everything past this was clipped and must be zeroed.
-                    covered_sub_blocks = min(
-                        len(local_group) * block_size_ratio,
-                        len(meta.remote.block_ids[g]),
+                    # Range of remote-sized sub-blocks the transfer covered;
+                    # everything outside it was clipped and must be zeroed.
+                    covered_sub_blocks = (
+                        meta.covered_sub_blocks[g]
+                        if meta.covered_sub_blocks is not None
+                        else range(
+                            min(
+                                len(local_group) * block_size_ratio,
+                                len(meta.remote.block_ids[g]),
+                            )
+                        )
                     )
                     block_ids_for_blocksize_post_process[block_size_ratio].append(
                         (g, local_group, covered_sub_blocks)

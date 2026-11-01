@@ -704,6 +704,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     resolved_types = tuple(spec_name_to_type[n] for n in group_spec_types)
 
     worker = object.__new__(NixlConnectorWorker)
+    worker.block_size = 16
     worker._physical_blocks_per_logical_kv_block = local_physical_per_logical
     worker._invalid_remote_engines = set()
     worker._remote_registration_generations = {}
@@ -736,6 +737,7 @@ def test_read_blocks_for_req_expands_remote_ids(
     # but set for realism.
     worker.transfer_topo.tp_ratio.return_value = tp_ratio
     remote_info = MagicMock()
+    remote_info.remote_block_size = 16
     remote_info.remote_physical_blocks_per_logical = remote_physical_per_logical
     remote_info.remote_dcp_size = 1
     worker.transfer_topo.get_engine_info.return_value = remote_info
@@ -1478,7 +1480,7 @@ def test_post_process_zeroes_untransferred_tail(
     _bind_worker_method(worker, "post_process_device_kv_on_receive")
 
     # Group 0 request in blocks [2, 3]; only 6 of 8 sub-blocks were received.
-    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], 6)])
+    worker.post_process_device_kv_on_receive(ratio, [(0, [2, 3], range(6))])
 
     # Block 2 fully covered; block 3 covered for 2 sub-blocks (4 tokens).
     assert torch.equal(attn_cache[2], expected[2])
