@@ -243,41 +243,12 @@ sweep/parallel-layout-recommendation.json
 
 The selected TP/DP layout becomes the fixed server layout for Stage 2.
 
-### Temporary TP/DP NUMA-binding workaround
+### CPU NUMA binding
 
-Xeon TP/DP and Tune All sweeps currently enable a temporary explicit CPU-binding
-workaround by default:
-
-```text
---tp-dp-numa-bind-workaround
-```
-
-Hardware detection builds one `VLLM_CPU_OMP_THREADS_BIND` CPU list per effective
-NUMA node. On x86 it selects one logical CPU per physical core, matching vLLM's
-auto-binding SMT policy, and excludes one physical core from each NUMA node for
-non-OMP work. The resulting value is written to `env.sh`, for example:
-
-```bash
-export VLLM_CPU_OMP_THREADS_BIND='48-62|64-78|80-94|96-110'
-```
-
-The exact CPU IDs depend on the effective container/cgroup cpuset and NUMA
-topology. Discontinuous CPU IDs are preserved as comma-separated ranges.
-
-`VLLM_CPU_NUM_OF_RESERVED_CPU` is not used by this workaround because vLLM only
-applies its reserved-CPU logic in automatic binding mode. With an explicit
-`VLLM_CPU_OMP_THREADS_BIND`, reserved cores must already be omitted from the
-generated lists.
-
-After the vLLM CPU DP NUMA-binding issue is fixed, disable the workaround
-without removing the implementation:
-
-```bash
---no-tp-dp-numa-bind-workaround
-```
-
-An explicit non-`auto` `VLLM_CPU_OMP_THREADS_BIND` supplied by the recipe is
-preserved.
+Recipes rely on vLLM's native CPU NUMA and OpenMP binding, including per-DP-rank
+node assignment fixed in vLLM PR #62867. Sweep generation does not override
+`VLLM_CPU_OMP_THREADS_BIND`; recipe-provided environment values are preserved.
+Use a vLLM image containing the fix for multi-DP CPU sweeps.
 
 ### Stage 2: Tune Concurrency
 
