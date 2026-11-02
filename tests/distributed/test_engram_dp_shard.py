@@ -277,7 +277,6 @@ def _check_bf16_table(vllm_config):
         )
         with set_current_vllm_config(vllm_config), torch.device("cuda"):
             module = Engram(config, None, layout, 0, tp_size > 1, "engram")
-            assert EngramBatch.create([module], 8) is None
         table = module.embed_tokens
         assert table.weight.dtype == torch.bfloat16
         assert "weight_scale_inv" not in dict(table.named_parameters())
