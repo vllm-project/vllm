@@ -1578,12 +1578,12 @@ class NixlBaseConnectorWorker:
         self._ple_block_len = None
         self._ple_region_index = None
 
-        # A shared packed row may transfer whole if every page in it is
-        # replicated across TP ranks (MLA), or if P and D shard heads alike
-        # (non-MLA, equal TP checked at handshake). SSM state (e.g.
-        # Qwen3.8-Flash-Next) must stay split.
-        packed_storage = (
+        # A shared packed row may transfer whole only if every page in it is
+        # replicated across TP ranks: MLA without SSM state. Head-sharded
+        # attention or SSM state (e.g. Qwen3.8-Flash-Next) must stay split.
+        replicated_shared_storage = (
             _share_storage_and_block_stride(list(xfer_buffers.values()))
+            and self.use_mla
             and not self._has_mamba
         )
         if route_packed_layers and any(
@@ -1709,14 +1709,13 @@ class NixlBaseConnectorWorker:
                     and cache[0].is_contiguous()
                     and cache[0].nbytes == physical_page_size
                 )
-                # Block-outermost: one block row holds every layer's page (in an
-                # MLA model, only its MLA layers' pages travel as rows).
+                # Block-outermost MLA: one block row holds every layer's page.
                 packed_mla = (
                     self._has_packed_cache
                     and not self._has_mamba
-                    and packed_storage
+                    and replicated_shared_storage
                     and storage_is_block_major
-                    and (is_mla_region or not self.use_mla)
+                    and is_mla_region
                 )
                 if packed_mla and use_layer_name_routing:
                     # PP>1 prefill stage: register only this layer's page of each row.
@@ -1736,10 +1735,13 @@ class NixlBaseConnectorWorker:
                     packed_member_layouts[layer_name] = (offset, physical_page_size)
                 elif storage_is_block_major and (
                     not page_contiguous
-                    and ((packed_storage and is_mla_region) or not self._is_csa_linear)
+                    and (
+                        (replicated_shared_storage and is_mla_region)
+                        or not self._is_csa_linear
+                    )
                 ):
-                    # TODO(Lucas): handle TP slicing for packed_storage; for now
-                    # restrict to MLA (DSv4) where kv is replicated.
+                    # TODO(Lucas): handle TP slicing for head-sharded shared
+                    # storage; for now restrict to MLA (DSv4) where kv is replicated.
                     # The complete storage row is one block stride. Dividing the
                     # registered length instead would fold the padding tail in.
                     storage_block_len = block_stride
@@ -2910,13 +2912,6 @@ class NixlBaseConnectorWorker:
                 "NIXL KV-head re-sharding is not supported for NVFP4 KV cache "
                 f"(local TP {self.transfer_topo.tp_size}, remote TP "
                 f"{remote_tp_size}). Use matching TP sizes on prefill and decode."
-            )
-        # A whole row holds this rank's heads of every layer: no re-sharding.
-        if self._packed_member_layouts and not self.use_mla and tp_ratio != 1:
-            raise RuntimeError(
-                "Packed KV rows of a non-MLA model need the same TP on prefill "
-                f"and decode (local TP {self.transfer_topo.tp_size}, remote TP "
-                f"{remote_tp_size}). Use LBHNC for heterogeneous TP."
             )
 
         # Per-region block_len validation enforcing the P/D invariant.
