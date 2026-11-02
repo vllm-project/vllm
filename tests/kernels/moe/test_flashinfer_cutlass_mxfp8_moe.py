@@ -75,15 +75,14 @@ def _reference(
     output = torch.zeros(NUM_TOKENS, HIDDEN_SIZE, device=x.device)
     for k in range(TOP_K):
         experts = topk_ids[:, k].long()
-        gemm1 = torch.einsum("td,tid->ti", x, w13[experts])
+        gemm1 = torch.einsum("td,tid->ti", x, w13[experts]).bfloat16().float()
         if activation == MoEActivation.SILU:
             gate, up = gemm1.chunk(2, dim=-1)
             intermediate = F.silu(gate) * up
         else:
             intermediate = F.relu(gemm1).square()
-        expert_output = torch.einsum(
-            "ti,tdi->td", _mxfp8_quantize_dequantize(intermediate), w2[experts]
-        )
+        intermediate = _mxfp8_quantize_dequantize(intermediate.bfloat16().float())
+        expert_output = torch.einsum("ti,tdi->td", intermediate, w2[experts])
         output += topk_weights[:, k, None] * expert_output
     return output
 
