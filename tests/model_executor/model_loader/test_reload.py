@@ -49,6 +49,7 @@ from vllm.model_executor.model_loader.reload.utils import get_layer_tensors
 from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
+    finalize_model_weights,
     load_attention_sink,
     safetensors_weights_iterator,
 )
@@ -353,7 +354,7 @@ class _ReloadableMMEncoderAttention(MMEncoderAttention):
         self.weight.weight_loader = default_weight_loader
         self.post_load_called = False
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         self.post_load_called = True
 
 
@@ -373,7 +374,7 @@ class _ReloadableAttentionLayer(
     def get_kv_cache_spec(self, vllm_config):
         return None
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         self.post_load_called = True
 
 
@@ -1577,6 +1578,48 @@ class _TwoLayerModel(torch.nn.Module):
 
 def _full(value: float) -> torch.Tensor:
     return torch.full((2, 2), value)
+
+
+class _LoggedHookModule(torch.nn.Module):
+    def __init__(self, name: str, log: list[str], *children: torch.nn.Module):
+        super().__init__()
+        self.name, self.log = name, log
+        self.kids = torch.nn.ModuleList(children)
+
+    def process_weights_after_loading(self) -> None:
+        self.log.append(self.name)
+
+
+class _QuantMethodModule(torch.nn.Module, QuantizeMethodBase):
+    def create_weights(self, *args, **kwargs) -> None:
+        pass
+
+    def apply(self, *args, **kwargs) -> torch.Tensor:
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        raise AssertionError("quant methods run in the per-layer pass")
+
+
+def test_finalize_runs_every_module_hook_after_its_submodules():
+    log: list[str] = []
+    shared = _LoggedHookModule("shared", log)
+    model = _LoggedHookModule(
+        "root",
+        log,
+        _LoggedHookModule("a", log, _LoggedHookModule("a.x", log), shared),
+        _LoggedHookModule("b", log, shared),
+    )
+    model.attn = _ReloadableAttentionLayer()
+    model.quant_method = _QuantMethodModule()
+
+    finalize_model_weights(model)
+
+    assert sorted(log) == ["a", "a.x", "b", "root", "shared"]
+    for child, parent in [("a.x", "a"), ("shared", "a"), ("shared", "b")]:
+        assert log.index(child) < log.index(parent)
+    assert log[-1] == "root"
+    assert not model.attn.post_load_called
 
 
 def _loaded_model() -> _TwoLayerModel:

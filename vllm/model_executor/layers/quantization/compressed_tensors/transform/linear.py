@@ -143,10 +143,6 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer):
         self.quant_method.process_weights_after_loading(layer)
 
-        for submodule in layer.children():
-            if isinstance(submodule, HadamardTransform):
-                submodule.process_weights_after_loading()
-
     def apply(
         self,
         layer: torch.nn.Module,

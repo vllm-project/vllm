@@ -1511,9 +1511,35 @@ def multi_thread_pt_weights_iterator(
 
 
 def finalize_model_weights(model: torch.nn.Module) -> None:
-    """Run once after a full load or reload: the model-level post-load hook."""
-    if hasattr(model, "process_weights_after_loading"):
-        model.process_weights_after_loading()
+    """Run every module's own post-load hook after a full load or reload,
+    each module after all of its submodules.
+
+    Quantization methods and attention layers are skipped: the loader runs
+    them in its earlier per-layer passes.
+    """
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+
+    seen: set[torch.nn.Module] = set()
+
+    def children_first(module: torch.nn.Module) -> Iterable[torch.nn.Module]:
+        # a module shared by several parents runs once, before all of them
+        for child in module.children():
+            if child not in seen:
+                seen.add(child)
+                yield from children_first(child)
+        yield module
+
+    for module in children_first(model):
+        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
+            module
+        ):
+            continue
+        hook = getattr(module, "process_weights_after_loading", None)
+        if callable(hook):
+            hook()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:

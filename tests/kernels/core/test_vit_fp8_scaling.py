@@ -79,7 +79,7 @@ def _build_attention(mm_config, attn_backend=None):
             head_size=HEAD_DIM,
             prefix=LAYER_0,
         )
-        attn.process_weights_after_loading(torch.bfloat16)
+        attn.process_weights_after_loading()
         yield attn
 
 
@@ -247,7 +247,7 @@ def test_static_scales_missing_layer(tmp_path) -> None:
             prefix=LAYER_0,
         )
         with pytest.raises(ValueError, match="scales not found for layer"):
-            attn.process_weights_after_loading(torch.bfloat16)
+            attn.process_weights_after_loading()
 
 
 def test_dynamic_scales_auto_save(tmp_path) -> None:
