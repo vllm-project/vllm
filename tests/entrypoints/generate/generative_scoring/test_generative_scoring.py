@@ -237,6 +237,25 @@ class TestValidation:
     """Tests for input validation errors."""
 
     @pytest.mark.asyncio
+    async def test_synthetic_acceptance_is_rejected_before_generation(self):
+        mock_engine = _create_mock_engine()
+        mock_engine.vllm_config = MagicMock()
+        mock_engine.vllm_config.speculative_config.rejection_sample_method = "synthetic"
+        serving = _create_serving(mock_engine)
+        request = GenerativeScoringRequest(
+            model=MODEL_NAME,
+            query="q",
+            items=["i"],
+            label_token_ids=[100],
+        )
+
+        result = await serving.create_generative_scoring(request)
+
+        assert isinstance(result, ErrorResponse)
+        assert "Generative scoring is unsupported" in result.error.message
+        mock_engine.generate.assert_not_called()
+
+    @pytest.mark.asyncio
     @pytest.mark.parametrize(
         "request_kwargs,expected_error",
         [

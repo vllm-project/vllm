@@ -106,6 +106,11 @@ class LLMEngine:
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            synthetic_output=(
+                self.vllm_config.speculative_config is not None
+                and self.vllm_config.speculative_config.rejection_sample_method
+                == "synthetic"
+            ),
         )
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)

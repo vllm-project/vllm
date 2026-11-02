@@ -150,6 +150,11 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         self.renderer = engine_client.renderer
         self.input_processor = engine_client.input_processor
         vllm_config = getattr(engine_client, "vllm_config", None)
+        speculative_config = getattr(vllm_config, "speculative_config", None)
+        self.synthetic_output = (
+            speculative_config is not None
+            and speculative_config.rejection_sample_method == "synthetic"
+        )
         kv_transfer_config = getattr(vllm_config, "kv_transfer_config", None)
         self.has_kv_connector = kv_transfer_config is not None
 
