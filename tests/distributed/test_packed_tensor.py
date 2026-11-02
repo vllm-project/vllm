@@ -19,6 +19,58 @@ from vllm.distributed.weight_transfer.packed_tensor import (
 )
 
 
+@pytest.mark.parametrize(
+    "first_dtype,first_count,second_dtype",
+    [
+        (torch.float16, 3, torch.float32),
+        (torch.bfloat16, 3, torch.float32),
+        (torch.uint8, 3, torch.float32),
+        (torch.float32, 3, torch.float64),
+        (torch.float16, 4, torch.float32),
+    ],
+)
+@pytest.mark.parametrize(
+    "device",
+    [
+        "cpu",
+        pytest.param(
+            "cuda",
+            marks=pytest.mark.skipif(
+                not torch.cuda.is_available(), reason="CUDA not available"
+            ),
+        ),
+    ],
+)
+def test_pack_unpack_mixed_dtype_alignment(
+    first_dtype, first_count, second_dtype, device
+):
+    """Odd-sized preceding weights must not break the next dtype's byte view."""
+    params = [
+        ("first", torch.arange(first_count, dtype=first_dtype, device=device)),
+        ("second", torch.tensor([1.25, -2.5], dtype=second_dtype, device=device)),
+    ]
+    chunk = pack_tensors(iter(params), lambda item: item[1], 1024)
+    assert chunk is not None
+    result = unpack_tensor(
+        chunk.packed_tensor,
+        chunk.names,
+        chunk.shapes,
+        chunk.dtypes,
+        chunk.tensor_sizes,
+    )
+    for (expected_name, expected), (name, actual) in zip(params, result, strict=True):
+        assert name == expected_name
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+def test_aligned_unpack_preserves_shared_storage():
+    """Normal aligned transfers must retain the documented zero-copy behavior."""
+    original = torch.tensor([1.25, -2.5], dtype=torch.float32)
+    packed = original.view(torch.uint8)
+    result = unpack_tensor(packed, ["weight"], [[2]], [torch.float32], [8])
+    assert result[0][1].data_ptr() == packed.data_ptr()
+
+
 class MockCommunicationGroup:
     """Mock communication group for testing producer broadcast operations."""
 
