@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -16,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import get_dtype_size, is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -35,7 +36,11 @@ from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    is_quantized_kv_cache,
+)
 
 logger = init_logger(__name__)
 
@@ -148,7 +153,10 @@ class RocmAttentionBackend(AttentionBackend):
     def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # ROCM paged attention native C++ kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
-        # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
+        # The (head_size, block_size) pairs that have a native kernel are enumerated
+        # by csrc/rocm/attention_paged_attn_<head>_<dtype>_<kv>.cu, each of which
+        # instantiates ATTN_LAUNCH from csrc/rocm/attention_kernels.cuh; the runtime
+        # gate is use_rocm_custom_paged_attention() in vllm/platforms/rocm.py.
         # However, vLLM allows support for any multiple of 16 via the Triton path.
         # As addressed in PR: https://github.com/vllm-project/vllm/pull/31380,
         # non-standard models (like qwen3-next with block_size 544, or qwen3_5
@@ -158,6 +166,9 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
+        # Head sizes with a native ROCm kernel are only 64 and 128 (see
+        # csrc/rocm/attention_paged_attn_h{64,128}_*.cu); the remaining entries are
+        # served by the Triton fallback selected in use_rocm_custom_paged_attention().
         return [32, 64, 80, 96, 128, 160, 192, 224, 256]
 
     @classmethod
@@ -582,6 +593,21 @@ class RocmAttentionImpl(AttentionImpl):
         layer_slot_mapping: torch.Tensor,
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return
+        if self._use_interleaved_v_cache:
+            # The Triton RoPE + cache writer only stores the regular V layout.
+            # With layer_name hoisted, one RoPE + KV-cache pattern serves every
+            # layer, so a layer switched to the interleaved V cache is handled
+            # here at run time rather than left out of the fusion.
+            ops.rotary_embedding(
+                positions,
+                query,
+                key,
+                layer.head_size,  # type: ignore[attr-defined]
+                cos_sin_cache,
+                is_neox,
+            )
+            self.do_kv_cache_update(layer, key, value, kv_cache, layer_slot_mapping)
             return
         key_cache, value_cache = PagedAttention.split_kv_cache(
             kv_cache.transpose(0, 1),

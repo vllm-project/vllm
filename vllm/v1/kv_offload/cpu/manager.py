@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import OrderedDict
 from collections.abc import Collection, Iterable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from typing_extensions import override
 
@@ -65,12 +65,13 @@ class CPUOffloadingManager(OffloadingManager):
         enable_events: bool = False,
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
+        info: CPUOffloadingInfo | None = None,
     ):
         self.medium: Medium = Medium.CPU
         self._num_chunks: int = num_chunks
-        self._config_info: ConfigInfoMapping = CPUOffloadingInfo(
-            cpu_num_chunks=num_chunks
-        ).as_config_info()
+        self._config_info: ConfigInfoMapping = (
+            info.as_config_info() if info is not None else {}
+        )
         self._num_allocated_chunks: int = 0
         self._free_list: list[int] = []
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
@@ -167,6 +168,7 @@ class CPUOffloadingManager(OffloadingManager):
         reused_keys: Iterable[OffloadKey] = (),
     ) -> None:
         state = self._get_request_cache_access(req_context)
+        new_keys = []
         for key in keys:
             if key in state.seen_keys:
                 continue
@@ -176,6 +178,9 @@ class CPUOffloadingManager(OffloadingManager):
             group_idx = get_offload_group_idx(key)
             state.key_groups.setdefault(group_idx, []).append(key)
             state.seen_keys.add(key)
+            new_keys.append(key)
+        if new_keys:
+            self._policy.on_request_access(new_keys, req_context)
         state.inserted_keys.update(inserted_keys)
         # Re-reading a chunk inserted by this request is an internal transfer
         # (for example, a tiering cascade), not a second cache access.
@@ -234,10 +239,6 @@ class CPUOffloadingManager(OffloadingManager):
         if record_access:
             self._record_request_cache_access(keys, req_context, reused_keys=keys)
         return self._get_load_store_spec(keys, chunks)
-
-    @override
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        self._policy.touch(keys, req_context)
 
     @override
     def complete_load(
@@ -353,7 +354,7 @@ class CPUOffloadingManager(OffloadingManager):
         )
 
         for key, chunk in zip(keys_to_store, chunks):
-            self._policy.insert(key, chunk)
+            self._policy.insert(key, chunk, req_context)
         self._num_write_pending_chunks += len(keys_to_store)
         state.inserted_keys.update(keys_to_store)
 
@@ -374,6 +375,7 @@ class CPUOffloadingManager(OffloadingManager):
         success: bool = True,
     ) -> None:
         stored_keys: list[OffloadKey] = []
+        removed_keys: list[OffloadKey] = []
 
         if success:
             for key in keys:
@@ -391,6 +393,17 @@ class CPUOffloadingManager(OffloadingManager):
                     self._num_write_pending_chunks -= 1
                     self._policy.remove(key)
                     self._free_chunk(chunk)
+                    removed_keys.append(key)
+
+        if removed_keys and self.events is not None:
+            self.events.append(
+                OffloadingEvent(
+                    keys=removed_keys,
+                    medium=self.medium,
+                    removed=True,
+                    metadata_only=True,
+                )
+            )
 
         if stored_keys and self.events is not None:
             self.events.append(
@@ -398,6 +411,7 @@ class CPUOffloadingManager(OffloadingManager):
                     keys=stored_keys,
                     medium=self.medium,
                     removed=False,
+                    req_context=req_context,
                 )
             )
 
@@ -447,9 +461,19 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
-        if self.events is not None:
-            yield from self.events
-            self.events.clear()
+        if self.events is None:
+            return
+        # Detach the batch up front so a partially consumed drain cannot
+        # replay cleanup against a key a retry has since re-allocated.
+        events, self.events = self.events, []
+        for event in events:
+            if event.metadata_only:
+                # A retry may already own this key before cleanup is drained.
+                keys = [key for key in event.keys if self._policy.get(key) is None]
+                if not keys:
+                    continue
+                event = replace(event, keys=keys)
+            yield event
 
     @override
     def config_info(self) -> Sequence[ConfigInfoMapping]:

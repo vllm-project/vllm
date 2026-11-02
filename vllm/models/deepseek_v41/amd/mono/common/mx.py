@@ -14,9 +14,12 @@ from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl.expr import rocdl
 from flydsl.expr.typing import T
 
+from vllm.models.deepseek_v41.amd.mono.common.arch import GFX942
 from vllm.models.deepseek_v41.amd.mono.common.ops import CM_NT
 
-FP8_MAX = 448.0
+# gfx942 quantizes to FNUZ with 224: the same bytes as OCP with 448 and a scale
+# code one higher (common/gfx942.py).
+FP8_MAX = 224.0 if GFX942 else 448.0
 # the f8f6f4 MFMA's operand formats (cbsz / blgp)
 FP8, FP4 = 0, 4
 UNIT_SCALE = 127  # the E8M0 code of 1.0

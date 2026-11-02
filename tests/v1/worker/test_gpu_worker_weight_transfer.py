@@ -32,8 +32,9 @@ pytestmark = pytest.mark.skip_global_cleanup
 class _RecordingEngine:
     """Minimal stand-in for a weight transfer engine."""
 
-    def __init__(self, raise_on_update: bool = False):
+    def __init__(self, raise_on_update: bool = False, raise_on_finish: bool = False):
         self.raise_on_update = raise_on_update
+        self.raise_on_finish = raise_on_finish
         self.started = False
         self.finished = False
         self.closed = False
@@ -57,6 +58,8 @@ class _RecordingEngine:
 
     def finish_weight_update(self) -> None:
         self._record_config()
+        if self.raise_on_finish:
+            raise ValueError("boom")
         self.finished = True
 
     def reset_weight_update_target(self) -> None:
@@ -284,15 +287,17 @@ def test_rank_local_update_uses_data_parallel_index_after_reconfigure():
     assert worker._weight_update_active is True
 
 
-def test_finish_draft_session_keeps_lora_state():
+def test_finish_draft_session_keeps_lora_state(monkeypatch):
     engine = _RecordingEngine()
     engine.supports_draft_weight_update = True
     worker = _make_worker(engine)
-    worker._set_draft_weight_update_target = lambda: None
+    # Stub the bound method on a hand-built worker: retargeting needs a real model.
+    monkeypatch.setattr(worker, "_set_draft_weight_update_target", lambda: None)
 
     Worker.start_draft_weight_update(worker)
     Worker.finish_weight_update(worker)
 
+    assert isinstance(worker.model_runner, _RecordingModelRunner)
     assert worker.model_runner.reset_lora_calls == 0
 
 
@@ -326,6 +331,23 @@ def test_update_resets_active_on_error():
     # A failed update ends the session so the next start is clean.
     assert engine.reset_count == 1
     assert worker._weight_update_active is False
+
+
+@pytest.mark.parametrize("mode", ["direct", "layerwise"])
+def test_failed_finish_ends_session_only_in_direct_mode(mode, monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    engine = _RecordingEngine(raise_on_finish=True)
+    worker = _make_worker(engine)
+    Worker.start_weight_update(worker)
+
+    with pytest.raises(ValueError, match="boom"):
+        Worker.finish_weight_update(worker)
+
+    # a failed direct finish cannot be retried, so the next start must work;
+    # a failed layerwise finish stays active and can be retried
+    direct = mode == "direct"
+    assert worker._weight_update_active is not direct
+    assert engine.reset_count == int(direct)
 
 
 def test_missing_engine_raises():

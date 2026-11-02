@@ -38,6 +38,7 @@ def _compute_mapping(
     group_spec_types: tuple[type, ...] = (FullAttentionSpec,),
     dcp_size: int = 1,
     remote_dcp_size: int = 1,
+    head_sharded_kv_heads: int | None = None,
 ) -> TPMapping:
     transfer_topology = object.__new__(TransferTopology)
     transfer_topology.tp_rank = tp_rank
@@ -50,6 +51,7 @@ def _compute_mapping(
         remote_tp_size=remote_tp_size,
         group_spec_types=group_spec_types,
         remote_dcp_size=remote_dcp_size,
+        head_sharded_kv_heads=head_sharded_kv_heads,
     )
 
 
@@ -70,6 +72,40 @@ class TestTPMappingStructure:
     def test_source_ranks_p_gt_d(self):
         m = _compute_mapping(tp_size=1, tp_rank=0, remote_tp_size=2)
         assert m.all_source_ranks == (0, 1)
+
+
+@pytest.mark.parametrize(
+    "tp_rank,tp_size,remote_tp_size,draft_kv_heads,expected_offset",
+    [
+        (3, 8, 1, 8, 3),  # one draft head per decode rank
+        (5, 8, 2, 8, 1),  # rank 5 reads P rank 1, second head slot
+        (5, 16, 1, 8, 2),  # D_TP > heads: two ranks share each head
+    ],
+)
+def test_head_sharded_draft_under_mla_target_gets_gqa_offset(
+    tp_rank, tp_size, remote_tp_size, draft_kv_heads, expected_offset
+):
+    """An MLA target's mapping reads every head at offset 0, which is wrong
+    for a GQA draft's head-sharded KV. Mapping the draft as GQA with its own
+    head count recovers each rank's slice from the same source rank."""
+    mla = _compute_mapping(
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        remote_tp_size=remote_tp_size,
+        is_mla=True,
+        num_kv_heads=1,
+    )
+    draft = _compute_mapping(
+        tp_rank=tp_rank,
+        tp_size=tp_size,
+        remote_tp_size=remote_tp_size,
+        is_mla=True,
+        num_kv_heads=1,
+        head_sharded_kv_heads=draft_kv_heads,
+    )
+    assert mla.rank_offset_factor == 0
+    assert draft.rank_offset_factor == expected_offset
+    assert draft.all_source_ranks == mla.all_source_ranks
 
 
 @pytest.mark.parametrize(

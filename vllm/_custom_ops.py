@@ -339,6 +339,17 @@ def fused_add_rms_norm(
     torch.ops._C.fused_add_rms_norm(input, residual, weight, epsilon)
 
 
+def muse_spark_mul_tanh_soft_cap(
+    x: torch.Tensor,
+    multiplier: float,
+    soft_cap_temp: float,
+) -> torch.Tensor:
+    """Cast to FP32 and apply ``temp * tanh(x * multiplier / temp)`` in one pass."""
+    out = torch.empty_like(x, dtype=torch.float32)
+    torch.ops._C.muse_spark_mul_tanh_soft_cap(out, x, multiplier, soft_cap_temp)
+    return out
+
+
 def fused_qk_norm_rope(
     qkv: torch.Tensor,
     num_heads_q: int,
@@ -872,6 +883,7 @@ def get_cutlass_moe_mm_data(
     k: int,
     blockscale_offsets: torch.Tensor | None = None,
     is_gated: bool = True,
+    sorted_expert_ids: torch.Tensor | None = None,
 ):
     """Prepare data necessary to perform CUTLASS grouped matrix multiplications
     used in CUTLASS-based fused MoE.
@@ -896,6 +908,8 @@ def get_cutlass_moe_mm_data(
                           blockscale_offsets[E]
     - is_gated: Whether the activation is gated (gate + up). When True, the
                 first GEMM N dimension is 2*n; when False, it is n.
+    - sorted_expert_ids: Optional expert ID for each row after sorting, used to
+                         skip expert-offset searches in MXFP4 conversion.
     """
     return torch.ops._C.get_cutlass_moe_mm_data(
         topk_ids,
@@ -909,6 +923,7 @@ def get_cutlass_moe_mm_data(
         k,
         blockscale_offsets,
         is_gated,
+        sorted_expert_ids,
     )
 
 
@@ -1725,6 +1740,7 @@ def mxfp4_experts_quant(
     blockscale_offsets: torch.Tensor,
     n_experts: int,
     topk: int,
+    sorted_expert_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize input tensor to MXFP4 for packed MoE inputs.
     Uses 32-element blocks with E8M0 (power-of-two) scale factors.
@@ -1736,6 +1752,9 @@ def mxfp4_experts_quant(
         blockscale_offsets: [n_experts+1] SF row boundaries per expert
         n_experts: number of experts
         topk: number of top-k experts
+        sorted_expert_ids: Optional expert ID per sorted row; skips offset
+            lookup in the CUDA kernel when provided.
+
     Returns:
         output: [m_topk, k//2] packed E2M1 values (uint8)
         output_scales: E8M0 blockscales in swizzled layout (uint8 view)
@@ -1772,6 +1791,7 @@ def mxfp4_experts_quant(
         expert_offsets,
         blockscale_offsets,
         n_experts,
+        sorted_expert_ids,
     )
     # E8M0 SFs are stored as uint8
     output_scales = output_scales.view(torch.uint8)
@@ -1784,9 +1804,24 @@ def silu_and_mul_mxfp4_experts_quant(
     blockscale_offsets: torch.Tensor,
     n_experts: int,
     topk: int,
+    sorted_expert_ids: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused SiLU+Mul+MXFP4 quantization for MoE intermediate activations.
     MXFP4 has no global scale - only block-level E8M0 scale factors.
+
+    Args:
+        input_tensor: [m_topk, 2*k] BF16/FP16 gate||up activations
+        expert_offsets: [n_experts+1] token boundaries per expert
+        blockscale_offsets: [n_experts+1] SF row boundaries per expert
+        n_experts: number of experts
+        topk: number of top-k experts
+        sorted_expert_ids: Optional expert ID per sorted row; skips offset
+            lookup in the CUDA kernel when provided.
+
+    Returns:
+        output: [m_topk, k//2] packed E2M1 values (uint8)
+        output_scales: E8M0 blockscales in swizzled layout (uint8 view)
+
     """
     assert not current_platform.is_rocm()
     assert input_tensor.ndim == 2
@@ -1816,6 +1851,7 @@ def silu_and_mul_mxfp4_experts_quant(
         expert_offsets,
         blockscale_offsets,
         n_experts,
+        sorted_expert_ids,
     )
     output_scales = output_scales.view(torch.uint8)
     return output, output_scales
@@ -1949,6 +1985,222 @@ def scaled_int8_quant(
         output, input.contiguous(), input_scales, input_azp
     )
     return output, input_scales, input_azp
+
+
+def gather_block_table_cpu(
+    block_table: torch.Tensor,
+    output: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_blocks: torch.Tensor,
+    num_reqs_padded: int,
+) -> None:
+    torch.ops._C.gather_block_table_cpu(
+        block_table,
+        output,
+        idx_mapping,
+        num_blocks,
+        num_reqs_padded,
+    )
+
+
+def compute_slot_mapping_cpu(
+    block_table: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    positions: torch.Tensor,
+    block_size: int,
+    mapping_enabled: bool,
+    pad_slot_id: int,
+) -> None:
+    torch.ops._C.compute_slot_mapping_cpu(
+        block_table,
+        slot_mapping,
+        idx_mapping,
+        query_start_loc,
+        positions,
+        block_size,
+        mapping_enabled,
+        pad_slot_id,
+    )
+
+
+def prepare_prefill_inputs_cpu(
+    input_ids: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prefill_len: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_prefill_inputs_cpu(
+        input_ids,
+        next_prefill_tokens,
+        idx_mapping,
+        query_start_loc,
+        all_token_ids,
+        prefill_len,
+        num_computed_tokens,
+    )
+
+
+def get_prompt_logprobs_token_ids_cpu(
+    num_tokens: int,
+    query_start_loc: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    all_token_ids: torch.Tensor,
+) -> torch.Tensor:
+    return torch.ops._C.get_prompt_logprobs_token_ids_cpu(
+        num_tokens,
+        query_start_loc,
+        idx_mapping,
+        num_computed_tokens,
+        all_token_ids,
+    )
+
+
+def prepare_pos_seq_lens_cpu(
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    pos: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_pos_seq_lens_cpu(
+        idx_mapping,
+        query_start_loc,
+        num_computed_tokens,
+        pos,
+        seq_lens,
+    )
+
+
+def prepare_mrope_positions_cpu(
+    positions: torch.Tensor,
+    prefill_positions: torch.Tensor,
+    prefill_delta: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    prefill_lens: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+) -> None:
+    torch.ops._C.prepare_mrope_positions_cpu(
+        positions,
+        prefill_positions,
+        prefill_delta,
+        idx_mapping,
+        query_start_loc,
+        prefill_lens,
+        num_computed_tokens,
+    )
+
+
+def combine_sampled_and_draft_tokens_cpu(
+    input_ids: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    prefill_len: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    cu_num_logits: torch.Tensor,
+    num_logits: int,
+    num_new_sampled_tokens: int,
+) -> torch.Tensor:
+    return torch.ops._C.combine_sampled_and_draft_tokens_cpu(
+        input_ids,
+        idx_mapping,
+        last_sampled_tokens,
+        query_start_loc,
+        seq_lens,
+        prefill_len,
+        draft_tokens,
+        cu_num_logits,
+        num_logits,
+        num_new_sampled_tokens,
+    )
+
+
+def post_update_cpu(
+    idx_mapping: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    output_bin_counts: torch.Tensor | None,
+    sampled_tokens: torch.Tensor,
+    num_sampled: torch.Tensor,
+    num_rejected: torch.Tensor,
+    query_start_loc: torch.Tensor | None,
+    all_token_ids: torch.Tensor,
+    total_len: torch.Tensor,
+) -> None:
+    torch.ops._C.post_update_cpu(
+        idx_mapping,
+        num_computed_tokens,
+        last_sampled_tokens,
+        output_bin_counts,
+        sampled_tokens,
+        num_sampled,
+        num_rejected,
+        query_start_loc,
+        all_token_ids,
+        total_len,
+    )
+
+
+def gumbel_sample_cpu(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
+    seeds: torch.Tensor,
+    positions: torch.Tensor,
+    apply_temperature: bool,
+    is_drafting: bool,
+    use_fp64: bool,
+) -> torch.Tensor:
+    return torch.ops._C.gumbel_sample_cpu(
+        logits,
+        expanded_idx_mapping,
+        temperature,
+        seeds,
+        positions,
+        apply_temperature,
+        is_drafting,
+        use_fp64,
+    )
+
+
+def apply_logit_bias_cpu(
+    logits: torch.Tensor,
+    expanded_idx_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    num_allowed_token_ids: torch.Tensor,
+    allowed_token_ids: torch.Tensor,
+    num_logit_bias: torch.Tensor,
+    logit_bias_token_ids: torch.Tensor,
+    logit_bias: torch.Tensor,
+    min_lens: torch.Tensor,
+    num_stop_token_ids: torch.Tensor,
+    restore_when_all_masked: torch.Tensor,
+    stop_token_ids: torch.Tensor,
+    check_all_masked_rows: bool,
+) -> None:
+    torch.ops._C.apply_logit_bias_cpu(
+        logits,
+        expanded_idx_mapping,
+        positions,
+        num_allowed_token_ids,
+        allowed_token_ids,
+        num_logit_bias,
+        logit_bias_token_ids,
+        logit_bias,
+        min_lens,
+        num_stop_token_ids,
+        restore_when_all_masked,
+        stop_token_ids,
+        check_all_masked_rows,
+    )
 
 
 # mamba
@@ -2130,6 +2382,29 @@ if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "wvSplitK_int4_g
         return torch.empty(
             (num_tokens, out_features), dtype=in_b.dtype, device=in_b.device
         )
+
+
+def mxfp4_w4a8_gemv_rdna3(
+    a: torch.Tensor,
+    b_q: torch.Tensor,
+    b_scale: torch.Tensor,
+) -> torch.Tensor:
+    # a: [M, K] fp16/bf16 with 1 <= M <= 8; b_q: [N, K/2] uint8 E2M1;
+    # b_scale: [N, K/32] uint8 E8M0. Returns [M, N] in a.dtype.
+    return torch.ops._rocm_C.mxfp4_w4a8_gemv_rdna3(a, b_q, b_scale)
+
+
+if hasattr(torch.ops, "_rocm_C") and hasattr(
+    torch.ops._rocm_C, "mxfp4_w4a8_gemv_rdna3"
+):
+
+    @register_fake("_rocm_C::mxfp4_w4a8_gemv_rdna3")
+    def _mxfp4_w4a8_gemv_rdna3_fake(
+        a: torch.Tensor,
+        b_q: torch.Tensor,
+        b_scale: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty((a.size(0), b_q.size(0)), dtype=a.dtype, device=a.device)
 
 
 def wvSplitKrc(
@@ -2367,6 +2642,28 @@ def topk_sigmoid(
     )
 
 
+def muse_spark_routing(
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    logits: torch.Tensor,
+    bias: torch.Tensor,
+    multiplier: float,
+    route_scale: float,
+    division_eps: float,
+    is_padding: torch.Tensor | None = None,
+) -> None:
+    torch.ops._moe_C.muse_spark_routing(
+        topk_weights,
+        topk_ids,
+        logits,
+        bias,
+        multiplier,
+        route_scale,
+        division_eps,
+        is_padding,
+    )
+
+
 def topk_hash_softplus_sqrt(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -2406,6 +2703,7 @@ def grouped_topk(
     routed_scaling_factor: float,
     bias: torch.Tensor,
     scoring_func: int = 0,
+    is_padding: torch.Tensor | None = None,
 ):
     """Perform grouped top-k routing for mixture of experts.
 
@@ -2418,11 +2716,31 @@ def grouped_topk(
         routed_scaling_factor: Scaling factor for routing weights
         bias: Bias tensor (e_score_correction_bias). Always fused in kernel.
         scoring_func: 0=none (no activation), 1=sigmoid
+        is_padding: Optional CUDA token mask; padded rows get zero weights and -1 IDs.
 
     """
     if not (current_platform.is_cuda() or current_platform.is_xpu()):
         raise NotImplementedError(
             "The fused grouped_topk kernel is only available on CUDA and XPU platforms"
+        )
+    if scores.shape[0] == 0:
+        return (
+            scores.new_empty((0, topk), dtype=torch.float32),
+            scores.new_empty((0, topk), dtype=torch.int32),
+        )
+    # XPU provides its own operator with the original eight-argument schema.
+    if current_platform.is_xpu():
+        if is_padding is not None:
+            raise NotImplementedError("Fused grouped padding is only supported on CUDA")
+        return torch.ops._moe_C.grouped_topk(
+            scores,
+            num_expert_group,
+            topk_group,
+            topk,
+            renormalize,
+            routed_scaling_factor,
+            bias,
+            scoring_func,
         )
     return torch.ops._moe_C.grouped_topk(
         scores,
@@ -2433,6 +2751,7 @@ def grouped_topk(
         routed_scaling_factor,
         bias,
         scoring_func,
+        is_padding,
     )
 
 
@@ -2448,6 +2767,7 @@ if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "grouped_topk"):
         routed_scaling_factor: float,
         bias: torch.Tensor,
         scoring_func: int = 0,
+        is_padding: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         num_tokens = scores.size(0)
         return (
@@ -2593,6 +2913,105 @@ def reshape_and_cache_flash(
     )
 
 
+def fused_qknorm_rope_cache(
+    qkv: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    num_q_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    rotary_dim: int,
+    eps: float,
+    norm_weight_bias: float = 0.0,
+    kv_cache_dtype: str = "auto",
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fuse per-head RMSNorm, partial NeoX RoPE and KV insertion.
+
+    Norm weights may be FP32 independently of QKV. A zero rotary dimension
+    skips RoPE; norm outputs are rounded to QKV dtype before rotation.
+    """
+    if rotary_dim < 0 or rotary_dim > head_dim or rotary_dim % 8:
+        raise ValueError("rotary_dim must be a multiple of 8 in [0, head_dim]")
+    q = qkv.new_empty((qkv.shape[0], num_q_heads * head_dim))
+    k = qkv.new_empty((qkv.shape[0], num_kv_heads * head_dim))
+    v = torch.empty_like(k)
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    torch.ops._C.fused_qknorm_rope_cache(
+        q,
+        k,
+        v,
+        qkv,
+        q_weight,
+        k_weight,
+        cos,
+        sin,
+        positions,
+        slot_mapping,
+        key_cache,
+        value_cache,
+        head_dim,
+        num_q_heads,
+        num_kv_heads,
+        rotary_dim // 2,
+        eps,
+        norm_weight_bias,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+    return q, k, v
+
+
+def fused_muse_spark_qknorm_rope_kv_insert(
+    qkv: torch.Tensor,
+    positions: torch.Tensor,
+    num_heads: int,
+    num_kv_heads: int,
+    head_dim: int,
+    eps: float,
+    cos_sin_cache: torch.Tensor | None = None,
+    rotary_dim: int = 0,
+    slot_mapping: torch.Tensor | None = None,
+    kv_cache: torch.Tensor | None = None,
+    block_size: int = 0,
+    kv_cache_dtype: str = "auto",
+    k_scale: torch.Tensor | None = None,
+    v_scale: torch.Tensor | None = None,
+    q_fp8_out: torch.Tensor | None = None,
+    q_scale: torch.Tensor | None = None,
+) -> None:
+    """In-place weightless QK RMSNorm + GPT-J RoPE, optionally writing k/v to cache.
+
+    When ``kv_cache`` is given, the caller must skip the attention layer's own KV write.
+    With ``q_fp8_out``, write scaled E4M3 Q there instead of rewriting Q in ``qkv``.
+    """
+    torch.ops._C.fused_muse_spark_qknorm_rope_kv_insert(
+        qkv,
+        positions,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        eps,
+        cos_sin_cache,
+        rotary_dim,
+        slot_mapping,
+        kv_cache,
+        block_size,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+        q_fp8_out,
+        q_scale,
+    )
+
+
 def fused_minimax_m3_qknorm_rope_kv_insert(
     qkv: torch.Tensor,
     q_norm_weight: torch.Tensor,
@@ -2619,6 +3038,7 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     q_fp8_scale: float = 1.0,
     kv_k_scale: torch.Tensor | None = None,
     kv_v_scale: torch.Tensor | None = None,
+    write_qkv: bool = True,
 ) -> None:
     """Fused MiniMax-M3 attention pre-processing (in-place).
 
@@ -2629,11 +3049,13 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     - sparse layer (``num_index_heads > 0``): ``[q | k | v | index_q |
       index_k]`` — the index branch is read straight out of ``qkv``.
 
-    When ``kv_cache`` is given (sparse serving), also scatter-inserts the
-    normed/roped k & v into the paged KV cache by ``slot_mapping`` and the
-    index key into ``index_cache`` by ``index_slot_mapping``. ``kv_cache_dtype``
-    selects the cache storage/conversion path. If
-    ``index_slot_mapping`` is omitted, ``slot_mapping`` is used for both caches.
+    When ``kv_cache`` is given, also scatter-inserts the normed/roped k & v
+    into the paged KV cache by ``slot_mapping`` and, on sparse layers, the
+    index key into ``index_cache`` by ``index_slot_mapping``.
+    ``kv_cache_dtype`` selects the cache storage/conversion path; a dense
+    layer's insert stores exactly what ``reshape_and_cache_flash`` would with
+    unit k/v scales. If ``index_slot_mapping`` is omitted, ``slot_mapping`` is
+    used for both caches.
 
     If ``q_out`` / ``index_q_out`` (contiguous ``[N, nq*128]`` / ``[N,
     niq*128]``) are given, the normed/roped q / index_q are written there
@@ -2655,6 +3077,11 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
     ``[index_q | index_k]`` tail, but the kernel only processes the main q/k/v
     branches and main KV cache. This is used by MiniMax-M3 index-topk reuse
     layers that consume top-k block ids selected by an earlier sparse layer.
+
+    ``write_qkv=False`` needs ``q_fp8_out`` without ``q_out``, for callers that
+    read only the FP8 q, ``index_q_out`` and the caches: k and index_k need not
+    be rewritten in ``qkv``. The persistent kernel (SM80+, ``rotary_dim`` 64)
+    skips those stores; the fallback kernel may still make them.
     """
     torch.ops._C.fused_minimax_m3_qknorm_rope_kv_insert(
         qkv,
@@ -2682,6 +3109,47 @@ def fused_minimax_m3_qknorm_rope_kv_insert(
         q_fp8_scale,
         kv_k_scale,
         kv_v_scale,
+        write_qkv,
+    )
+
+
+def fused_minimax_m3_dspark_context_kv(
+    all_kv: torch.Tensor,
+    k_norm_weight: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    positions: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache: torch.Tensor,
+    cache_offsets: torch.Tensor,
+    k_scale: torch.Tensor,
+    scale_offsets: torch.Tensor,
+    rotary_dim: int,
+    eps: float,
+    kv_cache_dtype: str,
+) -> None:
+    """Store the MiniMax-M3 DSpark draft's context K/V for every layer.
+
+    ``all_kv`` ``[N, L, 2, nkv, 128]`` holds each layer's K and V. K gets the
+    layer's Gemma RMSNorm (``k_norm_weight[L, 128]``) and partial NeoX RoPE;
+    both are stored like ``reshape_and_cache_flash`` into the layers' caches.
+    Layer ``l``'s cache is ``kv_cache`` (layer 0, ``[nb, nkv, bs, 2 * 128]``)
+    shifted by ``cache_offsets[l]`` elements; its fp8 k/v scales are
+    ``k_scale`` (layer 0's) shifted by ``scale_offsets[0, l]`` /
+    ``scale_offsets[1, l]`` floats. Slots < 0 are skipped.
+    """
+    torch.ops._C.fused_minimax_m3_dspark_context_kv(
+        all_kv,
+        k_norm_weight,
+        cos_sin_cache,
+        positions,
+        slot_mapping,
+        kv_cache,
+        cache_offsets,
+        k_scale,
+        scale_offsets,
+        rotary_dim,
+        eps,
+        kv_cache_dtype,
     )
 
 
@@ -2777,10 +3245,18 @@ def concat_and_cache_mla(
     slot_mapping: torch.Tensor,
     kv_cache_dtype: str,
     scale: torch.Tensor,
+    skip_scale: bool = False,
 ) -> None:
-    torch.ops._C_cache_ops.concat_and_cache_mla(
-        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
-    )
+    if current_platform.is_xpu():
+        if skip_scale:
+            raise NotImplementedError("skip_scale is not supported on XPU")
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale
+        )
+    else:
+        torch.ops._C_cache_ops.concat_and_cache_mla(
+            kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale, skip_scale
+        )
 
 
 def concat_and_cache_mla_grouped(
@@ -3006,6 +3482,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
     block_table: torch.Tensor,
     workspace_starts: torch.Tensor,
     batch_size: int,
+    seq_starts: torch.Tensor | None = None,
 ) -> None:
     """Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace.
 
@@ -3015,6 +3492,8 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table: Block indices [num_reqs, max_blocks]
         workspace_starts: Workspace start offsets [num_reqs]
         batch_size: Number of requests
+        seq_starts: Per-request token offset into the context to start
+            reading from [num_reqs]; None reads from the first token.
 
     """
     torch.ops._C_cache_ops.cp_gather_and_upconvert_nvfp4_kv_cache(
@@ -3023,6 +3502,7 @@ def cp_gather_and_upconvert_nvfp4_kv_cache(
         block_table,
         workspace_starts,
         batch_size,
+        seq_starts,
     )
 
 
@@ -3351,6 +3831,13 @@ def weight_packed_linear_cpu(
     return output
 
 
+class CPUActMethod(IntEnum):
+    SILU_AND_MUL = 0
+    SWIGLU = 1
+    GELU_AND_MUL = 2
+    GELU_TANH_AND_MUL = 3
+
+
 class CPUQuantMethod(IntEnum):
     UNQUANT = 0
     INT8_W8A8 = 1
@@ -3397,6 +3884,7 @@ def fused_experts_cpu(
     limit: float | None = None,
     is_vnni: bool = True,
     a1_scale: torch.Tensor | None = None,
+    act_method: CPUActMethod = CPUActMethod.SILU_AND_MUL,
 ) -> None:
     torch.ops._C.fused_experts_cpu(
         out,
@@ -3417,6 +3905,7 @@ def fused_experts_cpu(
         alpha,
         limit,
         is_vnni,
+        act_method,
     )
 
 

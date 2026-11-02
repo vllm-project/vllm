@@ -72,8 +72,19 @@ lengths the model needs; the consumer uses them to reconstruct the audio
 placeholders and receives the embeddings through its EC connector without
 repeating audio preprocessing.
 
-This covers pure audio inputs, not video with an embedded audio track. It does
-not add `/v1/audio/transcriptions` or realtime routes to the example proxy.
+Qwen2.5-Omni and Qwen3-Omni also support videos with an embedded audio track
+using `mm_processor_kwargs={"use_audio_in_video": true}` in the request. Start
+both instances with `--trust-request-mm-kwargs` only for trusted clients.
+The proxy keeps one
+`video_embeds` content part per video, with an additional `audio_embeds` payload
+for its audio track. Both features share the source UUID but retain their own
+EC hashes and transfer handles. Audio lengths and video timing reconstruct the
+interleaved placeholders and M-RoPE positions without decoding the media again.
+If any item lacks metadata, the entire audio/video request falls back to raw
+media rather than mixing raw and metadata-only inputs.
+
+This does not add `/v1/audio/transcriptions` or realtime routes to the example
+proxy.
 
 ---
 

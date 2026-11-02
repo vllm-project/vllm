@@ -15,6 +15,7 @@
                 "type": "any_text",
                 "excludes": [
                   "<|close|>think<|sep|>",
+                  "<|open|>response<|sep|>",
                   "<|end_of_msg|>"
                 ],
                 "max_tokens": null,
@@ -446,6 +447,7 @@
                 "type": "any_text",
                 "excludes": [
                   "<|close|>think<|sep|>",
+                  "<|open|>response<|sep|>",
                   "<|end_of_msg|>"
                 ],
                 "max_tokens": null,
@@ -689,6 +691,7 @@
                 "type": "any_text",
                 "excludes": [
                   "<|close|>think<|sep|>",
+                  "<|open|>response<|sep|>",
                   "<|end_of_msg|>"
                 ],
                 "max_tokens": null,
@@ -822,6 +825,7 @@
                 "type": "any_text",
                 "excludes": [
                   "<|close|>think<|sep|>",
+                  "<|open|>response<|sep|>",
                   "<|end_of_msg|>"
                 ],
                 "max_tokens": null,
@@ -882,6 +886,7 @@
                 "type": "any_text",
                 "excludes": [
                   "<|close|>think<|sep|>",
+                  "<|open|>response<|sep|>",
                   "<|end_of_msg|>"
                 ],
                 "max_tokens": null,
