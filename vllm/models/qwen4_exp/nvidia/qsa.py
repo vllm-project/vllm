@@ -241,10 +241,12 @@ class Qwen4ExpQSAImpl(AttentionImplBase[Qwen4ExpQSAMetadata]):
         key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
         k_scale = v_scale = None
         if self.kv_cache_dtype in ("fp8", "fp8_e4m3"):
-            # The cache is allocated as uint8; on sm_89+ reinterpret the e4m3
-            # bytes (same itemsize, so shape and strides are preserved). Below
-            # sm_89 the kernel byte-decodes the raw uint8 storage instead.
-            if current_platform.has_device_capability(89):
+            # The cache is allocated as uint8; on sm_89+ and XPU reinterpret the
+            # e4m3 bytes (same itemsize, so shape and strides are preserved).
+            # Below sm_89 the kernel byte-decodes the raw uint8 storage instead.
+            from .ops.qsa import fp8_kv_view_is_native
+
+            if fp8_kv_view_is_native():
                 key_cache = key_cache.view(torch.float8_e4m3fn)
                 value_cache = value_cache.view(torch.float8_e4m3fn)
             # Host-side per-tensor dequant scales (Python floats), as used by
@@ -397,7 +399,7 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         self.use_fused_qk_norm_rope_gate = (
             self.attn_output_gate
             and getattr(self.rotary_emb, "is_neox_style", False)
-            and current_platform.is_cuda()
+            and (current_platform.is_cuda() or current_platform.is_xpu())
             and supports_dtype
             and (text_only or supports_mrope)
         )
@@ -436,13 +438,12 @@ class Qwen4ExpQSAAttention(Qwen3NextAttention, AttentionLayerBase):
         # the main K/V cache write (see QSAIndexer.forward); otherwise all of
         # them take the separate kernels. The fused writer receives an fp8
         # pointer, which Triton cannot lower below sm_89.
+        from .ops.qsa import fp8_kv_view_is_native
+
         self.use_fused_qsa_prepare = (
             self.use_fused_qk_norm_rope_gate
             and self.indexer.use_fused_pre_indexer
-            and (
-                self.kv_cache_torch_dtype != torch.uint8
-                or current_platform.has_device_capability(89)
-            )
+            and (self.kv_cache_torch_dtype != torch.uint8 or fp8_kv_view_is_native())
         )
         # Without a quant config here (BF16, or ModelOpt FP4, which keeps
         # attention in BF16) the fused layer is unquantized. Otherwise the
