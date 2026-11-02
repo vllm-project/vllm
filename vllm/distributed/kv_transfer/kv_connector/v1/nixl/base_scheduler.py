@@ -124,6 +124,8 @@ class NixlBaseConnectorScheduler:
             ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
         ] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
+        # Blocks of chunked host-buffer prefills, saved when prefill completes.
+        self._reqs_save_block_ids: dict[ReqId, tuple[list[int], ...]] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self._reqs_in_batch: set[ReqId] = set()
@@ -265,8 +267,8 @@ class NixlBaseConnectorScheduler:
         (null placeholders and the previous step's superseded state) go.
 
         Use this at every block-id exchange point. Pass ``clip_ssm=False``
-        for per-step partial lists (host-buffer save), where the SSM strip
-        does not apply.
+        for host-buffer save lists, which copy every allocated slot, so the
+        SSM strip does not apply.
         """
         if len(block_ids) == 0:
             # No blocks to clip, e.g. a full prefix cache hit.
@@ -447,35 +449,44 @@ class NixlBaseConnectorScheduler:
     ) -> None:
         # only called when use_host_buffer is True to build the save metadata
 
-        # NOTE: For the prefill side, there might be a chance that an early added
-        # request is a chunked prefill, so we need to check if new blocks are added
-        for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
-            req_to_save = self._reqs_need_save.get(req_id)
-            if req_to_save is None or new_block_id_groups is None:
+        # Later chunks keep rewriting earlier chunks' blocks (SSM state in place,
+        # an attention block across a chunk boundary), so accumulate a request's
+        # blocks and save them once, in the step that completes its prefill.
+        pending = self._reqs_save_block_ids
+        # Drop requests that left _reqs_need_save early, e.g. aborted mid-prefill.
+        for stale_id in pending.keys() - self._reqs_need_save.keys():
+            del pending[stale_id]
+        # Model Runner V2 schedules resumed requests as new requests.
+        new_req_ids = {
+            new_req.req_id for new_req in scheduler_output.scheduled_new_reqs
+        }
+        for req_id, new_block_id_groups, resumed in yield_req_data(scheduler_output):
+            req = self._reqs_need_save.get(req_id)
+            if req is None:
                 continue
-            req = req_to_save
-
-            assert req.kv_transfer_params is not None
-            clipped_block_id_groups = self.get_exchange_clipped_blocks(
-                new_block_id_groups, clip_ssm=False
-            )
-            meta.add_new_req_to_save(
-                request_id=req_id,
-                local_block_ids=clipped_block_id_groups,
-                kv_transfer_params=req.kv_transfer_params,
-            )
+            if new_block_id_groups is not None:
+                if resumed or req_id in new_req_ids or req_id not in pending:
+                    # New and resumed requests carry their full block list.
+                    pending[req_id] = tuple(list(g) for g in new_block_id_groups)
+                else:
+                    for group, new_blocks in zip(pending[req_id], new_block_id_groups):
+                        group.extend(new_blocks)
             assert scheduler_output.num_scheduled_tokens is not None
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             is_partial = (
                 req.num_computed_tokens + num_scheduled_tokens
             ) < req.num_prompt_tokens
-            if not is_partial:
-                # For non-partial prefills, once new req_meta is scheduled, it
-                # can be removed from _reqs_need_save.
-                # For partial prefill case, we will retain the request in
-                # _reqs_need_save until all blocks are scheduled with req_meta.
-                # Therefore, only pop if `not is_partial`.
-                self._reqs_need_save.pop(req_id)
+            if is_partial or req_id not in pending:
+                continue
+            assert req.kv_transfer_params is not None
+            meta.add_new_req_to_save(
+                request_id=req_id,
+                local_block_ids=self.get_exchange_clipped_blocks(
+                    pending.pop(req_id), clip_ssm=False
+                ),
+                kv_transfer_params=req.kv_transfer_params,
+            )
+            self._reqs_need_save.pop(req_id)
 
     def build_connector_meta(
         self,
