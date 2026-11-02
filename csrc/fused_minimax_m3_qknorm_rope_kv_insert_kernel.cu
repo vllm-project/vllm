@@ -691,8 +691,9 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
     // NHD/HND layout choice is captured by the head/token strides.
     int64_t const kv_s_block, int64_t const kv_s_head, int64_t const kv_s_token,
     int64_t const kv_s_dim,
-    // NVFP4 index cache only: page stride in bytes.
-    int64_t const idx_s_block,
+    // NVFP4 index cache only: page stride in bytes and rows per page
+    // (block_size, or block_size / TP for a TP-sharded index cache).
+    int64_t const idx_s_block, int const idx_block_size,
     // NVFP4 main cache only: per-layer K/V dequantization (global) scales.
     float const* __restrict__ kv_k_scale,
     float const* __restrict__ kv_v_scale) {
@@ -867,9 +868,9 @@ __global__ void fusedMiniMaxM3QNormRopeKVInsertKernel(
             // A single-head K side: data [bs, 64] then linear scales [bs, 8].
             storeNvfp4CacheElems<scalar_t>(
                 reinterpret_cast<uint8_t*>(index_cache) +
-                    (sm / block_size) * idx_s_block,
-                /*kv=*/0, /*head=*/0, static_cast<int>(sm % block_size),
-                block_size, laneId, elems, /*scale=*/1.0f);
+                    (sm / idx_block_size) * idx_s_block,
+                /*kv=*/0, /*head=*/0, static_cast<int>(sm % idx_block_size),
+                idx_block_size, laneId, elems, /*scale=*/1.0f);
 #endif
           } else if constexpr (kFp8Idx) {
             storeElemsFp8(index_cache + sm * kHeadDim + dim_base, elems);
@@ -1128,8 +1129,8 @@ __device__ __forceinline__ void runWarp(
     float const q_fp8_inv_scale, int const num_tokens, int const nq,
     int const niq, int const qkv_row, int const block_size,
     int64_t const kv_s_block, int64_t const kv_s_head, int64_t const kv_s_token,
-    int64_t const kv_s_dim, int64_t const idx_s_block, float const kv_scale,
-    bool const write_qkv) {
+    int64_t const kv_s_dim, int64_t const idx_s_block, int const idx_block_size,
+    float const kv_scale, bool const write_qkv) {
   constexpr bool kNorm = kRole != kV;
   constexpr bool kSlots =
       kInsertKV && (kRole == kK || kRole == kV || kRole == kIK);
@@ -1268,8 +1269,10 @@ __device__ __forceinline__ void runWarp(
       }
       sm = static_cast<int>(__shfl_sync(
           FINAL_MASK, static_cast<long long>(slot_l), it - slot_base, 32));
-      blk = static_cast<uint32_t>(sm) / static_cast<uint32_t>(block_size);
-      tok = static_cast<uint32_t>(sm) - blk * block_size;
+      uint32_t const page_rows =
+          kRole == kIK && kNvfp4Idx ? idx_block_size : block_size;
+      blk = static_cast<uint32_t>(sm) / page_rows;
+      tok = static_cast<uint32_t>(sm) - blk * page_rows;
     }
 
   #pragma unroll
@@ -1357,7 +1360,7 @@ __device__ __forceinline__ void runWarp(
             uint16_t const packed =
                 nvfp4QuantizeElems<scalar_t>(e[c], 1.0f, sf);
             if (sm >= 0 && row_ok) {
-              nvfp4StoreElems(page, /*kv=*/0, /*head=*/0, tok, block_size,
+              nvfp4StoreElems(page, /*kv=*/0, /*head=*/0, tok, idx_block_size,
                               kOneRow ? lane : 8 * c + v, packed, sf);
             }
           }
@@ -1464,8 +1467,8 @@ __global__ void __launch_bounds__(kMaxWarps * 32) fusedMiniMaxM3RowGroupKernel(
     int const num_tokens, int const nq, int const nkv, int const niq,
     int const block_size, int64_t const kv_s_block, int64_t const kv_s_head,
     int64_t const kv_s_token, int64_t const kv_s_dim, int64_t const idx_s_block,
-    float const* __restrict__ kv_k_scale, float const* __restrict__ kv_v_scale,
-    bool const write_qkv) {
+    int const idx_block_size, float const* __restrict__ kv_k_scale,
+    float const* __restrict__ kv_v_scale, bool const write_qkv) {
   #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 800)
   extern __shared__ __align__(16) uint8_t smem[];
   Roles const roles(kQHeads, nq, nkv, niq, kInsertKV, kProcessIndex);
@@ -1486,7 +1489,7 @@ __global__ void __launch_bounds__(kMaxWarps * 32) fusedMiniMaxM3RowGroupKernel(
       qkv, q_out, q_fp8_out, index_q_out, NORM_W, cos_sin_cache, positions,   \
           SLOTS, kv_cache, index_cache, eps, q_fp8_inv_scale, num_tokens, nq, \
           niq, qkv_row, block_size, kv_s_block, kv_s_head, kv_s_token,        \
-          kv_s_dim, idx_s_block, CACHE_SCALE, write_qkv
+          kv_s_dim, idx_s_block, idx_block_size, CACHE_SCALE, write_qkv
     #define RG_RUN(ROLE, STEPS, OUT)                                         \
       runWarp<ROLE, STEPS, OUT, scalar_t, cache_t, kv_dt, kNvfp4, out_idx_t, \
               kHasIndex, kInsertKV, kFp8Idx, kNvfp4Idx>
@@ -1683,10 +1686,11 @@ void launchFusedMiniMaxM3(
     float const q_fp8_inv_scale, int const rotary_dim, int const num_tokens,
     int const nq, int const nkv, int const niq, int const block_size,
     int64_t const kv_s_block, int64_t const kv_s_head, int64_t const kv_s_token,
-    int64_t const kv_s_dim, int64_t const idx_s_block, bool const has_index,
-    bool const insert_kv, bool const process_index, bool const fp8_idx,
-    bool const nvfp4_idx, float const* kv_k_scale, float const* kv_v_scale,
-    bool const write_qkv, bool const slots_fit_int32, cudaStream_t stream) {
+    int64_t const kv_s_dim, int64_t const idx_s_block, int const idx_block_size,
+    bool const has_index, bool const insert_kv, bool const process_index,
+    bool const fp8_idx, bool const nvfp4_idx, float const* kv_k_scale,
+    float const* kv_v_scale, bool const write_qkv, bool const slots_fit_int32,
+    bool const enable_pdl, cudaStream_t stream) {
   // Index outputs are scalar_t (bf16) or e4m3 bytes (uint8_t); reinterpret the
   // void* pointers per instantiation in the LAUNCH macro.
   // Slot count must match the kernel's compile-time gating.
@@ -1703,9 +1707,7 @@ void launchFusedMiniMaxM3(
   if (grid == 0) return;
 
 #ifndef USE_ROCM
-  // PDL: enable programmatic stream serialization whenever the hardware
-  // supports it (SM90+).  On pre-Hopper GPUs the attribute is unavailable, so
-  // leave numAttrs = 0 and launch as a regular kernel via cudaLaunchKernelEx.
+  // CP disables PDL here to fence metadata before the scorer prefetches old K.
   static int const sm_version = getSMVersion();
   cudaLaunchConfig_t config;
   config.gridDim = dim3(grid);
@@ -1716,7 +1718,7 @@ void launchFusedMiniMaxM3(
   attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
   attrs[0].val.programmaticStreamSerializationAllowed = 1;
   config.attrs = attrs;
-  config.numAttrs = (sm_version >= 90) ? 1 : 0;
+  config.numAttrs = (sm_version >= 90 && enable_pdl) ? 1 : 0;
 
   // The row-group kernel: same bytes, for rotary_dim == 64 on SM80+ (cp.async).
   int const q_heads = rgQHeads(num_tokens, nq);
@@ -1749,7 +1751,8 @@ void launchFusedMiniMaxM3(
         slot_mapping, index_slot_mapping, kv_cache,                         \
         reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,        \
         rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,       \
-        kv_s_head, kv_s_token, kv_s_dim, idx_s_block, kv_k_scale, kv_v_scale
+        kv_s_head, kv_s_token, kv_s_dim, idx_s_block, idx_block_size,       \
+        kv_k_scale, kv_v_scale
   #define LAUNCH_RG(QH, HAS_INDEX, INSERT, PROCESS_INDEX, FP8, NVFP4_IDX,      \
                     OUT_T)                                                     \
     rg::launch<QH, scalar_t, cache_t, kv_dt, kNvfp4, OUT_T, HAS_INDEX, INSERT, \
@@ -1782,8 +1785,8 @@ void launchFusedMiniMaxM3(
         slot_mapping, index_slot_mapping, kv_cache,                         \
         reinterpret_cast<OUT_T*>(index_cache), eps, q_fp8_inv_scale,        \
         rotary_dim, num_tokens, nq, nkv, niq, block_size, kv_s_block,       \
-        kv_s_head, kv_s_token, kv_s_dim, idx_s_block, kv_k_scale,           \
-        kv_v_scale)
+        kv_s_head, kv_s_token, kv_s_dim, idx_s_block, idx_block_size,       \
+        kv_k_scale, kv_v_scale)
   // clang-format on
 #endif
 
@@ -2187,9 +2190,10 @@ void launchFusedMiniMaxM3DSparkContextKV(
       static_cast<float>(eps), 1.0f / static_cast<float>(q_fp8_scale),          \
       static_cast<int>(rotary_dim), num_tokens, nq, nkv, niq,                  \
       static_cast<int>(block_size), kv_s_block, kv_s_head, kv_s_token,         \
-      kv_s_dim, idx_s_block, has_index, insert_kv, process_index, fp8_idx,     \
+      kv_s_dim, idx_s_block, static_cast<int>(idx_block_size), has_index,     \
+      insert_kv, process_index, fp8_idx,                                       \
       nvfp4_idx, kv_k_scale_ptr, kv_v_scale_ptr, write_qkv, slots_fit_int32,  \
-      stream)
+      enable_pdl, stream)
 #define CALL_FUSED_MINIMAX_M3(_RAW_T, CACHE_T, KV_DTYPE)                       \
   CALL_FUSED_MINIMAX_M3_IMPL(CACHE_T, KV_DTYPE, false)
 // clang-format on
@@ -2220,7 +2224,8 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
         q_fp8_out,  // [N, nq*128] contiguous E4M3
     double q_fp8_scale,
     std::optional<torch::stable::Tensor> kv_k_scale,  // [] f32, NVFP4 only
-    std::optional<torch::stable::Tensor> kv_v_scale, bool write_qkv) {
+    std::optional<torch::stable::Tensor> kv_v_scale, bool write_qkv,
+    bool enable_pdl) {
   STD_TORCH_CHECK(qkv.is_cuda() && qkv.is_contiguous(),
                   "qkv must be contiguous CUDA");
   STD_TORCH_CHECK(
@@ -2422,18 +2427,22 @@ void fused_minimax_m3_qknorm_rope_kv_insert(
        (index_cache.has_value() && index_cache->scalar_type() == kFp8) ||
        (index_q_out.has_value() && index_q_out->scalar_type() == kFp8));
   int64_t idx_s_block = 0;
+  int64_t idx_block_size = block_size;
   if (nvfp4_idx) {
 #ifdef USE_ROCM
     STD_TORCH_CHECK(false, "nvfp4 index_cache is not supported on ROCm");
 #endif
     int64_t const page_width = kHeadDim / 2 + kHeadDim / 16;
+    // A TP-sharded index cache holds block_size / TP rows per page.
+    idx_block_size = index_cache->size(1);
     STD_TORCH_CHECK(
-        index_cache->dim() == 3 && index_cache->size(1) == block_size &&
+        index_cache->dim() == 3 && idx_block_size > 0 &&
+            block_size % idx_block_size == 0 &&
             index_cache->size(2) == page_width && index_cache->stride(2) == 1 &&
             index_cache->stride(1) == page_width &&
-            index_cache->stride(0) >= block_size * page_width,
-        "nvfp4 index_cache must be [nb, block_size, 72] uint8 with "
-        "contiguous pages");
+            index_cache->stride(0) >= idx_block_size * page_width,
+        "nvfp4 index_cache must be [nb, rows, 72] uint8 with contiguous "
+        "pages, rows dividing block_size");
     idx_s_block = index_cache->stride(0);
   }
   if (fp8_idx) {

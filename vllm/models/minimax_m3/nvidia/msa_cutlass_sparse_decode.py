@@ -325,7 +325,7 @@ def supports_cutlass_sparse_decode(
         and current_platform.is_device_capability_family(100)
         and (kv_cache_dtype in ("fp8", "fp8_e4m3") or nvfp4)
         and _supported_head_geometry(num_q_heads, num_kv_heads)
-        and page_size == _PAGE_SIZE
+        and (page_size == _PAGE_SIZE or (page_size == 256 and nvfp4))
         and topk_blocks == _TOPK
     )
 

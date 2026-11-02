@@ -113,6 +113,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType | str = "bf16",
         backend_cls: type[AttentionBackend] = MiniMaxM3IndexerBackend,
+        tp_shard: int = 1,
     ) -> None:
         super().__init__()
         # Per-token storage width in elements of ``dtype``.
@@ -141,6 +142,7 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
         self.query_dtype = query_dtype
         self.prefix = prefix
         self.cache_config = cache_config
+        self.tp_shard = tp_shard
         # Impl-chosen backend -> each impl gets its own builder (get_attn_backend).
         self.backend_cls = backend_cls
         compilation_config = get_current_vllm_config().compilation_config
@@ -150,16 +152,32 @@ class MiniMaxM3IndexerCache(nn.Module, AttentionLayerBase):
 
     def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
         # [B, H=1, N, C] -> [B, N, C]
-        self.kv_cache = kv_cache.squeeze(1)
+        kv_cache = kv_cache.squeeze(1)
+        if self.tp_shard > 1:
+            # Packed [B, N, D / tp] page -> [B, N / tp, D]: this rank's rows of
+            # each page (D is the per-token width, 72 B for NVFP4). FP8 rows
+            # are token rows the fused insert kernel addresses flat; an NVFP4
+            # shard page is planar, all codes and then all scales.
+            num_blocks, block_size, content = kv_cache.shape
+            rows = block_size // self.tp_shard
+            assert content * self.tp_shard == self.head_size
+            assert kv_cache.is_contiguous()
+            kv_cache = kv_cache.view(num_blocks, rows, self.head_size)
+        self.kv_cache = kv_cache
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # Key-only: MLAAttentionSpec budgets one vector/token (not 2x for K+V).
+        # Key-only: MLAAttentionSpec budgets one vector/token (not 2x for K+V);
+        # a sharded cache budgets 1 / tp_shard of it per rank.
+        content = None
+        if self.tp_shard > 1:
+            content = self.head_size * self.dtype.itemsize // self.tp_shard
         return MLAAttentionSpec(
             block_size=vllm_config.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_size,
             dtype=self.dtype,
             cache_role=SparseCacheRole.INDEXER,
+            state_content_bytes=content,
         )
 
     def forward(self) -> None: ...
@@ -366,6 +384,7 @@ class MiniMaxM3IndexerImpl(nn.Module):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
+        index_k_shard: int = 1,
     ) -> None:
         super().__init__()
         self.num_kv_heads = num_kv_heads
@@ -400,6 +419,7 @@ class MiniMaxM3IndexerImpl(nn.Module):
             cache_config=cache_config,
             indexer_kv_dtype=indexer_kv_dtype,
             backend_cls=type(self).indexer_backend_cls,
+            tp_shard=index_k_shard,
         )
 
     def reserve_workspace(self) -> None:
@@ -417,6 +437,13 @@ class MiniMaxM3IndexerImpl(nn.Module):
 
 class MiniMaxM3IndexerTritonImpl(MiniMaxM3IndexerImpl):
     """Triton indexer score + top-k for both prefill and decode."""
+
+    def __init__(self, *, index_k_shard: int = 1, **kwargs) -> None:
+        if index_k_shard > 1:
+            raise ValueError(
+                "Triton indexer does not support a TP-sharded index-K cache"
+            )
+        super().__init__(index_k_shard=index_k_shard, **kwargs)
 
     def forward(
         self,
@@ -511,13 +538,15 @@ def select_indexer_impl_cls(
     *,
     topk_blocks: int,
     indexer_kv_dtype: IndexerKVDType | str = "bf16",
+    index_k_shard: int = 1,
 ) -> type[MiniMaxM3IndexerImpl]:
     """Pick the indexer impl off the platform, top-k count, and cache dtype.
 
     On Blackwell (SM100) with ``topk_blocks == 16`` (the only width fmha_sm100's
     ``sparse_topk_select`` kernel supports), the fmha_sm100 score + top-k path is
     used for both bf16 and fp8 index caches. An nvfp4 index cache uses the MSA
-    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only). Everything else falls back to
+    Q8KV4/Q8KV8 paged indexers (SM100/SM103/SM107 only), or the MSA impl when
+    the index cache is TP-sharded. Everything else falls back to
     the Triton indexer, with fp8 restricted to CUDA platforms that advertise fp8
     support.
     """
@@ -569,6 +598,20 @@ def select_indexer_impl_cls(
             raise NotImplementedError(
                 "indexer_kv_dtype='nvfp4' requires an SM100, SM103 or SM107 GPU."
             )
+        if index_k_shard > 1:
+            # Index-K CP lives in the MSA impl: sharded NVFP4 decode scoring and
+            # FP8 staging of the shard pages for prefill.
+            from vllm.models.minimax_m3.nvidia.indexer_msa import (
+                MiniMaxM3IndexerMSAImpl,
+            )
+
+            logger.info_once(
+                "MiniMax M3 indexer: selected MSA with an NVFP4 index cache "
+                "sharded over TP%d [topk_blocks=%d]",
+                index_k_shard,
+                topk_blocks,
+            )
+            return MiniMaxM3IndexerMSAImpl
         from vllm.models.minimax_m3.nvidia.indexer_nvfp4 import (
             MiniMaxM3IndexerNvfp4Impl,
         )
@@ -635,11 +678,13 @@ class MiniMaxM3Indexer(nn.Module):
         cache_config: CacheConfig | None = None,
         indexer_kv_dtype: IndexerKVDType | str = "bf16",
         topk_indices_buffer: torch.Tensor | None = None,
+        index_k_shard: int = 1,
     ) -> None:
         super().__init__()
         impl_cls = select_indexer_impl_cls(
             topk_blocks=topk_blocks,
             indexer_kv_dtype=indexer_kv_dtype,
+            index_k_shard=index_k_shard,
         )
         self.impl = impl_cls(
             num_kv_heads=num_kv_heads,
@@ -655,6 +700,7 @@ class MiniMaxM3Indexer(nn.Module):
             cache_config=cache_config,
             indexer_kv_dtype=indexer_kv_dtype,
             topk_indices_buffer=topk_indices_buffer,
+            index_k_shard=index_k_shard,
         )
 
     @property
