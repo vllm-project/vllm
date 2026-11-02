@@ -16,6 +16,7 @@ import pytest
 
 from vllm.config.model import _FLOAT16_NOT_SUPPORTED_MODELS, RunnerOption
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
 
 from ..models.registry import HF_EXAMPLE_MODELS
@@ -293,6 +294,10 @@ def _compare_tp(
         )
     if max_num_seqs:
         common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
+    if current_platform.is_rocm():
+        # MI250 reports ~2.7 GiB in use per idle GPU, which leaves too little
+        # headroom for the default 0.92 utilization once workers start.
+        common_args.extend(["--gpu-memory-utilization", "0.85"])
 
     pp_env = None
     tp_env = None
