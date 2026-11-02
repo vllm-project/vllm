@@ -3,19 +3,96 @@
 
 import json
 
+import httpx
 import openai
 import pytest
 import pytest_asyncio
+from PIL import Image
 from transformers import AutoProcessor
 
 from tests.entrypoints.multimodal.conftest import TEST_IMAGE_ASSETS
 from tests.utils import ROCM_EXTRA_ARGS, RemoteOpenAIServer
+from vllm.config import ModelConfig
+from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache.base import MultiModalCache
 from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.platforms import current_platform
 
 MODEL_NAME = "microsoft/Phi-3.5-vision-instruct"
 MAXIMUM_IMAGES = 2
+
+
+def test_processor_only_cache_eviction_preserves_chat_logprobs():
+    """A later image hit must survive inserts on the same API worker."""
+    model = "llava-hf/llava-1.5-7b-hf"
+    images = [Image.new("RGB", (112, 112), c) for c in ("red", "green", "blue")]
+    processor = MULTIMODAL_REGISTRY.create_processor(
+        ModelConfig(model, limit_mm_per_prompt={"image": 3})
+    )
+    processed = processor(
+        "<image>" * 3,
+        mm_items=processor.info.parse_mm_data({"image": images}),
+    )
+    items = processed["mm_kwargs"]["image"]
+    capacity = MultiModalCache.get_item_size(items[0]) + MultiModalCache.get_item_size(
+        items[1]
+    )
+    urls = [encode_image_url(image) for image in images]
+    args = [
+        "--api-server-count",
+        "2",
+        "--mm-processor-cache-gb",
+        str(capacity / (1 << 30)),
+        "--limit-mm-per-prompt",
+        '{"image": 3}',
+        "--max-model-len",
+        "4096",
+        "--max-num-seqs",
+        "1",
+        "--no-enable-prefix-caching",
+        "--enforce-eager",
+    ]
+    # Keep all requests on one API worker, whose cache holds exactly two images.
+    limits = httpx.Limits(max_connections=1, max_keepalive_connections=1)
+    with (
+        RemoteOpenAIServer(model, args) as server,
+        server.get_client(http_client=httpx.Client(limits=limits)) as client,
+    ):
+
+        def complete(order):
+            return client.chat.completions.create(
+                model=model,
+                temperature=0,
+                max_tokens=1,
+                logprobs=True,
+                top_logprobs=5,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe these images."},
+                            *[
+                                {"type": "image_url", "image_url": {"url": urls[i]}}
+                                for i in order
+                            ],
+                        ],
+                    }
+                ],
+            )
+
+        expected = complete((2, 0, 1))
+        complete((0, 1))
+        actual = complete((2, 0, 1))
+        assert actual.usage.prompt_tokens == expected.usage.prompt_tokens
+        assert actual.choices[0].message.content
+        expected_probs = expected.choices[0].logprobs.content[0].top_logprobs
+        actual_probs = actual.choices[0].logprobs.content[0].top_logprobs
+        assert [p.token for p in actual_probs] == [p.token for p in expected_probs]
+        assert [p.logprob for p in actual_probs] == pytest.approx(
+            [p.logprob for p in expected_probs], abs=1e-3
+        )
+
 
 # Required terms for beam search validation
 # Each entry is a list of term groups - ALL groups must match

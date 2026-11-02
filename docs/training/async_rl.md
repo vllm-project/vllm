@@ -18,13 +18,22 @@ To safely update weights while the inference engine is running, vLLM provides `p
 await engine.pause_generation(mode="keep", clear_cache=True)
 ```
 
-The `mode` parameter controls how in-flight requests are handled:
+The `mode` parameter controls how in-flight requests are handled, and whether
+new requests are admitted while paused:
 
-| Mode | Behavior |
-| ---- | -------- |
-| `"abort"` | Abort all in-flight requests immediately and return partial results (default) |
-| `"wait"` | Wait for all in-flight requests to finish before pausing |
-| `"keep"` | Freeze requests in the queue; they resume when `resume_generation` is called |
+| Mode | In-flight requests | New requests |
+| ---- | ------------------ | ------------ |
+| `"abort"` | Aborted immediately, returning partial results (default) | Rejected with HTTP 503 until resume |
+| `"wait"` | Running requests finish before the pause completes; queued ones run after resume | Rejected with HTTP 503 until resume |
+| `"keep"` | Frozen in the queue; they resume when `resume_generation` is called | Accepted and queued |
+
+`"abort"` and `"wait"` treat the pause as a generation boundary: from the moment
+the pause starts (for `"wait"`, including while in-flight requests drain) until
+`resume_generation` returns, the engine rejects new requests from every API server
+rather than carrying them across the boundary. Clients should retry on 503. A
+request racing the pause call itself may instead be treated as in-flight, and
+input to an already-open streaming-input session is still accepted. Other pauses,
+such as `sleep`, keep queueing new requests.
 
 The `clear_cache` parameter controls whether to clear the KV cache and prefix cache after pausing.
 
@@ -75,6 +84,10 @@ for span in completion.weight_versions:
 ```
 
 The offsets cover the whole output, so with streamed delta outputs, collect the tokens before slicing. `/inference/v1/generate` returns the same list on each choice; see [Tokens In <> Tokens Out API](../serving/online_serving/token_in_token_out.md#weight-versions).
+
+`/v1/completions` and `/v1/chat/completions` return it on each choice when the request sets `return_weight_versions: true`. The offsets count the choice's output tokens, which `return_token_ids` returns as `token_ids`, and a streamed choice gets the list on its last chunk.
+
+An aborted request returns spans over its partial output. If you resubmit that output as part of a new prompt, the new request's spans start again at 0, so shift them by the number of tokens already generated before joining the two lists.
 
 ## Example
 

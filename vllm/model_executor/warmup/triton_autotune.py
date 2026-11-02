@@ -44,6 +44,17 @@ def get_autotune_cache_dir(table_name: str) -> str:
     return os.path.join(root, f"triton={version}", table_name)
 
 
+def _umask() -> int:
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+# The mode open() gives new files. mkstemp always uses 0o600, which other users
+# and containers sharing the cache cannot read.
+_FILE_MODE = 0o666 & ~_umask()
+
+
 def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     fd, tmp_path = tempfile.mkstemp(
@@ -52,6 +63,7 @@ def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
         suffix=".tmp",
     )
     try:
+        os.fchmod(fd, _FILE_MODE)
         with os.fdopen(fd, "w") as f:
             json.dump(payload, f, indent=4)
             f.write("\n")
@@ -60,6 +72,23 @@ def atomic_write_json(path: str, payload: dict[str, Any]) -> None:
         with suppress(OSError):
             os.unlink(tmp_path)
         raise
+
+
+def read_config_json(path: str) -> dict[str, Any] | None:
+    """The JSON object stored at path, or None if there is none.
+
+    Tuned configs only change speed, so a file that cannot be read or parsed is
+    skipped with a warning instead of failing startup.
+    """
+    try:
+        with open(path) as f:
+            payload = json.load(f)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError) as e:
+        logger.warning_once("Skipping tuned config file %s: %s", path, str(e))
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 @dataclass(frozen=True)

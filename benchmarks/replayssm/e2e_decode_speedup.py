@@ -120,7 +120,7 @@ def run_worker(args):
     if args.disable_flashinfer_autotune:
         # FP4-MoE autotuner is unstable under CUDA-graph capture on Blackwell;
         # re-enable (--no-disable-flashinfer-autotune) only for non-FP4 models.
-        llm_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
+        llm_kwargs["enable_flashinfer_autotune"] = False
     if mode == "replayssm":
         llm_kwargs.update(use_replayssm=True, replayssm_buffer_len=args.buffer_len)
 
