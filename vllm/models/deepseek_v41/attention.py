@@ -78,7 +78,6 @@ from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV41IndexerBackend,
     dsa_indexer_uses_fp4,
-    get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerBackend,
@@ -185,17 +184,6 @@ def _indexer_k_cache_head_dim(index_head_dim: int, use_fp4_kv: bool) -> int:
     # NOTE(yifan): FP8 indexer cache uses the same layout as V3.2:
     # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
     return index_head_dim + index_head_dim // 128 * 4
-
-
-def _indexer_prefill_buffer_size(vllm_config: VllmConfig, compress_ratio: int) -> int:
-    """K-gather rows one indexer prefill chunk can reach under the builder's
-    logits budget (keys**2 <= max_logits_elems * max_len), capped at its budget."""
-    max_len = vllm_config.model_config.max_model_len // compress_ratio
-    max_logits_elems = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024 // 4
-    return min(
-        get_max_prefill_buffer_size(vllm_config) // compress_ratio,
-        max(max_len, math.isqrt(max_logits_elems * max_len)),
-    )
 
 
 @triton.jit
@@ -1531,8 +1519,11 @@ class DeepseekV4Indexer(nn.Module):
         )
         self.prefix = prefix
 
-        self.max_total_seq_len = _indexer_prefill_buffer_size(
-            vllm_config, self.compress_ratio
+        # Sized by the same builder that splits prefill into chunks.
+        self.max_total_seq_len = (
+            k_cache.get_attn_backend()
+            .get_builder_cls()
+            .get_prefill_buffer_size(vllm_config, self.compress_ratio)
         )
 
         assert cache_config is not None, "Deepseek V4 indexer requires cache_config"

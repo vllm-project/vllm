@@ -27,8 +27,8 @@ from vllm.utils.deep_gemm import has_deep_gemm_sparse_mqa
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
-    DeepseekV32IndexerMetadataBuilder,
     DeepseekV41IndexerBackend,
+    DeepseekV41IndexerMetadataBuilder,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -80,7 +80,7 @@ class DeepseekV41SparseIndexerBackend(DeepseekV41IndexerBackend):
         return DeepseekV41SparseIndexerMetadataBuilder
 
 
-class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
+class DeepseekV41SparseIndexerMetadataBuilder(DeepseekV41IndexerMetadataBuilder):
     """Dense indexer metadata plus the sparse-logits row scratch.
 
     Every requirement of the sparse kernels is checked here, at engine start,

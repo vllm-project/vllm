@@ -13,7 +13,6 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonMetadataBuilder,
 )
 from vllm.models.deepseek_v4.sparse_mla import DeepseekV4SparseMLABackend
-from vllm.models.deepseek_v41.attention import _indexer_prefill_buffer_size
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4SparseMLABackend as DeepseekV41SparseMLABackend,
 )
@@ -31,6 +30,7 @@ from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
     DeepseekV32IndexerMetadataBuilder,
     DeepseekV41IndexerBackend,
+    DeepseekV41IndexerMetadataBuilder,
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
@@ -765,18 +765,22 @@ def test_indexer_expanded_block_table_sized_by_decode_tokens():
 @pytest.mark.parametrize("max_model_len", [1 << 17, 1 << 20])
 @pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_dsv41_indexer_prefill_buffer_holds_every_chunk(max_model_len, compress_ratio):
-    """DeepSeek-V4.1 reserves only the K-gather rows a chunk can reach under the
-    builder's logits budget; the densest chunks the builder forms must fit, some
-    of them exactly."""
+    """DeepSeek-V4.1's smaller reservation splits the densest batch exactly as the
+    generic one does, and holds every chunk."""
     vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(max_model_len=max_model_len)
+        model_config=SimpleNamespace(max_model_len=max_model_len),
+        attention_config=SimpleNamespace(
+            sparse_mla_prefill_workspace_factor=5 if max_model_len <= 1 << 18 else 2
+        ),
     )
-    reserved = _indexer_prefill_buffer_size(vllm_config, compress_ratio)
-    seq_lens = [max_model_len // compress_ratio] * 256
-    chunks = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks(
-        torch.tensor(seq_lens),
-        torch.ones(len(seq_lens), dtype=torch.int64),
-        get_max_prefill_buffer_size(vllm_config) // compress_ratio,
-        envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024,
+    reserved = DeepseekV41IndexerMetadataBuilder.get_prefill_buffer_size(
+        vllm_config, compress_ratio
     )
-    assert max(sum(seq_lens[reqs]) for reqs, _ in chunks) <= reserved
+    seq_lens = torch.full((256,), max_model_len // compress_ratio)
+    query_lens = torch.ones(256, dtype=torch.int64)
+    max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    split = DeepseekV32IndexerMetadataBuilder._split_indexer_prefill_chunks
+    chunks = split(seq_lens, query_lens, reserved, max_logits_bytes)
+    generic = get_max_prefill_buffer_size(vllm_config) // compress_ratio
+    assert chunks == split(seq_lens, query_lens, generic, max_logits_bytes)
+    assert max(seq_lens[reqs].sum().item() for reqs, _ in chunks) <= reserved

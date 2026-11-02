@@ -98,7 +98,7 @@ def test_deepseek_rocm_adaptive_indexer_support(
 
     assert backend_cls.supports_device_cpu_query_lens_mismatch()
     assert indexer._rocm_supports_flattened_device_query_lens(adaptive_config)
-    assert backend_cls.get_builder_cls() is DeepseekV32IndexerMetadataBuilder
+    assert issubclass(backend_cls.get_builder_cls(), DeepseekV32IndexerMetadataBuilder)
     assert indexer._use_flattening(adaptive_config)
     assert (
         DeepseekV32IndexerMetadataBuilder.get_cudagraph_support(
