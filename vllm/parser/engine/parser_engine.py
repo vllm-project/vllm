@@ -1132,6 +1132,11 @@ class ParserEngine(Parser):
         if not safe_json:
             return None
         if prev and not safe_json.startswith(prev):
+            if self._arg_value_extender is not None:
+                # A repeated key replaced a streamed value. Deltas that only
+                # extend the new value skip the conversion until it closes.
+                slot.extend_open_value = self._arg_value_extender(slot.args)
+                slot.open_value_streams = False
             return None
 
         slot.streamed_json = safe_json
