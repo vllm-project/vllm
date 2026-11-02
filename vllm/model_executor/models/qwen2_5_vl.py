@@ -133,38 +133,6 @@ from .vision import (
 logger = init_logger(__name__)
 
 
-def _pad_cumulative_seqlens_buffer(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-) -> None:
-    n = src.shape[0]
-    dst.zero_()
-    dst[:n].copy_(src)
-    if n < dst.shape[0]:
-        dst[n:] = src[-1]
-
-
-def _pad_flashinfer_cu_seqlens_buffer(
-    dst: torch.Tensor,
-    src: torch.Tensor,
-) -> None:
-    src_mid = src.shape[0] // 2
-    dst_mid = dst.shape[0] // 2
-    assert src_mid <= dst_mid, (
-        f"FlashInfer cu_seqlens replay buffer is larger than capture buffer: "
-        f"src_section={src_mid}, dst_section={dst_mid}"
-    )
-
-    dst.zero_()
-    dst[:src_mid].copy_(src[:src_mid])
-    if src_mid < dst_mid:
-        dst[src_mid:dst_mid] = src[src_mid - 1]
-
-    dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
-    if dst_mid + src_mid < dst.shape[0]:
-        dst[dst_mid + src_mid :] = src[-1]
-
-
 # === Vision Inputs === #
 
 
@@ -1779,10 +1747,8 @@ class Qwen2_5_VLForConditionalGeneration(
         modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
 
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
-        cu_seqlens_padding = (
-            _pad_flashinfer_cu_seqlens_buffer
-            if self.visual.attn_backend == AttentionBackendEnum.FLASHINFER
-            else _pad_cumulative_seqlens_buffer
+        cu_seqlens_padding = MMEncoderAttention.cu_seqlens_buffer_padding(
+            self.visual.attn_backend
         )
         return EncoderCudaGraphConfig(
             modalities=modalities,
