@@ -823,6 +823,13 @@ class WhisperForConditionalGeneration(
             ".encoder_attn.v_proj": (".encoder_attn.kv_proj", 1),
         },
         orig_to_new_prefix={"proj_out.": None},
+        # Add fake zeros bias to k_proj for qkv packed
+        weights_transforms=[
+            lambda weights: _create_fake_bias_for_k_proj(weights, ".k_proj.weight"),
+            lambda weights: _create_fake_bias_for_k_proj(
+                weights, ".k_proj.weight_packed"
+            ),
+        ],
     )
 
     # Whisper only supports audio-conditioned generation.
@@ -1038,15 +1045,6 @@ class WhisperForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-
-        # add fake zeros bias for k_proj to state_dict. Covers the
-        # ``.k_proj.weight`` and the compressed-tensors packed
-        # ``.k_proj.weight_packed`` checkpoints.
-        k_proj_weight_suffixes = (".k_proj.weight", ".k_proj.weight_packed")
-        for suffix in k_proj_weight_suffixes:
-            weights = _create_fake_bias_for_k_proj(
-                weights, suffix, out_features=self.config.d_model
-            )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 

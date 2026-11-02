@@ -65,8 +65,9 @@ struct RadixRowState {
 // Kernel parameters
 // ============================================================================
 
+template <typename InT>
 struct PersistentTopKParams {
-  const float* __restrict__ input;      // [num_rows, stride]
+  const InT* __restrict__ input;        // [num_rows, stride]
   int32_t* __restrict__ output;         // [num_rows, top_k]
   const int32_t* __restrict__ lengths;  // [num_rows]
   RadixRowState* row_states;            // large path: per-group state
@@ -150,9 +151,9 @@ __device__ __forceinline__ void select_coarse_bin(
 // kernel
 // Returns where exact recovery resumes when the threshold bin overflows the
 // candidate buffer; .needed is false otherwise.
-template <int TopK, uint32_t VecSize>
+template <int TopK, uint32_t VecSize, typename InT>
 __device__ __noinline__ overflow::MediumResume histogram_medium_topk(
-    const float* __restrict__ logits, int* __restrict__ output_indices,
+    const InT* __restrict__ logits, int* __restrict__ output_indices,
     int seq_len) {
   // All shared state lives in dynamic shared memory to avoid static
   extern __shared__ char medium_smem[];
@@ -291,7 +292,8 @@ __device__ __noinline__ overflow::MediumResume histogram_medium_topk(
     if (remaining_k == 0) {
       for (int i = thread_id; i < num_buffered; i += kThreadsPerBlock) {
         const int idx = buffered_indices[src_buffer][i];
-        const uint32_t fp32_bits = convert_to_uint32_v2(logits[idx]);
+        const uint32_t fp32_bits =
+            convert_to_uint32_v2(topk_histogram_4096::to_float(logits[idx]));
         const int bin = (fp32_bits >> bit_offset) & 0xFF;
         if (bin > threshold_bin) {
           const int output_pos = atomicAdd(&shared_output_count, 1);
@@ -310,7 +312,7 @@ __device__ __noinline__ overflow::MediumResume histogram_medium_topk(
 
     for (int i = thread_id; i < num_buffered; i += kThreadsPerBlock) {
       const int idx = buffered_indices[src_buffer][i];
-      const float logit_value = logits[idx];
+      const float logit_value = topk_histogram_4096::to_float(logits[idx]);
       const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
       const int bin = (fp32_bits >> bit_offset) & 0xFF;
       if (bin > threshold_bin) {
@@ -400,8 +402,8 @@ __device__ __forceinline__ void wait_ge(int* ptr, int target_val,
 // Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
 // ============================================================================
 
-template <int TopK, uint32_t VEC_SIZE>
-__device__ void radix_topk(const float* __restrict__ row_input,
+template <int TopK, uint32_t VEC_SIZE, typename InT>
+__device__ void radix_topk(const InT* __restrict__ row_input,
                            int32_t* __restrict__ row_output, uint32_t seq_len,
                            uint32_t my_chunk_start, uint32_t chunk_size,
                            uint32_t* local_histogram, uint32_t* suffix_sum,
@@ -421,24 +423,26 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 
     for (uint32_t i = tx * VEC_SIZE; i < aligned_size;
          i += kThreadsPerBlock * VEC_SIZE) {
-      const float* src = row_input + my_chunk_start + i;
+      const InT* src = row_input + my_chunk_start + i;
       if constexpr (VEC_SIZE == 4) {
-        float4 v = *reinterpret_cast<const float4*>(src);
+        float4 v = topk_histogram_4096::load_score4(src);
         shared_ordered[i] = convert_to_uint32_v2(v.x);
         shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
         shared_ordered[i + 2] = convert_to_uint32_v2(v.z);
         shared_ordered[i + 3] = convert_to_uint32_v2(v.w);
       } else if constexpr (VEC_SIZE == 2) {
-        float2 v = *reinterpret_cast<const float2*>(src);
+        float2 v = topk_histogram_4096::load_score2(src);
         shared_ordered[i] = convert_to_uint32_v2(v.x);
         shared_ordered[i + 1] = convert_to_uint32_v2(v.y);
       } else {
-        shared_ordered[i] = convert_to_uint32_v2(*src);
+        shared_ordered[i] =
+            convert_to_uint32_v2(topk_histogram_4096::to_float(*src));
       }
     }
     for (uint32_t i = aligned_size + tx; i < actual_chunk_size;
          i += kThreadsPerBlock) {
-      shared_ordered[i] = convert_to_uint32_v2(row_input[my_chunk_start + i]);
+      shared_ordered[i] = convert_to_uint32_v2(
+          topk_histogram_4096::to_float(row_input[my_chunk_start + i]));
     }
   }
   __syncthreads();
@@ -609,9 +613,9 @@ __device__ void radix_topk(const float* __restrict__ row_input,
 // Persistent kernel — short/medium/large paths with RadixTopK.
 // ============================================================================
 
-template <int TopK = 2048, uint32_t VEC_SIZE = 1>
+template <int TopK = 2048, uint32_t VEC_SIZE = 1, typename InT = float>
 __global__ void __launch_bounds__(kThreadsPerBlock, 2)
-    persistent_topk_kernel(PersistentTopKParams params) {
+    persistent_topk_kernel(PersistentTopKParams<InT> params) {
   const uint32_t tx = threadIdx.x;
   extern __shared__ uint8_t smem_raw[];
 
@@ -675,7 +679,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
     const uint32_t seq_len =
         non_negative_len < row_bound ? non_negative_len : row_bound;
     int32_t* row_output = params.output + row_idx * params.top_k;
-    const float* row_input = params.input + row_idx * params.stride;
+    const InT* row_input = params.input + row_idx * params.stride;
 
     if (seq_len <= RADIX_THRESHOLD) {
       if (cta_in_group == 0) {
@@ -736,10 +740,11 @@ struct vec_t {
   FLASHINFER_INLINE T& operator[](size_t i) { return data[i]; }
   FLASHINFER_INLINE const T& operator[](size_t i) const { return data[i]; }
 
-  FLASHINFER_INLINE void cast_load(const T* ptr) {
+  template <typename InT>
+  FLASHINFER_INLINE void cast_load(const InT* ptr) {
 #pragma unroll
     for (size_t i = 0; i < N; ++i) {
-      data[i] = ptr[i];
+      data[i] = topk_histogram_4096::to_float(ptr[i]);
     }
   }
 };
@@ -802,7 +807,7 @@ __device__ __forceinline__ bool filtered_topk_row(
   extern __shared__ __align__(16) uint8_t dynamic_smem[];
   constexpr uint32_t BLOCK_SIZE = FILTERED_TOPK_BLOCK_THREADS;
   constexpr int SMEM_INPUT_SIZE = FILTERED_TOPK_SMEM_INPUT_SIZE;
-  using Traits = FilteredTopKTraits<DType, UseWideCoarse>;
+  using Traits = FilteredTopKTraits<float, UseWideCoarse>;
   constexpr int RADIX = 1 << Traits::REFINE_BITS;
   static_assert(RADIX == FilteredTopKStorage<MAX_K, UseWideCoarse>::RADIX);
   constexpr int COARSE_RADIX = Traits::COARSE_RADIX;
@@ -853,7 +858,7 @@ __device__ __forceinline__ bool filtered_topk_row(
   }
   __syncthreads();
 
-  vec_t<DType, VEC_SIZE> score_vec;
+  vec_t<float, VEC_SIZE> score_vec;
 
   const int aligned_length = (length / VEC_SIZE) * VEC_SIZE;
 #pragma unroll 2
@@ -868,7 +873,7 @@ __device__ __forceinline__ bool filtered_topk_row(
   }
   // Handle tail
   for (int i = aligned_length + tx; i < length; i += BLOCK_SIZE) {
-    const auto bin = Traits::ToCoarseKey(score[i]);
+    const auto bin = Traits::ToCoarseKey(hist4096::to_float(score[i]));
     atomicAdd(&s_coarse_histogram[bin], 1);
   }
   __syncthreads();
@@ -920,7 +925,8 @@ __device__ __forceinline__ bool filtered_topk_row(
     }
     // Handle tail
     for (int i = aligned_length + tx; i < length; i += BLOCK_SIZE) {
-      const auto bin = static_cast<int>(Traits::ToCoarseKey(score[i]));
+      const auto bin =
+          static_cast<int>(Traits::ToCoarseKey(hist4096::to_float(score[i])));
       if (bin > threshold_bin) {
         const auto pos = atomicAdd(&s_counter, 1);
         s_indices[pos] = i;
@@ -972,7 +978,7 @@ __device__ __forceinline__ bool filtered_topk_row(
     }
     // Handle tail
     for (int i = aligned_length + tx; i < length; i += BLOCK_SIZE) {
-      filter_and_add_to_histogram(score[i], i);
+      filter_and_add_to_histogram(hist4096::to_float(score[i]), i);
     }
     __syncthreads();
 
@@ -1007,7 +1013,8 @@ __device__ __forceinline__ bool filtered_topk_row(
         for (int i = tx; i < num_input; i += BLOCK_SIZE) {
           const auto idx = s_input_idx[r_idx][i];
           const auto bin =
-              (Traits::ToOrdered(score[idx]) >> offset) & (RADIX - 1);
+              (Traits::ToOrdered(hist4096::to_float(score[idx])) >> offset) &
+              (RADIX - 1);
           if (static_cast<int>(bin) > threshold) {
             const auto pos = atomicAdd(&s_counter, 1);
             s_indices[pos] = idx;
@@ -1023,7 +1030,7 @@ __device__ __forceinline__ bool filtered_topk_row(
         __syncthreads();
         for (int i = tx; i < num_input; i += BLOCK_SIZE) {
           const auto idx = s_input_idx[r_idx][i];
-          const auto raw_input = score[idx];
+          const float raw_input = hist4096::to_float(score[idx]);
           const auto bin =
               (Traits::ToOrdered(raw_input) >> offset) & (RADIX - 1);
           if (static_cast<int>(bin) > threshold) {
@@ -1100,7 +1107,7 @@ constexpr uint32_t gcd(uint32_t a, uint32_t b) {
 // Returns 1, 2, 4, or 8
 template <typename DType>
 constexpr int ComputeFilteredTopKVecSize(uint32_t max_len) {
-  constexpr int MAX_VEC = 16 / sizeof(DType);  // 4 for float32, 8 for fp16/bf16
+  constexpr int MAX_VEC = 4;
   // Use GCD to find largest power-of-2 divisor
   const uint32_t g = gcd(max_len, static_cast<uint32_t>(MAX_VEC));
   return static_cast<int>(g);
@@ -1114,7 +1121,7 @@ cudaError_t FilteredTopKRaggedTransform(const DType* input,
                                         uint32_t max_len,
                                         cudaStream_t stream = 0) {
   constexpr size_t smem_size = FILTERED_TOPK_SMEM_DYNAMIC;
-  constexpr int MAX_VEC = 16 / sizeof(DType);
+  constexpr int MAX_VEC = 4;
 
   dim3 grid(num_rows);
   dim3 block(FILTERED_TOPK_BLOCK_THREADS);

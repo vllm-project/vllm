@@ -33,6 +33,7 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
     is_draft_model_cacheable,
 )
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
+from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.tracing import instrument
@@ -151,8 +152,15 @@ def process_weights_after_loading(
     from vllm.model_executor.layers.quantization.online.moe_base import (
         OnlineMoEMethodBase,
     )
+    from vllm.model_executor.model_loader.reload.direct import (
+        direct_reload_enabled,
+        record_checkpoint_layout,
+    )
 
     maybe_retie_word_embeddings(model, model_config)
+
+    if direct_reload_enabled():
+        record_checkpoint_layout(model)  # cold start only; reloads reuse it
 
     for name, module in model.named_modules():
         quant_method = getattr(module, "quant_method", None)
@@ -183,6 +191,12 @@ def process_weights_after_loading(
                 else nullcontext()
             )
             with loading_context, timing_context:
+                # Quantize the staged fused shared experts into their slots.
+                shared_expert_loader = getattr(
+                    module, "shared_expert_online_loader", None
+                )
+                if shared_expert_loader is not None:
+                    shared_expert_loader.finalize(module)
                 quant_method.process_weights_after_loading(module)
             # process_weights_after_loading may swap in freshly-created
             # Parameters (e.g. FP8 requantization), which are stamped with the
@@ -206,8 +220,7 @@ def process_weights_after_loading(
                 module.process_weights_after_loading(model_config.dtype)
 
     # Model-level post-load hook, after the per-layer quant finalize.
-    if hasattr(model, "process_weights_after_loading"):
-        model.process_weights_after_loading()
+    finalize_model_weights(model)
 
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
