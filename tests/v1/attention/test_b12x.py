@@ -168,6 +168,35 @@ def test_b12x_attention_runtime_page_size_comes_from_cache() -> None:
         _kv_page_size(key_cache, torch.empty((3, 128, 4, 128), device="meta"))
 
 
+def test_b12x_attention_impl_accepts_default_block_size(workspace_init) -> None:
+    """The impl is constructed with the model, before the platform applies
+    get_preferred_block_size(); it must not reject the default block size.
+
+    Regression test: ``--attention-backend b12x`` without ``--block-size``
+    used to fail with "b12x requires --block-size in (64, 128), got 16".
+    """
+    _require_b12x_paged_attention()
+    from tests.v1.attention.utils import create_vllm_config
+    from vllm.config import set_current_vllm_config
+
+    vllm_config = create_vllm_config(model_name="Qwen/Qwen3-0.6B", dtype=torch.bfloat16)
+    cache_config = vllm_config.cache_config
+    assert cache_config.block_size == cache_config.DEFAULT_BLOCK_SIZE
+    assert not B12xPagedAttentionBackend.supports_block_size(cache_config.block_size)
+
+    with set_current_vllm_config(vllm_config):
+        impl = B12xPagedAttentionImpl(
+            num_heads=16,
+            head_size=128,
+            scale=128**-0.5,
+            num_kv_heads=8,
+            alibi_slopes=None,
+            sliding_window=None,
+            kv_cache_dtype="auto",
+        )
+    assert impl.num_heads == 16
+
+
 def test_b12x_attention_lazily_prepares_decode_bucket(monkeypatch) -> None:
     impl = object.__new__(B12xPagedAttentionImpl)
     plan = SimpleNamespace(layout=SimpleNamespace(nbytes=96))
