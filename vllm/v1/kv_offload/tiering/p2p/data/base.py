@@ -65,6 +65,14 @@ The transport decides each failure's scope:
   state check failed stays inflight unless the failure proves it can no
   longer write, so the peer's teardown is what bounds it.
 
+remove_remote_peer() does not stop a transfer that is still running: the
+transport retires it instead. A retired transfer leaves every poll(), so
+a reconnected peer under the same id never sees it; poll_retired()
+reports it once it has stopped, and only then are its handle and the
+removed peer's registration released. The caller keeps the transfer's
+source pins until then, or until it gives up and calls
+force_release_retired().
+
 The transport never recovers a peer itself. The session turns a peer
 fault into the same connection death as a missed heartbeat, so the
 manager's reap is the only teardown: DisconnectMsg makes the peer tear
@@ -261,9 +269,26 @@ class DataTransport(ABC):
     def remove_remote_peer(self, peer_id: str) -> None:
         """Unregister a remote peer and release associated resources.
 
-        Inflight transfers to this peer should be cancelled first.
+        Transfers to this peer still inflight are retired, not released
+        (see "Failure model"); the peer's registration is released once
+        they have stopped.
         """
         ...
+
+    def poll_retired(self) -> list[int]:
+        """Release retired transfers that have stopped; return their ids.
+
+        Must be called periodically while any transfer is retired. The
+        default transport retires nothing.
+        """
+        return []
+
+    def force_release_retired(self, transfer_ids: Iterable[int]) -> None:
+        """Release retired transfers that have not stopped.
+
+        Unsafe while one may still be writing; for a bounded hold only.
+        """
+        self.cancel(transfer_ids, mode="immediate")
 
     @abstractmethod
     def write_blocks(

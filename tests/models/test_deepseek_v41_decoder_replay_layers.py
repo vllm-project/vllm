@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DecoderReplayLayers runs the replay layers on the forward's replay batch."""
 
+from contextlib import contextmanager
 from unittest.mock import MagicMock
 
 import pytest
@@ -9,6 +10,7 @@ import torch
 
 from vllm.config import CompilationConfig, CUDAGraphMode
 from vllm.config.kernel import FLASHINFER_MOE_EP_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
+from vllm.distributed.parallel_state import GraphCaptureContext
 from vllm.forward_context import (
     BatchDescriptor,
     ForwardContext,
@@ -158,8 +160,16 @@ def test_replay_graph_matches_eager(monkeypatch, moe_backend, ids_dtype):
     """The replay graph of the next captured size pads and runs the rows. Input ids
     arrive as the model passes them: int32, cast to int64 for native MegaMoE only."""
     monkeypatch.setattr(cudagraph_utils, "get_pp_group", MagicMock)
-    capture = torch.cuda.stream(torch.cuda.Stream())
-    monkeypatch.setattr(cudagraph_utils, "graph_capture", lambda device: capture)
+
+    @contextmanager
+    def fake_graph_capture(device, stream=None):
+        if stream is None:
+            stream = torch.cuda.Stream(device=device)
+        stream.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(stream):
+            yield GraphCaptureContext(stream)
+
+    monkeypatch.setattr(cudagraph_utils, "graph_capture", fake_graph_capture)
     compilation = CompilationConfig(decoder_replay_cudagraph_capture_sizes=[4])
     cfg = MagicMock(compilation_config=compilation, speculative_config=None)
     # Mocking it true would capture into the cuMem pool, which breaks on ROCm.

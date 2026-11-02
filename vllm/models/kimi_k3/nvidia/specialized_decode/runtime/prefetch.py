@@ -37,6 +37,7 @@ import cuda.bindings.driver as cuda
 import torch
 
 from vllm.models.common.ops.moe_tail_fusion.primitives import to_cute
+
 from ..cutedsl.common.host import _checked, resolve_kernel
 from ..cutedsl.common.policy import batch_table
 from ..cutedsl.common.prefetch import compile_kernel

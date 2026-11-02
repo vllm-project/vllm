@@ -33,8 +33,9 @@ TOPK = 16
 SM_SCALE = D**-0.5
 
 
-def _nvfp4_cache(num_blocks, k_scale, v_scale, num_kv_heads=1):
+def _nvfp4_cache(num_blocks, scales, num_kv_heads=1):
     """Every slot of the cache filled with random K / V."""
+    k_scale, v_scale = scales
     cache = torch.zeros(
         num_blocks, 2 * num_kv_heads, BLOCK, 72, dtype=torch.uint8, device="cuda"
     )
@@ -150,7 +151,7 @@ def test_decode_matches_reference(decode_query_len, splits, random_bytes, xcd_co
             sf.masked_fill_((sf & 0x7F) == 0x7F, 0x38)  # no NaN scales
         q = (torch.randn(rows, GROUP, D, device="cuda") * 0.01).bfloat16()
     else:
-        cache = _nvfp4_cache(num_blocks, *_scales())
+        cache = _nvfp4_cache(num_blocks, _scales())
         q = torch.randn(rows, GROUP, D, device="cuda").bfloat16()
     kw = dict(splits=splits, xcd_count=xcd_count)
     out = _decode(q, cache, topk, table, seq_lens, decode_query_len, **kw)
@@ -172,7 +173,7 @@ def test_decode_padding_rows_and_kv_heads(num_kv_heads, decode_query_len, splits
     table, num_blocks = _block_table([max(s, 1) for s in lens])
     seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
     topk = _selections([max(s, 1) for s in lens], decode_query_len, num_kv_heads)
-    cache = _nvfp4_cache(num_blocks, *_scales(), num_kv_heads)
+    cache = _nvfp4_cache(num_blocks, _scales(), num_kv_heads)
     rows = topk.shape[1]
     q = torch.randn(rows, GROUP * num_kv_heads, D, device="cuda").bfloat16()
     out = torch.full((rows + 3, *q.shape[1:]), float("nan"), device="cuda").bfloat16()
@@ -200,7 +201,7 @@ def test_garbage_past_the_length_is_ignored(num_kv_heads, qlen, splits, xcd_coun
     table, blocks = _block_table(lens)
     seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
     topk = _selections(lens, qlen, num_kv_heads)
-    cache = _nvfp4_cache(blocks, *_scales(), num_kv_heads)
+    cache = _nvfp4_cache(blocks, _scales(), num_kv_heads)
     q = torch.randn(len(lens) * qlen, num_kv_heads * GROUP, D, device="cuda").bfloat16()
     kw = dict(splits=splits, xcd_count=xcd_count)
     out = _decode(q, cache, topk, table, seq_lens, qlen, **kw)
@@ -228,7 +229,7 @@ def test_decode_block_outer_pages_bitwise(num_kv_heads, decode_query_len):
     table, num_blocks = _block_table(lens)
     seq_lens = torch.tensor(lens, dtype=torch.int32, device="cuda")
     topk = _selections(lens, decode_query_len, num_kv_heads)
-    cache = _nvfp4_cache(num_blocks, *_scales(), num_kv_heads)
+    cache = _nvfp4_cache(num_blocks, _scales(), num_kv_heads)
     page = cache[0].numel()
     wide = torch.full((num_blocks, 3 * page), 0x7F, dtype=torch.uint8, device="cuda")
     wide_cache = wide[:, page : 2 * page].view(cache.shape)

@@ -1925,13 +1925,14 @@ __device__ __forceinline__ uint2 bf16x8ToE4m3(uint4 const p,
   }
   return make_uint2(r[0], r[1]);
 }
-  #if (defined(__CUDA_ARCH_FAMILY_SPECIFIC__) && \
-       __CUDA_ARCH_FAMILY_SPECIFIC__ >= 1000) || \
-      (defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ >= 1000)
+  #if ((defined(__CUDA_ARCH_FAMILY_SPECIFIC__) &&                              \
+        __CUDA_ARCH_FAMILY_SPECIFIC__ >= 1000) ||                              \
+       (defined(__CUDA_ARCH_SPECIFIC__) && __CUDA_ARCH_SPECIFIC__ >= 1000)) && \
+      defined(CUDART_VERSION) && CUDART_VERSION >= 13010
     #define VLLM_CTX_KV_BF16X2_TO_E4M3X2
   #endif
 // Eight bf16 -> e4m3 with a unit scale (exact); one convert per pair where
-// the arch converts bf16x2 -> e4m3x2.
+// the arch and toolkit (PTX ISA 9.1+) convert bf16x2 -> e4m3x2.
 __device__ __forceinline__ uint2 bf16x8ToE4m3(uint4 const p) {
   #ifdef VLLM_CTX_KV_BF16X2_TO_E4M3X2
   uint32_t r[2];

@@ -110,9 +110,10 @@ class _Batch:
 
     def run(self, qkv, pos, slots, islots, kv_full, idx_full, q, iq):
         minimax_m3_norm_rope_nvfp4_insert(
-            qkv, *self.w, self.cs, pos, slots, islots, self.kv(kv_full),
-            self.idx(idx_full), self.ks, self.vs, q, iq, num_heads=self.nq,
-            num_kv_heads=self.nkv, num_index_heads=self.niq, eps=EPS,
+            qkv, self.w[0], self.w[1], self.w[2], self.w[3], self.cs, pos,
+            slots, islots, self.kv(kv_full), self.idx(idx_full), self.ks,
+            self.vs, q, iq, num_heads=self.nq, num_kv_heads=self.nkv,
+            num_index_heads=self.niq, eps=EPS,
         )  # fmt: skip
 
     def fused(self, iq):

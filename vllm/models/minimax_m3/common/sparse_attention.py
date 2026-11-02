@@ -5,8 +5,9 @@
 The lightning indexer (``indexer.py``) selects the top-k KV blocks (written into
 the shared ``layer.topk_indices_buffer``); this module holds the main attention
 that attends only to those blocks: the paged K/V cache backend, its metadata +
-builder, and the impl that reads the indexer's top-k from that buffer. The Triton
-attend kernel lives here; the SM100 (MSA)
+builder, and the impl that reads the indexer's top-k from that buffer. The generic
+Triton attend kernel lives in ``common/ops``; Hopper uses the query-tiled prefill
+kernel in ``nvidia/ops``. The SM100 (MSA)
 ``build_k2q_csr`` + ``sparse_atten_func`` attend lives in
 ``nvidia/sparse_attention_msa.py``.
 
@@ -28,12 +29,20 @@ from vllm.logger import init_logger
 from vllm.models.minimax_m3.common.ops.sparse_attn import SPARSE_BLOCK_SIZE
 from vllm.platforms import current_platform
 
-# AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops;
+# AMD/ROCm uses the gfx942/gfx950-optimized block-sparse kernels in amd.ops.
+# Hopper uses query-tiled NVIDIA prefill and the common split-K decode kernel;
 # every other platform uses the generic common.ops implementation.
 if current_platform.is_rocm():
     from vllm.models.minimax_m3.amd.ops.sparse_attn import (
         minimax_m3_sparse_attn,
         minimax_m3_sparse_attn_decode,
+    )
+elif current_platform.is_cuda() and current_platform.is_device_capability_family(90):
+    from vllm.models.minimax_m3.common.ops.sparse_attn import (
+        minimax_m3_sparse_attn_decode,
+    )
+    from vllm.models.minimax_m3.nvidia.ops.sparse_prefill import (
+        minimax_m3_sparse_attn,
     )
 else:
     from vllm.models.minimax_m3.common.ops.sparse_attn import (

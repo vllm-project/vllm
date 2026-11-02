@@ -20,9 +20,11 @@ Differences from DFlash:
     previously sampled token at each step.
 
 CUDA graphs (FULL, mirroring DFlash) cover the whole draft step: the parallel
-backbone forward AND the sequential Markov sampling. With batch-sharded
-sampling the graph ends at the owner-sorted LM-head shard; each rank then
-samples its own requests after it (the all-to-all splits change every step).
+backbone forward AND the sequential Markov sampling.
+
+Under batch-sharded sampling, draft steps also shard the sequential sampling
+across TP ranks: each rank runs the Markov loop only for the requests it owns
+(the same owners as verification), see ``_sample_sequential_sharded``.
 """
 
 from typing import Any
@@ -31,10 +33,16 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.logger import init_logger
-from vllm.v1.worker.gpu.input_batch import InputBatch
-from vllm.v1.worker.gpu.sample.batch_shard import DraftBatchSharder
+from vllm.utils.math_utils import cdiv
+from vllm.v1.worker.gpu.sample.batch_shard import (
+    all_to_all_vocab_shards,
+    batch_sharded_sampling_enabled,
+    get_tp_pynccl_comm,
+)
+from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
@@ -76,10 +84,6 @@ class DSparkSpeculator(DFlashSpeculator):
             torch.arange(self.max_num_reqs, dtype=torch.int64, device=device)
             * self.num_query_per_req
         )
-        # The replicated Markov loop samples every row of its bias.
-        self._req_rows = torch.arange(
-            self.max_num_reqs, dtype=torch.int64, device=device
-        )
 
         # Reduced-vocab probabilistic drafting only; set in load_draft_model.
         self._d2t_scatter_index: torch.Tensor | None = None
@@ -89,8 +93,53 @@ class DSparkSpeculator(DFlashSpeculator):
         )
 
         self.use_confidence_head: bool = False
-        # Set by enable_batch_sharded_sampling().
-        self._draft_sharder: DraftBatchSharder | None = None
+
+        # Set when the sequential sampling can be batch-sharded across TP.
+        self._sharded_sequential_comm: PyNcclCommunicator | None = None
+
+    def load_model(self, target_model: torch.nn.Module) -> None:
+        super().load_model(target_model)
+        tp_size = get_tp_group().world_size
+        if tp_size > 1 and batch_sharded_sampling_enabled(
+            self.vllm_config, target_model
+        ):
+            self._try_enable_sharded_sequential_sampling()
+
+    def _try_enable_sharded_sequential_sampling(self) -> None:
+        tp_size = get_tp_group().world_size
+        lm_head = getattr(self.model, "lm_head", None)
+        pynccl_comm = get_tp_pynccl_comm()
+        reason = None
+        if self.draft_logits is not None and self.draft_logits.row_mapping is None:
+            reason = "the draft logits cache is replicated"
+        elif self.use_acceptance_estimator:
+            reason = (
+                "the online acceptance estimator fits on every request's "
+                "draft logits on every rank"
+            )
+        elif self._draft_topk is not None:
+            reason = "top-k Markov sampling is not supported"
+        elif hasattr(self.model, "sample_sequential"):
+            reason = "the draft model fuses its own sequential sampling"
+        elif not hasattr(self.model, "compute_draft_logits_local") or (
+            getattr(lm_head, "tp_size", None) != tp_size
+        ):
+            reason = "the draft model cannot compute vocab-sharded draft logits"
+        elif pynccl_comm is None:
+            reason = "PyNCCL is unavailable"
+
+        if reason is not None:
+            logger.info(
+                "DSpark sequential sampling stays replicated across TP ranks: %s.",
+                reason,
+            )
+            return
+
+        self._sharded_sequential_comm = pynccl_comm
+        logger.info(
+            "DSpark sequential sampling is batch-sharded across %d TP ranks.",
+            tp_size,
+        )
 
     def load_draft_model(
         self,
@@ -128,37 +177,6 @@ class DSparkSpeculator(DFlashSpeculator):
         # A model's own sample_sequential kernels write the full-size cache.
         return not hasattr(self.model, "sample_sequential")
 
-    def enable_batch_sharded_sampling(self) -> None:
-        # The target verifies each request on its owner rank, so each rank
-        # samples only its own requests' drafts and keeps their logits.
-        tp_group = get_tp_group()
-        lm_head = getattr(self.model, "lm_head", None)
-        reason = None
-        if not hasattr(self.model, "compute_draft_logits_local"):
-            reason = "the draft model has no compute_draft_logits_local"
-        elif tp_group.world_size == 1 or (
-            getattr(lm_head, "tp_size", 1) != tp_group.world_size
-        ):
-            reason = "the draft LM head is not vocab-parallel over the TP group"
-        elif self._draft_topk is not None:
-            reason = "top-k drafting is not supported"
-        elif self.draft_watermarker is not None:
-            reason = "draft watermarking is not supported"
-        elif self.acceptance_estimator is not None or self.use_confidence_head:
-            reason = "adaptive verification is not supported"
-        if reason is not None:
-            logger.info("DSpark draft sampling stays replicated: %s.", reason)
-            return
-        assert lm_head is not None
-        self._draft_sharder = DraftBatchSharder(
-            max_num_reqs=self.max_num_reqs,
-            num_steps=self.num_speculative_steps,
-            shard_width=lm_head.num_embeddings_per_partition,
-            dtype=self.model.logits_processor.head_dtype or self.dtype,
-            device=self.device,
-        )
-        logger.info("DSpark draft sampling is batch-sharded.")
-
     def _sample_logits(
         self,
         logits: torch.Tensor,
@@ -168,7 +186,7 @@ class DSparkSpeculator(DFlashSpeculator):
     ) -> torch.Tensor:
         self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
         if self.draft_logits is None:
-            draft_ids = logits.argmax(dim=-1)
+            draft_ids = greedy_argmax(logits)
             return self.model.map_draft_to_target(draft_ids)
 
         # Probabilistic sampling and rejection operate in target-vocabulary
@@ -190,7 +208,7 @@ class DSparkSpeculator(DFlashSpeculator):
                 sample_pos - 1,
                 apply_temperature=True,
                 is_drafting=True,
-                logits_cache=self.draft_logits,
+                logits_cache=self.draft_logits.values,
                 logits_cache_col=self._step_cols[step],
                 use_fp64=self.use_fp64_gumbel,
             )
@@ -202,54 +220,10 @@ class DSparkSpeculator(DFlashSpeculator):
             sample_pos - 1,
             apply_temperature=True,
             is_drafting=True,
-            logits_cache=self.draft_logits,
+            logits_cache=self.draft_logits.values,
             logits_cache_col=self._step_cols[step],
             use_fp64=self.use_fp64_gumbel,
-            logits_cache_num_shards=self.draft_logits_num_shards,
-            logits_cache_shard_idx=self.draft_logits_shard_idx,
-        )
-
-    def _sample_markov_step(
-        self,
-        step: int,
-        logits: torch.Tensor,
-        bias: torch.Tensor,
-        bias_rows: torch.Tensor,
-        idx_map: torch.Tensor,
-        draw_pos: torch.Tensor,
-    ) -> torch.Tensor:
-        """Draft ids of step `step`, sampled from `logits + bias[bias_rows]`."""
-        # Greedy drafting, a reduced draft vocab, watermarking, the acceptance
-        # estimator and an output logit transform need the biased logits;
-        # otherwise the Gumbel kernel adds the bias itself.
-        transform = getattr(self.model, "apply_output_logit_transform", None)
-        if (
-            self.draft_logits is None
-            or self._d2t_scatter_index is not None
-            or self.draft_watermarker is not None
-            or self.acceptance_estimator is not None
-            or transform is not None
-        ):
-            logits = logits + bias[bias_rows]
-            if transform is not None:
-                logits = transform(logits)
-            # _sample_logits takes the predicted position P.
-            return self._sample_logits(logits, idx_map, draw_pos + 1, step)
-        return gumbel_sample(
-            logits,
-            idx_map,
-            self.temperature,
-            self.seeds,
-            draw_pos,
-            apply_temperature=True,
-            is_drafting=True,
-            logits_cache=self.draft_logits,
-            logits_cache_col=self._step_cols[step],
-            use_fp64=self.use_fp64_gumbel,
-            logits_cache_num_shards=self.draft_logits_num_shards,
-            logits_cache_shard_idx=self.draft_logits_shard_idx,
-            bias=bias,
-            bias_rows=bias_rows,
+            logits_cache_row_mapping=self.draft_logits.row_mapping,
         )
 
     def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
@@ -275,44 +249,131 @@ class DSparkSpeculator(DFlashSpeculator):
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
 
-        idx_map = self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec)
-        sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
-        # Step-major, so every step reads contiguous rows. Draws are keyed by
-        # the position before the sampled token, P-1.
-        idx_map_steps = idx_map.t().contiguous()
-        draw_pos_steps = (sample_pos.t() - 1).contiguous()
-        bias_rows = self._req_rows[:num_reqs]
-        confidence_markov_embeds = []
-        draft_ids = []
-
         # Anchor (bonus) token per request = the input id at query offset 0,
         # read via the precomputed persistent index (fixed buffer for capture).
-        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]]
+        confidence = self._sample_markov_chain(
+            base_logits,
+            sample_hidden,
+            self.input_buffers.input_ids[self._anchor_idx[:num_reqs]],
+            self.sample_idx_mapping[:num_sample].view(num_reqs, n_spec),
+            self.sample_pos[:num_sample].view(num_reqs, n_spec),
+            self.draft_tokens[:num_reqs],
+        )
+        if confidence is not None:
+            self.draft_token_confidence_probs[:num_reqs] = confidence
 
-        for i in range(n_spec):
+    def _sample_markov_chain(
+        self,
+        base_logits: torch.Tensor,
+        hidden: torch.Tensor,
+        prev: torch.Tensor,
+        idx_map: torch.Tensor,
+        sample_pos: torch.Tensor,
+        out_tokens: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Run the sequential Markov steps for a block of requests, writing the
+        drafts to `out_tokens`.
+
+        Returns:
+            [num_rows, num_speculative_steps] draft confidences, or None
+            without a confidence head.
+
+        """
+        markov_embeds = []
+        for i in range(self.num_speculative_steps):
             # Sequential stage: Markov bias from the previously sampled token.
             markov_embed = self.model.markov_embed(prev)
             if self.use_confidence_head:
-                confidence_markov_embeds.append(markov_embed)
+                markov_embeds.append(markov_embed)
             bias = self.model.markov_bias(markov_embed)
-            prev = self._sample_markov_step(
-                i,
-                base_logits[:, i],
-                bias,
-                bias_rows,
-                idx_map_steps[i],
-                draw_pos_steps[i],
+            logits_i = base_logits[:, i] + bias
+            if hasattr(self.model, "apply_output_logit_transform"):
+                logits_i = self.model.apply_output_logit_transform(logits_i)
+            draft_sampled_i = self._sample_logits(
+                logits_i, idx_map[:, i], sample_pos[:, i], i
             )
-            draft_ids.append(prev)
-        torch.stack(draft_ids, dim=1, out=self.draft_tokens[:num_reqs])
+            out_tokens[:, i] = draft_sampled_i
+            prev = draft_sampled_i
 
+        confidence = None
         if self.use_confidence_head:
             confidence = self.model.compute_confidence(
-                sample_hidden,
-                torch.stack(confidence_markov_embeds, dim=1).flatten(0, 1),
+                hidden, torch.stack(markov_embeds, dim=1).flatten(0, 1)
+            ).view(out_tokens.shape)
+        return confidence
+
+    def _sample_sequential_sharded(
+        self, num_reqs: int, head_hidden: torch.Tensor
+    ) -> None:
+        """_sample_sequential with each TP rank sampling only its own requests.
+
+        Request i is owned by rank shard_owner(i), as in DraftLogitsCache, so no
+        rank owns more than cdiv(num_reqs, tp_size) requests. Each rank computes
+        vocab-shard base logits for every request, in owner-sorted order. An
+        all-to-all then gives each rank the full-vocab rows of the requests it
+        owns, the Markov loop runs on just those rows, and an all-gather returns
+        the drafts in batch order. All shapes depend only on num_reqs, so the
+        step can be captured.
+        """
+        assert self._sharded_sequential_comm is not None
+        tp_group = get_tp_group()
+        tp_size, tp_rank = tp_group.world_size, tp_group.rank_in_group
+        n_spec = self.num_speculative_steps
+        capacity = cdiv(num_reqs, tp_size)
+        # Rank r owns requests r, r + tp_size, r + 2 * tp_size, ...
+        send_reqs = torch.arange(capacity, device=self.device) * tp_size + torch.arange(
+            tp_size, device=self.device
+        ).unsqueeze(-1)
+        # Mark padding slots with -1.
+        send_reqs = torch.where(send_reqs < num_reqs, send_reqs, -1)
+        req_idxs = torch.arange(num_reqs, device=self.device)
+        # Inverse of send_reqs (ignoring padding), used for restoring the
+        # all-gathered drafts/confidences into the original request order.
+        gathered_src_idxs = (req_idxs % tp_size) * capacity + req_idxs // tp_size
+
+        # Re-shard the draft logits from the vocab dimension to the batch dimension.
+        # Afterwards, each rank holds the full-vocab logits of its own requests.
+        # Padding slots read request 0's rows, and their results are discarded.
+        send_rows = send_reqs.clamp(min=0).unsqueeze(-1) * n_spec + self._step_cols
+        send_hidden = head_hidden[self.sample_indices[send_rows.flatten()]]
+        local_logits = self.model.compute_draft_logits_local(send_hidden)
+        num_local_rows = capacity * n_spec
+        base_logits = all_to_all_vocab_shards(
+            local_logits, [num_local_rows] * tp_size, num_local_rows
+        ).view(capacity, n_spec, -1)[..., : self.model.logits_processor.org_vocab_size]
+
+        # Sample draft tokens for the locally assigned requests.
+        local_reqs = send_reqs[tp_rank]
+        local_rows = send_rows[tp_rank]
+        local_tokens = self.draft_tokens.new_empty(capacity, n_spec)
+        local_hidden = send_hidden.view(tp_size, capacity * n_spec, -1)[tp_rank]
+        confidence = self._sample_markov_chain(
+            base_logits,
+            local_hidden,
+            self.input_buffers.input_ids[self._anchor_idx[local_reqs.clamp(min=0)]],
+            # Empty slots are inert: no draft logits cache writes.
+            torch.where(
+                local_reqs.view(-1, 1) >= 0, self.sample_idx_mapping[local_rows], -1
+            ),
+            self.sample_pos[local_rows],
+            local_tokens,
+        )
+
+        # Gather the draft tokens and confidences sampled by each rank.
+        packed = local_tokens
+        if confidence is not None:
+            packed = torch.cat(
+                [local_tokens, confidence.float().view(torch.int32).long()], dim=1
             )
-            self.draft_token_confidence_probs[:num_reqs] = confidence.view(
-                num_reqs, n_spec
+        gathered = packed.new_empty(tp_size * capacity, packed.shape[1])
+        self._sharded_sequential_comm.all_gather(gathered, packed.contiguous())
+
+        # Write the output draft tokens and confidences.
+        packed = gathered[gathered_src_idxs]
+        self.draft_tokens[:num_reqs] = packed[:, :n_spec]
+        if confidence is not None:
+            self.draft_token_confidence_probs[:num_reqs] = (
+                packed[:, n_spec:].int().view(torch.float32)
             )
 
     def _sample_sequential_topk(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
@@ -382,54 +443,7 @@ class DSparkSpeculator(DFlashSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
-        if self._draft_sharder is not None:
-            # Sampled after the graph, in _sample_after_forward.
-            num_sample = num_reqs * self.num_speculative_steps
-            sample_hidden = head_hidden[self.sample_indices[:num_sample]]
-            self._draft_sharder.stage(
-                self.model.compute_draft_logits_local(sample_hidden),
-                self.sample_idx_mapping,
-                self.sample_pos,
-                num_reqs,
-            )
-            return
-        self._sample_sequential(num_reqs, head_hidden)
-
-    def _sample_after_forward(self, input_batch: InputBatch, num_reqs: int) -> None:
-        sharder = self._draft_sharder
-        if sharder is None:
-            return
-        logits, num_local_reqs = sharder.all_to_all(input_batch.idx_mapping_np)
-        if num_local_reqs > 0:
-            self._sample_sequential_local(logits, num_local_reqs, num_reqs)
-        sharder.gather_draft_ids(num_reqs, self.draft_tokens[: input_batch.num_reqs])
-
-    def _sample_sequential_local(
-        self, logits: torch.Tensor, num_local_reqs: int, num_reqs: int
-    ) -> None:
-        """_sample_sequential over this rank's requests (`logits` holds their
-        full-vocab rows); `num_reqs` is the staged, padded batch size."""
-        sharder = self._draft_sharder
-        assert sharder is not None
-        n_spec = self.num_speculative_steps
-        vocab_size = self.model.logits_processor.org_vocab_size
-        base_logits = logits[:, :vocab_size].view(num_local_reqs, n_spec, vocab_size)
-        local_rows = sharder.local_rows[:num_local_reqs]
-        idx_map = sharder.local_idx_mapping[:, :num_local_reqs]
-        sample_pos = sharder.local_sample_pos[:, :num_local_reqs]
-        # sample_pos is the predicted position; draws are keyed by P-1.
-        draw_pos = sample_pos - 1
-
-        # The Markov bias keeps all num_reqs rows, so it runs the GEMM (and
-        # gets the bits) of the replicated path; other ranks' rows are unused.
-        prev = self.input_buffers.input_ids[self._anchor_idx[:num_reqs]].long()
-        draft_ids = []
-        for i in range(n_spec):
-            bias = self.model.markov_bias(self.model.markov_embed(prev))
-            draft_sampled_i = self._sample_markov_step(
-                i, base_logits[:, i], bias, local_rows, idx_map[i], draw_pos[i]
-            )
-            draft_ids.append(draft_sampled_i)
-            if i + 1 < n_spec:
-                prev.index_copy_(0, local_rows, draft_sampled_i)
-        torch.stack(draft_ids, dim=1, out=sharder.local_draft_ids[:num_local_reqs])
+        if self._sharded_sequential_comm is not None:
+            self._sample_sequential_sharded(num_reqs, head_hidden)
+        else:
+            self._sample_sequential(num_reqs, head_hidden)

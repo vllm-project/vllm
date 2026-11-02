@@ -701,6 +701,7 @@ def dequantize_nvfp4_moe_weights(
     Returns:
         An iterator of ``(experts, w13, w2)`` over groups of experts, so that
         the dequantized staging tensors stay around ``_DEQUANT_CHUNK_BYTES``.
+
     """
     num_experts = w13_weight_packed.shape[0]
     # Two fp4 values per packed byte.
