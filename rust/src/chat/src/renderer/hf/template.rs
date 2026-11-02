@@ -49,6 +49,10 @@ pub(super) fn request_template_fuel(value: Option<&OsStr>) -> Result<Option<u64>
     Ok((fuel > 0).then_some(fuel))
 }
 
+fn supports_developer_role(template: &str) -> bool {
+    template.contains("\"developer\"") || template.contains("'developer'")
+}
+
 /// Build a pre-configured environment with the given template string.
 fn build_environment(template: String) -> Result<Environment<'static>> {
     let mut env = Environment::new();
@@ -61,6 +65,9 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_filter("tojson", hf_tojson_filter);
     env.add_function("__hf_generation", render_generation);
+    env.add_function("strftime_now", |format: String| {
+        chrono::Local::now().format(&format).to_string()
+    });
     env.add_function("raise_exception", raise_exception);
 
     Ok(env)
@@ -161,12 +168,14 @@ pub(super) struct CompiledChatTemplate {
     /// Cached, fully-configured environment for one compiled template.
     env: Environment<'static>,
     content_format: ChatTemplateContentFormat,
+    supports_developer_role: bool,
 }
 
 impl CompiledChatTemplate {
     /// Compile the given chat template string into a [`CompiledChatTemplate`].
     pub fn new(template: String, content_format: ChatTemplateContentFormatOption) -> Result<Self> {
         let template = rewrite_generation_blocks(template)?;
+        let supports_developer_role = supports_developer_role(&template);
         let content_format = match content_format {
             ChatTemplateContentFormatOption::Auto => detect_chat_template_content_format(&template),
             ChatTemplateContentFormatOption::String => ChatTemplateContentFormat::String,
@@ -176,6 +185,7 @@ impl CompiledChatTemplate {
         Ok(Self {
             env,
             content_format,
+            supports_developer_role,
         })
     }
 
@@ -198,6 +208,10 @@ impl CompiledChatTemplate {
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
         self.content_format
+    }
+
+    pub fn supports_developer_role(&self) -> bool {
+        self.supports_developer_role
     }
 }
 
@@ -259,6 +273,28 @@ mod tests {
     }
 
     #[test]
+    fn test_strftime_now_matches_transformers_contract() {
+        // `strftime_now` renders local wall-clock time with strftime-style
+        // formats, like the transformers Jinja environment.
+        let template = CompiledChatTemplate::new(
+            "{{ strftime_now('literal') }}|{{ strftime_now('%Y-%m-%d') }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let result = template.apply(TemplateContext::default()).unwrap();
+
+        let (literal, date) = result.split_once('|').unwrap();
+        assert_eq!(literal, "literal");
+        let is_digit_at =
+            |range: std::ops::Range<usize>| date[range].chars().all(|c| c.is_ascii_digit());
+        assert!(
+            date.len() == 10 && is_digit_at(0..4) && is_digit_at(5..7) && is_digit_at(8..10),
+            "expected %Y-%m-%d date, got: {date}"
+        );
+    }
+
+    #[test]
     fn test_raise_exception_returns_template_message() {
         let template = CompiledChatTemplate::new(
             "{{- raise_exception('Unexpected reasoning effort ' ~ reasoning_effort ~ '.') }}"
@@ -315,10 +351,10 @@ mod tests {
     fn render_turns(turns: usize, fuel: Option<u64>) -> Result<String> {
         let template =
             "{% for turn in turns %}{% for _ in range(10) %}{{ turn }}{% endfor %}{% endfor %}";
-        let template = CompiledChatTemplate {
-            env: build_environment(template.to_string())?,
-            content_format: ChatTemplateContentFormat::String,
-        }
+        let template = CompiledChatTemplate::new(
+            template.to_string(),
+            ChatTemplateContentFormatOption::String,
+        )?
         .with_fuel(fuel);
         let mut kwargs = HashMap::new();
         kwargs.insert("turns".to_string(), serde_json::json!(vec![0; turns]));
