@@ -173,6 +173,8 @@ steps:
   timeout_in_minutes: 50
   source_file_dependencies:
     - vllm/v1/
+    - vllm/model_executor/layers/mamba/gdn/
+    - vllm/third_party/flash_linear_attention/ops/
     - tests/v1/e2e/general/
   commands:
     - pytest -v -s v1/e2e/general/test_kv_sharing_fast_prefill.py
@@ -181,6 +183,7 @@ steps:
       v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2
       v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
       v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_flashinfer
+      v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_triton
   mirror:
     amd:
       automatic_shard: true
@@ -194,6 +197,8 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/v1/
+      - vllm/model_executor/layers/mamba/gdn/
+      - vllm/third_party/flash_linear_attention/ops/
       - tests/v1/e2e/general/
       - vllm/platforms/rocm.py
       commands:
@@ -202,6 +207,7 @@ steps:
         pytest -v -s
         v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2
         v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async
+        v1/e2e/general/test_mamba_prefix_cache.py::test_mamba_prefix_cache_mrv2_async_triton
 
 - label: ":nvidia: (H100) ReplaySSM E2E"
   device: h100

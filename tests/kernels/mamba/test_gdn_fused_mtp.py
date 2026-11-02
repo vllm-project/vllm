@@ -129,6 +129,11 @@ def _build_layer(
     with set_current_vllm_config(vllm_config):
         layer.chunk_gated_delta_rule = ChunkGatedDeltaRule()
     layer.gdn_prefill_backend = layer.chunk_gated_delta_rule.gdn_prefill_backend
+    # As QwenGatedDeltaNetAttention.__init__ derives it.
+    layer._prefill_on_paged_state = (
+        layer.chunk_gated_delta_rule.gdn_prefill_backend == "triton"
+        and current_platform.is_cuda_alike()
+    )
     for name in (
         "rearrange_mixed_qkv",
         "_forward_core",
