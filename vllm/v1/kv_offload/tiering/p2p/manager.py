@@ -521,6 +521,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         if dest_id is not None:
             # Prefiller-side finish: identify the session via kv_request_id.
             dest_session = self._kv_to_session.pop(dest_id, None)
+            # Same node as source and decoder (e.g. multi-turn with fixed
+            # P/D, P pulls the previous turn back from D): both roles share
+            # one session, and finish_request above already finished the
+            # server role for this id.
             if dest_session is not None and not (
                 dest_session is source_session and dest_id == source_id
             ):
