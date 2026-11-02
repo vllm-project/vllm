@@ -41,7 +41,8 @@ def tiny_step5(cfg):
         use_original_num_layers=True,
     )
     text = cfg.get_text_config()
-    text.sparse_config = {**text.sparse_config, "topk": TOPK}
+    if (sparse := getattr(text, "sparse_config", None)) is not None:
+        text.sparse_config = {**sparse, "topk": TOPK}
     return cfg
 
 

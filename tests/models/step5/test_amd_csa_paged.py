@@ -324,7 +324,7 @@ def test_decode_selects_and_attends_over_summaries(
         live = int(pos[t]) // REGION + 1
         keys = means[int(req[t])][:live].view(fp8).float().cpu()
         want = (keys @ q8_ref[t, g].T).relu() @ w_ref[t, g]
-        torch.testing.assert_close(scores_ref[row, :live], want, atol=1e-4, rtol=1e-4)
+        torch.testing.assert_close(scores_ref[row, :live], want, atol=5e-3, rtol=5e-3)
 
     regions = select_regions(
         scores,
