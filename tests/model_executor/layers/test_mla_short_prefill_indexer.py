@@ -11,7 +11,11 @@ import vllm.models.deepseek_v32.attention as deepseek_attention
 from vllm.config import CUDAGraphMode
 from vllm.models.deepseek_v32 import attention as deepseek_v32_attention
 from vllm.models.deepseek_v32.attention import DeepseekV32Attention
-from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
+from vllm.v1.attention.backends.mla.indexer import (
+    DeepseekV32IndexerMetadata,
+    DeepseekV32IndexerPrefillChunkMetadata,
+    DeepseekV32IndexerPrefillMetadata,
+)
 
 INDEXER_LAYER = "model.layers.0.self_attn.indexer.k_cache"
 MLA_LAYER = "model.layers.0.self_attn.attn"
@@ -72,6 +76,25 @@ def make_indexer_metadata(
 ) -> DeepseekV32IndexerMetadata:
     if slot_mapping is None:
         slot_mapping = torch.zeros(num_prefill_tokens, dtype=torch.long)
+    prefill = None
+    if num_prefills:
+        # Dispatch tests need scoring work; empty chunks would skip workspace
+        # setup before reaching the scoring sentinel.
+        chunk = DeepseekV32IndexerPrefillChunkMetadata(
+            block_table=torch.zeros(num_prefills, 1, dtype=torch.int32),
+            cu_seqlen_ks=torch.zeros(num_prefill_tokens, dtype=torch.int32),
+            cu_seqlen_ke=torch.ones(num_prefill_tokens, dtype=torch.int32),
+            cu_seq_lens=torch.arange(num_prefills + 1, dtype=torch.int32),
+            token_to_seq=torch.arange(num_prefill_tokens, dtype=torch.int32)
+            * num_prefills
+            // num_prefill_tokens,
+            total_seq_lens=num_prefills,
+            max_seqlen_k=1,
+            token_start=num_decode_tokens,
+            token_end=num_decode_tokens + num_prefill_tokens,
+            num_reqs=num_prefills,
+        )
+        prefill = DeepseekV32IndexerPrefillMetadata(chunks=[chunk])
     return DeepseekV32IndexerMetadata(
         seq_lens=torch.empty(0, dtype=torch.int32),
         max_seq_len=2048,
@@ -80,7 +103,7 @@ def make_indexer_metadata(
         num_decode_tokens=num_decode_tokens,
         num_prefills=num_prefills,
         num_prefill_tokens=num_prefill_tokens,
-        prefill=SimpleNamespace(chunks=[]) if num_prefills else None,
+        prefill=prefill,
     )
 
 

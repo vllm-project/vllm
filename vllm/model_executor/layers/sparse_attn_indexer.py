@@ -574,7 +574,12 @@ def sparse_attn_indexer(
     assert isinstance(attn_metadata_narrowed, DeepseekV32IndexerMetadata)
     slot_mapping = attn_metadata_narrowed.slot_mapping
     has_decode = attn_metadata_narrowed.num_decodes > 0
-    has_prefill = attn_metadata_narrowed.num_prefills > 0
+    prefill_metadata = attn_metadata_narrowed.prefill
+    # If all prefills are shorter than the compression ratio, chunks are empty:
+    # there are no compressed KV entries to score or select with top-k.
+    # Skip prefill workspace setup, which calls max() on the chunks and would
+    # raise ValueError for an empty list.
+    has_prefill = prefill_metadata is not None and bool(prefill_metadata.chunks)
     num_decode_tokens = attn_metadata_narrowed.num_decode_tokens
 
     # q_scale is required iff the FP4 cache path is enabled; the FP8 path
