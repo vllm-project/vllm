@@ -40,15 +40,13 @@
 
 """Routed-expert GEMMs of the DeepSeek-V4.1 low-batch MoE in CuTe DSL.
 
-The low-batch MoE (`routed_expert_gemm.py`) multiplies at most eight token
-rows by the weights of the experts they chose. Its routing record
-(`routed_expert_route_cute.py`) lists, for each 8-row token tile, the
-tile's expert and its row limit (the end of the expert's rows within the
-tile). A GEMM here computes 128 x 8 output tiles from MXFP4 weights (operand
-A, 128 rows of one expert) and MXFP8 activations (operand B, 8 rows) with
-`tcgen05` block-scaled MMAs, as FlashInfer's low-latency block-scaled GEMM
-does, over the work items (weight row tile, token tile) of the tiles the
-record uses:
+The low-batch MoE (`routed_expert_gemm.py`) multiplies at most eight token rows by the
+weights of the experts they chose. Its routing record (`routed_expert_route_cute.py`)
+lists, for each 8-row token tile, the tile's expert and its row limit (the end of the
+expert's rows within the tile). A GEMM here computes 128 x 8 output tiles from MXFP4
+weights (operand A, 128 rows of one expert) and MXFP8 activations (operand B, 8 rows)
+with `tcgen05` block-scaled MMAs, as FlashInfer's low-latency block-scaled GEMM does,
+over the work items (weight row tile, token tile) of the tiles the record uses:
 
 * the kernel is persistent: CTA `b` of `G` takes items `b, b + G, ..`,
   so the weight loads stream without a gap from one item to the next, and no
@@ -1074,16 +1072,15 @@ class RoutedExpertGemm1(RoutedExpertGemm):
     """GEMM1: `h = MXFP8(clamped SwiGLU(x @ w13[expert]^T))` of each token
     tile, in the tile's permuted rows.
 
-    B is the whole routed input `x` (at most eight rows; rows past its end
-    read as zero) with its linear UE8M0 scales, which the B load warp writes
-    into the layout the MMA reads. Accumulator column `t` is token `t`;
-    the epilogue writes it to the tile row that token was routed to
-    (`record[4 + 2 C + 8 c + r] == t`), if any. w13's rows interleave up and
-    gate, so each thread pairs them, clamps them, applies SwiGLU, scales each
-    32-column block by its amax / 448 rounded up to a power of two (UE8M0),
-    and stores E4M3 values with the block scales in the per-tile layout GEMM2
-    reads. The m tile holding the slice's last columns also zeroes the padding
-    columns of H and gives their blocks scale 1.
+    B is the whole routed input `x` (at most eight rows; rows past its end read as zero)
+    with its linear UE8M0 scales, which the B load warp writes into the layout the MMA
+    reads. Accumulator column `t` is token `t`; the epilogue writes it to the tile row
+    that token was routed to (`record[4 + 2 C + 8 c + r] == t`), if any. w13's rows
+    interleave up and gate, so each thread pairs them, clamps them, applies SwiGLU,
+    scales each 32-column block by its amax / 448 rounded up to a power of two (UE8M0),
+    and stores E4M3 values with the block scales in the per-tile layout GEMM2 reads. The
+    m tile holding the slice's last columns also zeroes the padding columns of H and
+    gives their blocks scale 1.
     """
 
     route_before_wait = False

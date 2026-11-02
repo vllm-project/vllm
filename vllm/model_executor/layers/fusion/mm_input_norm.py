@@ -182,9 +182,8 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
 class IdentityInputNorm(nn.Module):
     """Stand-in used when the processor requires no rescale/normalise.
 
-    Not a no-op: with `mm_device_do_normalize` enabled, raw `uint8`
-    pixels travel to the device unprocessed and must be cast to
-    `visual_dtype` here.
+    Not a no-op: with `mm_device_do_normalize` enabled, raw `uint8` pixels travel to the
+    device unprocessed and must be cast to `visual_dtype` here.
     """
 
     @property
@@ -204,13 +203,11 @@ class FusedMMInputNorm(CustomOp):
 
     Dtype semantics:
 
-    * Input dtype — the dtype of the `pixel_values` argument to `forward_*`.
-      It is `uint8` when `mm_device_do_normalize` is enabled (raw bytes
-      travel to the device unprocessed) and equals `visual_dtype`
-      otherwise.
-    * Output dtype — the `visual_dtype` argument of `forward_*`. The
-      computation itself is always fp32, independent of the output dtype
-      (e.g. compute fp32, emit bf16).
+    * Input dtype — the dtype of the `pixel_values` argument to `forward_*`. It is
+      `uint8` when `mm_device_do_normalize` is enabled (raw bytes travel to the device
+      unprocessed) and equals `visual_dtype` otherwise.
+    * Output dtype — the `visual_dtype` argument of `forward_*`. The computation itself
+      is always fp32, independent of the output dtype (e.g. compute fp32, emit bf16).
 
     Platform dispatch:
 
@@ -339,10 +336,9 @@ class FusedMMInputNorm(CustomOp):
 def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
     """Build the input normalisation module for a model.
 
-    Returns an `IdentityInputNorm` when device-side normalisation is
-    disabled or the processor's rescale/normalise is numerically the identity
-    transform; otherwise a `FusedMMInputNorm` built from the processor's
-    parameters.
+    Returns an `IdentityInputNorm` when device-side normalisation is disabled or the
+    processor's rescale/normalise is numerically the identity transform; otherwise a
+    `FusedMMInputNorm` built from the processor's parameters.
     """
     mm_config = getattr(model_config, "multimodal_config", None)
     if not getattr(mm_config, "mm_device_do_normalize", False):

@@ -123,10 +123,9 @@ class MiniMaxM3MTPConfig(MiniMaxM3TextConfig):
 class MiniMaxM3Config(PreTrainedConfig):
     """Top-level MiniMax M3 (VL) config.
 
-    Holds the text backbone as `text_config` so that
-    `config.get_text_config()` extracts the MiniMaxM3SparseForCausalLM
-    backbone. Vision components are kept as a raw dict passthrough and are
-    not modeled here.
+    Holds the text backbone as `text_config` so that `config.get_text_config()` extracts
+    the MiniMaxM3SparseForCausalLM backbone. Vision components are kept as a raw dict
+    passthrough and are not modeled here.
     """
 
     model_type = "minimax_m3_vl"

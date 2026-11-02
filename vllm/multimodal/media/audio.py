@@ -282,9 +282,8 @@ def load_audio_torchcodec(
             bytes.
 
     Returns:
-        `(waveform, sample_rate)` where *waveform* is a float32 NumPy
-        array (1-D when `mono=True`) and *sample_rate* is the output
-        sample rate in Hz.
+        `(waveform, sample_rate)` where *waveform* is a float32 NumPy array (1-D when
+        `mono=True`) and *sample_rate* is the output sample rate in Hz.
 
     """
     if AudioDecoder is None:
@@ -440,10 +439,9 @@ def load_audio(
         max_duration_s: Reject audio longer than this many seconds.
         max_decode_bytes: Reject audio that would decode to more than this
             many bytes.
-        backend: One of `AUDIO_BACKENDS`. `None` (default) selects
-            `"auto"`, which tries torchcodec, then falls back to the
-            soundfile → PyAV chain; the other values select a single
-            backend with no fallback.
+        backend: One of `AUDIO_BACKENDS`. `None` (default) selects `"auto"`, which tries
+            torchcodec, then falls back to the soundfile → PyAV chain; the other values
+            select a single backend with no fallback.
 
     """
     backend = backend or "auto"

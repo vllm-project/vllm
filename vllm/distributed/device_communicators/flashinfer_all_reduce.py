@@ -143,9 +143,8 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
     """Resolve the flashinfer allreduce backend for the current setup.
 
     Returns:
-        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None`
-        when automatic selection has no supported backend for the process
-        group.
+        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None` when automatic
+        selection has no supported backend for the process group.
 
     """
     backend = envs.VLLM_FLASHINFER_ALLREDUCE_BACKEND

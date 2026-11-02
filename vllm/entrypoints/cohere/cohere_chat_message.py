@@ -37,10 +37,9 @@ from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 class CitationSource(OpenAIBaseModel):
     """Source attribution for a :class:`Citation`.
 
-    Mirrors the shape used by Cohere's Chat v2 API. `type` is the source
-    discriminator (`document` or `tool`); `id` is the citing
-    document/tool-output identifier; `document` and `tool_output` carry
-    the original payload that produced the citation.
+    Mirrors the shape used by Cohere's Chat v2 API. `type` is the source discriminator
+    (`document` or `tool`); `id` is the citing document/tool-output identifier;
+    `document` and `tool_output` carry the original payload that produced the citation.
 
     Sources are fully resolved by the parser at emit time
     (see :func:`_melody_sources_to_vllm` in
@@ -63,10 +62,9 @@ class CitationSource(OpenAIBaseModel):
 class Citation(OpenAIBaseModel):
     """A citation grounding a span of generated text in source material.
 
-    vLLM-internal representation used by the Cohere reasoning parser and
-    the Cohere v2 serving layer. This is not the on-wire Cohere SDK shape:
-    conversion to the SDK's `cohere.types.Citation` happens in
-    :mod:`vllm.entrypoints.cohere.serving`.
+    vLLM-internal representation used by the Cohere reasoning parser and the Cohere v2
+    serving layer. This is not the on-wire Cohere SDK shape: conversion to the SDK's
+    `cohere.types.Citation` happens in :mod:`vllm.entrypoints.cohere.serving`.
     """
 
     start: int | None = None
@@ -91,14 +89,12 @@ class CohereChatMessage(ChatMessage):
 
     Only instantiated by :class:`CohereServingChatV2` (and any other
     :class:`OpenAIServingChat` subclass that opts in by overriding
-    `_create_chat_message`). Regular OpenAI-compatible handlers keep
-    emitting plain :class:`ChatMessage` so their response schema is
-    unchanged.
+    `_create_chat_message`). Regular OpenAI-compatible handlers keep emitting plain
+    :class:`ChatMessage` so their response schema is unchanged.
 
-    The response envelope declares `message: SerializeAsAny[ChatMessage]`,
-    so pydantic serializes this subclass with its own schema (including
-    `citations`) when it flows through
-    :class:`ChatCompletionResponseChoice`.
+    The response envelope declares `message: SerializeAsAny[ChatMessage]`, so pydantic
+    serializes this subclass with its own schema (including `citations`) when it flows
+    through :class:`ChatCompletionResponseChoice`.
     """
 
     citations: list[Citation] | None = None
@@ -126,9 +122,8 @@ class CohereDeltaMessage(DeltaMessage):
     return plain :class:`DeltaMessage`, so their streamed shape is
     unchanged.
 
-    The response envelope declares
-    `delta: SerializeAsAny[DeltaMessage]`, so pydantic serializes this
-    subclass with its own schema when it flows through
+    The response envelope declares `delta: SerializeAsAny[DeltaMessage]`, so pydantic
+    serializes this subclass with its own schema when it flows through
     :class:`ChatCompletionResponseStreamChoice`.
     """
 

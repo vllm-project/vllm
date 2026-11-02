@@ -1078,8 +1078,7 @@ def rms_norm_batch_invariant(
         residual: Optional residual tensor fused into the normalization path
 
     Returns:
-        RMS normalized tensor, or `(output, residual_out)` when `residual`
-        is provided
+        RMS normalized tensor, or `(output, residual_out)` when `residual` is provided
 
     """
     if residual is not None:
@@ -1206,11 +1205,10 @@ def reduce_scatter_batch_invariant(
 ) -> torch.Tensor:
     """Sum reduce-scatter over dim 0 whose result does not depend on the size.
 
-    `ncclReduceScatter` picks its chunking from the message size just as
-    `ncclAllReduce` does. Route around it the same way
-    `all_reduce_batch_invariant` does: an all-to-all sends rank `d` exactly
-    the rows it owns from every rank -- pure data movement, so bitwise
-    reproducible however the library chunks it -- and lands them rank-major,
+    `ncclReduceScatter` picks its chunking from the message size just as `ncclAllReduce`
+    does. Route around it the same way `all_reduce_batch_invariant` does: an all-to-all
+    sends rank `d` exactly the rows it owns from every rank -- pure data movement, so
+    bitwise reproducible however the library chunks it -- and lands them rank-major,
     which is the layout `_fixed_order_sum_kernel` already consumes.
 
     `sizes` (the reduce-scatterv case) changes only *which* rows a rank

@@ -725,14 +725,13 @@ class OnlineDerenderer:
         `parse_delta` (discarding the result) before processing this
         chunk's tokens for real.
 
-        Every chunk, replayed or live, goes through one `parse_delta` call
-        with the tokens it arrived with (more than one under e.g.
-        speculative decoding). Replay recovers those boundaries from
-        `state.output_chunk_lens`, so the rebuilt parser state matches
-        standard serving, which calls `parse_delta` once per engine step.
-        Text comes from a fresh incremental detokenizer with special tokens
-        preserved (`skip_special_tokens=False`), seeded from the prompt
-        tail on every call since replay starts from scratch.
+        Every chunk, replayed or live, goes through one `parse_delta` call with the
+        tokens it arrived with (more than one under e.g. speculative decoding). Replay
+        recovers those boundaries from `state.output_chunk_lens`, so the rebuilt parser
+        state matches standard serving, which calls `parse_delta` once per engine step.
+        Text comes from a fresh incremental detokenizer with special tokens preserved
+        (`skip_special_tokens=False`), seeded from the prompt tail on every call since
+        replay starts from scratch.
 
         Logprobs need no replay: a generate chunk's `logprobs` cover exactly
         that chunk's tokens, so they are resolved once and attached to
@@ -1419,10 +1418,9 @@ def _convert_chat_logprobs_to_completion_logprobs(
     """Convert ChatCompletionLogProbs (per-token objects) to CompletionLogProbs
     (parallel flat lists) as required by the /v1/completions response schema.
 
-    `generate_logprobs` is what `logprobs` was resolved from. A position
-    with no candidates there had no logprobs in the engine output, which
-    /v1/completions reports as `None`; every other position is a dict of
-    the candidates the cut kept.
+    `generate_logprobs` is what `logprobs` was resolved from. A position with no
+    candidates there had no logprobs in the engine output, which /v1/completions reports
+    as `None`; every other position is a dict of the candidates the cut kept.
 
     `initial_text_offset` keeps `text_offset` absolute across streaming
     chunks, mirroring the generate streaming path.

@@ -202,11 +202,10 @@ VIDEO_LOADER_REGISTRY.register_gpu_codec("deepstream")
 class VideoBackend(VideoLoader):
     """Uniform-sampling video backend.
 
-    Samples `num_frames` uniformly across the video (or one frame every
-    `1/fps` seconds, whichever produces fewer frames). The decoding codec
-    is selected via the `backend` kwarg (`"opencv"`, `"torchcodec"`,
-    `"pynvvideocodec"`, or `"deepstream"`),
-    which can be passed through `--media-io-kwargs`. Defaults to `"opencv"`.
+    Samples `num_frames` uniformly across the video (or one frame every `1/fps` seconds,
+    whichever produces fewer frames). The decoding codec is selected via the `backend`
+    kwarg (`"opencv"`, `"torchcodec"`, `"pynvvideocodec"`, or `"deepstream"`), which can
+    be passed through `--media-io-kwargs`. Defaults to `"opencv"`.
     """
 
     _sampling_suffix: ClassVar[str] = ""
@@ -606,12 +605,11 @@ class EmbeddingGemma2VideoBackend(VideoBackend):
 class Qwen2VLVideoBackend(VideoBackend):
     """Qwen2-VL / Qwen2.5-VL fps-based video backend.
 
-    Ports transformers' `Qwen2VLVideoProcessor.sample_frames` (fps mode),
-    shared by Qwen2-VL and Qwen2.5-VL (the latter has no video processor of its
-    own): sample `total / original_fps * fps` frames, clamp to
-    `[min_frames, max_frames]` (4 and 768), floor to a multiple of
-    `temporal_patch_size` (2), and take indices with the exact
-    `torch.arange(0, total, total / n)` call so they match HF byte-for-byte.
+    Ports transformers' `Qwen2VLVideoProcessor.sample_frames` (fps mode), shared by
+    Qwen2-VL and Qwen2.5-VL (the latter has no video processor of its own): sample
+    `total / original_fps * fps` frames, clamp to `[min_frames, max_frames]` (4 and
+    768), floor to a multiple of `temporal_patch_size` (2), and take indices with the
+    exact `torch.arange(0, total, total / n)` call so they match HF byte-for-byte.
 
     `num_frames` is ignored (fps-driven, like the Qwen3-VL loader). The
     float32 step can emit an out-of-range tail index (e.g. 451 for a 451-frame
@@ -688,10 +686,9 @@ class Qwen2VLVideoBackend(VideoBackend):
 class DynamicVideoBackend(VideoBackend):
     """Duration-aware dynamic-sampling video backend.
 
-    Samples at `fps` up to `max_duration` seconds, falling back to
-    uniform sampling across the full duration when the video is longer
-    than `max_duration`. Codec is selectable the same way as
-    :class:`VideoBackend`.
+    Samples at `fps` up to `max_duration` seconds, falling back to uniform sampling
+    across the full duration when the video is longer than `max_duration`. Codec is
+    selectable the same way as :class:`VideoBackend`.
     """
 
     _sampling_suffix: ClassVar[str] = "_dynamic"
@@ -932,16 +929,14 @@ class Glm5NextVideoBackend(VideoBackend):
     ) -> list[int]:
         """GLM video frame sampling (training-reference parity).
 
-        `target_fps` is the `fps_interval` request knob. The greedy walk
-        advances at `1 / (temporal_patch_size * target_fps)` seconds, so on
-        frame-dense sources it collects more candidates than `extract_t` and
-        the `> extract_t` fixup re-spreads the picks uniformly with
-        `np.linspace` -- that fallback is the intended reference behavior, not
-        an accident. Short clips (fewer frames than `extract_t`) are spread at
-        evenly spaced timestamps (`floor` sampling; the linspace variant
-        samples frames unevenly and cost 4 points on video grounding evals).
-        Request overrides: `target_fps` -> fps interval, `max_frame_count`
-        -> frame cap.
+        `target_fps` is the `fps_interval` request knob. The greedy walk advances at
+        `1 / (temporal_patch_size * target_fps)` seconds, so on frame-dense sources it
+        collects more candidates than `extract_t` and the `> extract_t` fixup re-spreads
+        the picks uniformly with `np.linspace` -- that fallback is the intended
+        reference behavior, not an accident. Short clips (fewer frames than `extract_t`)
+        are spread at evenly spaced timestamps (`floor` sampling; the linspace variant
+        samples frames unevenly and cost 4 points on video grounding evals). Request
+        overrides: `target_fps` -> fps interval, `max_frame_count` -> frame cap.
         """
         max_frame_idx = total_frames - 1
         if not duration:
@@ -1581,10 +1576,9 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader):
 @VIDEO_LOADER_REGISTRY.register("clef_omni")
 class ClefOmniVideoBackend(VideoBackend):
     """Clef-Omni's reference sampling: the first frame at or after each
-    `1/fps` boundary (frame i sits at `i / original_fps` seconds, so the
-    k-th boundary is crossed by frame `ceil(k * original_fps / fps)`),
-    capped at 768 frames and padded to an even count by repeating the last
-    frame."""
+    `1/fps` boundary (frame i sits at `i / original_fps` seconds, so the k-th boundary
+    is crossed by frame `ceil(k * original_fps / fps)`), capped at 768 frames and padded
+    to an even count by repeating the last frame."""
 
     MAX_FRAMES = 768
 

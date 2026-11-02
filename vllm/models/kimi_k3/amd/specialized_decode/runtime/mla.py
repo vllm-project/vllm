@@ -5,9 +5,8 @@ the reference M1a / M1b reproduce):
 
 - `pre`: qkv_a, the q / kv norms, q_b, W_UK (fp4), the query's fp8 quant,
   this rank's KV-cache rows, the DCP query all-gather (DCP8), the output gate.
-- `attend`: AITER's MLA decode on the (gathered) query (`forward_mqa`),
-  on M1a's padded query as is. At DCP1 with qlen 4 / 8 K2 runs the decode
-  itself (M1c, `m1c_inputs`).
+- `attend`: AITER's MLA decode on the (gathered) query (`forward_mqa`), on M1a's padded
+  query as is. At DCP1 with qlen 4 / 8 K2 runs the decode itself (M1c, `m1c_inputs`).
 - `post`: the DCP LSE combine (DCP8), W_UV (fp4), the gate: o_proj's input.
 
 Pure decode only (every row a decode row), as the mono step is.
@@ -39,9 +38,8 @@ def qkv_gate_weights(wrapper):
 
 def pre(wrapper, hidden, kv_cache, slots, bf16=False):
     """`hidden`: input_layernorm's output [S, 7168]. Returns the gathered fp8
-    query [S, heads * dcp, 576] (`bf16`, DCP1: bf16, unquantized) and the
-    gate sigmoid(g_proj) [S, 1536]; writes the rows whose slot is this
-    rank's."""
+    query [S, heads * dcp, 576] (`bf16`, DCP1: bf16, unquantized) and the gate
+    sigmoid(g_proj) [S, 1536]; writes the rows whose slot is this rank's."""
     attn = wrapper.mla_attn
     nope, rope = wrapper.qk_nope_head_dim, wrapper.qk_rope_head_dim
     qkv = wrapper.fused_qkv_a_proj(hidden)[0]
@@ -79,10 +77,9 @@ def attend(wrapper, q8, kv_cache, md):
     """The partial (this rank's KV) attention: `o` [S, heads * dcp, 512] and
     its LSE [S, heads * dcp] (None at DCP1), both possibly strided views.
 
-    `q8` may carry more heads than the layer: AITER's cprr pad (e.g. 96 ->
-    128, M1a writes it). forward_mqa gets the real heads, a view whose row
-    stride spans the pad, and AITER's `get_mla_padded_q` widens it back to
-    `q8` instead of copying."""
+    `q8` may carry more heads than the layer: AITER's cprr pad (e.g. 96 -> 128, M1a
+    writes it). forward_mqa gets the real heads, a view whose row stride spans the pad,
+    and AITER's `get_mla_padded_q` widens it back to `q8` instead of copying."""
     from vllm.platforms import current_platform
 
     attn = wrapper.mla_attn

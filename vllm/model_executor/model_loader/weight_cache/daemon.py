@@ -36,18 +36,16 @@ node-local, so each node serves only its local GPUs' shards). Reuse the same
         --nnodes 2 --node-rank 1 --master-addr 10.0.0.1 \\
         --weight-cache-master-port 29600
 
-The global TP rank of local GPU `i` on node `r` is
-`r * (tp_size // nnodes) + i`, matching vLLM's contiguous per-node rank
-assignment, so each engine worker maps its shard from the daemon on its own
-node. With pipeline parallelism each node additionally runs one daemon per PP
-stage; the global rank is `pp_rank * tp_size + tp_rank`.
+The global TP rank of local GPU `i` on node `r` is `r * (tp_size // nnodes) + i`,
+matching vLLM's contiguous per-node rank assignment, so each engine worker maps its
+shard from the daemon on its own node. With pipeline parallelism each node additionally
+runs one daemon per PP stage; the global rank is `pp_rank * tp_size + tp_rank`.
 
-For data parallelism (e.g. a TP1 x DP16 x EP decode fleet) run one launcher per
-node with the engine's DP placement flags. Local GPU `i` serves DP rank
-`start_rank + i // tp_size` and TP rank `i % tp_size`, and all
-`dp_size * tp_size` daemons form one world group on
-`--data-parallel-address`/`--weight-cache-master-port` so the expert
-shards are laid out exactly as in the engine:
+For data parallelism (e.g. a TP1 x DP16 x EP decode fleet) run one launcher per node
+with the engine's DP placement flags. Local GPU `i` serves DP rank
+`start_rank + i // tp_size` and TP rank `i % tp_size`, and all `dp_size * tp_size`
+daemons form one world group on `--data-parallel-address`/`--weight-cache-master-port`
+so the expert shards are laid out exactly as in the engine:
 
     # node r (4 local GPUs)
     vllm preload \\
@@ -68,12 +66,11 @@ block of the `dp_size * tp_size` global ranks, e.g. TP8 x DP2 on 4 nodes:
         --data-parallel-size 2 --data-parallel-address 10.0.0.1 \\
         --weight-cache-master-port 29600
 
-With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally
-starts a draft daemon group that caches the draft model. It uses its own cache
-key, Unix sockets (`*_draft.sock`) and rendezvous port
-(`--weight-cache-draft-master-port`, default ``--weight-cache-master-port +
-1``), so each process serves exactly one model role. Other draft types are not
-cached and keep loading from disk in the engine.
+With MTP, EAGLE or EAGLE3 speculative decoding the launcher additionally starts a draft
+daemon group that caches the draft model. It uses its own cache key, Unix sockets
+(`*_draft.sock`) and rendezvous port (`--weight-cache-draft-master-port`, default
+`--weight-cache-master-port + 1`), so each process serves exactly one model role.
+Other draft types are not cached and keep loading from disk in the engine.
 """
 
 import contextlib
@@ -145,21 +142,19 @@ def export_entries(
 ) -> tuple[dict[str, TensorEntry], dict[str, str]]:
     """Export a model's tensors, preserving tied-parameter aliases.
 
-    `named_parameters`/`named_buffers` are iterated with
-    `remove_duplicate=False` so tied weights (e.g. `lm_head.weight` sharing
-    storage with `embed_tokens.weight`) are not silently dropped. Each unique
-    tensor is exported once per call; every additional name that refers to the same
-    tensor object is recorded in the returned alias map so the client can
-    re-establish the shared identity instead of allocating uninitialized
+    `named_parameters`/`named_buffers` are iterated with `remove_duplicate=False` so
+    tied weights (e.g. `lm_head.weight` sharing storage with `embed_tokens.weight`) are
+    not silently dropped. Each unique tensor is exported once per call; every additional
+    name that refers to the same tensor object is recorded in the returned alias map so
+    the client can re-establish the shared identity instead of allocating uninitialized
     memory for it.
 
     CUDA reduction arguments must be exported separately for each consumer so
     that PyTorch registers a reference for each IPC mapping's lifetime.
 
     Returns:
-        A `(entries, aliases)` pair where `entries` maps a canonical name to
-        its `TensorEntry` and `aliases` maps each duplicate name to its
-        canonical name.
+        A `(entries, aliases)` pair where `entries` maps a canonical name to its
+        `TensorEntry` and `aliases` maps each duplicate name to its canonical name.
 
     """
     entries: dict[str, TensorEntry] = {}
@@ -600,11 +595,10 @@ def plan_local_ranks(
 ) -> list[tuple[int, int, int, int]]:
     """`(local_rank, dp_rank, pp_rank, tp_rank)` for every local daemon.
 
-    Global ranks enumerate DP, PP, then TP: ``global = dp_rank * pp_size *
-    tp_size + pp_rank * tp_size + tp_rank``.
-    With `--nnodes` the engine hands each node a contiguous block of global
-    ranks, so node `r` serves `node_rank * local + i`; without it a
-    launcher's block starts at `--data-parallel-start-rank * tp_size`.
+    Global ranks enumerate DP, PP, then TP: ``global = dp_rank * pp_size * tp_size +
+    pp_rank * tp_size + tp_rank``. With `--nnodes` the engine hands each node a
+    contiguous block of global ranks, so node `r` serves `node_rank * local + i`;
+    without it a launcher's block starts at `--data-parallel-start-rank * tp_size`.
     """
     tp_size = parallel_config.tensor_parallel_size
     pp_size = parallel_config.pipeline_parallel_size

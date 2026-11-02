@@ -224,12 +224,11 @@ def _copy_mamba_state_block(
     The caller owns the decision logic (which columns, whether to copy); this
     device function only performs the byte copy for the given metadata slot.
 
-    `tile_idx` in `[0, TEMPORAL_TILES)` partitions the temporal state's
-    u64 range into `TEMPORAL_TILES` contiguous, COPY_BLOCK_SIZE-aligned
-    slices, giving more CTAs to fill the SMs at small batch (multi-MiB
-    temporal copies otherwise leave the GPU under-filled). Conv states are
-    small; only `tile_idx == 0` copies them. `TEMPORAL_TILES == 1` and
-    `tile_idx == 0` reproduces the untiled behavior.
+    `tile_idx` in `[0, TEMPORAL_TILES)` partitions the temporal state's u64 range into
+    `TEMPORAL_TILES` contiguous, COPY_BLOCK_SIZE-aligned slices, giving more CTAs to
+    fill the SMs at small batch (multi-MiB temporal copies otherwise leave the GPU
+    under-filled). Conv states are small; only `tile_idx == 0` copies them.
+    `TEMPORAL_TILES == 1` and `tile_idx == 0` reproduces the untiled behavior.
     """
     state_base_addr = tl.load(state_base_addrs_ptr + state_idx)
     state_block_stride = tl.load(state_block_strides_ptr + state_idx)
@@ -574,13 +573,12 @@ def precopy_mamba_align_fused_kernel(
 ):
     """Pre-copy mamba "align" state across block boundaries.
 
-    Before the forward pass, copy each request's last SSM/conv state from its
-    previous block column into the new window block column, so the kernels read
-    the initial state from the write-side block as usual (V1 align semantics).
-    Same per-(layer, state) copy semantics as `postprocess_mamba_fused_kernel`
-    (shared `_copy_mamba_state_block` body, i.e. the V1 `preprocess_mamba`
-    copy specs), but driven by the GPU-resident src columns so it needs no
-    CPU-GPU sync (async-scheduling safe).
+    Before the forward pass, copy each request's last SSM/conv state from its previous
+    block column into the new window block column, so the kernels read the initial state
+    from the write-side block as usual (V1 align semantics). Same per-(layer, state)
+    copy semantics as `postprocess_mamba_fused_kernel` (shared `_copy_mamba_state_block`
+    body, i.e. the V1 `preprocess_mamba` copy specs), but driven by the GPU-resident src
+    columns so it needs no CPU-GPU sync (async-scheduling safe).
 
     Grid: (num_reqs, num_states [, TEMPORAL_TILES]). V2 passes a
     batch-to-state idx_mapping; V1 already stores the staged arrays in batch
@@ -1256,12 +1254,11 @@ class MambaSpecDecodeGPUContext:
         """V2 align postprocess: save the running state to the block-aligned
         position after spec-decode acceptance leaves the sequence non-aligned.
 
-        `num_accepted_tokens_gpu` is updated in place while the kernel reads
-        from a snapshot to avoid cross-program races when the accepted position
-        stays in the running block and the count is reset to 1.
-        `new_num_computed_tokens` already holds the post-step computed count
-        (PRECOMPUTED_NEW_COMPUTED).
-        `idx_mapping` maps batch row -> req-state slot (HAS_IDX_MAPPING).
+        `num_accepted_tokens_gpu` is updated in place while the kernel reads from a
+        snapshot to avoid cross-program races when the accepted position stays in the
+        running block and the count is reset to 1. `new_num_computed_tokens` already
+        holds the post-step computed count (PRECOMPUTED_NEW_COMPUTED). `idx_mapping`
+        maps batch row -> req-state slot (HAS_IDX_MAPPING).
         """
         if num_reqs == 0 or not self.is_initialized:
             return
@@ -1305,10 +1302,9 @@ class MambaSpecDecodeGPUContext:
 class MambaBuffers:
     """Single owner for all mamba-specific runner buffers.
 
-    The two sub-objects have different gates:
-    `preprocess` is needed whenever `mamba_cache_mode == "align"`;
-    `postprocess_align` is needed only when align is combined with
-    speculative decoding on a hybrid model, and is `None` otherwise.
+    The two sub-objects have different gates: `preprocess` is needed whenever
+    `mamba_cache_mode == "align"`; `postprocess_align` is needed only when align is
+    combined with speculative decoding on a hybrid model, and is `None` otherwise.
     """
 
     preprocess: MambaCopyBuffers

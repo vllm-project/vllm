@@ -40,9 +40,8 @@ class LLFp32WDotprod:
 
     :note: K is handled as vectorized main/tail loops plus scalar remainder.
 
-    :compile-key: `(M, K, bs, epb, act_dtype)` selects the token count,
-        hidden size, CTA thread/K-stripe width, experts per CTA, and activation
-        input type.
+    :compile-key: `(M, K, bs, epb, act_dtype)` selects the token count, hidden size, CTA
+        thread/K-stripe width, experts per CTA, and activation input type.
     """
 
     def __init__(
@@ -334,16 +333,11 @@ class LLFp32WDotprod:
         - Reduce each token accumulator first within the warp, then across
           warps through shared memory, and store `C[:, n]`.
 
-        :param gA: Input tensor A with shape `[M, K]`.
-        :type gA: cute.Tensor
-        :param gB: Input tensor B with shape `[N, K]`.
-        :type gB: cute.Tensor
-        :param gC: Output tensor C with shape `[M, N]`.
-        :type gC: cute.Tensor
-        :param N_dim: Output column count used for the launch grid.
-        :type N_dim: cutlass.Int32
-        :param stream: CUDA stream for asynchronous execution.
-        :type stream: CUstream
+        :param gA: Input tensor A with shape `[M, K]`. :type gA: cute.Tensor :param gB:
+        Input tensor B with shape `[N, K]`. :type gB: cute.Tensor :param gC: Output
+        tensor C with shape `[M, N]`. :type gC: cute.Tensor :param N_dim: Output column
+        count used for the launch grid. :type N_dim: cutlass.Int32 :param stream: CUDA
+        stream for asynchronous execution. :type stream: CUstream
         """
         self.kernel(
             gA,

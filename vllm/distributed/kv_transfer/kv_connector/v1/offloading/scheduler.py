@@ -447,19 +447,18 @@ class RequestOffloadState:
     ) -> int:
         """Number of allocated and keyed leading chunks eligible for store.
 
-        For eagle/MTP groups the volatile trailing chunk of the offloadable
-        range is excluded while decoding: the draft-layer KV of the last
-        accepted position may be rewritten after spec-token rejection. During
-        prefill the trailing chunk is stable (the draft input for a chunk's
-        last position is the next prompt token), so it is stored immediately.
-        Once the request has finished, no further spec-token rejection can
-        rewrite the tail, so the exclusion is lifted and the final chunk
-        becomes storable (issue #52735). The exclusion must be applied
-        consistently everywhere `next_stored_chunk_idx` is derived:
-        otherwise the trailing chunk of each step is skipped on collection but
-        jumped over by `next_stored_chunk_idx`, so it is never re-considered
-        and a permanent hole breaks prefix-reuse lookup. `is_finished` is
-        monotonic, so the finish-time calls all see the lifted exclusion.
+        For eagle/MTP groups the volatile trailing chunk of the offloadable range is
+        excluded while decoding: the draft-layer KV of the last accepted position may be
+        rewritten after spec-token rejection. During prefill the trailing chunk is
+        stable (the draft input for a chunk's last position is the next prompt token),
+        so it is stored immediately. Once the request has finished, no further
+        spec-token rejection can rewrite the tail, so the exclusion is lifted and the
+        final chunk becomes storable (issue #52735). The exclusion must be applied
+        consistently everywhere `next_stored_chunk_idx` is derived: otherwise the
+        trailing chunk of each step is skipped on collection but jumped over by
+        `next_stored_chunk_idx`, so it is never re-considered and a permanent hole
+        breaks prefix-reuse lookup. `is_finished` is monotonic, so the finish-time calls
+        all see the lifted exclusion.
         """
         num_chunks = num_offloadable_tokens // group_config.tokens_per_chunk
         is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
@@ -1259,11 +1258,9 @@ class OffloadingConnectorScheduler:
     ) -> tuple[bool, bool]:
         """Look up every key a partial-tail hit at `boundary` loads.
 
-        `bridge_pending` is True if a complete chunk that the hit also loads
-        is not ready yet.
-        Returns `(hit, pending)`. `hit` is True only if every key is ready.
-        `pending` is True if a key looked up before the first miss is not
-        ready yet.
+        `bridge_pending` is True if a complete chunk that the hit also loads is not
+        ready yet. Returns `(hit, pending)`. `hit` is True only if every key is ready.
+        `pending` is True if a key looked up before the first miss is not ready yet.
         """
         req = req_status.req
         req_context = req_status.req_context
@@ -1425,10 +1422,9 @@ class OffloadingConnectorScheduler:
     ) -> dict[CacheHitSource, int]:
         """Split the accepted external hit by the tier each loaded key came from.
 
-        Attention keys cover only their loaded token ranges; recurrent state
-        covers the whole reused prefix. Overlaps report the outermost tier.
-        Uncovered tokens, including omitted sliding-window history, are
-        `external_unspecified`.
+        Attention keys cover only their loaded token ranges; recurrent state covers the
+        whole reused prefix. Overlaps report the outermost tier. Uncovered tokens,
+        including omitted sliding-window history, are `external_unspecified`.
         """
         sources: dict[CacheHitSource, int] = {}
         if num_external_tokens == 0:

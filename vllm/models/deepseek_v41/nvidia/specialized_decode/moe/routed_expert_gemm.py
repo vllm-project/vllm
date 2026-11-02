@@ -20,24 +20,21 @@ tensors with CuTe DSL kernels sized for at most eight rows::
 * `routed_expert_route_cute.py` builds the expert-major, 8-row-tile
   permutation and the per-tile record both GEMMs read, as FlashInfer's routing
   kernel does with precomputed ids and an 8-token tile.
-* `routed_expert_gemm_cute.py` holds GEMM1 and GEMM2: persistent 128 x 8
-  `tcgen05` block-scaled tiles over the (weight tile, token tile) work items
-  of the record, with evict-first hints on the expert weights. GEMM1 skips the
-  zero padding tile of the 576-wide slice. Their numerics are those of the
-  TRT-LLM-gen `t128x8` tactics.
-* `routed_expert_front_cute.py` replaces the DSv4 top-k (Triton), the MXFP8
-  quantization of the routed input and the route kernel with one launch whose
-  outputs are bitwise those of the three; it is built for the target's 384
-  experts and top-6.
+* `routed_expert_gemm_cute.py` holds GEMM1 and GEMM2: persistent 128 x 8 `tcgen05`
+  block-scaled tiles over the (weight tile, token tile) work items of the record, with
+  evict-first hints on the expert weights. GEMM1 skips the zero padding tile of the
+  576-wide slice. Their numerics are those of the TRT-LLM-gen `t128x8` tactics.
+* `routed_expert_front_cute.py` replaces the DSv4 top-k (Triton), the MXFP8 quantization
+  of the routed input and the route kernel with one launch whose outputs are bitwise
+  those of the three; it is built for the target's 384 experts and top-6.
 
-The kernels read the tensors vLLM prepares for the TRT-LLM-gen MXFP4 backend:
-`w13` [E, 1280, 2560] u8 (interleaved up/gate rows shuffled for 128-row
-epilogue tiles) with [E, 1280, 160] scales in the 128x4 layout, `w2`
-[E, 5120, 320] u8 with [E, 5120, 20] scales, and the per-expert SwiGLU clamp.
-Each kernel is compiled once per device when the layers are bound (shapes,
-expert counts and the routing record are launch arguments) and launched on the
-current stream with programmatic dependent launch, so CUDA graphs capture
-them like any other kernel.
+The kernels read the tensors vLLM prepares for the TRT-LLM-gen MXFP4 backend: `w13` [E,
+1280, 2560] u8 (interleaved up/gate rows shuffled for 128-row epilogue tiles) with [E,
+1280, 160] scales in the 128x4 layout, `w2` [E, 5120, 320] u8 with [E, 5120, 20] scales,
+and the per-expert SwiGLU clamp. Each kernel is compiled once per device when the layers
+are bound (shapes, expert counts and the routing record are launch arguments) and
+launched on the current stream with programmatic dependent launch, so CUDA graphs
+capture them like any other kernel.
 """
 
 from __future__ import annotations
@@ -217,9 +214,8 @@ class RoutedExpertGemm:
     ) -> Routing:
         """Top-k, MXFP8 quantization and routing record in one launch.
 
-        `x`: BF16 router input [rows, 5120]; `logits`: FP32 router logits
-        [rows, 384]; `input_ids`: [rows] int32 or int64, read only with image
-        routing.
+        `x`: BF16 router input [rows, 5120]; `logits`: FP32 router logits [rows, 384];
+        `input_ids`: [rows] int32 or int64, read only with image routing.
         """
         config = self.front_config
         assert config is not None

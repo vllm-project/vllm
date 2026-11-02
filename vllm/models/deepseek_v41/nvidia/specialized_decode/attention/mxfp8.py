@@ -2,11 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Low-batch MXFP8 attention projections.
 
-At up to `LOW_BATCH_MAX_ROWS` rows the executor runs `fused_wqa_wkv`,
-`wq_b` and `wo_b` on FlashInfer `mm_mxfp8` with its
-`cutedsl_low_latency` backend whenever their input is already MXFP8; the
-stock layers keep `cute-dsl`. Both backends read the same weights, weight
-scales and F8_128x4 activation scales.
+At up to `LOW_BATCH_MAX_ROWS` rows the executor runs `fused_wqa_wkv`, `wq_b` and `wo_b`
+on FlashInfer `mm_mxfp8` with its `cutedsl_low_latency` backend whenever their input is
+already MXFP8; the stock layers keep `cute-dsl`. Both backends read the same weights,
+weight scales and F8_128x4 activation scales.
 
 The backend's tactics differ by under 1 us when tuned in isolation, but split-K
 tactics are slower inside the back-to-back PDL chain of a decode step, so the
@@ -134,9 +133,8 @@ def run_zeros(linear: nn.Module, rows: int) -> torch.Tensor:
 @contextmanager
 def pinned_tactics() -> Iterator[None]:
     """Offer FlashInfer's tuner only the pinned tactic for pinned problems. The
-    tuner's tactic list is a FlashInfer internal: when it has no
-    `autotune_tactics` or does not list a pinned tactic, every tactic is
-    tuned."""
+    tuner's tactic list is a FlashInfer internal: when it has no `autotune_tactics` or
+    does not list a pinned tactic, every tactic is tuned."""
     if not current_platform.is_device_capability(103):
         yield
         return

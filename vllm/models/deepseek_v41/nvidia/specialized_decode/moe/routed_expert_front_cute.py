@@ -40,16 +40,14 @@ three kernels; :class:`RoutedExpertFront` replaces them with one launch:
    amax / 448 and E4M3 values rounded to nearest with saturation;
 3. the routing record (`routed_expert_route_cute.py`).
 
-Bitwise contract. Every output equals that of the three kernels it replaces,
-so the arithmetic is spelled out instruction by instruction in inline PTX:
-the Triton kernel's exp is `ex2.approx.f32` of x * log2(e), its sqrt
-`sqrt.approx.ftz.f32`, its division `div.full.f32`, its weight sum the
-butterfly order of a one-warp eight-lane reduction; the quantization is
-FlashInfer's instruction sequence. The one exception is the log: like the
-Triton kernel, the kernel calls the toolchain's `logf` (libdevice, through
-`cute.math.log`), whose argument 1 + exp(x) is at least 1. No other
-floating-point operation is left to the compiler, which could contract or
-flush it.
+Bitwise contract. Every output equals that of the three kernels it replaces, so the
+arithmetic is spelled out instruction by instruction in inline PTX: the Triton kernel's
+exp is `ex2.approx.f32` of x * log2(e), its sqrt `sqrt.approx.ftz.f32`, its division
+`div.full.f32`, its weight sum the butterfly order of a one-warp eight-lane reduction;
+the quantization is FlashInfer's instruction sequence. The one exception is the log:
+like the Triton kernel, the kernel calls the toolchain's `logf` (libdevice, through
+`cute.math.log`), whose argument 1 + exp(x) is at least 1. No other floating-point
+operation is left to the compiler, which could contract or flush it.
 
 Work split (grid `1 + ceil(rows / 3)`, 1024 threads):
 
@@ -223,11 +221,10 @@ def lane_best(key: cute.Tensor):
 @cute.jit
 def part_top_k(logit: cute.Tensor, bias: cute.Tensor, base: Int32, lane: Int32):
     """One warp's top-6 of its 96 experts (expert = base + lane + 32 j), in
-    selection order: each round takes the warp's largest key with one
-    `redux.sync` max, then the lowest expert id holding it with one min
-    (Triton's `tl.max`, then the lowest index equal to it); only the winning
-    lane rescans. Lane `s < 6` gets slot `s`: its key, id and unbiased
-    score."""
+    selection order: each round takes the warp's largest key with one `redux.sync` max,
+    then the lowest expert id holding it with one min (Triton's `tl.max`, then the
+    lowest index equal to it); only the winning lane rescans. Lane `s < 6` gets slot
+    `s`: its key, id and unbiased score."""
     score = cute.make_rmem_tensor((PER_LANE,), Float32)
     key = cute.make_rmem_tensor((PER_LANE,), Uint32)
     for j in cutlass.range_constexpr(PER_LANE):
@@ -270,8 +267,7 @@ def merge_row(
     ids_shared: cute.Tensor,
 ):
     """Merge a row's 24 candidates (lane `c < 24` holds candidate `c`) into
-    its top-6, normalize as Triton does and store; lane `s < 6` ends with
-    slot `s`."""
+    its top-6, normalize as Triton does and store; lane `s < 6` ends with slot `s`."""
     slot_weight = Float32(0.0)  # lane s < 8 keeps slot s (Triton's 8-wide vector)
     slot_id = Int32(0)
     for slot in cutlass.range_constexpr(TOP_K):

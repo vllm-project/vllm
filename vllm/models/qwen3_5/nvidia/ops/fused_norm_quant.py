@@ -162,10 +162,9 @@ def gemma_add_rms_norm_quant(
         write_y: also return the bf16 normed activation.
 
     Returns:
-        `(q, block_scale, y)`: quantized data (fp8, or packed fp4 uint8),
-        NVFP4 block scales (fp8, `(round_up(M, 128), round_up(H // 16, 4))`;
-        rows >= M are left unwritten) or `scale` for FP8, and the normed
-        activation (or None).
+        `(q, block_scale, y)`: quantized data (fp8, or packed fp4 uint8), NVFP4 block
+        scales (fp8, `(round_up(M, 128), round_up(H // 16, 4))`; rows >= M are left
+        unwritten) or `scale` for FP8, and the normed activation (or None).
 
     """
     assert x.dim() == 2 and x.is_contiguous()

@@ -82,8 +82,7 @@ def _partial_tail_non_mamba_puts(
     A Mamba state handed off at any other position, i.e. a shared-prefix
     junction (`--enable-mamba-shared-prefix-checkpoint`), adds no puts here.
 
-    `block_sizes` are the per-group block sizes, indexed like
-    `req_meta.block_ids`.
+    `block_sizes` are the per-group block sizes, indexed like `req_meta.block_ids`.
     """
     mamba_tails = [
         put.num_tokens
@@ -767,13 +766,11 @@ class MooncakeStoreScheduler:
         Routes through the existing LookupKey ZMQ admin channel to worker
         rank 0, which owns the `MooncakeDistributedStore` handle.
 
-        Ordering assumption: caller (typically
-        `Scheduler.reset_connector_cache`, invoked via
-        `reset_prefix_cache(reset_connector=True)`) MUST ensure no
-        in-flight Mooncake lookups or transfers. For RL workflows this is
-        satisfied at the step boundary after weight updates and rollout
-        drain. Violating this can allow stale KV to be served on the next
-        request, defeating the hard-reset guarantee.
+        Ordering assumption: caller (typically `Scheduler.reset_connector_cache`,
+        invoked via `reset_prefix_cache(reset_connector=True)`) MUST ensure no in-flight
+        Mooncake lookups or transfers. For RL workflows this is satisfied at the step
+        boundary after weight updates and rollout drain. Violating this can allow stale
+        KV to be served on the next request, defeating the hard-reset guarantee.
 
         Returns True on ACK from worker, False on NACK or RPC error.
         """

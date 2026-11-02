@@ -4358,10 +4358,9 @@ class BFCLDataset(HuggingFaceDataset):
       - downloads the selected per-category files via `hf_hub_download`
         and interleaves rows round-robin so sampling is balanced
       - translates BFCL function schemas to OpenAI tool format
-      - sets :attr:`SampleRequest.chat_messages` directly and attaches
-        `tools` / `tool_choice` via :attr:`SampleRequest.request_overrides`,
-        producing production-alike tool calling traffic when used with an
-        `openai-chat` backend
+      - sets :attr:`SampleRequest.chat_messages` directly and attaches `tools` /
+        `tool_choice` via :attr:`SampleRequest.request_overrides`, producing
+        production-alike tool calling traffic when used with an `openai-chat` backend
     """
 
     DEFAULT_OUTPUT_LEN = 512

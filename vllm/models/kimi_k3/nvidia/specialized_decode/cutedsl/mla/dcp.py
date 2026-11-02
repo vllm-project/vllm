@@ -93,11 +93,10 @@ class DcpBox:
 class DcpValue:
     """The DCP tail of one MLA layer, one 512-thread CTA per (head, 16 requests).
     Every rank re-arms this parity's q mailbox (tokenspeed has read it) and pushes all
-    its local tokenspeed rows (+ LSE) to their head owner's Lamport mailbox (empty
-    local shards: zeros, LSE -inf). Warp r then LSE-weights request t0 + r of this
-    head over the DCP sources (exp2(lse - max) / sum in FP32), the CTA merges the
-    polled rows in FP32
-    (one BF16 rounding, re-arming what it read) into shared memory, and W_UV (BF16
+    its local tokenspeed rows (+ LSE) to their head owner's Lamport mailbox (empty local
+    shards: zeros, LSE -inf). Warp r then LSE-weights request t0 + r of this head over
+    the DCP sources (exp2(lse - max) / sum in FP32), the CTA merges the polled rows in
+    FP32 (one BF16 rounding, re-arming what it read) into shared memory, and W_UV (BF16
     MMA, FP32 accumulation) and the sigmoid gate follow as in MlaValue: warp w owns
     outputs 32 (w // 4) + 8 (w % 4) .. + 7. Rows are tokens, `q` per request."""
 

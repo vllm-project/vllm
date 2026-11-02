@@ -182,12 +182,11 @@ def mistral_config(
     """Return a :class:`ParserEngineConfig` for the Mistral output format.
 
     Args:
-        reasoning_encoding: Reasoning token format.
-            `"special_token"` – v13+ `[THINK]`/`[/THINK]` special
-            tokens placed in both `terminals` and `token_id_terminals`.
-            `"text"` – v11 `<think>`/`</think>` plain text placed in
-            `terminals` only; no `token_id_terminals` for think tokens.
-            `"none"` – no reasoning support.
+        reasoning_encoding: Reasoning token format. `"special_token"` – v13+
+            `[THINK]`/`[/THINK]` special tokens placed in both `terminals` and
+            `token_id_terminals`. `"text"` – v11 `<think>`/`</think>` plain text placed
+            in `terminals` only; no `token_id_terminals` for think tokens. `"none"` – no
+            reasoning support.
         name: Name embedded in the returned config (used for debugging).
 
     Returns:

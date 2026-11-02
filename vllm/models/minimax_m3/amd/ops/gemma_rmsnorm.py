@@ -16,11 +16,10 @@ Entry points:
            per-32-block MXFP8 activation quant as an epilogue, so a following
            MXFP8 linear need not quantize its input again.
 
-Both normalize over the last dim and broadcast `weight` (shape [N]) over it,
-so they serve both the full-hidden norms (input/post-attn/final) and the
-per-head q_norm/k_norm (N == head_dim). Inputs may be non-contiguous views
-(e.g. `qkv.split` slices); strides are passed through and outputs are written
-contiguous.
+Both normalize over the last dim and broadcast `weight` (shape [N]) over it, so they
+serve both the full-hidden norms (input/post-attn/final) and the per-head q_norm/k_norm
+(N == head_dim). Inputs may be non-contiguous views (e.g. `qkv.split` slices); strides
+are passed through and outputs are written contiguous.
 """
 
 import torch
@@ -181,10 +180,9 @@ def gemma_fused_add_rmsnorm_mxfp8(
     Bit-identical to `mxfp8_e4m3_quantize(gemma_fused_add_rmsnorm(...)[0])`.
 
     Returns:
-        `(x_q, x_scale, residual_out)`: `x_q` float8_e4m3fn `[M, N]` and
-        `x_scale` uint8 E8M0 `[M, N // 32]` (row-major, not swizzled), with
-        the leading dims of `x` flattened into `M`; `residual_out` has
-        the shape of `x`.
+        `(x_q, x_scale, residual_out)`: `x_q` float8_e4m3fn `[M, N]` and `x_scale` uint8
+        E8M0 `[M, N // 32]` (row-major, not swizzled), with the leading dims of `x`
+        flattened into `M`; `residual_out` has the shape of `x`.
 
     """
     n = x.shape[-1]
