@@ -194,7 +194,7 @@ def _select_with_indexer(
     from types import SimpleNamespace
 
     from vllm.models.qwen4_exp.common.qsa_indexer import QSADCPShard
-    from vllm.models.qwen4_exp.nvidia import indexer_qsa
+    from vllm.models.qwen4_exp.nvidia import qsa_indexer
     from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp as qsa_dcp_ops
     from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp_selector
     from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
@@ -220,7 +220,7 @@ def _select_with_indexer(
         "qsa_localize_dcp_indices",
         lambda *args: kernel_calls.append(args),
     )
-    monkeypatch.setattr(indexer_qsa, "qsa_prepare", lambda *args, **kwargs: None)
+    monkeypatch.setattr(qsa_indexer, "qsa_prepare", lambda *args, **kwargs: None)
     for name in (
         "qsa_select_paged_decode",
         "qsa_select_paged_prefill",
@@ -293,7 +293,7 @@ def _select_with_indexer(
         impl=impl,
     )
     selection = _pack([[3, 1], [5, 2, 0]], token_topk)
-    returned, _ = indexer_qsa.QSAIndexer.forward(
+    returned, _ = qsa_indexer.QSAIndexer.forward(
         indexer,
         torch.zeros(num_tokens, 2),
         torch.arange(num_tokens),

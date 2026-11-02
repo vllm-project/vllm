@@ -775,12 +775,12 @@ def _select_through_indexer(
 
     The fused prepare is replaced by a copy of the index queries (the
     caches are written beforehand)."""
-    from vllm.models.qwen4_exp.nvidia import indexer_qsa
+    from vllm.models.qwen4_exp.nvidia import qsa_indexer
 
     def prepare(*args, **kwargs):
         args[7].copy_(q)
 
-    monkeypatch.setattr(indexer_qsa, "qsa_prepare", prepare)
+    monkeypatch.setattr(qsa_indexer, "qsa_prepare", prepare)
     rows = q.shape[0]
     decode_rows = E2E_NUM_DECODES * E2E_DECODE_QUERY_LEN
     raw_metadata = SimpleNamespace(
@@ -839,7 +839,7 @@ def _select_through_indexer(
     projected_qk = torch.zeros(
         rows, (E2E_INDEX_HEADS + 1) * E2E_INDEX_DIM, device="cuda"
     )
-    returned, _ = indexer_qsa.QSAIndexer.forward(
+    returned, _ = qsa_indexer.QSAIndexer.forward(
         indexer,
         projected_qk,
         positions,
