@@ -10,7 +10,7 @@ This document will introduce how CustomOp works in vLLM and how to implement a n
 
 We can use `@CustomOp.register("op_name")` to register an op class to the `CustomOp` system. After this, the `op_name` and its class will be added into the `op_registry` dictionary. In addition, We can also register an OOT op by `@CustomOp.register_oot("op_name")`. We will introduce this mechanism in detail later.
 
-When a `CustomOp` is called (i.e., call its `forward()` method), if it is enabled (i.e., with `--compilation_config.custom_ops '["+op_name"]'`), it will automatically dispatch the forward method to the appropriate backend according to `current_platform`. Otherwise (i.e., it is disabled), it will only call the `forward_native()` method to use PyTorch-native implementation of this forward method.
+When a `CustomOp` is called (i.e., call its `forward()` method), if it is enabled (i.e., with `--compilation-config '{"custom_ops": ["+op_name"]}'`), it will automatically dispatch the forward method to the appropriate backend according to `current_platform`. Otherwise (i.e., it is disabled), it will only call the `forward_native()` method to use PyTorch-native implementation of this forward method.
 
 - **CPU platform:** dispatch to `forward_cpu()`.
 - **CUDA platform:** dispatch to `forward_cuda()`.
@@ -37,14 +37,14 @@ By default, if `compilation_config.backend == "inductor"` and `compilation_confi
 
 ## How to Customise Your Configuration for CustomOp
 
-vLLM also offers fine-grained control over which custom ops to enable or disable for users, by manually passing a `--compilation_config.custom_ops '["..."]'` when launching a server.
+vLLM also offers fine-grained control over which custom ops to enable or disable for users, by manually passing a `--compilation-config '{"custom_ops": ["..."]}'` when launching a server.
 
 For example:
 
-- Use `--compilation_config.custom_ops '["all"]'` to enable all custom ops.
-- Use `--compilation_config.custom_ops '["none"]'` to disable all custom ops.
-- Use `--compilation_config.custom_ops '["all,-op1"]'` to enable all custom ops except op1 (i.e., prefixed with a `-` means "disable").
-- Use `--compilation_config.custom_ops '["none,+op1,+op2"]'` to only enable op1 and op2 (i.e., prefixed with a `+` means "enable").
+- Use `--compilation-config '{"custom_ops": ["all"]}'` to enable all custom ops.
+- Use `--compilation-config '{"custom_ops": ["none"]}'` to disable all custom ops.
+- Use `--compilation-config '{"custom_ops": ["all,-op1"]}'` to enable all custom ops except op1 (i.e., prefixed with a `-` means "disable").
+- Use `--compilation-config '{"custom_ops": ["none,+op1,+op2"]}'` to only enable op1 and op2 (i.e., prefixed with a `+` means "enable").
 
 ## Types of Supported CustomOp in vLLM
 
