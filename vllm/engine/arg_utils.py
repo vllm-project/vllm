@@ -3250,6 +3250,7 @@ class AsyncEngineArgs(EngineArgs):
     """Arguments for asynchronous vLLM engine."""
 
     enable_log_requests: bool = False
+    enable_log_request_ids_only: bool = False
 
     @staticmethod
     def add_cli_args(
@@ -3270,7 +3271,21 @@ class AsyncEngineArgs(EngineArgs):
             "- DEBUG: Prompt inputs (e.g: text, token IDs).\n"
             "You can set the minimum log level via `VLLM_LOGGING_LEVEL`.\n"
             "You can also set a separate log level for request JSON body "
-            "via `VLLM_REQUEST_BODY_LOG_LEVEL` (default: DEBUG).",
+            "via `VLLM_REQUEST_BODY_LOG_LEVEL` (default: DEBUG).\n"
+            "To log request IDs without request content, use "
+            "`--enable-log-request-ids-only` instead.",
+        )
+        parser.add_argument(
+            "--enable-log-request-ids-only",
+            action=argparse.BooleanOptionalAction,
+            default=AsyncEngineArgs.enable_log_request_ids_only,
+            help="Log request IDs and lifecycle events (received, added, "
+            "aborted, failed) at INFO without any request content: no "
+            "prompts, token IDs, parameters, LoRA requests or JSON bodies, "
+            "at any log level. Cannot be combined with "
+            "`--enable-log-requests`, `--enable-log-outputs` or "
+            "`VLLM_REQUEST_BODY_LOG_LEVEL`. `--max-log-len` has no effect "
+            "in this mode.",
         )
         current_platform.pre_register_and_update(parser)
         return parser
