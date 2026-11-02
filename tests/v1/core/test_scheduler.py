@@ -2532,6 +2532,41 @@ def test_kv_cache_release_after_keep_pause_preserves_requests():
     assert resumed.num_scheduled_tokens == {running.request_id: running.num_tokens}
 
 
+@pytest.mark.parametrize("extensible", [True, False])
+def test_pause_that_clears_the_kv_cache_lets_weight_updates_borrow_it(extensible):
+    """Workers learn that their extensible KV cache holds nothing to keep from
+    a pause that cleared it until the resume, and only then."""
+    from types import SimpleNamespace
+
+    core = object.__new__(EngineCore)
+    core.scheduler = create_scheduler()
+    core.mm_receiver_cache = None
+    core.batch_queue = None
+    core.model_executor = Mock(
+        is_sleeping=False,
+        vllm_config=SimpleNamespace(
+            cache_config=SimpleNamespace(enable_extensible_kv_cache=extensible)
+        ),
+    )
+    rpc = core.model_executor.collective_rpc
+
+    def reclaimable_calls() -> list[bool]:
+        return [
+            call.kwargs["args"][0]
+            for call in rpc.call_args_list
+            if call.args == ("set_kv_cache_reclaimable",)
+        ]
+
+    core.pause_scheduler(mode="keep", clear_cache=False)
+    core.resume_scheduler()
+    assert reclaimable_calls() == []
+
+    core.pause_scheduler(mode="abort", clear_cache=True)
+    core.pause_scheduler(mode="abort", clear_cache=True)
+    core.resume_scheduler()
+    assert reclaimable_calls() == ([True, False] if extensible else [])
+
+
 @pytest.mark.parametrize(
     "sleeping_tags",
     [{"weights", "kv_cache"}, {"weights"}, {"kv_cache"}],
@@ -2584,7 +2619,7 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
     (tmp_path / "config.json").write_text(
         '{"architectures": ["OPTForCausalLM"], "model_type": "opt"}'
     )
-    scheduler = create_scheduler(
+    base = create_scheduler(
         model=str(tmp_path),
         max_num_seqs=16,
         max_num_batched_tokens=20,
@@ -2592,8 +2627,24 @@ def test_draft_slots_budgeted_per_scheduled_request(tmp_path, monkeypatch):
         parallel_drafting=True,
         skip_tokenizer_init=True,
     )
-    speculative_config = scheduler.vllm_config.speculative_config
+    # P-EAGLE needs a resolvable draft model, so switch the ngram config in place
+    # and redo the config step.
+    vllm_config = base.vllm_config
+    speculative_config = vllm_config.speculative_config
     assert speculative_config is not None
+    object.__setattr__(speculative_config, "method", "eagle3")
+    object.__setattr__(
+        speculative_config,
+        "draft_model_config",
+        SimpleNamespace(hf_config=SimpleNamespace(), architectures=[]),
+    )
+    vllm_config._set_max_num_scheduled_tokens()
+    scheduler = Scheduler(
+        vllm_config=vllm_config,
+        kv_cache_config=base.kv_cache_config,
+        structured_output_manager=base.structured_output_manager,
+        block_size=base.block_size,
+    )
     assert scheduler.max_num_scheduled_tokens == 20
     assert speculative_config.max_num_new_slots_for_drafting == 3
 
@@ -2624,7 +2675,7 @@ def test_block_drafters_cap_requests_instead_of_draft_slots(
     object.__setattr__(
         vllm_config.speculative_config,
         "draft_model_config",
-        SimpleNamespace(hf_config=SimpleNamespace()),
+        SimpleNamespace(hf_config=SimpleNamespace(), architectures=[]),
     )
     vllm_config._set_max_num_scheduled_tokens()
     scheduler = Scheduler(
