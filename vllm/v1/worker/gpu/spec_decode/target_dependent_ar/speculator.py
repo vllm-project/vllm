@@ -273,6 +273,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             max_query_len=None if input_batch.has_prefill else int(max_query_len),
             need_eager=is_profile,
             dp_sync_state=dp_sync_state,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_across_dp = (
             prefill_batch_sync.num_tokens_across_dp
@@ -359,6 +360,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync_state=decode_batch_sync,
+            parallel_config=self.vllm_config.parallel_config,
         )
         if self.decode_cudagraph_manager is not None:
             decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
