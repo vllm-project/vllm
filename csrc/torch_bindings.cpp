@@ -658,7 +658,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   ops.def(
       "topp_cutoffs_lse(Tensor logits, Tensor expanded_idx_mapping, "
       "Tensor temperature, Tensor top_p, Tensor! thresh, Tensor! lse, "
-      "int cluster_size, bool force_fp64) -> ()");
+      "int cluster_size, int force_fallback) -> ()");
 #endif
 
   // Activation ops
