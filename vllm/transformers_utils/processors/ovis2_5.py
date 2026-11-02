@@ -11,6 +11,8 @@ from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
+from vllm.multimodal.media.base import MediaDecodedBudget
+
 __all__ = ["Ovis2_5Processor"]
 IMAGE_TOKEN = "<image>"
 VIDEO_TOKEN = "<video>"
@@ -173,6 +175,7 @@ class Ovis2_5Processor(ProcessorMixin):
             tokenizer_init_kwargs=self.tokenizer.init_kwargs,
             **kwargs,
         )
+        decoded_budget = MediaDecodedBudget()
         # Process all images first
         visual_features = {}
         output = BatchFeature()
@@ -184,6 +187,7 @@ class Ovis2_5Processor(ProcessorMixin):
             for image in images if isinstance(images, list) else [images]:
                 pixel_values, image_placeholders, grid = self.preprocess_multidata(
                     images=image,
+                    decoded_budget=decoded_budget,
                     **output_kwargs["images_kwargs"],
                 )
                 processed_images.append(pixel_values)
@@ -204,6 +208,7 @@ class Ovis2_5Processor(ProcessorMixin):
             for video in videos if isinstance(videos, list) else [videos]:
                 pixel_values, video_placeholders, grid = self.preprocess_multidata(
                     video=video,
+                    decoded_budget=decoded_budget,
                     **output_kwargs["videos_kwargs"],
                 )
                 processed_videos.append(pixel_values)
@@ -392,6 +397,7 @@ class Ovis2_5Processor(ProcessorMixin):
         min_pixels: int = MIN_PIXELS,
         max_pixels: int = MAX_PIXELS,
         return_tensors: str | None = "pt",
+        decoded_budget: MediaDecodedBudget | None = None,
     ):
         is_video = False
         if images is not None:
@@ -420,16 +426,25 @@ class Ovis2_5Processor(ProcessorMixin):
         ]
 
         width, height = images[0].size
-        resized_height, resized_width = height, width
+        resized_height, resized_width = self.smart_resize(
+            height,
+            width,
+            factor=self.patch_size * self.hidden_stride,
+            min_pixels=min_pixels,
+            max_pixels=max_pixels,
+        )
+        padded_frames = len(images) + (-len(images) % self.temporal_patch_size)
+        if decoded_budget is None:
+            decoded_budget = MediaDecodedBudget()
+        decoded_budget.charge(
+            padded_frames
+            * resized_height
+            * resized_width
+            * 3
+            * np.dtype(np.float32).itemsize
+        )
         processed_images = []
         for image in images:
-            resized_height, resized_width = self.smart_resize(
-                height,
-                width,
-                factor=self.patch_size * self.hidden_stride,
-                min_pixels=min_pixels,
-                max_pixels=max_pixels,
-            )
             new_size = dict(height=resized_height, width=resized_width)
             image_pt = self.image_processor.preprocess(image, size=new_size)[
                 "pixel_values"
