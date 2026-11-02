@@ -1355,6 +1355,9 @@ def rejection_sample(
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
         vocab_size = min(vocab_size, draft_logits.size(-1))
+    if vocab_size < target_logits.shape[-1]:
+        # A precomputed log-sum-exp spans the target columns dropped here.
+        target_lse = None
 
     fly_entropy = None
     if fly_window_size > 0:

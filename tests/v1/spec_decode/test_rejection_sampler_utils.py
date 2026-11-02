@@ -2032,6 +2032,47 @@ def test_precomputed_target_lse_matches_stats_pass(
     torch.testing.assert_close(sampled[valid], expected_sampled[valid], rtol=0, atol=0)
 
 
+def test_precomputed_target_lse_ignored_for_padded_target_vocab():
+    """topp_cutoffs_lse reduces the whole target row. When the target is wider
+    than the draft vocab (a padded lm_head), verification drops the extra
+    columns, so their mass must not reach it through a precomputed target_lse."""
+    torch.manual_seed(13)
+    device = "cuda"
+    vocab_size = 2 * 8192 + 17
+    num_trials = 64
+    K = 3
+    temperature = 0.73
+    raw_1d = (torch.randn(vocab_size, device=device) * 3).to(torch.bfloat16)
+    inputs = _build_rejection_sample_inputs(
+        raw_1d.float(),
+        torch.randn(vocab_size, device=device),
+        K,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    raw = raw_1d.unsqueeze(0).expand(num_trials * (K + 1), -1)
+    raw = torch.cat([raw, raw.amax(-1, keepdim=True).expand(-1, 64)], dim=1)
+    raw = raw.contiguous()
+    thresh = torch.full((raw.shape[0],), float("-inf"), device=device)
+    target_lse = (raw.double() / temperature).logsumexp(-1)
+
+    kwargs = dict(
+        num_speculative_steps=K,
+        target_logits_pre_scaled=False,
+        target_topp_thresh=thresh,
+    )
+    expected_sampled, expected_num_sampled = _rejection_sample(
+        **dict(inputs, target_logits=raw), **kwargs
+    )
+    sampled, num_sampled = _rejection_sample(
+        **dict(inputs, target_logits=raw), **kwargs, target_lse=target_lse
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
+    torch.testing.assert_close(sampled[valid], expected_sampled[valid], rtol=0, atol=0)
+
+
 @triton.jit
 def _div_rn_by_scalar_probe_kernel(x_ptr, temp_ptr, out_ptr, n, BLOCK: tl.constexpr):
     offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
