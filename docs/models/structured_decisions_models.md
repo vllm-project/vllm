@@ -13,6 +13,7 @@ used for classification and routing.
 | `ClefFlashForJointSchema` | `ClefFlashStrategy` | `token_classify` | `JointSchemaHead` | `Cloudflare/clef-flash` |
 | `Gemma4ForCausalLM`       | `NextTokenStrategy` | `generate`       | N/A               | `google/gemma-4-E2B-it` |
 | `Qwen3ForCausalLM`        | `NextTokenStrategy` | `generate`       | N/A               | `Qwen/Qwen3-0.6B`, etc. |
+| `Qwen3_5ForSlotDecision`  | `SlotLMStrategy`    | `generate`       | LM head (fp32)    | `baselabs/mammoth-1`    |
 
 ### Multimodal Models
 
@@ -393,3 +394,31 @@ vllm serve LiquidAI/d1-3B
   letters.
 - When each request carries one question over a state that changes from
   request to request, `--disable-prefix-caching` lowers latency.
+
+### Mammoth-1 and Elephant-1
+
+Base Labs [`baselabs/mammoth-1`](https://huggingface.co/baselabs/mammoth-1)
+and [`baselabs/elephant-1`](https://huggingface.co/baselabs/elephant-1) are
+Qwen3.5 checkpoints whose `modeling_overrides` select `Qwen3_5ForSlotDecision`.
+
+```bash
+vllm serve baselabs/mammoth-1
+```
+
+- The full attention layers read the shared prefix and the question as two
+  bidirectional blocks, and each prompt is prefilled in one step, so a
+  `--max-num-batched-tokens` below `--max-model-len` is raised to it.
+  `--max-model-len` defaults to the trained 16,384 tokens.
+- Prefix caching (on by default) prefills the shared prefix once per decision
+  request instead of once per question. It needs FlashInfer's GatedDeltaNet
+  prefill (Hopper, or Blackwell with CUDA 13) and is turned off with other
+  backends.
+- A `choice` can have up to 255 options, labeled `A` to `Z` and then with
+  two-letter labels in the prompt. Media inputs return 400.
+- Only Model Runner V2 and the `TRITON_ATTN` attention backend are supported,
+  and the backend is selected automatically. KV transfer connectors,
+  `--kv-offloading-size`, speculative decoding, context parallelism,
+  micro-batching, `--prefix-match-unit` and `--scheduler-cls` are refused.
+- `instructions` returns 400, as does any `chat_template_kwargs` other than
+  `{"enable_thinking": false}`. `/v1/decisions` reads every question as a
+  choice and returns 400 for score levels with the same label.

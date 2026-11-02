@@ -85,6 +85,7 @@ def create_scheduler(
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
     kv_cache_spec: KVCacheSpec | None = None,
+    mamba_spec: MambaSpec | None = None,
     runner: RunnerOption = "auto",
     per_request_spec_decode_metrics: str = "none",
     prefill_schedule_interval: int = 1,
@@ -150,6 +151,7 @@ def create_scheduler(
         gpu_memory_utilization=0.9,
         cache_dtype="auto",
         enable_prefix_caching=enable_prefix_caching,
+        mamba_cache_mode=mamba_spec.mamba_cache_mode if mamba_spec else "none",
     )
     kv_transfer_config = None
     if isinstance(use_kv_connector, MockKVConfig):
@@ -235,7 +237,8 @@ def create_scheduler(
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)]
+        + ([KVCacheGroupSpec(["mamba"], mamba_spec)] if mamba_spec else []),
     )
     cache_config.num_gpu_blocks = num_blocks
     register_all_kvcache_specs(vllm_config)
