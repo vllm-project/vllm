@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, cast
 
 import regex as re
 
+import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.config.quantization import QuantSpec
 from vllm.model_executor.layers.fused_moe import (
@@ -24,6 +25,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp8Dynamic,
     kMxfp8Static,
 )
+from vllm.platforms import current_platform
 
 _DEEPSEEK_V4_EXPERT_DTYPES = ("fp4", "fp8")
 _EXPERTS_LAYER_RE = re.compile(r"(?:^|\.)layers\.(\d+)\.ffn\.experts$")
@@ -237,10 +239,17 @@ class DeepseekV4FP8Config(Fp8Config):
             )
 
             rows, cols = self.weight_block_size
-            return ModelOptLinearMethod(
-                QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic),
-                CkptCtx(scale_block_size=(rows, cols)),
-            )
+            spec = QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic)
+            ctx = CkptCtx(scale_block_size=(rows, cols))
+            if (
+                current_platform.is_cuda()
+                and envs.VLLM_DSV41_MXFP8_CUBLASLT_MIN_M > 0
+                and any(current_platform.is_device_capability(c) for c in (100, 103))
+            ):
+                from .nvidia.ops.mxfp8_linear import DeepseekV41Mxfp8LinearMethod
+
+                return DeepseekV41Mxfp8LinearMethod(spec, ctx)
+            return ModelOptLinearMethod(spec, ctx)
         if isinstance(layer, RoutedExperts):
             if is_layer_skipped(
                 prefix=prefix,
