@@ -57,6 +57,8 @@ pub(super) struct ResponseOptions {
     /// The request's `return_tokens_as_token_ids`; `None` falls back to the
     /// server's `--return-tokens-as-token-ids`.
     pub return_tokens_as_token_ids: Option<bool>,
+    /// Whether to return the weight-version spans on each finished choice.
+    pub return_weight_versions: bool,
     /// Whether the request forces one named function tool.
     pub is_named_tool_choice: bool,
 }
@@ -80,11 +82,7 @@ pub(super) fn prepare_chat_request(
     .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
 
     let request_id = format!("chatcmpl-{}", ctx.request_id);
-    let response_model = lora_resolution
-        .lora_request
-        .as_ref()
-        .map(|request| request.lora_name.clone())
-        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
+    let response_model = lora_resolution.response_model();
     let include_reasoning = request.include_reasoning;
     let echo = request
         .echo
@@ -203,6 +201,7 @@ pub(super) fn prepare_chat_request(
             include_stop_str_in_output: request.include_stop_str_in_output,
             stop_strings: request.stop.map(|stop| stop.into_vec()),
             min_tokens: request.min_tokens.unwrap_or(0),
+            detokenize: true,
         },
         intermediate: request.stream,
         prompt_truncation,
@@ -213,6 +212,7 @@ pub(super) fn prepare_chat_request(
         data_parallel_rank: ctx.data_parallel_rank,
         session_id,
         lora_request: lora_resolution.lora_request.clone(),
+        return_prompt_text: request.return_prompt_text.unwrap_or(false),
     };
 
     Ok(PreparedRequest {
@@ -228,6 +228,7 @@ pub(super) fn prepare_chat_request(
             echo,
             return_token_ids: request.return_token_ids.unwrap_or(false),
             return_tokens_as_token_ids: request.return_tokens_as_token_ids,
+            return_weight_versions: request.return_weight_versions.unwrap_or(false),
             is_named_tool_choice,
         },
         chat_request,
@@ -293,9 +294,7 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             name: _,
         } => {
             let mut blocks = Vec::new();
-            if let Some(reasoning) = reasoning
-                && !reasoning.is_empty()
-            {
+            if let Some(reasoning) = reasoning {
                 blocks.push(AssistantContentBlock::Reasoning { text: reasoning });
             }
             if let Some(content) = content {
@@ -304,7 +303,9 @@ pub(crate) fn convert_message(message: ChatMessage) -> Result<VllmChatMessage, A
             if let Some(tool_calls) = tool_calls {
                 blocks.extend(convert_assistant_tool_calls(tool_calls)?);
             }
-            if blocks.is_empty() {
+            if blocks.iter().all(|block| {
+                matches!(block, AssistantContentBlock::Reasoning { text } if text.is_empty())
+            }) {
                 bail_invalid_request!(
                     "Assistant messages must contain text, reasoning content, or tool_calls."
                 );
@@ -481,6 +482,7 @@ mod tests {
 
     use super::prepare_chat_request;
     use crate::lora::LoraModelResolution;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
@@ -497,7 +499,7 @@ mod tests {
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
-            model_names: names.iter().map(|s| s.to_string()).collect(),
+            model_names: ServedModelNames::new(names.iter().map(|s| s.to_string()).collect()),
             lora_request: None,
         }
     }
@@ -958,6 +960,7 @@ mod tests {
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,
+                detokenize: true,
             }
         );
         assert!(prepared.chat_request.initial_tools().is_empty());
@@ -1033,6 +1036,7 @@ mod tests {
                 include_stop_str_in_output: false,
                 stop_strings: None,
                 min_tokens: 0,
+                detokenize: true,
             }
         );
         assert!(prepared.chat_request.initial_tools().is_empty());
@@ -1425,36 +1429,38 @@ mod tests {
 
     #[test]
     fn prepare_chat_request_accepts_legacy_reasoning_content_alias() {
-        let request = ChatCompletionRequest {
-            messages: vec![
-                serde_json::from_value(json!({
-                    "role": "assistant",
-                    "content": "answer",
-                    "reasoning_content": "inner",
-                }))
-                .expect("legacy reasoning_content alias is accepted"),
-            ],
-            add_generation_prompt: Some(false),
-            ..base_request()
-        };
+        for reasoning in ["inner", ""] {
+            let request = ChatCompletionRequest {
+                messages: vec![
+                    serde_json::from_value(json!({
+                        "role": "assistant",
+                        "content": "answer",
+                        "reasoning_content": reasoning,
+                    }))
+                    .expect("legacy reasoning_content alias is accepted"),
+                ],
+                add_generation_prompt: Some(false),
+                ..base_request()
+            };
 
-        let prepared = prepare_chat_request(
-            request,
-            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
-            ResolvedRequestContext::default(),
-        )
-        .expect("request is valid");
-        assert_eq!(
-            prepared.chat_request.messages,
-            vec![VllmChatMessage::assistant_blocks(vec![
-                AssistantContentBlock::Reasoning {
-                    text: "inner".to_string(),
-                },
-                AssistantContentBlock::Text {
-                    text: "answer".to_string(),
-                },
-            ])]
-        );
+            let prepared = prepare_chat_request(
+                request,
+                &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+                ResolvedRequestContext::default(),
+            )
+            .expect("request is valid");
+            assert_eq!(
+                prepared.chat_request.messages,
+                vec![VllmChatMessage::assistant_blocks(vec![
+                    AssistantContentBlock::Reasoning {
+                        text: reasoning.to_string(),
+                    },
+                    AssistantContentBlock::Text {
+                        text: "answer".to_string(),
+                    },
+                ])]
+            );
+        }
     }
 
     #[test]

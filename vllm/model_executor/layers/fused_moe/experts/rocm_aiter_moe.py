@@ -488,7 +488,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # so we should not defer input quantization.
         # Otherwise, AITER fused MoE kernels handle input quantization
         # internally via a single fused kernel.
-        return not self.moe_config.use_mori_kernels
+        return not self.moe_config.use_mori_epv1_kernels
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -554,7 +554,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # MoRI dispatches MXFP4 activations packed two per byte, so K is
         # half the hidden size there.
         packed_fp4_input = (
-            self.moe_config.use_mori_kernels and self.quant_config.use_mxfp4_w4a4
+            self.moe_config.use_mori_epv1_kernels and self.quant_config.use_mxfp4_w4a4
         )
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)

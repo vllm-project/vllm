@@ -562,7 +562,7 @@ def _check_layers(rank: int, tp: int, device) -> None:
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
-@pytest.mark.parametrize("tp", [2, 4])
+@pytest.mark.parametrize("tp", [2, 4, 8])
 def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int):
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")

@@ -10,7 +10,7 @@ The NCCL weight transfer engine uses [NCCL](https://developer.nvidia.com/nccl) b
 
 ## How It Works
 
-1. The trainer and all inference workers join a shared NCCL process group using `StatelessProcessGroup` (vLLM's torch.distributed-independent group abstraction). The trainer is rank 0; workers start at `rank_offset` (1).
+1. The trainer's broadcasting ranks and all inference workers join a shared NCCL process group using `StatelessProcessGroup` (vLLM's torch.distributed-independent group abstraction). Trainer rank 0 is group rank 0; with [several broadcasters](#broadcasting-ranks) they take `[0, rank_offset)` and workers follow them (`rank_offset` is 1 otherwise).
 2. The trainer broadcasts weights to all workers simultaneously. Each worker receives and loads the weights.
 3. Optionally, **packed tensor broadcasting** batches multiple small tensors into larger buffers with double/triple buffering and CUDA stream overlap for higher throughput. This implementation is based on [NeMo-RL's packed tensor](https://github.com/NVIDIA-NeMo/RL/blob/main/nemo_rl/utils/packed_tensor.py).
 
@@ -52,7 +52,7 @@ engine = WeightTransferTrainerFactory.trainer_init(
     init_info=NCCLTrainerInitInfo(
         master_address=master_address,
         master_port=master_port,
-        world_size=world_size,   # trainer + all inference workers
+        world_size=world_size,   # broadcasting trainer ranks + all inference workers
         rank=0,                  # this trainer rank; rank 0 is the sender
         packed=True,
     ),
@@ -66,7 +66,8 @@ engine.send_weights()   # once per sync
 `trainer_init` drives the whole handshake: it kicks off the inference side's
 `init_weight_transfer_engine` (through the client) on a side thread while opening
 the trainer's own rank-0 endpoint, since both ends must rendezvous together. It
-builds the worker's init info itself, with `rank_offset=1` and the same packed
+builds the worker's init info itself, with `rank_offset` set to the number of
+broadcasting ranks (1 unless the source is partitioned) and the same packed
 params, so the two sides cannot disagree.
 
 `send_weights()` then drives `start_weight_update`, `update_weights` — run
@@ -79,7 +80,7 @@ once every transfer has drained.
 | ----- | ------- | ----------- |
 | `master_address` | — | Rendezvous host |
 | `master_port` | — | Rendezvous port |
-| `world_size` | — | Full trainer + worker NCCL group size |
+| `world_size` | — | Transfer NCCL group size: the [broadcasting trainer ranks](#broadcasting-ranks) plus the inference workers (`1 + num_workers` for a single sender). Other trainer ranks are not counted |
 | `rank` | — | Keyword-only. This trainer process's rank; **0 is the sender** |
 | `packed` | `True` | Use packed broadcasting |
 | `packed_buffer_size_bytes` | 1 GiB | Packed buffer size |
@@ -124,13 +125,37 @@ rather than letting it reach the wire. `ModuleSource` satisfies this by
 construction. If you write a custom source — a Megatron export, an MoE re-fusing
 pass — this is the invariant to test first.
 
-### One sender
+### Broadcasting ranks
 
-Each parameter is sent by its first owner, and this backend has a single
-sender, trainer rank 0. Every parameter's `owners` must therefore start at rank
-0 or be unset; a source whose pipeline stages own different parameters is
-rejected at `trainer_init`. Other owners (FSDP peers of rank 0) only
-drive `iter_full()` to take part in the gathers.
+Each parameter is broadcast by its first owner (rank 0 when `owners` is unset).
+When that is rank 0 for every parameter, rank 0 is the only broadcaster. Other
+owners (FSDP peers of rank 0) only drive `iter_full()` to take part in the
+gathers.
+
+A partitioned source, such as pipeline stages declaring `owners=(stage
+ranks...)`, has several broadcasters. They join the transfer group at group
+ranks `[0, rank_offset)` in trainer-rank order, rank 0 always included. Every
+rank derives this plan from `metadata`, which is identical on every rank, so
+the broadcasters need no extra coordination. In `send_weights()`, rank 0 sends
+one `update_weights` per broadcaster, in order, each tagged with that
+broadcaster's group rank as `src`. Each broadcaster sends its own parameters
+during its turn and receives and discards the others' to stay in the
+collective. Initialize and call `send_weights()` on every trainer rank
+concurrently.
+
+Every parameter a rank owns must share its first owner, since each broadcaster
+gathers and sends in its own turn. So with several broadcasters every parameter
+must declare `owners`. Rank 0 is always in the transfer group and only gathers
+in its own turn, so if it owns a parameter it must be that parameter's first
+owner. `trainer_init` raises on every rank otherwise.
+
+A failure on any broadcaster during an update is fatal for the transfer. That
+rank raises immediately, but the other trainer ranks and the inference workers
+can stay blocked in that update's broadcasts, so tear down the trainer job and
+restart or re-initialize the inference engine before transferring again.
+
+[`rlhf_nccl_multi_source.py`](../../../examples/rl/rlhf_nccl_multi_source.py)
+shows two pipeline stages updating one tensor-parallel inference engine.
 
 ### Metadata is sent once, then reused
 
@@ -142,7 +167,7 @@ round. So the worker remembers the list:
 | `update_info` you send | What the worker loads |
 | ---------------------- | --------------------- |
 | `names`, `dtype_names`, `shapes` filled in | Exactly these parameters. The worker also saves this list. |
-| All three lists empty (or `{}`) | The list saved by the previous `update_weights` call on the same model. |
+| All three lists empty (or `{}`) | The list saved by the previous `update_weights` call on the same model from the same `src`. |
 | All three lists empty, nothing saved yet | Nothing. |
 
 Rules to remember:
@@ -195,6 +220,9 @@ while rank 0 broadcasts in `names` order, then `POST /finish_weight_update`.
 checkpoint shapes. From the second sync on, send `{"update_info": {}}` if the
 parameters did not change; see
 [Metadata is sent once, then reused](#metadata-is-sent-once-then-reused).
+An optional `src` (default `0`, below `rank_offset`) selects the trainer rank
+that broadcasts that update, so one start/finish lifecycle can carry updates
+from several trainer ranks.
 
 - Unpacked: one broadcast per tensor.
 - Packed: concatenate `t.contiguous().view(-1).view(torch.uint8)` in `names`
@@ -275,11 +303,9 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
 
 ## Limitations
 
-- **Pipeline-parallel trainers are not supported yet (work in progress).** Rank 0
-  is the only sender, so it must own every parameter (see
-  [One sender](#one-sender)). A source whose ranks own different parameters is
-  rejected at `trainer_init`.
-- **Full tensors on the wire.** Rank 0 materializes each parameter in full and
+- **A broadcaster failure is fatal.** See
+  [Broadcasting ranks](#broadcasting-ranks).
+- **Full tensors on the wire.** Each broadcaster materializes its parameters in full and
   every worker receives all of it, whatever its tensor-parallel shard. For
   large or expert-parallel models, see [sharded RDT](sharded_rdt.md) or
   [NCCL M2N](m2n.md).
@@ -288,6 +314,7 @@ Sparse NCCL sends only `O(nnz)` indices and values. Checkpoint application still
 ## Examples
 
 - [RLHF with NCCL weight syncing (`vllm serve`, HTTP)](../../../examples/rl/rlhf_http_nccl.py) - **Start here.** Trainer on one GPU, 2x tensor-parallel fp8 server on two others; HTTP control plane, NCCL data plane. Launches and tears down its own server
+- [Multi-source NCCL weight syncing](../../../examples/rl/rlhf_nccl_multi_source.py) - Two pipeline stages each broadcast their own parameters to one TP2 inference engine within a single lifecycle
 - [NCCL weight syncing from a trainer that does not import vLLM](../../../examples/rl/rlhf_http_nccl_no_vllm.py) - `torch` + `requests` only, `nccl_unique_id_b64` rendezvous; see [Trainer Without vLLM over HTTP](#trainer-without-vllm-over-http)
 - [RLHF with NCCL + FSDP2 and expert parallelism](../../../examples/rl/rlhf_nccl_fsdp_ep.py) - Multi-rank trainer: every FSDP rank builds an engine and joins the `full_tensor()` gather while only rank 0 touches the wire
 - [RLHF with sparse NCCL weight syncing (offline, Ray)](../../../examples/rl/rlhf_sparse_nccl.py) - Qwen3 MoE per-expert checkpoint updates with one trainer GPU and two TP2/EP2 inference GPUs

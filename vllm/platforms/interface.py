@@ -196,6 +196,11 @@ class Platform:
     def is_cuda(self) -> bool:
         return self._enum == PlatformEnum.CUDA
 
+    @classmethod
+    def get_hisparse_backend_cls(cls) -> str | None:
+        """Return the device implementation for the common HiSparse runtime."""
+        return None
+
     def is_rocm(self) -> bool:
         return self._enum == PlatformEnum.ROCM
 
@@ -1353,6 +1358,12 @@ class Platform:
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         """Returns if the hybrid kv cache is supported by the current platform."""
+        return False
+
+    @classmethod
+    def uses_standalone_cpu_model_runner(cls) -> bool:
+        """Returns if Model Runner V2 runs as the standalone (no-Triton) CPU
+        runner instead of the Triton-based one."""
         return False
 
     @classmethod

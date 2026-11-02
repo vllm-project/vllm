@@ -8,6 +8,7 @@ Integration tests for NCCL and IPC weight transfer between processes using Ray.
 
 import builtins
 import importlib.util
+import math
 import pickle
 import runpy
 import threading
@@ -50,7 +51,10 @@ from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferInitInfo,
     IPCWeightTransferUpdateInfo,
 )
-from vllm.distributed.weight_transfer.nccl_common import run_trainer_rendezvous
+from vllm.distributed.weight_transfer.nccl_common import (
+    run_trainer_rendezvous,
+    uid_init_process_group,
+)
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerInitInfo,
     NCCLTrainerWeightTransferEngine,
@@ -281,12 +285,14 @@ class TestNCCLEngineParsing:
                 "names": ["w1", "w2"],
                 "dtype_names": ["float32", "bfloat16"],
                 "shapes": [[100, 100], [50]],
+                "src": 1,
             }
         )
         assert isinstance(update_info, NCCLWeightTransferUpdateInfo)
         assert update_info.names == ["w1", "w2"]
         assert update_info.dtype_names == ["float32", "bfloat16"]
         assert update_info.shapes == [[100, 100], [50]]
+        assert update_info.src == 1
 
 
 # --- Unit Tests: Engine Registry ---
@@ -394,6 +400,13 @@ def test_nccl_receive_weights_without_init_raises():
 
     with pytest.raises(RuntimeError, match="not initialized"):
         engine.receive_weights(update_info)
+
+
+def test_nccl_disabled_communicator_raises(monkeypatch):
+    """A disabled PyNccl communicator would turn every broadcast into a no-op."""
+    monkeypatch.setenv("VLLM_DISABLE_PYNCCL", "1")
+    with pytest.raises(RuntimeError, match="would be a no-op"):
+        uid_init_process_group(b"\x00" * 128, rank=0, world_size=2, device=0)
 
 
 def test_sparse_nccl_receive_weights_without_init_raises():
@@ -625,6 +638,197 @@ def test_nccl_weight_transfer_between_processes(batch_invariant):
         f"Received shape: {result['received_shape']}, "
         f"Received sum: {result['received_sum']}"
     )
+
+
+@ray.remote(num_gpus=1)
+class MultiSourceInferenceWorker:
+    def __init__(self, worker_rank: int, num_workers: int):
+        import contextlib
+
+        device = _set_ray_assigned_device()
+
+        from vllm.config.weight_transfer import WeightTransferConfig
+        from vllm.distributed.weight_transfer.nccl_engine import (
+            NCCLWeightTransferEngine,
+        )
+
+        class Recorder(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.received: dict[str, float] = {}
+                self.load_counts: dict[str, int] = {}
+
+            def load_weights(self, weights):
+                for name, tensor in weights:
+                    self.received[name] = tensor.sum().item()
+                    self.load_counts[name] = self.load_counts.get(name, 0) + 1
+
+        self.recorder = Recorder()
+        self.engine = NCCLWeightTransferEngine(
+            WeightTransferConfig(backend="nccl"),
+            create_mock_vllm_config(rank=worker_rank, world_size=num_workers),
+            device,
+            self.recorder,
+        )
+        import vllm.config as vllm_config_mod
+
+        vllm_config_mod.set_current_vllm_config = lambda cfg: contextlib.nullcontext()
+
+    def ready(self):
+        return True
+
+    def initialize(self, init_info):
+        self.engine.init_transfer_engine(self.engine.parse_init_info(init_info))
+
+    def update(self, update_info):
+        self.engine.receive_weights(self.engine.parse_update_info(update_info))
+
+    def results(self):
+        torch.accelerator.synchronize()
+        results = {
+            "received": self.recorder.received,
+            "load_counts": self.recorder.load_counts,
+        }
+        self.engine.shutdown()
+        return results
+
+
+@ray.remote(num_gpus=1)
+def trainer_send_from_source(
+    receivers,
+    master_address: str,
+    master_port: int,
+    world_size: int,
+    num_sources: int,
+    rank: int,
+    tensor_shape: list[int],
+    num_tensors_per_source: int,
+    packed: bool,
+) -> bool:
+    from functools import cached_property
+
+    device = _set_ray_assigned_device()
+
+    from vllm.distributed.weight_transfer import (
+        ParamMeta,
+        WeightSource,
+        WeightTransferTrainerFactory,
+    )
+    from vllm.distributed.weight_transfer.nccl_engine import NCCLTrainerInitInfo
+
+    class Source(WeightSource):
+        """Rank r owns (and broadcasts) `source_r.*`, like a pipeline stage."""
+
+        @cached_property
+        def metadata(self):
+            return [
+                ParamMeta(
+                    f"source_{r}.weight_{i}",
+                    torch.float32,
+                    tuple(tensor_shape),
+                    owners=(r,),
+                )
+                for r in range(num_sources)
+                for i in range(num_tensors_per_source)
+            ]
+
+        def iter_full(self):
+            for i in range(num_tensors_per_source):
+                value = rank * num_tensors_per_source + i + 1
+                yield (
+                    f"source_{rank}.weight_{i}",
+                    torch.full(tensor_shape, value, dtype=torch.float32, device=device),
+                )
+
+    class Client:
+        def call(self, method, *args):
+            return ray.get(
+                [getattr(receiver, method).remote(*args) for receiver in receivers]
+            )
+
+        def init_weight_transfer_engine(self, init_info):
+            self.call("initialize", init_info)
+
+        def start_weight_update(self):
+            pass
+
+        def update_weights(self, update_info):
+            self.call("update", update_info)
+
+        def finish_weight_update(self, weight_version=None):
+            pass
+
+    engine = WeightTransferTrainerFactory.trainer_init(
+        NCCLTrainerInitInfo(
+            master_address=master_address,
+            master_port=master_port,
+            world_size=world_size,
+            rank=rank,
+            packed=packed,
+            packed_buffer_size_bytes=1024,
+        ),
+        client=Client(),
+        source=Source(),
+    )
+    for _ in range(2):
+        engine.send_weights()
+    engine.shutdown()
+    return True
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4,
+    reason="Need 4 GPUs for two NCCL sources and two inference workers.",
+)
+@pytest.mark.parametrize("packed", [False, True], ids=["unpacked", "packed"])
+def test_nccl_weight_transfer_from_multiple_sources(packed):
+    """Two trainer ranks each own and broadcast half the parameters (like
+    pipeline stages); both workers receive all of them, twice (the second
+    round reusing metadata)."""
+    _init_ray_for_weight_transfer()
+
+    master_address = "127.0.0.1"
+    master_port = get_open_port()
+    num_sources = 2
+    num_workers = 2
+    world_size = num_sources + num_workers
+    tensor_shape = [8, 8]
+    num_tensors_per_source = 10
+
+    receivers = [
+        MultiSourceInferenceWorker.remote(  # type: ignore[attr-defined]
+            worker_rank, num_workers
+        )
+        for worker_rank in range(num_workers)
+    ]
+    ray.get([receiver.ready.remote() for receiver in receivers])
+    futures = [
+        trainer_send_from_source.remote(
+            receivers,
+            master_address,
+            master_port,
+            world_size,
+            num_sources,
+            rank,
+            tensor_shape,
+            num_tensors_per_source,
+            packed,
+        )
+        for rank in range(num_sources)
+    ]
+    assert ray.get(futures, timeout=300) == [True] * num_sources
+    expected_numel = math.prod(tensor_shape)
+    expected = {
+        f"source_{r}.weight_{i}": (r * num_tensors_per_source + i + 1) * expected_numel
+        for r in range(num_sources)
+        for i in range(num_tensors_per_source)
+    }
+    results = ray.get([receiver.results.remote() for receiver in receivers])
+    for result in results:
+        assert result["received"] == expected
+        assert result["load_counts"] == dict.fromkeys(expected, 2)
+    for receiver in receivers:
+        ray.kill(receiver)
 
 
 def test_sparse_nccl_checkpoint_chunks_to_ep_local_experts_cpu(monkeypatch):
@@ -1702,7 +1906,9 @@ def test_nccl_trainer_init_ships_worker_init_info(monkeypatch, packed):
 
     # Bypass the real NCCL rendezvous.
     group = object()
-    monkeypatch.setattr(nccl_engine_mod, "open_trainer_endpoint", lambda info: group)
+    monkeypatch.setattr(
+        nccl_engine_mod, "open_trainer_endpoint", lambda info, rank: group
+    )
 
     client = RecordingClient()
     engine = WeightTransferTrainerFactory.trainer_init(
@@ -1849,7 +2055,7 @@ def test_nccl_trainer_send_weights_drives_client_in_order():
         packed=False,
     )
     # Bypass the real NCCL rendezvous; broadcast is a no-op.
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
 
     engine.send_weights()
 
@@ -1873,7 +2079,7 @@ def test_nccl_trainer_sends_metadata_only_when_changed():
         source=ModuleSource(_module_with(("w", torch.zeros(4, device="cuda")))),
         packed=False,
     )
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
 
     engine.send_weights()
     assert client.last_update_info is not None
@@ -1886,8 +2092,9 @@ def test_nccl_trainer_sends_metadata_only_when_changed():
 
 
 def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
-    """Empty update info reuses the previous call's metadata for the same model;
-    target and draft keep separate copies, and re-init clears them."""
+    """Empty update info reuses the previous call's metadata for the same
+    (model, src) and receives from that src; re-init clears every entry, and
+    src must be a trainer rank."""
     import vllm.distributed.weight_transfer.nccl_engine as nccl_engine_mod
 
     monkeypatch.setattr(
@@ -1896,7 +2103,9 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
     target, draft = MagicMock(spec=torch.nn.Module), MagicMock(spec=torch.nn.Module)
     received: list = []
     for model in (target, draft):
-        model.load_weights = lambda w, m=model: received.append((m, w[0][0]))
+        model.load_weights = lambda w, m=model: received.append(
+            (m, w[0][0], tuple(w[0][1].shape))
+        )
     engine = NCCLWeightTransferEngine(
         WeightTransferConfig(backend="nccl"),
         create_mock_vllm_config(),
@@ -1904,29 +2113,53 @@ def test_nccl_worker_reuses_metadata_per_model(monkeypatch):
         target,
     )
     init_info = NCCLWeightTransferInitInfo(
-        master_address="127.0.0.1", master_port=29500, rank_offset=1, world_size=2
+        master_address="127.0.0.1", master_port=29500, rank_offset=2, world_size=3
     )
     engine.init_transfer_engine(init_info)
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
 
-    def update(model, *names):
+    def update(model, src, name=None, shape=None):
         engine.set_weight_update_target(model, None)
         engine.receive_weights(
             NCCLWeightTransferUpdateInfo(
-                names=list(names),
-                dtype_names=["float32"] * len(names),
-                shapes=[[2]] * len(names),
+                names=[name] if name else [],
+                dtype_names=["float32"] if name else [],
+                shapes=[shape] if name else [],
+                src=src,
             )
         )
 
-    update(target, "t")
-    update(draft, "d")
-    update(target)
-    update(draft)
-    engine.init_transfer_engine(init_info)
-    update(target)
+    seeded = {
+        (target, 0): ("t0", [2]),
+        (target, 1): ("t1", [3]),
+        (draft, 0): ("d0", [4]),
+        (draft, 1): ("d1", [5]),
+    }
+    for (model, src), (name, shape) in seeded.items():
+        update(model, src, name, shape)
+    reused = [(draft, 1), (target, 0), (draft, 0), (target, 1)]
+    for model, src in reused:
+        update(model, src)
 
-    assert received == [(target, "t"), (draft, "d"), (target, "t"), (draft, "d")]
+    order = [*seeded, *reused]
+    assert received == [
+        (model, seeded[model, src][0], tuple(seeded[model, src][1]))
+        for model, src in order
+    ]
+    group = engine.model_update_group
+    assert [c.kwargs["src"] for c in group.broadcast.call_args_list] == [
+        src for _, src in order
+    ]
+
+    engine.init_transfer_engine(init_info)
+    for model, src in seeded:
+        update(model, src)
+    assert len(received) == len(order)
+    engine.model_update_group.broadcast.assert_not_called()
+
+    for bad in (-1, 2):
+        with pytest.raises(ValueError, match=r"sender rank in \[0, 2\)"):
+            update(target, bad, "c", [2])
 
 
 class _ScriptedSource(WeightSource):
@@ -1950,7 +2183,7 @@ def _mock_group_engine(source, monkeypatch, **kwargs):
     engine = NCCLTrainerWeightTransferEngine(
         client=RecordingClient(), source=source, packed=False, **kwargs
     )
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
     return engine
 
@@ -2007,27 +2240,60 @@ def test_nccl_trainer_send_weights_rejects_truncated_source(monkeypatch):
         engine.send_weights()
 
 
-def test_nccl_trainer_rejects_a_second_sender():
-    """Each parameter is sent by its first owner and broadcast has one sender,
-    so a pipeline stage that does not start at rank 0 cannot be sent; every
-    rank sees the same metadata and raises alike."""
-    meta = [
-        ParamMeta("w", torch.float32, (4,), owners=(0, 1)),
-        ParamMeta("b", torch.float32, (2,), owners=(2, 3)),
-    ]
-    source = _ScriptedSource(meta, [])
+_TWO_STAGES = [
+    ParamMeta("w", torch.float32, (4,), owners=(0, 1)),
+    ParamMeta("b", torch.float32, (2,), owners=(2, 3)),
+]
+
+
+@pytest.mark.parametrize(
+    ("meta", "match"),
+    [
+        (
+            [ParamMeta("w", torch.float32, (4,)), _TWO_STAGES[1]],
+            "'w' has no owners",
+        ),
+        (
+            [*_TWO_STAGES, ParamMeta("x", torch.float32, (2,), owners=(1, 2))],
+            "rank 1 owns parameters broadcast by ranks 0 and 1",
+        ),
+        (
+            [ParamMeta("w", torch.float32, (4,), owners=(1, 0))],
+            r"'w' has owners \(1, 0\)",
+        ),
+        (
+            [ParamMeta("w", torch.float32, (4,), owners=(1, 0)), _TWO_STAGES[1]],
+            r"'w' has owners \(1, 0\)",
+        ),
+    ],
+)
+def test_nccl_trainer_rejects_ranks_spanning_broadcasters(meta, match):
+    """Each broadcaster sends in its own turn, so a rank owning parameters of
+    two broadcasters would gather out of turn; every rank sees the same
+    metadata and raises alike."""
     for rank in (0, 2):
-        with pytest.raises(ValueError, match="'b' is sent by its first owner, rank 2"):
+        with pytest.raises(ValueError, match=match):
             NCCLTrainerWeightTransferEngine.trainer_init(
                 NCCLTrainerInitInfo(
                     master_address="127.0.0.1",
                     master_port=29500,
-                    world_size=2,
+                    world_size=3,
                     rank=rank,
                 ),
                 client=RecordingClient(),
-                source=source,
+                source=_ScriptedSource(meta, []),
             )
+
+
+def test_nccl_trainer_rejects_world_size_without_workers():
+    with pytest.raises(ValueError, match="leaves no inference workers"):
+        NCCLTrainerWeightTransferEngine.trainer_init(
+            NCCLTrainerInitInfo(
+                master_address="127.0.0.1", master_port=29500, world_size=2, rank=0
+            ),
+            client=RecordingClient(),
+            source=_ScriptedSource(_TWO_STAGES, []),
+        )
 
 
 def test_nccl_trainer_non_sender_owner_drives_its_gathers(monkeypatch):
@@ -2098,7 +2364,7 @@ def test_nccl_trainer_send_weights_raises_instead_of_hanging(monkeypatch):
     engine = NCCLTrainerWeightTransferEngine(
         client=_BlockingClient(), source=_FailingSource(), packed=False
     )
-    engine.model_update_group = MagicMock()
+    engine.model_update_group = MagicMock(rank=0)
     monkeypatch.setattr(torch.cuda, "current_stream", MagicMock())
 
     started = time.perf_counter()

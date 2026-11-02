@@ -13,7 +13,6 @@ import torch
 
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
-import vllm.v1.hisparse.runtime as hisparse_runtime_module
 from tests.v1.core.utils import (
     new_kv_cache_spec,
     new_mamba_spec,
@@ -35,6 +34,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
     PlaceholderRange,
 )
+from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256, sha256_cbor, xxhash, xxhash_cbor
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
@@ -138,7 +138,9 @@ def test_hisparse_steady_state_concurrency_excludes_spilled_resident_pages():
 def test_hisparse_host_pool_must_fit_max_model_len(monkeypatch, extra_blocks, ok):
     """Every page needs a host block, so one max_model_len request must fit."""
     monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
+        current_platform,
+        "get_hisparse_backend_cls",
+        lambda: "vllm.v1.hisparse.backend.CUDAHiSparseBackend",
     )
     specs = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -181,9 +183,6 @@ def test_hisparse_derived_specs_do_not_affect_kv_cache_layout(monkeypatch):
     backing; KV cache layout resolution must skip them."""
     from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
 
-    monkeypatch.setattr(
-        hisparse_runtime_module.current_platform, "is_cuda_alike", lambda: True
-    )
     monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
     specs: dict[str, KVCacheSpec] = {
         "model.layers.0.self_attn": MLAAttentionSpec(
@@ -1045,6 +1044,64 @@ def test_request_block_hasher(hash_fn):
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_continues_from_frontend_block_hashes(hash_fn):
+    """Frontend-computed prompt block hashes are used as is, and blocks that
+    outputs complete chain onto them."""
+    frontend_hashes = [BlockHash(bytes([i]) * 32) for i in range(1, 4)]
+    sampling_params = SamplingParams(max_tokens=17)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+    request = Request(
+        request_id="0",
+        prompt_token_ids=list(range(10)),
+        sampling_params=sampling_params,
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(3, hash_fn),
+        block_hashes=list(frontend_hashes),
+    )
+    assert request.block_hashes == frontend_hashes
+
+    request.append_output_token_ids([10, 11])
+    assert request.block_hashes == [
+        *frontend_hashes,
+        hash_fn((frontend_hashes[-1], (9, 10, 11), None)),
+    ]
+
+
+def test_frontend_block_hashes_count_check():
+    from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
+
+    def frontend_hashes(config, num_hashes):
+        request = EngineCoreRequest(
+            request_id="0",
+            prompt_token_ids=list(range(10)),
+            mm_features=None,
+            sampling_params=SamplingParams(),
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            block_hashes=[bytes([i]) * 32 for i in range(num_hashes)],
+        )
+        return kv_cache_utils.frontend_block_hashes(request, config)
+
+    config = PrefixHashConfig(
+        hash_algo="sha256", hash_block_size=3, none_hash=kv_cache_utils.NONE_HASH
+    )
+    # 10 prompt tokens make 3 full blocks of 3.
+    assert frontend_hashes(config, 3) == [bytes([i]) * 32 for i in range(3)]
+    assert frontend_hashes(config, 2) is None
+    assert frontend_hashes(config, 4) is None
+    # The engine doesn't hash blocks.
+    assert frontend_hashes(None, 3) is None
+    # With 2 lookahead tokens, the last full block isn't hashed until the 2
+    # tokens after it exist: (10 - 2) // 3 = 2.
+    config.num_lookahead_tokens = 2
+    assert frontend_hashes(config, 2) == [bytes([i]) * 32 for i in range(2)]
+    assert frontend_hashes(config, 3) is None
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 @pytest.mark.parametrize("lookahead", [False, True])
 def test_request_block_hasher_incremental_append_with_multiple_mm_features(
     hash_fn, lookahead
@@ -1374,6 +1431,31 @@ def test_dcp_replicated_kpool_tail_keeps_block_interior_layout(monkeypatch):
     )
     layout = resolve_kv_cache_layout(config, [["LBHNC"]], [new_mla_spec(), tail])
     assert layout == KVCacheLayout.LBHNC
+
+
+def test_pipeline_stages_resolve_a_layout_every_stage_supports(monkeypatch):
+    """PP stages hold different layers, so their workers can report different
+    supported layouts (e.g. only one stage has FlashInfer layers on SM100)."""
+    from vllm.v1.attention.backends.utils import (
+        get_supported_kv_cache_layouts,
+        resolve_kv_cache_layout,
+    )
+
+    monkeypatch.delenv("VLLM_KV_CACHE_LAYOUT", raising=False)
+    config = VllmConfig(model_config=ModelConfig(max_model_len=1024))
+    config.cache_config.kv_cache_layout = None
+    any_layout = [layout.name for layout in get_supported_kv_cache_layouts([])]
+    layout = resolve_kv_cache_layout(config, [["LBHNC", "BLHNC"], any_layout])
+    assert layout == KVCacheLayout.LBHNC
+
+    # A stage that declares nothing must not outvote a declared preference.
+    config.cache_config.kv_cache_layout = None
+    layout = resolve_kv_cache_layout(config, [["BLHNC", "LBNHC"], any_layout])
+    assert layout == KVCacheLayout.BLHNC
+
+    config.cache_config.kv_cache_layout = None
+    with pytest.raises(ValueError, match="No KV cache layout satisfies"):
+        resolve_kv_cache_layout(config, [["LBHNC"], ["LBNHC"]])
 
 
 @pytest.mark.parametrize("use_mla", [False, True])
@@ -2002,6 +2084,26 @@ def test_merge_mla_spec():
     ]
     with pytest.raises(AssertionError):
         kv_cache_specs[0].merge(kv_cache_specs)
+
+
+@pytest.mark.skip_global_cleanup
+def test_merge_sliding_window_mla_spec_preserves_quantization_mode():
+    specs = [
+        SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8_ds_mla",
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            sliding_window=128,
+        )
+        for _ in range(2)
+    ]
+
+    merged = SlidingWindowMLASpec.merge(specs)
+
+    assert merged.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

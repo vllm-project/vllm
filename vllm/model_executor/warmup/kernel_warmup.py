@@ -59,6 +59,46 @@ logger = init_logger(__name__)
 _LL_BF16_WARMUP_M_RANGE = range(1, 17)
 
 
+def _warmup_flashinfer_attention(worker: "Worker") -> None:
+    from vllm.distributed.parallel_state import get_pp_group
+
+    # Only warmup if the model has FlashInfer attention groups
+    # and is not a pooling model
+    def _is_flashinfer_backend(backend):
+        try:
+            return backend.get_name() == "FLASHINFER"
+        except NotImplementedError:
+            return False
+
+    check = any if worker.use_v2_model_runner else all
+    local_flashinfer_warmup = (
+        not worker.model_runner.is_pooling_model
+        and bool(worker.model_runner.attn_groups)
+        and check(
+            _is_flashinfer_backend(group.backend)
+            for groups in worker.model_runner.attn_groups
+            for group in groups
+        )
+    )
+    # The mixed warmup uses worker.execute_model, which participates in PP
+    # send/recv operations. Every PP rank must make the same warmup decision.
+    pp_group = get_pp_group()
+    eligible_pp_ranks = int(local_flashinfer_warmup)
+    if pp_group.world_size > 1:
+        eligibility = torch.tensor([eligible_pp_ranks], dtype=torch.int32, device="cpu")
+        pp_group.cpu_all_reduce_(eligibility)
+        eligible_pp_ranks = int(eligibility.item())
+
+    if worker.use_v2_model_runner:
+        should_warmup = eligible_pp_ranks > 0
+    else:
+        should_warmup = eligible_pp_ranks == pp_group.world_size
+
+    if should_warmup:
+        logger.info_once("Warming up FlashInfer attention.")
+        mixed_batch_attention_warmup(worker)
+
+
 def _ll_bf16_router_shapes_from_model(
     model: torch.nn.Module,
 ) -> tuple[tuple[int, int], ...]:
@@ -104,11 +144,32 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
     )
 
 
+def _warmup_skinny_gemm(model: torch.nn.Module) -> None:
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+        SkinnyGemmConfig,
+        shape_dynamic_skinny_gemm,
+    )
+    from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+        get_skinny_gemm_plan,
+    )
+
+    configs: set[SkinnyGemmConfig] = set()
+    for module in model.modules():
+        if not getattr(module, "use_skinny_gemm", False):
+            continue
+        plan = get_skinny_gemm_plan(*module.weight.shape)
+        if plan is not None:
+            configs.update(plan.values())
+    if configs:
+        # Compiled by cutedsl_warmup() below.
+        shape_dynamic_skinny_gemm.request_warmup_configs(torch.bfloat16, configs)
+
+
 def _warmup_bf16x3_router_gemm(
     model: torch.nn.Module,
     max_num_tokens: int,
 ) -> None:
-    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_cutedsl import (  # noqa: E501
+    from vllm.model_executor.layers.fused_moe.router.bf16x3_router_gemm_sm100 import (  # noqa: E501
         warmup_bf16x3_router_gemm,
     )
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
@@ -162,9 +223,6 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
 
 
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
-    from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
-        minimax_m3_msa_warmup,
-    )
     from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
 
     if not worker.use_v2_model_runner:
@@ -222,6 +280,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         # TODO(roberto): Remove after registered CuTeDSL warmups are migrated
         # to the shared JIT warmup infrastructure.
         # https://github.com/vllm-project/vllm/pull/47451
+        _warmup_skinny_gemm(worker.get_model())
         cutedsl_warmup()
 
     if process_local_only:
@@ -249,7 +308,13 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
 
     b12x_warmup(worker, cudagraph_capture_sizes)
 
-    minimax_m3_msa_warmup(worker)
+    if current_platform.is_cuda():
+        # The MSA kernels, and the CuTe DSL their modules import, are CUDA-only.
+        from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
+            minimax_m3_msa_warmup,
+        )
+
+        minimax_m3_msa_warmup(worker)
 
     # Allocate the exact decode-sized workspace, autotune cache misses, and
     # resolve every CUDA Graph bucket before capture begins.
@@ -271,29 +336,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     elif has_flashinfer() and current_platform.has_device_capability(90):
         flashinfer_autotune(worker.model_runner)
 
-    # FlashInfer attention warmup
-    # Only warmup if the model has FlashInfer attention groups
-    # and is not a pooling model
-    def _is_flashinfer_backend(backend):
-        try:
-            return backend.get_name() == "FLASHINFER"
-        except NotImplementedError:
-            return False
-
-    if (
-        not worker.model_runner.is_pooling_model
-        and worker.model_runner.attn_groups
-        # NOTE: This should be `any` instead of `all` but other hybrid attention
-        # backends don't support this dummy run. Once we remove
-        # `build_for_cudagraph_capture`, we can change it to `any`.
-        and all(
-            _is_flashinfer_backend(group.backend)
-            for groups in worker.model_runner.attn_groups
-            for group in groups
-        )
-    ):
-        logger.info_once("Warming up FlashInfer attention.")
-        mixed_batch_attention_warmup(worker)
+    _warmup_flashinfer_attention(worker)
 
 
 def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
@@ -347,6 +390,7 @@ def _run_flashinfer_autotune_dummy_runs(
     runner: "GPUModelRunner", *, skip_attn: bool = False
 ) -> None:
     import vllm.utils.flashinfer as fi_utils
+    from vllm.models.deepseek_v41.attention import autotune_indexer_wq_b
 
     dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
     for num_tokens in _flashinfer_autotune_token_counts(runner):
@@ -383,6 +427,7 @@ def _run_flashinfer_autotune_dummy_runs(
                 randomize_inputs=True,
                 **dummy_run_kwargs,
             )
+            autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
 
 
 def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
