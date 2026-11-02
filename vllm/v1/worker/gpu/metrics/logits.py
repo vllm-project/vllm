@@ -6,7 +6,7 @@ from torch._inductor.runtime.triton_helpers import libdevice
 from vllm.triton_utils import tl, triton
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_logits"])
 def _num_nans_kernel(
     logits_ptr,
     logits_stride,

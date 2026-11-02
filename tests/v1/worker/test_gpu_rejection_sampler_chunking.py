@@ -579,8 +579,8 @@ def test_get_num_nans_sums_rows_per_request():
 
     assert get_num_nans(logits, cu_num_logits).tolist() == [1, 2, 1]
 
-    # Vocab spanning several kernel chunks, NaNs on chunk edges, an empty
-    # request, and a trailing padding row.
+    # Vocab spanning several kernel chunks (BLOCK_SIZE 2048), NaNs on chunk
+    # edges, an empty request, and a trailing padding row.
     cu_num_logits = torch.tensor([0, 1, 3, 3], dtype=torch.int32, device=device)
     logits = torch.zeros(4, 4097, device=device)
     logits[0, [0, 2047, 2048, 4095, 4096]] = float("nan")
