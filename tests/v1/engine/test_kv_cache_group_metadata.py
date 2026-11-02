@@ -38,7 +38,7 @@ def test_global_layout_finalizes_worker_interleave_before_profiling(
 ):
     """Workers with different local blocks must use the global interleave."""
     config = VllmConfig(
-        cache_config=CacheConfig(block_size=64),
+        cache_config=CacheConfig(block_size=64, enable_extensible_kv_cache=False),
         device_config=DeviceConfig(device="cpu"),
         parallel_config=ParallelConfig(
             tensor_parallel_size=2,
