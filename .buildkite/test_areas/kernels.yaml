@@ -398,6 +398,7 @@ steps:
   - vllm/v1/attention
     # TODO: remove this dependency (https://github.com/vllm-project/vllm/issues/32267)
   - vllm/model_executor/layers/attention
+  - vllm/model_executor/kernels/attention
   - vllm/utils/flashinfer.py
   - tests/kernels/attention
   commands:
@@ -416,6 +417,7 @@ steps:
       - csrc/core/vec_dtypes/
       - vllm/v1/attention
       - vllm/model_executor/layers/attention
+      - vllm/model_executor/kernels/attention
       - tests/kernels/attention
       - vllm/_aiter_ops.py
       - vllm/envs.py
