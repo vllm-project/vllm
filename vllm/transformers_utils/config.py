@@ -782,6 +782,18 @@ def is_encoder_decoder(config: PreTrainedConfig) -> bool:
     return _is_encoder_decoder(config) or _is_encoder_decoder(config.get_text_config())
 
 
+def is_mla_config(text_config: PreTrainedConfig) -> bool:
+    """Whether a Transformers model implementation with this config uses MLA.
+
+    `kv_lora_rank` indicates MLA unless the config opts out with `use_mla=False`,
+    as legacy HunYuan checkpoints (e.g. HunyuanOCR) do for dense attention.
+    """
+    return (
+        getattr(text_config, "kv_lora_rank", None) is not None
+        and getattr(text_config, "use_mla", None) is not False
+    )
+
+
 def _maybe_update_auto_config_kwargs(kwargs: dict[str, Any], model_type: str):
     """Update kwargs for AutoConfig initialization based on model_type."""
     if model_type in _AUTO_CONFIG_KWARGS_OVERRIDES:

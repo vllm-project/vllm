@@ -2776,6 +2776,23 @@ def test_nested_hf_overrides():
     assert model_config.hf_config.vision_config.hidden_size == 512
 
 
+@pytest.mark.parametrize(
+    ("mla_fields", "expected"),
+    [
+        ({"kv_lora_rank": 512}, True),
+        # Legacy HunYuan checkpoints (e.g. HunyuanOCR) carry unused MLA fields
+        ({"kv_lora_rank": 512, "use_mla": False}, False),
+    ],
+)
+def test_transformers_backend_use_mla(mla_fields: dict, expected: bool):
+    """A config that opts out of MLA must not be served with MLA."""
+    model_config = ModelConfig(
+        "Qwen/Qwen3-0.6B", model_impl="transformers", hf_overrides=mla_fields
+    )
+    assert model_config.using_transformers_backend()
+    assert model_config.use_mla is expected
+
+
 def test_model_class_overrides_registers_target():
     """`model_class_overrides` redirects an architecture to a custom class."""
     from vllm.model_executor.models import ModelRegistry

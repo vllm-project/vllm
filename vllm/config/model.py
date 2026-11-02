@@ -37,6 +37,7 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
+    is_mla_config,
     iter_rope_parameters,
     mrope_num_dims,
     try_get_dense_modules,
@@ -2093,8 +2094,7 @@ class ModelConfig:
         if envs.VLLM_MLA_DISABLE:
             return False
         if self.using_transformers_backend():
-            # kv_lora_rank indicates that a Transformers model implementation uses MLA
-            return getattr(self.hf_text_config, "kv_lora_rank", None) is not None
+            return is_mla_config(self.hf_text_config)
         # Manually maintained list of model types for vLLM model implementations
 
         # Bidirectional DeepSeek variants (is_causal=False, used by some

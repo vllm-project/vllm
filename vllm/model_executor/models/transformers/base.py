@@ -86,6 +86,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.config import is_mla_config
 
 if TYPE_CHECKING:
     from transformers import PreTrainedModel
@@ -611,8 +612,7 @@ class Base(
         text_config = self.text_config
         attn_cls = self._get_attn_cls()
 
-        # kv_lora_rank indicates that this is an MLA model
-        if getattr(text_config, "kv_lora_rank", None) is not None:
+        if is_mla_config(text_config):
             if attn_cls is MLAAttention:
                 text_config._attn_implementation = VLLM_MLA_ATTN_IMPL
             else:
