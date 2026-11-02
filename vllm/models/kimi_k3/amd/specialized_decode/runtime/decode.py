@@ -17,11 +17,13 @@ from typing import Any, NamedTuple
 import torch
 
 from vllm.config import CUDAGraphMode
-from vllm.distributed import get_tp_group
+from vllm.distributed import get_dcp_group, get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.models.kimi_k3.amd.specialized_decode.mono.abi import FAILED
 from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
+    DCP,
+    FFN,
     WHOLE,
     DecodeConfig,
     layer_kinds,
@@ -29,19 +31,22 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     FailStop,
     cache_reasons,
+    mla_weight_reasons,
     weight_reasons,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
     FfnLayer,
+    MlaOpsLayer,
     WholeLayer,
     compile_build,
+    m1c_at,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.peer import tp_agree
 from vllm.models.kimi_k3.amd.specialized_decode.runtime.runner import MonoRunner
 
 logger = init_logger(__name__)
 
-Kernel = WholeLayer | FfnLayer
+Kernel = WholeLayer | FfnLayer | MlaOpsLayer
 
 
 class Step(NamedTuple):
@@ -57,10 +62,12 @@ class Step(NamedTuple):
         return None if kernel is None else partial(kernel.launch, self)
 
 
-def step_reason(attn_metadata, kda_prefix: str, width: int) -> str | None:
-    """None if a step's KDA metadata (identical on every TP rank) is a pure
-    spec-verify step of whole uniform requests filling ``width`` rows, else why
-    not."""
+def step_reason(
+    attn_metadata, kda_prefix: str, width: int, mla_prefix: str = ""
+) -> str | None:
+    """None if a step's KDA and MLA metadata (identical on every TP rank) are a
+    pure spec-verify step of whole uniform requests filling ``width`` rows, else
+    why not."""
     if not isinstance(attn_metadata, dict):
         return "no metadata"
     m: Any = attn_metadata.get(kda_prefix)
@@ -71,6 +78,19 @@ def step_reason(attn_metadata, kda_prefix: str, width: int) -> str | None:
     q = m.spec_state_indices_tensor.size(-1)
     if m.uniform_spec_sequence_length != q or m.num_spec_decodes * q != width:
         return "not uniform"
+    if mla_prefix:
+        a: Any = attn_metadata.get(mla_prefix)
+        if a is None or a.decode is None:
+            return "no MLA decode metadata"
+        if a.num_prefills or a.num_decode_tokens != width:
+            return "MLA: not pure decode"
+        if a.decode.max_qo_len != q:
+            return "MLA: not uniform"
+        # Gluon serves bf16 caches only; M1a hands AITER an fp8 query
+        if getattr(a.decode, "use_gluon_decode", False) or getattr(
+            a.decode, "use_gluon_verify", False
+        ):
+            return "MLA: Gluon decode"
     return None
 
 
@@ -90,22 +110,47 @@ class SpecializedDecode:
     plans every step."""
 
     def __init__(self, backbone, config: DecodeConfig):
-        tp = get_tp_group()
-        agree(weight_reasons(backbone), tp.cpu_group, "the loaded weights")
+        tp, dcp = get_tp_group(), get_dcp_group()
+        reasons = weight_reasons(backbone)
+        if dcp.world_size > 1 and (
+            dcp.world_size != DCP or dcp.rank_in_group != tp.rank_in_group
+        ):
+            reasons.append(
+                f"DCP{dcp.world_size} rank {dcp.rank_in_group} on TP rank "
+                f"{tp.rank_in_group} (the DCP group must be the TP group)"
+            )
+        agree(reasons, tp.cpu_group, "the loaded weights")
         self.backbone, self.config = backbone, config
         kinds = {
             i: kind
             for i, kind in layer_kinds(backbone.config).items()
             if backbone.start_layer <= i < backbone.end_layer
         }
-        runner = self.runner = MonoRunner(next(backbone.parameters()).device)
+        ffn = [i for i, kind in kinds.items() if kind == FFN]
+        m1 = config.m1 and bool(ffn)
+        if m1:
+            why = mla_weight_reasons(backbone)
+            m1 = tp_agree(not why, tp.cpu_group)
+            if not m1:
+                logger.info(
+                    "Kimi-K3 specialized decode: the MLA layers run vLLM's "
+                    "attention ops, then K2 (M1 does not support: %s)",
+                    "; ".join(why) if why else "another TP rank's MLA layers",
+                )
+        runner = self.runner = MonoRunner(next(backbone.parameters()).device, m1=m1)
         runner.num_spec = config.q - 1
+        runner.interleave = config.interleave
         runner.first_layer = min(kinds)
         whole = [i for i, kind in kinds.items() if kind == WHOLE]
         runner.kda_prefix = backbone.layers[whole[0]].self_attn.prefix
+        if m1:
+            # the M1 layers' metadata: their MLAAttention's
+            wrapper = backbone.layers[ffn[0]].self_attn.mla_attn
+            runner.mla_prefix = wrapper.mla_attn.layer_name
+        mla_kernel = FfnLayer if m1 else MlaOpsLayer
         self.kernels: dict[int, dict[int, Kernel]] = {
             w: {
-                i: (WholeLayer if kind == WHOLE else FfnLayer)(
+                i: (WholeLayer if kind == WHOLE else mla_kernel)(
                     backbone.layers[i], runner, w
                 )
                 for i, kind in kinds.items()
@@ -115,6 +160,10 @@ class SpecializedDecode:
         self.kda: list[WholeLayer] = [
             k for k in self.kernels[config.widths[0]].values()
             if isinstance(k, WholeLayer)
+        ]  # fmt: skip
+        self.mla: list[FfnLayer] = [
+            k for k in self.kernels[config.widths[0]].values()
+            if isinstance(k, FfnLayer)
         ]  # fmt: skip
         builds = {
             b for by in self.kernels.values() for k in by.values() for b in k.builds()
@@ -126,10 +175,13 @@ class SpecializedDecode:
         )
         # (data_ptr, numel) of the first KDA layer's state prepare_kv bound
         self._kv: tuple[int, int] | None = None
+        m1c = [w for w in config.widths if m1c_at(runner, w)]
+        mla = f"M1 (M1c in K2 at widths {m1c})" if m1c else "M1"
         logger.info(
-            "Kimi-K3 specialized decode: %d layers, widths %s, %d builds; other "
-            "steps run vLLM's decode",
+            "Kimi-K3 specialized decode: %d layers (MLA: %s), widths %s, %d "
+            "builds; other steps run vLLM's decode",
             len(kinds),
+            mla if m1 else "vLLM's ops",
             list(config.widths),
             len(builds),
         )
@@ -143,12 +195,13 @@ class SpecializedDecode:
         return state[1].data_ptr(), state[1].numel()
 
     def prepare_kv(self) -> None:
-        """Checks and binds the KDA states vLLM just bound (the CUDA-graph memory
-        profiling cache, then the real one)."""
+        """Checks and binds the KDA states and MLA caches vLLM just bound (the
+        CUDA-graph memory profiling cache, then the real one)."""
         self._kv = None
         if self._kv_key() is None:
             return
         caches = {k.layer.self_attn.prefix: k.caches() for k in self.kda}
+        caches.update({k.wrapper.mla_attn.layer_name: k.caches() for k in self.mla})
         agree(cache_reasons(caches), get_tp_group().cpu_group, "the KV caches")
         self._kv = self._kv_key()
 
@@ -159,7 +212,7 @@ class SpecializedDecode:
         - pipeline-parallel stage inputs, and steps before a KV cache is bound
           (profiling, dummy runs);
         - PIECEWISE steps (captured without attention metadata);
-        - widths without kernels (more than MAX_TOKENS rows);
+        - widths without kernels (more than MAX_ROWS rows);
         - steps that are not pure spec-verify steps of whole uniform requests
           (``step_reason``).
 
@@ -181,7 +234,8 @@ class SpecializedDecode:
         if kernels is None:
             return None
         md = context.attn_metadata
-        if step_reason(md, self.runner.kda_prefix, width) is not None:
+        runner = self.runner
+        if step_reason(md, runner.kda_prefix, width, runner.mla_prefix) is not None:
             return None
         assert isinstance(md, dict)
         if self._kv_key() != self._kv:
