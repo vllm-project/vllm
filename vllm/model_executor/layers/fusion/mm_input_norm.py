@@ -18,6 +18,7 @@ where::
 """
 
 import math
+from enum import Enum
 from typing import NamedTuple
 
 import torch
@@ -40,7 +41,7 @@ def _fused_mm_input_norm_kernel(
     C: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    # 1D grid over the flattened (N, C, L) tensor. Each program processes
+    # 1D grid over the flattened (P, C, L) tensor. Each program processes
     # BLOCK contiguous elements; the channel index is recovered from the
     # flat offset via `(offs // L) % C`. int32 offsets: int64 division is
     # ~2x slower here (measured on GB200); the wrapper asserts
@@ -75,9 +76,9 @@ def fused_mm_input_norm_triton(
     """Fused per-channel affine transform for normalisation.
 
     Args:
-        inputs: Input tensor, shape ``(N, C, L)``. A contiguous copy is
+        inputs: Input tensor, shape ``(P, C, L)``. A contiguous copy is
             materialized internally if needed.
-        outputs: Output tensor, contiguous and shaped exactly ``(N, C, L)``.
+        outputs: Output tensor, contiguous and shaped exactly ``(P, C, L)``.
         weight: Per-channel scale, shape ``(C,)``.
         bias: Per-channel shift, shape ``(C,)``.
 
@@ -85,9 +86,9 @@ def fused_mm_input_norm_triton(
         ``outputs``, for chaining.
 
     """
-    N, C, L = inputs.shape
-    assert outputs.shape == (N, C, L), (
-        f"outputs shape {tuple(outputs.shape)} != inputs shape {(N, C, L)}"
+    P, C, L = inputs.shape
+    assert outputs.shape == (P, C, L), (
+        f"outputs shape {tuple(outputs.shape)} != inputs shape {(P, C, L)}"
     )
     assert weight.numel() == C and bias.numel() == C, (
         f"weight/bias must have {C} elements, got {weight.numel()} / {bias.numel()}"
@@ -102,7 +103,7 @@ def fused_mm_input_norm_triton(
     # sizes; larger tiles starve the SMs on small inputs.
     BLOCK_SIZE = 1024
 
-    numel = N * C * L
+    numel = P * C * L
     # The kernel indexes with int32 offsets (int64 division costs ~2x
     # throughput); guard the flat index range here.
     assert numel < 2**31, f"numel={numel} exceeds the int32 index range"
@@ -179,6 +180,18 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
     )
 
 
+class InputLayout(str, Enum):
+    """Layout of the tensors (a.k.a. ``pixel_values``) passed to
+    ``FusedMMInputNorm``.
+
+    * ``PCL``  — ``(patches, C * L)``: flattened per-patch pixels。
+    * ``BCHW`` — ``(B, C, H, W)``: NCHW image tensors.
+    """
+
+    PCL = "pcl"
+    BCHW = "bchw"
+
+
 class IdentityInputNorm(nn.Module):
     """Stand-in used when the processor requires no rescale/normalise.
 
@@ -212,6 +225,13 @@ class FusedMMInputNorm(CustomOp):
       computation itself is always fp32, independent of the output dtype
       (e.g. compute fp32, emit bf16).
 
+    Input Layout semantics:
+
+    * ``layout="pcl"``  (default) — ``pixel_values`` is ``(patches, C*L)``,
+      output has the same shape.
+    * ``layout="bchw"`` — ``pixel_values`` is ``(B, C, H, W)``, output has
+      the same shape.
+
     Platform dispatch:
 
     * ``forward_native`` — pure PyTorch eager path, used as the semantic
@@ -228,6 +248,7 @@ class FusedMMInputNorm(CustomOp):
         image_std: list[float],
         rescale_factor: float,
         channel: int = 3,
+        layout: InputLayout | str = InputLayout.PCL,
     ):
         super().__init__()
 
@@ -238,6 +259,7 @@ class FusedMMInputNorm(CustomOp):
         assert rescale_factor != 0.0, "rescale_factor must be non-zero"
 
         self.channel = channel
+        self.layout = InputLayout(layout)
 
         # Model construction can set the accelerator as PyTorch's default
         # device; build the buffers on CPU first, then move them over.
@@ -277,6 +299,37 @@ class FusedMMInputNorm(CustomOp):
         )
         return size // self.channel
 
+    def _unpack(
+        self, pixel_values: torch.Tensor
+    ) -> tuple[torch.Tensor, tuple[int, ...]]:
+        """Normalise either layout to ``(P, C, L)`` plus the output shape.
+
+        Returns a ``(x3, out_shape)`` pair where ``x3`` is a
+        ``(P, C, L)`` view of the input and ``out_shape`` is the shape
+        the final output must have. The ``reshape`` below is a pure view
+        as long as the caller's tensor is contiguous; the platform
+        forward_* methods call ``.contiguous()`` inside
+        ``fused_mm_input_norm_triton`` when needed.
+        """
+        if self.layout is InputLayout.BCHW:
+            assert pixel_values.ndim == 4, (
+                f"pixel_values must be 4D (B, C, H, W) for layout='bchw', "
+                f"got {pixel_values.dim()}D with shape "
+                f"{tuple(pixel_values.shape)}"
+            )
+            B, C, H, W = pixel_values.shape
+            assert self.channel == C, (
+                f"input has {C} channels, module expects {self.channel}"
+            )
+            return pixel_values.reshape(B, C, H * W), (B, C, H, W)
+
+        patches, size = self._unpack_2d(pixel_values)
+        patch_size = self._patch_size(size)
+        return (
+            pixel_values.reshape(patches, self.channel, patch_size),
+            (patches, size),
+        )
+
     # ------------------------------------------------------------------
     # Platform-specific implementations
     # ------------------------------------------------------------------
@@ -289,26 +342,21 @@ class FusedMMInputNorm(CustomOp):
         This is the semantic reference implementation and the fallback used
         on any platform without a specialised kernel.
         """
-        patches, size = self._unpack_2d(pixel_values)
-        patch_size = self._patch_size(size)
+        x3, out_shape = self._unpack(pixel_values)
 
-        # weight/bias are fp32, so type promotion makes the arithmetic fp32
-        x = pixel_values.reshape(patches, self.channel, patch_size)
-        x = x * self.weight.view(1, self.channel, 1) + self.bias.view(
+        # weight/bias are fp32, so type promotion makes the arithmetic fp32.
+        x = x3 * self.weight.view(1, self.channel, 1) + self.bias.view(
             1, self.channel, 1
         )
-        return x.view(patches, size).to(visual_dtype)
+        return x.reshape(out_shape).to(visual_dtype)
 
     def forward_cuda(
         self, pixel_values: torch.Tensor, visual_dtype: torch.dtype
     ) -> torch.Tensor:
         """Triton kernel path for CUDA devices."""
-        patches, size = self._unpack_2d(pixel_values)
-        patch_size = self._patch_size(size)
-
-        x3 = pixel_values.reshape(patches, self.channel, patch_size)
-        y = torch.empty((patches, size), dtype=visual_dtype, device=pixel_values.device)
-        y3 = y.view(patches, self.channel, patch_size)
+        x3, out_shape = self._unpack(pixel_values)
+        y = torch.empty(out_shape, dtype=visual_dtype, device=pixel_values.device)
+        y3 = y.view(x3.shape)
 
         fused_mm_input_norm_triton(x3, y3, self.weight, self.bias)
         return y
@@ -319,7 +367,7 @@ class FusedMMInputNorm(CustomOp):
         """XPU fused custom kernel path for uint8 and Triton kernel path
         for others.
         """
-        if pixel_values.dtype != torch.uint8:
+        if pixel_values.dtype != torch.uint8 or self.layout is InputLayout.BCHW:
             return self.forward_cuda(pixel_values, visual_dtype)
 
         # For uint8 input, falls to xpu_fused_input_norm from xpu kernels
@@ -336,14 +384,16 @@ class FusedMMInputNorm(CustomOp):
         return self.forward_native(pixel_values, visual_dtype)
 
 
-def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
+def build_mm_input_norm(
+    model_config: ModelConfig,
+    layout: InputLayout | str = InputLayout.PCL,
+) -> nn.Module:
     """Build the input normalisation module for a model.
 
     Returns an ``IdentityInputNorm`` when device-side normalisation is
     disabled or the processor's rescale/normalise is numerically the identity
     transform; otherwise a ``FusedMMInputNorm`` built from the processor's
-    parameters.
-    """
+    parameters."""
     mm_config = getattr(model_config, "multimodal_config", None)
     if not getattr(mm_config, "mm_device_do_normalize", False):
         return IdentityInputNorm()
@@ -361,4 +411,5 @@ def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
         image_std=params.image_std,
         rescale_factor=params.rescale_factor,
         channel=len(params.image_mean),
+        layout=layout,
     )
