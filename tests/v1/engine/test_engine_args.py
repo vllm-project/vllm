@@ -453,19 +453,26 @@ def test_kv_transfer_registers_kv_cache_memory(
             kv_connector=connector, kv_role="kv_both", kv_buffer_device=buffer_device
         )
     assert transfer.registers_kv_cache_memory() is registers
+    assert transfer.uses_nixl_on_device_memory() is (
+        registers and connector.startswith("Nixl")
+    )
 
 
+@pytest.mark.parametrize("imex_channel", [False, True])
 @pytest.mark.parametrize("rocm", [False, True])
 @pytest.mark.parametrize("requested", [None, True])
 def test_extensible_kv_cache_off_for_rocm_registering_connector(
-    monkeypatch, rocm, requested
+    monkeypatch, rocm, requested, imex_channel
 ):
     """UCX and RDMA cannot yet register driver-mapped memory on ROCm, so a
     connector that registers the KV cache keeps the extensible cache off there
-    by default and an explicit request is an error; CUDA is unaffected."""
+    by default and an explicit request is an error. On CUDA, NIXL within a host
+    would fall back to TCP without an IMEX channel, so it stays off by default
+    and an explicit request, for transfers across hosts, is honored."""
     from types import SimpleNamespace
 
     import vllm.platforms
+    import vllm.utils.vmm_driver
     from vllm.config.kv_transfer import KVTransferConfig
     from vllm.config.vllm import VllmConfig
 
@@ -473,6 +480,9 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
         vllm.platforms,
         "current_platform",
         SimpleNamespace(is_cuda_alike=lambda: True, is_rocm=lambda: rocm),
+    )
+    monkeypatch.setattr(
+        vllm.utils.vmm_driver, "imex_channel_available", lambda: imex_channel
     )
     config = SimpleNamespace(
         cache_config=SimpleNamespace(
@@ -493,7 +503,8 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
             VllmConfig._resolve_extensible_kv_cache(config)
         return
     VllmConfig._resolve_extensible_kv_cache(config)
-    assert config.cache_config.enable_extensible_kv_cache is not rocm
+    enabled = not rocm and (imex_channel or bool(requested))
+    assert config.cache_config.enable_extensible_kv_cache is enabled
 
 
 @pytest.mark.parametrize("multi", [False, True])

@@ -3,11 +3,12 @@
 
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.utils.vmm_driver import _find_loaded_library
+from vllm.utils.vmm_driver import CudaVmmDriver, _find_loaded_library
 
 _CUDART = "/usr/lib/python3.12/site-packages/nvidia/cuda_runtime/lib/libcudart.so.12"
 _MAPS = [
@@ -139,3 +140,32 @@ def test_driver_prefers_the_library_already_loaded(monkeypatch):
     opened.clear()
     assert vmm_driver.VmmDriver._load_library(driver) == "libamdhip64.so.7"
     assert opened == ["libamdhip64.so.7"]
+
+
+@pytest.mark.parametrize(
+    "create_rc, export_rc, requested",
+    [(0, 0, 0x8), (1, 0, 0), (0, 1, 0)],
+    ids=["exportable", "create-fails", "export-fails"],
+)
+def test_fabric_handle_requested_only_if_it_can_be_exported(
+    monkeypatch, create_rc, export_rc, requested
+):
+    """The device attribute reports FABRIC support without an IMEX channel, so
+    only a real export decides; a failed probe must leave allocations working
+    and must not leak its handle."""
+    released: list[object] = []
+    driver = CudaVmmDriver.__new__(CudaVmmDriver)
+    driver._rdma_capable = {0: False}
+    driver._fabric_capable = {}
+    monkeypatch.setattr(driver, "ensure_context", lambda device_index: None)
+    driver._fns = {
+        "get_granularity": lambda *args: 0,
+        "create": lambda *args: create_rc,
+        "release": released.append,
+    }
+    driver._lib = SimpleNamespace(cuMemExportToShareableHandle=lambda *args: export_rc)
+
+    assert driver._make_alloc_prop(0).requestedHandleTypes == requested
+    assert driver._make_alloc_prop(0).requestedHandleTypes == requested
+
+    assert len(released) == (create_rc == 0)

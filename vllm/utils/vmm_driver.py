@@ -7,6 +7,7 @@ management APIs, used by :class:`vllm.utils.extensible_tensor.ExtensibleTensor`.
 from __future__ import annotations
 
 import ctypes
+import glob
 import os
 from collections.abc import Iterable
 from functools import cache
@@ -19,6 +20,9 @@ _MEM_ALLOC_GRANULARITY_MINIMUM = 0
 _MEM_ACCESS_FLAGS_PROT_READWRITE = 3
 _MEM_ALLOCATION_COMP_NONE = 0
 _DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_WITH_CUDA_VMM_SUPPORTED = 110
+_MEM_HANDLE_TYPE_FABRIC = 0x8
+_IPC_HANDLE_SIZE = 64
+_IMEX_CHANNELS = "/dev/nvidia-caps-imex-channels/channel*"
 
 DevicePtr = ctypes.c_ulonglong
 MemHandle = ctypes.c_ulonglong
@@ -53,6 +57,15 @@ class _MemAllocationProp(ctypes.Structure):
 
 class _MemAccessDesc(ctypes.Structure):
     _fields_ = [("location", _MemLocation), ("flags", ctypes.c_int)]
+
+
+class _MemFabricHandle(ctypes.Structure):
+    _fields_ = [("data", ctypes.c_ubyte * _IPC_HANDLE_SIZE)]
+
+
+def imex_channel_available() -> bool:
+    """Whether this process can use an IMEX channel, which FABRIC handles take."""
+    return any(os.access(path, os.R_OK) for path in glob.glob(_IMEX_CHANNELS))
 
 
 def _find_loaded_library(
@@ -265,7 +278,15 @@ class CudaVmmDriver(VmmDriver):
             ctypes.c_int,
         ]
         lib.cuDeviceGetAttribute.restype = ctypes.c_int
+        lib.cuMemExportToShareableHandle.argtypes = [
+            ctypes.POINTER(_MemFabricHandle),
+            MemHandle,
+            ctypes.c_int,
+            ctypes.c_ulonglong,
+        ]
+        lib.cuMemExportToShareableHandle.restype = ctypes.c_int
         self._rdma_capable: dict[int, bool] = {}
+        self._fabric_capable: dict[int, bool] = {}
 
     def _make_alloc_prop(self, device_index: int) -> _MemAllocationProp:
         # Request GPUDirect RDMA support where available, as the sleep-mode
@@ -282,7 +303,44 @@ class CudaVmmDriver(VmmDriver):
             capable = result == _SUCCESS and bool(flag.value)
             self._rdma_capable[device_index] = capable
         prop.allocFlags.gpuDirectRDMACapable = int(capable)
+        # UCX's cuda_ipc, the NVLink path between processes, can only map
+        # driver-mapped memory through a FABRIC handle.
+        prop.requestedHandleTypes = _MEM_HANDLE_TYPE_FABRIC
+        if (fabric := self._fabric_capable.get(device_index)) is None:
+            fabric = self._can_export_fabric(device_index, prop)
+            self._fabric_capable[device_index] = fabric
+        if not fabric:
+            prop.requestedHandleTypes = 0
         return prop
+
+    def _can_export_fabric(self, device_index: int, prop: _MemAllocationProp) -> bool:
+        """Whether an allocation can export a FABRIC handle. That takes an IMEX
+        channel, which the device attribute does not tell."""
+        self.ensure_context(device_index)
+        size = ctypes.c_size_t()
+        handle = MemHandle()
+        fns = self._fns
+        if (
+            fns["get_granularity"](
+                ctypes.byref(size), ctypes.byref(prop), _MEM_ALLOC_GRANULARITY_MINIMUM
+            )
+            != _SUCCESS
+            or fns["create"](ctypes.byref(handle), size, ctypes.byref(prop), 0)
+            != _SUCCESS
+        ):
+            return False
+        try:
+            return (
+                self._lib.cuMemExportToShareableHandle(
+                    ctypes.byref(_MemFabricHandle()),
+                    handle,
+                    _MEM_HANDLE_TYPE_FABRIC,
+                    0,
+                )
+                == _SUCCESS
+            )
+        finally:
+            fns["release"](handle)
 
     def error_string(self, code: int) -> str:
         msg = ctypes.c_char_p()
