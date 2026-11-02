@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import tl, tldevice, triton
+from vllm.triton_utils import tl, triton
 from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.worker.gpu.sample.gumbel import (
     gumbel_block_argmax,
@@ -24,6 +24,20 @@ def _compute_max_and_sumexp(logits):
         tl.sum(tl.exp(logits - max)),
         0.0,
     )
+    return max, sumexp
+
+
+@triton.jit
+def _compute_max_and_sumexp_excluding_max(logits):
+    # Leaves one max element (its exp(0) = 1) out of the sum, so that a
+    # runner-up far below the max is not rounded away by 1 + eps in fp32
+    # (Barron, "A Fix for Softmax"): the other elements plus the other ties.
+    max = tl.max(logits, axis=0)
+    at_max = logits == max
+    sumexp = tl.sum(tl.where(at_max, 0.0, tl.exp(logits - max))) + (
+        tl.sum(at_max.to(tl.float32)) - 1.0
+    )
+    sumexp = tl.where(max > float("-inf"), sumexp, 0.0)
     return max, sumexp
 
 
@@ -147,10 +161,15 @@ def _compute_global_logsumexp(
     # near-1.0 probability to exactly 1.0; and 1.0 + 8e-7 in fp32 already loses
     # the 8e-7 at ULP(1.0). So the sum leaves out the max token's 1 and takes
     # log1p of the rest, and the result is hi + lo == global_max + log1p(rest)
-    # exactly (TwoSum). This runs in every program of the per-block kernels, so
-    # it stays in fp32.
-    terms = sumexps * tl.exp(maxes - global_max)
-    terms = tl.where(blocks == tl.argmax(maxes, axis=0), terms - 1.0, terms)
+    # exactly (TwoSum). The block sums already leave out their own max's 1, so
+    # every other block adds it back. This runs in every program of the
+    # per-block kernels, so it stays in fp32.
+    max_block = tl.argmax(maxes, axis=0)
+    terms = tl.where(
+        blocks == max_block,
+        sumexps,
+        (1.0 + sumexps) * tl.exp(maxes - global_max),
+    )
     log_big, log_small = _log1p_fp32(tl.sum(terms, axis=0))
     hi, err_big = _two_sum(global_max, log_big)
     hi, err_small = _two_sum(hi, log_small)
@@ -424,7 +443,8 @@ def _compute_local_logits_stats_kernel(
         if HAS_TARGET_LSE:
             # The fp64 log-sum-exp L as two fp32 partials, (hi, 1) and
             # (hi + log(L - hi), 1) with hi just below L, which the global
-            # combine reproduces to ~5e-12 relative.
+            # combine reproduces to ~5e-12 relative. Block sums leave out
+            # the block's max, so both store 0.
             target_lse = tl.load(target_lse_ptr + logit_idx)
             hi = (target_lse - tl.abs(target_lse) * 2.384185791015625e-07).to(
                 tl.float32
@@ -442,7 +462,7 @@ def _compute_local_logits_stats_kernel(
                 target_local_sumexp_ptr
                 + logit_idx * target_local_sumexp_stride
                 + block_idx,
-                tl.where(block_idx < 2, 1.0, 0.0),
+                0.0,
             )
         else:
             # Get local target max and summed exponentials.
@@ -460,7 +480,9 @@ def _compute_local_logits_stats_kernel(
                     target_topp_thresh_ptr,
                     MASK_TARGET_LOGITS,
                 )
-            target_max, target_sumexp = _compute_max_and_sumexp(target_logits)
+            target_max, target_sumexp = _compute_max_and_sumexp_excluding_max(
+                target_logits
+            )
             tl.store(
                 target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
                 target_max,
@@ -488,7 +510,9 @@ def _compute_local_logits_stats_kernel(
                 ).to(tl.float32)
                 / temp
             )
-            draft_max, draft_sumexp = _compute_max_and_sumexp(draft_logits)
+            draft_max, draft_sumexp = _compute_max_and_sumexp_excluding_max(
+                draft_logits
+            )
             tl.store(
                 draft_local_max_ptr + logit_idx * draft_local_max_stride + block_idx,
                 draft_max,
@@ -1181,11 +1205,13 @@ def _resample_kernel(
         # Gumbel sampling needs logits, so we compute it in log space:
         #   log(r(x)) = log(max(exp(log_p(x)) - exp(log_q(x)), 0))
         # The more numerically stable form is:
-        #   log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
-        ratio = tl.exp(draft_log_probs - target_log_probs)
+        #   log(max(exp(a) - exp(b), 0)) = a + log(1 - exp(b - a)) if b < a
+        # with 1 - exp(b - a) kept nonzero where exp(b - a) rounds to 1 in fp32.
+        # b = -inf gives a; a = -inf with b >= a, and NaN, fail b - a < 0.
+        delta = draft_log_probs - target_log_probs
         residual_logits = tl.where(
-            ratio < 1.0,
-            target_log_probs + tldevice.log1p(-ratio),
+            delta < 0.0,
+            target_log_probs + tl.log(_one_minus_exp(tl.minimum(delta, 0.0))),
             float("-inf"),
         ).to(tl.float32)
     else:
