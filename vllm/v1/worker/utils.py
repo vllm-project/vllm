@@ -623,21 +623,9 @@ def allocate_kv_cache(
             kv_caches.update((name, buf) for name in tensor.layers)
             continue
 
-        kernel_block_size = layer_kernel_block_size(group_id, kernel_block_sizes)
-        if (
-            kernel_block_size is not None
-            and isinstance(spec, AttentionSpec)
-            and spec.page_size_padded is None
-            and spec.block_size > kernel_block_size
-            and spec.block_size % kernel_block_size == 0
-            and tensor.block_stride > spec.unpadded_page_size_bytes
-            and packed_kernel_blocks_are_mappable(
-                spec, kernel_block_size, tensor.block_stride
-            )
-        ):
-            # Bind the packed compressed page whole. AttentionGroup maps its
-            # kernel blocks afterwards, with the stride between manager blocks.
-            kernel_block_size = None
+        kernel_block_size = view_kernel_block_size(
+            spec, tensor, layer_kernel_block_size(group_id, kernel_block_sizes)
+        )
         views = create_kv_cache_views(
             buf,
             spec,
@@ -673,6 +661,29 @@ def layer_kernel_block_size(
     kernel_block_size = None
     if kernel_block_sizes is not None and group_id < len(kernel_block_sizes):
         kernel_block_size = kernel_block_sizes[group_id]
+    return kernel_block_size
+
+
+def view_kernel_block_size(
+    spec: KVCacheSpec, tensor: KVCacheTensor, kernel_block_size: int | None
+) -> int | None:
+    """Kernel block size to create the layer's views with.
+
+    None binds a packed compressed page whole; AttentionGroup maps its kernel
+    blocks afterwards, with the stride between manager blocks.
+    """
+    if (
+        kernel_block_size is not None
+        and isinstance(spec, AttentionSpec)
+        and spec.page_size_padded is None
+        and spec.block_size > kernel_block_size
+        and spec.block_size % kernel_block_size == 0
+        and tensor.block_stride > spec.unpadded_page_size_bytes
+        and packed_kernel_blocks_are_mappable(
+            spec, kernel_block_size, tensor.block_stride
+        )
+    ):
+        return None
     return kernel_block_size
 
 
