@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD041 MD051 -->
 --8<-- [start:installation]
 
-vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 10.0; ROCm 7.2 wheels remain available for earlier releases.
+vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 10.1; ROCm 7.2 wheels remain available for earlier releases.
 
 #### Prebuilt Wheels
 
@@ -10,7 +10,7 @@ vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available fo
 | `rocm700` | 3.12 | 7.0 | >= 2.35 | `0.14.0` to `0.18.0` |
 | `rocm721` | 3.12 | 7.2.1 | >= 2.35 | Nightly releases after commit `171775f306a333a9cf105bfd533bf3e113d401d9` |
 | `rocm72` | 3.12 | 7.2 | >= 2.39 | Earlier nightly releases on the legacy ROCm 7.2 stack (no longer built) |
-| `rocm100` | 3.12 | 10.0 | >= 2.35 | Nightly releases (default) |
+| `rocm101` | 3.12 | 10.1 | >= 2.35 | Nightly releases (default) |
 
 --8<-- [end:installation]
 --8<-- [start:requirements]
@@ -42,14 +42,14 @@ If you need a different ROCm version or want to use an existing PyTorch installa
     source .venv/bin/activate
     ```
 
-To install the latest version of vLLM for Python 3.12, ROCm 10.0 and `glibc >= 2.35`:
+To install the latest version of vLLM for Python 3.12, ROCm 10.1 and `glibc >= 2.35`:
 
 ```bash
 uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/ --upgrade
 ```
 
 !!! tip
-    The ROCm 10.0 wheels install the ROCm SDK from pip ([TheRock](https://github.com/ROCm/TheRock)), including the GPU kernels for every supported architecture.
+    The ROCm 10.1 wheels install the ROCm SDK from pip ([TheRock](https://github.com/ROCm/TheRock)), including the GPU kernels for every supported architecture.
 
     Wheels for the legacy ROCm 7.2 stack, which use a system ROCm installation, remain available for earlier releases at `https://wheels.vllm.ai/rocm/${VLLM_VERSION}/rocm72`.
 
@@ -215,7 +215,7 @@ build:
 - `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the full commit hash used to
   download the pre-compiled wheel.
 - `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the ROCm variant subdirectory, e.g.,
-  `rocm72` or `rocm100`. If not specified, the variant is auto-detected based
+  `rocm72` or `rocm101`. If not specified, the variant is auto-detected based
   on your system's ROCm version. An explicitly specified variant must match the
   detected environment.
 
@@ -237,7 +237,7 @@ You can find more information about vLLM's wheels in
 
 0. Install the ROCm SDK and PyTorch (skip if you are already in an environment or docker image with them installed, e.g. `vllm/vllm-openai-rocm:base-nightly`).
 
-    ROCm 10.0 is installed from pip ([TheRock](https://github.com/ROCm/TheRock)), together with PyTorch and the GPU kernels for your GPU's architecture. In a Python 3.12 environment:
+    ROCm 10.1 is installed from pip ([TheRock](https://github.com/ROCm/TheRock)), together with PyTorch and the GPU kernels for your GPU's architecture. In a Python 3.12 environment:
 
     ```bash
     # Your GPU's architecture, e.g. gfx942 for MI300 or gfx950 for MI350
@@ -245,9 +245,9 @@ You can find more information about vLLM's wheels in
     export ROCM_INDEX=https://stable.repo.amd.com/rocm/whl-next/
 
     pip install --index-url ${ROCM_INDEX} \
-        "rocm[libraries,devel,device-${GPU_ARCH}]==10.0.0" \
-        "torch[device-${GPU_ARCH}]==2.12.0+rocm10.0.0" \
-        "torchvision[device-${GPU_ARCH}]==0.27.0+rocm10.0.0"
+        "rocm[libraries,devel,device-${GPU_ARCH}]==10.1.0" \
+        "torch[device-${GPU_ARCH}]==2.13.0+rocm10.1.0" \
+        "torchvision[device-${GPU_ARCH}]==0.28.0+rocm10.1.0"
     rocm-sdk init
 
     # Point builds at the pip-installed ROCm SDK
@@ -328,18 +328,19 @@ You can find more information about vLLM's wheels in
         - You will need to config the `$MORI_BRANCH_OR_COMMIT` for your purpose.
         - The validated `$MORI_BRANCH_OR_COMMIT` can be found in the [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base).
 
-5. Build vLLM. For example, vLLM on ROCm 10.0 can be built with the following steps:
+5. Build vLLM. For example, vLLM on ROCm 10.1 can be built with the following steps:
 
     ???+ console "Commands"
 
         ```bash
         pip install --upgrade pip
 
-        # Install AMD SMI, which the ROCm SDK ships as sources
+        # Install AMD SMI, which the ROCm SDK ships as sources, packaged and patched as in the vLLM image
         SDK_CORE=$(python3 -c "import _rocm_sdk_core, os; print(os.path.dirname(_rocm_sdk_core.__file__))")
-        pip install ${SDK_CORE}/share/amd_smi
-        # It loads the SDK's libamd_smi relative to its own directory
-        export PYTHONPATH=${SDK_CORE}/share/amd_smi
+        cp -r tools/vllm-rocm/amdsmi /tmp/amd_smi
+        cp -r ${SDK_CORE}/share/amd_smi/amdsmi /tmp/amd_smi/
+        patch -d /tmp/amd_smi -p1 -i amdsmi_wrapper.patch
+        pip install /tmp/amd_smi
 
         # Install dependencies
         pip install -r requirements/rocm.txt
@@ -368,12 +369,12 @@ You can find more information about vLLM's wheels in
 vLLM offers official Docker images for deployment.
 The images can be used to run OpenAI compatible server and are available on Docker Hub as [vllm/vllm-openai-rocm](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags).
 
-- `vllm/vllm-openai-rocm:latest` — stable release, built on ROCm 10.0 (also tagged `latest-rocm100`)
-- `vllm/vllm-openai-rocm:nightly` — preview build from the latest development branch on ROCm 10.0 (also tagged `nightly-rocm100`), use this if you want the latest features and fixes
+- `vllm/vllm-openai-rocm:latest` — stable release, built on ROCm 10.1 (also tagged `latest-rocm101`)
+- `vllm/vllm-openai-rocm:nightly` — preview build from the latest development branch on ROCm 10.1 (also tagged `nightly-rocm101`), use this if you want the latest features and fixes
 - `vllm/vllm-openai-rocm:latest-rocm72` / `nightly-rocm72` — earlier builds on the legacy ROCm 7.2 stack, no longer updated
-- `vllm/vllm-openai-rocm:base-nightly` / `latest-base` (and their `-rocm100` forms) — the same image without vLLM itself: the ROCm stack plus all of vLLM's dependencies. Earlier builds of these tags held only the ROCm stack ([docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base))
+- `vllm/vllm-openai-rocm:base-nightly` / `latest-base` (and their `-rocm101` forms) — the same image without vLLM itself: the ROCm stack plus all of vLLM's dependencies. Earlier builds of these tags held only the ROCm stack ([docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base))
 
-ROCm 10.0 images use zstd-compressed layers; pulling them needs Docker 23 or newer (or containerd 1.5 or newer).
+ROCm 10.1 images use zstd-compressed layers; pulling them needs Docker 23 or newer (or containerd 1.5 or newer).
 
 ```bash
 docker run --rm \
@@ -425,9 +426,9 @@ AMD also offered nightly prebuilt docker image from [Docker Hub](https://hub.doc
 --8<-- [start:build-image-from-source]
 
 You can build and run vLLM from source via the provided [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm), driven by [docker/docker-bake-rocm.hcl](https://github.com/vllm-project/vllm/blob/main/docker/docker-bake-rocm.hcl) (requires Docker Buildx).
-It uses ROCm 10.0 (installed from TheRock wheels, [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)). Older vLLM branches support ROCm 5.7 through 7.0.
+It uses ROCm 10.1 (installed from TheRock wheels, [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)). Older vLLM branches support ROCm 5.7 through 7.0.
 
-To build vllm on ROCm 10.0 for all supported GPUs (an image with `vllm serve` as entrypoint), reusing the published ROCm stack and dependencies (`vllm/vllm-openai-rocm:base-nightly`) so that only vLLM itself is compiled:
+To build vllm on ROCm 10.1 for all supported GPUs (an image with `vllm serve` as entrypoint), reusing the published ROCm stack and dependencies (`vllm/vllm-openai-rocm:base-nightly`) so that only vLLM itself is compiled:
 
 ```bash
 STACK_IMAGE=vllm/vllm-openai-rocm:base-nightly RUNTIME=vllm/vllm-openai-rocm:base-nightly \

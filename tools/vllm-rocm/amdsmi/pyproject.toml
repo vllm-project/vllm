@@ -1,0 +1,25 @@
+# Packaging metadata for the amdsmi Python bindings in TheRock's rocm-sdk-core
+# (_rocm_sdk_core/share/amd_smi), which ROCm 10.1 ships without any. The
+# build_amdsmi stage of docker/Dockerfile.rocm_base builds a wheel from those
+# sources with this file and amdsmi_wrapper.patch: the vLLM ROCm image installs
+# it, the vLLM wheel pins it, and the vLLM ROCm wheel index serves it.
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "amdsmi"
+dynamic = ["version"]
+description = "AMD SMI Python interface, from TheRock's rocm-sdk-core"
+requires-python = ">=3.9"
+
+[tool.setuptools.dynamic]
+version = {attr = "amdsmi._version.__version__"}
+
+# Not namespace packages: a __pycache__ directory in the sources is not a package.
+[tool.setuptools.packages.find]
+include = ["amdsmi*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+amdsmi = ["LICENSE", "README.md"]

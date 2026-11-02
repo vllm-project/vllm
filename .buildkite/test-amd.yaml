@@ -128,6 +128,7 @@ steps:
   - .buildkite/scripts/rocm/build.sh
   - .buildkite/scripts/rocm/publish.sh
   - tools/vllm-rocm/therock_wheels.py
+  - tools/vllm-rocm/amdsmi/
   - tests/tools/test_docker_build_metadata_args.py
   - tests/tools/test_rocm_build.py
   - tests/tools/test_amd_ci_fast_exit.py
@@ -551,7 +552,7 @@ steps:
   - vllm/platforms/rocm.py
   optional: true
   commands:
-  - rocm-smi
+  - amd-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "llama-3"
 
 - label: ":amd: (MI300) Fusion E2E Quick" # TBD
@@ -571,7 +572,7 @@ steps:
   - vllm/platforms/rocm.py
   optional: true
   commands:
-  - rocm-smi
+  - amd-smi
   # Run all models and attn backends but only Inductor partition and native custom ops
   - "pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k 'inductor_partition and not +rms_norm and not +quant_fp8'"
   # Different from CUDA, Qwen requires +rms_norm and +quant_fp8 as rms+quant fusion is only supported on AITER
@@ -2741,7 +2742,7 @@ steps:
   - vllm/platforms/rocm.py
   - tests/compile/fusions_e2e/
   commands:
-  - rocm-smi
+  - amd-smi
   - pytest -v -s tests/compile/fusions_e2e/test_tp1_quant.py -k "test_tp1_fp8_fusions and inductor_partition and not +rms_norm and not True and ((Llama-3 and TRITON_ATTN) or (Qwen3-30B and +quant_fp8 and TRITON_ATTN) or (DeepSeek-Coder and +quant_fp8 and TRITON_MLA))"
 
 #--------------------------------------------------------  mi355 · distributed  --------------------------------------------------------#

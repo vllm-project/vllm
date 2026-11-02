@@ -158,7 +158,7 @@ pushed() {
 # ---------------------------------------------------------------------------
 # Content keys
 # ---------------------------------------------------------------------------
-# Ks (stack key): hash of the stack Dockerfile + therock_wheels.py.
+# Ks (stack key): hash of the stack Dockerfile + tools/vllm-rocm/amdsmi + therock_wheels.py.
 #   A Ks cache miss triggers a full stack rebuild (hours).
 # Kr (runtime key): Ks + the portion of Dockerfile.rocm above the per-commit
 #   marker + all pip requirement files.
@@ -167,7 +167,8 @@ pushed() {
 _trw=$( [[ $STACK == rocm ]] && echo tools/vllm-rocm/therock_wheels.py || true )
 # The layer format (compression, and mtimes as built: see the bake file) is part of every image's
 # identity: an image left in an older format would hand later builds a second copy of the same layers.
-Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree HEAD -- "$SDF" ${_trw:+"$_trw"}; } | sha256sum | cut -c1-16)
+Ks=$( { echo "layers: zstd-3, mtimes kept"; git ls-tree HEAD -- "$SDF" tools/vllm-rocm/amdsmi ${_trw:+"$_trw"}; } \
+  | sha256sum | cut -c1-16)
 Kr=$(
   {
     echo "$Ks"
