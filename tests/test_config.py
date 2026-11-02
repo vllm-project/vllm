@@ -4259,6 +4259,17 @@ def test_watermark_key_must_fit_in_64_bits():
         WatermarkConfig(key=2**64)
 
 
+def test_watermark_validation_errors_do_not_quote_the_key(tmp_path):
+    """Validation errors end up in logs; the input they would quote holds the key."""
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text("42")
+
+    for kwargs in ({"key": 2**64}, {"key": 987654321, "key_file": str(key_file)}):
+        with pytest.raises(ValidationError) as error:
+            WatermarkConfig(**kwargs)
+        assert str(kwargs["key"]) not in str(error.value)
+
+
 @pytest.mark.parametrize("alpha", [-0.1, 1.1])
 def test_watermark_alpha_must_be_a_probability(alpha):
     with pytest.raises(ValidationError):
@@ -4278,6 +4289,30 @@ def test_watermark_key_is_excluded_from_serialization():
     )
 
     assert "key" not in serialized
+
+
+def test_watermark_key_and_key_file_are_exclusive(tmp_path):
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text("42")
+
+    with pytest.raises(ValidationError, match="either key or key_file"):
+        WatermarkConfig(key=42, key_file=str(key_file))
+
+
+@pytest.mark.parametrize("content", ["not-a-key", "-5", "+1000", "1_000", str(2**64)])
+def test_invalid_watermark_key_file_is_rejected_without_quoting_it(tmp_path, content):
+    key_file = tmp_path / "watermark_key"
+    key_file.write_text(content)
+
+    with pytest.raises(ValidationError, match="decimal integer") as error:
+        WatermarkConfig(key_file=str(key_file))
+
+    assert content not in str(error.value)
+
+
+def test_missing_watermark_key_file_is_rejected(tmp_path):
+    with pytest.raises(ValidationError, match="Cannot read watermark key file"):
+        WatermarkConfig(key_file=str(tmp_path / "missing"))
 
 
 @patch("vllm.config.ModelConfig")
