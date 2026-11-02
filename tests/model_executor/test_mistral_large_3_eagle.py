@@ -45,8 +45,9 @@ class DummyLinear(nn.Module):
 
 
 class DummyNorm(nn.Module):
-    def __init__(self, *args, **kwargs):
+    def __init__(self, hidden_size, *args, **kwargs):
         super().__init__()
+        self.weight = nn.Parameter(torch.zeros(hidden_size))
 
     def forward(self, hidden_states, residual=None):
         return hidden_states, residual
@@ -72,6 +73,8 @@ def make_vllm_config(
         rms_norm_eps=1e-5,
         qk_nope_head_dim=qk_nope_head_dim,
         qk_rope_head_dim=qk_rope_head_dim,
+        n_routed_experts=8,
+        n_shared_experts=1,
     )
 
     return SimpleNamespace(
@@ -124,6 +127,8 @@ def test_eagle_mistral_large3_initializes_deepseek_runtime_attrs(
     model = eagle_mod.EagleMistralLarge3Model(vllm_config=vllm_config)
 
     assert model.aux_hidden_state_layers == ()
+    assert model.hidden_size == 16
+    assert model.is_fused_shared_expert_enabled is False
     assert model.use_mha is expected_use_mha
 
     # Add this if your fix also copies num_redundant_experts from
@@ -144,3 +149,14 @@ def test_eagle_mistral_large3_forward_reuses_deepseek_parent_forward():
 
     assert isinstance(output, torch.Tensor)
     assert output.shape == hidden_states.shape
+
+
+@pytest.mark.cpu_test
+def test_eagle_mistral_large3_load_weights_reuses_deepseek_parent_load_weights():
+    vllm_config = make_vllm_config()
+    model = eagle_mod.EagleMistralLarge3Model(vllm_config=vllm_config)
+
+    loaded = model.load_weights([("norm.weight", torch.ones(16))])
+
+    assert loaded == {"norm.weight"}
+    assert torch.equal(model.norm.weight, torch.ones(16))
