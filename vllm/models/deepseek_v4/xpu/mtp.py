@@ -466,11 +466,10 @@ class DeepSeekV4MTP(nn.Module):
                     f"Use a checkpoint that includes MTP layer weights, "
                     f"or disable speculative decoding."
                 )
-        self.finalize_mega_moe_weights()
         logger.info_once("MTP draft model loaded: %d params", len(loaded_params))
         return loaded_params
 
-    def finalize_mega_moe_weights(self) -> None:
+    def process_weights_after_loading(self) -> None:
         for layer in self.model.layers.values():
             layer.mtp_block.ffn.finalize_mega_moe_weights()
 
