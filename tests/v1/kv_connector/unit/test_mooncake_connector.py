@@ -20,6 +20,7 @@ import zmq.asyncio
 from tests.v1.attention.utils import dense_kv_cache_views
 from vllm import envs
 from vllm.config import KVTransferConfig, set_current_vllm_config
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVLoadRange
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import (
     mooncake_connector,
     mooncake_utils,
@@ -30,8 +31,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector im
     LeaseHeartbeat,
     MooncakeConnector,
     MooncakeConnectorMetadata,
+    MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     MooncakeLeaseHeartbeat,
+    MooncakeRangeRequest,
     MooncakeXferMetadata,
     MooncakeXferResponse,
     MooncakeXferResponseStatus,
@@ -231,6 +234,98 @@ def _make_packed_mla_kv_cache_config(
         kv_cache_tensors=[],
         kv_cache_groups=groups,
     )
+
+
+@pytest.mark.parametrize(
+    "load_range,expected",
+    [
+        (KVLoadRange(16, 48, is_terminal=False), [[101, 102], []]),
+        (KVLoadRange(16, 48), [[101, 102], []]),
+        (
+            KVLoadRange(64, 96, window_group_ids=(1,), window_end_token=96),
+            [[104, 105], [203, 204, 205]],
+        ),
+        (
+            KVLoadRange(95, 95, window_group_ids=(1,), window_end_token=95),
+            [[], [203, 204, 205]],
+        ),
+    ],
+)
+def test_piecewise_load_selects_exact_destination_groups(load_range, expected):
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.kv_cache_utils import KVCacheBlock
+
+    from .utils import make_kv_cache_config
+
+    config = create_vllm_config(kv_connector="MooncakeConnector")
+    caches = make_kv_cache_config(16, swa_enabled=True, sw_size=32)
+    scheduler = MooncakeConnectorScheduler(config, "engine", caches)
+    request = create_request(num_tokens=96, do_remote_prefill=True)
+    request.kv_transfer_params.update(
+        transfer_id="transfer", remote_bootstrap_addr="localhost:1234"
+    )
+    blocks = KVCacheBlocks(
+        tuple(
+            [KVCacheBlock(i) for i in range(start, start + 7)] for start in (100, 200)
+        )
+    )
+
+    scheduler.update_state_after_alloc_for_range(request, blocks, load_range)
+    assert scheduler._reqs_need_recv[request.request_id][1] == expected
+    assert scheduler._range_start_blocks[request.request_id] == [
+        load_range.start_token // 16,
+        None,
+    ]
+
+
+def test_piecewise_window_requires_original_prefill_endpoint():
+    from .utils import make_kv_cache_config
+
+    config = create_vllm_config(kv_connector="MooncakeConnector")
+    scheduler = MooncakeConnectorScheduler(
+        config, "engine", make_kv_cache_config(16, swa_enabled=True)
+    )
+    request = create_request(num_tokens=96, do_remote_prefill=True)
+    request.kv_transfer_params.update(
+        transfer_id="transfer", remote_bootstrap_addr="localhost:1234"
+    )
+    assert scheduler.get_loadable_window_group_ids(request, 96) == (1,)
+    assert scheduler.get_loadable_window_group_ids(request, 64) == ()
+    request.kv_transfer_params = None
+    assert scheduler.get_loadable_window_group_ids(request, 96) == ()
+
+
+@pytest.mark.parametrize("mamba", [False, True])
+def test_piecewise_recurrent_falls_back(mamba):
+    from .utils import make_kv_cache_config
+
+    scheduler = MooncakeConnectorScheduler(
+        create_vllm_config(kv_connector="MooncakeConnector"),
+        "engine",
+        make_kv_cache_config(16, mamba_enabled=mamba),
+    )
+    assert scheduler.supports_load_range is not mamba
+
+
+def test_range_wire_preserves_offsets_and_rejects_legacy_decoder():
+    value = MooncakeXferMetadata(
+        remote_hostname="localhost",
+        remote_port=1234,
+        remote_tp_size=1,
+        remote_tp_rank=0,
+        req_blocks={"req": MooncakeRangeRequest("transfer", [[100, 101]], [1])},
+        kv_caches_base_addr=[],
+        block_lens=[],
+        kv_block_lens=[],
+    )
+    encoded = msgspec.msgpack.encode(value)
+    assert msgspec.msgpack.decode(encoded, type=MooncakeXferMetadata) == value
+
+    class LegacyMetadata(msgspec.Struct):
+        req_blocks: dict[str, tuple[str, list[list[int]]]]
+
+    with pytest.raises(msgspec.ValidationError):
+        msgspec.msgpack.decode(encoded, type=LegacyMetadata)
 
 
 class FakeMooncakeWrapper:
@@ -1161,6 +1256,20 @@ def patch_worker_dependencies():
         patch(
             "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector.make_zmq_socket"
         ) as mock_make_zmq,
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.torch.accelerator.current_device_index",
+            return_value=0,
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.current_platform.set_device"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.get_current_attn_backends",
+            return_value=[],
+        ),
         patch("httpx.AsyncClient") as mock_async_client,
     ):
         # Mock PP group
@@ -2323,6 +2432,68 @@ def test_register_noncontiguous_packed_allows_matching_pp():
         assert worker.region_row_offsets == [0]
 
 
+def test_register_kv_caches_excludes_non_transfer_groups():
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeConnector", kv_role="kv_consumer"
+    )
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=4,
+        head_size=64,
+        dtype=torch.float16,
+    )
+    groups = [
+        KVCacheGroupSpec(
+            [f"model.layers.{i}.self_attn"],
+            spec,
+            enable_kv_transfer=i > 0,
+        )
+        for i in range(3)
+    ]
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+    )
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch_worker_dependencies(),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake."
+            "mooncake_connector.threading.Thread"
+        ) as mock_thread,
+    ):
+        connector = MooncakeConnector(
+            vllm_config,
+            KVConnectorRole.WORKER,
+            kv_cache_config,
+        )
+        worker = connector.connector_worker
+        mock_thread.return_value.is_alive.return_value = False
+        kv_caches = {
+            group.layer_names[0]: torch.zeros(
+                (2, spec.page_size_bytes), dtype=torch.uint8
+            )
+            for group in groups
+        }
+
+        with patch.object(worker.engine, "batch_register_memory", return_value=0):
+            connector.register_kv_caches(kv_caches)
+
+        assert worker.registered_layer_names == [
+            "model.layers.1.self_attn",
+            "model.layers.2.self_attn",
+        ]
+        assert worker.registered_layer_indices == [1, 2]
+        assert worker.registered_group_indices == [0, 1]
+        assert len(worker.kv_caches_base_addr) == 2
+
+
 def test_register_kv_caches_supports_mixed_mla_and_eagle_shapes():
     """Mixed MLA+Eagle caches should register by byte length, not shape."""
     with mooncake_register_worker(_make_test_kv_cache_config()) as (worker, reg):
@@ -2535,7 +2706,8 @@ def test_contiguous_runs(src, dst, starts, run_lens):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kv_block_len", [256, 128])
-async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
+@pytest.mark.parametrize("range_load", [False, True])
+async def test_build_transfer_params_fragmented_block_ids(kv_block_len, range_load):
     """Fragmented ids give one copy per contiguous run per layer, in layer order.
 
     A kv_block_len shorter than the block row cannot be merged across blocks.
@@ -2579,6 +2751,11 @@ async def test_build_transfer_params_fragmented_block_ids(kv_block_len):
     xfer_meta = _xfer_meta(
         remote_regions, {"d-fragmented": (transfer_id, [[7, 8, 2, 5]])}
     )
+    if range_load:
+        send_meta.local_block_ids = [[80, 3, 4, 9, 6, 90]]
+        xfer_meta.req_blocks["d-fragmented"] = MooncakeRangeRequest(
+            transfer_id, [[7, 8, 2, 5]], [1]
+        )
 
     (
         src_ptrs,

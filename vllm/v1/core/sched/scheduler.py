@@ -1150,7 +1150,10 @@ class Scheduler(SchedulerInterface):
                             continue
 
                         if self.prefix_replay_tokens and not (
-                            ext_tokens and self._load_restores_replay_window(request)
+                            ext_tokens
+                            and self._load_restores_replay_window(
+                                request, block_aligned_local + ext_tokens
+                            )
                         ):
                             # DSV41 SWA bounded replay recomputes the hit's last
                             # window, from the block holding its first
@@ -1223,7 +1226,9 @@ class Scheduler(SchedulerInterface):
                     # nothing.
                     window_loaded = bool(
                         num_external_computed_tokens
-                    ) and self._load_restores_replay_window(request)
+                    ) and self._load_restores_replay_window(
+                        request, num_computed_tokens
+                    )
                     if (
                         not window_loaded
                         and 0 < num_computed_tokens <= self.prefix_replay_tokens
@@ -1440,7 +1445,9 @@ class Scheduler(SchedulerInterface):
                     num_external_computed_tokens=num_external_computed_tokens,
                     delay_cache_blocks=load_kv_async,
                     skip_zeroing_group_ids=(
-                        self.connector.get_loaded_kv_cache_group_ids(request)
+                        self.connector.get_loaded_kv_cache_group_ids_for_prefix(
+                            request, num_computed_tokens
+                        )
                         if load_kv_async and self.connector is not None
                         else ()
                     ),
@@ -3425,14 +3432,17 @@ class Scheduler(SchedulerInterface):
             self._request_remaining_blocks(req) for req in self._inflight_prefills
         )
 
-    def _load_restores_replay_window(self, request: Request) -> bool:
+    def _load_restores_replay_window(self, request: Request, end_token: int) -> bool:
         """Whether the KV connector's load for ``request`` restores every DSV41
         SWA bounded-replay group, as a P/D transfer of the request's own blocks
         does; a prefix-cache store holds no window."""
         assert self.connector is not None
+        loaded_groups = self.connector.get_loaded_kv_cache_group_ids_for_prefix(
+            request, end_token
+        )
         return bool(self.prefix_replay_group_ids) and set(
             self.prefix_replay_group_ids
-        ).issubset(self.connector.get_loaded_kv_cache_group_ids(request))
+        ).issubset(loaded_groups)
 
     def _mark_prefix_replay(
         self, request: Request, num_hit_tokens: int, window_loaded: bool
@@ -3498,7 +3508,7 @@ class Scheduler(SchedulerInterface):
             request,
             request.num_computed_tokens,
             window_loaded=not load_failed
-            and self._load_restores_replay_window(request),
+            and self._load_restores_replay_window(request, request.num_computed_tokens),
         )
         if num_replay_tokens > 0:
             request.num_computed_tokens -= num_replay_tokens

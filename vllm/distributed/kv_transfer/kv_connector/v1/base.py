@@ -82,6 +82,27 @@ CopyBlocksOp = Callable[
     None,
 ]
 
+
+@dataclass(frozen=True)
+class KVLoadRange:
+    """Half-open absolute token range assigned to one connector.
+
+    A boundary shared by two sources is aligned for both connectors and the
+    scheduler's KV block layout. Only a terminal range may end in a partial
+    scheduler block.
+    """
+
+    start_token: int
+    end_token: int
+    is_terminal: bool = True
+    window_group_ids: tuple[int, ...] = ()
+    window_end_token: int | None = None
+
+    @property
+    def num_tokens(self) -> int:
+        return self.end_token - self.start_token
+
+
 logger = init_logger(__name__)
 
 
@@ -512,6 +533,24 @@ class KVConnectorBase_V1(ABC):
         """
         return self._kv_cache_config.prefix_cacheable_group_ids
 
+    def get_loaded_kv_cache_group_ids_for_prefix(
+        self, request: "Request", end_token: int
+    ) -> tuple[int, ...]:
+        """Groups restored at the adopted endpoint, before block allocation."""
+        return self.get_loaded_kv_cache_group_ids(request)
+
+    def get_loadable_window_group_ids(
+        self, request: "Request", end_token: int
+    ) -> tuple[int, ...]:
+        """Complete SWA windows available at this endpoint for a range load.
+
+        Resolve availability during prefix lookup, including window-only hits.
+        Returning a group commits to restoring its whole window for the same
+        request history, not just the overlap with the assigned prefix range.
+        The default does not opt into independent window loading.
+        """
+        return ()
+
     @abstractmethod
     def get_num_new_matched_tokens(
         self,
@@ -590,6 +629,46 @@ class KVConnectorBase_V1(ABC):
 
         """
         pass
+
+    @property
+    def supports_load_range(self) -> bool:
+        """Whether this connector accepts an explicitly assigned load range.
+
+        MultiConnector only composes children whose lookup results agree on
+        synchronous versus asynchronous loading; otherwise it uses one child.
+        """
+        return False
+
+    @property
+    def load_range_alignment(self) -> int | None:
+        """Additional positive alignment for inter-source boundaries.
+
+        MultiConnector combines this value with the scheduler block size and
+        the neighboring connector's requirement. ``None`` adds no constraint.
+        """
+        return None
+
+    def update_state_after_alloc_for_range(
+        self,
+        request: "Request",
+        blocks: "KVCacheBlocks",
+        load_range: KVLoadRange,
+    ) -> None:
+        """Load an absolute token range into the request's allocated blocks.
+
+        ``blocks`` is the request's complete allocated block table, not a view
+        sliced to ``load_range``. Implementations must locate each KV group's
+        destination blocks from the absolute token offsets. The token range
+        loads full-attention groups only. Restore only the SWA groups named in
+        ``window_group_ids``, each with its full window at ``window_end_token``.
+        An empty token range can carry a window-only load. Recurrent state is
+        not composable through this API. The scheduler may shorten the lookup's
+        prefix before assigning ranges. A later
+        ``update_state_after_alloc(request, blocks, 0)`` is allowed and must
+        remain a no-load operation. Load failures follow the
+        ``get_block_ids_with_load_errors`` contract.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     def build_connector_meta(
