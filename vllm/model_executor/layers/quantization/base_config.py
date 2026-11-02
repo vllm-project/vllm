@@ -13,6 +13,7 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
     from vllm.model_executor.layers.quantization import QuantizationMethods
     from vllm.model_executor.layers.quantization.online.base import (
         OnlineQuantizationConfig,
@@ -97,6 +98,7 @@ class QuantizeMethodBase(ABC):
         Returns:
             The dequantized weight for linear layers. For MoE layers, an
             iterator of ``(experts, w13, w2)`` over groups of experts.
+
         """
         raise NotImplementedError(
             f"The quantization method {type(self)} does not implement "
@@ -268,6 +270,10 @@ class QuantizationConfig(ABC):
 
         return WeightsMapper(orig_to_new_suffix={".g_idx": None})
 
+    def get_kv_cache_dtype(self, prefix: str) -> "CacheDType | None":
+        """Return a checkpoint-selected KV-cache dtype for one layer."""
+        return None
+
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
     ):
@@ -355,9 +361,7 @@ def resolve_quant_method(
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
 
-        online_quant_method = quant_config.online_quantization_config.get_quant_method(
-            layer, prefix
-        )
+        online_quant_method = online_config.get_quant_method(layer, prefix)
 
         assert base_quant_method is not None and not isinstance(
             base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
@@ -374,4 +378,4 @@ def resolve_quant_method(
         return base_quant_method
 
     # Quantize an unquantized layer with the online method.
-    return quant_config.online_quantization_config.get_quant_method(layer, prefix)
+    return online_config.get_quant_method(layer, prefix)

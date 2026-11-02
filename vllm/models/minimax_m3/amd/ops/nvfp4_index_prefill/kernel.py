@@ -392,7 +392,7 @@ def compile_score_prefill(heads: int = 1):
                                     x = (vis[ni] >= mt * 16 + i).select(x, neg_inf)
                                 run[ni] = maxf_nn(run[ni], x)
 
-                    pend = []
+                    pend: list = []
                     a_next = read_a(0)
                     for mt in range_constexpr(MT):
                         a = a_next
@@ -522,7 +522,7 @@ def compile_score_prefill(heads: int = 1):
                 fx.gpu.barrier()
                 raw0 = read_raw(0)
                 tabs0 = dq_tables(raw0)
-                pend = []
+                pend: list = []
                 for k in range_constexpr(8):
                     pend = dq_step(raw0, tabs0, 0, k, pend)
                 fx.gpu.barrier()
@@ -552,12 +552,12 @@ def compile_score_prefill(heads: int = 1):
                 def one(st):
                     return fx.Int32(st[0] if isinstance(st, (list, tuple)) else st)
 
-                for g, st in range(
+                for g, st in range(  # type: ignore[call-overload]
                     fx.Index(0), fx.Index(n_full), fx.Index(1), init=[_ir(pg_next)]
                 ):
                     pgn = group(blk0 + fx.Int32(g) * GROUP, one(st), False)
                     res = yield [_ir(pgn)]
-                for g, st in range(
+                for g, st in range(  # type: ignore[call-overload]
                     fx.Index(n_full),
                     fx.Index(n_groups),
                     fx.Index(1),

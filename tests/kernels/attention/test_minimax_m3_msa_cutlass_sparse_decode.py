@@ -1105,6 +1105,14 @@ def _make_prefill_metadata(
     return metadata, topk
 
 
+def _skip_without_q8kv4_prefill(num_q_heads: int, num_kv_heads: int) -> None:
+    blocker = sparse_attention_msa_module._q8kv4_prefill_blocker(
+        num_q_heads, num_kv_heads, BLOCK_SIZE, TOPK
+    )
+    if blocker is not None:
+        pytest.skip(blocker)
+
+
 @pytest.mark.parametrize(
     ("num_q_heads", "num_kv_heads"),
     [pytest.param(64, 4, id="tp1"), pytest.param(16, 1, id="tp4")],
@@ -1117,6 +1125,7 @@ def test_msa_prefill_nvfp4_matches_triton_on_dequantized_cache(
     including chunked prefill over cached context, with the fp8 q the fused
     insert writes (the only q it writes on this path), on the CUTLASS Q8KV4
     kernel."""
+    _skip_without_q8kv4_prefill(num_q_heads, num_kv_heads)
     torch.manual_seed(0)
     q_lens = [300, 128, 77]
     seq_lens_list = [300, 640, 1100]
@@ -1187,6 +1196,7 @@ def test_msa_prefill_nvfp4_uses_the_builders_workspace(
     grown by the call, and the output equals the per-call-allocation path's."""
     from vllm.third_party.fmha_sm100.prefill_q8kv4 import PrefillWorkspace
 
+    _skip_without_q8kv4_prefill(num_q_heads, num_kv_heads)
     torch.manual_seed(0)
     q_lens = [300, 128, 77]
     seq_lens_list = [300, 640, 1100]

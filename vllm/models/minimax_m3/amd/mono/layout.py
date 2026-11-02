@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 """Where the mono layer kernel (K4) puts its tasks and data, per decode token count.
@@ -107,8 +110,9 @@ SCRATCH_BYTES = SCRATCH["_bytes"]
 
 
 def sym_layout(npes: int):
-    """Per-rank symmetric buffer: attn / ffn partial regions, [src rank][token][HIDDEN],
-    and the peers' index-selection candidates (``sel_cp``)."""
+    """Per-rank symmetric buffer: attn / ffn partial regions,
+    `[src rank][token][HIDDEN]`, and the peers' index-selection candidates
+    (``sel_cp``)."""
     rows = npes * MAX_TOKENS * HIDDEN // 2
     # a_ag / ffn_ag: the finished attention / FFN all-reduce rows, each written by
     # its owner rank (the reduce-scatter + all-gather form, S >= AG_RS_FROM)

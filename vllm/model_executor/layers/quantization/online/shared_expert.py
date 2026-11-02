@@ -73,35 +73,38 @@ class OnlineSharedExpertLoader:
             self.stored_key = get_checkpoint_quant_keys(
                 quant_config, f"{shared_expert_prefix}.down_proj", LinearBase
             )[0]
-        if not self.routed_requantized and target_key is not None:
-            if self.stored_key != target_key:
-                from vllm.model_executor.layers.quantization.online.base import (
-                    ONLINE_SHARED_EXPERT_QUANTIZERS,
-                )
+        if (
+            not self.routed_requantized
+            and target_key is not None
+            and self.stored_key != target_key
+        ):
+            from vllm.model_executor.layers.quantization.online.base import (
+                ONLINE_SHARED_EXPERT_QUANTIZERS,
+            )
 
-                if target_key not in ONLINE_SHARED_EXPERT_QUANTIZERS:
-                    raise NotImplementedError(
-                        "Online quantization of fused shared experts is not "
-                        f"supported for weight key {target_key}. Disable FSE or "
-                        "open an issue."
-                    )
-                self.quantizer = ONLINE_SHARED_EXPERT_QUANTIZERS[target_key]
-                # Quantized shared experts are staged, as their weight and scale
-                # are needed together to be dequantized.
-                self.stages_shared_experts = self.stored_key is not None
-                from vllm.model_executor.layers.quantization.online.moe_base import (
-                    OnlineMoEMethodBase,
+            if target_key not in ONLINE_SHARED_EXPERT_QUANTIZERS:
+                raise NotImplementedError(
+                    "Online quantization of fused shared experts is not "
+                    f"supported for weight key {target_key}. Disable FSE or "
+                    "open an issue."
                 )
+            self.quantizer = ONLINE_SHARED_EXPERT_QUANTIZERS[target_key]
+            # Quantized shared experts are staged, as their weight and scale
+            # are needed together to be dequantized.
+            self.stages_shared_experts = self.stored_key is not None
+            from vllm.model_executor.layers.quantization.online.moe_base import (
+                OnlineMoEMethodBase,
+            )
 
-                if self.stages_shared_experts and isinstance(
-                    quant_method, OnlineMoEMethodBase
-                ):
-                    # `finalize` writes into pre-quantized routed experts slots.
-                    raise NotImplementedError(
-                        "Fused shared experts stored quantized are not supported "
-                        "with routed experts quantized online from high "
-                        "precision. Disable FSE or open an issue."
-                    )
+            if self.stages_shared_experts and isinstance(
+                quant_method, OnlineMoEMethodBase
+            ):
+                # `finalize` writes into pre-quantized routed experts slots.
+                raise NotImplementedError(
+                    "Fused shared experts stored quantized are not supported "
+                    "with routed experts quantized online from high "
+                    "precision. Disable FSE or open an issue."
+                )
         self.staging_parameters: dict[str, torch.nn.Parameter] = {}
 
     def _get_shared_target_key(self, online_config) -> QuantKey | None:
@@ -290,6 +293,7 @@ class OnlineSharedExpertLoader:
         Returns:
             The parameter and local expert id to load into, and the load result if
             the tensor was already loaded (None to let the caller load it).
+
         """
         if not self.is_fused_shared_expert(global_expert_id):
             return param, expert_id, None

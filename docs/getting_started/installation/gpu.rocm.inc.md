@@ -1,7 +1,7 @@
 <!-- markdownlint-disable MD041 MD051 -->
 --8<-- [start:installation]
 
-vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 10.0 (the default) and ROCm 7.2.
+vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available for ROCm 10.0; ROCm 7.2 wheels remain available for earlier releases.
 
 #### Prebuilt Wheels
 
@@ -9,7 +9,7 @@ vLLM supports AMD GPUs with ROCm 6.3 or above. Pre-built wheels are available fo
 | ------------ | -------------- | ------------ | ----------------- | ------------------ |
 | `rocm700` | 3.12 | 7.0 | >= 2.35 | `0.14.0` to `0.18.0` |
 | `rocm721` | 3.12 | 7.2.1 | >= 2.35 | Nightly releases after commit `171775f306a333a9cf105bfd533bf3e113d401d9` |
-| `rocm72` | 3.12 | 7.2 | >= 2.39 | Nightly releases on the legacy ROCm 7.2 stack |
+| `rocm72` | 3.12 | 7.2 | >= 2.39 | Earlier nightly releases on the legacy ROCm 7.2 stack (no longer built) |
 | `rocm100` | 3.12 | 10.0 | >= 2.35 | Nightly releases (default) |
 
 --8<-- [end:installation]
@@ -51,7 +51,7 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/ --upgrade
 !!! tip
     The ROCm 10.0 wheels install the ROCm SDK from pip ([TheRock](https://github.com/ROCm/TheRock)), including the GPU kernels for every supported architecture.
 
-    Wheels for the legacy ROCm 7.2 stack, which use a system ROCm installation, remain available at `https://wheels.vllm.ai/rocm/${VLLM_VERSION}/rocm72`.
+    Wheels for the legacy ROCm 7.2 stack, which use a system ROCm installation, remain available for earlier releases at `https://wheels.vllm.ai/rocm/${VLLM_VERSION}/rocm72`.
 
 !!! tip
     You can find out about which ROCm version the latest vLLM supports by checking the `vllm` package in index in extra-index-url <https://wheels.vllm.ai/rocm/> at [https://wheels.vllm.ai/rocm/vllm](https://wheels.vllm.ai/rocm/vllm) .
@@ -234,7 +234,6 @@ You can find more information about vLLM's wheels in
 
 !!! tip
     - The steps below follow [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base), which pins the validated version of every component. If a step does not work for you, refer to it; a Dockerfile is a form of installation steps.
-    - The legacy ROCm 7.2 stack uses a system ROCm installation instead; its steps are in [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base).
 
 0. Install the ROCm SDK and PyTorch (skip if you are already in an environment or docker image with them installed, e.g. `vllm/vllm-openai-rocm:base-nightly`).
 
@@ -371,7 +370,10 @@ The images can be used to run OpenAI compatible server and are available on Dock
 
 - `vllm/vllm-openai-rocm:latest` — stable release, built on ROCm 10.0 (also tagged `latest-rocm100`)
 - `vllm/vllm-openai-rocm:nightly` — preview build from the latest development branch on ROCm 10.0 (also tagged `nightly-rocm100`), use this if you want the latest features and fixes
-- `vllm/vllm-openai-rocm:latest-rocm72` / `nightly-rocm72` — the same builds on the legacy ROCm 7.2 stack, kept for a transition period
+- `vllm/vllm-openai-rocm:latest-rocm72` / `nightly-rocm72` — earlier builds on the legacy ROCm 7.2 stack, no longer updated
+- `vllm/vllm-openai-rocm:base-nightly` / `latest-base` (and their `-rocm100` forms) — the same image without vLLM itself: the ROCm stack plus all of vLLM's dependencies. Earlier builds of these tags held only the ROCm stack ([docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base))
+
+ROCm 10.0 images use zstd-compressed layers; pulling them needs Docker 23 or newer (or containerd 1.5 or newer).
 
 ```bash
 docker run --rm \
@@ -422,56 +424,18 @@ AMD also offered nightly prebuilt docker image from [Docker Hub](https://hub.doc
 --8<-- [end:pre-built-images]
 --8<-- [start:build-image-from-source]
 
-You can build and run vLLM from source via the provided [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm).
+You can build and run vLLM from source via the provided [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm), driven by [docker/docker-bake-rocm.hcl](https://github.com/vllm-project/vllm/blob/main/docker/docker-bake-rocm.hcl) (requires Docker Buildx).
+It uses ROCm 10.0 (installed from TheRock wheels, [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base)). Older vLLM branches support ROCm 5.7 through 7.0.
 
-??? info "(Optional) Build an image with ROCm software stack"
-
-    Build a docker image from [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base) which setup ROCm software stack needed by the vLLM.
-    **This step is optional as this rocm_base image is usually prebuilt and store at [Docker Hub](https://hub.docker.com/r/rocm/vllm-dev) under tag `rocm/vllm-dev:base` to speed up user experience.** For the legacy ROCm 7.2 stack, the base image is built from [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base) and published as `vllm/vllm-openai-rocm:base-nightly-rocm72`.
-    If you choose to build this rocm_base image yourself, the steps are as follows.
-
-    It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration `/etc/docker/daemon.json` as follows and restart the daemon:
-
-    ```json
-    {
-        "features": {
-            "buildkit": true
-        }
-    }
-    ```
-
-    To build vllm on ROCm 10.0 for all supported GPUs, you can use the default:
-
-    ```bash
-    DOCKER_BUILDKIT=1 docker build \
-        -f docker/Dockerfile.rocm_base \
-        -t rocm/vllm-dev:base .
-    ```
-
-First, build a docker image from [docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) and launch a docker container from the image.
-It is important that the user kicks off the docker build using buildkit. Either the user put `DOCKER_BUILDKIT=1` as environment variable when calling docker build command, or the user needs to set up buildkit in the docker daemon configuration /etc/docker/daemon.json as follows and restart the daemon:
-
-```json
-{
-    "features": {
-        "buildkit": true
-    }
-}
-```
-
-[docker/Dockerfile.rocm](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm) uses ROCm 10.0 (installed from TheRock wheels) by default. The legacy ROCm 7.2 stack is available as [docker/Dockerfile.rocm_72](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72) with [docker/Dockerfile.rocm_72_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72_base); older vLLM branches support ROCm 5.7 through 7.0.
-It provides flexibility to customize the build of docker image using the following arguments:
-
-- `BASE_IMAGE`: specifies the base image used when running `docker build`. The default value `rocm/vllm-dev:base` is an image published and maintained by AMD. It is being built using [docker/Dockerfile.rocm_base](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_base). For [docker/Dockerfile.rocm_72](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile.rocm_72), the default is `vllm/vllm-openai-rocm:base-nightly-rocm72`
-- `ARG_PYTORCH_ROCM_ARCH`: Allows to override the gfx architecture values from the base docker image
-
-Their values can be passed in when running `docker build` with `--build-arg` options.
-
-To build vllm on ROCm 10.0 for all supported GPUs, you can use the default (which build a docker image with `vllm serve` as entrypoint):
+To build vllm on ROCm 10.0 for all supported GPUs (an image with `vllm serve` as entrypoint), reusing the published ROCm stack and dependencies (`vllm/vllm-openai-rocm:base-nightly`) so that only vLLM itself is compiled:
 
 ```bash
-DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vllm-openai-rocm .
+STACK_IMAGE=vllm/vllm-openai-rocm:base-nightly RUNTIME=vllm/vllm-openai-rocm:base-nightly \
+    TAG=vllm/vllm-openai-rocm docker buildx bake -f docker/docker-bake-rocm.hcl vllm-openai
 ```
+
+Without `STACK_IMAGE` and `RUNTIME`, the ROCm stack and every dependency are built from source as well, which takes several hours.
+To compile vLLM only for your GPU, add for example `--set vllm-openai.args.ARCH=gfx942`.
 
 To run vLLM with the custom-built Docker image:
 

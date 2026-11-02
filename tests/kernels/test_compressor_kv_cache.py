@@ -31,6 +31,7 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
 )
 from vllm.models.deepseek_v4.compressor import _get_c128_boundary
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.mla.compressor_utils import (
     get_dspark_swa_index_width,
 )
@@ -797,6 +798,157 @@ def test_v41_nvfp4_gather_matches_insert(num_reqs, num_tokens, partial):
         gather_lens.sub_(1)
     graph.replay()
     check(1)
+
+
+@triton.jit
+def _per_token_nvfp4_gather_kernel(
+    out_ptr,
+    out_stride0,
+    out_stride1,
+    k_cache_ptr,
+    seq_lens_ptr,
+    block_table_ptr,
+    offset,
+    gather_lens_ptr,
+    max_blocks_per_seq: tl.constexpr,
+    cache_block_size: tl.constexpr,
+    block_stride: tl.constexpr,
+):
+    """Reference for the tiled NVFP4 gather: one token per iteration, with
+    the e2m1 grid decoded arithmetically."""
+    batch_idx = tl.program_id(0)
+    seq_len = tl.load(seq_lens_ptr + batch_idx)
+    if gather_lens_ptr is not None:  # noqa: SIM108
+        gather_len = tl.load(gather_lens_ptr + batch_idx)
+    else:
+        gather_len = seq_len
+    start_pos = seq_len - gather_len
+    d = tl.arange(0, 512)
+    for i in range(tl.program_id(1), gather_len, tl.num_programs(1)):
+        pos = start_pos + i
+        physical_block_idx = tl.load(
+            block_table_ptr + batch_idx * max_blocks_per_seq + pos // cache_block_size
+        )
+        page = k_cache_ptr + physical_block_idx.to(tl.int64) * block_stride
+        token_ptr = page + (pos % cache_block_size) * 288
+        packed = tl.load(token_ptr + tl.arange(0, 256))
+        codes = tl.interleave((packed & 0xF).to(tl.int32), (packed >> 4).to(tl.int32))
+        mag_code = codes & 7
+        e = (mag_code >> 1).to(tl.float32)
+        m = (mag_code & 1).to(tl.float32)
+        mag = tl.where(mag_code < 2, m * 0.5, (1.0 + m * 0.5) * tl.exp2(e - 1.0))
+        vals = tl.where(codes >= 8, -mag, mag)
+        sf = tl.load(token_ptr + 256 + tl.arange(0, 32))
+        scale = sf.to(tl.float8e4nv, bitcast=True).to(tl.float32)
+        dequant = tl.reshape(tl.reshape(vals, (32, 16)) * scale[:, None], (512,))
+        out_row_ptr = out_ptr + batch_idx * out_stride0 + (offset + i) * out_stride1
+        tl.store(out_row_ptr + d, dequant.to(tl.bfloat16))
+
+
+def _per_token_nvfp4_gather(
+    out, k_cache, seq_lens, gather_lens, block_table, block_size, offset
+):
+    _per_token_nvfp4_gather_kernel[(seq_lens.shape[0], 128)](
+        out,
+        out.stride(0),
+        out.stride(1),
+        k_cache,
+        seq_lens,
+        block_table,
+        offset,
+        gather_lens,
+        max_blocks_per_seq=block_table.shape[-1],
+        cache_block_size=block_size,
+        block_stride=k_cache.stride(0),
+    )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+@pytest.mark.parametrize(
+    "block_size,num_reqs", [(64, 1), (128, 3), (64, 17), (128, 64)]
+)
+@pytest.mark.parametrize("partial", [False, True])
+def test_v41_nvfp4_gather_ragged_batch(block_size, num_reqs, partial):
+    """The NVFP4 gather writes the same bits as the per-token reference on
+    arbitrary cache bytes (NaN, subnormal and negative scales included) for
+    ragged batches: empty requests, partial last blocks and a long context, a
+    shuffled block table holding -1 in every slot the gather must not read,
+    and an offset into a wider strided workspace."""
+    from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
+
+    torch.manual_seed(19)
+    device = "cuda"
+    if num_reqs == 1:
+        seq_lens_list = [65_541]
+    else:
+        edges = [0, 1, block_size - 1, block_size, block_size + 1, 3 * block_size + 5]
+        seq_lens_list = (edges + torch.randint(0, 5000, (num_reqs,)).tolist())[
+            :num_reqs
+        ]
+    gather_lens_list = (
+        [int(torch.randint(0, n + 1, ())) for n in seq_lens_list] if partial else None
+    )
+    offset = 7 if partial else 0
+
+    blocks_per_req = [math.ceil(n / block_size) for n in seq_lens_list]
+    num_blocks = sum(blocks_per_req) + 1
+    # Padded pages, so the block stride is not block_size * 288.
+    page_bytes = block_size * 288 + 512
+    backing = torch.randint(
+        0, 256, (num_blocks, page_bytes), dtype=torch.uint8, device=device
+    )
+    cache = backing.as_strided((num_blocks, block_size, 288), (page_bytes, 288, 1))
+    pages = iter(torch.randperm(num_blocks).tolist())
+    block_table = torch.full((num_reqs, max(blocks_per_req) + 2), -1, dtype=torch.int32)
+    for req, seq_len in enumerate(seq_lens_list):
+        start = 0 if gather_lens_list is None else seq_len - gather_lens_list[req]
+        for block in range(start // block_size, blocks_per_req[req]):
+            block_table[req, block] = next(pages)
+    block_table = block_table.to(device)
+    seq_lens = torch.tensor(seq_lens_list, dtype=torch.int32, device=device)
+    gather_lens = (
+        None
+        if gather_lens_list is None
+        else torch.tensor(gather_lens_list, dtype=torch.int32, device=device)
+    )
+
+    width = max(seq_lens_list) + offset
+    storage = torch.full(
+        (num_reqs, width + 9, 512), -123.0, dtype=torch.bfloat16, device=device
+    )
+    args = (cache, seq_lens, gather_lens, block_table)
+    dequantize_and_gather_k_cache(
+        storage[:, :width], *args, block_size=block_size, offset=offset
+    )
+    expected = torch.full_like(storage, -123.0)
+    _per_token_nvfp4_gather(expected[:, :width], *args, block_size, offset)
+    assert torch.equal(storage.view(torch.int16), expected.view(torch.int16))
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA only")
+def test_v41_nvfp4_gather_decodes_every_code_and_scale():
+    """Every (packed byte, e4m3 scale byte) pair: token t holds the bytes
+    0..255, and scale byte t for all of its 32 groups."""
+    from vllm.models.deepseek_v41.common.ops import dequantize_and_gather_k_cache
+
+    device, block_size = "cuda", 64
+    codes = torch.arange(256, device=device).to(torch.uint8)
+    records = torch.empty(256, 288, dtype=torch.uint8, device=device)
+    records[:, :256] = codes
+    records[:, 256:] = codes[:, None]
+    args = (
+        records.view(256 // block_size, block_size, 288),
+        torch.tensor([256], dtype=torch.int32, device=device),
+        None,
+        torch.arange(4, dtype=torch.int32, device=device)[None],
+        block_size,
+        0,
+    )
+    out = torch.empty(1, 256, 512, dtype=torch.bfloat16, device=device)
+    expected = torch.empty_like(out)
+    dequantize_and_gather_k_cache(out, *args)
+    _per_token_nvfp4_gather(expected, *args)
+    assert torch.equal(out.view(torch.int16), expected.view(torch.int16))
 
 
 @pytest.mark.skipif(

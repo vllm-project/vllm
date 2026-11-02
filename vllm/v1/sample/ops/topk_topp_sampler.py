@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from subprocess import CalledProcessError
-from typing import Any
 
 import torch
 import torch.nn as nn
@@ -14,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import HAS_TRITON
+from vllm.utils.flashinfer import has_flashinfer
 
 if HAS_TRITON:
     from vllm.v1.sample.ops.topk_topp_triton import (
@@ -27,14 +27,14 @@ if HAS_TRITON:
 logger = init_logger(__name__)
 
 
-def register_top_k_top_p_warmups(**warmup_kwargs: Any) -> None:
+def register_top_k_top_p_warmups() -> None:
     """Register every native accelerator sampling kernel used at runtime."""
     if HAS_TRITON and not current_platform.is_cpu():
-        _topk_topp.register_warmup(**warmup_kwargs)
+        _topk_topp.register_warmup()
         if current_platform.is_cuda_alike():
-            _topp_split_stats.register_warmup(**warmup_kwargs)
-            _topp_split_step.register_warmup(**warmup_kwargs)
-            _topp_split_mask.register_warmup(**warmup_kwargs)
+            _topp_split_stats.register_warmup()
+            _topp_split_step.register_warmup()
+            _topp_split_mask.register_warmup()
 
 
 def _aiter_temp_gumbel_sample(
@@ -129,7 +129,9 @@ def flashinfer_sampler_supported() -> bool:
     capability = current_platform.get_device_capability()
     assert capability is not None
     unsupported_reason: str | None = None
-    if not FlashInferBackend.supports_compute_capability(capability):
+    if not has_flashinfer():
+        unsupported_reason = "FlashInfer kernels are disabled"
+    elif not FlashInferBackend.supports_compute_capability(capability):
         unsupported_reason = (
             f"unsupported compute capability {capability.as_version_str()}"
         )
