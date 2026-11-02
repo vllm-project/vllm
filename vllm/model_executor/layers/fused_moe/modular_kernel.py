@@ -954,6 +954,10 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     def finalize_weight_and_reduce_impl(self) -> TopKWeightAndReduce:
         raise NotImplementedError
 
+    def supports_output_addend(self) -> bool:
+        """Whether `apply` can accumulate into `addend` after `addend_ready`."""
+        return False
+
     @abstractmethod
     def apply(
         self,
@@ -1336,6 +1340,7 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
         output_alias: torch.Tensor | None = None,
+        shared_experts: SharedExperts | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1388,6 +1393,16 @@ class FusedMoEKernelModularImpl:
         elif use_output_alias:
             fused_out = output_alias
 
+        addend_kwargs: dict[str, Any] = {}
+        if (
+            shared_experts is not None
+            and not self.prepare_finalize.supports_async()
+            and self.fused_experts.supports_output_addend()
+        ):
+            claimed = shared_experts.claim_output(fused_out)
+            if claimed is not None:
+                addend_kwargs = dict(addend=claimed[0], addend_ready=claimed[1])
+
         unfinalized = self.fused_experts.apply(
             output=fused_out,
             hidden_states=a1q,
@@ -1404,6 +1419,7 @@ class FusedMoEKernelModularImpl:
             workspace2=workspace2,
             expert_tokens_meta=expert_tokens_meta,
             apply_router_weight_on_input=apply_router_weight_on_input,
+            **addend_kwargs,
         )
 
         # Experts that stopped after GEMM2 wrote nothing into `fused_out`; the
@@ -1575,6 +1591,7 @@ class FusedMoEKernelModularImpl:
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
             output_alias=output,
+            shared_experts=shared_experts,
         )
 
         if lora_ctx is not None:
@@ -1727,6 +1744,13 @@ class FusedMoEKernel:
 
         self._post_init_setup()
 
+        # Resolved eagerly: the runner queries this while being traced.
+        self._supports_output_addend = (
+            isinstance(self.impl, FusedMoEKernelModularImpl)
+            and not self.prepare_finalize.supports_async()
+            and self.impl.fused_experts.supports_output_addend()
+        )
+
     @property
     def can_overlap_shared_experts(self) -> bool:
         if isinstance(self.impl, FusedMoEKernelModularImpl):
@@ -1771,6 +1795,9 @@ class FusedMoEKernel:
 
     def supports_deferred_moe_finalize(self) -> bool:
         return self.prepare_finalize.supports_deferred_moe_finalize()
+
+    def supports_output_addend(self) -> bool:
+        return self._supports_output_addend
 
     def apply_monolithic(
         self,

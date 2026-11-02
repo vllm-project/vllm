@@ -325,7 +325,7 @@ def _validate_rocm_aiter_fused_moe_shared_expert_args(
     return has_shared_expert
 
 
-def _rocm_aiter_fused_moe_impl(
+def _aiter_fused_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
     w2: torch.Tensor,
@@ -356,6 +356,7 @@ def _rocm_aiter_fused_moe_impl(
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
     q_dtype_a: torch.dtype | None = None,
+    **fused_moe_kwargs,
 ) -> torch.Tensor:
     has_shared_expert = _validate_rocm_aiter_fused_moe_shared_expert_args(
         shared_w1,
@@ -395,6 +396,7 @@ def _rocm_aiter_fused_moe_impl(
         # is checked at config time, so this is only reached on an AITER
         # build new enough to accept it.
         extra_kwargs["quant_dtype_a"] = q_dtype_a
+    extra_kwargs.update(fused_moe_kwargs)
 
     return fused_moe(
         hidden_states,
@@ -420,6 +422,41 @@ def _rocm_aiter_fused_moe_impl(
         swiglu_limit=swiglu_limit,
         **extra_kwargs,
     )
+
+
+def _rocm_aiter_fused_moe_impl(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weight: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_mask: torch.Tensor | None = None,
+    activation_method: int = 0,
+    quant_method: int = 0,
+    doweight_stage1: bool = False,
+    w1_scale: torch.Tensor | None = None,
+    w2_scale: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    num_local_tokens: torch.Tensor | None = None,
+    output_dtype: torch.dtype | None = None,
+    hidden_pad: int = 0,
+    intermediate_pad: int = 0,
+    gate_mode: str = "",
+    bias1: torch.Tensor | None = None,
+    bias2: torch.Tensor | None = None,
+    moe_sorting_dispatch_policy: int = 0,
+    swiglu_limit: float = 0.0,
+    beta: float | None = None,
+    linear_beta: float | None = None,
+    shared_w1: torch.Tensor | None = None,
+    shared_w2: torch.Tensor | None = None,
+    shared_w1_scale: torch.Tensor | None = None,
+    shared_w2_scale: torch.Tensor | None = None,
+    shared_expert_id: int = -1,
+    q_dtype_a: torch.dtype | None = None,
+) -> torch.Tensor:
+    return _aiter_fused_moe(**locals())
 
 
 def _rocm_aiter_fused_moe_fake(
@@ -2883,6 +2920,17 @@ class rocm_aiter_ops:
 
         return "quant_dtype_a" in inspect.signature(fused_moe).parameters
 
+    @classmethod
+    @if_aiter_supported
+    @functools.cache
+    def fused_moe_supports_accumulate_output(cls) -> bool:
+        """Probe whether the installed aiter.fused_moe accepts `accumulate_output`."""
+        import inspect
+
+        from aiter.fused_moe import fused_moe
+
+        return "output_ready_event" in inspect.signature(fused_moe).parameters
+
     @staticmethod
     def _probe_dsv4_i384_fhmoe_capability(num_tokens: int) -> bool:
         """Probe AITER's CSV-backed DSV4 native-I384 FHMoE contract."""
@@ -3575,7 +3623,48 @@ class rocm_aiter_ops:
         shared_w2_scale: torch.Tensor | None = None,
         shared_expert_id: int = -1,
         q_dtype_a: torch.dtype | None = None,
+        addend: torch.Tensor | None = None,
+        addend_ready: torch.cuda.Event | None = None,
     ) -> torch.Tensor:
+        """With `addend`, accumulates into it and returns it, waiting on
+        `addend_ready` only before stage 2. Eager only: the event can't cross
+        the custom-op schema."""
+        if addend is not None:
+            return _aiter_fused_moe(
+                hidden_states,
+                w1,
+                w2,
+                topk_weight,
+                topk_ids,
+                expert_mask,
+                activation_method,
+                quant_method,
+                doweight_stage1,
+                w1_scale,
+                w2_scale,
+                a1_scale,
+                a2_scale,
+                num_local_tokens,
+                output_dtype,
+                hidden_pad,
+                intermediate_pad,
+                gate_mode,
+                bias1,
+                bias2,
+                moe_sorting_dispatch_policy,
+                swiglu_limit,
+                beta,
+                linear_beta,
+                shared_w1,
+                shared_w2,
+                shared_w1_scale,
+                shared_w2_scale,
+                shared_expert_id,
+                q_dtype_a,
+                output=addend,
+                accumulate_output=True,
+                output_ready_event=addend_ready,
+            )
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
             w1,

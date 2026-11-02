@@ -291,6 +291,8 @@ def rocm_aiter_fused_experts(
     shared_w1_scale: torch.Tensor | None = None,
     shared_w2_scale: torch.Tensor | None = None,
     shared_expert_id: int = -1,
+    addend: torch.Tensor | None = None,
+    addend_ready: torch.cuda.Event | None = None,
 ) -> torch.Tensor:
     """ROCm AITER fused MoE expert computation."""
     if quant_config is None:
@@ -338,7 +340,7 @@ def rocm_aiter_fused_experts(
             "AITER tkw1 kernel does not support `num_local_tokens`"
         )
 
-        return rocm_aiter_ops.asm_moe_tkw1(
+        result = rocm_aiter_ops.asm_moe_tkw1(
             hidden_states,
             w1,
             w2,
@@ -353,6 +355,11 @@ def rocm_aiter_fused_experts(
             expert_mask=expert_mask,
             activation_method=activation_method,
         )
+        if addend is None:
+            return result
+        if addend_ready is not None:
+            torch.cuda.current_stream().wait_event(addend_ready)
+        return addend.add_(result)
 
     else:
         quant_method = QuantMethod.NO.value
@@ -475,6 +482,8 @@ def rocm_aiter_fused_experts(
             shared_w2_scale=shared_w2_scale,
             shared_expert_id=shared_expert_id,
             q_dtype_a=q_dtype_a,
+            addend=addend,
+            addend_ready=addend_ready,
         )
 
 
@@ -537,6 +546,9 @@ class AiterExperts(mk.FusedMoEExpertsModular):
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
 
+    def supports_output_addend(self) -> bool:
+        return rocm_aiter_ops.fused_moe_supports_accumulate_output()
+
     def workspace_shapes(
         self,
         M: int,
@@ -576,6 +588,8 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         workspace2: torch.Tensor,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
+        addend: torch.Tensor | None = None,
+        addend_ready: torch.cuda.Event | None = None,
     ):
         # TODO(rob): rocm_aiter_fused_experts uses self.quant_config's
         # a_scales for static quantization. Update this to fit better
@@ -601,6 +615,8 @@ class AiterExperts(mk.FusedMoEExpertsModular):
             num_local_tokens=num_local_tokens,
             output_dtype=output.dtype,
             moe_sorting_dispatch_policy=rocm_aiter_ops.get_moe_dispatch_policy(),
+            addend=addend,
+            addend_ready=addend_ready,
         )
         # avoid redundant copy when output is a view of the result
         if (

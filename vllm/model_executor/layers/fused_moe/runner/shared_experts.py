@@ -53,6 +53,10 @@ class SharedExperts(torch.nn.Module):
         # index is always 0 and the second output list element is ignored.
         self.enable_dbo = enable_dbo
         self._output: list[torch.Tensor | None] = [None, None]
+        self._output_async = [False, False]
+        self._output_claimed = [False, False]
+        # Set by the runner; gates `claim_output`.
+        self.fold_output = False
         self._layer = layer
         self._moe_config = moe_config
 
@@ -158,6 +162,7 @@ class SharedExperts(torch.nn.Module):
             self._input_ready_event[idx].wait(self._stream)
             self._output[idx] = self._layer(shared_experts_input)
             self._output_ready_event[idx].record(self._stream)
+        self._output_async[idx] = True
         return True
 
     def wait(self) -> None:
@@ -169,11 +174,38 @@ class SharedExperts(torch.nn.Module):
     def _output_idx(self) -> int:
         return dbo_current_ubatch_id() if self.enable_dbo else 0
 
+    def claim_output(
+        self, like: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.cuda.Event | None] | None:
+        """Return (output, ready event or None) for the routed experts to
+        accumulate into, or None if it can't be used in place of `like`."""
+        idx = self._output_idx
+        output = self._output[idx]
+        if (
+            not self.fold_output
+            or output is None
+            or output.shape != like.shape
+            or output.dtype != like.dtype
+            or output.device != like.device
+            or not output.is_contiguous()
+        ):
+            return None
+        self._output_claimed[idx] = True
+        event = self._output_ready_event[idx] if self._output_async[idx] else None
+        return output, event
+
+    @property
+    def output_claimed(self) -> bool:
+        return self._output_claimed[self._output_idx]
+
     @property
     def output(self) -> torch.Tensor:
-        assert self._output[self._output_idx] is not None
-        output = self._output[self._output_idx]
-        self._output[self._output_idx] = None
+        idx = self._output_idx
+        output = self._output[idx]
+        assert output is not None
+        self._output[idx] = None
+        self._output_async[idx] = False
+        self._output_claimed[idx] = False
         return output
 
     def forward(
