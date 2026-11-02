@@ -1,0 +1,88 @@
+suite: test service monitor
+templates:
+  - servicemonitor.yaml
+release:
+  name: demo
+  namespace: serving
+tests:
+  - it: should not require a ServiceMonitor when disabled
+    asserts:
+      - hasDocuments:
+          count: 0
+
+  - it: should scrape this release's service without filtering by default
+    set:
+      serviceMonitor.enabled: true
+    asserts:
+      - isKind:
+          of: ServiceMonitor
+      - equal:
+          path: metadata.namespace
+          value: serving
+      - equal:
+          path: spec.selector.matchLabels
+          value:
+            app.kubernetes.io/instance: demo
+      - equal:
+          path: spec.endpoints
+          value:
+            - port: service-port
+              path: /metrics
+              interval: 30s
+
+  - it: should keep only matching metric names for an allowlist
+    set:
+      serviceMonitor.enabled: true
+      serviceMonitor.metricFilter.regex: 'vllm:.*'
+    asserts:
+      - equal:
+          path: spec.endpoints[0].metricRelabelings
+          value:
+            - sourceLabels: [__name__]
+              action: keep
+              regex: 'vllm:.*'
+
+  - it: should drop matching metric names for a denylist
+    set:
+      serviceMonitor.enabled: true
+      serviceMonitor.metricFilter.action: drop
+      serviceMonitor.metricFilter.regex: '(python|process)_.*'
+    asserts:
+      - equal:
+          path: spec.endpoints[0].metricRelabelings
+          value:
+            - sourceLabels: [__name__]
+              action: drop
+              regex: '(python|process)_.*'
+
+  - it: should honor the service name, operator labels and endpoint overrides
+    set:
+      serviceName: vllm-api
+      serviceMonitor.enabled: true
+      serviceMonitor.additionalLabels:
+        release: prometheus
+      serviceMonitor.port: metrics
+      serviceMonitor.path: /custom-metrics
+      serviceMonitor.interval: 15s
+    asserts:
+      - equal:
+          path: metadata.name
+          value: vllm-api
+      - equal:
+          path: metadata.labels
+          value:
+            release: prometheus
+      - equal:
+          path: spec.endpoints
+          value:
+            - port: metrics
+              path: /custom-metrics
+              interval: 15s
+
+  - it: should reject unsupported filtering actions
+    set:
+      serviceMonitor.enabled: true
+      serviceMonitor.metricFilter.action: replace
+    asserts:
+      - failedTemplate:
+          errorPattern: 'serviceMonitor.*metricFilter.*action'
