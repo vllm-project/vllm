@@ -361,6 +361,7 @@ class UBatchRunner:
         init_dbo_tp_comms(self.parallel_config)
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
+        # TODO: remove once hipblasLtCreate no longer issues a null-stream memset.
         if current_platform.is_rocm():
             self._warm_blas_lt_handles()
 

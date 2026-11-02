@@ -725,7 +725,7 @@ class ParallelConfig:
 
     @property
     def dbo_tp_only(self) -> bool:
-        """DBO with one DP rank and no EP: microbatches overlap TP all-reduces."""
+        """DBO with TP and no EP"""
         return (
             self.use_ubatching
             and self.data_parallel_size == 1

@@ -154,7 +154,7 @@ def fused_allreduce_gemma_rms_norm(
         # No all-reduce needed; identical to the unfused path.
         return norm(hidden_states, residual)
 
-    # Under DBO every all-reduce must reach the microbatch hand-off hook.
+    # Turn off fuse. Under DBO every all-reduce must reach the microbatch hand-off hook.
     ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size)
     if ok and not dbo_enabled():
         norm_out = torch.empty_like(hidden_states)
