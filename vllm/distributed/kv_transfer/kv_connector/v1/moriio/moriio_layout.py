@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable, Mapping
+from math import prod
 from typing import NamedTuple, cast
 
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-    MambaConvSplitInfo,
-)
+from vllm.distributed.kv_transfer.kv_connector.utils import mamba_tp_transfer_chunks
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -327,10 +327,6 @@ def kda_conv_ssm(
     spec: MambaSpec,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return zero-copy conv and SSM views over a packed two-state page."""
-    from math import prod
-
-    from vllm.utils.torch_utils import get_dtype_size
-
     if len(spec.shapes) != 2 or len(spec.dtypes) != 2:
         raise ValueError(
             "MoRIIO KDA transfer requires exactly two states (conv and SSM)"
@@ -507,18 +503,33 @@ class MambaOffsetTemplate(NamedTuple):
     conv_subprojs: tuple[tuple[int, int, int], ...]
 
 
+def mamba_conv_proj_bytes(spec: MambaSpec) -> tuple[int, ...]:
+    """Byte sizes of the conv sub-projections ``spec`` shards across TP,
+    in page order."""
+    conv_bytes = prod(spec.shapes[0]) * get_dtype_size(spec.dtypes[0])
+    runs = mamba_tp_transfer_chunks(spec, 1, 0, 1, 0, receiving=True)
+    proj_bytes = tuple(size for offset, _, size in runs if offset < conv_bytes)
+    if sum(proj_bytes) != conv_bytes:
+        raise ValueError(
+            f"{type(spec).__name__} does not shard its conv state by "
+            "sub-projection; MoRIIO needs a Mamba1, Mamba2 or GDN spec with "
+            "VLLM_SSM_CONV_STATE_LAYOUT=DS"
+        )
+    return proj_bytes
+
+
 def build_mamba_offset_template(
     conv: torch.Tensor,
     ssm: torch.Tensor,
-    split_info: MambaConvSplitInfo,
+    conv_proj_bytes: tuple[int, ...],
     tp_ratio: int,
 ) -> MambaOffsetTemplate:
     """Precompute the slot-independent conv+ssm offset decomposition.
 
     Only homogeneous TP (``tp_ratio == 1``) is supported; heterogeneous TP is
     gated with ``NotImplementedError`` (see the design doc). The returned
-    template is a pure function of the layer geometry and ``split_info``, so it
-    can be cached and reused across requests without recomputation.
+    template is a pure function of the layer geometry and ``conv_proj_bytes``,
+    so it can be cached and reused across requests without recomputation.
     """
     if tp_ratio != 1:
         # Heterogeneous-TP recurrent-state transfer needs the remote page's
@@ -532,19 +543,17 @@ def build_mamba_offset_template(
             "hybrid models"
         )
     geom = get_mamba_transfer_geometry(conv, ssm)
-    conv_local_offsets = split_info.local_conv_offsets
-    conv_remote_offsets = split_info.remote_conv_offsets(0, 1)
-    ssm_read_bytes = geom.ssm_slot_bytes
-    conv_subprojs = tuple(
-        (loff, roff, rsz)
-        for (loff, _lsz), (roff, rsz) in zip(conv_local_offsets, conv_remote_offsets)
-    )
+    conv_subprojs = []
+    offset = 0
+    for size in conv_proj_bytes:
+        conv_subprojs.append((offset, offset, size))
+        offset += size
     return MambaOffsetTemplate(
         num_slots=conv.shape[0],
         conv_slot_stride_bytes=geom.conv_slot_stride * geom.conv_element_size,
         ssm_slot_stride_bytes=geom.ssm_slot_stride * geom.ssm_element_size,
-        ssm_read_bytes=ssm_read_bytes,
-        conv_subprojs=conv_subprojs,
+        ssm_read_bytes=geom.ssm_slot_bytes,
+        conv_subprojs=tuple(conv_subprojs),
     )
 
 
@@ -603,14 +612,14 @@ def apply_mamba_offset_template(
 
 def compute_mamba_conv_split_count(
     local_slots: list[int],
-    split_info: MambaConvSplitInfo,
+    conv_proj_bytes: tuple[int, ...],
 ) -> int:
     """Number of leading conv entries in a KDA layer transfer plan.
 
     Entries ``[:count]`` are conv sub-projections (conv region/session);
     entries ``[count:]`` are the per-slot ssm state (ssm region/session).
     """
-    return len(local_slots) * len(split_info.local_conv_offsets)
+    return len(local_slots) * len(conv_proj_bytes)
 
 
 class HeadLayout(NamedTuple):
@@ -836,14 +845,14 @@ class MambaStateLayout(NamedTuple):
 
 
 def get_mamba_state_layout(
-    conv: torch.Tensor, ssm: torch.Tensor, split_info: MambaConvSplitInfo
+    conv: torch.Tensor, ssm: torch.Tensor, conv_proj_bytes: tuple[int, ...]
 ) -> MambaStateLayout:
     geom = get_mamba_transfer_geometry(conv, ssm)
     return MambaStateLayout(
         conv_slot_stride=geom.conv_slot_stride * geom.conv_element_size,
         ssm_slot_stride=geom.ssm_slot_stride * geom.ssm_element_size,
         ssm_bytes=geom.ssm_slot_bytes,
-        conv_proj_bytes=split_info.proj_bytes,
+        conv_proj_bytes=conv_proj_bytes,
     )
 
 

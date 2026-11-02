@@ -3,7 +3,7 @@
 """Backend for GatedDeltaNet attention."""
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, replace
 from typing import Literal
 
 import torch
@@ -14,6 +14,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     MambaPrefillCheckpointBuilder,
     MambaPrefillCheckpointMetadata,
 )
+from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -72,6 +73,22 @@ class GDNFlashInferCheckpointPlan:
     rows: torch.Tensor
 
 
+@dataclass(frozen=True)
+class GDNSpec(MambaSpec):
+    """Conv state ``[Q | K | V, conv]`` (``dim(Q) == dim(K)``) and temporal
+    state ``[v_heads, v_dim, k_dim]``; Q, K, V and heads are each sharded
+    across TP."""
+
+    def _tp_segments(self) -> tuple[tuple[int, ...], ...] | None:
+        if len(self.shapes) != 2:
+            return None
+        conv, temporal = self.shapes
+        value = temporal[0] * temporal[1]
+        key = (conv[0] - value) // 2
+        assert 2 * key + value == conv[0], f"Unexpected GDN state {self.shapes}"
+        return (key, key, value), (temporal[0],)
+
+
 class GDNAttentionBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
@@ -88,6 +105,13 @@ class GDNAttentionBackend(AttentionBackend):
     @classmethod
     def supports_device_cpu_query_lens_mismatch(cls) -> bool:
         return True
+
+    @classmethod
+    def customize_mamba_spec(cls, spec: MambaSpec) -> MambaSpec:
+        # Sub-projections are contiguous only with (dim, state_len) conv state.
+        if not is_conv_state_dim_first():
+            return spec
+        return GDNSpec(**{f.name: getattr(spec, f.name) for f in fields(spec)})
 
 
 @dataclass

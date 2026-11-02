@@ -15,14 +15,14 @@ cache and recurrent state into the decode (consumer) ranks that need it:
   block. Copies that would be identical (MLA, replicated heads) are written by
   one producer only.
 
-Heads follow vLLM's sharding: with ``tp_size <= num_kv_heads`` rank ``i`` holds
-heads ``[i * n, (i + 1) * n)`` with ``n = num_kv_heads // tp_size``; with more
-ranks than heads every rank holds the single head ``i * num_kv_heads //
-tp_size``.
+Which KV heads move between two ranks is decided by
+``AttentionSpec.slice_for_tp_transfer``.
 """
 
 from dataclasses import dataclass
 from functools import cache
+
+from vllm.distributed.kv_transfer.kv_connector.utils import kv_head_transfer
 
 
 @dataclass(frozen=True)
@@ -69,14 +69,6 @@ class MoRIIOWriteTPMapping:
         return target.num_heads == self.local_num_heads == self.remote_num_heads
 
 
-def _rank_heads(tp_rank: int, tp_size: int, total_num_kv_heads: int) -> range:
-    if tp_size <= total_num_kv_heads:
-        per_rank = total_num_kv_heads // tp_size
-        return range(tp_rank * per_rank, (tp_rank + 1) * per_rank)
-    head = tp_rank * total_num_kv_heads // tp_size
-    return range(head, head + 1)
-
-
 def validate_write_tp_topology(
     producer_tp_size: int,
     consumer_tp_size: int,
@@ -115,19 +107,30 @@ def _producer_targets(
     num_heads: int,
     has_mamba: bool,
 ) -> list[WriteTarget]:
-    local_heads = _rank_heads(producer_tp_rank, producer_tp_size, num_heads)
+    def moved_heads(producer: int, consumer: int) -> tuple[slice, slice] | None:
+        return kv_head_transfer(
+            num_heads,
+            producer_tp_size,
+            producer,
+            consumer_tp_size,
+            consumer,
+            receiving=False,
+        )
+
     if consumer_tp_size >= producer_tp_size:
         ratio = consumer_tp_size // producer_tp_size
         targets = []
         for j in range(ratio):
             tp_rank = producer_tp_rank * ratio + j
-            remote_heads = _rank_heads(tp_rank, consumer_tp_size, num_heads)
+            moved = moved_heads(producer_tp_rank, tp_rank)
+            assert moved is not None
+            local_heads, remote_heads = moved
             targets.append(
                 WriteTarget(
                     tp_rank=tp_rank,
-                    local_head=remote_heads.start - local_heads.start,
-                    remote_head=0,
-                    num_heads=len(remote_heads),
+                    local_head=local_heads.start,
+                    remote_head=remote_heads.start,
+                    num_heads=local_heads.stop - local_heads.start,
                     local_slice=j,
                     local_slices=ratio,
                     remote_slice=0,
@@ -139,34 +142,22 @@ def _producer_targets(
 
     ratio = producer_tp_size // consumer_tp_size
     tp_rank = producer_tp_rank // ratio
-    remote_heads = _rank_heads(tp_rank, consumer_tp_size, num_heads)
-    # The first producer holding a head writes it; the others hold an
-    # identical copy and skip the attention write.
-    group = range(tp_rank * ratio, (tp_rank + 1) * ratio)
-    first_holder = next(
-        p
-        for p in group
-        if _rank_heads(p, producer_tp_size, num_heads).start == local_heads.start
-    )
-    writes_attention = first_holder == producer_tp_rank
-    if not writes_attention and not has_mamba:
+    # Producers holding an identical copy of the heads skip the attention write.
+    moved = moved_heads(producer_tp_rank, tp_rank)
+    if moved is None and not has_mamba:
         return []
     writers = sum(
         1
-        for p in group
-        if has_mamba
-        or _rank_heads(p, producer_tp_size, num_heads).start
-        not in {
-            _rank_heads(q, producer_tp_size, num_heads).start
-            for q in range(group.start, p)
-        }
+        for p in range(tp_rank * ratio, (tp_rank + 1) * ratio)
+        if has_mamba or moved_heads(p, tp_rank) is not None
     )
+    local_heads, remote_heads = moved or (slice(0, 0), slice(0, 0))
     return [
         WriteTarget(
             tp_rank=tp_rank,
-            local_head=0,
-            remote_head=local_heads.start - remote_heads.start,
-            num_heads=len(local_heads) if writes_attention else 0,
+            local_head=local_heads.start,
+            remote_head=remote_heads.start,
+            num_heads=local_heads.stop - local_heads.start,
             local_slice=0,
             local_slices=1,
             remote_slice=producer_tp_rank % ratio,
@@ -194,14 +185,11 @@ def compute_write_tp_mapping(
             f"producer_tp_rank {producer_tp_rank} must be in [0, {producer_tp_size})"
         )
     num_heads = 1 if is_mla else total_num_kv_heads
-    first_remote_rank = producer_tp_rank * consumer_tp_size // producer_tp_size
     return MoRIIOWriteTPMapping(
         producer_tp_size=producer_tp_size,
         consumer_tp_size=consumer_tp_size,
-        local_num_heads=len(_rank_heads(producer_tp_rank, producer_tp_size, num_heads)),
-        remote_num_heads=len(
-            _rank_heads(first_remote_rank, consumer_tp_size, num_heads)
-        ),
+        local_num_heads=max(1, num_heads // producer_tp_size),
+        remote_num_heads=max(1, num_heads // consumer_tp_size),
         targets=tuple(
             _producer_targets(
                 producer_tp_rank,

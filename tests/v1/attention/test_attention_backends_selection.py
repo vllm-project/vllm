@@ -35,6 +35,7 @@ def test_replayssm_does_not_reserve_speculative_state_blocks(
         get_state_dtype=lambda: (torch.float32,),
         mamba_type=MambaAttentionBackendEnum.MAMBA2,
         is_kv_cache_tp_replicated=False,
+        get_attn_backend=MambaAttentionBackendEnum.MAMBA2.get_class,
     )
     vllm_config = SimpleNamespace(
         cache_config=SimpleNamespace(

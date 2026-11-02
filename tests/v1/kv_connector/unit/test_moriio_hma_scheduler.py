@@ -40,10 +40,6 @@ moriio_connector = importlib.import_module(
 moriio_layout = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout"
 )
-ssm_conv_transfer_utils = importlib.import_module(
-    "vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils"
-)
-MambaConvSplitInfo = ssm_conv_transfer_utils.MambaConvSplitInfo
 MoRIIOMode = moriio_connector.MoRIIOMode
 moriio_common = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common"
@@ -111,18 +107,6 @@ def _slot_strided(num_slots, per_slot_shape, slot_stride, dtype=torch.bfloat16):
         acc *= d
     return backing.as_strided(
         (num_slots, *per_slot_shape), (slot_stride, *inner_strides)
-    )
-
-
-def _gdn_split_info(conv_rows=3, key_dim=4, value_dim=8, dtype_size=2):
-    conv_dim = 2 * key_dim + value_dim
-    conv_state_bytes = conv_dim * conv_rows * dtype_size
-    ssm_state_bytes = 64
-    return MambaConvSplitInfo(
-        conv_rows=conv_rows,
-        local_proj_dims=(key_dim, key_dim, value_dim),
-        conv_dtype_size=dtype_size,
-        ssm_sizes=(conv_state_bytes, ssm_state_bytes),
     )
 
 
@@ -1594,9 +1578,9 @@ _SAMPLE_SLOT_SETS = [
 
 
 def test_worker_compute_mamba_offsets_caches_and_matches_template():
-    split = _gdn_split_info()
-    conv_dim = sum(split.local_proj_dims)
-    conv_shape = (conv_dim, split.conv_rows)
+    # A GDN-style bf16 conv state: sub-projections (key, key, value) x 3 rows.
+    conv_proj_bytes = tuple(dim * 3 * 2 for dim in (4, 4, 8))
+    conv_shape = (16, 3)
     ssm_shape = (2, 4, 4)
     page_bytes = 256
     pages = torch.zeros((8, 1, 1, page_bytes), dtype=torch.uint8)
@@ -1611,7 +1595,7 @@ def test_worker_compute_mamba_offsets_caches_and_matches_template():
     worker = _FakeWorker(
         kv_caches={"kda.0": pages},
         layer_to_spec={"kda.0": spec},
-        _conv_decomp=split,
+        _conv_proj_bytes=conv_proj_bytes,
         _mamba_offset_templates={},
         tp_rank=0,
         world_size=1,
@@ -1623,14 +1607,14 @@ def test_worker_compute_mamba_offsets_caches_and_matches_template():
             "kda.0", local_slots, remote_slots
         )
         template = moriio_layout.build_mamba_offset_template(
-            conv, ssm, split, tp_ratio=1
+            conv, ssm, conv_proj_bytes, tp_ratio=1
         )
         expected = moriio_layout.apply_mamba_offset_template(
             template, local_slots, remote_slots
         )
         assert (lo, ro, sz) == expected
         assert n_conv == moriio_layout.compute_mamba_conv_split_count(
-            local_slots, split
+            local_slots, conv_proj_bytes
         )
 
         current_template = worker._mamba_offset_templates["kda.0"]

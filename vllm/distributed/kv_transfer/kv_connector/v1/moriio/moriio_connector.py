@@ -83,16 +83,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
     is_mla_cache_layer,
     iter_layer_registration_regions,
     kda_conv_ssm,
+    mamba_conv_proj_bytes,
     validate_transfer_block_ids,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
     MoRIIOWriteTPMapping,
     WriteTarget,
     compute_write_tp_mapping,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
-    MambaConvSplitInfo,
-    derive_mamba_conv_split,
 )
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
@@ -2012,7 +2009,8 @@ class MoRIIOConnectorWorker:
         # Hybrid (mamba/KDA) recurrent-state transfer. Populated in
         # register_kv_caches when the model has a MambaSpec kv_cache group.
         self._has_mamba = False
-        self._conv_decomp: MambaConvSplitInfo | None = None
+        # Byte sizes of the conv sub-projections the Mamba spec shards across TP.
+        self._conv_proj_bytes: tuple[int, ...] | None = None
         self._mamba_offset_templates: dict[str, MambaOffsetTemplate] = {}
         # layer_name -> flat session indices (one per registered region:
         # 1 for attention, 2 (conv, ssm) for a KDA layer). Built once lazily.
@@ -2555,17 +2553,10 @@ class MoRIIOConnectorWorker:
             ]
             mamba_spec = _validate_mamba_specs(mamba_specs)
             assert mamba_spec is not None
-
-            from vllm.model_executor.layers.mamba.mamba_utils import (
-                is_conv_state_dim_first,
-            )
-
-            if not is_conv_state_dim_first():
-                raise MoRIIOError(
-                    "MoRIIO KDA conv transfer requires the DS (dim-first) "
-                    "state layout; set VLLM_SSM_CONV_STATE_LAYOUT=DS"
-                )
-            self._conv_decomp = derive_mamba_conv_split(mamba_spec, self.world_size)
+            try:
+                self._conv_proj_bytes = mamba_conv_proj_bytes(mamba_spec)
+            except ValueError as e:
+                raise MoRIIOError(str(e)) from e
         # KDA layers use packed pages with different geometry; only record
         # attention tensor shapes here.
         self.kv_cache_shapes = {
@@ -2772,11 +2763,11 @@ class MoRIIOConnectorWorker:
 
         # Report the prevalidated KDA decomposition after registration.
         if self._has_mamba:
-            assert self._conv_decomp is not None
             logger.info(
-                "MoRIIO registered %d KDA (conv+ssm) layer(s); ssm sizes=%s",
+                "MoRIIO registered %d KDA (conv+ssm) layer(s); conv sub-projection "
+                "sizes=%s",
                 sum(1 for ln in kv_caches if self._is_mamba_layer(ln)),
-                self._conv_decomp.ssm_sizes,
+                self._conv_proj_bytes,
             )
         # Optimization for models with local attention (Llama 4)
         if self.vllm_config.model_config.hf_config.model_type == "llama4":
@@ -2851,12 +2842,12 @@ class MoRIIOConnectorWorker:
                     self._get_layer_transfer_geometry(layer_name).block_size
                 )
             if self._is_mamba_layer(layer_name):
-                assert self._conv_decomp is not None
+                assert self._conv_proj_bytes is not None
                 conv, ssm = kda_conv_ssm(
                     kv_cache, cast(MambaSpec, self.layer_to_spec[layer_name])
                 )
                 self.mamba_state_layouts[layer_name] = get_mamba_state_layout(
-                    conv, ssm, self._conv_decomp
+                    conv, ssm, self._conv_proj_bytes
                 )
             elif not self._is_mla_cache_layer(layer_name):
                 with contextlib.suppress(ValueError):
@@ -3864,7 +3855,7 @@ class MoRIIOConnectorWorker:
         Entries [:n_conv] address the conv region/session; entries [n_conv:]
         address the ssm region/session.
         """
-        assert self._conv_decomp is not None, "KDA decomposition not derived"
+        assert self._conv_proj_bytes is not None, "KDA decomposition not derived"
         conv, ssm = kda_conv_ssm(
             self.kv_caches[layer_name],
             cast(MambaSpec, self.layer_to_spec[layer_name]),
@@ -3877,14 +3868,14 @@ class MoRIIOConnectorWorker:
             template = build_mamba_offset_template(
                 conv,
                 ssm,
-                self._conv_decomp,
+                self._conv_proj_bytes,
                 tp_ratio,
             )
             self._mamba_offset_templates[layer_name] = template
         local_offs, remote_offs, sizes = apply_mamba_offset_template(
             template, local_slots, remote_slots
         )
-        n_conv = compute_mamba_conv_split_count(local_slots, self._conv_decomp)
+        n_conv = compute_mamba_conv_split_count(local_slots, self._conv_proj_bytes)
         return local_offs, remote_offs, sizes, n_conv
 
     def _post_mamba_reads(

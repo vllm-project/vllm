@@ -739,7 +739,7 @@ class MambaStoreLayout(TPShardedStoreLayout):
     def _state_segments(
         spec: MambaSpec, local_tp_size: int, shards_per_rank: int
     ) -> tuple[tuple[int, int, int], ...]:
-        conv = derive_mamba_conv_split(spec, local_tp_size, require_dim_first=False)
+        conv = derive_mamba_conv_split(spec, local_tp_size)
         segments = []
         dim_first = is_conv_state_dim_first()
         num_rows = 1 if dim_first else conv.conv_rows
