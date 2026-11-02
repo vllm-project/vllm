@@ -833,6 +833,7 @@ class TritonWNA16Experts(TritonExperts):
             use_int8_w8a16=self.quant_config.use_int8_w8a16,
             use_int4_w4a16=self.quant_config.use_int4_w4a16,
             block_shape=self.block_shape,
+            num_input_tokens=num_tokens,
         )
 
         # separate function is required for MoE + LoRA
