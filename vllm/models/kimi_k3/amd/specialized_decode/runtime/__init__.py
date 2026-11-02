@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3 specialized decode on MI355X (layer mode), enabled by
+"""Kimi-K3 specialized decode on MI355X and MI325X (layer mode), enabled by
 ``additional_config={"decode_backend": "latency_specialized"}``.
 
 ``specialized_decode_config`` runs in the model's ``__init__``, before the weights
@@ -9,6 +9,7 @@ load. It returns None for the stock decode, and raises with every reason from
 serve. Checks that need the loaded weights run when the executor is built
 (``decode.SpecializedDecode``), those that need the KV cache in ``prepare_kv``."""
 
+import os
 from dataclasses import dataclass
 
 import torch
@@ -26,6 +27,8 @@ DCP_SIZES = (1, DCP)  # M1's builds: the whole KV a rank, or DCP over the TP gro
 MAX_TOKENS = 64
 # a served step's rows: at 32 and 64 rows the kernels lose to vLLM's decode
 MAX_ROWS = 16
+# gfx942's: the int4 MoE stages' LDS holds 8 rows (``moe.I4_MAX_S``)
+MAX_ROWS_GFX942 = 8
 # the served max_num_seqs: a full step of each is one of the widths (MAX_ROWS)
 MAX_SEQS = (1, 2, 4, 8)
 # M1c's qlens: DCP1 runs only them (AITER's asm decode at DCP1 is not served)
@@ -44,14 +47,16 @@ class DecodeConfig:
     m1: bool = True
     # the DCP KV cache interleave (AITER's decode path, M1a's query pad)
     interleave: int = 1
+    # a served step's rows at most (``max_rows``)
+    rows: int = MAX_ROWS
 
     @property
     def widths(self) -> tuple[int, ...]:
-        """The rows a launch serves: whole requests, at most MAX_ROWS rows. Every
-        uniform verify step up to MAX_ROWS rows is one of them, so an eager step
-        never pads; a FULL replay pads whole requests the way vLLM's stock decode
+        """The rows a launch serves: whole requests, at most ``rows``. Every
+        uniform verify step up to ``rows`` is one of them, so an eager step never
+        pads; a FULL replay pads whole requests the way vLLM's stock decode
         does."""
-        return tuple(range(self.q, MAX_ROWS + 1, self.q))
+        return tuple(range(self.q, self.rows + 1, self.q))
 
 
 def decode_backend(vllm_config) -> str:
@@ -95,6 +100,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
         q=spec.num_speculative_tokens + 1,
         m1=not m1,
         interleave=vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        rows=max_rows(),
     )
 
 
@@ -105,6 +111,7 @@ def m1_reasons(vllm_config) -> list[str]:
 
     cc = vllm_config.cache_config
     checks = (
+        (gfx942(), "gfx950 (M1's MXFP4 MFMAs)"),
         # M1a writes the MLA layers' fp8 KV and hands AITER an fp8 query
         (not cc.cache_dtype.startswith("fp8"), "an fp8 KV cache"),
         # M1 runs W_UK / W_UV as AITER's MXFP4 bmms
@@ -171,8 +178,8 @@ def unsupported(vllm_config) -> list[str]:
         # the kernels serve spec-verify steps of whole uniform requests only
         (spec is None, "decoding without speculative decoding"),
         (
-            spec is not None and spec.num_speculative_tokens + 1 > MAX_ROWS,
-            f"more than {MAX_ROWS - 1} speculative tokens",
+            spec is not None and spec.num_speculative_tokens + 1 > max_rows(),
+            f"more than {max_rows() - 1} speculative tokens",
         ),
         (
             spec is not None and spec.enable_adaptive_verification,
@@ -212,8 +219,8 @@ def unsupported(vllm_config) -> list[str]:
         )
     if getattr(mc.hf_text_config, "attn_res_block_size", None) is None:
         reasons.append("models without AttnRes")
-    platform = platform_reasons()
-    if spec is not None and spec.num_speculative_tokens + 1 <= MAX_ROWS:
+    platform = platform_reasons(vllm_config)
+    if spec is not None and spec.num_speculative_tokens + 1 <= max_rows():
         reasons += step_reasons(vllm_config, check_m1c=not platform)
     return reasons + platform
 
@@ -233,15 +240,17 @@ def m1c_serves(q: int, seqs: int) -> bool:
 def step_reasons(vllm_config, check_m1c: bool = True) -> list[str]:
     """The (max_num_seqs, speculative tokens) pairs served: a full step fits one
     launch, and at DCP1 every step runs M1c (``check_m1c``: M1c's geometry needs
-    the kernels' modules, so only on a supported platform)."""
+    the kernels' modules, so only on a supported platform). gfx942 has no M1:
+    its MLA layers run vLLM's ops at DCP1 too."""
     k = vllm_config.speculative_config.num_speculative_tokens
     seqs = vllm_config.scheduler_config.max_num_seqs
-    if seqs not in MAX_SEQS or seqs * (k + 1) > MAX_ROWS:
+    rows = max_rows()
+    if seqs not in MAX_SEQS or seqs * (k + 1) > rows:
         return [
             f"max_num_seqs {seqs} at {k} speculative tokens (max_num_seqs 1, 2, 4 "
-            f"or 8 with max_num_seqs x (k + 1) <= {MAX_ROWS})"
+            f"or 8 with max_num_seqs x (k + 1) <= {rows})"
         ]
-    if vllm_config.parallel_config.decode_context_parallel_size != 1:
+    if vllm_config.parallel_config.decode_context_parallel_size != 1 or gfx942():
         return []
     m1 = m1_reasons(vllm_config)
     if m1:
@@ -265,22 +274,64 @@ def text_shapes(text) -> tuple:
     )
 
 
-def platform_reasons() -> list[str]:
+def platform_reasons(vllm_config) -> list[str]:
+    """The GPU's reasons: gfx950, or gfx942 with the routed experts requantized
+    to packed int4 (it has no MXFP4 MFMA), a CU for every CTA, and no ``ARCH``
+    that makes FlyDSL build the kernels for another GPU."""
     from vllm.platforms import current_platform
 
     if not current_platform.is_rocm():
         return ["this platform (ROCm only)"]
-    from vllm.platforms.rocm import on_gfx950
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-    if not on_gfx950():
-        return ["this GPU (gfx950 / MI355X only)"]
+    if not (on_gfx950() or on_gfx942()):
+        return ["this GPU (gfx950 / MI355X and gfx942 / MI325X only)"]
     from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import BLOCKS
 
-    cus = torch.cuda.get_device_properties().multi_processor_count
-    if cus != BLOCKS:
+    reasons = []
+    props = torch.cuda.get_device_properties()
+    cus = props.multi_processor_count
+    if cus < BLOCKS:
         # every CTA of a launch must be resident: a partitioned GPU deadlocks
-        return [f"{cus} CUs (a partitioned GPU; the kernels need {BLOCKS})"]
-    return []
+        reasons.append(f"{cus} CUs (a partitioned GPU; the kernels need {BLOCKS})")
+    # FlyDSL builds for $ARCH (``mono.common.arch``); these checks and vLLM's MoE
+    # follow the GPU
+    arch, gpu = os.environ.get("ARCH"), props.gcnArchName.split(":")[0].lower()
+    if arch and arch.lower().split(":")[0] != gpu:
+        reasons.append(
+            f"ARCH={arch} (FlyDSL would build the kernels for it, not {gpu})"
+        )
+    if on_gfx942() and not int4_experts(vllm_config):
+        reasons.append(
+            "gfx942 without packed-int4 routed experts (--quantization-config "
+            '\'{"moe": {"weight": "int4_per_group_32"}}\')'
+        )
+    return reasons
+
+
+def gfx942() -> bool:
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx942
+
+    return on_gfx942()
+
+
+def max_rows() -> int:
+    """A served step's rows at most on this GPU."""
+    return MAX_ROWS_GFX942 if gfx942() else MAX_ROWS
+
+
+def int4_experts(vllm_config) -> bool:
+    """The routed experts are requantized to packed int4 (gfx942's MoE kernels)."""
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kInt4Static32,
+    )
+
+    quant = getattr(vllm_config.model_config, "quantization_config", None)
+    return getattr(getattr(quant, "moe", None), "weight", None) == kInt4Static32
 
 
 def piecewise_graphs_only(vllm_config) -> bool:

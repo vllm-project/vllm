@@ -46,6 +46,10 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
     vals_all,
     vals_words,
 )
+from vllm.models.kimi_k3.amd.specialized_decode.mono.common.arch import (
+    GFX942,
+    LDS_BYTES,
+)
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.debug import (
     region_ids,
     stamp,
@@ -62,7 +66,6 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ops import (
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import (
     BLOCKS,
-    LDS_BYTES,
     THREADS,
     WAVES,
     KernelAbi,
@@ -131,6 +134,10 @@ OPT_BATCH = 512
 K2_OPT = (
     OPT_SENTS | OPT_PRELOAD | OPT_TAG_X | OPT_SDOWN_FIRST | OPT_RLOG_PARTS | OPT_BATCH
 )
+if GFX942:
+    # its router / latent GEMVs take x a K window at a time; the tagged rows
+    # are polled whole into LDS
+    K2_OPT &= ~OPT_TAG_X
 SENT_ROWS = 16  # the served widths (runtime.MAX_ROWS)
 
 _STREAM = fx.Stream(None)
@@ -369,6 +376,9 @@ def xl_words(s):
     the core tile (o_proj), the early stages' x tiles, every h row (the shared
     down) and the LN tile (up)."""
     tiled = [k2a.OK, HIDDEN // k2b.R_PARTS, HIDDEN // k2b.L_PARTS, HIDDEN, k2b.LAT]
+    if GFX942:
+        # the S rows a K window at a time (``gemv.mfmas_windowed``)
+        return max(s * gemv.win_row(s, k) // 2 for k in [*tiled, k2b.SI])
     rows = [(k, min(s, gemv.tile_rows(k))) for k in tiled] + [(k2b.SI, s)]
     return max(n * (k + gemv.LDS_PAD) // 2 for k, n in rows)
 
@@ -408,6 +418,9 @@ def build(key: K2Build):
     s, ns = key.tokens, key.nblocks + 1
     assert 1 <= s <= k2b.MAX_S
     fused = key.m1b_qlen > 0
+    # gfx942: the int4 experts' rows, and no M1 (gfx950's MXFP4 MFMAs)
+    assert not GFX942 or (s <= k2b.I4_MAX_S and not fused)
+    assert not (GFX942 and key.opt & OPT_TAG_X), "OPT_TAG_X on gfx942"
     assert not fused or (s % key.m1b_qlen == 0 and key.m1b_ranks in (1, TP_))
     assert not key.m1c or (fused and key.m1b_ranks == 1 and key.m1b_splits)
     assert key.m1c or not key.m1c_wide
@@ -489,13 +502,15 @@ def build(key: K2Build):
         v: fx.Array[fx.Int32, 1, 16]
 
     M1cLds = m1c.smem(key.m1b_qlen) if key.m1c else NoLds
+    # gfx942: the int4 experts' bf16 latent and intermediate
+    UgStage, DownStage = k2b.i4_lds(s) if GFX942 else (UgLds, DownLds)
 
     @fx.union
     class StageLds:
         early: EarlyLds
         attn: AttnLds
-        ug: UgLds
-        down: DownLds
+        ug: UgStage  # type: ignore[valid-type]
+        down: DownStage  # type: ignore[valid-type]
         m1b: M1bLds
 
     # the stages' LDS: M1c runs first in a CTA and is done (a barrier) before
@@ -649,12 +664,7 @@ def build(key: K2Build):
             "xl": el.xl.ptr,
             "vals": al.vals.ptr,
             "delta_lds": al.dl.ptr,
-            "latq": ul.latq.ptr,
-            "latsc": ul.latsc.ptr,
-            "av": el.av.ptr,
-            "interq": dl.interq.ptr,
-            "intsc": dl.intsc.ptr,
-            "contrib": dl.contrib.ptr,
+            **k2b.lds_ptrs(el.av.ptr, ul, dl),
             "scan": rl.scan.ptr,
             "rt": {
                 "route": rl.route.ptr,
@@ -723,22 +733,10 @@ def build(key: K2Build):
                 off = sent_offset() + sl[region][0]
                 c[region + "_peer"] = [shift(preg(b, off, region), lpar) for b in bases]
                 c[region + "_own"] = shift(preg(own, off, region), lpar)
-        for region in (
-            "part",
-            "wgt",
-            "msq",
-            "xrdy",
-            "sgu",
-            "h",
-            "rpart",
-            "lpart",
-            "route",
-            "inter",
-            "isc",
-            "lnrdy",
-            "shrdy",
-        ):
+        for region in ["part", "wgt", "msq", "xrdy", *k2b.scratch_regions()]:
             c[region] = sreg(scratch, lay[region][0], region)
+        if const_expr(GFX942):
+            c["inter16"] = scratch + fx.Int64(lay["inter16"][0])
         on, tls = key.timeline, lds.tls.ptr
         stamp_begin(on, tls, tid, TL_POINTS)
         # ---- the fused M1b: core's rows, a flag a combine task
@@ -879,34 +877,44 @@ def build(key: K2Build):
         if bid >= NA:
             stamp(on, tls, tid, 2)
         # ---- the routed experts
-        # the latent (ready ~10 us before the route) quantized first
-        if const_expr(k2b.few_rows(s)):
+        # the latent (ready ~10 us before the route) quantized first (gfx942:
+        # its first K phase into LDS)
+        if const_expr(GFX942):
+            k2b.load_lat(c, 0)
+        elif const_expr(k2b.few_rows(s)):
             k2b.load_latq4(c)
         else:
             k2b.load_latq(c)
         stamp(on, tls, tid, 12)
         nt = k2b.load_route(c)
         stamp(on, tls, tid, 11)
-        total = nt * k2b.UG_GROUPS
-        last = total - 1
-        # reversed placement: the round's leftover tasks go to the high CTAs,
-        # whose early work ends first (the AttnRes / route CTAs start ug last)
-        task = BLOCKS - 1 - bid
-        ops = k2b.ug_loads(c, fx.min(task, last))
-        while task < total:
-            nxt = task + BLOCKS
-            ops_n = k2b.ug_loads(c, fx.min(nxt, last))
-            k2b.stage_ug(c, task, ops)
-            task = nxt
-            ops = ops_n
-        stamp(on, tls, tid, 3)
-        if bid < k2b.DOWN_TASKS:
-            dops = k2b.down_loads(c, bid, nt, fx.min(c["wave"], nt - 1))
-            if const_expr(k2b.inter_lds(s)):
-                k2b.load_inter(c)
-            stamp(on, tls, tid, 15)
-            k2b.stage_down(c, bid, nt, dops)
+        if const_expr(GFX942):
+            # at ``few_rows`` a slot is a pick tile
+            k2b.run_ug_i4(c, bid, nt)
+            stamp(on, tls, tid, 3)
+            k2b.run_down_i4(c, bid, nt)
             stamp(on, tls, tid, 16)
+        else:
+            total = nt * k2b.UG_GROUPS
+            last = total - 1
+            # reversed placement: the round's leftover tasks go to the high CTAs,
+            # whose early work ends first (the AttnRes / route CTAs start ug last)
+            task = BLOCKS - 1 - bid
+            ops = k2b.ug_loads(c, fx.min(task, last))
+            while task < total:
+                nxt = task + BLOCKS
+                ops_n = k2b.ug_loads(c, fx.min(nxt, last))
+                k2b.stage_ug(c, task, ops)
+                task = nxt
+                ops = ops_n
+            stamp(on, tls, tid, 3)
+            if bid < k2b.DOWN_TASKS:
+                dops = k2b.down_loads(c, bid, nt, fx.min(c["wave"], nt - 1))
+                if const_expr(k2b.inter_lds(s)):
+                    k2b.load_inter(c)
+                stamp(on, tls, tid, 15)
+                k2b.stage_down(c, bid, nt, dops)
+                stamp(on, tls, tid, 16)
         if const_expr(key.opt & OPT_SDOWN_FIRST):
             k2b.run_sdown_first(c, bid, w_sd)
             k2b.run_sdown_rest(c, bid, w_sd)

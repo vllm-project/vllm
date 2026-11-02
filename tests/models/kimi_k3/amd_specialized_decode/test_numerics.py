@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Kimi-K3's MonoKernels on MI355X against the ops vLLM runs for the same
-spec-verify step, random weights in the checkpoint's formats at TP8 shapes:
+"""Kimi-K3's MonoKernels on MI355X and MI300X / MI325X against the ops vLLM runs
+for the same spec-verify step, random weights in the formats vLLM holds at TP8
+shapes (the routed experts MXFP4 on gfx950, vLLM's packed-int4 requant on gfx942):
 
 - K1 (one GPU): AttnRes -> in_proj -> f_b -> conv -> KDA recurrence -> gated
   norm, the conv / SSM state updates and a block-write layer's block store.
@@ -12,8 +13,8 @@ spec-verify step, random weights in the checkpoint's formats at TP8 shapes:
   fail the step.
 - M1a (AttnRes -> qkv_a / g_proj -> q / kv RMSNorm + the fp8 KV write -> q_b
   -> fp4 W_UK -> the DCP query gather) and M1b (the a2a LSE combine -> fp4
-  W_UV -> the gate): one GPU, then TP8 + DCP8 with a graph of two MLA layers
-  (M1a -> M1b -> K2) replayed.
+  W_UV -> the gate), gfx950 only: one GPU, then TP8 + DCP8 with a graph of two
+  MLA layers (M1a -> M1b -> K2) replayed.
 """
 
 import pytest
@@ -34,17 +35,23 @@ bf = torch.bfloat16
 COS_MIN = 0.9999
 
 
-def _on_gfx950() -> bool:
+def _mono_arch() -> str | None:
+    """The GPU's arch, if the K3 mono kernels run on it."""
     if not current_platform.is_rocm():
-        return False
-    from vllm.platforms.rocm import on_gfx950
+        return None
+    from vllm.platforms.rocm import on_gfx942, on_gfx950
 
-    return on_gfx950()
+    if on_gfx950():
+        return "gfx950"
+    return "gfx942" if on_gfx942() else None
 
 
-needs_gfx950 = pytest.mark.skipif(
-    not _on_gfx950(), reason="the K3 mono kernels need gfx950 (MI355X)"
+ARCH = _mono_arch()
+needs_mono_gpu = pytest.mark.skipif(
+    ARCH is None,
+    reason="the K3 mono kernels need gfx950 (MI355X) or gfx942 (MI300X / MI325X)",
 )
+needs_gfx950 = pytest.mark.skipif(ARCH != "gfx950", reason="M1 needs gfx950 (MI355X)")
 
 
 def _cos(a: torch.Tensor, b: torch.Tensor) -> float:
@@ -189,11 +196,15 @@ def _kda_reference(w, nb: int, S: int, L: int, write_idx: int):
 
 
 # (rows, tokens a request): the widths of concurrency 1 .. 16 at 1 + 3 or 1 + 7
-# speculative tokens
-K1_SHAPES = [(8, 8), (16, 8), (16, 4), (16, 16), (4, 4), (32, 8), (64, 4), (64, 16)]
+# speculative tokens (gfx942: up to its 8 rows, whose K1 GEMVs split x by width)
+K1_SHAPES = (
+    [(8, 8), (8, 4), (8, 2), (6, 6), (4, 4), (2, 2)]
+    if ARCH == "gfx942"
+    else [(8, 8), (16, 8), (16, 4), (16, 16), (4, 4), (32, 8), (64, 4), (64, 16)]
+)
 
 
-@needs_gfx950
+@needs_mono_gpu
 @pytest.mark.parametrize("S, L", K1_SHAPES)
 @pytest.mark.parametrize("dim_first", [True, False])
 @pytest.mark.parametrize("nacc", [1, 3])
@@ -715,7 +726,7 @@ def _all_reduce_fp32(t: torch.Tensor) -> torch.Tensor:
 
 def _moe_reference(x, mw, rank: int):
     """KimiMoE's decode path on ``x``: sigmoid router + bias top-16, the latent
-    down, aiter's MXFP4 experts, the latent all-reduce + RMSNorm, this rank's
+    down, aiter's 4-bit experts, the latent all-reduce + RMSNorm, this rank's
     up_proj rows into the shared experts' output, the final all-reduce."""
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -759,6 +770,32 @@ def _moe_reference(x, mw, rank: int):
     return _all_reduce_fp32(shared)
 
 
+def _int4_experts(g, e: int, n: int, k: int, scale: float):
+    """Experts as vLLM's packed-int4 requant leaves them on gfx942: shuffled
+    int4 pairs with their group-32 bf16 scales."""
+    from aiter import dtypes
+    from aiter.ops.quant import per_1x32_i4_quant
+    from aiter.ops.shuffle import (
+        pack_int8_to_packed_int4,
+        shuffle_scale_for_int4,
+        shuffle_weight,
+    )
+
+    chunk, groups = 64, k // 32
+    w = torch.empty(e, n, k // 2, dtype=torch.uint8, device=g.device)
+    s = torch.empty(e * n * groups, dtype=bf, device=g.device)
+    for lo in range(0, e, chunk):
+        q, sc = per_1x32_i4_quant(_randn(g, chunk, n, k, scale=scale))
+        q = q.view(dtypes.i4x2).view(chunk, n, k)
+        packed = pack_int8_to_packed_int4(shuffle_weight(q.view(dtypes.i8), (16, 16)))
+        w[lo : lo + chunk] = packed.view(chunk, n, k // 2)
+        sc = shuffle_scale_for_int4(sc, group_size=32).view(-1)
+        s[lo * n * groups : (lo + chunk) * n * groups] = sc
+    w = w.view(dtypes.i4x2)
+    w.is_shuffled = True
+    return w, s
+
+
 def _moe_weights(rank: int, device):
     from aiter.utility.fp4_utils import e8m0_shuffle
 
@@ -780,7 +817,7 @@ def _moe_weights(rank: int, device):
 
     fp4, e8 = torch.float4_e2m1fn_x2, torch.float8_e8m0fnu
     w_up = _randn(gc, HIDDEN, LAT, scale=0.02)
-    return {
+    mw = {
         "w_gate": _randn(gc, E, HIDDEN, scale=0.02),
         "bias": _randn(gc, E, scale=0.02, dtype=torch.float32),
         "w_ld": _randn(gc, LAT, HIDDEN, scale=0.02),
@@ -788,6 +825,12 @@ def _moe_weights(rank: int, device):
         "w_up_shard": w_up[rank * UP_N : (rank + 1) * UP_N].contiguous(),
         "w_sgu": _randn(gr, 2 * SI, HIDDEN, scale=0.02),
         "w_sd": _randn(gr, HIDDEN, SI, scale=0.03),
+    }
+    if ARCH == "gfx942":
+        mw["w13"], mw["w13s"] = _int4_experts(gr, E, 2 * RI, LAT, 0.03)
+        mw["w2"], mw["w2s"] = _int4_experts(gr, E, LAT, RI, 0.05)
+        return mw
+    return mw | {
         "w13": rocm_aiter_ops.shuffle_weight_a16w4(
             u8(gr, E, 2 * RI, LAT // 2).view(fp4), 16, False
         ),
@@ -949,7 +992,7 @@ def _k2_worker(
             1e-5,
         )
         # the kernel sums the ranks in rank order, NCCL in its own order
-        assert _rel_l2(prefix, ref_prefix) < 1e-2
+        assert _rel_l2(prefix, ref_prefix) < 1e-2, (S, reset)
         lay = k2.scratch_layout(key)["xrow"][0]
         x = runner.scratch[lay : lay + S * HIDDEN * 2].view(bf).view(S, HIDDEN)
         cos_x = _cos(x, x_ref)
@@ -980,20 +1023,25 @@ def _k2_worker(
     assert not runner.health.any() and not runner.flags.any()
 
 
-# (rows, block-write layer): every width up to the runner's MAX_TOKENS
-K2_CASES = [
-    (8, False),
-    (8, True),
-    (4, False),
-    (16, False),
-    (16, True),
-    (32, False),
-    (64, False),
-    (64, True),
-]
+# (rows, block-write layer): every width up to the runner's MAX_TOKENS (gfx942:
+# up to its 8 rows, whose int4 stages split by width); the last is the graph's
+K2_CASES = (
+    [(2, False), (2, True), (4, False), (6, False), (6, True), (8, False), (8, True)]
+    if ARCH == "gfx942"
+    else [
+        (8, False),
+        (8, True),
+        (4, False),
+        (16, False),
+        (16, True),
+        (32, False),
+        (64, False),
+        (64, True),
+    ]
+)
 
 
-@needs_gfx950
+@needs_mono_gpu
 @multi_gpu_test(num_gpus=8)
 def test_k2_tp8_matches_vllm_ops_and_replays(monkeypatch: pytest.MonkeyPatch) -> None:
     multi_process_parallel(monkeypatch, 8, 1, _k2_worker)
@@ -1041,7 +1089,7 @@ def _k2_opt_worker(
     assert not runner.health.any() and not runner.flags.any()
 
 
-@needs_gfx950
+@needs_mono_gpu
 @multi_gpu_test(num_gpus=8)
 def test_k2_tp8_opt_bits_are_bit_exact(monkeypatch: pytest.MonkeyPatch) -> None:
     """K2's critical-path options (``layer.K2_OPT``, the default) give the
@@ -1483,7 +1531,7 @@ def _fault_worker(
         assert runner.flags.any(), "the output rank's flags missed the failure"
 
 
-@needs_gfx950
+@needs_mono_gpu
 @multi_gpu_test(num_gpus=8)
 def test_stalled_rank_fails_the_step_without_a_hang(
     monkeypatch: pytest.MonkeyPatch,
@@ -1491,7 +1539,7 @@ def test_stalled_rank_fails_the_step_without_a_hang(
     multi_process_parallel(monkeypatch, 8, 1, _fault_worker)
 
 
-@needs_gfx950
+@needs_mono_gpu
 def test_warmup_compiles_without_launching() -> None:
     """The JIT warm-up compiles K1, K2, M1a and M1b before capture without running them:
     a launch on its null arguments would fault."""
@@ -1507,11 +1555,13 @@ def test_warmup_compiles_without_launching() -> None:
     from vllm.models.kimi_k3.amd.specialized_decode.mono.layer import K2Build
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import compile_build
 
-    for s, q in ((8, 8), (16, 4), (64, 16)):
+    shapes = ((8, 8), (4, 4)) if ARCH == "gfx942" else ((8, 8), (16, 4), (64, 16))
+    for s, q in shapes:
         compile_build(
             KdaPreBuild(tokens=s, qlen=q, nblocks=4, delta=True, state_len=3 + q - 1)
         )
         compile_build(K2Build(tokens=s, nblocks=4))
-        compile_build(MlaPreBuild(tokens=s, nblocks=4, delta=True))
-        compile_build(MlaPostBuild(tokens=s, qlen=q))
+        if ARCH == "gfx950":
+            compile_build(MlaPreBuild(tokens=s, nblocks=4, delta=True))
+            compile_build(MlaPostBuild(tokens=s, qlen=q))
     torch.accelerator.synchronize()
