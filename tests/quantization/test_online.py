@@ -279,6 +279,7 @@ def test_online_nvfp4_reuses_kernel_when_weights_are_reprocessed(
     kernel = SimpleNamespace(
         fused_experts=SimpleNamespace(
             process_weights_after_loading=process_weights,
+            keep_constants=lambda layer: None,
         )
     )
     make_kernel = Mock(return_value=kernel)
