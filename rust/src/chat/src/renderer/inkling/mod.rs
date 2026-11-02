@@ -175,7 +175,7 @@ impl InklingChatRenderer {
         )
     }
 
-    fn write_tool_declarations(&self, out: &mut Vec<u32>, tools: &[&ChatTool]) -> Result<()> {
+    fn write_tool_declarations(&self, out: &mut Vec<u32>, tools: &[ChatTool]) -> Result<()> {
         if tools.is_empty() {
             return Ok(());
         }
@@ -304,8 +304,7 @@ impl ChatRenderer for InklingChatRenderer {
             &self.default_template_kwargs,
         )?)?;
         let effective_template_kwargs = reasoning.template_kwargs(request);
-        let tools = rendered_tools(request);
-        self.write_tool_declarations(&mut out, &tools)?;
+        self.write_tool_declarations(&mut out, request.tools())?;
         let mut reasoning_effort = if reasoning.is_enabled() {
             reasoning.effort().and_then(EffortValue::as_f64)
         } else {
@@ -412,14 +411,6 @@ fn resolve_special_token(tokenizer: &dyn Tokenizer, token: &str) -> Result<u32> 
             "Inkling tokenizer is missing special token `{token}`"
         ))
     })
-}
-
-fn rendered_tools(request: &ChatRequest) -> Vec<&ChatTool> {
-    if !request.tool_parsing_enabled() {
-        return Vec::new();
-    }
-
-    request.tools().iter().collect()
 }
 
 fn tool_call_json(tool_call: &AssistantToolCall) -> Result<String> {

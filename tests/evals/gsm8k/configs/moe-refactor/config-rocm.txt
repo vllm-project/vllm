@@ -1,0 +1,4 @@
+Qwen3-30B-A3B-BF16-triton-rocm.yaml
+Qwen3-30B-A3B-Fp8-AutoFp8-triton.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-triton.yaml
+Mixtral-8x7B-Fp8-AutoFp8-triton.yaml
