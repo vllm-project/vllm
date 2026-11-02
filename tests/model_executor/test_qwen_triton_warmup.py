@@ -14,9 +14,14 @@ from vllm.model_executor.warmup.qwen_triton_warmup import (
     _warm_causal_conv1d_fwd_kernel,
     _warm_fused_gdn_decode_post_conv_mtp_kernel,
     _warm_fused_post_conv_kernel,
+    _warm_fused_sigmoid_gating_delta_rule_update_kernel,
     _warm_gated_rms_norm_kernel,
 )
 from vllm.platforms import current_platform
+from vllm.third_party.flash_linear_attention.ops.fused_sigmoid_gating import (
+    fused_sigmoid_gating_delta_rule_update,
+    fused_sigmoid_gating_delta_rule_update_kernel,
+)
 from vllm.utils.platform_utils import num_compute_units
 
 
@@ -98,3 +103,58 @@ def test_qwen_gdn_fused_mtp_warmup_covers_reachable_tile_sizes(
         heads = num_reqs * config.hv
         tiles.add(32 if heads < num_cus else 64 if heads <= 4 * num_cus else v)
     assert tiles == ({32} if max_num_reqs == 1 else {32, 64, v})
+
+
+@pytest.mark.skipif(not current_platform.is_cuda_alike(), reason="CUDA is required")
+def test_qwen_gdn_update_warmup_covers_spec_rows() -> None:
+    """After warmup, spec rows batched with prefills may not JIT-compile the GDN
+    recurrent update kernel during serving."""
+    num_spec = 3
+    config = replace(_cuda_gdn_config(), num_spec=num_spec)
+    device = torch.device("cuda")
+    # triton.heuristics wraps the JITFunction that holds the compile cache.
+    kernel = fused_sigmoid_gating_delta_rule_update_kernel.fn
+
+    def compiled_variants() -> set:
+        return {key for caches in kernel.device_caches.values() for key in caches[0]}
+
+    _warm_fused_sigmoid_gating_delta_rule_update_kernel(device, config)
+    warmed = compiled_variants()
+
+    # Spec rows as the GDN layer passes them in a step with prefills.
+    num_reqs = 2
+    num_tokens = num_reqs * (num_spec + 1)
+    q = torch.randn(
+        (1, num_tokens, config.h, config.k), dtype=config.conv_dtype, device=device
+    )
+    v = torch.randn(
+        (1, num_tokens, config.hv, config.v), dtype=config.conv_dtype, device=device
+    )
+    a = torch.randn((1, num_tokens, config.hv), dtype=config.conv_dtype, device=device)
+    state = torch.zeros(
+        (num_tokens + 1, config.state_stride_token),
+        dtype=config.state_dtype,
+        device=device,
+    )
+    fused_sigmoid_gating_delta_rule_update(
+        A_log=config.a_log,
+        a=a,
+        b=torch.randn_like(a),
+        dt_bias=config.dt_bias,
+        q=q,
+        k=torch.randn_like(q),
+        v=v,
+        initial_state=state,
+        inplace_final_state=True,
+        cu_seqlens=torch.arange(
+            0, num_tokens + 1, num_spec + 1, dtype=torch.int32, device=device
+        ),
+        ssm_state_indices=torch.arange(
+            1, num_tokens + 1, dtype=torch.int32, device=device
+        ).view(num_reqs, num_spec + 1),
+        num_accepted_tokens=torch.ones(num_reqs, dtype=torch.int32, device=device),
+        use_qk_l2norm_in_kernel=True,
+    )
+    torch.accelerator.synchronize(device)
+
+    assert compiled_variants() == warmed
