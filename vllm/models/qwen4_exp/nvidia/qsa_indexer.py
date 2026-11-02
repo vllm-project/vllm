@@ -283,8 +283,12 @@ class QSAIndexer(nn.Module):
                 dtype=self.indexer_dtype,
             )
             main_kv_cache = attn.kv_cache.transpose(1, 2)
+            main_slot_mapping = slot_mapping[:num_tokens]
             if attn.kv_cache_dtype in ("fp8", "fp8_e4m3"):
                 main_kv_cache = main_kv_cache.view(torch.float8_e4m3fn)
+            elif attn.kv_cache_dtype == "nvfp4":  # fused + NVFP4: BF16 staging
+                main_kv_cache = attn.nvfp4_staging(num_tokens)
+                main_slot_mapping = attn.staging_slots[:num_tokens]
             main_outputs = qsa_prepare(
                 projected_q,
                 raw_keys,
@@ -314,10 +318,12 @@ class QSAIndexer(nn.Module):
                 main_k_norm_weight=attn.k_norm.weight,
                 main_eps=attn.q_norm.variance_epsilon,
                 main_kv_cache=main_kv_cache,
-                main_slot_mapping=slot_mapping[:num_tokens],
+                main_slot_mapping=main_slot_mapping,
                 main_k_scale=attn._k_scale_float,
                 main_v_scale=attn._v_scale_float,
             )
+            if attn.kv_cache_dtype == "nvfp4":
+                attn.write_nvfp4_staging(main_kv_cache, slot_mapping[:num_tokens])
         else:
             # Unfused reference path
             from flashinfer.norm import gemma_rmsnorm
