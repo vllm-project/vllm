@@ -120,6 +120,11 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
 
         x = x.view(-1, x.shape[-1])
         output, out_orig_shape = output.view(-1, output.shape[-1]), output.shape
+        route_mapping = self.punica_wrapper.lora_route_mapping
+        if route_mapping is not None:
+            output = self._apply_routed_sharded_lora_to_output(x, output, route_mapping)
+            return output.view(*out_orig_shape)
+
         buffer = torch.zeros(
             (self.n_slices, x.shape[0], self.lora_a_stacked[0].shape[2]),
             dtype=torch.float32,
@@ -156,6 +161,36 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
             output = lora_output
 
         output = output.view(*out_orig_shape)
+        return output
+
+    def _apply_routed_sharded_lora_to_output(
+        self,
+        x: torch.Tensor,
+        output: torch.Tensor,
+        route_mapping: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        token_lora_indices, token_lora_weights = self._validate_routed_lora_mapping(
+            x, route_mapping
+        )
+        shard_size = self.lora_b_stacked[0].shape[2]
+        offset_start = self.tp_rank * shard_size
+        output_view = output[:, offset_start : offset_start + shard_size]
+        lora_a = self.lora_a_stacked[0]
+        lora_b = self.lora_b_stacked[0]
+
+        for lora_idx, token_mask, route_weights in self._iter_lora_route_groups(
+            token_lora_indices, token_lora_weights
+        ):
+            routed_x = x[token_mask].to(dtype=lora_a.dtype)
+            shrink = routed_x @ lora_a[lora_idx, 0].T
+            if self.tp_size > 1:
+                shrink = tensor_model_parallel_all_reduce(shrink)
+            delta = shrink.to(dtype=lora_b.dtype) @ lora_b[lora_idx, 0].T
+            weights = route_weights.to(dtype=delta.dtype)
+            output_view[token_mask] += (
+                delta.to(dtype=output_view.dtype) * weights[:, None]
+            )
+
         return output
 
     @classmethod

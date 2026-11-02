@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
+from vllm.lora.request import iter_lora_int_ids
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalKwargsItem
@@ -1039,9 +1040,10 @@ class Scheduler(SchedulerInterface):
         scheduled_loras: set[int] = set()
         if self.lora_config:
             scheduled_loras = set(
-                req.lora_request.lora_int_id
+                lora_int_id
                 for req in self.running
-                if req.lora_request and req.lora_request.lora_int_id > 0
+                for lora_int_id in iter_lora_int_ids(req.lora_request)
+                if lora_int_id > 0
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
@@ -1087,14 +1089,14 @@ class Scheduler(SchedulerInterface):
                     skip_request(request_queue)
                     continue
 
-                # Check that adding the request still respects the max_loras constraint.
+                # Check that adding the request still respects the max_loras
+                # constraint.
+                request_loras = set(iter_lora_int_ids(request.lora_request))
                 if (
                     self.lora_config
-                    and request.lora_request
-                    and (
-                        len(scheduled_loras) == self.lora_config.max_loras
-                        and request.lora_request.lora_int_id not in scheduled_loras
-                    )
+                    and request_loras
+                    and len(scheduled_loras | request_loras)
+                    > self.lora_config.max_loras
                 ):
                     # Scheduling would exceed max_loras, skip.
                     skip_request(request_queue)
@@ -1561,7 +1563,7 @@ class Scheduler(SchedulerInterface):
                     raise RuntimeError(f"Invalid request status: {request.status}")
 
                 if self.lora_config and request.lora_request:
-                    scheduled_loras.add(request.lora_request.lora_int_id)
+                    scheduled_loras.update(iter_lora_int_ids(request.lora_request))
                 req_to_new_blocks[request_id] = self.kv_cache_manager.get_blocks(
                     request_id
                 )

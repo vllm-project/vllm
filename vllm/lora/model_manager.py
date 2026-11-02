@@ -19,6 +19,7 @@ from vllm.lora.layers import (
     FusedMoEWithLoRA,
     LoRAMapping,
     LoRAMappingType,
+    LoRARouteMapping,
     TokenClassificationHeadWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
@@ -430,7 +431,7 @@ class LoRAModelManager:
             "Use LRUCacheLoRAModelManager for pinning"
         )  # type: ignore
 
-    def _set_adapter_mapping(self, mapping: LoRAMapping) -> None:
+    def _set_adapter_mapping(self, mapping: LoRAMapping | LoRARouteMapping) -> None:
         # Default to the main language model wrapper
         if not (self.supports_mm and self.supports_tower_connector_lora):
             target_prefix = (

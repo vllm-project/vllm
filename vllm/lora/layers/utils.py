@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 
@@ -40,6 +41,61 @@ class LoRAMapping:
     def __post_init__(self):
         self.index_mapping = tuple(self.index_mapping)
         self.prompt_mapping = tuple(self.prompt_mapping)
+
+
+@dataclass
+class LoRARouteMapping:
+    token_lora_ids: tuple[tuple[int, ...], ...]
+    token_lora_weights: tuple[tuple[float, ...], ...]
+    prompt_mapping: tuple[int, ...]
+    is_prefill: bool = False
+    type: LoRAMappingType = LoRAMappingType.LANGUAGE
+
+    def __post_init__(self):
+        self.token_lora_ids = tuple(
+            tuple(token_lora_ids) for token_lora_ids in self.token_lora_ids
+        )
+        self.token_lora_weights = tuple(
+            tuple(token_lora_weights) for token_lora_weights in self.token_lora_weights
+        )
+        self.prompt_mapping = tuple(self.prompt_mapping)
+
+        if len(self.token_lora_ids) != len(self.token_lora_weights):
+            raise ValueError(
+                "token_lora_ids and token_lora_weights must have the same length"
+            )
+        if not self.token_lora_ids:
+            raise ValueError("token_lora_ids cannot be empty")
+
+        route_k = len(self.token_lora_ids[0])
+        if route_k == 0:
+            raise ValueError("route_k must be greater than 0")
+
+        for token_lora_ids, token_lora_weights in zip(
+            self.token_lora_ids, self.token_lora_weights
+        ):
+            if len(token_lora_ids) != route_k:
+                raise ValueError("token_lora_ids must have a fixed route_k")
+            if len(token_lora_weights) != route_k:
+                raise ValueError("token_lora_weights must have a fixed route_k")
+            if any(lora_id < 0 for lora_id in token_lora_ids):
+                raise ValueError("token_lora_ids must use non-negative LoRA ids")
+            if any(not math.isfinite(weight) for weight in token_lora_weights):
+                raise ValueError("token_lora_weights must be finite")
+            if any(weight < 0 for weight in token_lora_weights):
+                raise ValueError("token_lora_weights must be non-negative")
+
+    @property
+    def route_k(self) -> int:
+        return len(self.token_lora_ids[0])
+
+    def scalar_fallback_mapping(self) -> LoRAMapping:
+        return LoRAMapping(
+            index_mapping=(0,) * len(self.token_lora_ids),
+            prompt_mapping=self.prompt_mapping,
+            is_prefill=self.is_prefill,
+            type=self.type,
+        )
 
 
 def _get_lora_device(base_layer: nn.Module) -> torch.device:
