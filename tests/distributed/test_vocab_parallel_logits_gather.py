@@ -3,7 +3,8 @@
 """The fused vocab-parallel logits gather equals a last-dim all-gather, the
 vocab slice and the dtype cast, bitwise, and LogitsProcessor uses it only
 where it reproduces the unfused path. The model runner asks it for FP32 only
-for a model that opts in with SupportsFP32LogitsGather."""
+for a model that opts in with SupportsFP32LogitsGather, and only when the
+sampler or rejection sampler wants FP32 logits for the step."""
 
 from types import SimpleNamespace
 
@@ -161,18 +162,16 @@ def test_vocab_parallel_logits_gather(world_size):
 
 
 def _check_model_opt_in(world_size: int, device: torch.device):
-    """The runner's target logits on a step that would take FP32: FP32 only for
-    a model that opts in, and bitwise equal to main (head-dtype gather, then
-    the sampler's FP32 copy) in either case."""
+    """The runner's target logits: FP32 only for a model that opts in and only
+    when the logits' consumer (the rejection sampler on a step with drafts,
+    the sampler otherwise) wants FP32; bitwise equal to main (head-dtype
+    gather, then the sampler's FP32 copy where it makes one) in every case."""
     from vllm.v1.worker.gpu.model_runner import (
         GPUModelRunner,
         fp32_gather_logits_processors,
     )
 
     vocab_size, lm_head, hidden_states = _make_lm_head(world_size, device)
-    # A step whose logits the sampler would copy to FP32 and process in place.
-    sampler = SimpleNamespace(can_process_logits_in_place=lambda _: True)
-    input_batch = SimpleNamespace(idx_mapping_np=np.zeros(1, dtype=np.int32))
     for model_cls in (PassthroughModel, SoftCapModel):
         # main: no FP32 request reaches the gather.
         main = model_cls(lm_head, UnfusedLogitsProcessor(vocab_size)).compute_logits(
@@ -188,30 +187,52 @@ def _check_model_opt_in(world_size: int, device: torch.device):
             processors = fp32_gather_logits_processors(model)
             opted_in = cls is opted_in_cls
             assert processors == ([model.logits_processor] if opted_in else [])
-            model_state = SimpleNamespace(compute_sample_logits=model.compute_logits)
-            runner = SimpleNamespace(
-                sampler=sampler,
-                fp32_logits_processors=processors,
-                vocab_size=vocab_size,
-                model_state=model_state,
-            )
-            logits = GPUModelRunner._compute_logits(
-                runner,  # type: ignore[arg-type]
-                hidden_states,
-                input_batch,  # type: ignore[arg-type]
-            )
-            assert model.logits_processor.gather_out_dtype is None
-            assert logits.dtype == (torch.float32 if opted_in else torch.bfloat16)
-            if not opted_in:
-                # Not opted in: the same tensor as main, and so the same copy.
-                assert torch.equal(logits, main)
-            elif model_cls is PassthroughModel:
-                # Opted in: exactly the sampler's FP32 copy of main's logits.
-                assert torch.equal(logits, main.float())
-            else:
-                # Why post-processing models must not opt in: the soft cap
-                # then runs on FP32 logits and the result differs from main.
-                assert not torch.equal(logits, main.float())
+            # Which consumer is asked: the sampler without drafts, the
+            # rejection sampler with them. Each says whether it wants FP32
+            # (a verify path that reads bf16 logits directly says no).
+            for num_draft_tokens, sampler_wants, rejection_wants in (
+                (0, True, False),
+                (0, False, True),
+                (7, False, True),
+                (7, True, False),
+            ):
+                consumer_wants = rejection_wants if num_draft_tokens else sampler_wants
+                runner = SimpleNamespace(
+                    sampler=SimpleNamespace(
+                        wants_fp32_logits=lambda _, w=sampler_wants: w
+                    ),
+                    rejection_sampler=SimpleNamespace(
+                        wants_fp32_logits=lambda _, w=rejection_wants: w
+                    ),
+                    fp32_logits_processors=processors,
+                    vocab_size=vocab_size,
+                    model_state=SimpleNamespace(
+                        compute_sample_logits=model.compute_logits
+                    ),
+                )
+                input_batch = SimpleNamespace(
+                    idx_mapping_np=np.zeros(1, dtype=np.int32),
+                    num_draft_tokens=num_draft_tokens,
+                )
+                logits = GPUModelRunner._compute_logits(
+                    runner,  # type: ignore[arg-type]
+                    hidden_states,
+                    input_batch,  # type: ignore[arg-type]
+                )
+                assert model.logits_processor.gather_out_dtype is None
+                fp32 = opted_in and consumer_wants
+                assert logits.dtype == (torch.float32 if fp32 else torch.bfloat16)
+                if not fp32:
+                    # Head dtype: the same tensor as main, for the consumer
+                    # to copy or read as on main.
+                    assert torch.equal(logits, main)
+                elif model_cls is PassthroughModel:
+                    # FP32: exactly the sampler's FP32 copy of main's logits.
+                    assert torch.equal(logits, main.float())
+                else:
+                    # Why post-processing models must not opt in: the soft
+                    # cap then runs on FP32 logits and differs from main.
+                    assert not torch.equal(logits, main.float())
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")

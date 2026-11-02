@@ -180,6 +180,17 @@ class RejectionSampler:
             assert spec_config.fly_window_size is not None
             self.fly_window_size = spec_config.fly_window_size
 
+    def wants_fp32_logits(self, idx_mapping_np: np.ndarray) -> bool:
+        """`Sampler.wants_fp32_logits` for verifying the given requests.
+
+        Verification processes the logits with
+        `Sampler.apply_sampling_params`, which copies them to FP32, so this
+        asks the sampler. A verify path that reads the head-dtype logits
+        without that copy must return False for the batches it takes, so
+        that the TP gather keeps the head dtype for it.
+        """
+        return self.sampler.wants_fp32_logits(idx_mapping_np)
+
     def _get_logprobs_tensors(
         self,
         sampled: torch.Tensor,

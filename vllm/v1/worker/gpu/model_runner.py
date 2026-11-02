@@ -1806,17 +1806,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     ) -> torch.Tensor:
         """The target logits of ``sample_hidden_states``.
 
-        When the sampler would copy the logits to FP32 and may process them in
-        place, and the model opts in (see `fp32_gather_logits_processors`),
-        the TP gather writes FP32 itself (exact) and the copy is saved.
+        When the logits' consumer (the rejection sampler on a step with
+        drafts, the sampler otherwise) wants them in FP32 (see
+        `Sampler.wants_fp32_logits`) and the model opts in (see
+        `fp32_gather_logits_processors`), the TP gather writes FP32 itself
+        (exact) and the sampler's copy is saved. Otherwise the gather keeps
+        the head dtype.
         """
-        sampler = self.sampler
+        consumer: Sampler | RejectionSampler | None = self.sampler
+        if input_batch.num_draft_tokens > 0 and self.rejection_sampler is not None:
+            consumer = self.rejection_sampler
         processors = self.fp32_logits_processors
         if (
-            sampler is None
+            consumer is None
             or not processors
             or sample_hidden_states.shape[0] > get_max_chunk_logits(self.vocab_size)
-            or not sampler.can_process_logits_in_place(input_batch.idx_mapping_np)
+            or not consumer.wants_fp32_logits(input_batch.idx_mapping_np)
         ):
             return self.model_state.compute_sample_logits(sample_hidden_states)
         for processor in processors:
