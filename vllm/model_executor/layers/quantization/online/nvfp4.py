@@ -198,6 +198,7 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
                 routing_tables=layer._expert_routing_tables(),
                 per_token_activation=self.per_token_activation,
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
         else:
             # Reload creates new scale tensors; derived kernel scales must use
             # their new values before layerwise reload restores captured storage.

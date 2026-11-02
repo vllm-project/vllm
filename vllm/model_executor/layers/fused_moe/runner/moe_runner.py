@@ -46,6 +46,7 @@ from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExpertsOrder,
 )
 from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     _USE_LAYERNAME,
@@ -341,19 +342,22 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._set_moe_config(new_moe_config)
 
-    def _maybe_fuse_gate_weights(self):
-        """Fuse router and shared expert gate weights on first call.
+    def fuse_gate_weights(self) -> None:
+        """Fuse router and shared expert gate weights.
 
         Cannot be done at __init__ because gate weights are loaded after
-        module construction (via weight_loader). Called once from
-        _forward_impl before the first forward pass.
+        module construction (via weight_loader). Runs after every load or
+        reload (`finalize_model_weights`), refilling the fused tensor in place
+        so captured CUDA graphs see updated gates.
         """
-        if self._combined_gate_weight is None:
-            assert self.gate is not None and self.shared_expert_gate is not None
-            self._combined_gate_weight = torch.cat(
-                [self.gate.weight, self.shared_expert_gate.weight],
-                dim=0,
-            )
+        if not self._fse_fuse_gate:
+            return
+        assert self.gate is not None and self.shared_expert_gate is not None
+        refill_derived(
+            self,
+            "_combined_gate_weight",
+            torch.cat([self.gate.weight, self.shared_expert_gate.weight], dim=0),
+        )
 
     @property
     def _quant_method(self) -> FusedMoEMethodBase:
@@ -906,7 +910,8 @@ class MoERunner(MoERunnerInterface):
         # NOTE: in future PR, MoE runner will always hold the gate.
         if self.gate is not None:
             if self._fse_fuse_gate:
-                self._maybe_fuse_gate_weights()
+                if self._combined_gate_weight is None:
+                    self.fuse_gate_weights()
                 router_logits = dispatch_unquantized_gemm()(
                     self, hidden_states, self._combined_gate_weight, None
                 )

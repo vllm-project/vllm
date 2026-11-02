@@ -25,6 +25,7 @@ from vllm.model_executor.models.utils import (
     get_draft_quant_config,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
@@ -245,21 +246,21 @@ class K3DSparkModel(nn.Module):
                 and attn.kv_a_layernorm.variance_epsilon
                 == attn0.kv_a_layernorm.variance_epsilon
             ), "All MLA DSpark layers must share their latent KV geometry."
-        self._context_kv_norm_weights = torch.stack(
-            [attn.kv_a_layernorm.weight.detach() for attn in attentions], dim=0
-        ).contiguous()
+        norms = [attn.kv_a_layernorm.weight.detach() for attn in attentions]
+        refill_derived(
+            self, "_context_kv_norm_weights", torch.stack(norms, dim=0).contiguous()
+        )
         self._num_context_layers = len(attentions)
         self._context_kv_width = kv_width
         self._context_kv_lora_rank = attn0.kv_lora_rank
         self._context_rope_dim = attn0.qk_rope_head_dim
         self._context_rms_norm_eps = attn0.kv_a_layernorm.variance_epsilon
-        self._context_kv_scales: torch.Tensor | None = None
+        kv_scales = None
         if attn0.kv_cache_dtype in _GROUPED_KV_CACHE_DTYPES and is_quantized_kv_cache(
             attn0.kv_cache_dtype
         ):
-            self._context_kv_scales = torch.stack(
-                [attn._k_scale.reshape(()) for attn in attentions]
-            )
+            kv_scales = torch.stack([attn._k_scale.reshape(()) for attn in attentions])
+        refill_derived(self, "_context_kv_scales", kv_scales)
 
     def _precompute_fused_context_kv(
         self,

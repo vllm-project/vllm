@@ -106,3 +106,40 @@ def test_root_model_builds_the_fold() -> None:
     root = MagicMock()
     KimiK3ForConditionalGeneration.process_weights_after_loading(root)
     root.language_model.process_weights_after_loading.assert_called_once_with()
+
+
+def test_rebuild_refills_fold_in_place(monkeypatch) -> None:
+    """A weight reload reruns the post-load hook. CUDA graphs captured at
+    startup read W_fold at its first address, so the rebuild must write the new
+    fold there."""
+    from types import SimpleNamespace
+
+    num_heads = 12
+    w_qb, w_uk = _weights(num_heads)
+    kv_b = {"w_uk": w_uk}
+    monkeypatch.setattr(
+        "vllm.models.kimi_k3.amd.mla.split_kv_b_proj",
+        lambda *args: (kv_b["w_uk"], None),
+    )
+    attn = SimpleNamespace(
+        q_b_proj=SimpleNamespace(weight=w_qb.clone()),
+        mla_attn=SimpleNamespace(kv_b_proj=None),
+        kv_lora_rank=L,
+        num_heads=num_heads,
+        qk_nope_head_dim=P,
+        qk_rope_head_dim=R,
+        v_head_dim=P,
+        _compute_w_fold=compute_w_fold,
+        _w_fold=None,
+    )
+    build = KimiK3MultiHeadLatentAttentionWrapper._build_w_fold
+    build(attn)
+    first = attn._w_fold
+    ptr = first.data_ptr()
+
+    attn.q_b_proj.weight.mul_(-2)
+    kv_b["w_uk"] = w_uk * 3
+    build(attn)
+    assert attn._w_fold is first and attn._w_fold.data_ptr() == ptr
+    expect = compute_w_fold(attn.q_b_proj.weight, kv_b["w_uk"], num_heads, P, R)
+    torch.testing.assert_close(attn._w_fold, expect, rtol=0, atol=0)

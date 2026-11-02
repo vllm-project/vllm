@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_activation_quant,
 )
+from vllm.model_executor.utils import replace_parameter
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe import RoutedExperts
@@ -165,9 +166,9 @@ def _shard_nvfp4_moe_weights_per_die(layer, res, w13, w13_scale, w2, w2_scale):
 
         # Register shards for EPLB; Parameter wrapping preserves their pool storage.
         for name in _LOCALIZED_SHARD_PARAMS:
-            param = torch.nn.Parameter(shard[name], requires_grad=False)
-            layer.register_parameter(f"localized{i}_{name}", param)
-            shard[name] = param
+            param_name = f"localized{i}_{name}"
+            replace_parameter(layer, param_name, shard[name])
+            shard[name] = getattr(layer, param_name)
 
         # Views preserve visibility of EPLB's in-place updates.
         shard["w13_weight_scale"] = nvfp4_swizzled_scale_to_cutedsl_mma_view(

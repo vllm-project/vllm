@@ -94,7 +94,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 
-from .attention import Glm5NextMLAAttention
+from .attention import Glm5NextMLAAttention, Indexer
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
     Glm5NextMultiModalProcessor,
@@ -1059,6 +1059,14 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         return loaded_params
 
 
+def process_indexers_after_loading(model: nn.Module) -> None:
+    """Run the indexers' post-load processing (the fp32 head gate, rebuilt in
+    place) after every load and reload."""
+    for module in model.modules():
+        if isinstance(module, Indexer):
+            module.process_weights_after_loading()
+
+
 class Glm5NextForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsEagle3
 ):
@@ -1146,6 +1154,9 @@ class Glm5NextForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
+
+    def process_weights_after_loading(self) -> None:
+        process_indexers_after_loading(self)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -1250,6 +1261,9 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
+
+    def process_weights_after_loading(self) -> None:
+        process_indexers_after_loading(self)
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [

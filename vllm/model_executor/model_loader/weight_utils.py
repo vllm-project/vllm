@@ -1512,6 +1512,11 @@ def multi_thread_pt_weights_iterator(
 
 def finalize_model_weights(model: torch.nn.Module) -> None:
     """Run once after a full load or reload: the model-level post-load hook."""
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+
+    for module in model.modules():
+        if isinstance(module, MoERunner):
+            module.fuse_gate_weights()
     if hasattr(model, "process_weights_after_loading"):
         model.process_weights_after_loading()
 

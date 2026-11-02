@@ -112,11 +112,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
                 # cutlass_w8a8 requires azp to be folded into azp_adj
                 # in the per-tensor case
                 azp_adj = getattr(layer, i_zp_name) * azp_adj
-            setattr(
-                layer,
-                azp_adj_name,
-                torch.nn.Parameter(azp_adj, requires_grad=False),
-            )
+            replace_parameter(layer, azp_adj_name, azp_adj)
 
     def apply_weights(
         self,

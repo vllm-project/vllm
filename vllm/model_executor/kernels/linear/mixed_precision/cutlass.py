@@ -91,10 +91,8 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
         fp8_scales, chan_scales = convert_bf16_scales_to_fp8(self.quant_fp8, w_s.data)
         replace_parameter(layer, self.w_s_name, fp8_scales)
 
-        # register per-channel scales
-        layer.register_parameter(
-            "weight_chan_scale", torch.nn.Parameter(chan_scales, requires_grad=False)
-        )
+        # per-channel scales; a rerun refills the first one in place
+        replace_parameter(layer, "weight_chan_scale", chan_scales)
 
         # Encode/reorder weights and pack scales
         self._transform_param(layer, self.w_q_name, transform_w_q)
