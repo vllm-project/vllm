@@ -233,8 +233,10 @@ def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
         return MoRIIOMode.WRITE
 
 
-def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int = 1) -> int:
-    return (dp_rank) * tp_size + tp_rank
+def get_port_offset(dp_rank: int, tp_rank: int, tp_size: int) -> int:
+    """Port offset of a worker; tp_size is the TP size of the instance that
+    owns the port, so listeners and senders agree."""
+    return dp_rank * tp_size + tp_rank
 
 
 def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
@@ -354,7 +356,7 @@ class MoRIIOConfig:
         dp_rank = fold_local_rank(pc.data_parallel_rank, pc.data_parallel_size_local)
         base_notify_port = int(extra_config["notify_port"])
         tp_size = get_tensor_model_parallel_world_size()
-        port_offset = get_port_offset(dp_rank, tp_rank)
+        port_offset = get_port_offset(dp_rank, tp_rank, tp_size)
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
             raise ValueError(

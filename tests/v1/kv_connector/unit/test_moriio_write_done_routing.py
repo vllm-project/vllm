@@ -12,10 +12,15 @@ from unittest.mock import patch
 
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.v1.moriio import moriio_engine
+from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio import (
+    moriio_common,
+    moriio_engine,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     LayerTransferPlan,
+    MoRIIOConfig,
     MoRIIOConnectorMetadata,
     MoRIIOError,
     MoRIIOMode,
@@ -45,6 +50,7 @@ def _fake_worker(
     alloc: dict[str, Any],
     *,
     tp_rank: int = 0,
+    world_size: int = 1,
     set_remote_dp_size_local: int | None = None,
 ) -> Any:
     wrapper = SimpleNamespace(
@@ -70,7 +76,9 @@ def _fake_worker(
     )
     wrapper._mark_transfer_terminal_locked = lambda transfer_id: None
     wrapper._is_transfer_terminal_locked = lambda transfer_id: False
-    worker = SimpleNamespace(moriio_wrapper=wrapper, tp_rank=tp_rank)
+    worker = SimpleNamespace(
+        moriio_wrapper=wrapper, tp_rank=tp_rank, world_size=world_size
+    )
     if set_remote_dp_size_local is not None:
         worker.remote_dp_size_local = set_remote_dp_size_local
     return worker
@@ -224,7 +232,7 @@ def test_finalize_notify_port_uses_pod_local_rank():
     _tid, ip, port, mtype = worker.moriio_wrapper.sent_notifies[-1]
     assert mtype == "write_done"
     assert ip == "10.0.0.2"
-    assert port == base + get_port_offset(9 % 8, 0)
+    assert port == base + get_port_offset(9 % 8, 0, 1)
 
 
 def test_finalize_port_ignores_stale_worker_dp_local():
@@ -241,7 +249,7 @@ def test_finalize_port_ignores_stale_worker_dp_local():
         remote_dp_size_local=8,
     )
     writer._execute_write_task(task)
-    assert info.completion_notify_port == base + get_port_offset(9 % 8, 0)
+    assert info.completion_notify_port == base + get_port_offset(9 % 8, 0, 1)
 
     info.writes_expected = 1
     info.writes_done = 1
@@ -249,28 +257,28 @@ def test_finalize_port_ignores_stale_worker_dp_local():
 
     _tid, _ip, port, mtype = worker.moriio_wrapper.sent_notifies[-1]
     assert mtype == "write_done"
-    assert port == base + get_port_offset(9 % 8, 0)
-    assert port != base + get_port_offset(9 % 1, 0)
+    assert port == base + get_port_offset(9 % 8, 0, 1)
+    assert port != base + get_port_offset(9 % 1, 0, 1)
 
 
 def test_finalize_single_pod_port_uses_global_rank():
     base = 20000
     info = RemoteAllocInfo(block_ids=None, decode_dp_rank=3)
     alloc = {"tA": info}
-    worker = _fake_worker(alloc, tp_rank=2)
+    worker = _fake_worker(alloc, tp_rank=2, world_size=4)
     writer = make_moriio_writer(worker)
 
     task = _write_task("tA", "10.0.0.1", multi_pod_hosts=[], remote_dp_size_local=0)
     writer._execute_write_task(task)
     assert info.completion_remote_ip == "10.0.0.1"
-    assert info.completion_notify_port == base + get_port_offset(3, 2)
+    assert info.completion_notify_port == base + get_port_offset(3, 2, 4)
 
     info.writes_expected = 1
     info.writes_done = 1
     writer._finalize_if_complete("tA", info)
 
     _tid, _ip, port, _mtype = worker.moriio_wrapper.sent_notifies[-1]
-    assert port == base + get_port_offset(3, 2)
+    assert port == base + get_port_offset(3, 2, 4)
 
 
 def test_execute_write_task_writes_every_fanout_target():
@@ -333,8 +341,8 @@ def test_fanout_write_done_notifies_every_target_after_completion():
     writer._execute_write_task(task)
 
     assert info.completion_notify_targets == {
-        ("10.0.0.1", base + get_port_offset(1, 2)): 1,
-        ("10.0.0.1", base + get_port_offset(1, 3)): 1,
+        ("10.0.0.1", base + get_port_offset(1, 2, 4)): 1,
+        ("10.0.0.1", base + get_port_offset(1, 3, 4)): 1,
     }
 
     info.writes_expected = 1
@@ -351,13 +359,13 @@ def test_fanout_write_done_notifies_every_target_after_completion():
         (
             "tA",
             "10.0.0.1",
-            base + get_port_offset(1, 2),
+            base + get_port_offset(1, 2, 4),
             "write_done",
         ),
         (
             "tA",
             "10.0.0.1",
-            base + get_port_offset(1, 3),
+            base + get_port_offset(1, 3, 4),
             "write_done",
         ),
     ]
@@ -507,14 +515,16 @@ def test_rank_with_nothing_to_write_does_not_wait_for_a_handshake():
 
 
 @pytest.mark.parametrize(
-    ("params", "expected_tp_ranks"),
+    ("params", "expected_ports"),
     [
-        ({"remote_tp_size": 2}, [0, 1]),
-        ({"tp_size": 8}, list(range(8))),
-        ({}, list(range(4))),
+        ({"remote_tp_size": 2}, [20000, 20001]),
+        ({"tp_size": 8}, list(range(20000, 20008))),
+        ({}, list(range(20000, 20004))),
+        # TP2 x DP2 prefill: DP rank 1 listens at offsets 2 and 3.
+        ({"remote_dp_rank": 1, "remote_tp_size": 2}, [20002, 20003]),
     ],
 )
-def test_release_reaches_every_prefill_rank_and_no_other(params, expected_tp_ranks):
+def test_release_reaches_every_prefill_rank_and_no_other(params, expected_ports):
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.tp_size = 4
     sent: list[tuple[str, str, int]] = []
@@ -533,10 +543,7 @@ def test_release_reaches_every_prefill_rank_and_no_other(params, expected_tp_ran
         },
     )
 
-    assert sent == [
-        ("tA", "10.0.0.1", 20000 + get_port_offset(0, tp_rank))
-        for tp_rank in expected_tp_ranks
-    ]
+    assert sent == [("tA", "10.0.0.1", port) for port in expected_ports]
 
 
 def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
@@ -545,7 +552,9 @@ def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
     wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
         (ip, port, message_type)
     )
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0, world_size=1)
+    )
     task = _write_task(
         "tA",
         "10.0.0.1",
@@ -562,7 +571,7 @@ def test_deferred_write_timeout_fails_transfer_on_every_decode_rank():
     assert [ack.transfer_id for ack in wrapper.done_req_ids] == ["tA"]
     # Global DP ranks 0-3, two per pod: the owning rank is unknown.
     assert sent == [
-        (host, 20000 + get_port_offset(local_rank, 0), "write_failed")
+        (host, 20000 + get_port_offset(local_rank, 0, 1), "write_failed")
         for host in ("10.0.0.1", "10.0.0.2")
         for local_rank in (0, 1)
     ]
@@ -581,7 +590,9 @@ def test_deferred_write_timeout_notifies_every_fanout_target():
     wrapper.send_notify = lambda tid, ip, port, message_type: sent.append(
         (ip, port, message_type)
     )
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0, world_size=1)
+    )
     task = _write_task(
         "tA",
         "10.0.0.1",
@@ -597,7 +608,7 @@ def test_deferred_write_timeout_notifies_every_fanout_target():
     assert sent == [
         (
             "10.0.0.1",
-            20000 + get_port_offset(dp_rank, tp_rank),
+            20000 + get_port_offset(dp_rank, tp_rank, 4),
             "write_failed",
         )
         for dp_rank in (0, 1)
@@ -723,3 +734,37 @@ def test_hybrid_write_requires_exactly_one_running_state_slot(local_state):
 
     with pytest.raises(MoRIIOError, match="one running-state slot"):
         writer._prepare_mamba_transfer_plans(task, RemoteAllocInfo(block_ids=[[], [9]]))
+
+
+def test_notify_ports_are_unique_across_tp_and_dp_ranks(monkeypatch):
+    """TP2 x DP2 ranks (dp0, tp1) and (dp1, tp0) must not share a notify port."""
+    kv_config = KVTransferConfig(
+        kv_connector="MoRIIOConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={
+            "http_port": "8000",
+            "handshake_port": "6301",
+            "notify_port": "61005",
+            "backend": "xgmi",
+        },
+    )
+    monkeypatch.setattr(
+        moriio_common, "get_tensor_model_parallel_world_size", lambda: 2
+    )
+    ports = []
+    for dp_rank in range(2):
+        for tp_rank in range(2):
+            monkeypatch.setattr(
+                moriio_common, "get_tensor_model_parallel_rank", lambda r=tp_rank: r
+            )
+            vllm_config = VllmConfig(
+                kv_transfer_config=kv_config,
+                parallel_config=ParallelConfig(
+                    data_parallel_size=2,
+                    data_parallel_rank=dp_rank,
+                    data_parallel_size_local=2,
+                ),
+            )
+            ports.append(MoRIIOConfig.from_vllm_config(vllm_config).notify_port)
+
+    assert ports == [61005, 61006, 61007, 61008]

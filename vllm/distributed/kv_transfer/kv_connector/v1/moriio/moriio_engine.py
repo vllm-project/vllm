@@ -676,7 +676,9 @@ class MoRIIOWriter:
             tp_rank = self.worker.tp_rank
         # Same offset the consumer binds its notify socket at (MoRIIOConfig).
         remote_port = task.remote_notify_port + get_port_offset(
-            fold_local_rank(decode_dp_rank, dp_local), tp_rank
+            fold_local_rank(decode_dp_rank, dp_local),
+            tp_rank,
+            task.remote_tp_size or self.worker.world_size,
         )
         return remote_ip, remote_port
 
