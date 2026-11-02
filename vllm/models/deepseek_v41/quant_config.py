@@ -258,7 +258,7 @@ class DeepseekV4FP8Config(Fp8Config):
                         quant_config=self._get_nvfp4_config(),
                         moe_config=layer.moe_config,
                     )
-                return Mxfp4MoEMethod(layer.moe_config)
+                return Mxfp4MoEMethod(layer.moe_config, activation_key=kMxfp8Dynamic)
             # expert_dtype == "fp8": fall through to Fp8Config which
             # returns Fp8MoEMethod with block-wise float32 scales.
         return super().get_quant_method(layer, prefix)

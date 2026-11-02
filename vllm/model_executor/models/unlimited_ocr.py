@@ -64,7 +64,9 @@ import math
 from collections.abc import Mapping, Sequence
 
 from vllm.config import VllmConfig
+from vllm.inputs import MultiModalHashes
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.multimodal.inputs import MultiModalKwargsItems
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -186,6 +188,9 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
 
+        mm_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+        crop_mode = mm_kwargs.get("crop_mode", CROP_MODE)
+
         image_token_id = hf_processor.image_token_id
         assert isinstance(image_token_id, int)
 
@@ -203,7 +208,7 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
                 # Disable crop mode for multi-image input.
                 # UnlimitedOCRProcessor.tokenize_with_images applies the same
                 # fallback, so both paths must agree on the effective crop flag.
-                effective_cropping = CROP_MODE and len(images) == 1
+                effective_cropping = bool(crop_mode) and len(images) == 1
 
                 num_image_tokens = self.info.get_num_image_tokens(
                     image_width=size.width,
@@ -219,6 +224,23 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
                 replacement=get_replacement_unlimited_ocr,
             )
         ]
+
+    def _get_mm_hashes(self, inputs: ProcessorInputs) -> MultiModalHashes:
+        hashes = dict(super()._get_mm_hashes(inputs))
+        images = inputs.mm_data_items.get("image")
+        if isinstance(images, ImageProcessorItems):
+            mm_kwargs = self.info.ctx.get_merged_mm_kwargs(
+                inputs.hf_processor_mm_kwargs
+            )
+            cropping = len(images) == 1 and bool(mm_kwargs.get("crop_mode", CROP_MODE))
+            algorithm = self.info.ctx.get_mm_config().mm_hasher_algorithm
+            hashes["image"] = [
+                MultiModalHasher.hash_kwargs(
+                    algorithm, mm_hash=mm_hash, cropping=cropping
+                )
+                for mm_hash in hashes["image"]
+            ]
+        return hashes
 
     def _cached_apply_hf_processor(
         self,

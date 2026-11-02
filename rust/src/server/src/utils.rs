@@ -13,7 +13,7 @@ use serde_json::Value;
 use thiserror_ext::AsReport;
 use uuid::Uuid;
 
-use crate::error::ApiError;
+use crate::error::{ApiError, bail_invalid_request};
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ResolvedRequestContext {
@@ -113,27 +113,35 @@ pub fn resolve_session_id(
 
 /// Convert OpenAI-style `logit_bias` with string token-ID keys into the
 /// internal `HashMap<u32, f32>` representation, validating that every key
-/// parses as a `u32`.
+/// parses as a `u32`. All invalid keys are reported in one error, like Python.
 pub fn convert_logit_bias(
     logit_bias: Option<HashMap<String, f32>>,
 ) -> Result<Option<HashMap<u32, f32>>, ApiError> {
-    logit_bias
-        .map(|bias| {
-            bias.into_iter()
-                .map(|(key, value)| {
-                    key.parse().map(|k| (k, value)).map_err(|_| {
-                        ApiError::invalid_request(
-                            format!(
-                                "Invalid key in 'logit_bias': '{key}' is not a valid token ID. \
-                                 Token IDs must be non-negative integers."
-                            ),
-                            Some("logit_bias"),
-                        )
-                    })
-                })
-                .collect()
-        })
-        .transpose()
+    let Some(logit_bias) = logit_bias else {
+        return Ok(None);
+    };
+
+    let mut converted = HashMap::with_capacity(logit_bias.len());
+    let mut invalid_keys = Vec::new();
+    for (key, value) in logit_bias {
+        match key.parse() {
+            Ok(token_id) => {
+                converted.insert(token_id, value);
+            }
+            Err(_) => invalid_keys.push(key),
+        }
+    }
+    if !invalid_keys.is_empty() {
+        // The JSON object's order is lost in the map, so sort for a stable
+        // message.
+        invalid_keys.sort_unstable();
+        bail_invalid_request!(
+            param = "logit_bias",
+            "logit_bias contains key(s) that are not valid token IDs: {invalid_keys:?}. \
+             Token IDs must be non-negative integers."
+        );
+    }
+    Ok(Some(converted))
 }
 
 /// Extract common request metadata from HTTP headers: the external request ID,
@@ -191,6 +199,34 @@ mod tests {
     use tokio::time::{Instant, sleep};
 
     use super::*;
+
+    /// Every key that is not a token ID is named in one error, in a stable
+    /// order, instead of only the first one the map yields.
+    #[test]
+    fn convert_logit_bias_reports_all_invalid_keys() {
+        let logit_bias = HashMap::from([
+            ("bad2".to_string(), 20.0),
+            ("7".to_string(), 1.0),
+            ("bad1".to_string(), 50.0),
+            ("-1".to_string(), 5.0),
+        ]);
+        let error = convert_logit_bias(Some(logit_bias)).expect_err("invalid keys");
+        expect_test::expect![[r#"
+            InvalidRequest {
+                message: "logit_bias contains key(s) that are not valid token IDs: [\"-1\", \"bad1\", \"bad2\"]. Token IDs must be non-negative integers.",
+                param: Some(
+                    "logit_bias",
+                ),
+            }
+        "#]].assert_debug_eq(&error);
+    }
+
+    #[test]
+    fn convert_logit_bias_converts_valid_keys() {
+        let logit_bias = HashMap::from([("7".to_string(), 1.0), ("42".to_string(), -2.5)]);
+        let converted = convert_logit_bias(Some(logit_bias)).expect("valid keys");
+        assert_eq!(converted, Some(HashMap::from([(7, 1.0), (42, -2.5)])));
+    }
 
     /// Collect `(elapsed seconds, frame)` pairs from a response whose event
     /// stream idles for 20 seconds between its two events.

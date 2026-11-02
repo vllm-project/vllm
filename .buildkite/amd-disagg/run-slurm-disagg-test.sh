@@ -47,6 +47,7 @@ SHARED_MOUNT="${SHARED_MOUNT:-/data}"
 LOG_ROOT="${LOG_ROOT:-${SHARED_MOUNT}/${USER:-$(whoami)}/disagg_logs}"
 DRY_RUN="${DRY_RUN:-0}"
 MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
+KV_CONNECTOR="${KV_CONNECTOR:-MoRIIOConnector}"
 
 WAIT="${WAIT:-0}"
 
@@ -69,7 +70,7 @@ export DISAGG_SCRIPTS_DIR="${STAGED_DIR}"
 echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&2
 
 export IMAGE MODEL_NAME WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
-export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
+export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE KV_CONNECTOR
 export ROUTER_TYPE ROUTER_PORT VLLM_ROUTER_IMAGE
 # Leave the image's own ionic userspace in place instead of mounting the host's.
 export SKIP_IONIC_MOUNTS

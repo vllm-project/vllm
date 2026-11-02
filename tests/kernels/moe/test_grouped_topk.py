@@ -76,7 +76,13 @@ def _single_group_reference(
     not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
 )
 @pytest.mark.parametrize("skip_padding", [False, True])
-def test_kimi_grouped_topk_masks_padding_when_enabled(skip_padding: bool):
+@pytest.mark.parametrize("use_fused", [False, True])
+def test_kimi_grouped_topk_masks_padding_when_enabled(
+    skip_padding: bool, use_fused: bool, monkeypatch
+):
+    set_random_seed(0)
+    monkeypatch.setenv("VLLM_USE_FUSED_MOE_GROUPED_TOPK", str(int(use_fused)))
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
     hidden_states = torch.randn((2, 16), device="cuda")
     gating_output = torch.randn((2, 896), device="cuda")
     is_padding = torch.tensor([False, True], device="cuda")
@@ -86,20 +92,99 @@ def test_kimi_grouped_topk_masks_padding_when_enabled(skip_padding: bool):
         num_expert_group=1,
         topk_group=1,
         skip_padding=skip_padding,
+        e_score_correction_bias=torch.randn((896,), device="cuda"),
     )
 
+    baseline_weights, baseline_ids = router._compute_routing(
+        hidden_states, gating_output, torch.int32
+    )
     with set_forward_context(None, VllmConfig(), is_padding=is_padding):
         topk_weights, topk_ids = router._compute_routing(
             hidden_states, gating_output, torch.int32
         )
 
-    assert torch.all(topk_ids[0] >= 0)
+    torch.testing.assert_close(topk_weights[0], baseline_weights[0], rtol=0, atol=0)
+    assert torch.equal(topk_ids[0], baseline_ids[0])
     if skip_padding:
         assert torch.all(topk_ids[1] == -1)
         assert torch.all(topk_weights[1] == 0)
     else:
         assert torch.all(topk_ids[1] >= 0)
         assert torch.all(topk_weights[1] > 0)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
+@pytest.mark.parametrize(
+    "num_experts,num_groups,topk_group,topk",
+    [(128, 1, 1, 8), (896, 1, 1, 16), (256, 8, 4, 8), (512, 8, 4, 8)],
+)
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+def test_grouped_topk_padding_changes_on_graph_replay(
+    num_experts: int, num_groups: int, topk_group: int, topk: int, scoring_func: str
+):
+    """Every kernel family must read the current mask on each graph replay."""
+    set_random_seed(0)
+    logits = torch.randn((33, num_experts), device="cuda")
+    bias = torch.randn((num_experts,), device="cuda")
+    hidden = torch.empty((33, 0), device="cuda")
+    padding = torch.zeros(33, dtype=torch.bool, device="cuda")
+
+    def route(mask):
+        return fused_grouped_topk(
+            hidden,
+            logits,
+            topk,
+            True,
+            bias,
+            num_groups,
+            topk_group,
+            scoring_func,
+            2.5,
+            is_padding=mask,
+        )
+
+    baseline_weights, baseline_ids = route(None)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        route(padding)
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        weights, ids = route(padding)
+    for pattern in (
+        torch.arange(33, device="cuda") % 2 == 0,
+        torch.ones_like(padding),
+        torch.zeros_like(padding),
+    ):
+        padding.copy_(pattern)
+        graph.replay()
+        torch.testing.assert_close(
+            weights, baseline_weights.masked_fill(pattern[:, None], 0), rtol=0, atol=0
+        )
+        assert torch.equal(ids, baseline_ids.masked_fill(pattern[:, None], -1))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="This test is skipped on non-CUDA platform."
+)
+def test_grouped_topk_padding_opcheck():
+    torch.library.opcheck(
+        torch.ops._moe_C.grouped_topk,
+        (
+            torch.randn((4, 256), device="cuda"),
+            8,
+            4,
+            8,
+            True,
+            2.5,
+            torch.randn(256, device="cuda"),
+            1,
+            torch.tensor([False, True, False, True], device="cuda"),
+        ),
+    )
 
 
 @pytest.mark.skipif(

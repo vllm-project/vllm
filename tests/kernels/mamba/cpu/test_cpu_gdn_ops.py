@@ -729,7 +729,7 @@ def test_spec_forward_prepares_native_conv_metadata(
         conv_buf=torch.empty(0),
         ssm_state=torch.empty(0),
         width=CONV_KERNEL,
-        state_len=0,
+        state_len=CONV_KERNEL + 2,
     )
 
     expected = (
@@ -742,6 +742,108 @@ def test_spec_forward_prepares_native_conv_metadata(
         assert actual.dtype == torch.int32
         assert forwarded_is_weight_packed is True
         torch.testing.assert_close(actual, reference)
+
+
+@pytest.mark.parametrize("use_native", [False, True])
+@torch.inference_mode()
+def test_spec_forward_conv_tracks_accepted_tokens(
+    use_native: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Spec-decode steps with uneven draft counts, including a row without
+    drafts whose previous step accepted more tokens than it now carries
+    (MRV2 keeps such rows as spec rows), must convolve over exactly the
+    accepted token history."""
+    if use_native and not (
+        torch.cpu._is_amx_tile_supported() or gdn_attention.is_arm_bf16()
+    ):
+        pytest.skip("native causal conv1d requires AMX or Arm BF16 support")
+    if not use_native:
+        monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: False)
+        monkeypatch.setattr(gdn_attention, "is_arm_bf16", lambda: False)
+    monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
+    monkeypatch.setattr(
+        gdn_attention.ops,
+        "fused_sigmoid_gating_delta_rule_update_spec_cpu",
+        lambda **kwargs: kwargs["q"],
+    )
+
+    num_spec = 3
+    state_len = CONV_KERNEL - 1 + num_spec
+    _, weight, bias = _conv_inputs(0)
+    layer = types.SimpleNamespace(
+        activation="silu",
+        conv1d=types.SimpleNamespace(
+            weight=_maybe_pack_conv_weight(weight, use_native),
+            bias=bias,
+            _cpu_unpacked_conv_weight=weight,
+        ),
+        A_log=None,
+        dt_bias=None,
+        rearrange_mixed_qkv=lambda x: (x.unsqueeze(0),) * 3,
+    )
+    slots = [1, 2]
+    conv_buf = _sd_conv_states(len(slots) + 1, state_len)
+    history = []
+    for slot in slots:
+        prefix = torch.randn(CONV_KERNEL - 1, CONV_DIM).to(torch.bfloat16)
+        conv_buf[slot, :, : CONV_KERNEL - 1] = prefix.T
+        history.append(list(prefix))
+
+    # (query lens, accepted counts of the previous step's tokens)
+    steps = [
+        ([4, 4], [1, 1]),
+        ([4, 1], [3, 2]),
+        ([2, 4], [4, 1]),
+        ([4, 4], [2, 3]),
+    ]
+    prev_x: list[torch.Tensor] = []
+    for step, (q_lens, accepted) in enumerate(steps):
+        xs = [torch.randn(q, CONV_DIM).to(torch.bfloat16) for q in q_lens]
+        if step > 0:
+            for hist, x, n in zip(history, prev_x, accepted):
+                hist.extend(x[:n])
+        prev_x = xs
+
+        cu = torch.tensor([0, *q_lens]).cumsum(0).to(torch.int32)
+        metadata = GDNAttentionMetadata(
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_decodes=0,
+            num_decode_tokens=0,
+            num_spec_decodes=len(slots),
+            num_spec_decode_tokens=sum(q_lens),
+            num_actual_tokens=sum(q_lens),
+            spec_state_indices_tensor=torch.tensor(
+                [[slot] + [0] * num_spec for slot in slots], dtype=torch.int32
+            ),
+            spec_query_start_loc=cu,
+            num_accepted_tokens=torch.tensor(accepted, dtype=torch.int32),
+        )
+        out = gdn_attention._spec_forward(
+            layer=layer,
+            attn_metadata_i=metadata,
+            mixed_qkv_spec=torch.cat(xs),
+            b_spec=torch.empty(0),
+            a_spec=torch.empty(0),
+            conv_buf=conv_buf,
+            ssm_state=torch.empty(0),
+            width=CONV_KERNEL,
+            state_len=state_len,
+        )
+
+        for i, (hist, x) in enumerate(zip(history, xs)):
+            conv_in = torch.cat([torch.stack(hist[-(CONV_KERNEL - 1) :]), x])
+            ref = F.silu(
+                F.conv1d(
+                    conv_in.T.float().unsqueeze(0),
+                    weight.float().unsqueeze(1),
+                    bias.float(),
+                    groups=CONV_DIM,
+                )[0]
+            ).T
+            torch.testing.assert_close(
+                out[cu[i] : cu[i + 1]].float(), ref, atol=2e-2, rtol=2e-2
+            )
 
 
 @pytest.mark.parametrize("total_tokens, split", TWO_CALL_SPLITS)

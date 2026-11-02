@@ -10,6 +10,7 @@ from transformers import PreTrainedConfig
 
 from tests.models.utils import build_model_context
 from vllm.config.ec_transfer import ECRole, ECTransferConfig
+from vllm.config.kv_transfer import KVTransferConfig
 from vllm.config.model import ModelConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.vllm import VllmConfig
@@ -628,6 +629,44 @@ def test_ec_producer_only_enables_mm_encoder_only(
     VllmConfig._resolve_mm_encoder_only(vllm_config)
 
     assert mm_config.mm_encoder_only is expected
+
+
+@pytest.mark.parametrize(
+    ("role", "language_model_only", "enable_mm_embeds", "expected"),
+    [
+        ("kv_consumer", False, False, True),
+        # Text-only P/D decode: no MM infrastructure.
+        ("kv_consumer", True, False, False),
+        # EPD decode that skips the encoder but still takes embeddings.
+        ("kv_consumer", True, True, True),
+        ("ec_consumer", True, False, True),
+    ],
+)
+def test_consumer_resolves_mm_embedding_inputs(
+    role: str, language_model_only: bool, enable_mm_embeds: bool, expected: bool
+):
+    mm_config = MultiModalConfig(
+        language_model_only=language_model_only, enable_mm_embeds=enable_mm_embeds
+    )
+    model_config = MagicMock(spec=ModelConfig)
+    model_config.multimodal_config = mm_config
+    vllm_config = MagicMock(spec=VllmConfig)
+    vllm_config.model_config = model_config
+    vllm_config.ec_transfer_config = (
+        ECTransferConfig(ec_connector="ECExampleConnector", ec_role=role)
+        if role == "ec_consumer"
+        else None
+    )
+    vllm_config.kv_transfer_config = (
+        KVTransferConfig(kv_connector="ExampleConnector", kv_role=role)
+        if role == "kv_consumer"
+        else None
+    )
+
+    VllmConfig._resolve_mm_embedding_inputs(vllm_config)
+
+    assert mm_config.allow_missing_mm_embeddings is expected
+    assert mm_config.enable_mm_embeds is expected
 
 
 def test_vllm_config_runs_the_mm_processor_device_check():

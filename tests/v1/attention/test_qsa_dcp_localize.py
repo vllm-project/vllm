@@ -153,9 +153,7 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
     from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
     import_module("vllm.models.qwen4_exp.nvidia.model")
-    qsa_backend = import_module(
-        "vllm.models.qwen4_exp.nvidia.qsa"
-    ).Qwen4ExpQSAFlashAttentionBackend
+    qsa_backend = import_module("vllm.models.qwen4_exp.nvidia.qsa").Qwen4ExpQSABackend
     assert qsa_backend.get_impl_cls().lse_base_on_e is False
 
     torch.manual_seed(1234 + seq_len)

@@ -71,7 +71,11 @@ inline int _store_block(const char* tmp_path, const char* dest_path,
   if (rename(tmp_path, dest_path) != 0) {
     const int err = errno;
     unlink(tmp_path);
-    return err;
+    // Another writer published this block after the access() above; some
+    // shared filesystems fail rename(2) with EEXIST instead of replacing.
+    // File names are content hashes, so the file already in place holds this
+    // block and the store is done.
+    return err == EEXIST ? 0 : err;
   }
 
   return 0;

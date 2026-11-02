@@ -7,9 +7,9 @@ import pytest
 import torch
 
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
-from vllm.models.qwen4_exp.common.qsa_cache import (
+from vllm.models.qwen4_exp.common.qsa_indexer import (
     QSACompressedKeyCache,
-    QSAStateBackend,
+    QSAIndexerBackend,
     _build_qsa_metadata_torch,
     compressed_qsa_slot_mapping,
 )
@@ -250,7 +250,7 @@ def _packed_qsa_views(dcp_world_size: int):
     attn_groups = [
         [
             AttentionGroup(
-                QSAStateBackend if name == "selector" else _QSAMainBackend,
+                QSAIndexerBackend if name == "selector" else _QSAMainBackend,
                 [name],
                 specs[name],
                 group_id,

@@ -16,6 +16,7 @@ from functools import cache
 
 import torch
 import torch.distributed as dist
+from packaging.version import Version
 
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig
@@ -37,10 +38,11 @@ MHC_OVERLAP_MAX_ROWS = 48
 # Rows of the low-batch GEMMs: one DSpark verification step of up to 8 rows
 # (6 at one request).
 LOW_BATCH_MAX_ROWS = 8
-# The FlashInfer (requirements/cuda.txt) whose internals the publishing wo_b
-# GEMM, the MXFP8 layer input and the pinned MXFP8 tactics were checked
-# against. Its sparse-MLA decode takes caller-owned KV counters (since 0.7.1).
-FLASHINFER_VERSION = "0.7.2"
+# The oldest FlashInfer whose internals the publishing wo_b GEMM and the MXFP8
+# layer input were checked against. Newer releases run them too: test_numerics.py
+# compares both with FlashInfer's own GEMM and quantize bitwise on the release
+# requirements/cuda.txt pins.
+MIN_FLASHINFER_VERSION = "0.7.2"
 
 
 @dataclass(frozen=True)
@@ -54,19 +56,19 @@ class DecodeConfig:
 
 @cache
 def uses_checked_flashinfer(feature: str) -> bool:
-    """Whether the installed FlashInfer is the version whose internals
-    ``feature`` uses; logs once per feature when it is not."""
+    """Whether the installed FlashInfer is at least the version whose internals
+    ``feature`` was checked against; logs once per feature when it is not."""
     try:
         version = importlib.metadata.version("flashinfer-python")
     except importlib.metadata.PackageNotFoundError:
         version = None
-    if version == FLASHINFER_VERSION:
+    if version is not None and Version(version) >= Version(MIN_FLASHINFER_VERSION):
         return True
     logger.warning(
-        "DeepSeek-V4.1 specialized decode: %s needs flashinfer-python %s "
+        "DeepSeek-V4.1 specialized decode: %s needs flashinfer-python >= %s "
         "(found %s); using the stock path instead.",
         feature,
-        FLASHINFER_VERSION,
+        MIN_FLASHINFER_VERSION,
         version,
     )
     return False
