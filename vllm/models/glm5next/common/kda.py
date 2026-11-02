@@ -52,6 +52,7 @@ from vllm.model_executor.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -68,6 +69,9 @@ else:
     )
 
 logger = init_logger(__name__)
+
+# Below this many tokens vLLM's prefill conv is as fast as AITER's HIP conv.
+_AITER_CONV1D_MIN_TOKENS = 4096
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -377,6 +381,15 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if self._use_aiter_decode:
             logger.info_once("GLM-5.3-Flash KDA decode: AITER single-launch kernel.")
         self._register_decode_conv1d_weight()
+        # AITER's HIP prefill conv: width 4, no bias and a bf16 conv state.
+        conv_state_dtype, _ = self.get_state_dtype()
+        self._use_aiter_conv1d = (
+            self.conv_size == 4
+            and self.conv1d.bias is None
+            and conv_state_dtype == torch.bfloat16
+            and bool(rocm_aiter_ops.is_causal_conv1d_prefill_available())
+        )
+        self._register_aiter_conv1d_weight()
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -523,10 +536,64 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             weight.view(3, self.local_projection_size, self.conv_size).transpose(1, 2)
         )
 
+    def _register_aiter_conv1d_weight(self) -> None:
+        """Register ``aiter_conv1d_weight``, a bf16 copy of the q|k|v conv weight
+        for AITER's HIP prefill conv (None when that conv is not used).
+
+        Like ``decode_conv1d_weight``, it is allocated once and refreshed after
+        every load, layerwise reload and ``conv1d.weight`` shard load. The conv
+        parameter is fp32, so the layer takes AITER's conv only while the copy
+        is exact, as it is when the checkpoint stores bf16.
+        """
+        aiter_conv1d_weight = None
+        self._aiter_conv1d_exact = False
+        if self._use_aiter_conv1d:
+            weight = self.conv1d.weight
+            aiter_conv1d_weight = torch.empty(
+                weight.size(0),
+                weight.size(-1),
+                dtype=torch.bfloat16,
+                device=weight.device,
+            )
+            load_shard = weight.weight_loader
+
+            def weight_loader(
+                param: torch.Tensor,
+                loaded_weight: torch.Tensor,
+                loaded_shard_id: int,
+            ) -> None:
+                load_shard(param, loaded_weight, loaded_shard_id)
+                self._copy_aiter_conv1d_weight()
+
+            delattr(weight, "weight_loader")
+            set_weight_attrs(weight, {"weight_loader": weight_loader})
+        self.register_buffer(
+            "aiter_conv1d_weight", aiter_conv1d_weight, persistent=False
+        )
+
+    @torch.no_grad()
+    def _copy_aiter_conv1d_weight(self, copy: bool = True) -> None:
+        """Refresh ``aiter_conv1d_weight`` (unless ``copy`` is False, for a
+        buffer that is already filled) and whether it holds the conv weight
+        exactly."""
+        aiter_weight, weight = self.aiter_conv1d_weight, self.conv1d.weight
+        # Meta during a layerwise reload, as in _copy_decode_conv1d_weight.
+        if aiter_weight is None or aiter_weight.is_meta or weight.is_meta:
+            return
+        weight = weight.view(weight.size(0), weight.size(-1))
+        if copy:
+            aiter_weight.copy_(weight)
+        with gpu_sync_allowed():
+            self._aiter_conv1d_exact = torch.equal(aiter_weight.float(), weight)
+        if self._aiter_conv1d_exact:
+            logger.info_once("GLM-5.3-Flash KDA prefill conv: AITER HIP.")
+
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         # The weight cache IPC loader maps the buffer the daemon already filled.
-        if not is_weights_pre_processed():
+        pre_processed = is_weights_pre_processed()
+        if not pre_processed:
             self._copy_decode_conv1d_weight()
+        self._copy_aiter_conv1d_weight(copy=not pre_processed)
 
     def _flashkda_prefill(
         self,
@@ -807,18 +874,36 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         q_ns = k_ns = v_ns = None
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
-            qkv_ns = causal_conv1d_fn(
-                qkv_ns.transpose(0, 1),
-                conv_weights,
-                conv_bias,
-                activation="silu",
-                conv_states=conv_state,
-                has_initial_state=has_initial_state,
-                cache_indices=non_spec_state_indices_tensor,
-                query_start_loc=non_spec_query_start_loc,
-                metadata=attn_metadata_narrowed,
-            ).transpose(0, 1)
-            q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
+            if (
+                self._aiter_conv1d_exact
+                and qkv_ns.shape[0] >= _AITER_CONV1D_MIN_TOKENS
+                and qkv_ns.dtype == torch.bfloat16
+            ):
+                q_ns, k_ns, v_ns = rocm_aiter_ops.causal_conv1d_prefill_split_qkv(
+                    qkv_ns.transpose(0, 1),
+                    self.aiter_conv1d_weight,
+                    None,
+                    conv_state,
+                    non_spec_query_start_loc,
+                    self.local_projection_size,
+                    self.local_projection_size,
+                    cache_indices=non_spec_state_indices_tensor,
+                    has_initial_state=has_initial_state,
+                    metadata=attn_metadata_narrowed,
+                )
+            else:
+                qkv_ns = causal_conv1d_fn(
+                    qkv_ns.transpose(0, 1),
+                    conv_weights,
+                    conv_bias,
+                    activation="silu",
+                    conv_states=conv_state,
+                    has_initial_state=has_initial_state,
+                    cache_indices=non_spec_state_indices_tensor,
+                    query_start_loc=non_spec_query_start_loc,
+                    metadata=attn_metadata_narrowed,
+                ).transpose(0, 1)
+                q_ns, k_ns, v_ns = qkv_ns.split(self.local_projection_size, dim=-1)
         elif attn_metadata_narrowed.num_decodes > 0:
             assert non_spec_state_indices_tensor is not None
             decode_conv_indices = non_spec_state_indices_tensor[
