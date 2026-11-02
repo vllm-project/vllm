@@ -13,6 +13,11 @@ from vllm.outputs import RequestOutput
 
 from ...serve.engine.protocol import ErrorResponse
 from ..base.serving import SpeechToTextBaseServing
+from ..whisper import (
+    generate_chunk_with_gzip_fallback,
+    gzip_vocab_size,
+    should_gzip_fallback,
+)
 from .protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -44,6 +49,28 @@ class OpenAIServingTranscription(SpeechToTextBaseServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             task_type="transcribe",
             enable_force_include_usage=enable_force_include_usage,
+        )
+
+    def _engine_generate(
+        self,
+        request,
+        engine_input,
+        sampling_params,
+        request_id: str,
+        **generate_kwargs,
+    ):
+        # Whisper T=0 non-stream only. Translation and other ASR keep base.
+        if should_gzip_fallback(self.model_cls, request):
+            return generate_chunk_with_gzip_fallback(
+                self.engine_client.generate,
+                engine_input,
+                sampling_params,
+                request_id,
+                vocab_size=gzip_vocab_size(getattr(self, "tokenizer", None)),
+                **generate_kwargs,
+            )
+        return super()._engine_generate(
+            request, engine_input, sampling_params, request_id, **generate_kwargs
         )
 
     async def create_transcription(
