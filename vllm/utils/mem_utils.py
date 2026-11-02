@@ -13,6 +13,7 @@ import torch.types
 
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.platforms.interface import in_wsl
 
 from .mem_constants import GiB_bytes, KiB_bytes, MiB_bytes
 
@@ -141,7 +142,10 @@ class MemorySnapshot:
         self.torch_allocated = stats.get("allocated_bytes.all.current", 0)
 
         self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)
-        if current_platform.is_integrated_gpu(device.index):
+        # WSL guest RAM does not describe CUDA's memory allocation budget.
+        if current_platform.is_integrated_gpu(device.index) and not (
+            current_platform.is_cuda() and in_wsl()
+        ):
             # On UMA (Unified Memory Architecture) platforms where CPU and
             # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin),
             # cudaMemGetInfo underreports free memory because it does not
