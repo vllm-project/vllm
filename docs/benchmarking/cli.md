@@ -51,6 +51,15 @@ If any configuration fails, the benchmark exits with status `1` after reporting
 results and writing any requested CSV or JSON output. Successful runs exit with
 status `0`. Profiling runs also propagate failures, but do not save timing metrics.
 
+## Multi-Turn Benchmark
+
+Use [the multi-turn benchmark script](../../benchmarks/multi_turn/README.md)
+to benchmark conversations that reuse earlier responses as context.
+It supports streaming from servers started with `--enable-force-include-usage`:
+usage-only messages are skipped, while generated text is retained even when
+content messages include continuous usage statistics. Token counts continue to
+come from the benchmark's tokenizer.
+
 ## Dataset Overview
 
 <style>

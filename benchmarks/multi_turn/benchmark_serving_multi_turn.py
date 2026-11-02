@@ -319,6 +319,9 @@ async def send_request(
                     timestamp: int = time.perf_counter_ns()
                     data = json.loads(chunk)
 
+                    if data["choices"] == [] and data.get("usage"):
+                        continue
+
                     # Delta is the new content/text/data
                     delta = data["choices"][0]["delta"]
                     if delta.get("content", None):
