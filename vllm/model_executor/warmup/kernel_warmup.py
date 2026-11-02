@@ -292,6 +292,14 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
         )
 
         rocm_segmented_attn_autotune_warmup(worker)
+        if worker.vllm_config.kernel_config.enable_jit_warmup:
+            from vllm.model_executor.warmup.rocm_flydsl_mxfp8_warmup import (
+                rocm_flydsl_mxfp8_warmup,
+            )
+
+            rocm_flydsl_mxfp8_warmup(
+                worker.get_model(), worker.scheduler_config.max_num_batched_tokens
+            )
 
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
