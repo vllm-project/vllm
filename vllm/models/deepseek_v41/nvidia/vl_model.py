@@ -316,6 +316,3 @@ class DeepseekV41ForCausalLM(
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
-
-    def process_weights_after_loading(self) -> None:
-        self.language_model.process_weights_after_loading()
