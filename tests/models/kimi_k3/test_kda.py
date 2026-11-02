@@ -1704,6 +1704,94 @@ def test_flashinfer_kda_prefill_breakable_graph_cross_stream():
     torch.testing.assert_close(graph_value, torch.full_like(graph_value, 2))
 
 
+@pytest.mark.parametrize("backend", ["flashkda", "triton"])
+@torch.inference_mode()
+def test_prefill_convolution_preserves_raw_cache_history(
+    dist_init, default_vllm_config, workspace_init, tmp_path, backend: str
+):
+    """Convolution history, including prefill checkpoints, stores raw projections."""
+    from vllm.config import ModelConfig
+    from vllm.forward_context import set_forward_context
+    from vllm.models.kimi_k3.nvidia.kda_metadata import KimiK3KDAMetadata
+    from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.utils import compute_causal_conv1d_metadata
+
+    if backend == "flashkda":
+        _require_kda_prefill_backend(backend, torch.float32, -3.0)
+    config = KimiLinearConfig(
+        architectures=["KimiLinearForCausalLM"],
+        hidden_size=256,
+        num_hidden_layers=1,
+        linear_attn_config=dict(
+            kda_layers=[1],
+            full_attn_layers=[],
+            head_dim=128,
+            num_heads=2,
+            short_conv_kernel_size=4,
+            use_full_rank_gate=True,
+            gate_lower_bound=-3.0,
+        ),
+    )
+    config.save_pretrained(tmp_path)
+    cfg = default_vllm_config
+    cfg.model_config = ModelConfig(model=str(tmp_path), dtype="bfloat16")
+    cfg.scheduler_config.max_num_seqs = 1
+    cfg.scheduler_config.max_num_batched_tokens = 64
+    cfg.additional_config = {"kda_prefill_backend": backend}
+    with set_default_torch_dtype(torch.bfloat16), torch.device(DEVICE):
+        layer = nvidia_kda.KimiK3DeltaAttention(
+            cfg.model_config.hf_config, cfg, prefix="model.layers.0.self_attn"
+        )
+    assert layer.kda_prefill_backend == backend
+    torch.manual_seed(42)
+    for parameter in layer.parameters():
+        parameter.normal_(std=0.1)
+    layer.kv_cache = tuple(
+        torch.zeros((3, *shape), dtype=dtype, device=DEVICE)
+        for shape, dtype in zip(layer.get_state_shape(), layer.get_state_dtype())
+    )
+    hidden = torch.randn(33, 256, dtype=torch.bfloat16, device=DEVICE)
+    raw_qkv = layer.in_proj_qkvgfab(hidden)[0][:, : 3 * layer.local_projection_size]
+    cu_cpu = torch.tensor([0, 33], dtype=torch.int32)
+    nums, batch_ptr, offsets = compute_causal_conv1d_metadata(cu_cpu, device=DEVICE)
+    checkpoint = (
+        MambaPrefillCheckpointMetadata(
+            torch.tensor([16], dtype=torch.int32, device=DEVICE),
+            torch.tensor([2], dtype=torch.int32, device=DEVICE),
+        )
+        if backend == "flashkda"
+        else None
+    )
+    metadata = KimiK3KDAMetadata(
+        num_prefills=1,
+        num_prefill_tokens=33,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_spec_decodes=0,
+        num_spec_decode_tokens=0,
+        num_actual_tokens=33,
+        has_initial_state=torch.tensor([False], device=DEVICE),
+        non_spec_query_start_loc=cu_cpu.to(DEVICE),
+        non_spec_state_indices_tensor=torch.tensor(
+            [1], dtype=torch.int32, device=DEVICE
+        ),
+        checkpoint=checkpoint,
+        nums_dict=nums,
+        batch_ptr=batch_ptr,
+        token_chunk_offset_ptr=offsets,
+    )
+    with set_forward_context({layer.prefix: metadata}, cfg):
+        output = layer(hidden, torch.arange(33, device=DEVICE))
+    assert output.isfinite().all()
+    conv_state = layer.kv_cache[0]
+    if not nvidia_kda.is_conv_state_dim_first():
+        conv_state = conv_state.transpose(-1, -2)
+    torch.testing.assert_close(conv_state[1], raw_qkv[-3:].T, rtol=0, atol=0)
+    if checkpoint is not None:
+        torch.testing.assert_close(conv_state[2], raw_qkv[13:16].T, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     ("state_dtype", "tolerance"),
     [
