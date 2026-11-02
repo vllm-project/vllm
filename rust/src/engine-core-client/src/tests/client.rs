@@ -21,6 +21,7 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
+use crate::protocol::dtype::{NumpyDtype, TensorDtype};
 use crate::metrics::SchedulerStatsRecorder;
 use crate::mock_engine::{MockEngineConfig, default_ready_response};
 use crate::protocol::handshake::{
@@ -41,7 +42,7 @@ use crate::protocol::output::{
 use crate::protocol::request::{BlockHash, EngineCoreRequest, EngineCoreRequestType};
 use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::{KvConnectorStats, MooncakeOperation, SchedulerStats, UmbpOperation};
-use crate::protocol::tensor::{WireArrayData, WireTensor};
+use crate::protocol::tensor::{WireArrayData, WireNdArray, WireTensor};
 use crate::protocol::utility::{PauseMode, SleepLevel, UtilityOutput, UtilityResultEnvelope};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_hybrid_mock_engine_sockets,
@@ -172,6 +173,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
             routed_experts_prompt_start: 1,
+            indexer_topk_prompt_start: 2,
             ..EngineCoreSamplingParams::for_test()
         }),
         arrival_time: 42.5,
@@ -3449,11 +3451,23 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let lora_request_hex = lines.next().expect("missing LoRA request fixture line");
     let inplace_lora_request_hex =
         lines.next().expect("missing in-place LoRA request fixture line");
+    let indexer_outputs_hex = lines.next().expect("missing indexer outputs fixture line");
 
     let request_bytes = hex::decode(request_hex).unwrap();
     let multimodal_request_bytes = hex::decode(multimodal_request_hex).unwrap();
     let outputs_bytes = hex::decode(outputs_hex).unwrap();
     let sampling_mask_outputs_bytes = hex::decode(sampling_mask_outputs_hex).unwrap();
+    let indexer_outputs_bytes = hex::decode(indexer_outputs_hex).unwrap();
+    let indexer_outputs =
+        decode_engine_core_outputs(&[bytes::Bytes::from(indexer_outputs_bytes)]).unwrap();
+    assert_eq!(
+        indexer_outputs.outputs[0].indexer_topk.as_deref(),
+        Some(&WireNdArray::from_raw(
+            NumpyDtype::little(TensorDtype::I32),
+            vec![2, 1, 2],
+            [8_i32, -1, 2, 0].into_iter().flat_map(i32::to_le_bytes).collect(),
+        ))
+    );
 
     let decoded_request: EngineCoreRequest = rmp_serde::from_slice(&request_bytes).unwrap();
     let expected_request = sample_request();
@@ -3498,6 +3512,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            indexer_topk_prompt_start: 0,
             stream_interval: None,
         },
     );
@@ -3592,6 +3607,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
                                 retryable: true,
                             },
                         ),
+                        indexer_topk: None,
                     },
                 ],
                 scheduler_stats: None,

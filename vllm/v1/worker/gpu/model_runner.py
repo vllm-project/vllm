@@ -362,7 +362,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Expert parallelism load balancer.
         self.eplb = EPLBController(self.parallel_config, self.device)
-        # The AuxOutput Connector owns R3 capture, copying, and storage.
+        # The connector owns capture, copying, and storage.
         self.aux_output_connector: AuxOutputWorkerConnector | None = None
 
         set_offloader(create_offloader(self.vllm_config.offload_config))
@@ -2430,17 +2430,32 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+    def _release_capture_resources(self) -> None:
+        """Release graphs before the connector and its capture buffers.
+
+        Captured graphs reference capture buffers, so they are dropped before
+        the connector unbinds and releases them.
+        """
+        has_aux_output = self.aux_output_connector is not None
+        if current_platform.is_rocm() or has_aux_output:
+            # Capture callbacks are captured into graphs that must be dropped before
+            # the referenced buffers. On ROCm RCCL's ncclCommAbort also waits
+            # for live graphs that captured the comm:
+            # https://github.com/ROCm/rocm-systems/issues/13018
+            CUDAGraphWrapper.clear_all_graphs()
+            BreakableCUDAGraphWrapper.clear_all_graphs()
+        if has_aux_output and self.cudagraph_manager is not None:
+            self.cudagraph_manager.release_graphs()
+            self.cudagraph_manager = None
+        if self.aux_output_connector is not None:
+            self.aux_output_connector.close()
+            self.aux_output_connector = None
+
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
-        if current_platform.is_rocm():
-            # RCCL's ncclCommAbort waits for live graphs that captured the comm:
-            # https://github.com/ROCm/rocm-systems/issues/13018
-            CUDAGraphWrapper.clear_all_graphs()
-            BreakableCUDAGraphWrapper.clear_all_graphs()
-        if self.aux_output_connector is not None:
-            self.aux_output_connector.close()
+        self._release_capture_resources()
         set_offloader(None)
         self.cudagraph_manager = None
         self.fast_prefill = None

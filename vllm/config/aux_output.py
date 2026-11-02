@@ -14,6 +14,9 @@ class AuxOutputConfig:
     enable_return_routed_experts: bool = False
     """Capture and return routed-experts auxiliary outputs."""
 
+    enable_return_indexer_topk: bool = False
+    """Capture and return sparse-attention index selections."""
+
     max_bytes: int | None = Field(default=None, gt=0)
     """Initial capacity, or ``None`` to derive it from the KV cache capacity.
     Grows when every object is referenced."""
@@ -21,12 +24,17 @@ class AuxOutputConfig:
     @property
     def enabled(self) -> bool:
         """Whether any execution auxiliary output is enabled."""
-        return self.enable_return_routed_experts
+        return self.enable_return_routed_experts or self.enable_return_indexer_topk
 
     def compute_hash(self) -> str:
         """Hash AuxOutput settings that alter the model forward graph."""
         from vllm.config.utils import hash_factors
 
-        return hash_factors(
-            {"enable_return_routed_experts": self.enable_return_routed_experts}
-        )
+        factors: dict[str, object] = {
+            "enable_return_routed_experts": self.enable_return_routed_experts
+        }
+        if self.enable_return_indexer_topk:
+            factors.update(
+                enable_return_indexer_topk=True,
+            )
+        return hash_factors(factors)

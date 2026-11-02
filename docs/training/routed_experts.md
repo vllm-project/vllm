@@ -52,3 +52,7 @@ Per-request, default `0`: drops the first N prompt-token rows (e.g. routing alre
 - The Rust HTTP frontend never returns `routed_experts` and always sends `routed_experts_prompt_start = 0`. Use the Python API server.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).
+
+
+For sparse-attention selections, see [Indexer Replay](indexer_replay.md).
+Indexer and routed-expert return can be enabled independently or together.

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Routed-experts auxiliary output keys, publication, and materialization."""
+"""Auxiliary output block buffering, publication, and materialization."""
 
 from __future__ import annotations
 
@@ -24,8 +24,8 @@ class _RequestTail:
     length: int = 0
 
 
-class RoutedExpertsBuffer:
-    """Own incomplete and unkeyed full routed-experts blocks."""
+class AuxOutputBuffer:
+    """Own incomplete and unkeyed full auxiliary output blocks."""
 
     def __init__(
         self,
@@ -71,7 +71,7 @@ class RoutedExpertsBuffer:
         """Stage rows and return completed blocks without retaining them."""
         rows = np.asarray(rows)
         assert rows.shape[1:] == self.shape_per_token and rows.dtype == self.dtype, (
-            "routed-experts capture profile changed"
+            "auxiliary output capture profile changed"
         )
         if token_start < 0:
             raise ValueError("auxiliary output token start must be non-negative")
@@ -159,14 +159,14 @@ class RoutedExpertsBuffer:
         self._free_slots[:] = range(len(self._rows) - 1, -1, -1)
 
 
-def routed_experts_keys(
+def aux_output_keys(
     block_hashes: Iterable[bytes], aux_output_namespace: str
 ) -> list[str]:
     prefix = f"vllm-artifact/{aux_output_namespace}/"
     return [prefix + block_hash.hex() for block_hash in block_hashes]
 
 
-def materialize_routed_experts(
+def materialize_aux_output(
     store: BackgroundBlockObjectStore | BlockObjectStore,
     aux_output_keys: list[str],
     *,
@@ -174,12 +174,12 @@ def materialize_routed_experts(
     dtype: np.dtype[Any],
 ) -> np.ndarray:
     if not aux_output_keys:
-        raise ValueError("routed-experts auxiliary output key list must not be empty")
+        raise ValueError("auxiliary output key list must not be empty")
     payload = store.get_concatenated(aux_output_keys)
     return np.frombuffer(payload, dtype=dtype).reshape((-1, *shape_per_token))
 
 
-def publish_routed_experts(
+def publish_aux_output(
     store: BackgroundBlockObjectStore | BlockObjectStore,
     *,
     batches: Sequence[tuple[Sequence[str], list[tuple[int, np.ndarray]]]],
@@ -187,7 +187,7 @@ def publish_routed_experts(
     retain_keys: Sequence[str] = (),
     release_keys: Sequence[str] = (),
 ) -> None:
-    """Publish immutable full R3 blocks."""
+    """Publish immutable full auxiliary output blocks."""
     objects = []
     for aux_output_keys, blocks in batches:
         for block_start, array in blocks:
