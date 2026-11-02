@@ -62,6 +62,11 @@ from vllm.tool_parsers.abstract_tool_parser import (
     Tool,
     ToolParser,
 )
+from vllm.tool_parsers.schema_types import (
+    ParameterTypes,
+    ParameterTypesCache,
+    convert_value,
+)
 
 logger = init_logger(__name__)
 
@@ -198,6 +203,7 @@ class MuseToolParser(ToolParser):
         tools: list[Tool] | None = None,
     ) -> None:
         super().__init__(tokenizer, tools)
+        self._parameter_types_cache = ParameterTypesCache()
         # Streaming cursors. vLLM constructs one ToolParser per request, so
         # instance state is per-stream.
         self._streamed_content_len: int = 0
@@ -314,28 +320,12 @@ class MuseToolParser(ToolParser):
                 names.add(name)
         return names
 
-    @classmethod
-    def _string_parameters(
-        cls, request: ChatCompletionRequest | ResponsesRequest | None
-    ) -> dict[str, set[str]]:
-        if not cls._preserve_string_parameters:
-            return {}
-        strings: dict[str, set[str]] = {}
-        for tool in getattr(request, "tools", None) or []:
-            function = getattr(tool, "function", None) or tool
-            if isinstance(function, dict):
-                name = function.get("name")
-                parameters = function.get("parameters")
-            else:
-                name = getattr(function, "name", None)
-                parameters = getattr(function, "parameters", None)
-            if name and isinstance(parameters, dict):
-                strings[name] = {
-                    key
-                    for key, schema in parameters.get("properties", {}).items()
-                    if isinstance(schema, dict) and schema.get("type") == "string"
-                }
-        return strings
+    def _parameter_types(
+        self, request: ChatCompletionRequest | ResponsesRequest | None
+    ) -> dict[str, ParameterTypes]:
+        if not self._preserve_string_parameters:
+            return {}  # MuseGlimmer keeps legacy decoding, so it never walks.
+        return self._parameter_types_cache.for_tools(getattr(request, "tools", None))
 
     @staticmethod
     def _normalize_name(emitted: str, registered: set[str]) -> str:
@@ -369,7 +359,7 @@ class MuseToolParser(ToolParser):
         cls,
         text: str,
         registered: set[str] | None = None,
-        strings: dict[str, set[str]] | None = None,
+        types: dict[str, ParameterTypes] | None = None,
     ) -> list[ToolCall]:
         registered = registered or set()
         scoped = cls._tool_channel_text(text)
@@ -379,11 +369,11 @@ class MuseToolParser(ToolParser):
             if not name_m:
                 continue
             name = cls._normalize_name(name_m.group(1), registered)
-            string_parameters = (strings or {}).get(name, set())
+            props, extra = (types or {}).get(name, ({}, None))
             args: dict = {}
             for pm in _PARAM_RE.finditer(invoke):
                 key, raw = pm.group("key"), pm.group("value")
-                args[key] = raw if key in string_parameters else _decode_value(raw)
+                args[key] = convert_value(raw, props.get(key, extra), _decode_value)
             tool_calls.append(
                 ToolCall(
                     function=FunctionCall(
@@ -422,7 +412,7 @@ class MuseToolParser(ToolParser):
         try:
             registered = self._registered_names(request)
             tool_calls = self._parse_tool_calls(
-                model_output, registered, self._string_parameters(request)
+                model_output, registered, self._parameter_types(request)
             )
             if not tool_calls:
                 # A tool block was opened but no COMPLETE
@@ -488,7 +478,7 @@ class MuseToolParser(ToolParser):
         try:
             registered = self._registered_names(request)
             calls = self._parse_tool_calls(
-                current_text, registered, self._string_parameters(request)
+                current_text, registered, self._parameter_types(request)
             )
             content, reasoning, content_open, reasoning_open = self._visible_channels(
                 current_text
