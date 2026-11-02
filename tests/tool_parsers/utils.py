@@ -196,4 +196,10 @@ def run_tool_extraction_streaming(
             reconstructor.append_delta(delta_message)
         previous_text = current_text
         previous_tokens = current_tokens
+    # Serving flushes parsers that held text back until the stream ended.
+    finish = getattr(tool_parser, "finish_streaming", None)
+    if finish is not None:
+        flushed = finish()
+        if flushed is not None:
+            reconstructor.append_delta(flushed)
     return reconstructor
