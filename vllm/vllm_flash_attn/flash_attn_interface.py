@@ -442,7 +442,7 @@ def flash_attn_varlen_func(
             and torch.cuda.get_device_capability()[0] == 9
         )
 
-        out, softmax_lse, _, _ = _flash_attn_fwd(
+        out, softmax_lse, *_ = _flash_attn_fwd(
             q,
             k,
             v,
