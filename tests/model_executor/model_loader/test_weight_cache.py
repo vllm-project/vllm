@@ -7,6 +7,7 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import json
 import os
 import shutil
 import signal
@@ -121,7 +122,9 @@ class WeightCacheDaemon:
                 if time.monotonic() > deadline:
                     raise
                 if self._proc is not None and self._proc.poll() is not None:
-                    raise AssertionError("vllm preload exited before ready") from None
+                    raise AssertionError(
+                        f"vllm preload exited before ready: {self.logs}"
+                    ) from None
                 time.sleep(2)
 
     def _stop(self) -> None:
@@ -232,6 +235,32 @@ QWEN_CASE = ModelCase(
     ),
 )
 
+# Online FP8 exercises the runtime weight transpose and kernel state that
+# must survive mapping the daemon's processed tensors into a fresh engine.
+FP8_CASE = ModelCase(
+    model="facebook/opt-125m",
+    prompts=["Hello, my name is", "The capital of France is"],
+    llm_kwargs=dict(
+        quantization="fp8_per_tensor",
+        kernel_config={"linear_backend": "cutlass"},
+        attention_config={"backend": "TRITON_ATTN"},
+        dtype="bfloat16",
+        gpu_memory_utilization=0.2,
+        enforce_eager=True,
+        max_model_len=512,
+    ),
+    daemon_args=[
+        "--quantization",
+        "fp8_per_tensor",
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
 # Kimi K3 adds the mxfp4-pack MoE path (post-load kernel setup runs in
 # pre-processed mode) and a vision tower, exercised with an image request.
 K3_CASE = ModelCase(
@@ -331,6 +360,104 @@ def test_ipc_cache_cold_start_and_warm_restart(
         # inherit it.
         monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
+
+
+@pytest.mark.parametrize("quantization", ["fp8_per_tensor", "fp8_per_channel"])
+def test_ipc_cache_online_fp8(vllm_runner, quantization, tmp_path, monkeypatch):
+    """Online FP8 weights are shared without requantizing on warm restarts."""
+    _run_online_quantization(
+        vllm_runner, quantization, "cutlass", tmp_path, monkeypatch
+    )
+
+
+@pytest.mark.parametrize(
+    "quantization,linear_backend",
+    [("fp8_per_block", "cutlass"), ("mxfp8", "flashinfer_cutlass")],
+)
+def test_ipc_cache_online_blackwell(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    """Reuse packed block scales with the same backend on each restart."""
+    _run_online_quantization(
+        vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+    )
+
+
+def _run_online_quantization(
+    vllm_runner, quantization, linear_backend, tmp_path, monkeypatch
+):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    kernel_config = {"linear_backend": linear_backend}
+    daemon_args = list(FP8_CASE.daemon_args)
+    daemon_args[daemon_args.index("--quantization") + 1] = quantization
+    daemon_args[daemon_args.index("--kernel-config") + 1] = json.dumps(kernel_config)
+    case = ModelCase(
+        model=FP8_CASE.model,
+        prompts=FP8_CASE.prompts,
+        llm_kwargs={
+            **FP8_CASE.llm_kwargs,
+            "quantization": quantization,
+            "kernel_config": kernel_config,
+        },
+        daemon_args=daemon_args,
+    )
+    run_cold_start_and_warm_restart(vllm_runner, case, tmp_path)
+
+
+COMPRESSED_FP8_CASE = ModelCase(
+    model="neuralmagic/Meta-Llama-3.1-8B-FP8",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"linear_backend": "cutlass"}',
+    ],
+)
+
+
+def test_ipc_cache_compressed_fp8(vllm_runner, tmp_path, monkeypatch):
+    """Reuse serialized FP8 weights without transposing or scaling them again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, COMPRESSED_FP8_CASE, tmp_path)
+
+
+NVFP4_CASE = ModelCase(
+    model="nvidia/Qwen3-30B-A3B-NVFP4",
+    prompts=["The capital of France is", "Hello, my name is"],
+    llm_kwargs=dict(
+        dtype="bfloat16",
+        gpu_memory_utilization=0.3,
+        enforce_eager=True,
+        max_model_len=512,
+        attention_config={"backend": "TRITON_ATTN"},
+        kernel_config={"moe_backend": "cutlass", "linear_backend": "cutlass"},
+    ),
+    daemon_args=[
+        "--dtype",
+        "bfloat16",
+        "--attention-backend",
+        "TRITON_ATTN",
+        "--kernel-config",
+        '{"moe_backend": "cutlass", "linear_backend": "cutlass"}',
+    ],
+)
+
+
+def test_ipc_cache_nvfp4_cutlass(vllm_runner, tmp_path, monkeypatch):
+    """Repeated IPC attachment must not fuse the shared MoE scales again."""
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    run_cold_start_and_warm_restart(vllm_runner, NVFP4_CASE, tmp_path)
 
 
 @create_new_process_for_each_test()
@@ -444,8 +571,8 @@ def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capf
         tp_size=case.llm_kwargs.get("tensor_parallel_size", 1),
         extra_args=case.daemon_args,
     ) as d:
-        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         d.wait_until_ready()
+        warm_outputs = generate(vllm_runner, case, d.socket_dir, fallback=False)
         if case.check_flashinfer_cache:
             # Each daemon tunes before its ready report; exactly one new file
             # (their OPENAI_API_SERVER-keyed table) must appear.
