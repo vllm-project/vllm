@@ -413,6 +413,7 @@ def _resolve_backend_kernels(
     *,
     quantization: str,
     compute_capability: int | None = None,
+    mp_config: MPLinearLayerConfig | None = None,
 ) -> list[type]:
     """Apply device priorities and --linear-backend filtering to a kernel list.
 
@@ -423,7 +424,7 @@ def _resolve_backend_kernels(
     layer types (e.g. NVFP4 MoE projections next to FP8 attention
     projections).
     """
-    kernels = prioritize_humming(kernels, compute_capability)
+    kernels = prioritize_humming(kernels, compute_capability, mp_config)
     linear_backend = _get_linear_backend(quantization=quantization)
     if linear_backend == "auto":
         return kernels
@@ -923,6 +924,7 @@ def choose_mp_linear_kernel(
         "mixed-precision",
         quantization="mixed_precision",
         compute_capability=compute_capability,
+        mp_config=config,
     )
 
     failure_reasons = []
