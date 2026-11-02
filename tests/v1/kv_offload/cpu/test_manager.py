@@ -17,14 +17,11 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     make_offload_key,
 )
-from vllm.v1.kv_offload.cpu.common import (
-    CPULoadStoreSpec,
-    CPUOffloadingMetrics,
-)
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.policies.arc import ARCCachePolicy
+from vllm.v1.kv_offload.cpu.policies.base import ChunkStatus
 from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
-from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 
 
 def make_req_context(
@@ -79,6 +76,14 @@ def to_key(int_hash: int) -> OffloadKey:
 
 def to_keys(int_hashes: list[int]) -> list[OffloadKey]:
     return [to_key(i) for i in int_hashes]
+
+
+def reuse_keys(manager: CPUOffloadingManager, keys: list[OffloadKey]) -> None:
+    """Load ready keys in one finished request, recording a single access."""
+    ctx = make_req_context("reuse")
+    manager.prepare_load(keys, ctx)
+    manager.complete_load(keys, ctx)
+    manager.on_request_finished(ctx)
 
 
 def verify_store_output(
@@ -146,6 +151,20 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
+def test_cpu_stored_event_carries_request_context():
+    manager = CPUOffloadingManager(
+        num_chunks=1,
+        enable_events=True,
+    )
+    req_context = make_req_context("writer")
+    keys = to_keys([1])
+    assert manager.prepare_store(keys, req_context) is not None
+    manager.complete_store(keys, req_context)
+
+    [event] = manager.take_events()
+    assert event.req_context is req_context
+
+
 def test_cpu_eviction_removed_precedes_stored():
     """An eviction is announced before the store that reuses its capacity."""
     manager = make_cpu_manager(num_chunks=2, enable_events=True)
@@ -173,7 +192,7 @@ def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
 
     Scenario:
         - Store chunks [1, 2] and complete.
-        - touch([1]) makes chunk 2 the LRU candidate.
+        - Reusing [1] makes chunk 2 the LRU candidate.
         - prepare_store([2, 3, 4, 5]):
             * chunk 2 is filtered out as "already stored"
             * but without the fix, chunk 2 would be evicted as the LRU
@@ -190,8 +209,8 @@ def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
-    # touch [1] to make chunk 2 the LRU candidate
-    manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+    # reuse [1] to make chunk 2 the LRU candidate
+    reuse_keys(manager, to_keys([1]))
 
     # prepare_store([2, 3, 4, 5]):
     #   - chunk 2 is already stored -> filtered out of keys_to_store
@@ -239,13 +258,16 @@ def test_filter_reused_manager_reports_stores_skipped_counter():
     assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 0
 
 
-def test_cpu_manager_fills_the_config_info_keys_of_the_spec():
-    """A name the declaration misses becomes a dropped label at runtime."""
+def test_cpu_manager_reports_no_config_info_without_info():
+    """A caller that passes no info keeps the empty default.
+
+    The scheduler still sends an info payload, so the metric appears with the
+    engine labels alone. Tests in tests/v1/kv_offload/test_factory.py cover the
+    published labels, because a real spec supplies the info.
+    """
     manager = make_cpu_manager(num_chunks=4)
 
-    (info,) = manager.config_info()
-    assert tuple(info) == CPUOffloadingSpec.config_info_keys({})
-    assert info["cpu_num_chunks"] == 4
+    assert manager.config_info() == [{}]
 
 
 def test_cpu_manager_reports_cache_usage_gauge():
@@ -464,10 +486,10 @@ def test_cpu_manager():
     # complete store [6, 7, 8]
     cpu_manager.complete_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
 
-    # touch [2, 6, 7] (move to end of LRU order)
-    cpu_manager.touch(to_keys([2, 6, 7]), _EMPTY_REQ_CTX)
+    # reuse [2, 6, 7] (move to end of LRU order)
+    reuse_keys(cpu_manager, to_keys([2, 6, 7]))
 
-    # prepare store [7, 9] -> evicts [8] (oldest following previous touch)
+    # prepare store [7, 9] -> evicts [8] (oldest following previous reuse)
     prepare_store_output = cpu_manager.prepare_store(to_keys([9]), _EMPTY_REQ_CTX)
     verify_store_output(
         prepare_store_output,
@@ -656,8 +678,8 @@ class TestARCPolicy:
         assert to_keys([1])[0] in arc_policy.t1
         assert to_keys([1])[0] not in arc_policy.t2
 
-        # touch chunk 1 (simulate second access)
-        cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+        # reuse chunk 1 (second access)
+        reuse_keys(cpu_manager, to_keys([1]))
 
         # chunk 1 should now be in T2 (frequent)
         assert to_keys([1])[0] not in arc_policy.t1
@@ -723,9 +745,9 @@ class TestARCPolicy:
         # chunk 1 should be in B1 (ghost list)
         assert to_keys([1])[0] in arc_policy.b1
 
-        # touch chunk 1 (cache miss, but in B1)
+        # store chunk 1 again (cache miss, but in B1)
         # this should increase target_t1_size (favor recency)
-        cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(to_keys([1]), make_req_context("ghost-hit"))
 
         # target should have increased
         assert arc_policy.target_t1_size > initial_target
@@ -740,8 +762,8 @@ class TestARCPolicy:
         cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
         cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
-        # promote chunks 3, 4 to T2 by touching them
-        cpu_manager.touch(to_keys([3, 4]), _EMPTY_REQ_CTX)
+        # promote chunks 3, 4 to T2 by reusing them
+        reuse_keys(cpu_manager, to_keys([3, 4]))
 
         # now: T1 = {1, 2}, T2 = {3, 4}
         assert len(arc_policy.t1) == 2
@@ -772,7 +794,7 @@ class TestARCPolicy:
         cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
         cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
 
-        cpu_manager.touch(keys[128:], _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, keys[128:])
         arc_policy.target_t1_size = 64
 
         protected = {keys[0], keys[2], keys[255]}
@@ -816,7 +838,7 @@ class TestARCPolicy:
         cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
         cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
 
-        cpu_manager.touch(keys[6:], _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, keys[6:])
         arc_policy.target_t1_size = 4
 
         t1_order = list(arc_policy.t1)
@@ -868,9 +890,9 @@ class TestARCPolicy:
             manager.complete_store(to_keys(keys), _EMPTY_REQ_CTX)
 
         # Ghost hits raise the target to 3; promotion leaves only 2 entries in T1.
-        manager.touch(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
-        manager.touch(to_keys([5, 6]), _EMPTY_REQ_CTX)
+        policy.on_store_miss(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        policy.on_store_miss(to_keys([1]), _EMPTY_REQ_CTX)
+        reuse_keys(manager, to_keys([5, 6]))
         assert policy.target_t1_size == 3
         assert list(policy.t1) == to_keys([3, 4])
         assert list(policy.t2) == to_keys([6, 5])
@@ -937,8 +959,8 @@ class TestARCPolicy:
         assert len(arc_policy.b1) <= arc_policy.cache_capacity
         assert len(arc_policy.b2) <= arc_policy.cache_capacity
 
-    def test_touch_ordering(self):
-        """Tests that touch() correctly updates access patterns.
+    def test_reuse_ordering(self):
+        """Tests that request reuse correctly updates access patterns.
         Similar to LRU test but verifies T1/T2 ordering.
         """
         cpu_manager, arc_policy = self._make_manager()
@@ -948,11 +970,11 @@ class TestARCPolicy:
         cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
         # promote 3, 4 to T2
-        cpu_manager.touch(to_keys([3, 4]), _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, to_keys([3, 4]))
 
         # T1 = {1, 2}, T2 = {3, 4}
-        # touch [1, 3, 4] - should promote 1 to T2, and move 3,4 to end of T2
-        cpu_manager.touch(to_keys([1, 3, 4]), _EMPTY_REQ_CTX)
+        # reuse [1, 3, 4] - should promote 1 to T2, and move 3,4 to end of T2
+        reuse_keys(cpu_manager, to_keys([1, 3, 4]))
 
         # T1 = {2}, T2 = {1, 3, 4} (in that order, with 4 most recent)
         assert len(arc_policy.t1) == 1
@@ -1016,7 +1038,7 @@ class TestARCPolicy:
         cpu_manager.complete_store(to_keys([3, 4, 5]), _EMPTY_REQ_CTX)
 
         # promote some chunks to T2
-        cpu_manager.touch(to_keys([2, 3]), _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, to_keys([2, 3]))
 
         # T1 has {4, 5}, T2 has {2, 3}
         assert len(arc_policy.t1) == 2
@@ -1256,29 +1278,6 @@ def test_evictable_cache_chunk_count(monkeypatch):
     manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
     # cache state [10, 11, 14, 15] <- all chunks idle
     assert manager._num_evictable_cache_chunks == 4
-
-
-def test_touch_forwards_req_context_to_policy(monkeypatch):
-    """Regression: CPUOffloadingManager.touch forwards ReqContext to policy."""
-    manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
-    received = []
-
-    def spy_touch(keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
-        received.append((list(keys), req_context))
-
-    monkeypatch.setattr(manager._policy, "touch", spy_touch)
-
-    keys = to_keys([1, 2])
-    ctx = make_req_context(
-        req_id="test-req",
-        kv_transfer_params={"test_param": "test_value"},
-    )
-
-    manager.touch(keys, ctx)
-
-    assert len(received) == 1
-    assert received[0][0] == keys
-    assert received[0][1] is ctx
 
 
 @pytest.mark.parametrize("finish_before_completion", [False, True])
@@ -1594,3 +1593,181 @@ def test_request_key_positions_order_tails_across_kv_groups():
     output = manager.prepare_store(to_keys([10, 11]), make_req_context("evict"))
     assert output is not None
     assert set(output.evicted_keys) == {group_0_tail, group_1_tail}
+
+
+@pytest.mark.parametrize("batch_size", [1, 2, 3])
+@pytest.mark.parametrize("reverse_completion", [False, True])
+def test_unfinished_lru_prefix_survives_pressure_across_store_batches(
+    batch_size, reverse_completion
+):
+    """Keep a contiguous prefix while its owner is still generating."""
+    manager = make_cpu_manager(num_chunks=8)
+    ctx = make_req_context("unfinished")
+    groups = [
+        [make_offload_key(str(position).encode(), group) for position in range(3)]
+        for group in range(2)
+    ]
+    batches = []
+    for start in range(0, 3, batch_size):
+        batch = [key for group in groups for key in group[start : start + batch_size]]
+        for group in groups:
+            for position in range(start, min(start + batch_size, 3)):
+                ctx.set_offload_key_position(group[position], (position + 1) * 16)
+        assert manager.prepare_store(batch, ctx) is not None
+        batches.append(batch)
+        if not reverse_completion:
+            manager.complete_store(batch, ctx)
+    if reverse_completion:
+        for batch in reversed(batches):
+            manager.complete_store(batch, ctx)
+
+    output = manager.prepare_store(to_keys([10, 11, 12, 13]), make_req_context("B"))
+    assert output is not None
+    assert set(output.evicted_keys) == {group[-1] for group in groups}
+    for group in groups:
+        assert all(manager.lookup(key, ctx) is LookupResult.HIT for key in group[:-1])
+
+
+@pytest.mark.parametrize("reuse_method", ["load", "store"])
+def test_unfinished_lru_reused_prefix_outlives_new_tail(reuse_method):
+    manager = make_cpu_manager(num_chunks=4)
+    head, middle, tail = to_keys([1, 2, 3])
+    seed = make_req_context("seed")
+    assert manager.prepare_store([head, middle], seed) is not None
+    manager.complete_store([head, middle], seed)
+    manager.on_request_finished(seed)
+
+    ctx = make_req_context("reuse")
+    for position, key in enumerate([head, middle, tail], 1):
+        ctx.set_offload_key_position(key, position * 16)
+    if reuse_method == "load":
+        manager.prepare_load([head, middle], ctx)
+        manager.complete_load([middle, head], ctx)
+    else:
+        assert manager.prepare_store([head, middle], ctx) is not None
+    assert manager.prepare_store([tail], ctx) is not None
+    manager.complete_store([tail], ctx)
+
+    output = manager.prepare_store(to_keys([10, 11, 12]), make_req_context("B"))
+    assert output is not None
+    assert set(output.evicted_keys) == {middle, tail}
+    assert manager.lookup(head, ctx) is LookupResult.HIT
+
+
+def test_unfinished_lru_backfill_orders_by_token_position():
+    manager = make_cpu_manager(num_chunks=3)
+    ctx = make_req_context("backfill")
+    head, middle, tail = to_keys([1, 2, 3])
+    for position, key in enumerate([head, middle, tail], 1):
+        ctx.set_offload_key_position(key, position * 16)
+    for key in [head, tail, middle]:
+        assert manager.prepare_store([key], ctx) is not None
+        manager.complete_store([key], ctx)
+
+    output = manager.prepare_store([to_key(4)], make_req_context("B"))
+    assert output is not None
+    assert output.evicted_keys == [tail]
+
+
+def test_lru_failed_store_retry_preserves_prefix_order():
+    manager = make_cpu_manager(num_chunks=2)
+    ctx = make_req_context("retry")
+    head, tail = to_keys([1, 2])
+    ctx.set_offload_key_position(head, 16)
+    ctx.set_offload_key_position(tail, 32)
+    assert manager.prepare_store([head], ctx) is not None
+    manager.complete_store([head], ctx, success=False)
+    for key in [head, tail]:
+        assert manager.prepare_store([key], ctx) is not None
+        manager.complete_store([key], ctx)
+
+    output = manager.prepare_store([to_key(3)], make_req_context("B"))
+    assert output is not None
+    assert output.evicted_keys == [tail]
+
+
+def test_lru_reset_discards_unfinished_request_recency():
+    manager = make_cpu_manager(num_chunks=2)
+    ctx = make_req_context("resumed")
+    head = to_key(1)
+    ctx.set_offload_key_position(head, 16)
+    assert manager.prepare_store([head], ctx) is not None
+    manager.complete_store([head], ctx)
+    manager.reset_cache()
+
+    other = make_req_context("other")
+    other_key = to_key(9)
+    other.set_offload_key_position(other_key, 16)
+    assert manager.prepare_store([other_key], other) is not None
+    manager.complete_store([other_key], other)
+    assert manager.prepare_store([head], ctx) is not None
+    manager.complete_store([head], ctx)
+
+    output = manager.prepare_store([to_key(10)], make_req_context("B"))
+    assert output is not None
+    assert output.evicted_keys == [other_key]
+
+
+def test_older_lru_request_does_not_demote_a_newer_shared_access():
+    manager = make_cpu_manager(num_chunks=3)
+    old = make_req_context("old")
+    pinned, cold, shared = to_keys([1, 2, 3])
+    for context, key, position in [
+        (old, pinned, 16),
+        (make_req_context("cold"), cold, 16),
+        (make_req_context("newer"), shared, 32),
+    ]:
+        context.set_offload_key_position(key, position)
+        assert manager.prepare_store([key], context) is not None
+        manager.complete_store([key], context)
+    manager.prepare_load([pinned], old)
+
+    old.set_offload_key_position(shared, 32)
+    manager.prepare_load([shared], old)
+    manager.complete_load([shared], old)
+    output = manager.prepare_store([to_key(4)], make_req_context("pressure"))
+    assert output is not None
+    assert output.evicted_keys == [cold]
+    manager.complete_load([pinned], old)
+
+
+def test_lru_incremental_stores_do_not_rescan_the_prefix():
+    class CountingContext(ReqContext):
+        position_lookups = 0
+
+        def get_offload_key_position(self, key: OffloadKey) -> int | None:
+            self.position_lookups += 1
+            return super().get_offload_key_position(key)
+
+    keys = to_keys(list(range(64)))
+    manager = make_cpu_manager(num_chunks=len(keys))
+    ctx = CountingContext(req_id="incremental")
+    for position, key in enumerate(keys, 1):
+        ctx.set_offload_key_position(key, position * 16)
+        assert manager.prepare_store([key], ctx) is not None
+        manager.complete_store([key], ctx)
+
+    assert 0 < ctx.position_lookups <= 3 * len(keys)
+
+
+@pytest.mark.parametrize("ready_on_insert", [False, True])
+def test_lru_insert_orders_positioned_chunks_without_followup_access(ready_on_insert):
+    """Insertion alone orders new chunks, including out-of-order backfills."""
+    policy = LRUCachePolicy(cache_capacity=3)
+    ctx = make_req_context("insert")
+    head, middle, tail = to_keys([1, 2, 3])
+    for position, key in enumerate([head, middle, tail], 1):
+        ctx.set_offload_key_position(key, position * 16)
+    for chunk_id, key in enumerate([head, tail, middle]):
+        chunk = ChunkStatus(chunk_id)
+        if ready_on_insert:
+            chunk.ref_cnt = 0
+        policy.insert(key, chunk, ctx)
+        if not ready_on_insert:
+            chunk.ref_cnt = 0
+            policy.mark_evictable(key)
+
+    evicted = policy.evict(2, set())
+    assert evicted is not None
+    assert [key for key, _ in evicted] == [tail, middle]
+    assert policy.get(head) is not None
