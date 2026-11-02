@@ -701,8 +701,7 @@ mod tests {
             WireNdArray::from_i32(vec![1, 1, 2], vec![8, -1]).unwrap(),
             WireNdArray::from_i32(vec![1, 2, 1], vec![2, 0]).unwrap(),
         ];
-        let error =
-            take_aux_output_rows(&mut chunks, "req-indexer", "indexer_topk").unwrap_err();
+        let error = take_aux_output_rows(&mut chunks, "req-indexer", "indexer_topk").unwrap_err();
         assert!(matches!(
             error,
             crate::Error::AuxOutputShapeMismatch {
