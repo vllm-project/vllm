@@ -1324,10 +1324,18 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
 
             lora_context = self._lora_context
             if lora_context is not None:
+                # The matmuls produce expert-sorted (ragged) rows, while the
+                # LoRA kernels address row token * topk + slot. Ragged row r
+                # holds flat row order[r], matching make_routing_data's sort.
+                order = torch.argsort(
+                    topk_ids.reshape(-1).to(torch.int64).clamp(min=0), stable=True
+                )
+                inter_tt = torch.empty_like(inter)
+                inter_tt[order] = inter
                 s_ids = e_ids = n_pad = t_map = None
                 s_ids, e_ids, n_pad, t_map = self.apply_w13_lora(
                     lora_context,
-                    y=inter,
+                    y=inter_tt,
                     x=hidden_states,
                     topk_ids=global_topk_ids,
                     topk_weights=topk_weights,
@@ -1337,6 +1345,7 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
                     num_tokens=M,
                     top_k_num=topk,
                 )
+                inter.copy_(inter_tt[order])
 
             act_out = torch.empty(
                 (routing_data.n_valid, act_out_dim),
@@ -1357,18 +1366,16 @@ class UnfusedOAITritonExperts(LoRAExpertsMixin, BaseOAITritonExperts):
             )
 
             if lora_context is not None:
-                # w2 LoRA works in (num_tokens, topk, K) token-topk order. Scatter
-                # the ragged rows there via the same expert-sort permutation
-                # (flat idx = token*topk + slot = argsort(flat_e)), apply, then
-                # gather the LoRA-updated rows back to ragged order for the combine.
-                flat_e = topk_ids.reshape(-1).to(torch.int64).clamp(min=0)
-                order = torch.argsort(flat_e, stable=True)
-                down_tt = down.new_zeros((M * topk, K))
+                # w2 LoRA reads its input and writes its output in token-topk
+                # order; convert both, then return to ragged order for combine.
+                act_tt = torch.empty_like(act_out)
+                act_tt[order] = act_out
+                down_tt = down.new_empty((M * topk, K))
                 down_tt[order] = down
                 self.apply_w2_lora(
                     lora_context,
                     y=down_tt.view(M, topk, K),
-                    x=act_out,
+                    x=act_tt,
                     topk_weights=topk_weights,
                     sorted_token_ids_lora=s_ids,
                     expert_ids_lora=e_ids,
