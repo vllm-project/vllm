@@ -127,6 +127,42 @@ class TestMCPToolServerUnit:
         # Empty list - returns None
         assert server.get_tool_description("test_server", allowed_tools=[]) is None
 
+    @pytest.mark.asyncio
+    async def test_add_tool_server_duplicate_name_keeps_first_server(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        pytest.importorskip("mcp")
+
+        server = MCPToolServer()
+
+        def make_result(tool_name: str):
+            tool = SimpleNamespace(
+                name=tool_name,
+                description="test tool",
+                input_schema={"type": "object"},
+                meta={},
+            )
+            return SimpleNamespace(
+                server_info=SimpleNamespace(name="dup"), instructions=None
+            ), SimpleNamespace(tools=[tool])
+
+        async def fake_list_server_and_tools(server_url: str):
+            if server_url == "http://first/sse":
+                return make_result("first_only")
+            return make_result("second_only")
+
+        monkeypatch.setattr(
+            tool_server_module, "list_server_and_tools", fake_list_server_and_tools
+        )
+
+        await server.add_tool_server("first,second")
+
+        # A duplicate server name must not replace the first server's tool
+        # descriptions, and calls must keep routing to the first server's URL.
+        dup = server.harmony_tool_descriptions["dup"]
+        assert [t.name for t in dup.tools] == ["first_only"]
+        assert server.urls["dup"] == "http://first/sse"
+
     def test_post_process_tools_description_uses_trim_schema_result(self, monkeypatch):
         mcp_types = pytest.importorskip("mcp.types")
         tool = mcp_types.Tool(
