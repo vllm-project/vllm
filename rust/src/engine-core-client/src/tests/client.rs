@@ -21,9 +21,9 @@ use zeromq::prelude::{Socket, SocketRecv, SocketSend};
 use zeromq::util::PeerIdentity;
 use zeromq::{DealerSocket, PushSocket, SocketOptions, SubSocket, XPubSocket, ZmqMessage};
 
-use crate::protocol::dtype::{NumpyDtype, TensorDtype};
 use crate::metrics::SchedulerStatsRecorder;
 use crate::mock_engine::{MockEngineConfig, default_ready_response};
+use crate::protocol::dtype::{NumpyDtype, TensorDtype};
 use crate::protocol::handshake::{
     EngineCoreReadyResponse, HandshakeInitMessage, HandshakeParallelConfig, PrefixHashConfig,
     ReadyMessage,

@@ -464,19 +464,15 @@ async fn generate_merges_outputs_by_stream_interval() {
             )))
         ]
     );
-    let indexer_topk: Vec<_> =
-        outputs.iter().map(|output| output.indexer_topk.clone()).collect();
+    let indexer_topk: Vec<_> = outputs.iter().map(|output| output.indexer_topk.clone()).collect();
     assert_eq!(
         indexer_topk,
         [
             None,
             None,
             Some(Box::new(
-                WireNdArray::from_i32(
-                    vec![7, 1, 2],
-                    (1..=7).flat_map(|id| [id, -1]).collect(),
-                )
-                .unwrap(),
+                WireNdArray::from_i32(vec![7, 1, 2], (1..=7).flat_map(|id| [id, -1]).collect(),)
+                    .unwrap(),
             ))
         ]
     );
