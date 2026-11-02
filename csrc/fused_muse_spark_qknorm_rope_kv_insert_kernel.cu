@@ -52,6 +52,17 @@
   #endif
 #endif
 
+// This file is include-only: it is instantiated once per head_dim by
+// fused_muse_spark_qknorm_rope_kv_insert_hd<n>.cu, which define this first.
+// Guarding it here keeps a TU that was added back to a source list from
+// compiling a copy that would reject every head_dim at runtime.
+#ifndef FUSED_MUSE_SPARK_LANE
+  #error "define FUSED_MUSE_SPARK_LANE (64/128/256) before including this file"
+#endif
+static_assert(FUSED_MUSE_SPARK_LANE == 64 || FUSED_MUSE_SPARK_LANE == 128 ||
+                  FUSED_MUSE_SPARK_LANE == 256,
+              "FUSED_MUSE_SPARK_LANE must be 64, 128 or 256");
+
 namespace vllm {
 namespace muse_spark_fused_ops {
 
@@ -416,9 +427,14 @@ __launch_bounds__(256, 6) void fusedMuseSparkQKNormRopeKVInsertKernel(
 #endif
 }
 
+// static: launchFusedMuseSpark's body depends on FUSED_MUSE_SPARK_LANE, so the
+// per-head_dim units must not share one weak definition - otherwise the linker
+// keeps one unit's copy and the other head_dims fail the "not compiled" check
+// in the dispatch below. launchFusedMuseSparkTyped is static for consistency;
+// its instantiations are already unique per unit through HEAD_DIM.
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
           typename rope_t, int HEAD_DIM, int HEADS_PER_GROUP>
-void launchFusedMuseSparkTyped(
+static void launchFusedMuseSparkTyped(
     scalar_t* qkv, rope_t const* cos_sin_cache, int64_t const* positions,
     int64_t const* slot_mapping, cache_t* kv_cache, float const* k_scale,
     float const* v_scale, uint8_t* q_fp8_out, float const* q_scale,
@@ -493,7 +509,7 @@ void launchFusedMuseSparkTyped(
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
-void launchFusedMuseSpark(
+static void launchFusedMuseSpark(
     scalar_t* qkv, void const* cos_sin_cache, bool const rope_is_fp32,
     int64_t const* positions, int64_t const* slot_mapping, cache_t* kv_cache,
     float const* k_scale, float const* v_scale, uint8_t* q_fp8_out,
@@ -568,33 +584,23 @@ void launchFusedMuseSpark(
     DISPATCH_HPG(scalar_t, HD);   \
   }
 
-  // Which head_dim arm this translation unit instantiates. 0 (the default)
-  // keeps all of them; the build compiles this file once per lane instead, each
-  // with FUSED_MUSE_SPARK_LANE = 64/128/256, so the device code of one head_dim
-  // is generated per unit instead of all three landing on one core.
-#ifndef FUSED_MUSE_SPARK_LANE
-  #define FUSED_MUSE_SPARK_LANE 0
-#endif
-
   switch (head_dim) {
     case 64:
-      if constexpr (FUSED_MUSE_SPARK_LANE == 0 || FUSED_MUSE_SPARK_LANE == 64) {
+      if constexpr (FUSED_MUSE_SPARK_LANE == 64) {
         DISPATCH_ROPE_T(64);
       } else {
         STD_TORCH_CHECK(false, "head_dim 64 not compiled");
       }
       break;
     case 128:
-      if constexpr (FUSED_MUSE_SPARK_LANE == 0 ||
-                    FUSED_MUSE_SPARK_LANE == 128) {
+      if constexpr (FUSED_MUSE_SPARK_LANE == 128) {
         DISPATCH_ROPE_T(128);
       } else {
         STD_TORCH_CHECK(false, "head_dim 128 not compiled");
       }
       break;
     case 256:
-      if constexpr (FUSED_MUSE_SPARK_LANE == 0 ||
-                    FUSED_MUSE_SPARK_LANE == 256) {
+      if constexpr (FUSED_MUSE_SPARK_LANE == 256) {
         DISPATCH_ROPE_T(256);
       } else {
         STD_TORCH_CHECK(false, "head_dim 256 not compiled");
