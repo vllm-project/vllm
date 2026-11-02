@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NCCL-based (dense) weight transfer engine."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, ClassVar, Self
@@ -12,6 +12,7 @@ import torch
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.model_executor.model_loader.reload import LoadPlan
 
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
@@ -80,6 +81,10 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     packed: bool = True
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
+    use_load_plan: bool = False
+    """Have the workers write received tensors through a load plan instead of
+    `load_weights` where the plan allows (off by default). The inference
+    server must run with `VLLM_RELOAD_MODE=direct`."""
 
 
 @dataclass
@@ -110,6 +115,12 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
                 f"`shapes` should be of the same size as `names`: "
                 f"got {len(self.shapes)} and {len(self.names)}"
             )
+
+
+def _same_metadata(
+    a: NCCLWeightTransferUpdateInfo, b: NCCLWeightTransferUpdateInfo
+) -> bool:
+    return (a.names, a.dtype_names, a.shapes) == (b.names, b.dtype_names, b.shapes)
 
 
 class NCCLWeightTransferEngine(
@@ -144,6 +155,12 @@ class NCCLWeightTransferEngine(
         self._last_update_info: dict[
             tuple[torch.nn.Module, int], NCCLWeightTransferUpdateInfo
         ] = {}
+        self.use_load_plan = False
+        # Load plan per (model, src), with the update info it was built from.
+        self._plans: dict[
+            tuple[torch.nn.Module, int],
+            tuple[NCCLWeightTransferUpdateInfo, LoadPlan],
+        ] = {}
 
     def init_transfer_engine(self, init_info: NCCLWeightTransferInitInfo) -> None:
         """Initialize NCCL process group with the trainer and record the
@@ -155,11 +172,21 @@ class NCCLWeightTransferEngine(
                       rank offset, world size, and the packed wire params
 
         """
+        from vllm.model_executor.model_loader.reload.direct import (
+            direct_reload_enabled,
+        )
+
+        if init_info.use_load_plan and not direct_reload_enabled():
+            raise ValueError(
+                "NCCL weight transfer: use_load_plan requires VLLM_RELOAD_MODE=direct"
+            )
         self.rank_offset = init_info.rank_offset
         self.packed = init_info.packed
         self.packed_buffer_size_bytes = init_info.packed_buffer_size_bytes
         self.packed_num_buffers = init_info.packed_num_buffers
+        self.use_load_plan = init_info.use_load_plan
         self._last_update_info.clear()
+        self._plans.clear()
         self.model_update_group = worker_init_process_group(
             init_info, self.parallel_config
         )
@@ -213,6 +240,7 @@ class NCCLWeightTransferEngine(
             disable_mtp_completeness_check,
         )
 
+        load_weights = self._loader(key, update_info)
         with disable_mtp_completeness_check():
             if self.packed:
                 # Build iterator of (name, (shape, dtype)) from update_info
@@ -227,7 +255,7 @@ class NCCLWeightTransferEngine(
                     iterator=state_dict_info_iterator(),
                     group=self.model_update_group,
                     src=src,
-                    post_unpack_func=self.model.load_weights,
+                    post_unpack_func=load_weights,
                     buffer_size_bytes=self.packed_buffer_size_bytes,
                     num_buffers=self.packed_num_buffers,
                     device=self.device,
@@ -242,8 +270,37 @@ class NCCLWeightTransferEngine(
                     self.model_update_group.broadcast(
                         weight, src=src, stream=torch.cuda.current_stream()
                     )
-                    self.model.load_weights([(name, weight)])
+                    load_weights([(name, weight)])
                     del weight
+
+    def _loader(
+        self,
+        key: tuple[torch.nn.Module, int],
+        update_info: NCCLWeightTransferUpdateInfo,
+    ) -> Callable[[list[tuple[str, torch.Tensor]]], None]:
+        """``model.load_weights``, or with ``use_load_plan`` the same through
+        the load plan for this metadata, built on first use."""
+        from vllm.model_executor.model_loader.reload import load_planned, plan_loads
+
+        model = self.model
+        if not self.use_load_plan:
+
+            def load(weights: list[tuple[str, torch.Tensor]]) -> None:
+                model.load_weights(weights)
+
+            return load
+        cached = self._plans.get(key)
+        if cached is None or not _same_metadata(cached[0], update_info):
+            metadata = [
+                ParamMeta(name, getattr(torch, dtype_name), tuple(shape))
+                for name, dtype_name, shape in zip(
+                    update_info.names, update_info.dtype_names, update_info.shapes
+                )
+            ]
+            cached = (update_info, plan_loads(model, metadata))
+            self._plans[key] = cached
+        plan = cached[1]
+        return lambda weights: load_planned(model, plan, weights)
 
     def shutdown(self) -> None:
         if self.model_update_group is not None:
@@ -290,12 +347,15 @@ class NCCLTrainerWeightTransferEngine(TrainerWeightTransferEngine[NCCLTrainerIni
 
     @classmethod
     def _build_worker_init_payload(cls, init_info: NCCLTrainerInitInfo) -> dict:
-        return build_worker_init_payload(
+        payload = build_worker_init_payload(
             init_info,
             packed=init_info.packed,
             packed_buffer_size_bytes=init_info.packed_buffer_size_bytes,
             packed_num_buffers=init_info.packed_num_buffers,
         )
+        if init_info.use_load_plan:
+            payload["use_load_plan"] = True
+        return payload
 
     def _open_trainer_endpoint(self, init_info: NCCLTrainerInitInfo) -> None:
         self.model_update_group = open_trainer_endpoint(init_info, self._group_rank)

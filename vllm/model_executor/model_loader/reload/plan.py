@@ -42,7 +42,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-__all__ = ["Box", "LoadPlan", "plan_loads"]
+__all__ = ["Box", "LoadPlan", "load_planned", "plan_loads"]
 
 Dest = tuple[tuple[Box, torch.Tensor], ...]
 
@@ -116,6 +116,27 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
     plan = LoadPlan(entries=entries, dests=dests)
     _report(plan, time.perf_counter() - t0)
     return plan
+
+
+def load_planned(
+    model: torch.nn.Module,
+    plan: LoadPlan,
+    weights: Iterable[tuple[str, torch.Tensor]],
+) -> None:
+    """Load full checkpoint tensors as ``plan`` says: copy each direct name's
+    boxes into its destinations, skip names this rank needs nothing of, and
+    pass fallbacks to ``model.load_weights``. Call between ``start_reload``
+    and ``finish_reload``."""
+    fallbacks = []
+    for name, full in weights:
+        dest = plan.get_dest(name)
+        if dest is None:
+            fallbacks.append((name, full))
+        for box, tensor in dest or ():
+            part = full[tuple(slice(start, stop) for start, stop in box)]
+            tensor.copy_(part.reshape(tensor.shape))
+    if fallbacks:
+        model.load_weights(fallbacks)
 
 
 def _check_plannable(model: torch.nn.Module) -> None:

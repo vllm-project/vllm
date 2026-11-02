@@ -22,6 +22,7 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
 from vllm.model_executor.model_loader.reload import (
     finish_reload,
+    load_planned,
     plan_loads,
     start_reload,
 )
@@ -90,20 +91,13 @@ def _cold_start(make, weights):
     return model
 
 
-def _box_slice(box) -> tuple[slice, ...]:
-    return tuple(slice(a, b) for a, b in box)
-
-
 def _planned_reload(model, plan: LoadPlan, weights) -> None:
-    """What an engine does: boxes into their destinations, fallbacks in full."""
+    """What an engine does: boxes into their destinations, fallbacks in full,
+    in batches of two as a packed transfer hands them over."""
     start_reload(model)
-    for name, full in weights.items():
-        dest = plan.get_dest(name)
-        if dest is None:
-            model.load_weights([(name, full)])
-            continue
-        for box, tensor in dest:
-            tensor.copy_(full[_box_slice(box)].reshape(tensor.shape))
+    items = list(weights.items())
+    for i in range(0, len(items), 2):
+        load_planned(model, plan, items[i : i + 2])
     finish_reload(model, _MODEL_CONFIG, _CPU)
 
 

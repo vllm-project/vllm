@@ -106,6 +106,10 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
     packed: bool = False
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
+    use_load_plan: bool = False
+    """Dense backend only: write received tensors through a load plan
+    (`plan_loads`) instead of `load_weights` where the plan allows. Requires
+    `VLLM_RELOAD_MODE=direct`."""
 
     def __post_init__(self) -> None:
         _ = self.nccl_unique_id_bytes
@@ -123,9 +127,13 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
 def worker_init_payload(init_info: NCCLWeightTransferInitInfo) -> dict:
     """Serialize a worker init info for `init_weight_transfer_engine`, dropping
     the unset rendezvous field (the UID in TCP mode) so the wire payload carries
-    only the mode actually in use. Shared by the dense and sparse trainer
-    engines so the two cannot drift."""
-    return {key: value for key, value in asdict(init_info).items() if value is not None}
+    only the mode actually in use, and an unset `use_load_plan` so older
+    servers still accept it. Shared by the dense and sparse trainer engines so
+    the two cannot drift."""
+    payload = {k: v for k, v in asdict(init_info).items() if v is not None}
+    if not payload["use_load_plan"]:
+        del payload["use_load_plan"]
+    return payload
 
 
 def build_worker_init_payload(

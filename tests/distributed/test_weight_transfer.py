@@ -294,6 +294,33 @@ class TestNCCLEngineParsing:
         assert update_info.shapes == [[100, 100], [50]]
         assert update_info.src == 1
 
+    def test_use_load_plan_requires_direct_reload(self, monkeypatch):
+        monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+        init_info = NCCLWeightTransferInitInfo(
+            master_address="127.0.0.1",
+            master_port=12345,
+            rank_offset=1,
+            world_size=2,
+            use_load_plan=True,
+        )
+        with pytest.raises(ValueError, match="VLLM_RELOAD_MODE=direct"):
+            self._make_engine().init_transfer_engine(init_info)
+
+
+@pytest.mark.parametrize("use_load_plan", [False, True])
+def test_nccl_trainer_sends_use_load_plan_only_when_set(use_load_plan):
+    """Older servers reject unknown init fields, so the default is not sent."""
+    init_info = NCCLTrainerInitInfo(
+        master_address="127.0.0.1",
+        master_port=29500,
+        world_size=3,
+        rank=0,
+        use_load_plan=use_load_plan,
+    )
+    payload = NCCLTrainerWeightTransferEngine._build_worker_init_payload(init_info)
+    assert ("use_load_plan" in payload) is use_load_plan
+    assert NCCLWeightTransferInitInfo(**payload).use_load_plan is use_load_plan
+
 
 # --- Unit Tests: Engine Registry ---
 
