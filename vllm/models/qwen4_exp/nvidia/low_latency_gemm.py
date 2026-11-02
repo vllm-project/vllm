@@ -63,6 +63,38 @@ QWEN4_EXP_SM103_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
         1: SkinnyGemmConfig(1, 64, 4, k_unroll=2),
         2: SkinnyGemmConfig(2, 32, 4, k_unroll=2),
     },
+    # GDN and QSA output projections, TP=1 (DGX Station GB300).
+    (2560, 6144): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=2, vector_width=4, static_k=6144),
+        2: SkinnyGemmConfig(2, 128, 2, static_k=6144),
+    },
+    # GDN fused B/A projection, TP=1.
+    (96, 2560): {
+        1: SkinnyGemmConfig(1, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 128, 1, k_unroll=4, vector_width=4, static_k=2560),
+        4: SkinnyGemmConfig(4, 160, 1, k_unroll=2, static_k=2560),
+    },
+    # QSA fused QKV/gate + replicated indexer Q/K, TP=1.
+    (13952, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=6, vector_width=2, static_k=2560),
+    },
+    # Shared-expert fused gate/up projection, TP=1.
+    (1280, 2560): {
+        1: SkinnyGemmConfig(1, 128, 2, k_unroll=2, vector_width=4, static_k=2560),
+        2: SkinnyGemmConfig(2, 64, 2, k_unroll=2, static_k=2560),
+        4: SkinnyGemmConfig(4, 64, 2, k_unroll=4, vector_width=4, static_k=2560),
+    },
+    # Shared-expert down projection, TP=1.
+    (2560, 640): {
+        1: SkinnyGemmConfig(1, 160, 4, k_unroll=2, vector_width=4),
+        2: SkinnyGemmConfig(2, 160, 4, vector_width=4),
+    },
+    # HC final down projection, TP=1.
+    (320, 10240): {
+        1: SkinnyGemmConfig(1, 256, 1, k_unroll=2, static_k=10240),
+        2: SkinnyGemmConfig(2, 256, 1, k_unroll=2, static_k=10240),
+        4: SkinnyGemmConfig(4, 256, 1, k_unroll=2),
+    },
 }
 
 # H200 plans selected by exhaustive CUDA graph replay measurements over
@@ -118,7 +150,7 @@ QWEN4_EXP_SM90_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = 
 }
 
 
-# B200 plans; the winning configs differ from the B300 table.
+# B200 plans for TP=4 and TP=1; the winning configs differ from the B300 table.
 QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] = {
     # GDN fused B/A projection, TP=4.
     (24, 2560): {
@@ -164,6 +196,28 @@ QWEN4_EXP_SM100_GEMM_PLANS: dict[tuple[int, int], dict[int, SkinnyGemmConfig]] =
     # LM head, TP=4.
     (62080, 2560): {
         1: SkinnyGemmConfig(1, 128, 2, k_unroll=4, vector_width=4),
+    },
+    # GDN fused B/A projection, TP=1.
+    (96, 2560): {
+        1: SkinnyGemmConfig(1, 128, 4, k_unroll=2, vector_width=2, static_k=2560),
+    },
+    # Router, TP=1.
+    (512, 2560): {
+        1: SkinnyGemmConfig(1, 256, 1, k_unroll=4, vector_width=2, static_k=2560),
+    },
+    # Shared-expert fused gate/up projection, TP=1.
+    (1280, 2560): {
+        1: SkinnyGemmConfig(1, 32, 1, k_unroll=2, static_k=2560),
+    },
+    # Shared-expert down projection, TP=1.
+    (2560, 640): {
+        1: SkinnyGemmConfig(1, 160, 4, k_unroll=2, vector_width=4),
+        2: SkinnyGemmConfig(2, 160, 4, vector_width=4),
+    },
+    # GDN and QSA output projections, TP=1.
+    (2560, 6144): {
+        1: SkinnyGemmConfig(1, 256, 2, k_unroll=2, static_k=6144),
+        2: SkinnyGemmConfig(2, 128, 2, static_k=6144),
     },
 }
 

@@ -133,6 +133,13 @@ def test_tp1_fp8_fusions(
         # enabling AITER.
         matches_check.remove("norm_rope_fusion")
 
+    if current_platform.is_xpu():
+        # XPU defaults to the weight-only W8A16 FP8 path, which leaves no
+        # activation quant op for rms+quant fusion; opt into W8A8 instead.
+        model_kwargs["linear_backend"] = "xpu"
+        # Attention + quant fusion is not supported on XPU.
+        matches = matches._replace(attn_quant_fusion=0)
+
     run_e2e_fusion_test(
         model_name,
         matches,

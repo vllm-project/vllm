@@ -383,15 +383,29 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         """Finalize into ``output``, or stop after GEMM2 when it is None."""
         import flashinfer
 
+        # With output=None the caller consumes the UnfinalizedMoEOutput itself.
+        defer = output is not None and self._uses_post_gemm2_hook(topk_ids.shape[0])
+
         flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=(topk_ids, topk_weights),
             gemm1_weights=w1,
             gemm2_weights=w2,
             num_experts=global_num_experts,
-            do_finalize=output is not None,
-            output=output,
+            do_finalize=output is not None and not defer,
+            output=None if defer else output,
             **self._routed_moe_kwargs(hidden_states, a1q_scale, activation),
         )
+        if defer:
+            self._run_post_gemm2_hook(
+                convert_flashinfer_moe_output(
+                    flashinfer_output,
+                    do_finalize=False,
+                    num_tokens=topk_ids.shape[0],
+                    top_k=self.topk,
+                ),
+                output,
+            )
+            return None
         if output is not None:
             return None
         routed_output = convert_flashinfer_moe_output(
@@ -435,7 +449,10 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             # Each launch permutes into its own buffer, so only a run that fits
             # in one launch can leave the top-k reduction to a deferring
             # consumer.
-            defer = self.moe_config.should_defer_moe_finalize(M)
+            defer = (
+                self.post_gemm2_hook is None
+                and self.moe_config.should_defer_moe_finalize(M)
+            )
             return self._invoke_kernel(
                 None if defer else output,
                 hidden_states,
@@ -547,9 +564,10 @@ class TrtLlmNvFp4ExpertsMonolithic(
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         num_tokens = hidden_states.shape[0]
+        hooked = self._uses_post_gemm2_hook(num_tokens)
         # The runner divides by the token count on the host, so an idle rank's
         # dummy 0-token forward has to keep the finalized (empty) form.
-        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        defer = hooked or self.moe_config.should_defer_moe_finalize(num_tokens)
 
         # Invoke kernel.
         # NOTE: Activation padding and output
@@ -594,4 +612,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
             num_tokens=num_tokens,
             top_k=self.topk,
         )
+        if hooked:
+            return self._run_post_gemm2_hook(routed_output)
         return routed_output

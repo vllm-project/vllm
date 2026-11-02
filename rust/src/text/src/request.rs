@@ -307,6 +307,13 @@ impl TextRequest {
                 request_id: self.request_id.clone(),
             });
         }
+        if !self.decode_options.detokenize
+            && self.decode_options.stop_strings.as_ref().is_some_and(|stops| !stops.is_empty())
+        {
+            return Err(Error::StopStringsRequireDetokenize {
+                request_id: self.request_id.clone(),
+            });
+        }
         if self.cache_salt.as_deref().is_some_and(|salt| !is_valid_cache_salt(salt)) {
             return Err(Error::InvalidCacheSalt);
         }
