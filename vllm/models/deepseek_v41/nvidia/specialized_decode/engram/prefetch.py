@@ -13,6 +13,8 @@ The chain issues TP collectives on the side stream, so whether a step starts it
 depends only on the step's rows, which every TP rank shares.
 """
 
+from collections.abc import Callable
+
 import torch
 
 from vllm.distributed import tensor_model_parallel_all_gather
@@ -29,10 +31,16 @@ from vllm.triton_utils import triton
 logger = init_logger(__name__)
 
 
-def prefetchable(engram: Engram) -> bool:
+# WKV kernels that keep no workspace shared with GEMMs on other streams
+# (FlashInfer's CUTLASS MXFP8 GEMM shares one process-wide workspace).
+SIDE_STREAM_WKV_KERNELS: tuple[type, ...] = (FlashInferCutedslMxfp8LinearKernel,)
+
+
+def prefetchable(
+    engram: Engram, kernels: tuple[type, ...] = SIDE_STREAM_WKV_KERNELS
+) -> bool:
     """Whether ``engram``'s WKV can run ahead: host-offloaded, TP-only tables
-    and a CuTe DSL MXFP8 WKV (FlashInfer's CUTLASS MXFP8 GEMM shares one
-    process-wide workspace with GEMMs on other streams)."""
+    and a WKV on one of ``kernels``."""
     kernel = getattr(getattr(engram.wkv, "quant_method", None), "kernel", None)
     return (
         engram._prefetch_stream is not None
@@ -40,15 +48,27 @@ def prefetchable(engram: Engram) -> bool:
         and engram._batch is None
         and engram.embed_tokens.dp_size == 1
         and not engram.use_sequence_parallel
-        and isinstance(kernel, FlashInferCutedslMxfp8LinearKernel)
+        and isinstance(kernel, kernels)
     )
+
+
+def _stock_wkv(engram: Engram, x: torch.Tensor) -> torch.Tensor:
+    return engram.wkv(x)
 
 
 class EngramPrefetch:
     """The WKV chains of a decode step's Engram layers, on one side stream."""
 
-    def __init__(self, engrams: list[Engram], max_rows: int) -> None:
+    def __init__(
+        self,
+        engrams: list[Engram],
+        max_rows: int,
+        kernels: tuple[type, ...] = SIDE_STREAM_WKV_KERNELS,
+        wkv: Callable[[Engram, torch.Tensor], torch.Tensor] | None = None,
+    ) -> None:
         self.stream = torch.cuda.Stream()
+        # The WKV projection of an Engram's gathered rows.
+        self._wkv = wkv or _stock_wkv
         self._buffers: dict[Engram, tuple[torch.Tensor, torch.cuda.Event]] = {
             engram: (
                 torch.empty(
@@ -60,7 +80,7 @@ class EngramPrefetch:
                 torch.cuda.Event(),
             )
             for engram in engrams
-            if prefetchable(engram)
+            if prefetchable(engram, kernels)
         }
         # Started chains no layer has waited for yet.
         self._pending: set[Engram] = set()
@@ -81,7 +101,9 @@ class EngramPrefetch:
                 heads = engram.staged_rows[:num_tokens]
                 if engram.embed_tokens.tp_size > 1:
                     heads = tensor_model_parallel_all_gather(heads, dim=1)
-                kv = engram.wkv(heads[:, : engram.embed_tokens.n_hash_cols].flatten(-2))
+                kv = self._wkv(
+                    engram, heads[:, : engram.embed_tokens.n_hash_cols].flatten(-2)
+                )
                 # Temporaries stay on this stream; only the persistent output
                 # reaches the consumer, after the event below.
                 out[:num_tokens].copy_(kv)

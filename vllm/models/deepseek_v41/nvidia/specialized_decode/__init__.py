@@ -1,18 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DeepSeek-V4.1 specialized decode on NVIDIA GPUs: a decode executor over the
-stock backbone, enabled by
+stock backbone, and one over the DSpark draft model's, enabled by
 ``additional_config={"decode_backend": "latency_specialized"}``.
 
-The executor runs FULL-graph decode steps; every other step runs the stock
-forward. It issues cross-rank collectives, so the deployment check below is
+The executors run FULL-graph decode steps; every other step runs the stock
+forward. They issue cross-rank collectives, so the deployment check below is
 collective over the TP group and every per-step decision reads host state that
 all TP ranks share.
 """
 
 import importlib.metadata
+import weakref
 from dataclasses import dataclass
 from functools import cache
+from typing import TYPE_CHECKING
 
 import torch
 import torch.distributed as dist
@@ -25,7 +27,14 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-from ..ops.mhc import supports_mhc_all_reduce, supports_mhc_overlap
+from ..ops.mhc import (
+    mhc_overlap_max_tokens,
+    supports_mhc_all_reduce,
+    supports_mhc_overlap,
+)
+
+if TYPE_CHECKING:
+    from ..dspark import DSparkDeepseekV4ForCausalLM
 
 logger = init_logger(__name__)
 
@@ -43,6 +52,20 @@ LOW_BATCH_MAX_ROWS = 8
 # compares both with FlashInfer's own GEMM and quantize bitwise on the release
 # requirements/cuda.txt pins.
 MIN_FLASHINFER_VERSION = "0.7.2"
+
+
+# Rows of the Hopper executor's largest step: 32 DSpark requests of 6 rows.
+HOPPER_MAX_ROWS = 192
+
+
+def max_rows() -> int:
+    """Rows of the largest step this GPU's executor runs. On Hopper, steps
+    above the stock decode's fused all-reduce + mHC cap
+    (``mhc_overlap_max_tokens()``), where its one-shot kernel falls behind the
+    stock two-shot all-reduce, take the stock boundary."""
+    if current_platform.is_device_capability(90):
+        return max(HOPPER_MAX_ROWS, mhc_overlap_max_tokens())
+    return FUSED_MHC_MAX_ROWS
 
 
 @dataclass(frozen=True)
@@ -74,15 +97,45 @@ def uses_checked_flashinfer(feature: str) -> bool:
     return False
 
 
+def _attention_requirement(vllm_config: VllmConfig) -> dict[str, bool]:
+    """The attention the executor of this GPU runs over."""
+    attention = vllm_config.attention_config
+    cache_dtype = vllm_config.cache_config.cache_dtype
+    if current_platform.is_device_capability(90):
+        return {
+            "the FlashMLA sparse attention with its fp8_ds_mla KV cache": (
+                attention.backend
+                in (
+                    None,
+                    AttentionBackendEnum.FLASHMLA_SPARSE,
+                    AttentionBackendEnum.FLASHMLA_SPARSE_DSV4,
+                    AttentionBackendEnum.FLASHMLA_SPARSE_DSV41,
+                )
+                and cache_dtype in ("auto", "fp8", "fp8_ds_mla")
+            )
+        }
+    return {
+        "the FLASHINFER_MLA_SPARSE_DSV41 attention backend, an fp8 KV cache "
+        "and the MXFP4 indexer with sparse logits": (
+            attention.backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV41
+            and cache_dtype in ("fp8", "fp8_e4m3")
+            and attention.indexer_kv_dtype == "mxfp4"
+            and bool(attention.indexer_sparse_logits)
+        )
+    }
+
+
 def unsupported(vllm_config: VllmConfig) -> list[str]:
     """Every requirement of the specialized decode this deployment misses."""
     parallel = vllm_config.parallel_config
-    attention = vllm_config.attention_config
     spec = vllm_config.speculative_config
     compilation = vllm_config.compilation_config
     cudagraph_mode = compilation.cudagraph_mode
     requirements = {
-        "a GB300 (SM103) GPU": current_platform.is_device_capability(103),
+        "a GB300 (SM103), H100 or H200 (SM90) GPU": (
+            current_platform.is_device_capability(103)
+            or current_platform.is_device_capability(90)
+        ),
         "Model Runner V2": vllm_config.use_v2_model_runner,
         "tensor parallel size 4 without pipeline, data, expert or context "
         "parallelism or micro-batching": (
@@ -99,13 +152,7 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
             and spec.method == "dspark"
             and not spec.enable_adaptive_verification
         ),
-        "the FLASHINFER_MLA_SPARSE_DSV41 attention backend, an fp8 KV cache "
-        "and the MXFP4 indexer with sparse logits": (
-            attention.backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV41
-            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3")
-            and attention.indexer_kv_dtype == "mxfp4"
-            and attention.indexer_sparse_logits
-        ),
+        **_attention_requirement(vllm_config),
         "FULL CUDA graphs for decode batches only (FULL_AND_PIECEWISE or "
         "FULL_DECODE_ONLY)": (
             cudagraph_mode is not None
@@ -130,18 +177,24 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
     return [need for need, ok in requirements.items() if not ok]
 
 
+def decode_backend(vllm_config: VllmConfig) -> str:
+    """``additional_config["decode_backend"]``: ``auto`` (the default, the stock
+    decode) or ``latency_specialized``."""
+    extra = vllm_config.additional_config
+    backend = extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
+    if backend not in ("auto", "latency_specialized"):
+        raise ValueError("Supported decode_backend values are auto/latency_specialized")
+    return backend
+
+
 def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
     """The specialized decode settings, or None for the stock decode.
 
     Collective over the TP group when requested: every rank raises if any rank
     cannot run the specialized decode.
     """
-    extra = vllm_config.additional_config
-    backend = extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
-    if backend == "auto":
+    if decode_backend(vllm_config) == "auto":
         return None
-    if backend != "latency_specialized":
-        raise ValueError("Supported decode_backend values are auto/latency_specialized")
     missing = unsupported(vllm_config)
     supported = torch.tensor([0 if missing else 1], dtype=torch.int32)
     # The NVLink multicast check is rank-local (the custom all-reduce catches a
@@ -153,10 +206,29 @@ def specialized_decode_config(vllm_config: VllmConfig) -> DecodeConfig | None:
     logger.info_once(
         "DeepSeek-V4.1 specialized decode on, for FULL-graph decode steps of up "
         "to %d rows.",
-        FUSED_MHC_MAX_ROWS,
+        max_rows(),
     )
     kernel = vllm_config.kernel_config
     return DecodeConfig(
         autotune=kernel.enable_flashinfer_autotune is not False,
         jit_warmup=bool(kernel.enable_jit_warmup),
     )
+
+
+# The DSpark draft models built with decode_backend=latency_specialized and not yet
+# given an executor. The target's model state builds theirs once both models
+# are loaded, in registration order, which every TP rank shares.
+_drafts: list["weakref.ref[DSparkDeepseekV4ForCausalLM]"] = []
+
+
+def register_draft(draft: "DSparkDeepseekV4ForCausalLM") -> None:
+    """Have the target model's state build ``draft`` a decode executor."""
+    _drafts.append(weakref.ref(draft))
+
+
+def take_drafts() -> list["DSparkDeepseekV4ForCausalLM"]:
+    """The live drafts registered since the last call, in registration
+    order."""
+    drafts = [draft for ref in _drafts if (draft := ref()) is not None]
+    _drafts.clear()
+    return drafts

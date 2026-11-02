@@ -11,6 +11,12 @@ whose boundaries take the kernel's residual-only variant:
   (``routed_expert_gemm``);
 - above that, on the runner's own ``_forward_impl`` with the deferral raised to
   the step's rows for the call (``deferred_finalize``).
+
+The DSpark draft's layers finalize their MoE in the layer instead (the fused
+kernel's finalize is built for the target's top-k): up to
+``LOW_BATCH_MAX_ROWS`` rows on the routed-expert GEMMs and their finalize
+kernel, above that on ``_forward_impl``. Either way their output stays
+TP-partial for the next boundary, though their stock layers reduce it.
 """
 
 from collections.abc import Iterator
@@ -70,21 +76,40 @@ def defers_finalize(ffn: "DeepseekV4MoE", max_num_tokens: int) -> bool:
 
 
 class MoEStep:
-    """One MoE layer of the decode step."""
+    """One MoE layer of the decode step; with ``finalize``, one that finalizes
+    its own MoE (the DSpark draft's)."""
 
     def __init__(
-        self, ffn: "DeepseekV4MoE", gemm: RoutedExpertGemm | None, max_rows: int
+        self,
+        ffn: "DeepseekV4MoE",
+        gemm: RoutedExpertGemm | None,
+        max_rows: int,
+        finalize: bool = False,
     ) -> None:
         self.ffn = ffn
         self.runner = ffn.experts
-        self.deferrable = defers_finalize(ffn, max_rows)
-        # The low-batch GEMMs leave the top-k reduction open too.
-        self.gemm = gemm if self.deferrable else None
+        self.finalize = finalize
+        if finalize and (
+            self.runner.routed_scaling_factor != 1.0
+            or self.runner._fused_output_is_reduced
+        ):
+            # _run_finalized adds the shared and routed outputs as the stock
+            # forward does, without its routed scaling or reduced-output paths.
+            raise ValueError(
+                "decode_backend=latency_specialized requires the draft's MoE to have "
+                "routed_scaling_factor == 1.0 and an unreduced fused output"
+            )
+        self.deferrable = not finalize and defers_finalize(ffn, max_rows)
+        # The low-batch GEMMs leave the top-k reduction open too, for the next
+        # boundary or the finalize kernel.
+        self.gemm = gemm if self.deferrable or finalize else None
 
     def run(
         self, x: torch.Tensor, input_ids: torch.Tensor | None, step: "DecodeStep"
     ) -> torch.Tensor | MoEOutput:
         """The layer's TP-partial output, unfinalized where it can defer."""
+        if self.finalize:
+            return self._run_finalized(x, input_ids, step)
         if not self.deferrable:
             return self.ffn(x, input_ids, None)
         gemm = self.gemm
@@ -101,6 +126,23 @@ class MoEStep:
             return MoEOutput(routed=routed, shared_output=shared_output)
         # Experts that split the call across launches finalize it.
         return shared_output + routed
+
+    def _run_finalized(
+        self, x: torch.Tensor, input_ids: torch.Tensor | None, step: "DecodeStep"
+    ) -> torch.Tensor:
+        """The layer's TP-partial output with its top-k reduction done here:
+        the shared output plus the finalized routed output, as the stock
+        forward adds them before its all-reduce."""
+        gemm = self.gemm
+        if step.low_batch and gemm is not None and gemm.accepts(x, self.runner):
+            routed, shared_output = self._forward_low_batch(gemm, x, input_ids)
+            return shared_output + gemm.finalize(routed)
+        # The runner's custom op returns tensors only, so run its body directly.
+        shared_output, finalized = _unpack(
+            self.runner._forward_impl(x, x, x, input_ids)
+        )
+        assert shared_output is not None and isinstance(finalized, torch.Tensor)
+        return shared_output + finalized
 
     def _forward_low_batch(
         self,

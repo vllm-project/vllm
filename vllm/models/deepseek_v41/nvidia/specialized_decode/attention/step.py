@@ -23,32 +23,52 @@ low-batch kernels where they apply:
   sparse-index builds, which read the top-k indices they overwrite.
 - The sparse MLA reuses the step's sparse-index tables and runs on persistent
   KV counters (``sparse_mla``).
+
+``wo_b``'s output is TP-partial: the next boundary reduces it. The DSpark
+draft's stock layers reduce ``wo_b`` themselves, so for them the step projects
+without that all-reduce.
 """
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import torch
 
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
-from vllm.models.deepseek_v41.attention import DeepseekV4Indexer
+from vllm.models.deepseek_v41.attention import DeepseekV4Attention, DeepseekV4Indexer
 
-from ...flashinfer_sparse import DeepseekV4FlashInferMLAAttention
 from ...ops.o_proj import dsv41_o_proj
 from .aux_projections import aux_projection_gemm, aux_projection_gemm_accepts
 from .indexer import CandidateOverlap, decode_rows, rope_quant_q
 from .indexer_k_store import indexer_k_norm_rope_store_fp32
 from .mxfp8 import low_latency_mm, mxfp8_eligible
-from .sparse_mla import SparseIndexTables, SparseMlaDecode
 
 if TYPE_CHECKING:
     from ..boundary.publishing_gemm import PublishingMxfp8Linear
     from ..runtime.decode import DecodeStep
 
 
-def side_weights(attn: DeepseekV4FlashInferMLAAttention) -> list[torch.Tensor]:
+class StepTables(Protocol):
+    """The sparse-index tables the layers of a step share
+    (``sparse_mla.SparseIndexTables``)."""
+
+    def reset(self) -> None:
+        """Forget the previous step's tables."""
+
+    def join(self) -> None:
+        """Wait for side-stream builds, which read the top-k indices."""
+
+
+class StepMla(Protocol):
+    """The sparse-MLA decode of a step (``sparse_mla.SparseMlaDecode``)."""
+
+    def run(self, attn: Any, q: torch.Tensor, out: torch.Tensor) -> None:
+        """Write ``attn``'s sparse MLA of ``q`` into ``out``."""
+
+
+def side_weights(attn: DeepseekV4Attention) -> list[torch.Tensor]:
     """The weights of ``attn``'s side projections."""
     weights = []
     if attn.compressor is not None:
@@ -58,7 +78,7 @@ def side_weights(attn: DeepseekV4FlashInferMLAAttention) -> list[torch.Tensor]:
     return weights
 
 
-def key_weight(attn: DeepseekV4FlashInferMLAAttention) -> torch.Tensor | None:
+def key_weight(attn: DeepseekV4Attention) -> torch.Tensor | None:
     """``wk`` of ``attn``'s indexer when it produces MXFP4 index keys."""
     indexer = attn.indexer
     if indexer is not None and indexer.owns_k and indexer.use_fp4_kv:
@@ -71,9 +91,9 @@ class AttentionStep:
 
     def __init__(
         self,
-        attn: DeepseekV4FlashInferMLAAttention,
-        tables: SparseIndexTables,
-        mla: SparseMlaDecode,
+        attn: DeepseekV4Attention,
+        tables: StepTables,
+        mla: StepMla,
         publisher: "PublishingMxfp8Linear | None",
         mxfp8_input: bool,
         source: CandidateOverlap | None,
@@ -124,9 +144,16 @@ class AttentionStep:
             assert index_weights is not None
             self._indexer(indexer, x, index_q, index_q_scale, index_weights, step)
         self.mla.run(attn, q, out)
+        return self._o_proj(out, positions, step)
+
+    def _o_proj(
+        self, out: torch.Tensor, positions: torch.Tensor, step: "DecodeStep"
+    ) -> torch.Tensor:
+        """The output projection of the attention output ``out``."""
+        attn = self.attn
         if step.low_batch and (self.publisher is not None or self.wo_b_mxfp8):
             return dsv41_o_proj(attn, out, positions, wo_b_proj=self._wo_b_low_batch)
-        return attn._o_proj(out, positions)
+        return dsv41_o_proj(attn, out, positions, wo_b_proj=self._wo_b_partial)
 
     def _input_projections(
         self,
@@ -171,20 +198,29 @@ class AttentionStep:
                 results[i] = fn()
                 attn.ln_events[1 + i].record()
 
+        return self._wqa_wkv(x, quant, step), results[0], results[1]
+
+    def _wqa_wkv(
+        self,
+        x: torch.Tensor,
+        quant: QuantizedActivation | None,
+        step: "DecodeStep",
+    ) -> torch.Tensor:
+        """``fused_wqa_wkv`` of ``x`` (``quant``: the same input as MXFP8)."""
+        attn = self.attn
         if quant is None:
-            qr_kv = attn._fused_wqa_wkv_gemm(x)
-        else:
-            qr_kv = None
-            if step.low_batch and self.wqa_mxfp8:
-                qr_kv = low_latency_mm(attn.fused_wqa_wkv, quant)
-            if qr_kv is None:
-                qr_kv = attn.fused_wqa_wkv(quant)[0]
-        return qr_kv, results[0], results[1]
+            return attn._fused_wqa_wkv_gemm(x)
+        qr_kv = None
+        if step.low_batch and self.wqa_mxfp8:
+            qr_kv = low_latency_mm(attn.fused_wqa_wkv, quant)
+        if qr_kv is None:
+            qr_kv = attn.fused_wqa_wkv(quant)[0]
+        return qr_kv
 
     def _prepare(
         self,
         qr: torch.Tensor | QuantizedActivation,
-        kv: torch.Tensor,
+        kv: torch.Tensor | None,
         qr_scale: torch.Tensor | None,
         kv_score: torch.Tensor | None,
         indexer_weights: torch.Tensor | None,
@@ -205,18 +241,19 @@ class AttentionStep:
         """
         attn = self.attn
         indexer, compressor = attn.indexer, attn.compressor
+        # Only layers with an indexer or a compressor read them; the DSpark
+        # draft's sliding-window layers have neither, nor aux streams.
         streams = attn.aux_stream_list
-        assert streams is not None
         start, latent_ready, index_k_done, index_q_done = self._events
         start.record()
         index_q: torch.Tensor | None = None
         index_q_scale: torch.Tensor | None = None
         index_weights: torch.Tensor | None = None
         if indexer is not None:
-            assert indexer_weights is not None
+            assert indexer_weights is not None and streams is not None
             with torch.cuda.stream(streams[2]):
                 start.wait()
-                index_q_pre = indexer._wq_b_proj(qr, qr_scale)
+                index_q_pre = self._index_wq_b(indexer, qr, qr_scale, step)
                 attn.ln_events[2].wait()
                 index_q, index_q_scale, index_weights = rope_quant_q(
                     indexer,
@@ -228,7 +265,7 @@ class AttentionStep:
                 index_q_done.record()
         latent = None
         if compressor is not None:
-            assert kv_score is not None
+            assert kv_score is not None and streams is not None
             # After the kv_score GEMM, which ran on this stream.
             with torch.cuda.stream(streams[0]):
                 start.wait()
@@ -238,15 +275,8 @@ class AttentionStep:
                     self._produce_k(indexer, latent, positions, step)
                 index_k_done.record()
 
-        q = None
-        if step.low_batch and self.wq_b_mxfp8:
-            q = low_latency_mm(attn.wq_b, qr)
-        if q is None:
-            q = attn._wq_b_proj(qr, qr_scale)
-        q = q.view(-1, attn.n_local_heads, attn.head_dim)
-        q = attn._fused_qnorm_rope_kv_insert(
-            q, kv, positions, get_forward_context().attn_metadata
-        )
+        q = self._wq_b(qr, qr_scale, step).view(-1, attn.n_local_heads, attn.head_dim)
+        q = self._q_rope_kv_insert(q, kv, positions)
         if compressor is not None:
             latent_ready.wait()
             compressor.insert_cache(latent, positions, attn.rotary_emb)
@@ -254,6 +284,38 @@ class AttentionStep:
         if indexer is not None:
             index_q_done.wait()
         return q, index_q, index_q_scale, index_weights
+
+    def _q_rope_kv_insert(
+        self, q: torch.Tensor, kv: torch.Tensor | None, positions: torch.Tensor
+    ) -> torch.Tensor:
+        """The query ready for the MLA, and the step's KV inserted."""
+        return self.attn._fused_qnorm_rope_kv_insert(
+            q, kv, positions, get_forward_context().attn_metadata
+        )
+
+    def _wq_b(
+        self,
+        qr: torch.Tensor | QuantizedActivation,
+        qr_scale: torch.Tensor | None,
+        step: "DecodeStep",
+    ) -> torch.Tensor:
+        """``wq_b`` of the normalized query ``qr``."""
+        q = None
+        if step.low_batch and self.wq_b_mxfp8:
+            q = low_latency_mm(self.attn.wq_b, qr)
+        if q is None:
+            q = self.attn._wq_b_proj(qr, qr_scale)
+        return q
+
+    def _index_wq_b(
+        self,
+        indexer: DeepseekV4Indexer,
+        qr: torch.Tensor | QuantizedActivation,
+        qr_scale: torch.Tensor | None,
+        step: "DecodeStep",
+    ) -> torch.Tensor:
+        """The indexer's ``wq_b`` of the normalized query ``qr``."""
+        return indexer._wq_b_proj(qr, qr_scale)
 
     def _produce_k(
         self,
@@ -317,6 +379,16 @@ class AttentionStep:
         low-latency MXFP8 GEMM."""
         wo_b = self.attn.wo_b
         if self.publisher is not None:
-            return self.publisher(wo_b, z)
+            return self.publisher(wo_b, z, fallback=self._wo_b_partial)
         out = low_latency_mm(wo_b, z) if self.wo_b_mxfp8 else None
-        return out if out is not None else self.attn._wo_b_proj(z)
+        return out if out is not None else self._wo_b_partial(z)
+
+    def _wo_b_partial(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
+        """``wo_b``'s TP-partial output, which the next boundary reduces: the
+        layer's own projection, or for a ``wo_b`` that reduces its output (the
+        DSpark draft's stock layers) the projection without that all-reduce."""
+        wo_b = self.attn.wo_b
+        if not wo_b.reduce_results:
+            return self.attn._wo_b_proj(z)
+        assert wo_b.quant_method is not None
+        return wo_b.quant_method.apply(wo_b, z, None)

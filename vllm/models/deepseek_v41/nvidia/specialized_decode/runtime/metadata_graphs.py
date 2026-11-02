@@ -39,7 +39,7 @@ logger = init_logger(__name__)
 # Builders whose build() of a uniform decode batch launches only capture-safe
 # work (no device-to-host reads, no pageable host-to-device copies) into
 # persistent buffers, with host arguments set by the batch shape.
-_RECORDABLE_BUILDERS = frozenset(
+RECORDABLE_BUILDERS = frozenset(
     {
         CompressorMetadataBuilder,
         DeepseekSparseSWAFlashInferMetadataBuilder,
@@ -60,29 +60,44 @@ class AttnMetadataCudaGraphs:
     Each key is built once eagerly, warming lazy allocations, kernel
     compilation and per-stream library state, then recorded with the metadata
     it returns. The graphs write the builders' buffers at their capture-time
-    addresses: every capture releases and records them again.
+    addresses: every capture releases and records them again. Only groups whose
+    builders are all of the ``recordable`` types are recorded, for steps of up
+    to ``max_tokens`` padded rows (None: every FULL decode graph).
     """
 
-    def __init__(self, vllm_config: VllmConfig, decode_query_len: int) -> None:
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        decode_query_len: int,
+        recordable: frozenset[type] = RECORDABLE_BUILDERS,
+        max_tokens: int | None = None,
+    ) -> None:
         self._vllm_config = vllm_config
         self._decode_query_len = decode_query_len
+        self._recordable_builders = recordable
+        self._max_tokens = max_tokens
         self._graphs: dict[GraphKey, tuple[torch.cuda.CUDAGraph, dict[str, Any]]] = {}
         self._side_streams: list[torch.cuda.Stream] = []
         self._recordable: bool | None = None
 
-    @staticmethod
-    def key(input_batch: InputBatch, cudagraph_mode: CUDAGraphMode) -> GraphKey | None:
+    def key(
+        self, input_batch: InputBatch, cudagraph_mode: CUDAGraphMode
+    ) -> GraphKey | None:
         """The graph key of a step whose metadata build can be recorded, or None.
 
-        Only FULL steps of uniform decodes qualify; their key fixes every host
-        value the build reads. Under adaptive verification (``max_query_len``
-        set) the device splits the drafts, so the host query lengths are only
-        bounds.
+        Only FULL steps of uniform decodes of up to ``max_tokens`` padded rows
+        qualify; their key fixes every host value the build reads. Under
+        adaptive verification (``max_query_len`` set) the device splits the
+        drafts, so the host query lengths are only bounds.
         """
         if (
             cudagraph_mode != CUDAGraphMode.FULL
             or input_batch.has_prefill
             or input_batch.max_query_len is not None
+            or (
+                self._max_tokens is not None
+                and input_batch.num_tokens_after_padding > self._max_tokens
+            )
         ):
             return None
         query_lens = input_batch.num_scheduled_tokens[: input_batch.num_reqs]
@@ -109,6 +124,8 @@ class AttnMetadataCudaGraphs:
             self._vllm_config.scheduler_config.max_num_seqs * query_len,
             config.max_cudagraph_capture_size,
         )
+        if self._max_tokens is not None:
+            max_tokens = min(max_tokens, self._max_tokens)
         graph_reqs = sorted(
             {
                 round_up(size, query_len) // query_len
@@ -130,7 +147,7 @@ class AttnMetadataCudaGraphs:
         """Whether every metadata builder of ``attn_groups`` is recordable."""
         if self._recordable is None:
             self._recordable = all(
-                type(group.get_metadata_builder()) in _RECORDABLE_BUILDERS
+                type(group.get_metadata_builder()) in self._recordable_builders
                 for groups in attn_groups
                 for group in groups
             )
