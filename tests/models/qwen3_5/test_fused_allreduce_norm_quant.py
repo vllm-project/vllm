@@ -101,7 +101,7 @@ def _worker(local_rank, world_size, port):
     def run_one(nvfp4, allreduce, num_tokens):
         linear = None if nvfp4 is None else linears[nvfp4]
         set_random_seed(42)
-        norm = Qwen3_5RMSNorm(HIDDEN_SIZE, eps=1e-6, reduces_input=allreduce).cuda()
+        norm = Qwen3_5RMSNorm(HIDDEN_SIZE, eps=1e-6, reduce_inputs=allreduce).cuda()
         with torch.no_grad():
             norm.weight.normal_(mean=0.0, std=0.1)
             norm.weight.data = norm.weight.data.to(dtype)
