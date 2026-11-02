@@ -110,7 +110,15 @@ def _maybe_promote_torch_symbols_for_rocm():
 
     Best effort. If the library cannot be loaded early we leave the process
     exactly as it would have been, losing only GPU tracing.
+
+    Skipped when HSA_TOOLS_LIB is set (an external HSA profiling tool is
+    active).  Loading libtorch_cpu.so with RTLD_GLOBAL pulls
+    libhsa-runtime64 into the global symbol scope, which prevents the
+    external tool's OnLoad callback from firing — resulting in zero GPU
+    kernel records captured.
     """
+    if os.environ.get("HSA_TOOLS_LIB"):
+        return
     if _get_torch_version_attr("hip") is None:
         return
     try:
