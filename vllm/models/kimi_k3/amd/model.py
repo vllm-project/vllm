@@ -169,6 +169,8 @@ class KimiK3ForConditionalGeneration(
     def get_encoder_cudagraph_budget_range(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int]:
+        # Smallest realistic input: a 224x224 image is 16x16 patches, 8x8 = 64
+        # tokens after the 2x2 merge. Smaller items replay the 64-token graph.
         min_budget = 64
         max_budget = min(
             vllm_config.scheduler_config.max_num_batched_tokens,

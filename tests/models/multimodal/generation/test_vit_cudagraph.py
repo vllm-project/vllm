@@ -694,14 +694,18 @@ def test_eonly_vit_cudagraph_outputs(
         print(f"E-only {model_id}: {results}")
 
 
-def _check_k3_replay_and_threshold(worker, cases):
-    """Run image batches through the real manager; compare with eager.
+def _check_k3_replay_and_threshold(worker, grids, hits, misses):
+    """Run one image batch through the real manager; compare with eager.
 
     Args:
-        cases: (grid_thw list, expected graph hits, expected eager misses) per batch.
+        grids: grid_thw of each image in the batch.
+        hits: expected graph hits for the batch.
+        misses: expected eager fallbacks for the batch.
 
     """
     import torch
+
+    from vllm.utils.torch_utils import set_random_seed
 
     runner = worker.model_runner
     manager = (
@@ -711,41 +715,51 @@ def _check_k3_replay_and_threshold(worker, cases):
     )
     assert manager is not None and manager.is_captured()
     model = runner.model
-    vision_config = runner.model_config.hf_config.vision_config
-    patch = vision_config.patch_size
-    generator = torch.Generator(device=runner.device).manual_seed(0)
+    patch = runner.model_config.hf_config.vision_config.patch_size
+    set_random_seed(0)
     with torch.inference_mode():
-        for grids, hits, misses in cases:
-            num_patches = sum(t * h * w for t, h, w in grids)
-            kwargs = {
-                # The input norm takes raw 8-bit pixels.
-                "pixel_values": torch.randint(
-                    0,
-                    256,
-                    (num_patches, 3, patch, patch),
-                    device=runner.device,
-                    dtype=torch.uint8,
-                    generator=generator,
-                ),
-                "grid_thws": grids,
-            }
-            before = manager.get_cumulative_stats()
-            actual = torch.cat(manager.execute(kwargs))
-            after = manager.get_cumulative_stats()
-            assert after["graph_hits"] - before["graph_hits"] == hits, grids
-            assert after["graph_misses"] - before["graph_misses"] == misses, grids
-            expected = model.encoder_eager_forward(kwargs)
-            assert actual.shape == expected.shape
-            assert torch.isfinite(actual).all() and expected.abs().max() > 0
-            # Two bf16 ulps at the output scale: replay runs padded GEMMs.
-            bound = 2 * expected.abs().max().item() * 2**-7
-            diff = (actual.float() - expected.float()).abs().max().item()
-            assert diff <= bound, f"{grids}: max abs diff {diff} > {bound}"
+        num_patches = sum(t * h * w for t, h, w in grids)
+        kwargs = {
+            # The input norm takes raw 8-bit pixels.
+            "pixel_values": torch.randint(
+                0,
+                256,
+                (num_patches, 3, patch, patch),
+                device=runner.device,
+                dtype=torch.uint8,
+            ),
+            "grid_thws": grids,
+        }
+        before = manager.get_cumulative_stats()
+        actual = torch.cat(manager.execute(kwargs))
+        after = manager.get_cumulative_stats()
+        assert after["graph_hits"] - before["graph_hits"] == hits
+        assert after["graph_misses"] - before["graph_misses"] == misses
+        expected = model.encoder_eager_forward(kwargs)
+        assert actual.shape == expected.shape
+        assert torch.isfinite(actual).all() and expected.abs().max() > 0
+        # Two bf16 ulps at the output scale: replay runs padded GEMMs.
+        bound = 2 * expected.abs().max().item() * 2**-7
+        diff = (actual.float() - expected.float()).abs().max().item()
+        assert diff <= bound, f"max abs diff {diff} > {bound}"
     return manager.token_budgets
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="AMD Kimi-K3 encoder graphs")
-def test_kimi_k3_vit_cudagraph_replay_and_threshold(vllm_runner, monkeypatch):
+@pytest.mark.parametrize(
+    ("grids", "hits", "misses"),
+    [
+        pytest.param([[1, 16, 16]], 1, 0, id="fills_smallest_budget_64"),
+        pytest.param([[1, 28, 28]], 1, 0, id="padded_budget_196"),
+        pytest.param([[1, 32, 64]], 1, 0, id="fills_largest_budget_512"),
+        pytest.param([[1, 34, 64]], 0, 1, id="above_largest_budget_544"),
+        pytest.param([[1, 28, 28]] * 2, 2, 0, id="two_images_share_replay"),
+        pytest.param([[1, 28, 28], [1, 34, 64]], 1, 1, id="only_oversize_eager"),
+    ],
+)
+def test_kimi_k3_vit_cudagraph_replay_and_threshold(
+    grids, hits, misses, vllm_runner, monkeypatch
+):
     """Replay matches eager; graphs serve items up to the largest budget (512
     output tokens by default) and larger items run eagerly."""
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
@@ -753,15 +767,6 @@ def test_kimi_k3_vit_cudagraph_replay_and_threshold(vllm_runner, monkeypatch):
     compilation_config = get_compilation_config(config)
     compilation_config.pop("encoder_cudagraph_token_budgets")
     compilation_config["encoder_cudagraph_max_vision_items_per_batch"] = 2
-    small, mid, full, over = [1, 16, 16], [1, 28, 28], [1, 32, 64], [1, 34, 64]
-    cases = [
-        ([small], 1, 0),  # 64 tokens fill the smallest budget
-        ([mid], 1, 0),  # 196 tokens replay a padded budget
-        ([full], 1, 0),  # 512 tokens fill the largest budget
-        ([over], 0, 1),  # 544 tokens exceed it
-        ([mid, mid], 2, 0),  # two images share one replay
-        ([mid, over], 1, 1),  # only the oversize image runs eagerly
-    ]
     with vllm_runner(
         config.model,
         dtype=config.dtype,
@@ -772,7 +777,12 @@ def test_kimi_k3_vit_cudagraph_replay_and_threshold(vllm_runner, monkeypatch):
         **config.vllm_runner_kwargs,
     ) as vllm_model:
         results = vllm_model.llm.collective_rpc(
-            partial(_check_k3_replay_and_threshold, cases=cases)
+            partial(
+                _check_k3_replay_and_threshold,
+                grids=grids,
+                hits=hits,
+                misses=misses,
+            )
         )
     for token_budgets in results:
         assert token_budgets[-1] == 512
