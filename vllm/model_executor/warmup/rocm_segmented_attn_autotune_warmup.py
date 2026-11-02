@@ -13,10 +13,11 @@ import os
 import statistics
 import tempfile
 import time
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, NotRequired, TypedDict, Unpack
 
 import torch
 from filelock import FileLock
@@ -25,33 +26,94 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import triton
-from vllm.v1.attention.ops import segmented_attention
+from vllm.v1.attention.ops import segmented_attention, segmented_attention_config
 from vllm.v1.attention.ops.segmented_attention import (
-    MAX_QUERY_LEN,
     _segmented_attention_reduce,
     _segmented_attention_stage,
     compile_segmented_attention,
     run_segmented_attention,
-    segmented_query_capacity,
     segmented_workspace_shapes,
+    supports_segmented_native_fp8,
+)
+from vllm.v1.attention.ops.segmented_attention_config import (
+    KV_UPCAST_MODES,
+    MAX_QUERY_LEN,
+    MM_PREFIX_SPAN_BUCKETS,
+    KVUpcastMode,
+    MMPrefixMode,
+    SegmentedAttentionConfig,
+    SegmentedConfigOverrides,
+    SegmentedLaunchConfig,
+    segmented_kv_upcast_mode,
+    segmented_mm_prefix_bucket,
+    segmented_query_capacity,
     select_segmented_config,
 )
+
+ConfigKey = tuple[tuple[str, object], ...]
+
+
+class _ConfigRecord(TypedDict):
+    workload: Sequence[int]
+    best: SegmentedAttentionConfig
+    query_lengths: NotRequired[Sequence[int]]
+
+
+class _ConfigTable(TypedDict):
+    identity: dict[str, Any]
+    records: list[_ConfigRecord]
+
+
+class _ConfigComparison(TypedDict):
+    config: SegmentedAttentionConfig
+    us: float
+    paired_speedup_vs_default: float
+    paired_warm_speedup_vs_default: NotRequired[float]
+    paired_balanced_speedup_vs_default: NotRequired[float]
+    rejected_warm_regression: NotRequired[bool]
+    rejected_cold_regression: NotRequired[bool]
+
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
 
-_TABLES: dict[tuple, dict] = {}
+_TABLES: dict[tuple, _ConfigTable] = {}
 _QUERY_BUCKETS = (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192)
+_MM_QUERY_BUCKETS = (
+    4,
+    16,
+    32,
+    48,
+    64,
+    96,
+    128,
+    256,
+    384,
+    512,
+    1024,
+    1536,
+    2048,
+    4096,
+    8192,
+)
+_MM_RANGE_GAP = 8
+_MM_PROMPT_TOKENS = 32
 _BATCH_BUCKETS = (1, 2, 4, 8, 16, 32)
 _SEQUENCE_BUCKETS = (128, 512, 2048, 8192, 32768, 131072, 262144)
 _COMPILE_WORKERS = 2
 _CONDITION_ROUNDS = 2
 _SCREEN_ROUNDS = 5
+_UPCAST_GEOMETRY_SHORTLIST = 8
+_MM_UPCAST_GEOMETRY_SHORTLIST = 4
 _FINALIST_COUNT = 3
 _FINAL_ROUNDS = 7
 _MIN_PROMOTION_SPEEDUP = 1.02
+_MAX_WARM_SLOWDOWN = 1.02
+_WARM_GRAPH_CALLS = 2
+_MAX_WARM_GRAPH_CALLS = 256
+_WARM_TARGET_US = 1000
 
 
 def _key(
@@ -66,7 +128,15 @@ def _key(
     sliding_window=-1,
     causal=True,
     has_sinks=False,
+    mm_prefix_mode: MMPrefixMode = "none",
+    mm_prefix_max_span: int = 0,
+    mm_prefix_max_ranges: int = 0,
 ):
+    mm_span, mm_ranges = (
+        segmented_mm_prefix_bucket(mm_prefix_max_span, mm_prefix_max_ranges)
+        if mm_prefix_mode != "none"
+        else (0, 0)
+    )
     return (
         torch.device(device).index,
         dtype,
@@ -79,19 +149,236 @@ def _key(
         sliding_window,
         causal,
         has_sinks,
+        mm_prefix_mode,
+        mm_span,
+        mm_ranges,
     )
 
 
-def _normalized_config(config, batch, query_len, heads, dim):
+def _normalized_config(
+    config: SegmentedLaunchConfig, batch: int, query_len: int, heads: int, dim: int
+) -> SegmentedAttentionConfig:
     qcap = segmented_query_capacity(query_len)
-    result = dict(config)
+    result: SegmentedAttentionConfig = {
+        **config,
+        "kv_upcast": segmented_kv_upcast_mode(config),
+    }
+    result.pop("native_fp8_upcast", None)
+    result.pop("native_fp8_pack", None)
     result.setdefault("waves_per_eu", 2)
     result.setdefault("reduce_d", 64 if batch * qcap * heads < 64 else dim)
     result.setdefault("reduce_warps", 4)
+    if dim == 512:
+        result.setdefault("pv_split", False)
+        result.setdefault("prefix_fast", False)
+        result.setdefault("qk_pipeline", None)
+        result.setdefault("qk_unroll", None)
     return result
 
 
-def _candidate_configs(default, batch, query_len, heads, dim, seq_len=None):
+def _candidate_configs(
+    default: SegmentedLaunchConfig,
+    batch: int,
+    query_len: int,
+    heads: int,
+    dim: int,
+    seq_len: int | None = None,
+    *,
+    native_fp8: bool = False,
+    legacy_default: SegmentedLaunchConfig | None = None,
+    mm_prefix_mode: MMPrefixMode = "none",
+    sliding_window: int = -1,
+) -> list[SegmentedAttentionConfig]:
+    """Search conversion modes jointly with each eligible launch geometry."""
+    base = _normalized_config(default, batch, query_len, heads, dim)
+    if not native_fp8:
+        base["kv_upcast"] = "normal"
+    bases = [base]
+    if legacy_default is not None:
+        legacy = _normalized_config(legacy_default, batch, query_len, heads, dim)
+        legacy["kv_upcast"] = base["kv_upcast"]
+        if legacy != base:
+            bases.append(legacy)
+    launches: list[SegmentedAttentionConfig] = []
+    for seed in bases:
+        if mm_prefix_mode != "none":
+            launches.extend(
+                _mm_launch_candidate_configs(seed, batch, query_len, heads, dim)
+            )
+            continue
+        launches.extend(
+            _launch_candidate_configs(seed, batch, query_len, heads, dim, seq_len)
+        )
+        if native_fp8:
+            if dim == 512 and query_len > 2:
+                for bn in (32, 64):
+                    for warps in (4, 8):
+                        launches.append(
+                            {
+                                **seed,
+                                "bm": 16,
+                                "bn": bn,
+                                "bk": 64,
+                                "warps": warps,
+                                "stages": 1,
+                                "waves_per_eu": 2,
+                                "pv_split": False,
+                                "qk_pipeline": None,
+                                "qk_unroll": None,
+                            }
+                        )
+            elif dim in (128, 256) and query_len >= 64:
+                for bm, bn, waves in ((32, 64, 2), (64, 64, 6), (64, 128, 6)):
+                    launches.append(
+                        {
+                            **seed,
+                            "bm": bm,
+                            "bn": bn,
+                            "bk": 64,
+                            "warps": 8,
+                            "stages": 1,
+                            "waves_per_eu": waves,
+                        }
+                    )
+    if mm_prefix_mode != "none":
+        launches = [_canonical_mm_config(c, dim, sliding_window) for c in launches]
+    launches = list({_config_key(c): c for c in launches}.values())
+    normal_modes: tuple[KVUpcastMode, ...] = ("normal",)
+    return [
+        {**config, "kv_upcast": mode}
+        for config in launches
+        for mode in (
+            dict.fromkeys((config["kv_upcast"], *KV_UPCAST_MODES))
+            if native_fp8
+            else normal_modes
+        )
+    ]
+
+
+def _canonical_mm_config(
+    config: SegmentedAttentionConfig, dim: int, sliding_window: int
+) -> SegmentedAttentionConfig:
+    """Collapse knobs omitted by the selected stage/reduction specialization."""
+    result = config.copy()
+    result.setdefault("pv_split", False)
+    result.setdefault("prefix_fast", False)
+    result.setdefault("qk_pipeline", None)
+    result.setdefault("qk_unroll", None)
+    if sliding_window >= 0:
+        result["prefix_fast"] = False
+    if result["bk"] == dim:
+        result["qk_pipeline"] = result["qk_unroll"] = None
+    if result["splits"] == 1:
+        result["reduce_d"] = dim
+        result["reduce_warps"] = 4
+    return result
+
+
+def _mm_launch_candidate_configs(
+    default: SegmentedAttentionConfig,
+    batch: int,
+    query_len: int,
+    heads: int,
+    dim: int,
+) -> list[SegmentedAttentionConfig]:
+    """Search image reuse and partitioning without inactive text-only knobs."""
+    configs = [default]
+    for splits in sorted({1, max(1, default["splits"] // 2)} - {default["splits"]}):
+        partition = default.copy()
+        partition["splits"] = splits
+        configs.append(partition)
+    for bm, bn, bk, warps, stages in (
+        (16, 64, min(128, dim), 4, 1),
+        (32, 32, 64, 4, 1),
+        (32, 32, 64, 4, 2),
+        (32, 128, 64, 8, 1),
+        (32, 64, min(128, dim), 8, 2),
+        (64, 32, 64, 4, 1),
+        (64, 32, 64, 8, 1),
+        (64, 64, 64, 8, 1),
+        (64, 64, 64, 8, 2),
+        (64, 128, 64, 8, 1),
+        (64, 128, 64, 8, 3),
+        (128, 32, dim, 8, 1),
+        (128, 64, 64, 8, 1),
+    ):
+        if (
+            bk > dim
+            or (stages > 2 and dim > 128)
+            or (query_len <= 8 and bm > 32)
+            or 2 * max(bm * bk, bn * dim) > 64 * 1024
+        ):
+            continue
+        for splits in sorted({1, max(1, default["splits"] // 2), default["splits"]}):
+            config: SegmentedAttentionConfig = {
+                **default,
+                "bm": bm,
+                "bn": bn,
+                "bk": bk,
+                "warps": warps,
+                "stages": stages,
+                "splits": splits,
+                "waves_per_eu": 2 if bm <= 32 else 6,
+                "pv_split": False,
+                "prefix_fast": False,
+                "qk_pipeline": None,
+                "qk_unroll": None,
+            }
+            configs.append(_normalized_config(config, batch, query_len, heads, dim))
+    return configs
+
+
+def _geometry_key(config: Mapping[str, object]) -> ConfigKey:
+    return tuple(sorted((k, v) for k, v in config.items() if k != "kv_upcast"))
+
+
+def _initial_search_configs(
+    configs: list[SegmentedAttentionConfig],
+) -> list[SegmentedAttentionConfig]:
+    """Screen native4 geometries while retaining the static incumbent."""
+    if not any(c["kv_upcast"] == "native4" for c in configs):
+        return configs
+    return [
+        configs[0],
+        *(c for c in configs if c["kv_upcast"] == "native4" and c != configs[0]),
+    ]
+
+
+def _upcast_expansion_configs(
+    configs: list[SegmentedAttentionConfig],
+    comparisons: list[_ConfigComparison],
+    *,
+    geometry_shortlist: int = _UPCAST_GEOMETRY_SHORTLIST,
+) -> list[SegmentedAttentionConfig]:
+    """Expand conversion modes on promising or unmeasurable geometries."""
+    initial = _initial_search_configs(configs)
+    attempted = {_config_key(c) for c in initial}
+    if len(attempted) == len(configs):
+        return []
+    anchors = sorted(
+        (r for r in comparisons if r["config"]["kv_upcast"] == "native4"),
+        key=lambda r: r["paired_balanced_speedup_vs_default"],
+        reverse=True,
+    )
+    measured = {_geometry_key(r["config"]) for r in anchors}
+    geometries = {_geometry_key(c) for c in configs} - measured
+    geometries.add(_geometry_key(configs[0]))
+    geometries.update(_geometry_key(r["config"]) for r in anchors[:geometry_shortlist])
+    return [
+        c
+        for c in configs
+        if _geometry_key(c) in geometries and _config_key(c) not in attempted
+    ]
+
+
+def _launch_candidate_configs(
+    default: SegmentedLaunchConfig,
+    batch: int,
+    query_len: int,
+    heads: int,
+    dim: int,
+    seq_len: int | None = None,
+) -> list[SegmentedAttentionConfig]:
     """Search launch tiles and split counts within a bounded workspace."""
     base = _normalized_config(default, batch, query_len, heads, dim)
     max_splits = base["splits"]
@@ -106,11 +393,11 @@ def _candidate_configs(default, batch, query_len, heads, dim, seq_len=None):
         max_splits = 512
     elif dim == 64 and query_len <= 512 and seq_len is not None and seq_len >= 4096:
         max_splits = min(64, 2 * max_splits)
-    candidates: list[dict] = []
+    candidates: list[SegmentedAttentionConfig] = []
     seen = set()
 
-    def add(**updates):
-        config = {**base, **updates}
+    def add(**updates: Unpack[SegmentedConfigOverrides]) -> None:
+        config: SegmentedAttentionConfig = {**base, **updates}
         if (
             config["splits"] > max_splits
             or dim % config["bk"]
@@ -151,6 +438,90 @@ def _candidate_configs(default, batch, query_len, heads, dim, seq_len=None):
     split_choices.append(1)
     for splits in split_choices:
         add(splits=splits)
+
+    if dim == 512:
+        # Keep the wide PV accumulator distributed over enough threads. Search
+        # QK chunks separately instead of inheriting the full-width decode tile.
+        add(prefix_fast=not base["prefix_fast"])
+        add(pv_split=False, qk_pipeline=None, qk_unroll=None)
+        add(qk_unroll=2)
+        add(qk_unroll=4)
+        if base["splits"] > 1:
+            for reduce_d in (64, 128, dim):
+                add(reduce_d=reduce_d)
+            for warps in (1, 2):
+                add(reduce_d=64, reduce_warps=warps)
+        add(waves_per_eu=4)
+        add(
+            bm=32,
+            bn=64,
+            bk=64,
+            warps=8,
+            stages=2,
+            waves_per_eu=4,
+            pv_split=False,
+            qk_pipeline=None,
+            qk_unroll=None,
+        )
+        add(
+            bm=32,
+            bn=64,
+            bk=128,
+            warps=8,
+            stages=2,
+            waves_per_eu=4,
+            pv_split=False,
+            qk_pipeline=None,
+            qk_unroll=None,
+        )
+        if query_len > 2:
+            for bn in (32, 64):
+                for pipeline in (None, 3):
+                    add(
+                        bm=64,
+                        bn=bn,
+                        bk=64,
+                        warps=8,
+                        stages=1,
+                        waves_per_eu=6,
+                        pv_split=True,
+                        qk_pipeline=pipeline,
+                        qk_unroll=None,
+                    )
+        if query_len <= 2:
+            tiles = (
+                (16, 32, 64, 4, 1),
+                (16, 64, 64, 4, 1),
+                (16, 32, 64, 8, 1),
+                (16, 64, 64, 8, 1),
+                (16, 32, 128, 8, 1),
+                (16, 64, 128, 8, 1),
+            )
+        else:
+            tiles = (
+                (32, 32, 64, 8, 1),
+                (32, 64, 64, 8, 1),
+                (64, 32, 64, 8, 1),
+                (64, 64, 64, 8, 1),
+                (32, 32, 128, 8, 1),
+                (32, 64, 64, 8, 2),
+            )
+        for splits in (base["splits"], max(1, base["splits"] // 2)):
+            for bm, bn, bk, warps, stages in tiles:
+                for waves in (2, 6) if splits == base["splits"] else (2,):
+                    add(
+                        bm=bm,
+                        bn=bn,
+                        bk=bk,
+                        splits=splits,
+                        warps=warps,
+                        stages=stages,
+                        waves_per_eu=waves,
+                        pv_split=False,
+                        qk_pipeline=None,
+                        qk_unroll=None,
+                    )
+        return candidates
 
     tile_variants: tuple[tuple[int, int, int, int, int, int], ...] = (
         (16, 32, dim, 4, 1, 2),
@@ -227,6 +598,9 @@ def _identity(
     max_query_len,
     has_sinks=False,
     physical_max_len=None,
+    mm_prefix_mode: MMPrefixMode = "none",
+    mm_prefix_max_span: int = 0,
+    mm_prefix_max_ranges: int = 0,
 ):
     properties = torch.cuda.get_device_properties(device)
     from triton._C.libtriton import get_cache_invalidating_env_vars
@@ -234,7 +608,7 @@ def _identity(
     source = Path(__file__)
     kernel = Path(segmented_attention.__file__)
     return {
-        "schema": 5,
+        "schema": 9,
         "gpu": properties.name,
         "arch": properties.gcnArchName,
         "compute_units": properties.multi_processor_count,
@@ -242,6 +616,9 @@ def _identity(
         "hip": torch.version.hip,
         "compiler_env": get_cache_invalidating_env_vars(),
         "kernel_sha256": hashlib.sha256(kernel.read_bytes()).hexdigest(),
+        "selector_sha256": hashlib.sha256(
+            Path(segmented_attention_config.__file__).read_bytes()
+        ).hexdigest(),
         "tuner_sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
         "dtype": str(dtype),
         "kv_dtype": str(kv_dtype),
@@ -258,7 +635,19 @@ def _identity(
         "max_query_len": max_query_len,
         "has_sinks": has_sinks,
         "physical_max_len": physical_max_len,
+        "table_max_len": physical_max_len or max_len,
+        "mm_prefix_mode": mm_prefix_mode,
+        "mm_prefix_max_span": mm_prefix_max_span,
+        "mm_prefix_max_ranges": mm_prefix_max_ranges,
         "query_buckets": list(_QUERY_BUCKETS),
+        "mm_query_buckets": list(_MM_QUERY_BUCKETS),
+        "mm_span_buckets": list(MM_PREFIX_SPAN_BUCKETS),
+        "mm_range_gap": _MM_RANGE_GAP,
+        "mm_prompt_tokens": _MM_PROMPT_TOKENS,
+        "mm_prefill_batch_buckets": [1, 2, 4],
+        "mm_short_sequence_capacity": 128,
+        "mm_page_layout": "shuffled",
+        "mm_upcast_geometry_shortlist": _MM_UPCAST_GEOMETRY_SHORTLIST,
         "batch_buckets": list(_BATCH_BUCKETS),
         "sequence_buckets": list(_SEQUENCE_BUCKETS),
         "compile_workers": _COMPILE_WORKERS,
@@ -267,6 +656,18 @@ def _identity(
         "finalist_count": _FINALIST_COUNT,
         "final_rounds": _FINAL_ROUNDS,
         "min_promotion_speedup": _MIN_PROMOTION_SPEEDUP,
+        "warm_cache_guard": True,
+        "kv_upcast_modes": list(KV_UPCAST_MODES)
+        if supports_segmented_native_fp8(dtype, kv_dtype)
+        else ["normal"],
+        "kv_upcast_search": "native4_geometry_shortlist",
+        "kv_upcast_geometry_shortlist": _UPCAST_GEOMETRY_SHORTLIST,
+        "promotion_objective": "warm_cold_geomean",
+        "graph_internal_events": True,
+        "max_warm_slowdown": _MAX_WARM_SLOWDOWN,
+        "warm_graph_calls": _WARM_GRAPH_CALLS,
+        "max_warm_graph_calls": _MAX_WARM_GRAPH_CALLS,
+        "warm_target_us": _WARM_TARGET_US,
     }
 
 
@@ -292,6 +693,10 @@ def _scratch_bytes(
     max_tokens,
     workload,
     physical_max_len=None,
+    mm_prefix_mode: MMPrefixMode = "none",
+    mm_prefix_max_span: int = 0,
+    mm_prefix_max_ranges: int = 0,
+    sliding_window: int = -1,
 ):
     batch, query_len, seq_len = workload
     queries = _query_lengths(batch, query_len, max_tokens)
@@ -305,10 +710,31 @@ def _scratch_bytes(
     cache = 2 * blocks * page * kv_heads * dim * kv_dtype.itemsize
     tensors = tokens * dim * (4 * heads + 2 * kv_heads) * dtype.itemsize
     default = select_segmented_config(
-        batch, query_len, seq_len, heads, kv_heads, dim, kv_dtype.itemsize == 1
+        batch,
+        query_len,
+        seq_len,
+        heads,
+        kv_heads,
+        dim,
+        kv_dtype.itemsize == 1,
+        mm_prefix_mode=mm_prefix_mode,
+        mm_prefix_max_span=mm_prefix_max_span,
+        mm_prefix_max_ranges=mm_prefix_max_ranges,
+        sliding_window=sliding_window,
     )
     candidates = _candidate_configs(
-        default, batch, query_len, heads, dim, seq_len=seq_len
+        default,
+        batch,
+        query_len,
+        heads,
+        dim,
+        seq_len=seq_len,
+        native_fp8=dtype == torch.bfloat16 and kv_dtype == torch.float8_e4m3fn,
+        legacy_default=segmented_attention._select_segmented_launch_config(
+            batch, query_len, seq_len, heads, kv_heads, dim, kv_dtype.itemsize == 1
+        ),
+        mm_prefix_mode=mm_prefix_mode,
+        sliding_window=sliding_window,
     )
     shapes = segmented_workspace_shapes(
         batch,
@@ -338,9 +764,31 @@ def _workloads(
     cache_budget_bytes=None,
     max_query_len=MAX_QUERY_LEN,
     physical_max_len=None,
+    mm_prefix_mode: MMPrefixMode = "none",
+    mm_prefix_max_span: int = 0,
+    mm_prefix_max_ranges: int = 0,
+    sliding_window: int = -1,
 ):
     query_limit = min(max_tokens, max_len, max_query_len, MAX_QUERY_LEN)
-    queries = {q for q in _QUERY_BUCKETS if q <= query_limit}
+    if mm_prefix_mode == "clamped" and query_limit <= 1:
+        return
+    query_buckets = _QUERY_BUCKETS if mm_prefix_mode == "none" else _MM_QUERY_BUCKETS
+    queries = {
+        q
+        for q in query_buckets
+        if q <= query_limit and (mm_prefix_mode != "clamped" or q > 1)
+    }
+    if mm_prefix_mode != "none" and mm_prefix_max_span:
+        # Image-sized ceilings preserve the image/text ratio of real prefills.
+        queries.add(min(query_limit, mm_prefix_max_span + _MM_PROMPT_TOKENS))
+        queries.add(
+            min(
+                query_limit,
+                mm_prefix_max_span * max(1, mm_prefix_max_ranges)
+                + _MM_RANGE_GAP * max(0, mm_prefix_max_ranges - 1)
+                + _MM_PROMPT_TOKENS,
+            )
+        )
     if query_limit:
         queries.add(query_limit)
     for query_len in sorted(queries):
@@ -351,6 +799,8 @@ def _workloads(
             batches = {min(batch, batch_limit) for batch in _BATCH_BUCKETS}
         else:
             batches = {1, min(4, batch_limit), batch_limit}
+            if mm_prefix_mode != "none":
+                batches.add(min(2, batch_limit))
         if query_len <= 2:
             sequences = {
                 seq for seq in _SEQUENCE_BUCKETS if query_len <= seq <= max_len
@@ -363,6 +813,8 @@ def _workloads(
                 max(query_len, min(max_len, 8192)),
                 max_len,
             }
+            if mm_prefix_mode != "none" and query_len <= 128:
+                sequences.add(min(max_len, segmented_query_capacity(query_len)))
             # Keep long-context verification and prefill buckets even when
             # the model's maximum length is pruned by the KV memory budget.
             sequences.update(
@@ -382,6 +834,10 @@ def _workloads(
                     max_tokens,
                     workload,
                     physical_max_len,
+                    mm_prefix_mode,
+                    mm_prefix_max_span,
+                    mm_prefix_max_ranges,
+                    sliding_window,
                 )
                 > memory_budget_bytes
             ):
@@ -407,6 +863,9 @@ def _make_inputs(
     max_tokens,
     workload,
     physical_seq_len=None,
+    table_max_len=None,
+    *,
+    shuffle_pages: bool = False,
 ):
     batch, query_len, seq_len = workload
     physical_seq_len = max(seq_len, physical_seq_len or seq_len)
@@ -429,16 +888,26 @@ def _make_inputs(
     scale_value = 0.125 if kv_dtype.itemsize == 1 else 1.0
     cache = (randn(*cache_shape).float() / scale_value).to(kv_dtype)
     kc, vc = cache[:, 0], cache[:, 1]
-    table = (
-        torch.arange(physical_blocks_per_seq, device=device, dtype=torch.int32)[None, :]
-        .remainder(cache_blocks_per_seq)
-        .expand(batch, -1)
-        .contiguous()
+    table_width = max(
+        physical_blocks_per_seq, math.ceil((table_max_len or seq_len) / page)
     )
-    table += (
-        torch.arange(batch, device=device, dtype=torch.int32)[:, None]
-        * cache_blocks_per_seq
+    offsets = torch.arange(table_width, device=device, dtype=torch.int64).remainder(
+        cache_blocks_per_seq
     )
+    if shuffle_pages:
+        pages = torch.randperm(
+            batch * cache_blocks_per_seq,
+            device=device,
+            generator=generator,
+            dtype=torch.int32,
+        ).view(batch, cache_blocks_per_seq)
+        table = pages[:, offsets].contiguous()
+    else:
+        table = offsets.to(torch.int32)[None, :].expand(batch, -1).contiguous()
+        table += (
+            torch.arange(batch, device=device, dtype=torch.int32)[:, None]
+            * cache_blocks_per_seq
+        )
     starts = torch.tensor(
         [0, *itertools.accumulate(queries)], device=device, dtype=torch.int32
     )
@@ -447,7 +916,26 @@ def _make_inputs(
     return q, k, v, kc, vc, table, starts, lengths, scale
 
 
-def _config_key(config):
+def _make_mm_prefix_input(device, workload, max_tokens, span, ranges):
+    """Place separate image islands across the scheduled prefill queries."""
+    batch, query_len, seq_len = workload
+    queries = _query_lengths(batch, query_len, max_tokens)
+    islands = []
+    for nq in queries:
+        first = max(0, seq_len - max(nq, ranges * span + (ranges - 1) * _MM_RANGE_GAP))
+        islands.append(
+            [
+                (
+                    first + ri * (span + _MM_RANGE_GAP),
+                    first + ri * (span + _MM_RANGE_GAP) + span - 1,
+                )
+                for ri in range(ranges)
+            ]
+        )
+    return torch.tensor(islands, dtype=torch.int32, device=device)
+
+
+def _config_key(config: Mapping[str, object]) -> ConfigKey:
     return tuple(sorted(config.items()))
 
 
@@ -456,45 +944,53 @@ def _rotated(configs, offset):
     return configs[offset:] + configs[:offset]
 
 
-def _measure_configs(configs, run, device, eviction, rounds, graph_calls=0):
+def _measure_configs(
+    configs: list[SegmentedAttentionConfig],
+    run: Callable[[SegmentedAttentionConfig], object],
+    device: torch.device | str,
+    eviction: torch.Tensor,
+    rounds: int,
+    graph_calls: int = 0,
+) -> dict[ConfigKey, list[float]]:
     """Interleave candidates so clock and thermal drift affect them evenly."""
-    stream = torch.cuda.current_stream(device)
     samples: dict[tuple, list[float]] = {_config_key(config): [] for config in configs}
     graphs = {}
-    if graph_calls:
-        for config in configs:
-            graph = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(graph):
-                for _ in range(graph_calls):
-                    run(config)
-            graphs[_config_key(config)] = graph
-        for graph in graphs.values():
-            graph.replay()
-        torch.accelerator.synchronize(device)
+    calls = max(1, graph_calls)
+    for config in configs:
+        start = torch.cuda.Event(enable_timing=True, external=True)
+        end = torch.cuda.Event(enable_timing=True, external=True)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            if graph_calls <= 1:
+                eviction.zero_()
+            start.record()
+            for _ in range(calls):
+                run(config)
+            end.record()
+        graphs[_config_key(config)] = graph, start, end
+    for graph, _, _ in graphs.values():
+        graph.replay()
+    torch.accelerator.synchronize(device)
     for round_index in range(rounds):
         events = []
-        order = _rotated(configs, round_index)
+        order = _rotated(configs, round_index // 2)
         if round_index % 2:
             order = list(reversed(order))
         for config in order:
-            if not graph_calls:
-                eviction.zero_()
-            start = torch.cuda.Event(enable_timing=True)
-            end = torch.cuda.Event(enable_timing=True)
-            start.record(stream)
-            if graph_calls:
-                graphs[_config_key(config)].replay()
-            else:
-                run(config)
-            end.record(stream)
+            graph, start, end = graphs[_config_key(config)]
+            graph.replay()
+            end.synchronize()
             events.append((_config_key(config), start, end))
-        events[-1][2].synchronize()
         for key, start, end in events:
-            samples[key].append(start.elapsed_time(end) * 1000 / max(1, graph_calls))
+            samples[key].append(start.elapsed_time(end) * 1000 / calls)
     return samples
 
 
-def _condition_configs(configs, run, device):
+def _condition_configs(
+    configs: list[SegmentedAttentionConfig],
+    run: Callable[[SegmentedAttentionConfig], object],
+    device: torch.device | str,
+) -> None:
     for round_index in range(_CONDITION_ROUNDS):
         for config in _rotated(configs, round_index):
             run(config)
@@ -502,12 +998,17 @@ def _condition_configs(configs, run, device):
 
 
 def _select_tuned_winner(
-    default, finalists, samples, min_promotion_speedup=_MIN_PROMOTION_SPEEDUP
-):
+    default: SegmentedAttentionConfig,
+    finalists: list[SegmentedAttentionConfig],
+    samples: dict[ConfigKey, list[float]],
+    min_promotion_speedup: float = _MIN_PROMOTION_SPEEDUP,
+    *,
+    warm_samples: dict[ConfigKey, list[float]] | None = None,
+) -> tuple[_ConfigComparison, list[_ConfigComparison]]:
     """Return a finalist only when it reliably beats the static incumbent."""
     default_key = _config_key(default)
     default_samples = samples[default_key]
-    comparisons = []
+    comparisons: list[_ConfigComparison] = []
     for config in finalists:
         key = _config_key(config)
         config_samples = samples[key]
@@ -522,10 +1023,41 @@ def _select_tuned_winner(
                 "paired_speedup_vs_default": paired_speedup,
             }
         )
+        if warm_samples is not None:
+            warm_speedup = statistics.median(
+                baseline / candidate
+                for baseline, candidate in zip(
+                    warm_samples[default_key], warm_samples[key], strict=True
+                )
+            )
+            comparisons[-1].update(
+                {
+                    "paired_warm_speedup_vs_default": warm_speedup,
+                    "rejected_warm_regression": warm_speedup < 1 / _MAX_WARM_SLOWDOWN,
+                    "rejected_cold_regression": paired_speedup < 1 / _MAX_WARM_SLOWDOWN,
+                    "paired_balanced_speedup_vs_default": math.sqrt(
+                        paired_speedup * warm_speedup
+                    ),
+                }
+            )
     challenger = max(
-        comparisons, key=lambda result: result["paired_speedup_vs_default"]
+        (
+            row
+            for row in comparisons
+            if not row.get("rejected_warm_regression", False)
+            and not row.get("rejected_cold_regression", False)
+        ),
+        key=lambda result: result.get(
+            "paired_balanced_speedup_vs_default", result["paired_speedup_vs_default"]
+        ),
     )
-    if challenger["paired_speedup_vs_default"] >= min_promotion_speedup:
+    if (
+        challenger.get(
+            "paired_balanced_speedup_vs_default",
+            challenger["paired_speedup_vs_default"],
+        )
+        >= min_promotion_speedup
+    ):
         return challenger, comparisons
     return (
         next(result for result in comparisons if result["config"] == default),
@@ -549,6 +1081,8 @@ def _precompile_configs(
     sliding_window,
     causal,
     sinks=None,
+    mm_prefix_range=None,
+    mm_prefix_clamp_sliding_window=False,
 ):
     workers = min(_COMPILE_WORKERS, len(configs))
     with (
@@ -573,26 +1107,32 @@ def _precompile_configs(
                 sliding_window=sliding_window,
                 causal=causal,
                 sinks=sinks,
+                mm_prefix_range=mm_prefix_range,
+                mm_prefix_clamp_sliding_window=mm_prefix_clamp_sliding_window,
             )
 
 
 def _tune_workload(
-    device,
-    dtype,
-    kv_dtype,
-    heads,
-    kv_heads,
-    dim,
-    page,
-    scale,
-    max_tokens,
-    workload,
+    device: torch.device | str,
+    dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+    heads: int,
+    kv_heads: int,
+    dim: int,
+    page: int,
+    scale: float,
+    max_tokens: int,
+    workload: tuple[int, int, int],
     *,
-    sliding_window=-1,
-    causal=True,
-    has_sinks=False,
-    physical_seq_len=None,
-):
+    sliding_window: int = -1,
+    causal: bool = True,
+    has_sinks: bool = False,
+    physical_seq_len: int | None = None,
+    table_max_len: int | None = None,
+    mm_prefix_mode: MMPrefixMode = "none",
+    mm_prefix_max_span: int = 0,
+    mm_prefix_max_ranges: int = 0,
+) -> dict[str, Any]:
     batch, query_len, seq_len = workload
     q, _, _, kc, vc, table, starts, lengths, kv_scale = _make_inputs(
         device,
@@ -605,11 +1145,37 @@ def _tune_workload(
         max_tokens,
         workload,
         physical_seq_len,
+        table_max_len,
+        shuffle_pages=mm_prefix_mode != "none",
     )
     default = select_segmented_config(
-        batch, query_len, seq_len, heads, kv_heads, dim, kv_dtype.itemsize == 1
+        batch,
+        query_len,
+        seq_len,
+        heads,
+        kv_heads,
+        dim,
+        kv_dtype.itemsize == 1,
+        sliding_window=sliding_window,
+        native_fp8=supports_segmented_native_fp8(dtype, kv_dtype),
+        mm_prefix_mode=mm_prefix_mode,
+        mm_prefix_max_span=mm_prefix_max_span,
+        mm_prefix_max_ranges=mm_prefix_max_ranges,
     )
-    configs = _candidate_configs(default, batch, query_len, heads, dim, seq_len=seq_len)
+    configs = _candidate_configs(
+        default,
+        batch,
+        query_len,
+        heads,
+        dim,
+        seq_len=seq_len,
+        native_fp8=supports_segmented_native_fp8(dtype, kv_dtype),
+        legacy_default=segmented_attention._select_segmented_launch_config(
+            batch, query_len, seq_len, heads, kv_heads, dim, kv_dtype.itemsize == 1
+        ),
+        mm_prefix_mode=mm_prefix_mode,
+        sliding_window=sliding_window,
+    )
     sinks = (
         torch.linspace(-1, 1, heads, dtype=torch.float32, device=device)
         if has_sinks
@@ -628,6 +1194,13 @@ def _tune_workload(
     )
     reference = torch.empty_like(q)
     output = torch.empty_like(q)
+    mm_prefix = (
+        _make_mm_prefix_input(
+            device, workload, max_tokens, mm_prefix_max_span, mm_prefix_max_ranges
+        )
+        if mm_prefix_mode != "none"
+        else None
+    )
 
     def run(config, out=output):
         run_segmented_attention(
@@ -648,25 +1221,33 @@ def _tune_workload(
             config=config,
             workspace=workspace,
             sinks=sinks,
+            mm_prefix_range=mm_prefix,
+            mm_prefix_clamp_sliding_window=mm_prefix_mode == "clamped",
         )
 
-    _precompile_configs(
-        configs,
-        q,
-        output,
-        kc,
-        vc,
-        table,
-        starts,
-        lengths,
-        query_len,
-        kv_scale,
-        scale,
-        workspace,
-        sliding_window,
-        causal,
-        sinks,
-    )
+    def precompile(candidates: list[SegmentedAttentionConfig]) -> None:
+        _precompile_configs(
+            candidates,
+            q,
+            output,
+            kc,
+            vc,
+            table,
+            starts,
+            lengths,
+            query_len,
+            kv_scale,
+            scale,
+            workspace,
+            sliding_window,
+            causal,
+            sinks,
+            mm_prefix,
+            mm_prefix_mode == "clamped",
+        )
+
+    initial_configs = _initial_search_configs(configs)
+    precompile(initial_configs)
     incumbent = configs[0]
     reference.fill_(float("nan"))
     run(incumbent, reference)
@@ -675,52 +1256,143 @@ def _tune_workload(
         raise AssertionError("Default segmented attention output is not finite")
     reference_norm = reference.float().norm().clamp_min(1e-6)
     eviction = torch.empty(256 * 1024**2, dtype=torch.int8, device=device)
-    results = []
-    valid_configs = []
-    for config in configs:
-        try:
-            output.fill_(float("nan"))
-            run(config)
-            torch.accelerator.synchronize(device)
-            torch.testing.assert_close(output, reference, atol=0.01, rtol=0.01)
-            relative_l2 = (
-                (output.float() - reference.float()).norm() / reference_norm
-            ).item()
-            if relative_l2 > 0.005:
-                raise AssertionError(f"Relative L2 error {relative_l2} exceeds 0.5%")
-            results.append({"config": config, "relative_l2": relative_l2})
-            valid_configs.append(config)
-        except (
-            torch.OutOfMemoryError,
-            triton.OutOfResources,
-            triton.CompilationError,
-            AssertionError,
-            RuntimeError,
-        ) as error:
-            logger.warning("Rejected segmented attention config %s: %s", config, error)
-    if not results:
-        raise RuntimeError("No valid segmented attention launch configurations")
+    results: list[dict[str, Any]] = []
+
+    def validate(
+        candidates: list[SegmentedAttentionConfig],
+    ) -> list[SegmentedAttentionConfig]:
+        valid = []
+        for config in candidates:
+            try:
+                output.fill_(float("nan"))
+                run(config)
+                torch.accelerator.synchronize(device)
+                torch.testing.assert_close(output, reference, atol=0.01, rtol=0.01)
+                relative_l2 = (
+                    (output.float() - reference.float()).norm() / reference_norm
+                ).item()
+                if relative_l2 > 0.005:
+                    raise AssertionError(
+                        f"Relative L2 error {relative_l2} exceeds 0.5%"
+                    )
+                results.append({"config": config, "relative_l2": relative_l2})
+                valid.append(config)
+            except (
+                torch.OutOfMemoryError,
+                triton.OutOfResources,
+                triton.CompilationError,
+                AssertionError,
+                RuntimeError,
+            ) as error:
+                logger.warning(
+                    "Rejected segmented attention config %s: %s", config, error
+                )
+        return valid
+
+    valid_configs = validate(initial_configs)
     if incumbent not in valid_configs:
         raise RuntimeError("Static segmented attention configuration was rejected")
 
-    _condition_configs(valid_configs, run, device)
-    graph_calls = 5 if dim == 64 and has_sinks else 0
-    screen_samples = _measure_configs(
-        valid_configs, run, device, eviction, _SCREEN_ROUNDS, graph_calls
-    )
-    by_key = {_config_key(result["config"]): result for result in results}
-    for key, samples in screen_samples.items():
-        by_key[key]["screen_us"] = statistics.median(samples)
-        by_key[key]["screen_samples_us"] = samples
+    graph_calls = 1
+    screen_baselines = []
 
+    def screen(
+        candidates: list[SegmentedAttentionConfig], stage: int, warm_calls: int = 0
+    ) -> tuple[list[_ConfigComparison], int]:
+        _condition_configs(candidates, run, device)
+        cold = _measure_configs(
+            candidates, run, device, eviction, _SCREEN_ROUNDS, graph_calls
+        )
+        if not warm_calls:
+            warm_calls = min(
+                _MAX_WARM_GRAPH_CALLS,
+                max(
+                    _WARM_GRAPH_CALLS,
+                    math.ceil(
+                        _WARM_TARGET_US
+                        / statistics.median(cold[_config_key(incumbent)])
+                    ),
+                ),
+            )
+        warm = _measure_configs(
+            candidates, run, device, eviction, _SCREEN_ROUNDS, warm_calls
+        )
+        _, comparisons = _select_tuned_winner(
+            incumbent, candidates, cold, warm_samples=warm
+        )
+        screen_baselines.append(
+            dict(
+                stage=stage,
+                cold_us=cold[_config_key(incumbent)],
+                warm_us=warm[_config_key(incumbent)],
+            )
+        )
+        by_key = {_config_key(result["config"]): result for result in results}
+        for row in comparisons:
+            key = _config_key(row["config"])
+            if row["config"] == incumbent and stage != 0:
+                continue
+            by_key[key].update(
+                search_stage=stage,
+                screen_us=statistics.median(cold[key]),
+                screen_samples_us=cold[key],
+                warm_screen_us=statistics.median(warm[key]),
+                warm_screen_samples_us=warm[key],
+                screen_paired_cold_speedup=row["paired_speedup_vs_default"],
+                screen_paired_warm_speedup=row["paired_warm_speedup_vs_default"],
+                screen_paired_balanced_speedup=row[
+                    "paired_balanced_speedup_vs_default"
+                ],
+            )
+        return comparisons, warm_calls
+
+    screen_comparisons, warm_calls = screen(valid_configs, 0)
+    expanded_configs = _upcast_expansion_configs(
+        configs,
+        screen_comparisons,
+        geometry_shortlist=_MM_UPCAST_GEOMETRY_SHORTLIST
+        if mm_prefix_mode != "none"
+        else _UPCAST_GEOMETRY_SHORTLIST,
+    )
+    if expanded_configs:
+        precompile(expanded_configs)
+        expanded_valid = validate(expanded_configs)
+        if expanded_valid:
+            expanded_comparisons, _ = screen(
+                [incumbent, *expanded_valid], 1, warm_calls
+            )
+            screen_comparisons.extend(
+                row for row in expanded_comparisons if row["config"] != incumbent
+            )
+            valid_configs.extend(expanded_valid)
+
+    by_key = {_config_key(result["config"]): result for result in results}
+    warm_eligible = {
+        _config_key(row["config"])
+        for row in screen_comparisons
+        if not row.get("rejected_warm_regression", False)
+        and not row.get("rejected_cold_regression", False)
+    }
     challengers = sorted(
-        (config for config in valid_configs if config != incumbent),
-        key=lambda config: statistics.median(screen_samples[_config_key(config)]),
+        (
+            config
+            for config in valid_configs
+            if config != incumbent and _config_key(config) in warm_eligible
+        ),
+        key=lambda config: next(
+            row["paired_balanced_speedup_vs_default"]
+            for row in screen_comparisons
+            if row["config"] == config
+        ),
+        reverse=True,
     )
     finalists = [incumbent, *challengers[: _FINALIST_COUNT - 1]]
     _condition_configs(finalists, run, device)
     final_samples = _measure_configs(
         finalists, run, device, eviction, _FINAL_ROUNDS, graph_calls
+    )
+    warm_final = _measure_configs(
+        finalists, run, device, eviction, _FINAL_ROUNDS, warm_calls
     )
     min_promotion_speedup = (
         1.10
@@ -728,13 +1400,31 @@ def _tune_workload(
         else _MIN_PROMOTION_SPEEDUP
     )
     winner, comparisons = _select_tuned_winner(
-        incumbent, finalists, final_samples, min_promotion_speedup
+        incumbent,
+        finalists,
+        final_samples,
+        min_promotion_speedup,
+        warm_samples=warm_final,
     )
     for comparison in comparisons:
         result = by_key[_config_key(comparison["config"])]
         result["final_us"] = comparison["us"]
         result["final_samples_us"] = final_samples[_config_key(comparison["config"])]
         result["paired_speedup_vs_default"] = comparison["paired_speedup_vs_default"]
+        if warm_final is not None:
+            key = _config_key(comparison["config"])
+            result.update(
+                warm_final_us=statistics.median(warm_final[key]),
+                warm_final_samples_us=warm_final[key],
+                paired_warm_speedup_vs_default=comparison[
+                    "paired_warm_speedup_vs_default"
+                ],
+                rejected_warm_regression=comparison["rejected_warm_regression"],
+                rejected_cold_regression=comparison["rejected_cold_regression"],
+                paired_balanced_speedup_vs_default=comparison[
+                    "paired_balanced_speedup_vs_default"
+                ],
+            )
     winner_result = by_key[_config_key(winner["config"])]
     logger.info(
         "ROCm segmented attention autotune: B=%d Q=%d seq=%d best=%s "
@@ -752,12 +1442,33 @@ def _tune_workload(
         "query_lengths": _query_lengths(batch, query_len, max_tokens),
         "default": default,
         "best": winner["config"],
+        "search": {
+            "available_candidates": len(configs),
+            "initial_candidates": len(initial_configs),
+            "expanded_candidates": len(expanded_configs),
+            "valid_candidates": len(results),
+            "screen_baselines": screen_baselines,
+        },
         "selection": {
             "incumbent": incumbent,
             "finalists": finalists,
             "min_promotion_speedup": min_promotion_speedup,
             "winner_us": winner_result["final_us"],
+            "warm_graph_calls": warm_calls,
             "paired_speedup_vs_default": winner["paired_speedup_vs_default"],
+            **(
+                {
+                    "paired_warm_speedup_vs_default": winner[
+                        "paired_warm_speedup_vs_default"
+                    ],
+                    "max_warm_slowdown": _MAX_WARM_SLOWDOWN,
+                    "paired_balanced_speedup_vs_default": winner[
+                        "paired_balanced_speedup_vs_default"
+                    ],
+                }
+                if warm_final is not None
+                else {}
+            ),
         },
         "results": results,
     }
@@ -790,7 +1501,18 @@ def _load_records(path, identity, heads, kv_heads, dim, fp8):
         try:
             saved = json.loads(source.read_text())
             if saved["identity"] != identity or not all(
-                _valid_record(record, heads, kv_heads, dim, fp8)
+                _valid_record(
+                    record,
+                    heads,
+                    kv_heads,
+                    dim,
+                    fp8,
+                    native_fp8=len(identity["kv_upcast_modes"]) > 1,
+                    sliding_window=identity["sliding_window"],
+                    mm_prefix_mode=identity.get("mm_prefix_mode", "none"),
+                    mm_prefix_max_span=identity.get("mm_prefix_max_span", 0),
+                    mm_prefix_max_ranges=identity.get("mm_prefix_max_ranges", 0),
+                )
                 for record in saved["records"]
             ):
                 raise ValueError("identity or record validation failed")
@@ -834,7 +1556,18 @@ def _workload_weight(workload, max_tokens, heads, kv_heads, dim, fp8):
         batch, query_len, seq_len, heads, kv_heads, dim, fp8
     )
     candidates = len(
-        _candidate_configs(default, batch, query_len, heads, dim, seq_len=seq_len)
+        _candidate_configs(
+            default,
+            batch,
+            query_len,
+            heads,
+            dim,
+            seq_len=seq_len,
+            native_fp8=fp8,
+            legacy_default=segmented_attention._select_segmented_launch_config(
+                batch, query_len, seq_len, heads, kv_heads, dim, fp8
+            ),
+        )
     )
     query_tokens = sum(_query_lengths(batch, query_len, max_tokens))
     attention_work = query_tokens * seq_len * heads * dim
@@ -865,7 +1598,19 @@ def _shard_workloads(workloads, world_size, max_tokens, heads, kv_heads, dim, fp
     ]
 
 
-def _valid_record(record, heads, kv_heads, dim, fp8):
+def _valid_record(
+    record,
+    heads,
+    kv_heads,
+    dim,
+    fp8,
+    *,
+    native_fp8=False,
+    sliding_window=-1,
+    mm_prefix_mode: MMPrefixMode = "none",
+    mm_prefix_max_span: int = 0,
+    mm_prefix_max_ranges: int = 0,
+):
     workload = record["workload"]
     if len(workload) != 3 or any(
         type(value) is not int or value < 1 for value in workload
@@ -873,21 +1618,45 @@ def _valid_record(record, heads, kv_heads, dim, fp8):
         return False
     batch, query_len, seq_len = workload
     default = select_segmented_config(
-        batch, query_len, seq_len, heads, kv_heads, dim, fp8
+        batch,
+        query_len,
+        seq_len,
+        heads,
+        kv_heads,
+        dim,
+        fp8,
+        sliding_window=sliding_window,
+        native_fp8=native_fp8,
+        mm_prefix_mode=mm_prefix_mode,
+        mm_prefix_max_span=mm_prefix_max_span,
+        mm_prefix_max_ranges=mm_prefix_max_ranges,
     )
     return record["best"] in _candidate_configs(
-        default, batch, query_len, heads, dim, seq_len=seq_len
+        default,
+        batch,
+        query_len,
+        heads,
+        dim,
+        seq_len=seq_len,
+        native_fp8=native_fp8,
+        legacy_default=segmented_attention._select_segmented_launch_config(
+            batch, query_len, seq_len, heads, kv_heads, dim, fp8
+        ),
+        mm_prefix_mode=mm_prefix_mode,
+        sliding_window=sliding_window,
     )
 
 
 @contextmanager
-def _temporary_tuning_kernels(device):
+def _temporary_tuning_kernels(device, *, kernels=None):
     """Release tuning-only HIP modules without invalidating existing graphs."""
     device_index = torch.device(device).index
     if device_index is None:
         device_index = torch.accelerator.current_device_index()
     caches = []
-    for kernel in (_segmented_attention_stage, _segmented_attention_reduce):
+    if kernels is None:
+        kernels = (_segmented_attention_stage, _segmented_attention_reduce)
+    for kernel in kernels:
         cache = kernel.device_caches[device_index][0]
         caches.append((cache, set(cache)))
     try:
@@ -925,6 +1694,9 @@ def warmup_segmented_attention(
     max_query_len=MAX_QUERY_LEN,
     has_sinks=False,
     physical_max_len=None,
+    mm_prefix_mode: MMPrefixMode = "none",
+    mm_prefix_max_span: int = 0,
+    mm_prefix_max_ranges: int = 0,
 ):
     """Tune reachable segmented buckets before graph capture."""
     if (
@@ -936,12 +1708,18 @@ def warmup_segmented_attention(
             torch.float8_e4m3fn,
             torch.float8_e4m3fnuz,
         )
-        or dim not in (64, 128, 256)
+        or dim not in (64, 128, 256, 512)
         or kv_heads < 1
         or heads % kv_heads
         or not 1 <= heads // kv_heads <= 16
     ):
         return
+    if mm_prefix_mode != "none":
+        mm_prefix_max_span, mm_prefix_max_ranges = segmented_mm_prefix_bucket(
+            mm_prefix_max_span, mm_prefix_max_ranges
+        )
+        if not mm_prefix_max_span:
+            return
     key = _key(
         device,
         dtype,
@@ -954,6 +1732,9 @@ def warmup_segmented_attention(
         sliding_window,
         causal,
         has_sinks,
+        mm_prefix_mode,
+        mm_prefix_max_span,
+        mm_prefix_max_ranges,
     )
     identity = _identity(
         device,
@@ -972,6 +1753,9 @@ def warmup_segmented_attention(
         max_query_len,
         has_sinks,
         physical_max_len,
+        mm_prefix_mode,
+        mm_prefix_max_span,
+        mm_prefix_max_ranges,
     )
     if memory_budget_bytes is None:
         memory_budget_bytes = _memory_budget(device)
@@ -989,12 +1773,16 @@ def warmup_segmented_attention(
         physical_max_len=(
             physical_max_len if has_sinks and sliding_window >= 0 else None
         ),
+        mm_prefix_mode=mm_prefix_mode,
+        mm_prefix_max_span=mm_prefix_max_span,
+        mm_prefix_max_ranges=mm_prefix_max_ranges,
+        sliding_window=sliding_window if mm_prefix_mode != "none" else -1,
     )
     workloads = list(_workloads(max_tokens, max_len, max_seqs, **workload_args))
-    active = _TABLES.get(key, {})
+    active = _TABLES.get(key)
     warmed = (
         {tuple(record["workload"]) for record in active.get("records", [])}
-        if active.get("identity") == identity
+        if active is not None and active.get("identity") == identity
         else set()
     )
     if all(workload in warmed for workload in workloads):
@@ -1013,7 +1801,18 @@ def warmup_segmented_attention(
             group, tp_rank, tp_size = None, 0, 1
 
     unpruned = len(
-        list(_workloads(max_tokens, max_len, max_seqs, max_query_len=max_query_len))
+        list(
+            _workloads(
+                max_tokens,
+                max_len,
+                max_seqs,
+                max_query_len=max_query_len,
+                mm_prefix_mode=mm_prefix_mode,
+                mm_prefix_max_span=mm_prefix_max_span,
+                mm_prefix_max_ranges=mm_prefix_max_ranges,
+                sliding_window=sliding_window,
+            )
+        )
     )
     start = time.monotonic()
     lock = FileLock(str(path) + ".lock") if tp_rank == 0 else None
@@ -1100,6 +1899,10 @@ def warmup_segmented_attention(
                                 if has_sinks and sliding_window >= 0
                                 else None
                             ),
+                            table_max_len=physical_max_len or max_len,
+                            mm_prefix_mode=mm_prefix_mode,
+                            mm_prefix_max_span=mm_prefix_max_span,
+                            mm_prefix_max_ranges=mm_prefix_max_ranges,
                         )
                     except (
                         torch.OutOfMemoryError,
@@ -1184,22 +1987,74 @@ def warmup_segmented_attention(
         )
 
 
+def _runtime_config(
+    record: _ConfigRecord,
+    batch: int,
+    query_len: int,
+    seq_len: int,
+    heads: int,
+    kv_heads: int,
+    dim: int,
+    fp8: bool,
+    *,
+    sliding_window: int = -1,
+    mm_prefix_mode: MMPrefixMode = "none",
+    mm_prefix_max_span: int = 0,
+    mm_prefix_max_ranges: int = 0,
+    native_fp8: bool = False,
+) -> SegmentedAttentionConfig:
+    """Preserve tuned parallelism below a warmed batch/query ceiling."""
+    config = record["best"].copy()
+    if config["splits"] == 1 and 0 <= sliding_window < 255:
+        return config
+    warm_batch, warm_query, _ = record["workload"]
+    gqa = heads // kv_heads
+    warm_groups = warm_batch * triton.cdiv(warm_query * gqa, config["bm"])
+    groups = batch * triton.cdiv(query_len * gqa, config["bm"])
+    if groups < warm_groups:
+        default = select_segmented_config(
+            batch,
+            query_len,
+            seq_len,
+            heads,
+            kv_heads,
+            dim,
+            fp8,
+            sliding_window=sliding_window if mm_prefix_mode != "none" else -1,
+            native_fp8=native_fp8,
+            mm_prefix_mode=mm_prefix_mode,
+            mm_prefix_max_span=mm_prefix_max_span,
+            mm_prefix_max_ranges=mm_prefix_max_ranges,
+        )
+        cap = max(config["splits"], default["splits"])
+        factor = triton.next_power_of_2(triton.cdiv(warm_groups, groups))
+        config["splits"] = min(cap, config["splits"] * factor)
+    if mm_prefix_mode != "none":
+        key_tiles = max(1, triton.cdiv(seq_len, config["bn"]))
+        config["splits"] = min(config["splits"], triton.next_power_of_2(key_tiles))
+    return config
+
+
 def get_segmented_config(
-    device,
-    dtype,
-    kv_dtype,
-    heads,
-    kv_heads,
-    dim,
-    page,
-    scale,
-    batch,
-    query_len,
-    seq_len,
-    sliding_window=-1,
-    causal=True,
-    has_sinks=False,
-):
+    device: torch.device | str,
+    dtype: torch.dtype,
+    kv_dtype: torch.dtype,
+    heads: int,
+    kv_heads: int,
+    dim: int,
+    page: int,
+    scale: float,
+    batch: int,
+    query_len: int,
+    seq_len: int,
+    sliding_window: int = -1,
+    causal: bool = True,
+    has_sinks: bool = False,
+    mm_prefix_mode: MMPrefixMode = "none",
+    mm_prefix_max_span: int = 0,
+    mm_prefix_max_ranges: int = 0,
+    num_query_tokens: int | None = None,
+) -> SegmentedAttentionConfig | None:
     """Return a warmed ceiling bucket, or None for the static fallback."""
     data = _TABLES.get(
         _key(
@@ -1214,6 +2069,9 @@ def get_segmented_config(
             sliding_window,
             causal,
             has_sinks,
+            mm_prefix_mode,
+            mm_prefix_max_span,
+            mm_prefix_max_ranges,
         )
     )
     if data is None:
@@ -1236,15 +2094,138 @@ def get_segmented_config(
             record["workload"][2],
         ),
     )
-    return dict(winner["best"])
+    native_fp8 = mm_prefix_mode != "none" and supports_segmented_native_fp8(
+        dtype, kv_dtype
+    )
+    actual_tokens = (
+        num_query_tokens if num_query_tokens is not None else batch * query_len
+    )
+    warm_tokens = sum(winner.get("query_lengths", ())) or (
+        winner["workload"][0] * winner["workload"][1]
+    )
+    if mm_prefix_mode != "none" and (
+        2 * actual_tokens * winner["workload"][0] * winner["workload"][1]
+        < warm_tokens * batch * query_len
+    ):
+        return None
+    actual_default = None
+    interpolating = (
+        tuple(winner["workload"]) != (batch, query_len, seq_len)
+        or actual_tokens < warm_tokens
+    )
+    if mm_prefix_mode != "none" and (interpolating or seq_len <= 128):
+        # Interpolation must not cross a change in the static tiling regime.
+        span_bucket, range_bucket = segmented_mm_prefix_bucket(
+            mm_prefix_max_span, mm_prefix_max_ranges
+        )
+        geometries = []
+        for b, q, s, span, ranges in (
+            (batch, query_len, seq_len, mm_prefix_max_span, mm_prefix_max_ranges),
+            (*winner["workload"], span_bucket, range_bucket),
+        ):
+            default = select_segmented_config(
+                b,
+                q,
+                s,
+                heads,
+                kv_heads,
+                dim,
+                kv_dtype.itemsize == 1,
+                sliding_window=sliding_window,
+                native_fp8=native_fp8,
+                mm_prefix_mode=mm_prefix_mode,
+                mm_prefix_max_span=span,
+                mm_prefix_max_ranges=ranges,
+            )
+            canonical = _canonical_mm_config(
+                _normalized_config(default, b, q, heads, dim), dim, sliding_window
+            )
+            if actual_default is None:
+                actual_default = canonical
+            geometries.append(
+                _config_key(
+                    {
+                        name: value
+                        for name, value in canonical.items()
+                        if name not in ("splits", "reduce_d", "reduce_warps")
+                    }
+                )
+            )
+        if geometries[0] != geometries[1]:
+            return None
+    config = _runtime_config(
+        winner,
+        batch,
+        query_len,
+        seq_len,
+        heads,
+        kv_heads,
+        dim,
+        kv_dtype.itemsize == 1,
+        sliding_window=sliding_window,
+        mm_prefix_mode=mm_prefix_mode,
+        mm_prefix_max_span=mm_prefix_max_span,
+        mm_prefix_max_ranges=mm_prefix_max_ranges,
+        native_fp8=native_fp8,
+    )
+    if (
+        actual_default is not None
+        and config["bm"] > actual_default["bm"]
+        and (interpolating or config["bn"] < actual_default["bn"])
+    ):
+        work = actual_tokens * heads
+        tuned_groups = work * config["splits"] / config["bm"]
+        static_groups = work * actual_default["splits"] / actual_default["bm"]
+        if tuned_groups < min(64, static_groups):
+            return None
+    return config
 
 
-def _warmup_segmented_attention(layer, device, **limits) -> None:
+def _mm_warmup_profiles(layer, model_config):
+    """Cover configured image budgets and small image/video batches at startup."""
+    if not getattr(layer, "use_mm_prefix", False):
+        return []
+    mm_config = model_config.multimodal_config
+    if mm_config is None:
+        return []
+    image_limit = mm_config.get_limit_per_prompt("image")
+    video_limit = mm_config.get_limit_per_prompt("video")
+    if not image_limit and not video_limit:
+        return []
+    vision = getattr(model_config.hf_config, "vision_config", None)
+    max_span = getattr(vision, "default_output_length", 1152)
+    kwargs = mm_config.mm_processor_kwargs or {}
+    nested = kwargs.get("images_kwargs", {})
+    if isinstance(nested, dict):
+        max_span = nested.get("max_soft_tokens", max_span)
+    max_span = kwargs.get("max_soft_tokens", max_span)
+    if not isinstance(max_span, int) or max_span <= 0:
+        max_span = 1152
+    span_limit, _ = segmented_mm_prefix_bucket(max_span, 1)
+    range_limit = min(4, 1 << (max(1, image_limit) - 1).bit_length())
+    counts = (
+        (1, 2, 4)
+        if video_limit
+        else tuple(count for count in (1, 2, 4) if count <= range_limit)
+    )
+    spans = [span for span in MM_PREFIX_SPAN_BUCKETS if span <= span_limit]
+    return [(span, count) for span in spans for count in counts]
+
+
+def _warmup_segmented_attention(
+    layer, device, *, model_clamps_mm_prefix=False, **limits
+) -> None:
     impl = layer.impl
     config = impl._segmented_attention_config
     assert config is not None
     spec = layer.get_kv_cache_spec(config)
     assert spec is not None
+    cache = getattr(layer, "kv_cache", None)
+    page = (
+        impl._split_kv_cache(cache)[0].shape[1]
+        if isinstance(cache, torch.Tensor) and cache.numel()
+        else spec.block_size
+    )
     sliding_window = impl.sliding_window[0]
     query_limit = getattr(layer, "segmented_query_limit", None)
     if not isinstance(query_limit, int):
@@ -1261,7 +2242,7 @@ def _warmup_segmented_attention(layer, device, **limits) -> None:
         impl.num_heads,
         impl.num_kv_heads,
         impl.head_size,
-        spec.block_size,
+        page,
         impl.scale,
         config.scheduler_config.max_num_batched_tokens,
         tuning_max_len,
@@ -1274,6 +2255,41 @@ def _warmup_segmented_attention(layer, device, **limits) -> None:
         max_query_len=query_limit,
         **limits,
     )
+    # A model declaring in-kernel MM window clamping uses image islands only
+    # on the layers carrying that flag; its full-attention layers stay causal.
+    clamps = getattr(layer, "mm_prefix_clamp_sliding_window", False)
+    profiles = (
+        []
+        if model_clamps_mm_prefix and not clamps
+        else _mm_warmup_profiles(layer, config.model_config)
+    )
+    for mm_span, mm_ranges in profiles:
+        mode: MMPrefixMode = "clamped" if clamps else "unclamped"
+        mm_max_len = config.model_config.max_model_len
+        if sliding_window >= 0:
+            mm_max_len = min(mm_max_len, sliding_window + query_limit + mm_span - 1)
+        warmup_segmented_attention(
+            device,
+            config.model_config.dtype,
+            impl.num_heads,
+            impl.num_kv_heads,
+            impl.head_size,
+            page,
+            impl.scale,
+            config.scheduler_config.max_num_batched_tokens,
+            mm_max_len,
+            config.scheduler_config.max_num_seqs,
+            kv_dtype=spec.dtype if spec.dtype != torch.uint8 else impl.fp8_dtype,
+            sliding_window=sliding_window,
+            causal=causal,
+            has_sinks=impl.sinks is not None,
+            max_query_len=query_limit,
+            physical_max_len=config.model_config.max_model_len,
+            mm_prefix_mode=mode,
+            mm_prefix_max_span=mm_span,
+            mm_prefix_max_ranges=mm_ranges,
+            **limits,
+        )
     impl._segmented_attention_warmed_up = True
 
 
@@ -1285,13 +2301,13 @@ def rocm_segmented_attn_autotune_warmup(worker: Worker) -> None:
     ):
         return
 
-    from vllm.platforms.rocm import on_gfx1x
+    from vllm.platforms.rocm import on_rdna
     from vllm.v1.attention.backends.rocm_segmented_attn import (
         RocmSegmentedAttentionImpl,
     )
     from vllm.v1.kv_cache_interface import FullAttentionSpec
 
-    if not on_gfx1x():
+    if not on_rdna():
         return
     layers = []
     for layer in worker.vllm_config.compilation_config.static_forward_context.values():
@@ -1329,6 +2345,9 @@ def rocm_segmented_attn_autotune_warmup(worker: Worker) -> None:
         _warmup_segmented_attention(
             layer,
             worker.device,
+            model_clamps_mm_prefix=getattr(
+                worker.model_runner.model, "mm_prefix_clamp_sliding_window", False
+            ),
             memory_budget_bytes=budget,
             cache_layouts=layouts,
             cache_budget_bytes=cache_budget,
