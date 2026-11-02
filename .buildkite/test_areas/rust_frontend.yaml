@@ -232,6 +232,7 @@ steps:
 
 - label: ":nvidia: (L4) [Nightly] Rust Frontend Distributed"
   key: rust-frontend-distributed
+  automatic_shard: true
   # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 25
@@ -266,6 +267,7 @@ steps:
       # Run on PRs even when the L4 step is optional (nightly only).
       optional: false
       label: ":amd: (MI355) Rust Frontend Distributed"
+      automatic_shard: true
       dind: false
       device: mi355_4
       timeout_in_minutes: 45
