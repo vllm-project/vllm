@@ -2248,8 +2248,8 @@ def build_mla_chunked_context_metadata(
         )
         # Context token t of a run, counted over all chunks, sits in
         # all-gathered row t + offset. The runs share the token-to-seq
-        # transfer and are expanded on the device. The row indices are
-        # int64: the gather measured faster with them than with int32.
+        # transfer and are expanded on the device into int64 row indices, the
+        # index dtype the row gather takes.
         local_token_to_seq = np.concatenate(padded_local_token_to_seq_parts)
         run_lens = np.concatenate(run_lens_parts)
         run_offsets = np.concatenate(run_first_rows_parts) - (

@@ -322,8 +322,8 @@ def test_fused_context_rejects_an_unquantized_query() -> None:
 
 
 # --------------------------------------------------------------------------
-# Decode context parallelism: the generic impl keeps its loop (allgather +
-# reorg) and only the per-chunk K/V pack is handed to the layer's fused kernel.
+# Decode context parallelism: the generic impl keeps its loop (allgather + row
+# gather) and only the per-chunk K/V pack is handed to the layer's fused kernel.
 # --------------------------------------------------------------------------
 _DCP = 2
 _DCP_TOKENS = 48
@@ -355,19 +355,14 @@ def _run_dcp_context_loop(monkeypatch, *, q_data_type, fused_mla_kv_concat_fn):
     monkeypatch.setattr(mla_attention, "_get_kv_b_proj_input_dtype", lambda *_: None)
     chunk = SimpleNamespace(
         index=0,
-        padded_local_seq_lens=[_DCP_TOKENS],
-        local_context_lens_allranks=[[_DCP_TOKENS // _DCP] * _DCP],
         padded_local_cu_seq_lens=torch.tensor([0, _DCP_TOKENS], device=device),
         padded_local_token_to_seq=torch.zeros(
             _DCP_TOKENS, dtype=torch.int32, device=device
         ),
-        local_starts=[0],
         num_local_context_tokens=_DCP_TOKENS,
         request_slice=slice(0, 1),
         num_requests=1,
         starts=torch.tensor([0], device=device),
-        num_context_tokens=_DCP_TOKENS,
-        max_seq_len=_DCP_TOKENS,
         token_slice=slice(0, 4),
         context_row_indices=torch.arange(_DCP_TOKENS, device=device),
     )
