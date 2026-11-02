@@ -187,7 +187,8 @@ and RMSNormGated, including pad rows and the TP2 `out_proj` partial.
 `RowCapsTest`, `StockAccumulationTest`, `StockSplitTest`, and
 `StockChainTest` check the row caps and that K2 follows the stock GEMM's
 split-K order. The Buildkite job `qwen38-27b-dense-mono-numerics-amd`
-runs this file on one MI355.
+runs this file on one MI355, once for its own grid and once with
+`VLLM_ROCM_QWEN38_DENSE_MONO_GRID=128` for the MI350P builds.
 
 ## Layout
 

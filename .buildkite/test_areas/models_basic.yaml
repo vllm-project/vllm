@@ -297,3 +297,5 @@ steps:
   commands:
   - pytest -v -s tests/models/qwen3_5/test_amd_dense_mono_tiling.py
   - pytest -v -s tests/models/qwen3_5/test_amd_dense_mono.py
+  # The 128-CTA builds (MI350P) on this 256-CU GPU.
+  - VLLM_ROCM_QWEN38_DENSE_MONO_GRID=128 pytest -v -s tests/models/qwen3_5/test_amd_dense_mono.py
