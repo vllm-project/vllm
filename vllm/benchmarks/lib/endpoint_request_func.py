@@ -101,8 +101,28 @@ class RequestFuncOutput:
     start_time: float = 0.0
     # Time spent awaiting the benchmark client concurrency semaphore.
     client_queue_time: float = 0.0
+    server_queue_time: float | None = None
+    server_ttft: float | None = None
     input_audio_duration: float = 0.0  # in seconds
     num_input_sequences: int = 1
+
+
+def _update_server_metrics(
+    output: RequestFuncOutput,
+    data: dict[str, Any],
+) -> None:
+    metrics = data.get("metrics")
+    if not isinstance(metrics, dict):
+        return
+
+    def to_seconds(value: Any) -> float | None:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return value / 1000.0
+        return None
+
+    # The server sends metrics only on the final streaming usage chunk.
+    output.server_queue_time = to_seconds(metrics.get("queue_time_ms"))
+    output.server_ttft = to_seconds(metrics.get("time_to_first_token_ms"))
 
 
 class RequestFunc(Protocol):
@@ -250,6 +270,7 @@ async def async_request_openai_completions(
 
                         if chunk != "[DONE]":
                             data = json.loads(chunk)
+                            _update_server_metrics(output, data)
 
                             # NOTE: Some completion API might have a last
                             # usage summary response without a token so we
@@ -444,6 +465,7 @@ async def async_request_openai_chat_completions(
                         if chunk != "[DONE]":
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
+                            _update_server_metrics(output, data)
 
                             if (
                                 choices := data.get("choices")
@@ -522,11 +544,17 @@ def _extract_sse_data(message: str) -> str | None:
 
 # Responses events that carry generated tokens. Reasoning deltas are included
 # because the server is already decoding when it emits them, so excluding them
-# would report the whole reasoning phase as time to first token.
+# would report the whole reasoning phase as time to first token. Tool call
+# arguments and code are generated tokens too, as `tool_calls` deltas are on
+# `openai-chat`; a response that only calls a tool emits nothing else.
 _RESPONSES_TOKEN_DELTA_EVENTS = frozenset(
     {
         "response.output_text.delta",
         "response.reasoning_text.delta",
+        "response.function_call_arguments.delta",
+        "response.custom_tool_call_input.delta",
+        "response.mcp_call_arguments.delta",
+        "response.code_interpreter_call_code.delta",
     }
 )
 

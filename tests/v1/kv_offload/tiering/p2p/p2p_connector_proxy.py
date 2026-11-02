@@ -371,7 +371,7 @@ async def _handle_completions_decoder_first(api: str, request: Request):
                 if kind == "done":
                     break
                 if kind == "error":
-                    raise value  # type: ignore[misc]
+                    raise value
                 yield value
 
         return StreamingResponse(generate(), media_type="application/json")

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Sequence
@@ -20,13 +21,14 @@ from vllm.config import CacheConfig, VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import _layout_from_name
 from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_down
 from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d, np_to_pinned_tensor
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
+    get_kv_quant_mode,
 )
 
 if TYPE_CHECKING:
@@ -39,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.utils import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
@@ -71,6 +74,37 @@ _LN_2 = math.log(2.0)
 def log2_lse_to_ln(lse: torch.Tensor) -> torch.Tensor:
     """Convert a base-2 log-sum-exp tensor to natural-log units."""
     return lse * _LN_2
+
+
+def compute_mm_prefix_ranges(
+    mm_features_per_req: Sequence[Sequence[MultiModalFeatureSpec]],
+    sliding_window: int | None = None,
+    clamp_sliding_window: bool = False,
+    span_pad: int = 0,
+) -> dict[int, list[tuple[int, int]]]:
+    """Per-request PrefixLM bidirectional ranges for image/video tokens."""
+    req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
+    for req_idx, mm_features in enumerate(mm_features_per_req):
+        image_doc_ranges = []
+        for mm_feature in mm_features:
+            if mm_feature.modality not in ("image", "video"):
+                continue
+            pos_info = mm_feature.mm_position
+            if span_pad:
+                start = round_down(pos_info.offset, span_pad) + span_pad - 1
+                feature_ranges = [(start, pos_info.offset + pos_info.length - 1)]
+            else:
+                feature_ranges = pos_info.extract_embeds_range()
+            for r in feature_ranges:
+                if (
+                    not clamp_sliding_window
+                    and sliding_window is not None
+                    and (r[1] - r[0] + 1) > sliding_window
+                ):
+                    continue
+                image_doc_ranges.append(r)
+        req_doc_ranges[req_idx] = image_doc_ranges
+    return req_doc_ranges
 
 
 def compute_mm_prefix_range_tensor(
@@ -218,12 +252,21 @@ def get_supported_kv_cache_layouts(
     their order; otherwise the layout the most backends put first wins, ties
     keeping the enum order. An empty intersection is a hard error.
     """
-    supported_layouts_lists: list[Sequence[KVCacheLayout]] = [
-        layouts
-        for backend in backends
-        if (layouts := backend.supported_kv_cache_layouts()) is not None
-    ] or [_DEFAULT_LAYOUT_PREFERENCE]
+    return _merge_supported_layouts(
+        [
+            layouts
+            for backend in backends
+            if (layouts := backend.supported_kv_cache_layouts()) is not None
+        ]
+        or [_DEFAULT_LAYOUT_PREFERENCE]
+    )
 
+
+def _merge_supported_layouts(
+    supported_layouts_lists: Sequence[Sequence[KVCacheLayout]],
+) -> list[KVCacheLayout]:
+    """Layouts in every supported set, merged as in
+    ``get_supported_kv_cache_layouts``."""
     first = supported_layouts_lists[0]
     if all(layouts == first for layouts in supported_layouts_lists[1:]):
         return list(first)
@@ -265,8 +308,10 @@ def resolve_kv_cache_layout(
     """Resolve one KV cache layout for the whole model.
 
     Runs once in the engine core. Every worker reports the layouts its backends
-    support, most preferred first (``get_supported_kv_cache_layouts``); all
-    ranks run the same backends, so their lists must agree. Specs mixing HNC
+    support, most preferred first (``get_supported_kv_cache_layouts``). Pipeline
+    stages hold different layers, so their lists may differ; the candidates are
+    the layouts every worker supports, and the layout the most workers put first
+    wins. Workers whose backends declare nothing do not vote. Specs mixing HNC
     shapes narrow the candidates to block-compact layouts. An explicit
     ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
     with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
@@ -283,10 +328,15 @@ def resolve_kv_cache_layout(
     assert supported_layouts and all(supported_layouts), (
         "No worker reported supported KV cache layouts."
     )
-    assert all(names == supported_layouts[0] for names in supported_layouts[1:]), (
-        f"Workers disagree on supported KV cache layouts: {supported_layouts}."
+    reported = [
+        tuple(_layout_from_name(name) for name in names) for names in supported_layouts
+    ]
+    # Workers where no backend declares a set report the default preference;
+    # like undeclared backends of one worker, they don't vote.
+    candidates = _merge_supported_layouts(
+        [layouts for layouts in reported if layouts != _DEFAULT_LAYOUT_PREFERENCE]
+        or reported
     )
-    candidates = [_layout_from_name(name) for name in supported_layouts[0]]
 
     # A block-compact layout means the block is densely packed in memory, so any mix of
     # specs can re-interpret HNC with different sizes as long as the total number of
@@ -324,6 +374,19 @@ def resolve_kv_cache_layout(
             raise ValueError(
                 "DCP with a replicated draft and mixed KV page sizes requires "
                 f"a block-outer KV cache layout; supported sets: {supported_layouts}."
+            )
+
+    # An extensible KV cache commits one contiguous run per layer only under a
+    # block-compact layout, which KV connectors need to register its memory.
+    if (
+        cache_config.enable_extensible_kv_cache
+        and vllm_config.kv_transfer_config is not None
+    ):
+        candidates = [m for m in candidates if m.is_block_compact]
+        if not candidates:
+            raise ValueError(
+                "KV connectors with the extensible KV cache need a block-compact "
+                f"layout, but none is in every supported set: {supported_layouts}."
             )
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
@@ -396,6 +459,43 @@ def get_per_layer_parameters(
         )
 
     return per_layer_params
+
+
+def _kv_cache_read_encoding(cache_dtype: str | None) -> str | None:
+    # NVFP4 scale-search variants only differ in the store kernel.
+    if cache_dtype == "fp8":
+        return "fp8_e4m3"
+    if cache_dtype is not None and get_kv_quant_mode(cache_dtype).is_nvfp4:
+        return "nvfp4"
+    return cache_dtype
+
+
+def get_kv_cache_dtype_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> str | None:
+    """Resolve the KV read encoding shared by an attention group.
+
+    Attention groups are split by spec, which separates quantization modes but
+    not encodings that share a storage layout (e.g. fp8_e4m3 vs fp8_e5m2).
+    Those must not be mixed within one group.
+    """
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    cache_dtypes = {
+        _kv_cache_read_encoding(getattr(layer, "kv_cache_dtype", None))
+        for layer in layers.values()
+    }
+    if not cache_dtypes:
+        return None
+    if len(cache_dtypes) != 1:
+        raise ValueError(
+            "All layers in one attention group must share the same KV cache "
+            f"dtype; got {cache_dtypes} for {layer_names}."
+        )
+    return cache_dtypes.pop()
 
 
 def get_num_attention_heads_from_layers(
@@ -981,6 +1081,23 @@ def reorder_batch_to_split_decodes_and_prefills(
             dst = next_dst
 
     return True
+
+
+def set_triton_ptr_range(region: torch.Tensor, *views: torch.Tensor) -> None:
+    """Bound the bytes Triton kernels may access through ``views``.
+
+    Triton's AMD backend uses 32-bit buffer addressing only for pointer
+    arguments within 2 GiB. It checks ``ptr_range()`` first and otherwise the
+    size of the whole storage, so views into one large allocation (such as a
+    layer of the KV cache) lose it. Each view gets the distance from its
+    ``data_ptr()`` to the end of ``region``; kernels must not access past it.
+    """
+    if region.numel() == 0:
+        return
+    last = sum((n - 1) * stride for n, stride in zip(region.shape, region.stride()))
+    region_end = region.data_ptr() + (last + 1) * region.element_size()
+    for view in views:
+        view.ptr_range = functools.partial(int, region_end - view.data_ptr())
 
 
 def reshape_query_for_spec_decode(query: torch.Tensor, batch_size: int) -> torch.Tensor:
