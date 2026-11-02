@@ -24,7 +24,7 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
-from vllm.v1.worker.gpu.spec_decode.vocab_shard import VocabShard
+from vllm.v1.worker.gpu.spec_decode.vocab_shard import VocabShard, warmup_num_logits
 
 # Cap on the FP32 target-logits buffer materialized by apply_sampling_params.
 # TODO(mgoin): Chunking is a workaround. The rejection kernels already upcast
@@ -462,34 +462,47 @@ class RejectionSampler:
     ) -> None:
         """Compile the vocab-sharded verification kernels on every rank at load
         time, so that no rank compiles them while its peers wait on an exchange.
-        Collective: one dummy request, with top-p."""
+        Collective: one step of dummy requests, with top-p, per size of
+        `warmup_num_logits`."""
         dev = draft_logits.values.device
         n = self.num_speculative_steps + 1
-        local_logits = torch.zeros(
-            n, vocab_shard.local_vocab_size, dtype=vocab_shard.logits_dtype, device=dev
-        )
         states = self.sampler.sampling_states
-        vocab_shard.begin_step()
-        logits = vocab_shard.owned_logits(local_logits)
-        vocab_shard.top_p(logits, torch.full((n,), 0.5, device=dev))
-        rejection_sample(
-            logits,
-            draft_logits,
-            torch.zeros(n, dtype=torch.int32, device=dev),  # draft_sampled
-            torch.tensor([0, n], dtype=torch.int32, device=dev),  # cu_num_logits
-            torch.zeros(n, dtype=torch.int64, device=dev),  # pos
-            torch.zeros(1, dtype=torch.int64, device=dev),  # idx_mapping
-            torch.zeros(n, dtype=torch.int64, device=dev),  # expanded_idx_mapping
-            torch.arange(n, dtype=torch.int32, device=dev),  # expanded_local_pos
-            states.temperature.gpu,
-            states.seeds.gpu,
-            self.num_speculative_steps,
-            self.synthetic_conditional_rates,
-            use_fp64=self.sampler.use_fp64_gumbel,
-            use_block_verification=self.use_block_verification,
-            vocab_shard=vocab_shard,
-        )
-        vocab_shard.end_step()
+        for num_logits in warmup_num_logits(vocab_shard.max_num_logits):
+            # Requests of n logits (the last one may be shorter), all mapped
+            # to request state 0.
+            cu_num_logits = torch.tensor(
+                [*range(0, num_logits, n), num_logits], dtype=torch.int32, device=dev
+            )
+            num_reqs = cu_num_logits.shape[0] - 1
+            zeros = torch.zeros(num_logits, dtype=torch.int64, device=dev)
+            local_pos = torch.arange(num_logits, dtype=torch.int32, device=dev) % n
+            local_logits = torch.zeros(
+                num_logits,
+                vocab_shard.local_vocab_size,
+                dtype=vocab_shard.logits_dtype,
+                device=dev,
+            )
+            vocab_shard.begin_step()
+            logits = vocab_shard.owned_logits(local_logits)
+            vocab_shard.top_p(logits, torch.full((num_logits,), 0.5, device=dev))
+            rejection_sample(
+                logits,
+                draft_logits,
+                zeros.int(),  # draft_sampled
+                cu_num_logits,
+                zeros,  # pos
+                zeros[:num_reqs],  # idx_mapping
+                zeros,  # expanded_idx_mapping
+                local_pos,  # expanded_local_pos
+                states.temperature.gpu,
+                states.seeds.gpu,
+                self.num_speculative_steps,
+                self.synthetic_conditional_rates,
+                use_fp64=self.sampler.use_fp64_gumbel,
+                use_block_verification=self.use_block_verification,
+                vocab_shard=vocab_shard,
+            )
+            vocab_shard.end_step()
         torch.accelerator.synchronize()
 
     def verify_vocab_sharded(
