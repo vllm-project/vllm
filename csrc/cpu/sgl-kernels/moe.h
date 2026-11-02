@@ -4,6 +4,7 @@
 // clang-format off
 
 #pragma once
+#include "gemm.h"
 #include "vec.h"
 
 template <typename scalar_t>
@@ -151,16 +152,23 @@ inline void silu_and_mul_stub(
       "silu_and_mul_stub only supports input_t == float or input_t == scalar_t");
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
+  constexpr int64_t kIterationSize =
+      std::is_same_v<scalar_t, float> ? 2 * fVec::size() : bVec::size();
 
   // no remainder
 #pragma GCC unroll 4
-  for (int64_t d = 0; d < size; d += bVec::size()) {
+  for (int64_t d = 0; d < size; d += kIterationSize) {
     auto [x0, x1] = load_float_vec2(input + d);
     auto [y0, y1] = load_float_vec2(input2 + d);
     x0 = fast_silu(x0) * y0;
     x1 = fast_silu(x1) * y1;
-    bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
-    out_vec.store(out + d);
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      x0.store(out + d);
+      x1.store(out + d + fVec::size());
+    } else {
+      bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
+      out_vec.store(out + d);
+    }
   }
 }
 
@@ -171,16 +179,24 @@ inline void gelu_and_mul_stub(
       std::is_same_v<input_t, float> || std::is_same_v<input_t, scalar_t>,
       "gelu_and_mul_stub only supports input_t == float or input_t == scalar_t");
   using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  constexpr int64_t kIterationSize =
+      std::is_same_v<scalar_t, float> ? 2 * fVec::size() : bVec::size();
 
   // no remainder
 #pragma GCC unroll 4
-  for (int64_t d = 0; d < size; d += bVec::size()) {
+  for (int64_t d = 0; d < size; d += kIterationSize) {
     auto [x0, x1] = load_float_vec2(input + d);
     auto [y0, y1] = load_float_vec2(input2 + d);
     x0 = fast_gelu(x0) * y0;
     x1 = fast_gelu(x1) * y1;
-    bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
-    out_vec.store(out + d);
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      x0.store(out + d);
+      x1.store(out + d + fVec::size());
+    } else {
+      bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
+      out_vec.store(out + d);
+    }
   }
 }
 
@@ -191,16 +207,24 @@ inline void gelu_tanh_and_mul_stub(
       std::is_same_v<input_t, float> || std::is_same_v<input_t, scalar_t>,
       "gelu_tanh_and_mul_stub only supports input_t == float or input_t == scalar_t");
   using bVec = at::vec::Vectorized<scalar_t>;
+  using fVec = at::vec::Vectorized<float>;
+  constexpr int64_t kIterationSize =
+      std::is_same_v<scalar_t, float> ? 2 * fVec::size() : bVec::size();
 
   // no remainder
 #pragma GCC unroll 4
-  for (int64_t d = 0; d < size; d += bVec::size()) {
+  for (int64_t d = 0; d < size; d += kIterationSize) {
     auto [x0, x1] = load_float_vec2(input + d);
     auto [y0, y1] = load_float_vec2(input2 + d);
     x0 = fast_gelu_tanh(x0) * y0;
     x1 = fast_gelu_tanh(x1) * y1;
-    bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
-    out_vec.store(out + d);
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      x0.store(out + d);
+      x1.store(out + d + fVec::size());
+    } else {
+      bVec out_vec = convert_from_float_ext<scalar_t>(x0, x1);
+      out_vec.store(out + d);
+    }
   }
 }
 
@@ -212,20 +236,26 @@ inline void clamp_sigmoid_and_mul_stub(
       "clamp_sigmoid_and_mul_stub only supports input_t == float or input_t == scalar_t");
   using bVec = at::vec::Vectorized<scalar_t>;
   using fVec = at::vec::Vectorized<float>;
+  constexpr int64_t kInputVecSize =
+      std::is_same_v<scalar_t, float> ? 2 * fVec::size() : bVec::size();
   const fVec one = fVec(1.f);
   const fVec limit_v = fVec(limit);
   const fVec nlimit_v = fVec(-limit);
   const fVec alpha_v = fVec(alpha);
 
 #pragma GCC unroll 4
-  for (int64_t d = 0; d < 2 * size; d += bVec::size()) {
+  for (int64_t d = 0; d < 2 * size; d += kInputVecSize) {
     auto [x0_, y0_] = load_float_vec2(input + d);
     auto [x0, y0] = at::vec::deinterleave2<float>(x0_, y0_);
 
     x0 = at::vec::minimum(x0, limit_v);
     y0 = at::vec::minimum(limit_v, at::vec::maximum(nlimit_v, y0));
     x0 = fast_sigmoid_glu(x0, alpha_v) * (y0 + one);
-    store_from_float_ext(out + d / 2, x0);
+    if constexpr (std::is_same_v<scalar_t, float>) {
+      x0.store(out + d / 2);
+    } else {
+      store_from_float_ext(out + d / 2, x0);
+    }
   }
 }
 
@@ -244,6 +274,30 @@ inline void copy_mul_stub(scalar_t* __restrict__ out, const float* __restrict__ 
   }
   for (; d < size; ++d) {
     out[d] = static_cast<scalar_t>(input[d] * weight);
+  }
+}
+
+template <typename scalar_t, typename input_t>
+inline void activation_stub(
+    scalar_t* __restrict__ out,
+    const input_t* __restrict__ input,
+    int64_t size,
+    CPUActMethod act_func,
+    float alpha,
+    float limit) {
+  switch (act_func) {
+    case CPUActMethod::swiglu:
+      clamp_sigmoid_and_mul_stub<scalar_t, input_t>(out, input, size, alpha, limit);
+      break;
+    case CPUActMethod::silu_and_mul:
+      silu_and_mul_stub<scalar_t, input_t>(out, input, input + size, size);
+      break;
+    case CPUActMethod::gelu_and_mul:
+      gelu_and_mul_stub<scalar_t, input_t>(out, input, input + size, size);
+      break;
+    case CPUActMethod::gelu_tanh_and_mul:
+      gelu_tanh_and_mul_stub<scalar_t, input_t>(out, input, input + size, size);
+      break;
   }
 }
 
