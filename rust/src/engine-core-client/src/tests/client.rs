@@ -3799,6 +3799,15 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     assert_eq!(kv_events_config.buffer_steps, 10_000);
     assert_eq!(kv_events_config.hwm, 100_000);
     assert_eq!(kv_events_config.max_queue_size, 100_000);
+    assert_eq!(
+        kv_events_config.snapshot_endpoint.as_deref(),
+        Some("tcp://127.0.0.1:5559")
+    );
+    assert_eq!(kv_events_config.snapshot_max_blocks, Some(1_000_000));
+    assert_eq!(
+        kv_events_config.snapshot_max_response_bytes,
+        Some(256 * 1024 * 1024)
+    );
 
     let lora_request_bytes = hex::decode(lora_request_hex).unwrap();
     let expected_lora_request = LoraRequest {
