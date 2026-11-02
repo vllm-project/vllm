@@ -3,13 +3,12 @@
 
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import pytest
 import torch
 
-from vllm.utils import vmm_driver
 from vllm.utils.vmm_driver import (
+    _MEM_HANDLE_TYPE_FABRIC,
     CudaVmmDriver,
     _find_loaded_library,
     imex_channel_available,
@@ -148,36 +147,27 @@ def test_driver_prefers_the_library_already_loaded(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "create_rc, export_rc, requested",
-    [(0, 0, 0x8), (1, 0, 0), (0, 1, 0)],
-    ids=["exportable", "create-fails", "export-fails"],
+    "device_support, imex_channel, requested",
+    [(True, True, _MEM_HANDLE_TYPE_FABRIC), (True, False, 0), (False, True, 0)],
 )
-def test_fabric_handle_requested_only_if_it_can_be_exported(
-    monkeypatch, create_rc, export_rc, requested
+def test_fabric_handle_needs_device_support_and_an_imex_channel(
+    monkeypatch, device_support, imex_channel, requested
 ):
-    """The device attribute reports FABRIC support without an IMEX channel, so
-    only a real export decides; a failed probe must leave allocations working
-    and must not leak its handle."""
-    released: list[object] = []
     driver = CudaVmmDriver.__new__(CudaVmmDriver)
-    driver._rdma_capable = {0: False}
+    driver._rdma_capable = {}
     driver._fabric_capable = {}
-    monkeypatch.setattr(driver, "ensure_context", lambda device_index: None)
-    driver._fns = {
-        "get_granularity": lambda *args: 0,
-        "create": lambda *args: create_rc,
-        "release": released.append,
-    }
-    driver._lib = SimpleNamespace(cuMemExportToShareableHandle=lambda *args: export_rc)
+    monkeypatch.setattr(driver, "_device_attribute", lambda *args: device_support)
+    monkeypatch.setattr(
+        "vllm.utils.vmm_driver.imex_channel_available", lambda: imex_channel
+    )
 
     assert driver._make_alloc_prop(0).requestedHandleTypes == requested
-    assert driver._make_alloc_prop(0).requestedHandleTypes == requested
-
-    assert len(released) == (create_rc == 0)
 
 
 def test_imex_channel_available_needs_a_channel_that_opens(monkeypatch, tmp_path):
-    monkeypatch.setattr(vmm_driver, "_IMEX_CHANNELS", str(tmp_path / "channel*"))
+    monkeypatch.setattr(
+        "vllm.utils.vmm_driver._IMEX_CHANNELS", str(tmp_path / "channel*")
+    )
     assert not imex_channel_available()
 
     # A dangling symlink stands in for a file the process cannot open.

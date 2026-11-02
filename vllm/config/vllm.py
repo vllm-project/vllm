@@ -3237,33 +3237,23 @@ class VllmConfig:
                 "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
                 "which the NIXL, Mooncake and MoRIIO connectors require"
             )
-        if (
-            unsupported is None
-            and requested is not False
-            and self.kv_transfer_config is not None
+        # NIXL within a host reaches driver-mapped memory through a FABRIC handle.
+        nixl_would_use_tcp = (
+            self.kv_transfer_config is not None
             and self.kv_transfer_config.uses_nixl_on_device_memory()
             and not imex_channel_available()
-        ):
-            # NIXL within a host goes through UCX's cuda_ipc, which can only map
-            # driver-mapped memory through a FABRIC handle, and that takes an IMEX
-            # channel. Without one UCX silently falls back to TCP. Transfers across
-            # hosts use RDMA, but they cannot be told apart here, so they opt in.
-            if requested:
-                logger.warning(
-                    "No IMEX channel: NIXL within a host falls back to TCP with the "
-                    "extensible KV cache. Transfers across hosts are unaffected."
-                )
-            else:
-                unsupported = "NIXL within a host would fall back to TCP"
-                logger.info(
-                    "Extensible KV cache off: NIXL within a host needs an IMEX "
-                    "channel to reach it over NVLink. For transfers across hosts, "
-                    "set --enable-extensible-kv-cache."
-                )
+        )
         if requested is None:
-            cache_config.enable_extensible_kv_cache = unsupported is None
+            cache_config.enable_extensible_kv_cache = (
+                unsupported is None and not nixl_would_use_tcp
+            )
         elif requested and unsupported is not None:
             raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
+        elif requested and nixl_would_use_tcp:
+            logger.warning(
+                "No IMEX channel: with the extensible KV cache, NIXL within a host "
+                "falls back to TCP. Transfers across hosts use RDMA."
+            )
 
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
