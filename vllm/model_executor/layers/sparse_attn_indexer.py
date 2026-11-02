@@ -52,6 +52,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     fp8_fp4_mqa_logits,
     fp8_fp4_paged_mqa_logits,
+    get_paged_mqa_logits_metadata,
     has_deep_gemm,
     mqa_logits_mx_inputs,
     mqa_logits_use_mx_scales,
@@ -65,6 +66,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.attention.backends.mla.indexer import (
+    DeepSeekV32IndexerDecodeMetadata,
     DeepseekV32IndexerMetadata,
     dense_logits_rows,
     tp_prefill_row_sharding_supported,
@@ -337,6 +339,98 @@ def as_fp32_logits(logits: torch.Tensor, row_ends: torch.Tensor) -> torch.Tensor
     return out
 
 
+def _decode_chunk_ranges(rows: int, width: int, budget: int) -> list[tuple[int, int]]:
+    """Partition independent Q rows under a BF16 payload budget."""
+    if budget < 0:
+        raise ValueError("Decode logits budget must be nonnegative")
+    if not rows or not budget or rows * width * 2 <= budget:
+        return []
+    limit = budget // (2 * width) // 16 * 16
+    if limit < 16:
+        raise ValueError("Decode logits budget must fit at least 16 BF16 rows")
+    units = (rows + 15) // 16
+    count = (units + limit // 16 - 1) // (limit // 16)
+    base, extra = divmod(units, count)
+    ranges = []
+    start = 0
+    # Allocate the largest scratch first so later graph nodes can reuse it.
+    for i in range(count):
+        end = min(rows, start + 16 * (base + (i < extra)))
+        ranges.append((start, end))
+        start = end
+    return ranges
+
+
+def _varlen_decode_rows(
+    q: torch.Tensor,
+    q_scale: torch.Tensor | None,
+    weights: torch.Tensor,
+    kv_cache: torch.Tensor,
+    decode: DeepSeekV32IndexerDecodeMetadata,
+    max_model_len: int,
+    max_seq_len: int,
+    topk_backend: str,
+    topk_tokens: int,
+    topk_indices_buffer: torch.Tensor,
+    candidate_blocks: torch.Tensor | None,
+    candidate_block_size: int,
+    candidate_write: bool,
+    start: int,
+    end: int,
+) -> None:
+    """The varlen (SM100) decode logits, candidate selection and top-k of rows
+    ``[start, end)``, with the slice's own DeepGEMM schedule."""
+    assert decode.indices is not None
+    seq_lens = decode.seq_lens[start:end]
+    indices = decode.indices[start:end]
+    schedule = decode.schedule_metadata
+    if end - start < decode.seq_lens.shape[0]:
+        schedule = get_paged_mqa_logits_metadata(
+            seq_lens, kv_cache.shape[1], schedule.shape[0] - 1, indices=indices
+        )
+    logits = fp8_fp4_paged_mqa_logits(
+        (q[start:end], q_scale[start:end] if q_scale is not None else None),
+        kv_cache,
+        weights[start:end],
+        seq_lens,
+        decode.block_table[start:end],
+        schedule,
+        max_model_len=max_model_len,
+        indices=indices,
+    )
+    row_ends = seq_lens.view(-1)
+    selector = get_indexer_topk(topk_backend)
+    if not selector.takes_bf16_logits(logits, topk_tokens, end - start):
+        logits = as_fp32_logits(logits, row_ends)
+    if candidate_blocks is not None:
+        candidates = candidate_blocks[start:end]
+        if candidate_write:
+            _select_candidate_blocks(
+                logits,
+                None,
+                row_ends,
+                candidates.shape[1],
+                candidate_block_size,
+                candidates,
+                1,
+                score_dtype=(
+                    torch.float32 if topk_backend in ("auto", "persistent") else None
+                ),
+            )
+        else:
+            _apply_candidate_mask(
+                logits, None, row_ends, candidates, candidate_block_size, 1
+            )
+    selector(
+        logits,
+        seq_lens,
+        1,
+        topk_indices_buffer[start:end, :topk_tokens],
+        topk_tokens,
+        max_seq_len,
+    )
+
+
 def _gather_workspace_shapes(
     total_seq_lens: int,
     head_dim: int,
@@ -503,6 +597,18 @@ def sparse_attn_indexer(
     # backends and the DCP merge read an FP32 copy.
     fp32_decode_logits = topk_backend != "deep_select" or dcp_world_size != 1
 
+    decode_budget = envs.VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB * 1024 * 1024
+    chunk_decode = (
+        decode_budget > 0
+        and current_platform.is_device_capability_family(100)
+        and use_fp4_cache
+        and not use_pcp
+        and (candidate_blocks is None or candidate_write)
+        and dcp_world_size == 1
+        and topk_backend in ("auto", "persistent")
+        and topk_tokens in (512, 1024, 2048)
+    )
+
     # assert isinstance(attn_metadata, dict)
     if not isinstance(attn_metadata, dict):
         # Reserve workspace for indexer during profiling run
@@ -551,6 +657,12 @@ def sparse_attn_indexer(
         row_align = math.lcm(split_kv, 1024 // logits_dtype.itemsize)
         copy_bytes = 0 if logits_dtype == torch.float32 else torch.float32.itemsize
         decode_copy_bytes = copy_bytes if fp32_decode_logits else 0
+        if chunk_decode:
+            # A decode chunk holds at most the budget, read as BF16 by top-k.
+            max_decode_tokens = min(
+                max_decode_tokens, decode_budget // (2 * max_model_len)
+            )
+            decode_copy_bytes = 0
         prefill_budget = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
         max_logits_bytes = max(
             prefill_budget
@@ -970,6 +1082,36 @@ def sparse_attn_indexer(
             if use_fp4_cache
             else padded_q_quant_decode_tokens
         )
+        if chunk_decode:
+            assert decode_metadata.indices is not None
+            assert decode_metadata.global_seq_lens is None
+            assert not needs_padded_path
+            ranges = _decode_chunk_ranges(
+                num_padded_tokens, max_model_len, decode_budget
+            )
+            if ranges:
+                padded_q_scale, decode_weights = mqa_logits_mx_inputs(
+                    padded_q_quant_cast, padded_q_scale, weights[:num_padded_tokens]
+                )
+                for start, end in ranges:
+                    _varlen_decode_rows(
+                        padded_q_quant_cast,
+                        padded_q_scale,
+                        decode_weights,
+                        kv_cache,
+                        decode_metadata,
+                        max_model_len,
+                        attn_metadata_narrowed.max_seq_len,
+                        topk_backend,
+                        topk_tokens,
+                        topk_indices_buffer,
+                        candidate_blocks,
+                        candidate_block_size,
+                        candidate_write,
+                        start,
+                        end,
+                    )
+                return topk_indices_buffer
         if current_platform.is_xpu():
             if padded_q_scale is not None:
                 raise RuntimeError("XPU fp8_paged_mqa_logits does not support FP4 Q")
