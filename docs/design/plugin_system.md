@@ -106,6 +106,13 @@ Every plugin has three parts:
     - `get_attn_backend_cls`: This function should return the attention backend class's fully qualified name.
     - `get_device_communicator_cls`: This function should return the device communicator class's fully qualified name.
 
+    Platforms can also adapt fused MoE components during construction:
+
+    - `get_fused_moe_router_constructor(selected_cls)` returns a callable accepting the selected router branch's constructor arguments and producing a `FusedMoERouter`. A compatible sibling router is allowed. Preserve the selected branch's routing semantics and optional EPLB state.
+    - `get_fused_moe_routed_experts_cls(selected_cls)` and `get_fused_moe_runner_cls(selected_cls)` return `RoutedExperts` and `MoERunner` subclasses after the factory or model has selected its components. Preserve model-specific weight loading and execution behavior.
+
+    All three hooks return `selected_cls` by default. They run during construction, without changing factory selection priority or adding forward-time platform lookups. A router explicitly supplied to `FusedMoEFactory` is used directly. EPLB statistics, weight transfer, and commit ordering remain owned by EPLB.
+
 4. Implement the worker class `MyDummyWorker` in `my_dummy_worker.py`. The worker class should inherit from [WorkerBase][vllm.v1.worker.worker_base.WorkerBase]. Please follow the interface to implement the functions one by one. Basically, all interfaces in the base class should be implemented, since they are called here and there in vLLM. To make sure a model can be executed, the basic functions should be implemented are:
 
     - `init_device`: This function is called to set up the device for the worker.
