@@ -144,7 +144,12 @@ def _resolve_standalone_options(config: UMBPRuntimeConfig) -> dict[str, Any]:
     if not isinstance(endpoint, str) or not endpoint:
         raise ValueError("standalone UMBP requires endpoint")
     normalize_endpoint(endpoint)
-    for name in ("startup_timeout_ms", "lookup_timeout_ms", "num_workers"):
+    for name in (
+        "startup_timeout_ms",
+        "lookup_timeout_ms",
+        "timeout_ms",
+        "num_workers",
+    ):
         if name in options and (type(options[name]) is not int or options[name] <= 0):
             raise ValueError(f"{name} must be a positive integer")
     server_options = sorted(
@@ -184,11 +189,6 @@ def _build_client(options: dict[str, Any]) -> Any:
     standalone.startup_timeout_ms = int(options.get("startup_timeout_ms", 30000))
     if hasattr(standalone, "lookup_timeout_ms"):
         standalone.lookup_timeout_ms = int(options.get("lookup_timeout_ms", 1000))
-    else:
-        logger.warning_once(
-            "MORI bindings do not support lookup_timeout_ms; ignoring it, so "
-            "standalone UMBP lookups have no native deadline"
-        )
     client_config.standalone_process = standalone
 
     try:
@@ -210,20 +210,50 @@ def _build_client(options: dict[str, Any]) -> Any:
 class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
     """Answers lookups from the shared server.
 
-    A lookup failure is reported as a miss so an unreachable server degrades
-    to recomputation instead of failing the scheduler step.
+    A lookup that fails, or gets no reply within lookup_timeout_ms, is
+    reported as a miss, so a stalled or unreachable server degrades to
+    recomputation instead of stalling the scheduler. MORI puts no deadline on
+    these calls, so each runs on a daemon thread; until one that overran its
+    deadline returns, later calls fail at once instead of queueing behind it.
     """
 
-    def __init__(self, client: Any, address: str) -> None:
+    def __init__(
+        self,
+        client: Any,
+        address: str,
+        call_timeout_s: float,
+        close_timeout_s: float,
+    ) -> None:
         self._client = client
         self._address = address
+        self._call_timeout_s = call_timeout_s
+        self._close_timeout_s = close_timeout_s
+        self._calls = _DaemonTransferPool(1, "umbp-standalone-lookup")
+        self._call_lock = threading.Lock()
+        self._unanswered: Future | None = None
         self._last_failure_log = float("-inf")
+
+    def _call(self, method: str, *args: Any) -> Any:
+        with self._call_lock:
+            if self._unanswered is not None and not self._unanswered.done():
+                raise TimeoutError("an earlier call to the server has not returned")
+            future = self._calls.submit(getattr(self._client, method), *args)
+        try:
+            return future.result(timeout=self._call_timeout_s)
+        except TimeoutError:
+            if future.done():
+                raise
+            with self._call_lock:
+                self._unanswered = future
+            raise TimeoutError(
+                f"{method} got no reply within {self._call_timeout_s:g}s"
+            ) from None
 
     def lookup(self, keys: Sequence[str]) -> Sequence[bool]:
         if not keys:
             return []
         try:
-            result = [bool(value) for value in self._client.batch_exists(list(keys))]
+            result = [bool(value) for value in self._call("batch_exists", list(keys))]
         except Exception as exc:
             self._log_failure("lookup", exc)
             return [False] * len(keys)
@@ -236,7 +266,7 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
 
     def clear(self) -> bool:
         try:
-            cleared = bool(self._client.clear())
+            cleared = bool(self._call("clear"))
         except Exception as exc:
             self._log_failure("clear", exc)
             return False
@@ -251,6 +281,22 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
         return cleared
 
     def close(self) -> None:
+        self._calls.shutdown(wait=False, cancel_futures=True)
+        with self._call_lock:
+            unanswered = self._unanswered is not None and not self._unanswered.done()
+        if unanswered:
+            # MORI's close() waits for every in-flight call.
+            self._leave_open("a call to the server never returned")
+            return
+        release = threading.Thread(
+            target=self._release_client, name="umbp-standalone-close", daemon=True
+        )
+        release.start()
+        release.join(self._close_timeout_s)
+        if release.is_alive():
+            self._leave_open(f"close did not return in {self._close_timeout_s:g}s")
+
+    def _release_client(self) -> None:
         close = getattr(self._client, "close", None)
         try:
             if callable(close):
@@ -258,6 +304,14 @@ class _StandaloneSchedulerHandle(UMBPSchedulerHandle):
         except Exception as exc:
             logger.warning("UMBP standalone client close failed: %s", exc)
         self._client = None
+
+    def _leave_open(self, reason: str) -> None:
+        self._client = None
+        logger.warning(
+            "UMBP standalone scheduler client for %s left open at shutdown: %s",
+            self._address,
+            reason,
+        )
 
     def _log_failure(self, operation: str, exc: Exception) -> None:
         now = time.monotonic()
@@ -275,9 +329,13 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
     """MORI worker handle whose objects are indexed outside this process.
 
     The pool's service can stall or disappear under a running engine, so its
-    failures degrade to misses and recomputation. A store that outlives
-    timeout_ms stays pending rather than failing the step: the scheduler keeps
-    its source blocks pinned until MORI returns, since MORI still reads them.
+    failures degrade to misses and recomputation. A transfer that outlives
+    timeout_ms stays pending rather than failing the step, since MORI still
+    uses its blocks: the scheduler keeps a store's source blocks pinned, and
+    keeps a loading request's blocks until the load is reported, even if the
+    request is aborted. New transfers fail while one is blocked. A synchronous
+    wait on a blocked transfer still raises, since its blocks are about to be
+    read or reused.
     """
 
     mode = "shared"
@@ -296,10 +354,13 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
             storage = cache.untyped_storage()
             self._storages.setdefault(storage.data_ptr(), storage)
 
-    def _blocked_stores(self) -> int:
+    def _blocked_transfers(self) -> int:
         now = time.monotonic()
         with self._job_lock:
-            deadlines = tuple(self._store_deadlines.items())
+            deadlines = (
+                *self._store_deadlines.items(),
+                *self._load_deadlines.items(),
+            )
             futures = dict(self._futures)
         return sum(
             1
@@ -332,12 +393,10 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
     def poll(self, job: TransferJobState) -> TransferJobState | None:
         with self._job_lock:
             future = self._futures.get(id(job))
-            is_load = id(job) in self._load_deadlines
         if future is not None and not future.done():
-            if self._blocked_stores() and self._fail_if_queued(job):
+            if self._blocked_transfers() and self._fail_if_queued(job):
                 return job
-            if not is_load:
-                return None
+            return None
         return super().poll(job)
 
     def wait(self, job: TransferJobState) -> TransferJobState:
@@ -358,7 +417,8 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
             self._futures.pop(id(job), None)
         job.fail(
             job.keys,
-            f"{TRANSFER_NOT_ATTEMPTED}: queued behind a blocked UMBP {self.mode} store",
+            f"{TRANSFER_NOT_ATTEMPTED}: queued behind a blocked UMBP {self.mode} "
+            "transfer",
         )
         return True
 
@@ -379,8 +439,8 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
     def _refuse_while_blocked(
         self, plans: Sequence[BlockTransferPlan]
     ) -> TransferJobState | None:
-        """Fail new transfers, before they touch memory, while a store is stuck."""
-        blocked = self._blocked_stores()
+        """Fail new transfers, before they touch memory, while one is stuck."""
+        blocked = self._blocked_transfers()
         if not blocked:
             return None
         job = TransferJobState(
@@ -389,15 +449,15 @@ class _SharedPoolWorkerHandle(_MoriWorkerHandle):
         job.start()
         job.fail(
             job.keys,
-            f"{TRANSFER_NOT_ATTEMPTED}: an earlier UMBP {self.mode} store "
+            f"{TRANSFER_NOT_ATTEMPTED}: an earlier UMBP {self.mode} transfer "
             "is still blocked",
         )
         now = time.monotonic()
         if now - self._last_refusal_log >= _FAILURE_LOG_INTERVAL_S:
             self._last_refusal_log = now
             logger.warning(
-                "UMBP %s transfers are refused while %d timed-out store(s) are "
-                "still blocked in MORI",
+                "UMBP %s transfers are refused while %d timed-out transfer(s) "
+                "are still blocked in MORI",
                 self.mode,
                 blocked,
             )
@@ -478,6 +538,9 @@ class StandaloneRuntime(IUMBPRuntime):
         self._address = normalize_endpoint(self._options["endpoint"])
         self._max_workers = int(self._options.get("num_workers", 4))
         self._timeout_s = float(self._options.get("timeout_ms", 30000)) / 1000
+        self._lookup_timeout_s = (
+            float(self._options.get("lookup_timeout_ms", 1000)) / 1000
+        )
 
     @classmethod
     def from_config(cls, config: UMBPRuntimeConfig) -> StandaloneRuntime:
@@ -490,7 +553,12 @@ class StandaloneRuntime(IUMBPRuntime):
         layout: KVLayoutDescriptor,
     ) -> UMBPSchedulerHandle:
         del namespace, topology, layout
-        return _StandaloneSchedulerHandle(_build_client(self._options), self._address)
+        return _StandaloneSchedulerHandle(
+            _build_client(self._options),
+            self._address,
+            call_timeout_s=self._lookup_timeout_s,
+            close_timeout_s=self._timeout_s,
+        )
 
     def create_worker_handle(
         self,

@@ -62,7 +62,11 @@ umbp_standalone_server
 
 The server needs the same GPU access as the engines (`/dev/kfd`, `/dev/dri`)
 and must share their host IPC namespace. In containers, run it in the engine
-container or with `--ipc=host` and the same device mounts. `UMBP_DRAM_*`
+container or with `--ipc=host` and the same device mounts. The server must see
+every GPU that its clients use, so do not narrow it with
+`HIP_VISIBLE_DEVICES` or `ROCR_VISIBLE_DEVICES`: a client on a GPU the server
+cannot see crashes the server with a GPU memory fault, which takes the pool
+down for every attached engine. `UMBP_DRAM_*`
 variables control huge pages, NUMA placement, prefaulting, and eviction
 watermarks; see the MORI UMBP documentation.
 
@@ -86,7 +90,7 @@ vllm serve <model> \
 | --- | --- | --- |
 | `endpoint` | required | Server socket path, or `unix://` address. TCP is rejected. |
 | `startup_timeout_ms` | `30000` | How long a client waits for the server at startup. |
-| `lookup_timeout_ms` | `1000` | Deadline for each lookup RPC. A timeout is a cache miss. Ignored with a warning when the MORI bindings do not expose this option; lookups then have no native deadline. |
+| `lookup_timeout_ms` | `1000` | Deadline for each lookup, enforced by vLLM. A lookup past it is a cache miss, and later lookups miss at once until the server answers it. Also passed to MORI bindings that expose this option. |
 
 The connector never launches the server. Since the server owns the pool, the
 connector rejects `capacity_bytes`, `total_capacity_bytes`, and `dram_*`
@@ -94,18 +98,19 @@ options. Use the [shared options](#shared-options) for transfer settings.
 
 ### Sharing and failure behavior
 
-Objects are keyed by the model, revision, KV layout, cache groups, TP/PCP/DCP
-topology, and block hash. The data-parallel rank is excluded, so DP ranks and
-engines serving the same model with the same layout share objects. Different
-layouts use different keys. Use `key_namespace` to separate weight versions
-that share a model path. There is no per-engine quota; engines can evict each
+Objects are keyed by the model, revision, effective model config (dtype,
+quantization, and `hf_config` with `hf_overrides` applied), KV layout, cache
+groups, TP/PCP/DCP topology, and block hash. The data-parallel rank is
+excluded, so DP ranks and engines serving the same model with the same layout
+share objects. Different layouts use different keys. Use `key_namespace` to
+separate weight versions that share a model path. There is no per-engine quota; engines can evict each
 other's objects.
 
 | Event | Behavior |
 | --- | --- |
 | Server not reachable at engine startup | Engine startup fails. |
 | Server dies while engines run | Lookups report misses; loads and stores fail. With the `recompute` policy above, failed loads are recomputed. |
-| Server stalls while engines run | A store that outlives `timeout_ms` stays pending with its source blocks pinned until the server answers; new loads and stores fail immediately meanwhile. A synchronous wait on a stalled transfer raises. |
+| Server stalls while engines run | Lookups past `lookup_timeout_ms` report misses. A load or store that outlives `timeout_ms` stays pending, with its blocks held, until the server answers; new loads and stores fail immediately meanwhile. A synchronous wait on a stalled transfer raises. Shutdown does not wait on a stalled server. |
 | Server restarted at the same address | Engines attached before the restart lose their GPU registrations; restart them to resume offloading. |
 | Engine restarts | Objects remain in the server and are restored by the new engine. |
 | `POST /reset_prefix_cache?reset_external=true` | Clears the whole server pool, for every attached engine. |
