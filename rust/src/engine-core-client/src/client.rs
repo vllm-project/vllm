@@ -18,11 +18,12 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::metrics::EngineSleepState;
+use crate::prompt_block_hasher::PromptBlockHasher;
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
-use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
-use crate::protocol::utility::{CheckpointState, EngineCoreUtilityRequest, PauseMode, SleepLevel};
+use crate::protocol::request::EngineCoreRequest;
+use crate::protocol::utility::{CheckpointState, PauseMode, SleepLevel};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
@@ -315,6 +316,8 @@ pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
+    /// Hashes prompt blocks for the engines, if they all accept the same hashes.
+    prompt_block_hasher: Option<PromptBlockHasher>,
     /// Whether a profiling session is awaiting an explicit stop. Held across each
     /// start/stop utility call so a stale stop reply cannot clear a newer session.
     profile_active: Mutex<bool>,
@@ -338,6 +341,17 @@ impl EngineCoreClient {
     /// sockets and waits for the expected engine registration frames.
     pub async fn connect(config: EngineCoreClientConfig) -> Result<Self> {
         config.validate()?;
+        let runtime = build_zmq_runtime();
+        let handle = runtime.handle().clone();
+        let connect_task =
+            AbortOnDropHandle::new(handle.spawn(Self::connect_on_runtime(config, runtime)));
+        connect_task.await?
+    }
+
+    async fn connect_on_runtime(
+        config: EngineCoreClientConfig,
+        runtime: BackgroundShutdownRuntime,
+    ) -> Result<Self> {
         let connected = match &config.transport_mode {
             TransportMode::HandshakeOwner {
                 handshake_address,
@@ -394,7 +408,7 @@ impl EngineCoreClient {
             }
         };
 
-        Self::from_connected(config, connected).await
+        Self::from_connected(config, connected, runtime).await
     }
 
     /// Create a new client instance from the connected transport state after
@@ -402,16 +416,18 @@ impl EngineCoreClient {
     async fn from_connected(
         config: EngineCoreClientConfig,
         connected: transport::ConnectedTransport,
+        runtime: BackgroundShutdownRuntime,
     ) -> Result<Self> {
         validate_lora_capabilities(&connected.engines)?;
+        let prompt_block_hasher = prompt_block_hasher(&connected.engines);
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let engines = connected.engines;
-        let runtime = build_zmq_runtime();
         let inner = Arc::new(ClientInner::new(
             connected.input_send,
             runtime.handle().clone(),
             config.model_name.clone(),
+            config.client_index,
             config.engine_stats_enabled,
             &engines,
         ));
@@ -472,6 +488,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
+            prompt_block_hasher,
             profile_active: Mutex::new(false),
             runtime,
             output_task,
@@ -625,6 +642,24 @@ impl EngineCoreClient {
     }
 }
 
+/// Build the prompt block hasher if every engine reports the same supported
+/// prefix hash config. Requests can go to any engine, and an engine that
+/// doesn't hash blocks has no use for the hashes.
+fn prompt_block_hasher(engines: &[ConnectedEngine]) -> Option<PromptBlockHasher> {
+    let config = (engines.iter())
+        .map(|engine| engine.ready_response.prefix_hash_config.as_ref())
+        .all_equal_value()
+        .ok()??;
+    let hasher = PromptBlockHasher::new(config);
+    if hasher.is_none() {
+        debug!(
+            ?config,
+            "engine prefix hash config not supported; engine hashes prompts"
+        );
+    }
+    hasher
+}
+
 fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
     let first = engines.first().expect("engine core client requires at least one engine");
     for engine in engines {
@@ -664,6 +699,11 @@ impl EngineCoreClient {
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
+        if req.block_hashes.is_none()
+            && let Some(hasher) = &self.prompt_block_hasher
+        {
+            req.block_hashes = hasher.hash_request(&req);
+        }
         trace!(
             request_id = %req.request_id,
             client_index = req.client_index,
@@ -749,59 +789,16 @@ impl EngineCoreClient {
     /// Callers should pass utility arguments using Rust tuple semantics so the
     /// encoded payload matches Python's `(client_index, call_id,
     /// method_name, args)` contract: `()`, `(arg,)`, `(arg1, arg2)`, etc.
+    ///
+    /// Once its requests are prepared, the call is not cancellable: dropping
+    /// the returned future stops waiting, but the requests are still sent and
+    /// their replies collected.
     pub async fn call_utility<T, A>(&self, method: &str, args: A) -> Result<Vec<T>>
     where
         T: serde::de::DeserializeOwned,
         A: serde::Serialize + std::fmt::Debug,
     {
-        trace!(
-            method,
-            client_index = self.config.client_index,
-            engine_count = self.engines.len(),
-            "sending utility request"
-        );
-
-        /// Removes utility waiters if a call future is cancelled before completion.
-        struct UtilityCallGuard<'a> {
-            inner: &'a ClientInner,
-            call_ids: Vec<u64>,
-        }
-
-        impl Drop for UtilityCallGuard<'_> {
-            fn drop(&mut self) {
-                self.inner.unregister_utility_calls(self.call_ids.drain(..));
-            }
-        }
-
-        let mut call_guard = UtilityCallGuard {
-            inner: self.inner.as_ref(),
-            call_ids: Vec::with_capacity(self.engines.len()),
-        };
-
-        let mut prepared_calls = Vec::with_capacity(self.engines.len());
-        for engine in &self.engines {
-            let (call_id, rx) = self.inner.allocate_and_register_utility_call()?;
-            call_guard.call_ids.push(call_id);
-            let request =
-                EngineCoreUtilityRequest::new(self.config.client_index, call_id, method, &args)?;
-            prepared_calls.push((&engine.engine_id, call_id, rx, request));
-        }
-
-        let outcomes = join_all(prepared_calls.into_iter().map(
-            |(engine_id, call_id, rx, request)| async move {
-                self.inner
-                    .send_to_engine(engine_id, EngineCoreRequestType::Utility, &request)
-                    .await?;
-                rx.await
-                    .map_err(|_| Error::UtilityCallClosed {
-                        method: method.to_string(),
-                        call_id,
-                    })??
-                    .into_typed_result(method)
-            },
-        ))
-        .await;
-        outcomes.into_iter().collect()
+        self.inner.call_utility(method, args).await
     }
 
     /// Call a utility method on all connected engines and return the shared
