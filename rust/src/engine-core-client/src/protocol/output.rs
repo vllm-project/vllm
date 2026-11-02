@@ -203,6 +203,12 @@ pub struct RequestSpecDecodeMetrics {
     /// Proposed draft count per verify step; empty unless `detailed`.
     #[serde(default)]
     pub per_step_drafted: Vec<u64>,
+    /// Total draft tokens the target model ran a forward pass on.
+    #[serde(default)]
+    pub num_verified_tokens: u64,
+    /// Verified draft count per verify step; empty unless `detailed`.
+    #[serde(default)]
+    pub per_step_verified: Vec<u64>,
 }
 
 impl EngineCoreOutput {

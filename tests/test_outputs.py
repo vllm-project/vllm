@@ -83,7 +83,9 @@ def test_request_output_add_preserves_terminal_spec_decode_metrics():
         finished=False,
     )
     spec_decode_metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=2)
-    spec_decode_metrics.observe(num_draft_tokens=2, num_accepted=1)
+    spec_decode_metrics.observe(
+        num_draft_tokens=2, num_accepted=1, num_verified_tokens=2
+    )
     terminal = RequestOutput(
         request_id="request",
         prompt=None,

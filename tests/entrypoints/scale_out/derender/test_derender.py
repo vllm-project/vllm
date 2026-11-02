@@ -357,6 +357,7 @@ async def test_derender_chat_metrics_passthrough(client):
             "num_accepted_draft_tokens": 1,
             "num_draft_tokens": 2,
             "num_spec_tokens": 1,
+            "num_verified_tokens": 2,
         }
     }
     response = await client.post(
@@ -385,6 +386,7 @@ async def test_derender_chat_metrics_passthrough(client):
         **metrics["speculative_decoding"],
         "per_step_accepted": None,
         "per_step_drafted": None,
+        "per_step_verified": None,
     }
 
 

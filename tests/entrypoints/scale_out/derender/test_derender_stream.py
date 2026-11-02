@@ -1277,6 +1277,7 @@ class TestDerenderChatStream:
                 num_accepted_draft_tokens=1,
                 num_draft_tokens=2,
                 num_spec_tokens=1,
+                num_verified_tokens=2,
             )
         )
         chunk, _ = await derenderer.derender_chat_stream(
