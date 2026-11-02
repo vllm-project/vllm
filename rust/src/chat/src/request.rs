@@ -600,6 +600,9 @@ pub struct ChatRequest {
     pub cache_salt: Option<String>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
+    /// Whether to return character offsets of the templated prompt's tokens.
+    #[serde(default)]
+    pub return_token_offsets: bool,
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
@@ -632,6 +635,7 @@ impl ChatRequest {
             documents: None,
             cache_salt: None,
             add_special_tokens: false,
+            return_token_offsets: false,
             data_parallel_rank: None,
             session_id: None,
             lora_request: None,

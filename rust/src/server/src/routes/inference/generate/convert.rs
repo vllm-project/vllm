@@ -74,6 +74,7 @@ pub(super) fn prepare_generate_request(
     let text_request = TextRequest {
         request_id: ctx.request_id.clone(),
         prompt: Prompt::TokenIds(request.token_ids),
+        prompt_token_offsets: None,
         mm_features,
         sampling_params,
         decode_options: TextDecodeOptions::default(),
@@ -82,6 +83,7 @@ pub(super) fn prepare_generate_request(
         priority: request.priority,
         cache_salt: request.cache_salt,
         add_special_tokens: false,
+        return_token_offsets: false,
         data_parallel_rank: ctx.data_parallel_rank,
         session_id: ctx.session_id,
         kv_hints: None,
