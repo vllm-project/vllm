@@ -347,6 +347,11 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
         FlashInferCuteDslNvFp4LinearKernel,
     )
 
+    skip_ops: set[str] = set()
+    if runner.cache_config.enable_extensible_kv_cache:
+        # The trtllm-gen MLA decode sweep reads arbitrary block ids, which
+        # an extensible KV cache has not committed yet.
+        skip_ops.add("trtllm_batch_decode_mla")
     for module in runner.get_model().modules():
         for holder_name in ("quant_method", "scheme"):
             kernel = getattr(getattr(module, holder_name, None), "kernel", None)
@@ -354,8 +359,8 @@ def _flashinfer_autotune_skip_ops(runner: "GPUModelRunner") -> set[str] | None:
             # fallback is already the heuristic; all mm_fp4 backends share
             # the "fp4_gemm" op name, so skip only when cute-dsl is selected.
             if isinstance(kernel, FlashInferCuteDslNvFp4LinearKernel):
-                return {"fp4_gemm"}
-    return None
+                skip_ops.add("fp4_gemm")
+    return skip_ops or None
 
 
 def _flashinfer_deferred_moe_token_counts(
@@ -390,6 +395,7 @@ def _run_flashinfer_autotune_dummy_runs(
     runner: "GPUModelRunner", *, skip_attn: bool = False
 ) -> None:
     import vllm.utils.flashinfer as fi_utils
+    from vllm.models.deepseek_v41.attention import autotune_indexer_wq_b
 
     dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
     for num_tokens in _flashinfer_autotune_token_counts(runner):
@@ -426,6 +432,7 @@ def _run_flashinfer_autotune_dummy_runs(
                 randomize_inputs=True,
                 **dummy_run_kwargs,
             )
+            autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
 
 
 def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:

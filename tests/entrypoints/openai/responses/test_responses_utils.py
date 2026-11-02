@@ -29,6 +29,8 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.exceptions import VLLMValidationError
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 def _single_chat_message(item):
     message = _construct_message_from_response_item(item)
@@ -252,6 +254,19 @@ class TestResponsesUtils:
         formatted_item = _single_chat_message(output_item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
+
+        # Assistant messages with empty content (e.g. tool-only turns) should
+        # not crash; they map to empty string content.
+        empty_output_item = ResponseOutputMessage(
+            id="msg_empty_content",
+            content=[],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        formatted_item = _single_chat_message(empty_output_item)
+        assert formatted_item["role"] == "assistant"
+        assert formatted_item["content"] == ""
 
 
 class TestCustomTools:

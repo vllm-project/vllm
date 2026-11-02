@@ -2086,6 +2086,26 @@ def test_merge_mla_spec():
         kv_cache_specs[0].merge(kv_cache_specs)
 
 
+@pytest.mark.skip_global_cleanup
+def test_merge_sliding_window_mla_spec_preserves_quantization_mode():
+    specs = [
+        SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8_ds_mla",
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            sliding_window=128,
+        )
+        for _ in range(2)
+    ]
+
+    merged = SlidingWindowMLASpec.merge(specs)
+
+    assert merged.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]):
     block_size = 3
