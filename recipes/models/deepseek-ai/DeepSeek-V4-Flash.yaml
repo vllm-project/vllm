@@ -4,7 +4,7 @@ meta:
   provider: "DeepSeek"
   description: "DeepSeek V4 MoE model with hybrid CSA+HCA attention, manifold-constrained hyper-connections, and three-tier reasoning (Non-think / Think High / Think Max)."
   date_added: 2026-07-31
-  date_updated: 2026-09-29
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Compact 284B/13B V4 sibling — single-node 1M-context serving with FP4+FP8 weights, MTP, and DSpark speculative decoding"
@@ -376,6 +376,13 @@ variants:
     label: "NVFP4 (RedHat)"
     vram_minimum_gb: 170
     description: "RedHatAI NVFP4+FP8 mixed-precision checkpoint for Blackwell GPUs"
+  redhat_0731_nvfp4:
+    model_id: "RedHatAI/DeepSeek-V4-Flash-0731-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHatAI 0731)"
+    vram_minimum_gb: 170
+    supported_hardware: [arch:sm100, arch:sm103]
+    description: "RedHatAI NVFP4 checkpoint based on the 0731 release"
   dspark:
     # Official fused DSpark checkpoint — the preview weights with the DSpark draft
     # module attached (config.json gains the dspark_* block). A distinct served
@@ -1263,3 +1270,7 @@ guide: |
     --intra-node-data-parallel-size 4 \
     --kv-connector nixl
   ```
+
+  ## References
+
+  - [RedHatAI DeepSeek-V4-Flash 0731 NVFP4 checkpoint](https://huggingface.co/RedHatAI/DeepSeek-V4-Flash-0731-NVFP4)

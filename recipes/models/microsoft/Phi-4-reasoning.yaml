@@ -4,12 +4,13 @@ meta:
   provider: "Microsoft"
   description: "Microsoft Phi-4 14B dense reasoning model with 32K context."
   date_added: 2026-08-19
-  date_updated: 2026-09-12
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Validated on Intel Xeon 6 with BF16 serving"
   hardware:
     xeon6: verified
+    h100: supported
 
 model:
   model_id: "microsoft/Phi-4-reasoning"
@@ -31,6 +32,13 @@ variants:
     vram_minimum_gb: 34
     description: "Full precision BF16"
     supported_hardware: [xeon6]
+  redhat_fp8_dynamic:
+    model_id: "RedHatAI/Phi-4-reasoning-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHatAI)"
+    vram_minimum_gb: 17
+    description: "RedHatAI FP8 with dynamic per-token activation quantization"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp
@@ -95,4 +103,5 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/microsoft/Phi-4-reasoning)
+  - [RedHatAI FP8 Dynamic checkpoint](https://huggingface.co/RedHatAI/Phi-4-reasoning-FP8-dynamic)
   - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)
