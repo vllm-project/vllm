@@ -41,8 +41,8 @@ class MoEKernelOracle(ABC, Generic[BackendT]):
     implemented per module, so they are declared but not enforced.
     """
 
-    # Display name used by the shared selection helpers below.
-    name: ClassVar[str] = "MoE"
+    # Display name for the shared log helpers below; subclasses must set it.
+    name: ClassVar[str]
 
     def __init__(
         self,
