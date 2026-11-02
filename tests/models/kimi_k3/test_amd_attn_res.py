@@ -12,6 +12,7 @@ from vllm.models.kimi_k3.amd import linear
 from vllm.models.kimi_k3.amd.linear import KimiLinearModel
 from vllm.models.kimi_k3.amd.ops.attn_res import attn_res
 from vllm.platforms import current_platform
+from vllm.sequence import IntermediateTensors
 from vllm.v1.worker import workspace
 
 pytestmark = pytest.mark.skipif(
@@ -354,15 +355,16 @@ def test_forward_reuses_one_fixed_bank_across_steps(
         lambda: SimpleNamespace(is_first_rank=True, is_last_rank=False),
     )
 
-    residuals = [
-        model.forward(
+    residuals = []
+    for num_tokens in step_tokens:
+        out = model.forward(
             None,
             torch.arange(num_tokens),
             None,
             inputs_embeds=torch.randn(num_tokens, HIDDEN),
-        )["residual"]
-        for num_tokens in step_tokens
-    ]
+        )
+        assert isinstance(out, IntermediateTensors)
+        residuals.append(out["residual"])
     bank = workspace.current_workspace_manager().get_persistent(
         "kimi_k3_attn_res_block_residual", (BANK_TOKENS, 1, HIDDEN), torch.float32
     )
