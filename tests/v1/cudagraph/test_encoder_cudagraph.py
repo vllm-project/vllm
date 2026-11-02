@@ -1530,13 +1530,15 @@ class TestInitInvariantValidation:
 
 
 class TestFlashInferCuSeqlensPadding:
-    """FlashInfer packs the q/k/o and v offsets into one cu_seqlens tensor and
-    splits it at its midpoint. A replay padded to a smaller batch bucket than
-    the capture must keep each half in its own half of the capture buffer."""
+    """A replay pads its cu_seqlens into the buffer captured at a larger batch
+    size. The padded buffer must equal the cu_seqlens computed for the same
+    inputs at the capture batch size. FlashInfer packs the q/k/o and v offsets
+    into one tensor and splits it at its midpoint, so each half has to stay in
+    its own half of the capture buffer."""
 
     HIDDEN_SIZE = 16
 
-    def _flashinfer_cu_seqlens(self, seq_lens: list[int], pad_to: int):
+    def _cu_seqlens(self, flashinfer: bool, seq_lens: list[int], pad_to: int):
         import numpy as np
 
         from vllm.model_executor.layers.attention.mm_encoder_attention import (
@@ -1544,12 +1546,17 @@ class TestFlashInferCuSeqlensPadding:
         )
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
+        backend = (
+            AttentionBackendEnum.FLASHINFER
+            if flashinfer
+            else AttentionBackendEnum.FLASH_ATTN
+        )
         cu_seqlens = np.concatenate([[0], np.cumsum(seq_lens)]).astype(np.int32)
         cu_seqlens = np.concatenate(
             [cu_seqlens, np.full(pad_to - len(seq_lens), cu_seqlens[-1], np.int32)]
         )
         return MMEncoderAttention.maybe_recompute_cu_seqlens(
-            AttentionBackendEnum.FLASHINFER,
+            backend,
             cu_seqlens,
             self.HIDDEN_SIZE,
             1,
@@ -1557,51 +1564,7 @@ class TestFlashInferCuSeqlensPadding:
         )
 
     @staticmethod
-    def _halves(cu_seqlens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        # Same split as flashinfer_wrapper in vit_attn_wrappers.py.
-        mid = len(cu_seqlens) // 2
-        return cu_seqlens[:mid], cu_seqlens[mid:]
-
-    def test_replay_keeps_qko_and_v_offsets(self):
-        from vllm.model_executor.models.qwen2_5_vl import (
-            _pad_flashinfer_cu_seqlens_buffer,
-        )
-
-        # Capture is sized for 16 frames (bucket 16); one 49-token image
-        # replayed with a max batch size of 2 pads to bucket 8.
-        capture = self._flashinfer_cu_seqlens([49] * 16, pad_to=16)
-        replay = self._flashinfer_cu_seqlens([49], pad_to=2)
-        assert len(capture) > len(replay)
-
-        buf = torch.full_like(capture, -1)
-        _pad_flashinfer_cu_seqlens_buffer(buf, replay)
-
-        want_qko, want_v = self._halves(replay)
-        got_qko, got_v = self._halves(buf)
-        n = len(want_qko)
-        assert torch.equal(got_qko[:n], want_qko)
-        assert torch.equal(got_v[:n], want_v)
-        # Padded sequences have zero length in both halves.
-        assert torch.all(got_qko[n:] == want_qko[-1])
-        assert torch.all(got_v[n:] == want_v[-1])
-
-    def test_default_copy_misaligns_v_offsets(self):
-        capture = self._flashinfer_cu_seqlens([49] * 16, pad_to=16)
-        replay = self._flashinfer_cu_seqlens([49], pad_to=2)
-
-        buf = torch.full_like(capture, -1)
-        EncoderCudaGraphManager._copy_padded_buffer(buf, replay)
-
-        _, want_v = self._halves(replay)
-        _, got_v = self._halves(buf)
-        assert not torch.equal(got_v[: len(want_v)], want_v)
-
-    @pytest.mark.parametrize("flashinfer", [True, False])
-    def test_qwen3_vl_registers_cu_seqlens_padding(self, flashinfer: bool):
-        from vllm.model_executor.models.qwen2_5_vl import (
-            _pad_cumulative_seqlens_buffer,
-            _pad_flashinfer_cu_seqlens_buffer,
-        )
+    def _qwen3_vl_padding_fn(flashinfer: bool):
         from vllm.model_executor.models.qwen3_vl import (
             Qwen3VLForConditionalGeneration,
         )
@@ -1620,9 +1583,44 @@ class TestFlashInferCuSeqlensPadding:
         config = Qwen3VLForConditionalGeneration.get_encoder_cudagraph_config(
             cast(Any, model)
         )
-        want = (
-            _pad_flashinfer_cu_seqlens_buffer
-            if flashinfer
-            else _pad_cumulative_seqlens_buffer
+        # Same lookup as EncoderCudaGraphManager replay.
+        return config.padding_logics.get(
+            "cu_seqlens", EncoderCudaGraphManager._copy_padded_buffer
         )
-        assert config.padding_logics == {"cu_seqlens": want}
+
+    # (seq_lens, replay batch size, capture batch size). The FlashInfer batch
+    # buckets are 8, 16, 32 and 64.
+    CASES = [
+        ([49], 2, 16),  # bucket 8 replayed into bucket 16
+        ([49, 196], 2, 16),
+        ([64] * 9, 9, 32),  # bucket 16 replayed into bucket 32
+        ([49] * 3, 3, 8),  # same bucket
+    ]
+
+    @pytest.mark.parametrize("flashinfer", [True, False])
+    @pytest.mark.parametrize(("seq_lens", "replay_batch", "capture_batch"), CASES)
+    def test_replay_padding_matches_capture_size_metadata(
+        self,
+        flashinfer: bool,
+        seq_lens: list[int],
+        replay_batch: int,
+        capture_batch: int,
+    ):
+        capture = self._cu_seqlens(flashinfer, [49] * capture_batch, capture_batch)
+        replay = self._cu_seqlens(flashinfer, seq_lens, replay_batch)
+        want = self._cu_seqlens(flashinfer, seq_lens, capture_batch)
+        assert want.shape == capture.shape
+
+        buf = torch.full_like(capture, -1)
+        self._qwen3_vl_padding_fn(flashinfer)(buf, replay)
+        assert torch.equal(buf, want)
+
+    @pytest.mark.parametrize("flashinfer", [True, False])
+    def test_default_copy_breaks_capture_size_metadata(self, flashinfer: bool):
+        capture = self._cu_seqlens(flashinfer, [49] * 16, 16)
+        replay = self._cu_seqlens(flashinfer, [49], 2)
+        want = self._cu_seqlens(flashinfer, [49], 16)
+
+        buf = torch.full_like(capture, -1)
+        EncoderCudaGraphManager._copy_padded_buffer(buf, replay)
+        assert not torch.equal(buf, want)
