@@ -160,8 +160,6 @@ The floor never relaxes a constraint the request would already receive: tools th
 
 ## Automatic Function Calling
 
-Engine-based tool parsers, such as `qwen3_coder`, preserve assistant prose before, between, and after tool calls in non-streaming responses. The prose is returned in `message.content`, alongside the parsed calls in `message.tool_calls`.
-
 To enable this feature, you should set the following flags:
 
 * `--enable-auto-tool-choice` -- **mandatory** Auto tool choice. It tells vLLM that you want to enable the model to generate its own tool calls when it
@@ -174,6 +172,8 @@ that contain previously generated tool calls. Hermes, Mistral and Llama models h
 `tokenizer_config.json` files, but you can specify a custom template. This argument can be set to `tool_use` if your model has a tool use-specific chat
 template configured in the `tokenizer_config.json`. In this case, it will be used per the `transformers` specification. More on this [here](https://huggingface.co/docs/transformers/en/chat_templating#why-do-some-models-have-multiple-templates)
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json).
+
+With `qwen3_coder` and other engine-based tool parsers that keep assistant text in streaming responses, non-streaming responses return text written before, between, and after tool calls in `message.content`, next to the parsed calls in `message.tool_calls`. Some parsers, such as `deepseek_v4`, drop text that follows a tool call.
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
 
