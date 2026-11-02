@@ -19,6 +19,10 @@ import torch
 
 from vllm.compilation.cudagraph_pool import capture_pool
 from vllm.config import CUDAGraphMode, VllmConfig
+from vllm.config.compilation import (
+    decode_cudagraph_capture_max_tokens,
+    decode_cudagraph_capture_shapes,
+)
 from vllm.logger import init_logger
 from vllm.models.deepseek_v41.compressor import CompressorMetadataBuilder
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
@@ -26,7 +30,6 @@ from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferSparseMLAMetadataBuilder,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import current_stream
 from vllm.v1.attention.backends.mla.sparse_indexer import (
     DeepseekV41SparseIndexerMetadataBuilder,
@@ -99,23 +102,22 @@ class AttnMetadataCudaGraphs:
         """The keys of the decode steps the FULL decode graphs serve, largest
         first.
 
-        As in ``CudaGraphManager``, each capture size rounds up to whole
-        requests of the decode query length, and a step runs the smallest graph
-        that holds its requests.
+        The graphs are the ones ``CudaGraphManager`` captures, and a step runs
+        the smallest graph that holds its requests. Under dynamic speculative
+        decoding only the widest query length is recorded; steps of the
+        narrower tiers build their metadata eagerly.
         """
         config = self._vllm_config.compilation_config
         query_len = self._decode_query_len
-        max_tokens = min(
-            self._vllm_config.scheduler_config.max_num_seqs * query_len,
-            config.max_cudagraph_capture_size,
-        )
-        graph_reqs = sorted(
-            {
-                round_up(size, query_len) // query_len
-                for size in config.cudagraph_capture_sizes or ()
-                if round_up(size, query_len) <= max_tokens
-            }
-        )
+        max_reqs = self._vllm_config.get_decode_cudagraph_query_lens(query_len)
+        graph_reqs = [
+            n
+            for n, _ in decode_cudagraph_capture_shapes(
+                config.decode_cudagraph_capture_request_sizes or (),
+                {query_len: max_reqs.get(query_len, 0)},
+                decode_cudagraph_capture_max_tokens(config),
+            )
+        ]
         keys: list[GraphKey] = []
         num_reqs = 1
         for padded in graph_reqs:

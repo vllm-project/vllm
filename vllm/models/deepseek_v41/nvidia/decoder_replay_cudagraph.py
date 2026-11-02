@@ -46,9 +46,13 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
             )
         compilation.cudagraph_capture_sizes = sizes
         compilation.max_cudagraph_capture_size = max(sizes)
+        compilation.prefill_cudagraph_capture_token_sizes = sizes
+        compilation.decode_cudagraph_capture_request_sizes = []
         replay_config = copy(vllm_config)
         replay_config.compilation_config = compilation
-        super().__init__(replay_config, device, CUDAGraphMode.PIECEWISE, 1)
+        super().__init__(
+            replay_config, device, CUDAGraphMode.PIECEWISE, {1: scheduler.max_num_seqs}
+        )
         self.layers = layers
         self.breakable_cg_runner: BreakableCUDAGraphWrapper = BreakableCUDAGraphWrapper(
             layers.run_layers, replay_config
