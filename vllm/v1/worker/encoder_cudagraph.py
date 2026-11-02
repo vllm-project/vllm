@@ -604,54 +604,64 @@ class EncoderCudaGraphManager:
 
         if num_items == 0:
             return []
-        # One replay per path: the smallest budget that holds the whole batch.
-        # A batch beyond the captured range runs eagerly in one forward.
-        fits = num_items <= self.max_batch_size
         # Largest items first: varlen attention schedules long sequences first,
         # which balances its tiles better on mixed batches.
-        batch_indices = sorted(
+        by_size = sorted(
             range(num_items), key=lambda i: per_item_out_tokens[i], reverse=True
         )
-        batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
-        graph_outputs: dict[str, torch.Tensor] = {}
-        all_eager = True
-
-        for path, tokens in per_item_path_tokens.items():
-            if sum(tokens) == 0:
-                continue
-
-            token_budget = (
-                self._path_fitting_budget(path, sum(tokens)) if fits else None
-            )
-            if token_budget is None:
-                with torch.inference_mode():
-                    output = self.model.encoder_eager_forward(
-                        batch_mm_kwargs, path=path
-                    )
-            else:
-                all_eager = False
-                graph_output = self._run_budget_graph(
-                    batch_mm_kwargs,
-                    token_budget,
-                    path=path,
-                    axis_keys=axis_keys,
-                )
-                assert graph_output is not None
-                output = graph_output
-            graph_outputs[path] = output
-
-        if all_eager:
-            self.graph_misses += num_items
+        graph_indices = [i for i in by_size if not item_specs[i].eager_only]
+        eager_indices = [i for i in by_size if item_specs[i].eager_only]
+        # One replay per path: the smallest budget that holds the whole batch.
+        # A batch beyond the captured range runs eagerly in one forward.
+        fits = len(graph_indices) <= self.max_batch_size
 
         outputs_by_orig_idx: dict[int, torch.Tensor] = {}
-        self.model.postprocess_encoder_output(
-            graph_outputs,
-            batch_indices,
-            per_item_out_tokens,
-            outputs_by_orig_idx,
-            clone=True,
-            batch_mm_kwargs=batch_mm_kwargs,
-        )
+        for batch_indices, use_graphs in (
+            (graph_indices, fits),
+            (eager_indices, False),
+        ):
+            if not batch_indices:
+                continue
+            batch_mm_kwargs, axis_keys = self._select_items(mm_kwargs, batch_indices)
+            graph_outputs: dict[str, torch.Tensor] = {}
+            all_eager = True
+
+            for path in paths:
+                path_tokens = sum(per_item_path_tokens[path][i] for i in batch_indices)
+                if path_tokens == 0:
+                    continue
+
+                token_budget = (
+                    self._path_fitting_budget(path, path_tokens) if use_graphs else None
+                )
+                if token_budget is None:
+                    with torch.inference_mode():
+                        output = self.model.encoder_eager_forward(
+                            batch_mm_kwargs, path=path
+                        )
+                else:
+                    all_eager = False
+                    graph_output = self._run_budget_graph(
+                        batch_mm_kwargs,
+                        token_budget,
+                        path=path,
+                        axis_keys=axis_keys,
+                    )
+                    assert graph_output is not None
+                    output = graph_output
+                graph_outputs[path] = output
+
+            if all_eager:
+                self.graph_misses += len(batch_indices)
+
+            self.model.postprocess_encoder_output(
+                graph_outputs,
+                batch_indices,
+                per_item_out_tokens,
+                outputs_by_orig_idx,
+                clone=True,
+                batch_mm_kwargs=batch_mm_kwargs,
+            )
         return [outputs_by_orig_idx[i] for i in range(num_items)]
 
     def _dp_shard(
