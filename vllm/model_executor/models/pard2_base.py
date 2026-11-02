@@ -18,7 +18,6 @@ import torch
 import torch.nn as nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.config.speculative import pard2_is_target_dependent
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
@@ -104,7 +103,9 @@ class Pard2ModelBase(nn.Module):
     def _init_target_projection(self, vllm_config: VllmConfig, prefix: str) -> None:
         # Target-independent mode drafts from embeddings alone, so there is no
         # projection to build and no warp_model.bin to require.
-        self.target_dependent = pard2_is_target_dependent(self.config)
+        self.target_dependent = bool(
+            getattr(self.config, "pard2_target_dependent", True)
+        )
         if not self.target_dependent:
             self.target_proj = None
             return

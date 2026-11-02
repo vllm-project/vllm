@@ -35,9 +35,7 @@ class Pard2SpeculatorConfig(DraftModelSpeculatorConfig):
     states through the ``target_proj`` shipped in the checkpoint."""
 
     base_method = "pard2"
-    speculator_class = (
-        "vllm.v1.worker.gpu.spec_decode.pard2.speculator.Pard2Speculator"
-    )
+    speculator_class = "vllm.v1.worker.gpu.spec_decode.pard2.speculator.Pard2Speculator"
     uses_target_hidden_states = True
 
     @classmethod

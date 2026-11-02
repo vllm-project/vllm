@@ -30,7 +30,6 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.config.speculative import pard2_is_target_dependent
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionCGSupport
@@ -56,8 +55,8 @@ class Pard2Speculator(DraftModelSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        self.target_dependent = pard2_is_target_dependent(
-            self.draft_model_config.hf_config
+        self.target_dependent = (
+            self.speculative_config.speculator_config.uses_target_hidden_states
         )
 
         # Fed to the draft as feat[t-1]; the draft projects it internally. Left
