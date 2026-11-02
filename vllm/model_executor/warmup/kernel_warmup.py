@@ -222,6 +222,31 @@ def _autotune_kimi_k3_kda_qkvg(model: torch.nn.Module) -> None:
         module.autotune_kda_qkvg(model)
 
 
+def run_jit_warmup_registry(worker: "Worker") -> None:
+    """Compile the kernels registered on the runner's JIT warmup registry.
+
+    Split out of `kernel_warmup` so the CPU worker, which does not run the rest
+    of it, can still drive the registry.
+    """
+    if not worker.vllm_config.kernel_config.enable_jit_warmup:
+        return
+    logger.info("JIT kernel warmup starting.")
+    jit_warmup_start = time.perf_counter()
+    try:
+        registry = worker.model_runner.jit_warmup_registry  # type: ignore[attr-defined]
+        registry.warmup()
+    except Exception:
+        logger.exception(
+            "JIT kernel warmup failed after %.2fs.",
+            time.perf_counter() - jit_warmup_start,
+        )
+        raise
+    logger.info(
+        "JIT kernel warmup finished in %.2fs.",
+        time.perf_counter() - jit_warmup_start,
+    )
+
+
 def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
     from vllm.model_executor.warmup.step5_dsa_warmup import step5_dsa_warmup
 
@@ -233,24 +258,7 @@ def kernel_warmup(worker: "Worker", *, process_local_only: bool = False):
             zeroer.warmup(worker.model_runner.kv_cache_config.num_blocks)
 
     enable_jit_warmup = worker.vllm_config.kernel_config.enable_jit_warmup
-    if enable_jit_warmup:
-        logger.info("JIT kernel warmup starting.")
-        jit_warmup_start = time.perf_counter()
-        try:
-            registry = (
-                worker.model_runner.jit_warmup_registry  # type: ignore[attr-defined]
-            )
-            registry.warmup()
-        except Exception:
-            logger.exception(
-                "JIT kernel warmup failed after %.2fs.",
-                time.perf_counter() - jit_warmup_start,
-            )
-            raise
-        logger.info(
-            "JIT kernel warmup finished in %.2fs.",
-            time.perf_counter() - jit_warmup_start,
-        )
+    run_jit_warmup_registry(worker)
 
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
     qwen_vl_triton_warmup(worker.model_runner)

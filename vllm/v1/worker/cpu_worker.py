@@ -276,11 +276,18 @@ class CPUWorker(Worker):
         # their Triton JIT lands in the first request's TTFT.
         kernel_config = self.vllm_config.kernel_config
         if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
+            from vllm.model_executor.warmup.kernel_warmup import (
+                run_jit_warmup_registry,
+            )
+
             if current_platform.uses_standalone_cpu_model_runner():
                 from vllm.v1.worker.cpu.warmup import warmup_kernels
             else:
                 from vllm.v1.worker.gpu.warmup import warmup_kernels
 
+            # CPU does not run kernel_warmup(), whose GPU-specific autotuning
+            # does not apply, so the registry is driven directly.
+            run_jit_warmup_registry(self)
             warmup_kernels(
                 self.model_runner,
                 self.execute_model,
