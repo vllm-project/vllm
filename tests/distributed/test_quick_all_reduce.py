@@ -759,6 +759,8 @@ def dp_moe_combine_quickreduce(
         assert dp.device_communicator.qr_comm is None
         comm = dp.device_communicator.moe_qr_comm
         assert comm is not None and not comm.disabled
+        # Groups of 4 and 8 keep AITER's reduce-scatter below a few MB.
+        assert comm.qr_min_size == {4: 4 << 20, 8: 8 << 20}.get(data_parallel_size)
 
         # [world * tokens, hidden] gathered MoE output, as combine receives it.
         tokens, hidden = 1024, 5120
@@ -785,14 +787,21 @@ def dp_moe_combine_quickreduce(
     not current_platform.is_rocm(), reason="only test quick allreduce for rocm"
 )
 @pytest.mark.parametrize("quant_mode", ["FP", "INT4"])
-def test_dp_moe_combine_quick_reduce(monkeypatch: pytest.MonkeyPatch, quant_mode):
+@pytest.mark.parametrize("data_parallel_size", [2, 4])
+def test_dp_moe_combine_quick_reduce(
+    monkeypatch: pytest.MonkeyPatch, quant_mode, data_parallel_size
+):
     """The opt-in DP MoE combine matches the RCCL reduce-scatter."""
-    if torch.accelerator.device_count() < 2:
+    if torch.accelerator.device_count() < data_parallel_size:
         pytest.skip("Not enough GPUs to run the test.")
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", quant_mode)
     monkeypatch.setenv("VLLM_ROCM_DP_MOE_QUICK_REDUCE", "1")
     multi_process_parallel(
-        monkeypatch, 1, 1, dp_moe_combine_quickreduce, data_parallel_size=2
+        monkeypatch,
+        1,
+        1,
+        dp_moe_combine_quickreduce,
+        data_parallel_size=data_parallel_size,
     )
 
 

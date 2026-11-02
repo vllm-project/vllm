@@ -1428,7 +1428,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # QuickReduce all-reduce over the DP group plus this rank's slice instead
     # of an RCCL reduce-scatter. The codec is VLLM_ROCM_QUICK_REDUCE_QUANTIZATION
     # (INT4 recommended); tensors QuickReduce cannot take keep the
-    # reduce-scatter. Faster on 2-GPU MI355X pairs; lossy with a quantized codec.
+    # reduce-scatter. On MI355X it is faster for DP groups of 2, 4 and 8 once the
+    # gathered output is a few MB (smaller tensors keep AITER's reduce-scatter on
+    # groups of 4 and 8); lossy with a quantized codec.
     "VLLM_ROCM_DP_MOE_QUICK_REDUCE": lambda: (
         os.getenv("VLLM_ROCM_DP_MOE_QUICK_REDUCE", "0").lower() in ("true", "1")
     ),

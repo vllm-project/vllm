@@ -27,6 +27,12 @@ from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
 
+# Below these gathered-output sizes AITER's custom reduce-scatter beats QuickReduce
+# (MI355X, benchmarks/kernels/benchmark_device_communicators.py), so the DP MoE
+# combine keeps it there. A 2-rank group wins at every size QuickReduce accepts.
+# VLLM_ROCM_QUICK_REDUCE_MIN_SIZE_BYTES_MB overrides these.
+_DP_MOE_QR_MIN_SIZE = {4: 4 << 20, 8: 8 << 20}
+
 # Since NCCL 2.29.2, ncclSymkPickKernel accepts registered input with
 # non-registered output for ReduceScatter (ncclSymSendRegRecvNonreg).
 NCCL_DIRECT_SYMM_RS_OUTPUT_MIN_VERSION = 22902
@@ -209,6 +215,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.moe_qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
             if self.moe_qr_comm.disabled:
                 self.moe_qr_comm = None
+            elif self.moe_qr_comm.qr_min_size is None:
+                min_size = _DP_MOE_QR_MIN_SIZE.get(self.world_size)
+                if min_size is not None and min_size <= self.moe_qr_comm.qr_max_size:
+                    self.moe_qr_comm.qr_min_size = min_size
 
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()
