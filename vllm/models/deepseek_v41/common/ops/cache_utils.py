@@ -806,14 +806,28 @@ def dequantize_and_gather_k_cache(
     """Dequantize and gather a paged DSv4 K cache.
 
     The record is read off ``k_cache.shape[-1]``; see the module header. Only
-    the fp8 records have a CuteDSL gather, so NVFP4 always takes the Triton
-    path.
+    the FP8 records have a CuteDSL gather. BI NVFP4 uses native CUDA; the
+    default NVFP4 path uses Triton.
 
     ``use_fnuz`` MUST match the encoder of the specific cache being read:
     ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
     ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
+    from vllm import envs
+
+    if (
+        envs.VLLM_BATCH_INVARIANT
+        and current_platform.is_cuda()
+        and k_cache.shape[-1] == V41_NVFP4_BYTES_PER_TOKEN
+    ):
+        from vllm.model_executor.kernels.batch_invariant import dequant_gather_nvfp4
+
+        dequant_gather_nvfp4(
+            k_cache, seq_lens, gather_lens, block_table, block_size, offset, out
+        )
+        return
+
     if has_cutedsl() and k_cache.shape[-1] != V41_NVFP4_BYTES_PER_TOKEN:
         # lazily import, otherwise some tests fail due to CUDA driver init failure.
         from vllm.models.deepseek_v4.nvidia.ops.dequant_gather_k_cutedsl import (

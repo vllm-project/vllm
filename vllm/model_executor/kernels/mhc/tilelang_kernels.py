@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 
+from vllm import envs
 from vllm.model_executor.warmup.jit_warmup import WarmupIntRange, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_tilelang_helper import (
     TileLangLaunchSpec,
@@ -43,6 +44,8 @@ def _is_collapse_thread():
 
 @cache
 def compute_num_split(block_k: int, k: int | None, grid_size: int) -> int:
+    if envs.VLLM_BATCH_INVARIANT:
+        grid_size = 1
     device_props = torch.cuda.get_device_properties(0)
     n_sms = device_props.multi_processor_count
     split_k = n_sms // grid_size
@@ -76,6 +79,10 @@ def _fused_post_pre_single_pass_supported() -> bool:
     return current_platform.is_cuda() and current_platform.has_device_capability(100)
 
 
+_BI_FUSED_POST_PRE_TILE_N = 12
+_BI_FUSED_POST_PRE_TOKENS = 2
+
+
 def mhc_fused_post_pre_split_config(
     num_tokens: int, hidden_size: int, hc_mult: int
 ) -> tuple[int, int, int] | None:
@@ -86,11 +93,15 @@ def mhc_fused_post_pre_split_config(
     fused kernel's block. One source of truth for the dispatch decision, the
     compile key and the launch, which must agree.
     """
-    if num_tokens > _FUSED_POST_PRE_MAX_TOKENS:
+    bi = envs.VLLM_BATCH_INVARIANT
+    if num_tokens > _FUSED_POST_PRE_MAX_TOKENS and not bi:
         return None
     tile_n, n_splits, n_thr = _FUSED_POST_PRE_SINGLE_PASS
+    # Not under BI: a row's bits depend on n_splits and n_thr, so every batch
+    # size must share them.
     if (
-        num_tokens <= _FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS
+        not bi
+        and num_tokens <= _FUSED_POST_PRE_SINGLE_PASS_MAX_TOKENS
         and hidden_size == n_splits * n_thr
         and (hc_mult * (hc_mult + 2)) % tile_n == 0
         and _fused_post_pre_single_pass_supported()
@@ -104,8 +115,12 @@ def mhc_fused_post_pre_split_config(
     # against a split-k GEMM given the split its own estimator computes.
     if num_tokens < 16:
         tile_n, n_splits = 2, 8
-    else:
+    elif not bi:
         tile_n, n_splits = 6, 8
+    else:
+        # BI fuses at every size. A row's bits depend on n_thr and n_splits
+        # only; tile_n just sets how many outputs share one residual read.
+        tile_n, n_splits = _BI_FUSED_POST_PRE_TILE_N, 8
     # The kernel drops projection tiles and k-slices it cannot fill evenly.
     mix_size = hc_mult * (hc_mult + 2)
     while tile_n > 1 and mix_size % tile_n:
@@ -113,6 +128,14 @@ def mhc_fused_post_pre_split_config(
     while n_splits > 1 and hidden_size % (n_splits * n_thr):
         n_splits //= 2
     return tile_n, n_splits, n_thr
+
+
+def mhc_fused_tokens_per_block(num_tokens: int) -> int:
+    """Tokens per block of the fused mHC kernel: >1 only under batch invariance,
+    where the multi-token kernel keeps the single-token kernel's bits."""
+    if envs.VLLM_BATCH_INVARIANT and num_tokens >= 16:
+        return _BI_FUSED_POST_PRE_TOKENS
+    return 1
 
 
 def require_fused_post_pre_config(
@@ -805,6 +828,136 @@ def mhc_fused_tilelang(
                 for w in T.unroll(num_warps):
                     v2 += s_warp[w, tile_n]
                 rp_out[i_ks, i_n] = v2
+
+        if ENABLE_PDL:
+            T.pdl_trigger()
+
+
+@tilelang_jit
+def mhc_fused_multi_tilelang(
+    comb_mix,
+    residual_in,
+    post_mix,
+    x_in,
+    weight_t,
+    yp_out,
+    rp_out,
+    residual_out,
+    hc: int,
+    hidden: int,
+    n_out: int,
+    n_thr: int = 128,
+    tile_n: int = 12,
+    tok: int = 4,
+) -> tilelang.JITKernel:
+    """``mhc_fused_tilelang`` for ``tok`` tokens per block (batch invariance).
+
+    Each block loads its weight slice once for ``tok`` tokens; every output
+    keeps the single-token kernel's arithmetic (per-thread FMA chain over the
+    same h indices, warp reduce, cross-warp sum in warp order), so its bits
+    match ``mhc_fused_tilelang`` with the same ``n_thr`` and split count.
+    """
+    m = T.dynamic("num_tokens")
+    split_k = T.dynamic("split_k")
+    h = hidden
+    h_per_split = h // split_k
+    n_tiles = n_out // tile_n
+
+    comb_mix: T.Tensor((m, hc, hc), T.float32)  # type: ignore[no-redef, valid-type]
+    residual_in: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    post_mix: T.Tensor((m, hc), T.float32)  # type: ignore[no-redef, valid-type]
+    x_in: T.Tensor((m, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+    weight_t: T.Tensor((n_out, hc, h), T.float32)  # type: ignore[no-redef, valid-type]
+    yp_out: T.Tensor((split_k, m, n_out), T.float32)  # type: ignore[no-redef, valid-type]
+    rp_out: T.Tensor((split_k, m), T.float32)  # type: ignore[no-redef, valid-type]
+    residual_out: T.Tensor((m, hc, h), T.bfloat16)  # type: ignore[no-redef, valid-type]
+
+    h_iters = h_per_split // n_thr
+    num_warps = n_thr // 32
+
+    with T.Kernel(T.ceildiv(m, tok), n_tiles, split_k, threads=n_thr) as (
+        i_b,
+        i_nt,
+        i_ks,
+    ):
+        tid = T.get_thread_binding()
+        warp_id = tid // 32
+        lane = tid % 32
+
+        s_warp = T.alloc_shared((num_warps, tok, tile_n + 1), T.float32)
+        s_post = T.alloc_shared((tok, hc), T.float32)
+        s_comb = T.alloc_shared((tok, hc, hc), T.float32)
+
+        acc = T.alloc_local((tok, tile_n), T.float32)
+        sqr = T.alloc_local((tok,), T.float32)
+        wv = T.alloc_local((tile_n, hc), T.float32)
+        new_r = T.alloc_local((hc,), T.float32)
+
+        T.clear(acc)
+        T.clear(sqr)
+        h_split_start = i_ks * h_per_split
+
+        if ENABLE_PDL:
+            T.pdl_sync()
+
+        for t in T.serial(tok):
+            if i_b * tok + t < m:
+                if tid < hc:
+                    s_post[t, tid] = post_mix[i_b * tok + t, tid]
+                if tid < hc * hc:
+                    s_comb[t, tid // hc, tid % hc] = comb_mix[
+                        i_b * tok + t, tid // hc, tid % hc
+                    ]
+        T.sync_threads()
+
+        for it in T.serial(h_iters):
+            h_idx = h_split_start + it * n_thr + tid
+            for n in T.unroll(tile_n):
+                for j in T.unroll(hc):
+                    wv[n, j] = weight_t[i_nt * tile_n + n, j, h_idx]
+            for t in T.unroll(tok):
+                if i_b * tok + t < m:
+                    for j in T.unroll(hc):
+                        new_r[j] = s_post[t, j] * x_in[i_b * tok + t, h_idx]
+                        for k in T.unroll(hc):
+                            new_r[j] += (
+                                s_comb[t, k, j] * residual_in[i_b * tok + t, k, h_idx]
+                            )
+                    if i_nt == 0:
+                        for j in T.unroll(hc):
+                            residual_out[i_b * tok + t, j, h_idx] = new_r[j]
+                            sqr[t] += new_r[j] * new_r[j]
+                    for n in T.unroll(tile_n):
+                        for j in T.unroll(hc):
+                            acc[t, n] += wv[n, j] * new_r[j]
+
+        for t in T.unroll(tok):
+            for n in T.unroll(tile_n):
+                acc[t, n] = T.warp_reduce_sum(acc[t, n])
+            if i_nt == 0:
+                sqr[t] = T.warp_reduce_sum(sqr[t])
+
+        if lane == 0:
+            for t in T.unroll(tok):
+                for n in T.unroll(tile_n):
+                    s_warp[warp_id, t, n] = acc[t, n]
+                if i_nt == 0:
+                    s_warp[warp_id, t, tile_n] = sqr[t]
+        T.sync_threads()
+
+        if warp_id == 0:
+            for t in T.serial(tok):
+                if i_b * tok + t < m:
+                    if lane < tile_n:
+                        v = T.alloc_var(T.float32, init=0.0)
+                        for w in T.unroll(num_warps):
+                            v += s_warp[w, t, lane]
+                        yp_out[i_ks, i_b * tok + t, i_nt * tile_n + lane] = v
+                    if i_nt == 0 and lane == 0:
+                        v2 = T.alloc_var(T.float32, init=0.0)
+                        for w in T.unroll(num_warps):
+                            v2 += s_warp[w, t, tile_n]
+                        rp_out[i_ks, i_b * tok + t] = v2
 
         if ENABLE_PDL:
             T.pdl_trigger()
@@ -1692,9 +1845,12 @@ class MhcFusedTileLangKernel(
         n_splits: int
         tile_n: int
         n_thr: int
+        tok: int = 1
 
     @staticmethod
-    def kernel() -> Any:
+    def kernel(compile_key: CompileKey | None = None) -> Any:
+        if compile_key is not None and compile_key.tok > 1:
+            return mhc_fused_multi_tilelang
         return mhc_fused_tilelang
 
     def dispatch(  # type: ignore[override]
@@ -1707,12 +1863,14 @@ class MhcFusedTileLangKernel(
         # Subscripts rather than an unpack: the warmup tracer parses this body
         # and allows only plain assignments before the return.
         config = require_fused_post_pre_config(num_tokens, hidden_size, hc_mult)
+        tok = mhc_fused_tokens_per_block(num_tokens)
         return self.CompileKey(
             hidden_size=hidden_size,
             hc_mult=hc_mult,
             n_splits=config[1],
             tile_n=config[0],
             n_thr=config[2],
+            tok=tok,
         )
 
     def get_warmup_keys(
@@ -1727,7 +1885,9 @@ class MhcFusedTileLangKernel(
             num_tokens=WarmupIntRange(1, max_tokens + 1),
             hidden_size=hidden_size,
             hc_mult=hc_mult,
-            _when=lambda *, num_tokens: num_tokens <= _FUSED_POST_PRE_MAX_TOKENS,
+            _when=lambda *, num_tokens: (
+                num_tokens <= _FUSED_POST_PRE_MAX_TOKENS or envs.VLLM_BATCH_INVARIANT
+            ),
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
@@ -1740,6 +1900,7 @@ class MhcFusedTileLangKernel(
             t
             for t in range(1, _FUSED_POST_PRE_MAX_TOKENS + 1)
             if mhc_fused_post_pre_split_config(t, hidden_size, hc_mult) == config
+            and mhc_fused_tokens_per_block(t) == compile_key.tok
         )
         hc_mult3 = hc_mult * (2 + hc_mult)
         comb_mix = make_tilelang_warmup_tensor(
@@ -1780,13 +1941,23 @@ class MhcFusedTileLangKernel(
         tile_n, n_splits, n_thr = require_fused_post_pre_config(
             num_tokens, hidden_size, hc_mult
         )
+        tok = mhc_fused_tokens_per_block(num_tokens)
         yp_out = residual_in.new_empty(
             (n_splits, num_tokens, hc_mult3), dtype=torch.float32
         )
         rp_out = residual_in.new_empty((n_splits, num_tokens), dtype=torch.float32)
         residual_out = residual_in.new_empty(residual_in.shape)
+        kernel_args = (
+            (
+                self.dispatch(
+                    num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=hc_mult
+                ),
+            )
+            if tok > 1
+            else ()
+        )
         return (
-            (),
+            kernel_args,
             (
                 comb_mix,
                 residual_in,
@@ -1800,7 +1971,7 @@ class MhcFusedTileLangKernel(
                 hidden_size,
                 hc_mult3,
             ),
-            dict(n_thr=n_thr, tile_n=tile_n),
+            dict(n_thr=n_thr, tile_n=tile_n, **({"tok": tok} if tok > 1 else {})),
             (yp_out, rp_out, residual_out),
         )
 

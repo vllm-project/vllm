@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, cast
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_tp_group
 from vllm.logger import init_logger
@@ -44,6 +45,9 @@ _all_reduce_mhc: "AllReduceMHC | None" = None
 
 def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
     """Check kernel requirements and safety of sharing the coefficient stream."""
+    if envs.VLLM_BATCH_INVARIANT:
+        # FULL-graph-only route; BI keeps every M on the TileLang mHC.
+        return False
     config = vllm_config.model_config.hf_config
     # DeepGEMM's prenorm kernel requires K % 64 == 0, N % 8 == 0, and N <= 32.
     mix_size = config.hc_mult * (config.hc_mult + 2)
@@ -58,6 +62,8 @@ def supports_mhc_overlap(vllm_config: VllmConfig) -> bool:
 
 
 def supports_mhc_all_reduce(vllm_config: VllmConfig) -> bool:
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
     parallel = vllm_config.parallel_config
     config = vllm_config.model_config.hf_config
     if (
