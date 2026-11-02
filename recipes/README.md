@@ -9,9 +9,10 @@ The site, the command builder, and the JSON API are built by
 [vllm-project/recipes](https://github.com/vllm-project/recipes). That
 repository owns the schema and the shared vocabulary (hardware profiles,
 serving strategies, KV-offload deployments) and pins this directory to a
-commit. Omni (image, video, audio) recipes stay in vllm-project/recipes for
-now (moving to vllm-omni), and Ascend NPU content is inline in these recipes
-(moving to vllm-ascend overlays).
+commit. Omni (image, video, audio) recipes live in vllm-project/vllm-omni, and
+Ascend NPU content lives in vllm-project/vllm-ascend as overlays that merge into
+these recipes when the site is built. Don't add Ascend hardware here: open those
+changes against `recipes/overlays/` in vllm-ascend.
 
 ## Editing a recipe
 
