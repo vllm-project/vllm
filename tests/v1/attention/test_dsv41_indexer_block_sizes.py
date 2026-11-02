@@ -11,6 +11,7 @@ Platform._preferred_block_size_for_backends for the full DSv4.1 backend set.
 from types import SimpleNamespace
 
 import pytest
+
 from vllm.models.deepseek_v41.compressor import CompressorBackend
 from vllm.models.deepseek_v41.nvidia.flashinfer_sparse import (
     DeepseekSparseSWAFlashInferBackend,
