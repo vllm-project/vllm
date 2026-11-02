@@ -244,6 +244,27 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/umbp_integration
 
+- label: ":amd: (MI355) UMBP Connector TP2 Integration"
+  key: amd-umbp-connector-tp2-integration-mi355
+  dind: false
+  device: mi355_2
+  num_devices: 2
+  timeout_in_minutes: 20
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - tests/v1/kv_connector/umbp_integration/
+  - tests/v1/kv_connector/umbp_test_utils.py
+  - tests/v1/kv_connector/conftest.py
+  - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+  - docker/Dockerfile.rocm_base
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs "v1/kv_connector/umbp_integration/test_mori_token_e2e.py::test_restore_matches_recompute[tp2]"
+
 # Single-node MoRIIO P/D on dummy weights, WRITE and READ mode: prefill and
 # decode on separate GPUs over xGMI, compared exactly against a direct serve.
 # Disabled until the KV connectors installation is locked.
