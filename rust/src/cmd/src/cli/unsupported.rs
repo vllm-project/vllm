@@ -242,36 +242,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub reasoning_parser_plugin: Option<Unsupported>,
 
-    /// Rank of the data parallel group.
-    #[arg(long, env = "VLLM_DP_RANK")]
-    pub data_parallel_rank: Option<Unsupported>,
-
-    /// Whether to use "hybrid" DP LB mode. Applies only to online serving
-    /// and when data_parallel_size > 0. Enables running an AsyncLLM
-    /// and API server on a "per-node" basis where vLLM load balances
-    /// between local data parallel ranks, but an external LB balances
-    /// between vLLM nodes/replicas. Set explicitly in conjunction with
-    /// --data-parallel-start-rank.
-    #[arg(
-        long,
-        visible_alias = "no-data-parallel-hybrid-lb",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub data_parallel_hybrid_lb: Option<Unsupported>,
-
-    /// Whether to use "external" DP LB mode. Applies only to online serving
-    /// and when data_parallel_size > 0. This is useful for a "one-pod-per-rank"
-    /// wide-EP setup in Kubernetes. Set implicitly when --data-parallel-rank
-    /// is provided explicitly to vllm serve.
-    #[arg(
-        long,
-        visible_alias = "no-data-parallel-external-lb",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub data_parallel_external_lb: Option<Unsupported>,
-
     /// Enable fault tolerance for detailed error recovery, such as scaling
     /// down fault DPEngineCore.
     #[arg(
@@ -374,10 +344,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub max_num_queued_tokens: Option<Unsupported>,
 
-    /// Structured outputs configuration.
-    #[arg(long)]
-    pub structured_outputs_config: Option<Noop>,
-
     /// Log aggregate rather than per-engine statistics when using data
     /// parallelism.
     #[arg(long, default_missing_value = "true", num_args = 0..=1)]
@@ -413,17 +379,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub response_role: Option<Unsupported>,
 
-    /// When `--max-logprobs` is specified, represents single tokens as
-    /// strings of the form 'token_id:{token_id}' so that tokens that are not
-    /// JSON-encodable can be identified.
-    #[arg(
-        long,
-        visible_alias = "no-return-tokens-as-token-ids",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub return_tokens_as_token_ids: Option<Unsupported>,
-
     /// Enable auto tool choice for supported models. Use `--tool-call-parser`
     /// to specify which parser to use.
     #[arg(
@@ -454,11 +409,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long, /* env = "VLLM_LOGGING_CONFIG_PATH" */)]
     pub log_config_file: Option<Unsupported>,
 
-    /// Max number of prompt characters or prompt ID numbers being printed in
-    /// log. The default of None means unlimited.
-    #[arg(long)]
-    pub max_log_len: Option<Unsupported>,
-
     /// If set to True, enable tracking server_load_metrics in the app state.
     #[arg(
         long,
@@ -476,27 +426,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_force_include_usage: Option<Unsupported>,
-
-    /// If set to True, log model outputs (generations).
-    /// Requires `--enable-log-requests`. As with `--enable-log-requests`,
-    /// information is only logged at INFO level at maximum.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-outputs",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_outputs: Option<Unsupported>,
-
-    /// If set to False, output deltas will not be logged. Relevant only if
-    /// --enable-log-outputs is set.
-    #[arg(
-        long,
-        visible_alias = "no-enable-log-deltas",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_log_deltas: Option<Unsupported>,
 
     /// If set to True, log the stack trace of error responses
     #[arg(
@@ -531,23 +460,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub uvicorn_log_level: Option<Unsupported>,
 
-    /// Disable uvicorn access log.
-    #[arg(
-        long,
-        visible_alias = "no-disable-uvicorn-access-log",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub disable_uvicorn_access_log: Option<Noop>,
-
-    /// Comma-separated list of endpoint paths to exclude from uvicorn access
-    /// logs. This is useful to reduce log noise from high-frequency endpoints
-    /// like health checks. Example: "/health,/metrics,/ping".
-    /// When set, access logs for requests to these paths will be suppressed
-    /// while keeping logs for other endpoints.
-    #[arg(long)]
-    pub disable_access_log_for_endpoints: Option<Noop>,
-
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
         long,
@@ -556,10 +468,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_ssl_refresh: Option<Unsupported>,
-
-    /// FastAPI root_path when app is behind a path based routing proxy.
-    #[arg(long)]
-    pub root_path: Option<Unsupported>,
 
     /// Additional ASGI middleware to apply to the app. We accept multiple
     /// --middleware arguments. The value should be an import path. If a

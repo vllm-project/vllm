@@ -17,7 +17,6 @@ from vllm.entrypoints.generate.base.protocol import (
     FunctionCall,
     PerRequestMetrics,
     RequestResponseMetadata,
-    ToolCall,
 )
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
@@ -27,11 +26,13 @@ from vllm.entrypoints.generate.base.serving import (
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
+from vllm.entrypoints.openai.chat_completion.message_assembly import (
+    assemble_chat_message_fields,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
     ChatCompletionLogProbsContent,
-    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionResponse,
     ChatCompletionResponseChoice,
@@ -52,7 +53,6 @@ from vllm.entrypoints.serve.engine.protocol import (
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
-    maybe_filter_parallel_tool_calls,
     resolve_finish_reason,
 )
 from vllm.exceptions import GenerationError
@@ -65,7 +65,6 @@ from vllm.parser.abstract_parser import Parser
 from vllm.renderers.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
-    make_tool_call_id,
 )
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -202,6 +201,7 @@ class OpenAIServingChat(GenerateBaseServing):
             request.build_chat_params(
                 self.chat_template,
                 self.chat_template_content_format,
+                self.online_renderer.reasoning_effort_map,
             )
             .with_defaults(self.default_chat_template_kwargs)
             .chat_template_kwargs
@@ -445,12 +445,11 @@ class OpenAIServingChat(GenerateBaseServing):
     def _create_chat_message(self, *args: Any, **kwargs: Any) -> ChatMessage:
         """Construct the response :class:`ChatMessage` for the non-streaming path.
 
-        The full-generator calls this at every construction site so
-        subclasses can swap in a specialized :class:`ChatMessage`
-        subclass (e.g. :class:`CohereServingChatV2` returning
-        :class:`CohereChatMessage`) without duplicating the branchy
-        tool-choice / auto-tools logic that decides which fields are
-        populated. The default returns a plain :class:`ChatMessage`.
+        Subclasses can swap in a specialized `ChatMessage` subclass
+        (e.g. `CohereServingChatV2` returning `CohereChatMessage`)
+        without duplicating the field selection in
+        ``assemble_chat_message_fields``. The default returns a plain
+        `ChatMessage`.
         """
         return ChatMessage(*args, **kwargs)
 
@@ -546,12 +545,20 @@ class OpenAIServingChat(GenerateBaseServing):
                     ChatStreamProcessor(
                         request,
                         self._make_parser(request, tokenizer, chat_template_kwargs),
+                        enable_auto_tools=self.enable_auto_tools,
+                        parser_cls=self.parser_cls,
                     )
                     for _ in range(num_choices)
                 ]
             else:
                 processors = [
-                    ChatStreamProcessor(request, None) for _ in range(num_choices)
+                    ChatStreamProcessor(
+                        request,
+                        None,
+                        enable_auto_tools=self.enable_auto_tools,
+                        parser_cls=None,
+                    )
+                    for _ in range(num_choices)
                 ]
         except Exception as e:
             logger.exception("Error in parser creation.")
@@ -811,6 +818,9 @@ class OpenAIServingChat(GenerateBaseServing):
                         created=created_time,
                         choices=[choice_data],
                         model=model_name,
+                        kv_transfer_params=(
+                            res.kv_transfer_params if finish_reason_sent[i] else None
+                        ),
                     )
                     # Stamp the fingerprint on terminal chunks only (those with
                     # finish_reason set). When ``include_usage`` is on, the
@@ -974,9 +984,6 @@ class OpenAIServingChat(GenerateBaseServing):
         total_reasoning_tokens = 0
 
         role = self.get_chat_request_role(request)
-        tool_parser_cls = (
-            self.parser_cls.tool_parser_cls if self.parser_cls is not None else None
-        )
         for i, output in enumerate(final_res.outputs):
             # check for error finish reason and raise GenerationError
             # finish_reason='error' indicates a retryable request-level internal error
@@ -1012,8 +1019,6 @@ class OpenAIServingChat(GenerateBaseServing):
                     model_output_token_ids=token_ids,
                 )
                 suppress_metadata = not request.include_reasoning and parser is not None
-                if not request.include_reasoning:
-                    reasoning = None
                 total_reasoning_tokens += parser.count_reasoning_tokens(token_ids)
                 if suppress_metadata:
                     logprobs = None
@@ -1023,76 +1028,20 @@ class OpenAIServingChat(GenerateBaseServing):
                 tool_calls = []
                 suppress_metadata = False
 
-            is_named_tool_choice = (
-                request.tool_choice is not None
-                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
+            fields = assemble_chat_message_fields(
+                request,
+                reasoning,
+                content,
+                tool_calls,
+                enable_auto_tools=self.enable_auto_tools,
+                parser_cls=self.parser_cls,
             )
-            is_required_tool_choice = request.tool_choice == "required"
-
-            # All six construction sites route through ``self._create_chat_message``
-            # so subclasses can swap in a specialized :class:`ChatMessage`
-            # (e.g. the Cohere v2 handler's ``CohereChatMessage``) without
-            # having to duplicate this branch logic.
-            if (not self.enable_auto_tools or not tool_parser_cls) and (
-                not is_named_tool_choice and not is_required_tool_choice
-            ):
-                message = self._create_chat_message(
-                    role=role, reasoning=reasoning, content=content
-                )
-
-            elif is_named_tool_choice or is_required_tool_choice:
-                message = self._create_chat_message(
-                    role=role,
-                    reasoning=reasoning,
-                    content=content or "",
-                    tool_calls=[
-                        ToolCall(id=tc.id or make_tool_call_id(), function=tc)
-                        for tc in (tool_calls or [])
-                    ],
-                )
-
-            # if the request doesn't use tool choice
-            # OR specifies to not use a tool
-            elif not request.tool_choice or request.tool_choice == "none":
-                message = self._create_chat_message(
-                    role=role, reasoning=reasoning, content=content
-                )
-
-            # handle when there are tools and tool choice is auto
-            elif (
-                request.tools
-                and (request.tool_choice == "auto" or request.tool_choice is None)
-                and self.enable_auto_tools
-                and tool_parser_cls
-            ):
-                if tool_calls:
-                    message = self._create_chat_message(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                        tool_calls=[
-                            ToolCall(id=tc.id or make_tool_call_id(), function=tc)
-                            for tc in tool_calls
-                        ],
-                    )
-
-                else:
-                    message = self._create_chat_message(
-                        role=role,
-                        reasoning=reasoning,
-                        content=content,
-                    )
-
-            # undetermined case that is still important to handle
-            else:
-                logger.error(
-                    "Error in chat_completion_full_generator - cannot determine"
-                    " if tools should be extracted. Returning a standard chat "
-                    "completion."
-                )
-                message = self._create_chat_message(
-                    role=role, reasoning=reasoning, content=content
-                )
+            message = self._create_chat_message(
+                role=role,
+                reasoning=fields.reasoning,
+                content=fields.content,
+                tool_calls=fields.tool_calls,
+            )
 
             # Subclass hook: enrich the constructed message with any
             # parser-side extras that don't fit through the plain
@@ -1125,7 +1074,6 @@ class OpenAIServingChat(GenerateBaseServing):
                     output.weight_versions if request.return_weight_versions else None
                 ),
             )
-            choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
 
             choices.append(choice_data)
 
