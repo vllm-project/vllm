@@ -36,6 +36,7 @@ from vllm.plugins.endpoint_plugins.interface import (
     attach_endpoint_plugins,
     drain_endpoint_plugins,
     init_endpoint_plugins_state,
+    stop_endpoint_plugins,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -740,6 +741,23 @@ async def test_watchdog_exit_during_drain_cancels_drain_before_stop(
 
     name = DummyAdminEndpointPlugin.name
     assert events == [f"start:{name}", "drain:cancelled", f"stop:{name}"]
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_running_drain_first():
+    """`stop` never overlaps a drain, e.g. when a later plugin's `start`
+    fails while a shutdown requested during startup is draining."""
+    state = State()
+    state.started_endpoint_plugins = [plugin := _HangingDrain([])]
+    state.shutdown_task = asyncio.create_task(
+        drain_endpoint_plugins(state, time.monotonic() + 30)
+    )
+    await plugin.entered.wait()
+
+    await stop_endpoint_plugins(state)
+
+    assert state.shutdown_task.cancelled()
+    assert plugin.events == ["drain:cancelled", f"stop:{plugin.name}"]
 
 
 @pytest.mark.asyncio

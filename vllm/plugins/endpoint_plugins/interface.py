@@ -187,7 +187,10 @@ async def init_endpoint_plugins_state(
     `engine_client` is `None` for the CPU only render server which has no
     engine (see `init_render_app_state`). Plugins must handle a `None`
     `engine_client` themselves (see `EndpointPlugin.init_state`).
+
+    Also sets `state.draining = False`, so plugins can read it directly.
     """
+    state.draining = False
     plugins = getattr(state, "endpoint_plugins", [])
     listeners = [p.name for p in plugins if getattr(p, "owns_non_http_listener", False)]
     api_server_count = getattr(args, "api_server_count", None)
@@ -201,11 +204,7 @@ async def init_endpoint_plugins_state(
 
 
 async def start_endpoint_plugins(state: State, plugins: Sequence[Any]) -> None:
-    """Start `plugins` in order, stopping the started ones if one fails.
-
-    Sets `state.draining = False` first, so plugins can read it directly.
-    """
-    state.draining = False
+    """Start `plugins` in order, stopping the started ones if one fails."""
     state.started_endpoint_plugins = started = []
     for plugin in plugins:
         if (start := getattr(plugin, "start", None)) is not None:
@@ -274,7 +273,16 @@ async def drain_endpoint_plugins(state: State, deadline: float) -> None:
 
 
 async def stop_endpoint_plugins(state: State) -> None:
-    """Stop started plugins in reverse order, each exactly once."""
+    """Stop started plugins in reverse order, each exactly once.
+
+    A graceful shutdown still in progress (`state.shutdown_task`, e.g. when
+    the watchdog stops HTTP or a later `start` fails while plugins drain) is
+    cancelled and awaited first, so no drain overlaps a `stop`. In the normal
+    path it has already finished and nothing is awaited.
+    """
+    shutdown = getattr(state, "shutdown_task", None)
+    if shutdown is not None and shutdown.cancel():
+        await asyncio.wait([shutdown])
     started = getattr(state, "started_endpoint_plugins", [])
     while started:
         plugin = started.pop()
