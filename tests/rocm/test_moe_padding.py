@@ -328,6 +328,76 @@ def test_maybe_pad_weight_asymmetric_w13_w2_eligibility(
     assert (w2_result is not w2) == expect_w2_padded
 
 
+def test_maybe_pad_weight_eplb_disables_padding(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+) -> None:
+    """EPLB requires contiguous weights for its view/rearrangement
+    operations, so `_maybe_pad_weight` must skip padding whenever it's
+    enabled -- even for an otherwise-eligible (512-byte-aligned) shape with
+    the flag on."""
+    assert default_vllm_config is not None
+    _set_padding_env(monkeypatch, True)
+
+    moe_config = _make_moe_config(HIDDEN_SIZE, INTERMEDIATE_SIZE)
+    moe_config.moe_parallel_config.enable_eplb = True
+    method = UnquantizedFusedMoEMethod(moe_config)
+
+    original = torch.randn(
+        NUM_EXPERTS,
+        2 * INTERMEDIATE_SIZE,
+        HIDDEN_SIZE,
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    # Sanity: this shape would be padded if EPLB were off (mirrors the
+    # "eligible-on" case in test_maybe_pad_weight_transparent).
+    assert (original.stride(-2) * original.element_size()) % 512 == 0
+    assert original.stride(-1) == 1
+
+    result = method._maybe_pad_weight(original)
+    assert result is original
+
+
+def test_maybe_pad_weight_non_unit_stride_disables_padding(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+) -> None:
+    """`_maybe_pad_weight` requires a unit inner stride (`F.pad` on a
+    non-contiguous-inner-dim view would not produce the intended memory-
+    stride effect), so it must skip padding whenever `weight.stride(-1) !=
+    1` -- even when the (would-be) outer-stride alignment check alone would
+    otherwise pass."""
+    assert default_vllm_config is not None
+    _set_padding_env(monkeypatch, True)
+
+    moe_config = _make_moe_config(HIDDEN_SIZE, INTERMEDIATE_SIZE)
+    method = UnquantizedFusedMoEMethod(moe_config)
+
+    # Every other column of a contiguous (..., 2 * HIDDEN_SIZE) tensor: a
+    # view with stride(-1) == 2 whose stride(-2) alignment still passes.
+    base = torch.randn(
+        NUM_EXPERTS,
+        2 * INTERMEDIATE_SIZE,
+        2 * HIDDEN_SIZE,
+        device=DEVICE,
+        dtype=DTYPE,
+    )
+    non_unit_stride_weight = base[..., ::2]
+    assert non_unit_stride_weight.shape == (
+        NUM_EXPERTS,
+        2 * INTERMEDIATE_SIZE,
+        HIDDEN_SIZE,
+    )
+    assert non_unit_stride_weight.stride(-1) != 1
+    assert (
+        non_unit_stride_weight.stride(-2) * non_unit_stride_weight.element_size()
+    ) % 512 == 0
+
+    result = method._maybe_pad_weight(non_unit_stride_weight)
+    assert result is non_unit_stride_weight
+
+
 def _reference_moe_forward(
     seed: int,
     hidden_size: int,
@@ -424,3 +494,66 @@ def test_aiter_moe_padding_numerically_transparent(
             f"padding={padded} output diverged from reference "
             f"(cosine similarity {cos_sim:.4f})"
         )
+
+
+@requires_aiter
+@torch.inference_mode()
+def test_aiter_moe_padding_rl_reload_address_stable(
+    monkeypatch: pytest.MonkeyPatch,
+    default_vllm_config,
+    workspace_init,
+) -> None:
+    """`process_weights_after_loading` must `.copy_()` the padded weight
+    into the existing parameter storage rather than rebinding `.data`: an RL
+    in-place weight reload (same `RoutedExperts` layer, new weight values)
+    has to leave `w13_weight`/`w2_weight`'s storage address unchanged, or it
+    would silently break CUDA-graph address capture. Covers the AITER path,
+    where VLLM_ROCM_MOE_PADDING's padded storage is transient (see module
+    docstring) but still goes through this same copy_-not-rebind step."""
+    assert default_vllm_config is not None
+    assert workspace_init is None
+    _set_padding_env_with_aiter(monkeypatch, True)
+
+    with torch.device(DEVICE):
+        layer = _make_routed_experts(HIDDEN_SIZE, INTERMEDIATE_SIZE)
+        _load_and_process_weights(
+            layer, seed=1, hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE
+        )
+    _assert_backend_is_aiter(layer)
+
+    w13_ptr = layer.w13_weight.data_ptr()
+    w2_ptr = layer.w2_weight.data_ptr()
+
+    # Simulate an RL in-place weight reload: new values, same layer/params.
+    with torch.device(DEVICE):
+        _load_and_process_weights(
+            layer, seed=2, hidden_size=HIDDEN_SIZE, intermediate_size=INTERMEDIATE_SIZE
+        )
+
+    assert layer.w13_weight.data_ptr() == w13_ptr, (
+        "w13_weight storage address must survive a reload for CUDA-graph "
+        "address capture to remain valid"
+    )
+    assert layer.w2_weight.data_ptr() == w2_ptr, (
+        "w2_weight storage address must survive a reload for CUDA-graph "
+        "address capture to remain valid"
+    )
+
+    x, topk_weights, topk_ids = _make_static_inputs(HIDDEN_SIZE)
+    output = _forward(layer, x, topk_weights, topk_ids)
+    reference = _reference_moe_forward(
+        seed=2,
+        hidden_size=HIDDEN_SIZE,
+        intermediate_size=INTERMEDIATE_SIZE,
+        x=x,
+        topk_weights=topk_weights,
+        topk_ids=topk_ids,
+    )
+    cos_sim = F.cosine_similarity(
+        output.flatten().float(), reference.flatten().float(), dim=0
+    )
+    assert cos_sim > 0.99, (
+        f"post-reload output diverged from reference (cosine similarity "
+        f"{cos_sim:.4f}); reload must reflect the new (seed=2) weights, not "
+        "stale seed=1 values"
+    )

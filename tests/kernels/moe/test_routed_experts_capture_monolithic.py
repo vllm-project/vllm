@@ -35,6 +35,9 @@ from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExpertsMonolithic,
 )
+from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
+    RoutingSimulatorRouter,
+)
 from vllm.platforms import current_platform
 
 try:
@@ -282,10 +285,16 @@ KERNELS = {"bf16": _bf16_kernel, "fp8_block": _fp8_block_kernel, "nvfp4": _nvfp4
 @pytest.mark.parametrize(
     "routing_method", [RoutingMethodType.Renormalize, RoutingMethodType.DeepSeekV3]
 )
+@pytest.mark.parametrize("simulated", [False, True])
 @pytest.mark.parametrize("top_k", [2, 4])
 @pytest.mark.parametrize("num_tokens", [2, 7, 16])
 def test_routing_replay_reports_the_routed_experts(
-    kernel: str, routing_method: RoutingMethodType, top_k: int, num_tokens: int
+    kernel: str,
+    routing_method: RoutingMethodType,
+    top_k: int,
+    num_tokens: int,
+    simulated: bool,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     torch.manual_seed(0)
     experts, forward = KERNELS[kernel](top_k, routing_method)
@@ -296,8 +305,25 @@ def test_routing_replay_reports_the_routed_experts(
         (num_tokens + 1, top_k), -1, dtype=torch.int16, device=DEVICE
     )
 
+    if simulated:
+        import vllm.envs as envs
+
+        monkeypatch.setitem(
+            envs.environment_variables,
+            "VLLM_MOE_ROUTING_SIMULATION_STRATEGY",
+            lambda: "uniform_random",
+        )
+        router = RoutingSimulatorRouter(top_k, NUM_EXPERTS, routing_method)
+        router_logits = router.prepare_monolithic_logits(router_logits)
+
     forward(router_logits, routing_replay_out)
 
     reported = routing_replay_out[:num_tokens].long().sort(dim=-1).values
-    assert torch.equal(reported, planted), (reported, planted)
+    if simulated:
+        assert not torch.equal(reported, planted), (reported, planted)
+        assert (reported >= 0).all()
+        assert (reported < NUM_EXPERTS).all()
+        assert (reported[:, 1:] != reported[:, :-1]).all()
+    else:
+        assert torch.equal(reported, planted), (reported, planted)
     assert (routing_replay_out[num_tokens:] == -1).all()

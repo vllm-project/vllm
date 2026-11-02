@@ -64,6 +64,12 @@ inline bool can_use_brgemm(int M, int N) {
   return brgemm_supported() && (can_use_brgemm<T>(M) || N != block_size_n());
 }
 
+// Routed INT8 MoE uses a lower threshold than the M-only GEMM selector.
+template <>
+inline bool can_use_brgemm<int8_t>(int M, int N) {
+  return brgemm_supported() && (M > 3 || N != block_size_n());
+}
+
 // work around compiler internal error
 #define BLOCK_K 128  // 4 * TILE_K
 
@@ -92,7 +98,17 @@ enum class CPUActMethod : int {
   silu_and_mul = 0,
   swiglu = 1,
   gelu_and_mul = 2,
+  gelu_tanh_and_mul = 3,
 };
+
+inline CPUActMethod act_method_from_int(int64_t act_method) {
+  TORCH_CHECK(
+      act_method >= static_cast<int64_t>(CPUActMethod::silu_and_mul) &&
+          act_method <= static_cast<int64_t>(CPUActMethod::gelu_tanh_and_mul),
+      "Unsupported act_method: ",
+      act_method);
+  return static_cast<CPUActMethod>(act_method);
+}
 
 enum class CPUQuantMethod : int64_t { BF16 = 0, INT8_W8A8 = 1, FP8_W8A16 = 2, INT4_W4A8 = 3, MXFP4 = 4, FP8_W8A8 = 5 };
 
@@ -163,7 +179,8 @@ void fused_experts_int8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad);
+    int64_t num_tokens_post_pad,
+    CPUActMethod act_func);
 
 // moe implementations for fp8 w8a16 and mxfp4
 template <typename scalar_t, typename packed_t, typename param_t, bool is_mxfp4>
@@ -247,7 +264,8 @@ void fused_experts_int4_w4a8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad);
+    int64_t num_tokens_post_pad,
+    CPUActMethod act_func);
 
 template <typename scalar_t>
 void shared_expert_fp8_kernel_impl(
@@ -446,4 +464,5 @@ void fused_experts_fp8_a8_kernel_impl(
     int64_t K,
     int64_t E,
     int64_t topk,
-    int64_t num_tokens_post_pad);
+    int64_t num_tokens_post_pad,
+    CPUActMethod act_func);

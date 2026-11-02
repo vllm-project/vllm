@@ -203,6 +203,35 @@ resolve_parent_commit() {
     fi
 }
 
+resolve_merge_base_cache_commit() {
+    # PR builds: the commit the PR branched from, whose build pushed
+    # vllm-ci-test-cache:<commit>. A cache source only (see ci.hcl), unlike
+    # the VLLM_MERGE_BASE_COMMIT build arg, which would change the cache key.
+    if [[ "${BUILDKITE_PULL_REQUEST:-false}" == "false" ]]; then
+        return 0
+    fi
+    if [[ -n "${VLLM_CACHE_MERGE_BASE_COMMIT:-}" ]]; then
+        echo "Using provided VLLM_CACHE_MERGE_BASE_COMMIT: ${VLLM_CACHE_MERGE_BASE_COMMIT}"
+        return 0
+    fi
+    local base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
+    local base_ref="refs/remotes/vllm-cache-base/${base_branch}"
+    git fetch --quiet --no-tags --depth=200 origin \
+        "+refs/heads/${base_branch}:${base_ref}" 2>/dev/null || true
+    VLLM_CACHE_MERGE_BASE_COMMIT=$(git merge-base HEAD "${base_ref}" 2>/dev/null || echo "")
+    if [[ -z "${VLLM_CACHE_MERGE_BASE_COMMIT}" ]]; then
+        git fetch --quiet --no-tags --deepen=1000 origin \
+            "+refs/heads/${base_branch}:${base_ref}" 2>/dev/null || true
+        VLLM_CACHE_MERGE_BASE_COMMIT=$(git merge-base HEAD "${base_ref}" 2>/dev/null || echo "")
+    fi
+    if [[ -n "${VLLM_CACHE_MERGE_BASE_COMMIT}" ]]; then
+        echo "Computed merge base with ${base_branch} for cache fallback: ${VLLM_CACHE_MERGE_BASE_COMMIT}"
+        export VLLM_CACHE_MERGE_BASE_COMMIT
+    else
+        echo "Could not determine merge base with ${base_branch}; skipping that cache source"
+    fi
+}
+
 print_bake_config() {
     echo "--- :page_facing_up: Resolved bake configuration"
     # Write to a temp directory to avoid polluting the repo root (which is the
@@ -353,6 +382,7 @@ setup_buildx_builder
 
 resolve_parent_commit
 export PARENT_COMMIT
+resolve_merge_base_cache_commit
 
 print_bake_config
 

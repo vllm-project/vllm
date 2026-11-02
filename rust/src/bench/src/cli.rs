@@ -12,6 +12,8 @@ pub enum BackendKind {
     Openai,
     #[value(name = "openai-chat")]
     OpenaiChat,
+    #[value(name = "openai-responses")]
+    OpenaiResponses,
     #[value(name = "openai-embeddings")]
     OpenaiEmbeddings,
     #[value(name = "openai-embeddings-chat")]
@@ -28,6 +30,7 @@ impl BackendKind {
             Self::Vllm => "vllm",
             Self::Openai => "openai",
             Self::OpenaiChat => "openai-chat",
+            Self::OpenaiResponses => "openai-responses",
             Self::OpenaiEmbeddings => "openai-embeddings",
             Self::OpenaiEmbeddingsChat => "openai-embeddings-chat",
             Self::VllmPooling => "vllm-pooling",
@@ -38,7 +41,7 @@ impl BackendKind {
     /// Return true if the backend is compatible with OpenAI-style API and sampling parameters.
     pub fn is_openai_compatible(self) -> bool {
         match self {
-            Self::Vllm | Self::Openai | Self::OpenaiChat => true,
+            Self::Vllm | Self::Openai | Self::OpenaiChat | Self::OpenaiResponses => true,
             Self::OpenaiEmbeddings
             | Self::OpenaiEmbeddingsChat
             | Self::VllmPooling
@@ -403,10 +406,11 @@ pub struct BenchServeArgs {
     #[arg(long, default_value_t = false)]
     pub profile: bool,
 
-    /// Minimum server batch size (num_requests_running) before starting the
-    /// profiler. When set, profiling is deferred until the /metrics endpoint
-    /// reports at least this many running requests, then captures for
-    /// --profile-duration seconds. Requires --profile.
+    /// Minimum total running requests across engines reported by /metrics
+    /// before starting the profiler. When set, profiling is deferred until
+    /// this threshold is reached, then captures for --profile-duration seconds.
+    /// Only engines exposed by the /metrics endpoint at --base-url are counted.
+    /// Requires --profile.
     #[arg(long)]
     pub profile_batch_threshold: Option<usize>,
 
@@ -702,6 +706,7 @@ impl BenchServeArgs {
         }
         match self.backend {
             BackendKind::OpenaiChat => "/v1/chat/completions".to_string(),
+            BackendKind::OpenaiResponses => "/v1/responses".to_string(),
             BackendKind::Vllm | BackendKind::Openai => "/v1/completions".to_string(),
             BackendKind::OpenaiEmbeddings | BackendKind::OpenaiEmbeddingsChat => {
                 "/v1/embeddings".to_string()

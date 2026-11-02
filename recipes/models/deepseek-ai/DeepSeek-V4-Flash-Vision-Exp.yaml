@@ -271,7 +271,7 @@ guide: |
   - `VLLM_FLASHINFER_AUTOTUNE_SKIP_OPS` excludes the FP4 block-scale MoE op from
     FlashInfer's startup autotuning. Export it if autotuning that op fails or costs more
     startup time than it earns back on your FlashInfer build; it is a tuning knob, not a
-    requirement. The Advanced row's `--no-enable-flashinfer-autotune` turns autotuning
+    requirement. The Advanced row's `--disable-flashinfer-autotune` turns autotuning
     off wholesale instead.
   - `--max-model-len 32768` bounds KV cache for the benchmark. The checkpoint advertises
     1M tokens; that is **not** what was measured, and 1M-token KV needs far more memory

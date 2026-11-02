@@ -17,11 +17,13 @@ use tracing::{debug, info, trace};
 use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop};
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
+use crate::metrics::EngineSleepState;
+use crate::prompt_block_hasher::PromptBlockHasher;
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
 use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
-use crate::protocol::utility::{EngineCoreUtilityRequest, PauseMode};
+use crate::protocol::utility::{CheckpointState, EngineCoreUtilityRequest, PauseMode, SleepLevel};
 use crate::runtime::{BackgroundShutdownRuntime, build_zmq_runtime};
 use crate::transport::{self, ConnectedEngine};
 
@@ -45,8 +47,18 @@ pub enum TransportMode {
         /// Host/IP that engines should use to connect back to the frontend
         /// transport sockets.
         advertised_host: String,
-        /// Total number of engines expected to join this transport.
+        /// First data-parallel engine rank that this frontend connects to.
+        ///
+        /// The frontend whose range starts at rank 0 handshakes with every
+        /// rank of the deployment; other frontends handshake only with their
+        /// own engines.
+        engine_start_index: u32,
+        /// Total number of engines this frontend connects to.
         engine_count: usize,
+        /// Deployment-wide data-parallel size. This is larger than
+        /// `engine_count` when frontends partition ranks across nodes (hybrid
+        /// or external DP LB).
+        data_parallel_size: usize,
         /// Maximum time to wait for each startup phase to complete.
         ready_timeout: Duration,
         /// Optional explicit bind address for the input ROUTER socket.
@@ -81,10 +93,24 @@ impl TransportMode {
     /// Return the deployment-wide data-parallel size for this transport.
     pub fn data_parallel_size(&self) -> usize {
         match self {
-            Self::HandshakeOwner { engine_count, .. } => *engine_count,
-            Self::Bootstrapped {
+            Self::HandshakeOwner {
+                data_parallel_size, ..
+            }
+            | Self::Bootstrapped {
                 data_parallel_size, ..
             } => *data_parallel_size,
+        }
+    }
+
+    /// Return the first data-parallel engine rank this frontend connects to.
+    pub fn engine_start_index(&self) -> u32 {
+        match self {
+            Self::HandshakeOwner {
+                engine_start_index, ..
+            }
+            | Self::Bootstrapped {
+                engine_start_index, ..
+            } => *engine_start_index,
         }
     }
 
@@ -101,8 +127,12 @@ impl TransportMode {
         }
 
         match self {
-            Self::HandshakeOwner { .. } => {}
-            Self::Bootstrapped {
+            Self::HandshakeOwner {
+                engine_start_index,
+                engine_count,
+                ..
+            }
+            | Self::Bootstrapped {
                 engine_start_index,
                 engine_count,
                 ..
@@ -171,7 +201,9 @@ impl EngineCoreClientConfig {
             transport_mode: TransportMode::HandshakeOwner {
                 handshake_address: handshake_address.into(),
                 advertised_host: "127.0.0.1".to_string(),
+                engine_start_index: 0,
                 engine_count: 1,
+                data_parallel_size: 1,
                 ready_timeout: Duration::from_secs(30),
                 local_input_address: None,
                 local_output_address: None,
@@ -284,6 +316,8 @@ pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
+    /// Hashes prompt blocks for the engines, if they all accept the same hashes.
+    prompt_block_hasher: Option<PromptBlockHasher>,
     /// Whether a profiling session is awaiting an explicit stop. Held across each
     /// start/stop utility call so a stale stop reply cannot clear a newer session.
     profile_active: Mutex<bool>,
@@ -311,7 +345,9 @@ impl EngineCoreClient {
             TransportMode::HandshakeOwner {
                 handshake_address,
                 advertised_host,
+                engine_start_index,
                 engine_count,
+                data_parallel_size,
                 ready_timeout,
                 local_input_address,
                 local_output_address,
@@ -326,7 +362,9 @@ impl EngineCoreClient {
 
                 transport::connect_handshake(
                     handshake_address,
+                    *engine_start_index,
                     *engine_count,
+                    *data_parallel_size,
                     advertised_host,
                     local_input_address.as_deref(),
                     local_output_address.as_deref(),
@@ -369,6 +407,7 @@ impl EngineCoreClient {
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
         validate_lora_capabilities(&connected.engines)?;
+        let prompt_block_hasher = prompt_block_hasher(&connected.engines);
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let engines = connected.engines;
@@ -397,8 +436,10 @@ impl EngineCoreClient {
 
         let (coordinator, coordinator_output_task, coordinator_task) =
             if let Some(coordinator_transport) = connected.coordinator {
-                let (handle, runner) =
-                    CoordinatorHandle::new_inproc(coordinator_transport.input_socket);
+                let (handle, runner) = CoordinatorHandle::new_inproc(
+                    coordinator_transport.input_socket,
+                    coordinator_transport.frontend_publish_socket,
+                );
                 let (coordinator_output_tx, coordinator_output_rx) = mpsc::channel(64);
                 let coordinator_output_task =
                     AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
@@ -435,6 +476,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
+            prompt_block_hasher,
             profile_active: Mutex::new(false),
             runtime,
             output_task,
@@ -473,11 +515,13 @@ impl EngineCoreClient {
         self.inner.pending_utility_call_count()
     }
 
-    /// Return the engine-side indices connected to this client.
+    /// Return the engine-side indices connected to this client, as stamped on
+    /// request output streams: an engine identity that does not encode an
+    /// index maps to 0, as in [`Self::call`].
     pub fn engine_indices(&self) -> Vec<u32> {
         self.engines
             .iter()
-            .map(|engine| engine.engine_id.engine_index().expect("engine id must encode as u16"))
+            .map(|engine| engine.engine_id.engine_index().unwrap_or(0))
             .collect()
     }
 
@@ -586,6 +630,24 @@ impl EngineCoreClient {
     }
 }
 
+/// Build the prompt block hasher if every engine reports the same supported
+/// prefix hash config. Requests can go to any engine, and an engine that
+/// doesn't hash blocks has no use for the hashes.
+fn prompt_block_hasher(engines: &[ConnectedEngine]) -> Option<PromptBlockHasher> {
+    let config = (engines.iter())
+        .map(|engine| engine.ready_response.prefix_hash_config.as_ref())
+        .all_equal_value()
+        .ok()??;
+    let hasher = PromptBlockHasher::new(config);
+    if hasher.is_none() {
+        debug!(
+            ?config,
+            "engine prefix hash config not supported; engine hashes prompts"
+        );
+    }
+    hasher
+}
+
 fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
     let first = engines.first().expect("engine core client requires at least one engine");
     for engine in engines {
@@ -625,6 +687,11 @@ impl EngineCoreClient {
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
+        if req.block_hashes.is_none()
+            && let Some(hasher) = &self.prompt_block_hasher
+        {
+            req.block_hashes = hasher.hash_request(&req);
+        }
         trace!(
             request_id = %req.request_id,
             client_index = req.client_index,
@@ -951,30 +1018,38 @@ impl EngineCoreClient {
     }
 
     /// Put the engine to sleep.
-    pub async fn sleep(&self, level: u32, mode: PauseMode) -> Result<()> {
+    pub async fn sleep(&self, level: SleepLevel, mode: PauseMode) -> Result<()> {
         self.call_utility::<(), _>("sleep", (level, mode)).await?;
+        self.inner.record_sleep_state(EngineSleepState::Asleep(level));
         Ok(())
     }
 
     /// Release KV cache memory while keeping model weights resident.
     pub async fn release_kv_cache_memory(&self) -> Result<()> {
         self.call_utility::<(), _>("release_kv_cache_memory", ()).await?;
+        self.inner.record_sleep_state(EngineSleepState::KvCacheReleased);
         Ok(())
     }
 
     /// Wake the engine from sleep, optionally limiting the wake-up to specific
     /// tags, and return whether every engine is fully awake.
     pub async fn wake_up(&self, tags: Option<Vec<String>>) -> Result<bool> {
-        Ok(self
+        let fully_awake = self
             .call_utility::<bool, _>("wake_up", (tags,))
             .await?
             .into_iter()
-            .all(|fully_awake| fully_awake))
+            .all(|fully_awake| fully_awake);
+        // A partial wake-up keeps the previous sleep state, as in Python.
+        if fully_awake {
+            self.inner.record_sleep_state(EngineSleepState::Awake);
+        }
+        Ok(fully_awake)
     }
 
-    /// Pause the scheduler so generation can be halted
-    pub async fn pause_scheduler(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
-        self.call_utility::<(), _>("pause_scheduler", (mode, clear_cache)).await?;
+    /// Pause generation (e.g. for weight updates). In `abort` and `wait` mode
+    /// the engine rejects new requests with a retryable error until resume.
+    pub async fn pause_generation(&self, mode: PauseMode, clear_cache: bool) -> Result<()> {
+        self.call_utility::<(), _>("pause_generation", (mode, clear_cache)).await?;
         Ok(())
     }
 
@@ -982,6 +1057,43 @@ impl EngineCoreClient {
     pub async fn resume_scheduler(&self) -> Result<()> {
         self.call_utility::<(), _>("resume_scheduler", ()).await?;
         Ok(())
+    }
+
+    /// Start preparing every engine for a process checkpoint: drain with
+    /// `mode`, then release the KV cache and what a checkpoint must not contain.
+    /// Returns the first refusal from any engine. An engine that refuses
+    /// changes nothing, but with data parallelism the others may have started.
+    pub async fn checkpoint_prepare(&self, mode: PauseMode) -> Result<Option<String>> {
+        let refusals: Vec<Option<String>> =
+            self.call_utility("checkpoint_prepare", (mode,)).await?;
+        Ok(refusals.into_iter().flatten().next())
+    }
+
+    /// Bring back what `checkpoint_prepare` released and serve again.
+    pub async fn checkpoint_restore(&self) -> Result<()> {
+        self.call_utility::<(), _>("checkpoint_restore", ()).await?;
+        Ok(())
+    }
+
+    /// Return the checkpoint lifecycle state and the error that failed it.
+    ///
+    /// Engines move independently: failed if any failed, otherwise the state
+    /// all engines share, otherwise the transition in progress.
+    pub async fn checkpoint_state(&self) -> Result<(CheckpointState, Option<String>)> {
+        let mut states: Vec<(CheckpointState, Option<String>)> =
+            self.call_utility("checkpoint_state", ()).await?;
+        if let Some(index) = states.iter().position(|(state, _)| *state == CheckpointState::Failed)
+        {
+            return Ok(states.swap_remove(index));
+        }
+        let state = match states.iter().map(|(state, _)| *state).all_equal_value() {
+            Ok(state) => state,
+            Err(_) if states.iter().any(|(state, _)| *state == CheckpointState::Preparing) => {
+                CheckpointState::Preparing
+            }
+            Err(_) => CheckpointState::Restoring,
+        };
+        Ok((state, None))
     }
 
     /// Return whether the scheduler is currently in any pause state.
@@ -995,6 +1107,7 @@ impl EngineCoreClient {
         profile_prefix: Option<&str>,
         delay_iterations: Option<u64>,
         max_iterations: Option<u64>,
+        profiler_kwargs: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<()> {
         let mut active = self.profile_active.lock().await;
         if *active {
@@ -1007,7 +1120,13 @@ impl EngineCoreClient {
         if let Err(error) = self
             .call_utility::<(), _>(
                 "profile",
-                (true, profile_prefix, delay_iterations, max_iterations),
+                (
+                    true,
+                    profile_prefix,
+                    delay_iterations,
+                    max_iterations,
+                    profiler_kwargs,
+                ),
             )
             .await
         {
