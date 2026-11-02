@@ -4,6 +4,7 @@
 # Adapted from
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
+from dataclasses import replace
 from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 from openai.types.chat.chat_completion_audio import (
@@ -347,6 +348,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "model will continue this message rather than starting a new one. "
             'This allows you to "prefill" part of the model\'s response for it. '
             "Cannot be used at the same time as `add_generation_prompt`."
+        ),
+    )
+    structured_output_prefill: bool = Field(
+        default=False,
+        description=(
+            "Apply the structured output constraint to the final assistant "
+            "message's existing text as well as newly generated text. "
+            "Requires continue_final_message and a structured output constraint."
         ),
     )
     add_special_tokens: bool = Field(
@@ -742,10 +751,43 @@ class ChatCompletionRequest(OpenAIBaseModel):
 
     def extract_structured_outputs(self) -> StructuredOutputsParams | None:
         """Normalize request constraints into ``StructuredOutputsParams``."""
-        return structured_outputs_from_response_format(
+        params = structured_outputs_from_response_format(
             self.structured_outputs,
             self.response_format,
         )
+        if not self.structured_output_prefill:
+            return params
+        if not self.continue_final_message or self.add_generation_prompt:
+            raise VLLMValidationError(
+                "structured_output_prefill requires continue_final_message=true "
+                "and add_generation_prompt=false."
+            )
+        if params is None:
+            raise VLLMValidationError(
+                "structured_output_prefill requires a structured output constraint."
+            )
+        if not self.messages or self.messages[-1]["role"] != "assistant":
+            raise VLLMValidationError(
+                "structured_output_prefill requires a final assistant message."
+            )
+        content = self.messages[-1].get("content")
+        if not isinstance(content, str):
+            raise VLLMValidationError(
+                "structured_output_prefill requires string assistant content."
+            )
+        params = replace(params)
+        params._prefill = content
+        return params
+
+    @model_validator(mode="after")
+    def validate_structured_output_prefill(self) -> "ChatCompletionRequest":
+        if self.structured_output_prefill:
+            if self.use_beam_search:
+                raise VLLMValidationError(
+                    "structured_output_prefill does not support beam search."
+                )
+            self.extract_structured_outputs()
+        return self
 
     def to_sampling_params(
         self,

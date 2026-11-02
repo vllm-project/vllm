@@ -15,12 +15,11 @@ from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.reasoning import ReasoningParserManager
 from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.utils.import_utils import LazyLoader
-from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
+    create_structured_output_backend,
 )
-from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.utils import strip_speculative_padding
 
 if TYPE_CHECKING:
@@ -156,41 +155,9 @@ class StructuredOutputManager:
         # backends on a per-request basis in V1 (for now, anyway...).
         # _backend is set in Processor._validate_structured_output
         if self.backend is None:
-            vocab_size = self.vllm_config.model_config.get_vocab_size()
-            if request_backend == "xgrammar":
-                self.backend = XgrammarBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            elif request_backend == "guidance":
-                self.backend = GuidanceBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            elif request_backend == "outlines":
-                from vllm.v1.structured_output.backend_outlines import OutlinesBackend
-
-                self.backend = OutlinesBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            elif request_backend == "lm-format-enforcer":
-                from vllm.v1.structured_output.backend_lm_format_enforcer import (  # noqa: E501
-                    LMFormatEnforcerBackend,
-                )
-
-                self.backend = LMFormatEnforcerBackend(
-                    self.vllm_config,
-                    tokenizer=self.tokenizer,
-                    vocab_size=vocab_size,
-                )
-            else:
-                raise ValueError(
-                    f"Unsupported structured output backend: {request_backend}"
-                )
+            self.backend = create_structured_output_backend(
+                self.vllm_config, self.tokenizer, request_backend
+            )
             self.backend_name = request_backend
 
         grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar
@@ -219,8 +186,11 @@ class StructuredOutputManager:
                 if request.sampling_params is not None
                 else None
             )
-            return self.backend.compile_grammar(
-                request_type, grammar_spec, stop_token_ids=stop_token_ids
+            return self.backend.compile_grammar_with_prefix(
+                request_type,
+                grammar_spec,
+                stop_token_ids=stop_token_ids,
+                prefix=struct_request.params._prefill,
             )
         except Exception:
             logger.exception(

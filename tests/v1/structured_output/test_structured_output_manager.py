@@ -19,12 +19,18 @@ from vllm.config import (
 from vllm.config.model import ModelConfig
 from vllm.config.speculative import SpeculativeConfig
 from vllm.config.structured_outputs import StructuredOutputsBackend
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.parser.engine.adapters import ParserEngineReasoningAdapter
 from vllm.parser.engine.parser_engine import ReasoningEnd
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.structured_output.backend_outlines import OutlinesBackend, OutlinesGrammar
+from vllm.v1.structured_output.backend_types import (
+    StructuredOutputOptions,
+    create_structured_output_backend,
+)
 from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 from vllm.v1.structured_output.request import get_structured_output_key
 
@@ -38,6 +44,180 @@ REGEX_BACKENDS = (*BACKENDS, "outlines")
 DIGITS_REGEX = "[0-9]+"
 MAX_WAIT_SECONDS = 5
 NUM_SPEC_TOKENS = 8
+PREFILL_JSON_SCHEMA = (
+    '{"type":"object","properties":{"city":{"type":"string"},'
+    '"country":{"type":"string"}},"additionalProperties":false}'
+)
+
+
+@pytest.fixture(scope="module")
+def prefill_config():
+    return VllmConfig(
+        model_config=ModelConfig(
+            model="HuggingFaceTB/SmolLM2-135M-Instruct",
+            max_model_len=1024,
+            enforce_eager=True,
+        ),
+        device_config=DeviceConfig(device="cpu"),
+    )
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance", "outlines"])
+@pytest.mark.parametrize(
+    "kind, spec, prefix, suffix",
+    [
+        (
+            StructuredOutputOptions.JSON,
+            PREFILL_JSON_SCHEMA,
+            '{"city":"Paris",',
+            '"country":"France"}',
+        ),
+        (
+            StructuredOutputOptions.REGEX,
+            "[0-9]{3}-[0-9]{3}-[0-9]{4}",
+            "555-",
+            "123-4567",
+        ),
+        (
+            StructuredOutputOptions.CHOICE,
+            '["The capital is Paris","The capital is Lyon"]',
+            "The capital is",
+            " Paris",
+        ),
+    ],
+)
+def test_prefill_advances_real_backend(
+    prefill_config, backend, kind, spec, prefix, suffix
+):
+    tokenizer = AutoTokenizer.from_pretrained(prefill_config.model_config.tokenizer)
+    engine = create_structured_output_backend(prefill_config, tokenizer, backend)
+    grammar = engine.compile_grammar_with_prefix(kind, spec, prefix=prefix)
+    tokens = tokenizer.encode(suffix, add_special_tokens=False)
+    assert grammar.accept_tokens("continuation", tokens)
+    assert grammar.accept_tokens("continuation", [tokenizer.eos_token_id])
+    assert grammar.is_terminated()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance", "outlines"])
+def test_invalid_prefill_rejected_by_real_backend(prefill_config, backend):
+    tokenizer = AutoTokenizer.from_pretrained(prefill_config.model_config.tokenizer)
+    engine = create_structured_output_backend(prefill_config, tokenizer, backend)
+    with pytest.raises(VLLMValidationError, match="not a valid prefix"):
+        engine.compile_grammar_with_prefix(
+            StructuredOutputOptions.JSON,
+            PREFILL_JSON_SCHEMA,
+            prefix="Here is the JSON:",
+        )
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("prefix", ['{"city":"北京",', '{"city":"<|im_end|>",'])
+def test_xgrammar_prefill_preserves_literal_text(prefill_config, prefix):
+    tokenizer = AutoTokenizer.from_pretrained(prefill_config.model_config.tokenizer)
+    engine = create_structured_output_backend(prefill_config, tokenizer, "xgrammar")
+    grammar = engine.compile_grammar_with_prefix(
+        StructuredOutputOptions.JSON, JSON_SCHEMA, prefix=prefix
+    )
+    assert grammar.accept_tokens(
+        "continuation",
+        tokenizer.encode('"country":"France"}', add_special_tokens=False),
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_manager_initializes_prefill_once_per_request(prefill_config):
+    manager = StructuredOutputManager(prefill_config)
+    prefix = '{"city":"Paris",'
+    params = ChatCompletionRequest(
+        messages=[{"role": "assistant", "content": prefix}],
+        continue_final_message=True,
+        add_generation_prompt=False,
+        structured_output_prefill=True,
+        structured_outputs=StructuredOutputsParams(json=JSON_SCHEMA),
+    ).to_sampling_params(20, {})
+    params.verify(
+        prefill_config.model_config,
+        None,
+        StructuredOutputsConfig(backend="xgrammar"),
+        manager.tokenizer,
+    )
+    request = Request(
+        "prefill",
+        prompt_token_ids=manager.tokenizer.encode(prefix),
+        sampling_params=params,
+        pooling_params=None,
+    )
+    try:
+        manager.grammar_init(request)
+        assert request.structured_output_request is not None
+        future = request.structured_output_request._grammar
+        if isinstance(future, Future):
+            future.result(timeout=30)
+        grammar = request.structured_output_request.grammar
+        assert grammar is not None and not isinstance(grammar, Exception)
+        assert request.structured_output_request.reasoning_ended is True
+        for _ in range(2):
+            masks = manager.grammar_bitmask({"prefill": request}, ["prefill"], {})
+            assert masks is not None
+        assert grammar.accept_tokens(
+            "prefill",
+            manager.tokenizer.encode('"country":"France"}', add_special_tokens=False),
+        )
+        assert manager.backend is not None
+        fresh = manager.backend.compile_grammar_with_prefix(
+            StructuredOutputOptions.JSON, JSON_SCHEMA
+        )
+        assert fresh.accept_tokens(
+            "fresh", manager.tokenizer.encode("{", add_special_tokens=False)
+        )
+    finally:
+        manager.clear_backend()
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("backend", ["xgrammar", "guidance"])
+def test_speculative_rollback_preserves_prefill(prefill_config, backend):
+    config = VllmConfig(
+        model_config=prefill_config.model_config,
+        device_config=DeviceConfig(device="cpu"),
+        speculative_config=SpeculativeConfig(model="[ngram]", num_speculative_tokens=8),
+    )
+    tokenizer = AutoTokenizer.from_pretrained(config.model_config.tokenizer)
+    engine = create_structured_output_backend(config, tokenizer, backend)
+    grammar = engine.compile_grammar_with_prefix(
+        StructuredOutputOptions.JSON,
+        PREFILL_JSON_SCHEMA,
+        prefix='{"city":"Paris",',
+    )
+    draft = tokenizer.encode('"country"', add_special_tokens=False)
+    assert grammar.accept_tokens("draft", draft)
+    grammar.rollback(len(draft))
+    assert grammar.accept_tokens(
+        "verified", tokenizer.encode('"country":"France"}', add_special_tokens=False)
+    )
+    assert grammar.accept_tokens("verified", [tokenizer.eos_token_id])
+    assert grammar.is_terminated()
+
+
+@pytest.mark.skip_global_cleanup
+def test_prefill_rejects_unsupported_backend_at_validation(prefill_config):
+    tokenizer = AutoTokenizer.from_pretrained(prefill_config.model_config.tokenizer)
+    params = ChatCompletionRequest(
+        messages=[{"role": "assistant", "content": "{"}],
+        continue_final_message=True,
+        add_generation_prompt=False,
+        structured_output_prefill=True,
+        response_format={"type": "json_object"},
+    ).to_sampling_params(20, {})
+    with pytest.raises(VLLMValidationError, match="supports the xgrammar"):
+        params.verify(
+            prefill_config.model_config,
+            None,
+            StructuredOutputsConfig(backend="lm-format-enforcer"),
+            tokenizer,
+        )
 
 
 @pytest.fixture(scope="module")

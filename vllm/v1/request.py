@@ -92,7 +92,11 @@ class Request:
             sampling_params
         )
         if self.structured_output_request is not None:
-            self.structured_output_request.reasoning_ended = reasoning_ended
+            self.structured_output_request.reasoning_ended = (
+                True
+                if self.structured_output_request.params._prefill
+                else reasoning_ended
+            )
             self.structured_output_request.reasoning_parser_kwargs = (
                 reasoning_parser_kwargs
             )

@@ -994,6 +994,146 @@ def test_chat_completion_request_n_parameter_to_sampling_params():
     assert sampling_params.n == 3, f"Expected n=3, got n={sampling_params.n}"
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "constraint",
+    [
+        {"response_format": {"type": "json_object"}},
+        {"structured_outputs": {"regex": "[0-9]{3}-[0-9]{4}"}},
+    ],
+)
+def test_structured_output_prefill_passes_assistant_prefix(enabled, constraint):
+    request = ChatCompletionRequest(
+        messages=[
+            {"role": "user", "content": "Continue the response."},
+            {"role": "assistant", "content": "555-"},
+        ],
+        continue_final_message=True,
+        add_generation_prompt=False,
+        structured_output_prefill=enabled,
+        **constraint,
+    )
+    params = request.to_sampling_params(20, {})
+    assert params.structured_outputs is not None
+    assert params.structured_outputs._prefill == ("555-" if enabled else None)
+    if request.structured_outputs is not None:
+        assert request.structured_outputs._prefill is None
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize(
+    "overrides, match",
+    [
+        ({"continue_final_message": False}, "requires continue_final_message"),
+        ({"response_format": None}, "requires a structured output"),
+        ({"use_beam_search": True}, "does not support beam search"),
+        ({"messages": [{"role": "user", "content": "{"}]}, "final assistant"),
+        (
+            {"messages": [{"role": "assistant", "content": None}]},
+            "string assistant content",
+        ),
+    ],
+)
+def test_structured_output_prefill_rejects_invalid_usage(overrides, match):
+    fields = {
+        "messages": [{"role": "assistant", "content": "{"}],
+        "continue_final_message": True,
+        "add_generation_prompt": False,
+        "structured_output_prefill": True,
+        "response_format": {"type": "json_object"},
+    }
+    fields.update(overrides)
+    with pytest.raises(VLLMValidationError, match=match):
+        request = ChatCompletionRequest(**fields)
+        request.to_sampling_params(20, {})
+
+
+@pytest.fixture(scope="module")
+def structured_prefill_server():
+    with RemoteOpenAIServer(
+        "HuggingFaceTB/SmolLM2-135M-Instruct",
+        [
+            "--dtype",
+            "bfloat16",
+            "--max-model-len",
+            "1024",
+            "--max-num-seqs",
+            "1",
+            "--max-num-batched-tokens",
+            "128",
+            "--kv-cache-memory-bytes",
+            "268435456",
+            "--enforce-eager",
+        ],
+        max_wait_seconds=180,
+    ) as server:
+        yield server
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("enabled, echo", [(False, False), (True, False), (True, True)])
+async def test_structured_output_prefill_json_chat(
+    structured_prefill_server, stream, enabled, echo
+):
+    prefix = '{"city":"Paris",'
+    async with structured_prefill_server.get_async_client() as client:
+        response = await client.chat.completions.create(
+            model="HuggingFaceTB/SmolLM2-135M-Instruct",
+            messages=[
+                {"role": "user", "content": "Describe Paris with city and country."},
+                {"role": "assistant", "content": prefix},
+            ],
+            temperature=0,
+            max_tokens=96,
+            stream=stream,
+            response_format={"type": "json_object"},
+            extra_body={
+                "echo": echo,
+                "continue_final_message": True,
+                "add_generation_prompt": False,
+                "structured_output_prefill": enabled,
+            },
+        )
+        if stream:
+            fragments = []
+            async for chunk in response:
+                if chunk.choices:
+                    fragments.append(chunk.choices[0].delta.content or "")
+            suffix = "".join(fragments)
+        else:
+            suffix = response.choices[0].message.content
+        value = json.loads(prefix + suffix if enabled and not echo else suffix)
+        assert isinstance(value, dict)
+        if enabled:
+            assert value["city"] == "Paris"
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.asyncio
+@pytest.mark.parametrize("prefix", ["Here is the JSON:", '{"city":}'])
+async def test_structured_output_prefill_invalid_prefix_is_400(
+    structured_prefill_server, prefix
+):
+    async with structured_prefill_server.get_async_client() as client:
+        with pytest.raises(BadRequestError, match="not a valid prefix"):
+            await client.chat.completions.create(
+                model="HuggingFaceTB/SmolLM2-135M-Instruct",
+                messages=[
+                    {"role": "user", "content": "Continue the JSON object."},
+                    {"role": "assistant", "content": prefix},
+                ],
+                response_format={"type": "json_object"},
+                extra_body={
+                    "continue_final_message": True,
+                    "add_generation_prompt": False,
+                    "structured_output_prefill": True,
+                },
+            )
+
+
 def test_chat_completion_request_n_parameter_default():
     """Test that n parameter defaults to 1."""
     request = ChatCompletionRequest(
