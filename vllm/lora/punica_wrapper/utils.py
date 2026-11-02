@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
+import numpy as np
 import torch
 
 from vllm.utils.torch_utils import async_tensor_h2d
@@ -155,12 +156,89 @@ def convert_mapping(
     )
 
 
+class RoutedLoRATensors(NamedTuple):
+    """Per-step routed LoRA metadata.
+
+    Tokens that use the same resident slot on every route form a plan. Fused
+    kernels process each plan's tokens together, so all routes of a token are
+    applied in one pass.
+    """
+
+    # [T, K] resident slot per token and route; -1 when the route is absent.
+    token_lora_indices: torch.Tensor
+    # [T, K] FP32 mixture coefficients.
+    token_lora_weights: torch.Tensor
+    # [P, K] resident slot per plan and route; -1 when the route is absent.
+    plan_lora_indices: torch.Tensor
+    # [N] indices of tokens with at least one route, grouped by plan.
+    plan_token_indices: torch.Tensor
+    # [P + 1] offsets into plan_token_indices.
+    plan_token_start_loc: torch.Tensor
+
+    @staticmethod
+    def make(
+        max_tokens: int, max_plans: int, max_routes: int, device: torch.device | str
+    ) -> "RoutedLoRATensors":
+        return RoutedLoRATensors(
+            torch.full((max_tokens, max_routes), -1, dtype=torch.long, device=device),
+            torch.zeros((max_tokens, max_routes), dtype=torch.float32, device=device),
+            torch.full((max_plans, max_routes), -1, dtype=torch.int32, device=device),
+            torch.zeros(max_tokens, dtype=torch.int32, device=device),
+            torch.zeros(max_plans + 1, dtype=torch.int32, device=device),
+        )
+
+    def copy_(self, source: "RoutedLoRATensors") -> None:
+        """Update captured buffers, clearing routes and plans from the last step."""
+        tokens, routes = source.token_lora_indices.shape
+        plans = source.plan_lora_indices.size(0)
+        active_tokens = source.plan_token_indices.numel()
+        if (
+            tokens > self.token_lora_indices.size(0)
+            or routes > self.token_lora_indices.size(1)
+            or plans > self.plan_lora_indices.size(0)
+        ):
+            raise ValueError("Routed LoRA metadata exceeds its reserved capacity")
+        self.token_lora_indices.fill_(-1)
+        self.token_lora_weights.zero_()
+        self.plan_lora_indices.fill_(-1)
+        self.plan_token_start_loc.fill_(active_tokens)
+        self.token_lora_indices[:tokens, :routes].copy_(source.token_lora_indices)
+        self.token_lora_weights[:tokens, :routes].copy_(source.token_lora_weights)
+        self.plan_lora_indices[:plans, :routes].copy_(source.plan_lora_indices)
+        self.plan_token_indices[:active_tokens].copy_(source.plan_token_indices)
+        self.plan_token_start_loc[: plans + 1].copy_(source.plan_token_start_loc)
+
+
+def make_route_plans(
+    token_lora_indices: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Groups tokens by their slot tuple; tokens without any route are dropped.
+
+    Returns:
+        Plan slots [P, K], grouped token indices [N] and offsets [P + 1].
+
+    """
+    active_tokens = np.flatnonzero((token_lora_indices >= 0).any(axis=1))
+    plans, inverse = np.unique(
+        token_lora_indices[active_tokens], axis=0, return_inverse=True
+    )
+    inverse = inverse.reshape(-1)
+    order = np.argsort(inverse, kind="stable")
+    counts = np.bincount(inverse, minlength=len(plans))
+    starts = np.concatenate(([0], np.cumsum(counts)))
+    return (
+        plans.astype(np.int32),
+        active_tokens[order].astype(np.int32),
+        starts.astype(np.int32),
+    )
+
+
 def convert_route_mapping(
     mapping: "LoRARouteMapping",
     lora_index_to_id: list[int | None],
     device: torch.device | str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Converts routed LoRA ids to GPU slot indices."""
+) -> RoutedLoRATensors:
+    """Converts routed LoRA ids to slot indices and per-plan token groups."""
     device = torch.device(device)
     lora_id_to_index = {
         lora_id: index
@@ -180,27 +258,26 @@ def convert_route_mapping(
             f"Routed LoRA mapping references unloaded LoRA ids: {missing_lora_ids}"
         )
 
-    token_lora_indices: list[list[int]] = []
-    for token_lora_ids in mapping.token_lora_ids:
-        token_lora_indices.append(
+    token_lora_indices = np.array(
+        [
             [
                 lora_id_to_index[lora_id] if lora_id > 0 else -1
                 for lora_id in token_lora_ids
             ]
-        )
+            for token_lora_ids in mapping.token_lora_ids
+        ],
+        dtype=np.int64,
+    )
+    token_lora_weights = np.array(mapping.token_lora_weights, dtype=np.float32)
+    plans = make_route_plans(token_lora_indices)
 
-    if device.type == "cpu":
-        token_lora_indices_tensor = torch.tensor(
-            token_lora_indices, dtype=torch.long, device=device
-        )
-        token_lora_weights_tensor = torch.tensor(
-            list(mapping.token_lora_weights), dtype=torch.float32, device=device
-        )
-    else:
-        token_lora_indices_tensor = async_tensor_h2d(
-            token_lora_indices, dtype=torch.long, device=device
-        )
-        token_lora_weights_tensor = async_tensor_h2d(
-            list(mapping.token_lora_weights), dtype=torch.float32, device=device
-        )
-    return token_lora_indices_tensor, token_lora_weights_tensor
+    def to_device(array: np.ndarray) -> torch.Tensor:
+        if device.type == "cpu":
+            return torch.from_numpy(array)
+        return async_tensor_h2d(array, device=device)
+
+    return RoutedLoRATensors(
+        to_device(token_lora_indices),
+        to_device(token_lora_weights),
+        *(to_device(array) for array in plans),
+    )

@@ -27,6 +27,7 @@ if HAS_TRITON:
 from vllm import _custom_ops as ops
 
 from .punica_base import PunicaWrapperBase
+from .utils import RoutedLoRATensors
 
 
 @final
@@ -47,6 +48,14 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
         self.lora_config = kwargs["lora_config"]
         self.max_loras = self.lora_config.max_loras
+        self.routed_lora_graph_mode = kwargs.get("enable_routed_lora_graphs", False)
+        if self.routed_lora_graph_mode:
+            self._lora_route_buffers = RoutedLoRATensors.make(
+                max_num_batched_tokens,
+                max_batches,
+                self.lora_config.max_loras_per_request,
+                device,
+            )
 
         # Compute captured LoRA counts for cudagraph specialization.
         captured_lora_counts = get_captured_lora_counts(
