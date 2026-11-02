@@ -359,6 +359,10 @@ Some models, e.g., [Granite Speech](https://huggingface.co/ibm-granite/granite-s
 
 To this end, we allow registration of default multimodal LoRAs to handle this automatically, where users can map each modality to a LoRA adapter to automatically apply it when the corresponding inputs are present. Note that currently, we only allow one LoRA per prompt; if several modalities are provided, each of which are registered to a given modality, none of them will be applied.
 
+This single-adapter restriction applies to default multimodal LoRAs.
+[Fixed-weight adapter composition](#fixed-weight-adapter-composition) is a
+separate text-only offline feature; it does not combine multimodal defaults.
+
 ??? code "Example usage for offline inference"
 
     ```python
@@ -481,3 +485,52 @@ vllm serve model --enable-lora --lora-target-modules o_proj qkv_proj down_proj
 ```
 
 When `--lora-target-modules` is not specified, LoRA will be applied to all supported modules in the model. This parameter accepts module suffixes (the last component of the module name), such as `o_proj`, `qkv_proj`, `gate_proj`, etc.
+
+## Fixed-Weight Adapter Composition
+
+Offline `LLM.generate()` accepts a `LoRARoutingRequest` to combine independently
+loaded adapters as `base(x) + sum_i weight_i * LoRA_i(x)`. The adapter's own
+LoRA scaling is applied in addition to the request coefficient.
+
+```python
+from vllm import LLM
+from vllm.lora.request import LoRARequest, LoRARoutingRequest
+
+llm = LLM(
+    model="Qwen/Qwen3-0.6B",
+    enable_lora=True,
+    enforce_eager=True,
+    max_loras=4,
+    max_loras_per_request=2,
+    max_lora_rank=64,
+)
+mixture = LoRARoutingRequest(
+    routing_name="composition",
+    routing_int_id=100,
+    lora_requests=(
+        LoRARequest("first", 1, "/path/to/first_adapter"),
+        LoRARequest("second", 2, "/path/to/second_adapter"),
+    ),
+    lora_weights=(0.7, 0.3),
+)
+outputs = llm.generate(["Hello"], lora_request=mixture)
+```
+
+A single request broadcasts to all prompts. A sequence selects one ordinary,
+routed, or absent (`None`) adapter request per prompt; its length must match the
+prompts. A list of ordinary adapters does not imply composition.
+
+`max_loras_per_request` defaults to 1 and must not exceed `max_loras`, the
+batch-wide distinct-adapter capacity. The equivalent engine argument is
+`--max-loras-per-request`. Every referenced adapter counts, including adapters
+with a zero coefficient. Requests over the limit are rejected before scheduling.
+
+Composition currently requires eager execution and text-only generation with
+supported linear-layer targets. Routed embeddings, LM-head adapters, pooling,
+multimodal inputs, learned gates, compiled execution, and the OpenAI-compatible
+server API are not supported. Prefix-cache identity includes the ordered
+component adapter names, paths, and coefficients, not the mixture's display name.
+
+For a runnable example, see
+[Composition Offline](../examples/features/lora.md#composition-offline)
+([source](../../examples/features/lora/composition_offline.py)).
