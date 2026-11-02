@@ -134,6 +134,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         self.lora_a_stacked[index] = 0
         self.lora_b_stacked[index] = 0
 
+    def slot_weights(
+        self, index: int
+    ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
+        return (self.lora_a_stacked[index, 0],), (self.lora_b_stacked[index, 0],)
+
     def set_lora(
         self,
         index: int,
