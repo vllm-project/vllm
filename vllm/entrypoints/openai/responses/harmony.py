@@ -8,6 +8,7 @@ Handles two directions:
 """
 
 import json
+from typing import Any
 
 from openai.types.responses import (
     ResponseFunctionToolCall,
@@ -50,6 +51,26 @@ logger = init_logger(__name__)
 # ---------------------------------------------------------------------------
 
 
+def _content_part_text(part: Any) -> str:
+    """Extract the text of a single user-supplied content part.
+
+    ``previous_input_messages`` entries are accepted as free-form dicts and are
+    not schema-validated by Pydantic, so parts may be plain strings (valid in
+    the chat format) or dicts with an optional ``text`` key. Anything else is a
+    client error: raise VLLMValidationError so it maps to HTTP 400 instead of
+    crashing the request with a raw exception.
+    """
+    if isinstance(part, str):
+        return part
+    if isinstance(part, dict):
+        return part.get("text", "")
+    raise VLLMValidationError(
+        f"Invalid content part: {part!r}. Expected a string or a dictionary "
+        "with an optional 'text' key.",
+        parameter="input",
+    )
+
+
 def _parse_harmony_format_message(chat_msg: dict) -> Message:
     """Reconstruct a Message from Harmony-format dict,
     preserving channel, recipient, and content_type."""
@@ -60,7 +81,7 @@ def _parse_harmony_format_message(chat_msg: dict) -> Message:
     raw_content = chat_msg.get("content", "")
     if isinstance(raw_content, list):
         # TODO: Support refusal and non-text content types.
-        contents = [TextContent(text=c.get("text", "")) for c in raw_content]
+        contents = [TextContent(text=_content_part_text(c)) for c in raw_content]
     elif isinstance(raw_content, str):
         contents = [TextContent(text=raw_content)]
     else:
@@ -133,12 +154,14 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
         return []
 
     # Default: user/assistant messages
-    content = chat_msg.get("content", "")
+    # NOTE: content may be explicitly None (valid for assistant messages), and
+    # list parts may be plain strings (valid in the chat format).
+    content = chat_msg.get("content") or ""
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
         # TODO: Support refusal.
-        contents = [TextContent(text=c.get("text", "")) for c in content]
+        contents = [TextContent(text=_content_part_text(c)) for c in content]
     msg = Message.from_role_and_contents(role, contents)
     return [msg]
 
