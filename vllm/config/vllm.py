@@ -3249,6 +3249,9 @@ class VllmConfig:
         if self.watermark_config is not None:
             unsupported.append("watermarking")
 
+        if self.compilation_config.cudagraph_capture_sizes_prefill is not None:
+            unsupported.append("cudagraph_capture_sizes_prefill")
+
         # PCP runtime support is implemented only by the V2 model runner.
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallel")
@@ -3513,6 +3516,15 @@ class VllmConfig:
 
     def _validate_v2_model_runner(self) -> None:
         """Check for features not yet supported by the V2 model runner."""
+        if (
+            self.compilation_config.cudagraph_capture_sizes_prefill is not None
+            and self.compilation_config.cudagraph_mode
+            != CUDAGraphMode.FULL_AND_PIECEWISE
+        ):
+            raise ValueError(
+                "cudagraph_capture_sizes_prefill requires FULL_AND_PIECEWISE"
+            )
+
         unsupported = self._get_v2_model_runner_unsupported_features()
         if unsupported:
             raise ValueError(
