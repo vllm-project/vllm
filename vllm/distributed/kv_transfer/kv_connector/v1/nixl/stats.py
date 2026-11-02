@@ -23,7 +23,12 @@ if TYPE_CHECKING:
 
 @dataclass
 class NixlKVConnectorStats(KVConnectorStats):
-    """Container for transfer performance metrics."""
+    """Container for transfer performance metrics.
+
+    Each worker records telemetry independently. In multi-rank TP deployments,
+    worker observations are pooled, which means the metrics calculated below are
+    aggregated across all TP ranks.
+    """
 
     def __post_init__(self):
         if not self.data:
@@ -128,6 +133,8 @@ class NixlKVConnectorStats(KVConnectorStats):
                 **failure_counts,
             }
 
+        # Observations have already been pooled across TP ranks and reporting
+        # batches in the logging interval. Each sample is a rank-level transfer.
         xfer_time = np.asarray(self.data["transfer_duration"])
         post_time = np.asarray(self.data["post_duration"])
         # Convert to MB for CLI logging.
@@ -137,11 +144,15 @@ class NixlKVConnectorStats(KVConnectorStats):
         assert n == self.num_successful_transfers
 
         total_mb = mb.sum()
+        # Mean payload size per rank-level transfer in the combined pool.
         avg_mb = total_mb / n
 
+        # Divide pooled transfer volume by summed rank-level transfer durations.
+        # This is a duration-weighted average of individual transfer rates.
         total_time_seconds = xfer_time.sum()
         throughput_mb_s = total_mb / total_time_seconds
 
+        # Means and P90s are computed from the combined raw observations
         return {
             "Num successful transfers": n,
             "Avg xfer time (ms)": round(xfer_time.mean().item() * 1e3, 3),
