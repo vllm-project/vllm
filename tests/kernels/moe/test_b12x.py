@@ -40,6 +40,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     NvFp4MoeBackend,
+    nvfp4_backend_supports_csf_scales,
     select_nvfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.b12x_moe import (
@@ -53,6 +54,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.b12x import get_b12x_fused_moe
 from vllm.utils.torch_utils import set_random_seed
 
 
@@ -173,6 +175,7 @@ def _make_b12x_moe_kernel(
     topk: int,
     activation: MoEActivation,
     quant_config: FusedMoEQuantConfig,
+    csf_scales: bool = False,
 ) -> mk.FusedMoEKernel:
     num_experts = w1.shape[0]
     moe_config = make_dummy_moe_config(
@@ -190,7 +193,7 @@ def _make_b12x_moe_kernel(
         in_dtype=hidden_states.dtype,
         activation=activation,
     )
-    experts = B12xExperts(moe_config, quant_config)
+    experts = B12xExperts(moe_config, quant_config, csf_scales=csf_scales)
     layer = SimpleNamespace(
         activation=activation,
         apply_router_weight_on_input=False,
@@ -607,6 +610,22 @@ def test_explicit_b12x_nvfp4_selection(
     assert backend == NvFp4MoeBackend.B12X
     assert experts_cls is B12xExperts
     assert selected_activation_keys == [expected_activation_key]
+
+
+def test_csf_scales_stay_resident_only_on_b12x_w4a4(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_dummy_moe_config(hidden_dim=2560, intermediate_size=640)
+    with_csf = SimpleNamespace(Nvfp4CsfWeights=object)
+    monkeypatch.setattr(b12x, "get_b12x_fused_moe", lambda: with_csf)
+    assert nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, False)
+    assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, True)
+    assert not nvfp4_backend_supports_csf_scales(
+        NvFp4MoeBackend.FLASHINFER_CUTLASS, config, False
+    )
+    # A b12x without the CSF API decodes the scales at load.
+    monkeypatch.setattr(b12x, "get_b12x_fused_moe", lambda: SimpleNamespace())
+    assert not nvfp4_backend_supports_csf_scales(NvFp4MoeBackend.B12X, config, False)
 
 
 @pytest.mark.parametrize(
@@ -1354,3 +1373,138 @@ def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
             )
             assert cosine >= 0.999 and relative_l2 <= 0.01
         graph.reset()
+
+
+@pytest.mark.skipif(
+    not _has_b12x_moe() or not hasattr(get_b12x_fused_moe(), "Nvfp4CsfWeights"),
+    reason="requires b12x MoE with CSF scales on SM120",
+)
+# Qwen3.8-Flash-Next routed-expert shards at TP1, TP2 and TP4.
+@pytest.mark.parametrize("intermediate_size", [640, 320, 160])
+@torch.inference_mode()
+def test_b12x_resident_csf_scales_match_decoded_scales(
+    intermediate_size: int, workspace_init
+) -> None:
+    from vllm.v1.worker.workspace import lock_workspace
+
+    set_random_seed(29)
+    num_experts, hidden_size, topk = 512, 2560, 10
+    w13 = torch.randint(
+        256, (num_experts, 2 * intermediate_size, hidden_size // 2), device="cuda"
+    ).to(torch.uint8)
+    w2 = torch.randint(
+        256, (num_experts, hidden_size, intermediate_size // 2), device="cuda"
+    ).to(torch.uint8)
+    # Spread over 32 E4M3 codes, so many scales are CSF exceptions.
+    w13_scale, w2_scale = (
+        torch.randint(0x28, 0x48, (*w.shape[:2], w.shape[2] // 8), device="cuda")
+        .to(torch.uint8)
+        .view(torch.float8_e4m3fn)
+        for w in (w13, w2)
+    )
+    alpha = torch.full((num_experts,), 1 / 64, device="cuda")
+    input_scale = torch.ones(num_experts, device="cuda")
+    kernels = {}
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        for csf_scales in (False, True):
+            prepared = prepare_nvfp4_moe_layer_for_b12x(
+                w13.clone(),
+                w13_scale,
+                alpha,
+                input_scale,
+                w2.clone(),
+                w2_scale,
+                alpha,
+                input_scale,
+                is_act_and_mul=True,
+                reorder_w13=csf_scales,
+            )
+            if csf_scales:
+                expected_scales = (prepared[1].clone(), prepared[5].clone())
+            quant_config = FusedMoEQuantConfig.make(
+                quant_dtype="nvfp4",
+                weight_dtype="nvfp4",
+                w1_scale=prepared[1],
+                w2_scale=prepared[5],
+                g1_alphas=prepared[2],
+                g2_alphas=prepared[6],
+                a1_gscale=1.0 / prepared[3],
+                a2_gscale=1.0 / prepared[7],
+            )
+            kernel = _make_b12x_moe_kernel(
+                torch.empty(0, hidden_size, dtype=torch.bfloat16),
+                prepared[0],
+                prepared[4],
+                topk,
+                MoEActivation.SILU,
+                quant_config,
+                csf_scales=csf_scales,
+            )
+            kernels[csf_scales] = (kernel, prepared[0], prepared[4])
+
+        experts = kernels[True][0].fused_experts
+        assert isinstance(experts, B12xExperts)
+        csf = experts._prepared()
+        csf.nvfp4_csf.decode_all(csf.w1_blockscale, csf.w2_blockscale)
+        for expanded, expected in zip(
+            (csf.w1_blockscale, csf.w2_blockscale), expected_scales
+        ):
+            assert torch.equal(expanded.view(torch.uint8), expected.view(torch.uint8))
+        with pytest.raises(NotImplementedError, match="reloading"):
+            experts.process_weights_after_loading(
+                SimpleNamespace(
+                    apply_router_weight_on_input=False, _b12x_prepared_experts=csf
+                )
+            )
+
+        hidden_states = torch.randn(
+            64, hidden_size, device="cuda", dtype=torch.bfloat16
+        )
+        scores = torch.randn(64, num_experts, device="cuda", dtype=torch.bfloat16)
+        topk_weights, topk_ids, _ = fused_topk(hidden_states, scores, topk, False)
+
+        def apply(csf_scales: bool, tokens: int) -> torch.Tensor:
+            kernel, w1, w2 = kernels[csf_scales]
+            return kernel.apply(
+                hidden_states=hidden_states[:tokens],
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights[:tokens],
+                topk_ids=topk_ids[:tokens],
+                activation=MoEActivation.SILU,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+        # One token runs the micro kernel, 64 the dynamic one. The dynamic
+        # kernel sums the experts with atomics, so only the micro kernel is
+        # bit-reproducible run to run, with decoded or with resident scales.
+        token_counts = (64, 1)
+        tolerance = {64: 0.25, 1: 0.0}
+        for tokens in token_counts:
+            expected = apply(False, tokens)
+            assert torch.isfinite(expected).all() and torch.count_nonzero(expected)
+            torch.testing.assert_close(
+                apply(True, tokens), expected, rtol=0, atol=tolerance[tokens]
+            )
+
+        lock_workspace()
+        graphs, outputs = [], []
+        for tokens in token_counts:
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=torch.cuda.Stream()):
+                outputs.append(apply(True, tokens))
+            graphs.append(graph)
+        # Replays must expand the newly routed experts' scales themselves.
+        hidden_states.neg_()
+        topk_ids.copy_(topk_ids.roll(1, dims=0))
+        for tokens, graph, output in zip(token_counts, graphs, outputs):
+            csf.w1_blockscale.view(torch.uint8).fill_(0x7F)
+            csf.w2_blockscale.view(torch.uint8).fill_(0x7F)
+            graph.replay()
+            torch.testing.assert_close(
+                output, apply(False, tokens), rtol=0, atol=tolerance[tokens]
+            )
