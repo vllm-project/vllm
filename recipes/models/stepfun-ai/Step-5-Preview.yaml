@@ -1,0 +1,211 @@
+meta:
+  title: "Step-5-Preview"
+  slug: "step-5-preview"
+  provider: "StepFun"
+  description: "Multimodal MoE with hybrid sparse/sliding-window attention, a 1M-token context window, and MTP."
+  date_added: 2026-10-15
+  date_updated: 2026-10-15
+  tasks:
+    - multimodal
+  default_hardware: b300
+  related_recipes:
+    - "stepfun-ai/Step-3.7-Flash"
+  hardware:
+    h200: verified
+    b300: verified
+    gb300: verified
+
+model:
+  model_id: "stepfun-ai/Step-5-Preview"
+  docker_image: "vllm/vllm-openai:step-5-preview"
+  install:
+    docker:
+      note: "Use the dedicated Step-5 image for these launch commands."
+    pip: false
+  architecture: moe
+  # Approximately 604B parameters, counted from the checkpoint tensor shapes.
+  parameter_count: "604B"
+  context_length: 1048576
+  base_args:
+    - "--data-parallel-backend"
+    - "mp"
+    - "--distributed-executor-backend"
+    - "mp"
+    - "--disable-custom-all-reduce"
+    - "--max-model-len"
+    - "1048576"
+    - "--max-num-batched-tokens"
+    - "16384"
+    - "--max-num-seqs"
+    - "64"
+    - "--gpu-memory-utilization"
+    - "0.85"
+    - "--enable-prefix-caching"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Step-5 tool calling with automatic tool choice."
+    args: ["--enable-auto-tool-choice", "--tool-call-parser", "step5"]
+  reasoning:
+    description: "Step-5 reasoning parser."
+    args: ["--reasoning-parser", "step5"]
+  spec_decoding:
+    description: "MTP with three speculative tokens."
+    args: ["--spec-method", "mtp", "--spec-tokens", "3"]
+
+variants:
+  default:
+    precision: fp8
+    vram_minimum_gb: 773
+  nvfp4:
+    model_id: "stepfun-ai/Step-5-Preview-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 473
+
+kv_offload_support:
+  simple: unsupported
+  lmcache: unsupported
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+default_strategy: single_node_tp
+
+# Blackwell runs on 8 GPUs: one B200/B300 node, or two 4-GPU GB200/GB300
+# trays. FP8 does not fit one 8x H100 node, so H100 runs on two nodes.
+# The floor drops single-node layouts there and sizes multi-node layouts
+# (and GB200/GB300 P/D pools) to two nodes.
+strategy_min_gpus:
+  gb200: 8
+  gb300: 8
+  h100: 16
+
+hardware_overrides:
+  blackwell:
+    extra_args: ["--moe-backend", "deep_gemm_mega_moe"]
+
+strategy_overrides:
+  single_node_tp:
+    hardware_overrides:
+      blackwell:
+        extra_args: []  # MegaMoE requires expert parallelism
+  multi_node_tp:
+    hardware_overrides:
+      blackwell:
+        extra_args: []
+  pd_cluster:
+    pool_modes: [dep]  # P and D must share TP
+
+guide: |
+  ## Overview
+
+  [Step-5 Preview](https://huggingface.co/stepfun-ai/Step-5-Preview) is a multimodal
+  MoE model with hybrid sparse/sliding-window attention, a 1M-token context window,
+  and multi-token prediction (MTP).
+
+  The [NVFP4 checkpoint](https://huggingface.co/stepfun-ai/Step-5-Preview-NVFP4)
+  is available through the NVFP4 variant below.
+
+  ## Docker
+
+  ```bash
+  docker pull vllm/vllm-openai:step-5-preview
+
+  docker run --rm -it \
+      --gpus all \
+      --ipc=host \
+      --network=host \
+      --volume "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      --entrypoint /bin/bash \
+      vllm/vllm-openai:step-5-preview
+  ```
+
+  Run the following commands inside the container. Model access is required;
+  use `hf auth login` if the checkpoint requires authentication.
+
+  ## FP8: single node on 4 B300 GPUs
+
+  The examples use four B300 GPUs. Choose TP4, TEP4, or DEP4:
+
+  | Mode | Tensor parallel | Data parallel | Expert parallel |
+  | --- | --- | --- | --- |
+  | TP4 | 4 | 1 | Disabled |
+  | TEP4 | 4 | 1 | 4 |
+  | DEP4 | 1 | 4 | 4 |
+
+  ```bash
+  export CUDA_VISIBLE_DEVICES=0,1,2,3
+  ```
+
+  On Blackwell, TEP4 and DEP4 use MegaMoE. TP4 uses the default MoE backend
+  because MegaMoE requires expert parallelism.
+
+  For FP8 on H200, use eight GPUs: TP8, TEP8, or DEP8, respectively.
+  Set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7` and change the parallel size
+  from 4 to 8 (DEP keeps TP=1). Omit the MegaMoE flag on Hopper.
+
+  These are separate layouts: TP4 and TEP4 use DP=1; DEP4 uses TP=1.
+  `--max-num-seqs` applies per DP rank. The 1M-token context limit includes
+  input and output; reduce `--max-model-len` or concurrency if KV cache memory
+  is insufficient.
+
+  ## NVFP4: single node on 4 B300 GPUs
+
+  Use [stepfun-ai/Step-5-Preview-NVFP4](https://huggingface.co/stepfun-ai/Step-5-Preview-NVFP4)
+  with the same Step-5 image. The checkpoint includes both NVFP4 and BF16 layers;
+  quantization is detected from its config.
+
+  ```bash
+  docker pull vllm/vllm-openai:step-5-preview
+
+  docker run --rm -it \
+      --gpus 4 \
+      --ipc=host \
+      --network=host \
+      --volume "$HOME/.cache/huggingface:/root/.cache/huggingface" \
+      --entrypoint /bin/bash \
+      vllm/vllm-openai:step-5-preview
+  ```
+
+  Inside the container, reuse one of the TP4, TEP4, or DEP4 commands above,
+  replacing the checkpoint with `stepfun-ai/Step-5-Preview-NVFP4` and setting
+  `--max-model-len 320000`.
+  Keep `--reasoning-parser step5` and `--tool-call-parser step5` unchanged.
+
+  | Mode | Parallel arguments |
+  | --- | --- |
+  | TP4 | `--tensor-parallel-size 4` |
+  | TEP4 | `--tensor-parallel-size 4 --enable-expert-parallel --moe-backend deep_gemm_mega_moe` |
+  | DEP4 | `--tensor-parallel-size 1 --data-parallel-size 4 --enable-expert-parallel --moe-backend deep_gemm_mega_moe` |
+
+  TP4 uses automatic MoE backend selection for the mixed-precision layers.
+  TEP4 and DEP4 use MegaMoE for routed experts; shared experts run separately.
+  Send requests with `"model": "stepfun-ai/Step-5-Preview-NVFP4"`.
+
+  Available context and concurrency depend on the remaining KV cache memory.
+
+  ## Send a request
+
+  ```bash
+  curl http://127.0.0.1:8000/v1/chat/completions \
+      --header 'Content-Type: application/json' \
+      --data '{
+        "model": "stepfun-ai/Step-5-Preview",
+        "messages": [{"role": "user", "content": "Hello!"}],
+        "max_tokens": 4096,
+        "stream": true
+      }'
+  ```
+
+  ## References
+
+  - [Step-5 Preview NVFP4 model](https://huggingface.co/stepfun-ai/Step-5-Preview-NVFP4)
+  - [Step-5 Preview model](https://huggingface.co/stepfun-ai/Step-5-Preview)
+  - [Step-5 Docker image](https://hub.docker.com/r/vllm/vllm-openai/tags?name=step-5-preview)

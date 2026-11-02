@@ -182,6 +182,152 @@ def test_all_reduce_mhc_matches_unfused_path(monkeypatch):
     multi_process_parallel(monkeypatch, 4, 1, _all_reduce_mhc)
 
 
+def _swizzled_scale_rows(scales: torch.Tensor, rows: int, cols: int) -> torch.Tensor:
+    """[rows, cols] UE8M0 scales read out of the 128x4 swizzled layout."""
+    row = torch.arange(rows, device=scales.device)[:, None]
+    col = torch.arange(cols, device=scales.device)[None, :]
+    offset = (
+        col % 4
+        + col // 4 * 512
+        + row % 32 * 16
+        + row % 128 // 32 * 4
+        + row // 128 * 128 * cols
+    )
+    return scales[offset]
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def _finalize_all_reduce_gemma_norm_mxfp8(
+    monkeypatch, tp_size, pp_size, rank, distributed_init_port
+):
+    from vllm.model_executor.layers.fused_moe.moe_output import (
+        MoEOutput,
+        UnfinalizedMoEOutput,
+    )
+    from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+        mxfp8_e4m3_quantize,
+    )
+    from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
+        FinalizeAllReduceGemmaRMSNormMxfp8,
+    )
+
+    hidden, top_k, eps = 6144, 4, 1e-6
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        op = FinalizeAllReduceGemmaRMSNormMxfp8(
+            hidden_size=hidden,
+            max_num_tokens=32,
+            top_k=top_k,
+            fp32_weights=False,
+            device=device,
+        )
+
+        def run(n):
+            torch.manual_seed(7 + rank)
+            # A padded permuted GEMM2 buffer, like the MoE's.
+            rows = n * top_k + 5
+            gemm2 = torch.randn(rows, hidden, device=device, dtype=torch.bfloat16)
+            permuted = torch.randperm(rows, device=device)[: n * top_k]
+            permuted = permuted.view(n, top_k).int()
+            # A route to an expert this rank does not hold.
+            permuted[0, -1] = -1
+            weights = torch.rand(n, top_k, device=device).bfloat16()
+            shared = torch.randn(n, hidden, device=device, dtype=torch.bfloat16)
+            torch.manual_seed(123)
+            residual = torch.randn(n, hidden, device=device, dtype=torch.bfloat16)
+            weight = torch.randn(hidden, device=device, dtype=torch.bfloat16) * 0.1
+            moe_output = MoEOutput(
+                routed=UnfinalizedMoEOutput(gemm2, weights, permuted),
+                shared_output=shared,
+            )
+
+            def fused():
+                return op(moe_output, residual, weight, eps)
+
+            def check(outputs):
+                quantized, residual_out = outputs
+                # One FP32 FMA per route in route order, the shared add, one
+                # rounding: the partial each rank publishes.
+                acc = torch.zeros(n, hidden, device=device)
+                for k in range(top_k):
+                    valid = (permuted[:, k] >= 0).unsqueeze(-1)
+                    rows_k = gemm2[permuted[:, k].clamp_min(0).long()].float()
+                    torch.addcmul(
+                        acc,
+                        torch.where(valid, rows_k, 0.0),
+                        torch.where(valid, weights[:, k : k + 1].float(), 0.0),
+                        out=acc,
+                    )
+                partial = (acc + shared.float()).bfloat16()
+                peers = get_tp_group().all_gather(partial, dim=0).view(tp_size, n, -1)
+                reduced = peers[0].float()
+                for peer in peers[1:]:
+                    reduced = reduced + peer.float()
+                prenorm = (reduced + residual.float()).bfloat16()
+                assert torch.equal(residual_out, prenorm)
+
+                inv_rms = torch.rsqrt(
+                    prenorm.float().square().mean(-1, keepdim=True) + eps
+                )
+                normed = (prenorm.float() * inv_rms * (weight.float() + 1)).bfloat16()
+                ref_values, ref_scales = mxfp8_e4m3_quantize(
+                    normed, is_sf_swizzled_layout=True
+                )
+                # The norm sums the squares in another order with an approximate
+                # rsqrt, so a value can move by one BF16 ULP, and with it rarely
+                # a block's scale. Padding rows' scales are zero in both.
+                assert quantized.scale.shape == ref_scales.shape
+                assert (quantized.scale == ref_scales).float().mean() >= 0.99
+                codes = quantized.data.view(torch.uint8)
+                assert (codes == ref_values.view(torch.uint8)).float().mean() >= 0.99
+                cols = hidden // 32
+                scales = _swizzled_scale_rows(
+                    quantized.scale, quantized.scale.numel() // cols, cols
+                )
+                assert not scales[n:].any()
+                scales = scales[:n]
+                step = torch.exp2(scales.float() - 127).repeat_interleave(32, dim=1)
+                dequantized = quantized.data.float() * step
+                expected = normed.float()
+                # E4M3 rounding (3 mantissa bits) plus one BF16 ULP, and the
+                # smallest E4M3 subnormal step of the block.
+                tolerance = 0.07 * expected.abs() + step * 2.0**-9
+                assert torch.all((dequantized - expected).abs() <= tolerance)
+
+            check(fused())
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                for _ in range(5):
+                    fused()
+                captured = fused()
+            for _ in range(20):
+                graph.replay()
+            check(captured)
+            # Replays must pick up in-place input changes.
+            gemm2.mul_(0.5)
+            residual.mul_(2)
+            graph.replay()
+            check(captured)
+
+        # Changing shapes cover shrinking and growing batches in one mailbox.
+        for n in (1, 6, 32, 3, 17, 2, 1):
+            run(n)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100), reason="Requires SM100"
+)
+def test_finalize_all_reduce_gemma_norm_mxfp8_matches_unfused_path(monkeypatch):
+    """MiniMax-M3's fused MoE finalize + all-reduce + Gemma RMSNorm + MXFP8."""
+    if torch.accelerator.device_count() < 4:
+        pytest.skip("Requires four GPUs with NVLink multicast")
+    multi_process_parallel(monkeypatch, 4, 1, _finalize_all_reduce_gemma_norm_mxfp8)
+
+
 @pytest.mark.parametrize(
     ("dtype", "expected"),
     [
@@ -203,6 +349,42 @@ def test_custom_allreduce_filters_dtype(
     communicator.max_size = 1024
 
     assert communicator.should_custom_ar(torch.empty(16, dtype=dtype)) is expected
+
+
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_custom_allreduce_size_gate_ignored_under_batch_invariance(
+    batch_invariant: bool,
+) -> None:
+    """Batch invariance must not switch backends based on the input size."""
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 2
+    communicator.max_size = 1024
+    communicator.batch_invariant = batch_invariant
+    communicator._ptr = 0
+
+    oversized = torch.empty(1024, dtype=torch.float16)
+    assert communicator.should_custom_ar(oversized) is batch_invariant
+
+
+@pytest.mark.parametrize("batch_invariant", [False, True])
+def test_custom_reduce_scatter_disabled_under_batch_invariance(
+    monkeypatch, batch_invariant: bool
+) -> None:
+    """Reduce-scatter stays on one backend under batch invariance."""
+    monkeypatch.setattr(car.current_platform, "is_cuda", lambda: True)
+    communicator = car.CustomAllreduce.__new__(car.CustomAllreduce)
+    communicator.disabled = False
+    communicator.world_size = 2
+    communicator.fully_connected = True
+    communicator.mnnvl_only = False
+    communicator.mnnvl_multicast_ptr = 0
+    communicator.max_reduce_scatter_size = 1024
+    communicator.max_mnnvl_reduce_scatter_size = 1024
+    communicator.batch_invariant = batch_invariant
+
+    in_range = torch.empty(64, dtype=torch.float16)
+    assert communicator.should_custom_reduce_scatter(in_range) is not batch_invariant
 
 
 @pytest.mark.parametrize(
@@ -273,9 +455,13 @@ def test_local_multicast_support_rejects_non_cuda(monkeypatch):
         (4, (10, 3), True, True),
         (8, (10, 0), True, True),
         (8, (10, 3), True, True),
+        (2, (10, 7), True, True),
+        (4, (10, 7), True, True),
+        (6, (10, 7), True, False),
         (6, (10, 3), True, False),
-        (8, (10, 1), True, False),
+        (8, (10, 1), True, True),
         (8, (9, 0), True, False),
+        (8, (11, 0), True, False),
         (8, (10, 3), False, False),
     ],
 )
@@ -286,15 +472,15 @@ def test_mnnvl_multimem_reduce_scatter_platform_gate(
     local_multicast,
     expected,
 ):
-    def is_device_capability(capability, device_id):
-        assert capability in ((10, 0), (10, 3))
+    def is_device_capability_family(capability, device_id):
+        assert capability == 100
         assert device_id == 3
-        return device_capability == capability
+        return device_capability[0] == capability // 10
 
     monkeypatch.setattr(
         car.current_platform,
-        "is_device_capability",
-        is_device_capability,
+        "is_device_capability_family",
+        is_device_capability_family,
     )
     monkeypatch.setattr(
         car,
@@ -620,6 +806,60 @@ def eager_allreduce(
         for _ in range(num_communication):
             out = fa.all_reduce(out, registered=False)
         torch.testing.assert_close(out, inp * (tp_size**num_communication))
+
+
+@ray.remote(num_gpus=1, max_calls=1)
+def chunked_allreduce(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size,
+    pp_size,
+    rank,
+    distributed_init_port,
+):
+    """Inputs above max_size are reduced in chunks and match the fixed-order
+    reference bitwise, both eagerly and inside a CUDA graph."""
+    with monkeypatch.context() as m:
+        m.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        m.delenv("HIP_VISIBLE_DEVICES", raising=False)
+        m.setenv("VLLM_CUSTOM_ALLREDUCE_ALGO", "1stage")
+        device = torch.device(f"cuda:{rank}")
+        torch.accelerator.set_device_index(device)
+        init_test_distributed_environment(tp_size, pp_size, rank, distributed_init_port)
+        ensure_model_parallel_initialized(tp_size, pp_size)
+        group = get_tp_group().device_group
+        fa = get_tp_group().device_communicator.ca_comm
+
+        # Two full chunks plus a partial one.
+        dtype = torch.bfloat16
+        chunk_numel = fa.max_size // dtype.itemsize
+        inp = torch.randn(2 * chunk_numel + 4096, device=device).to(dtype)
+        gathered = [torch.empty_like(inp) for _ in range(tp_size)]
+        dist.all_gather(gathered, inp, group=group)
+        ref = gathered[0].float()
+        for peer in gathered[1:]:
+            ref = ref + peer.float()
+        ref = ref.to(torch.bfloat16)
+
+        out = fa.all_reduce(inp, registered=False)
+        assert torch.equal(out, ref)
+
+        # Weak-contiguous but not C-contiguous: a transposed matrix.
+        inp_t, ref_t = inp.view(-1, 4096).t(), ref.view(-1, 4096).t()
+        assert torch.equal(fa.all_reduce(inp_t, registered=False), ref_t)
+
+        with fa.capture():
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                out = fa.all_reduce(inp, registered=True)
+        graph.replay()
+        assert torch.equal(out, ref)
+
+
+@pytest.mark.parametrize("tp_size", [2, 4])
+def test_custom_allreduce_chunked(monkeypatch: pytest.MonkeyPatch, tp_size):
+    if tp_size > torch.accelerator.device_count():
+        pytest.skip("Not enough GPUs to run the test.")
+    multi_process_parallel(monkeypatch, tp_size, 1, chunked_allreduce)
 
 
 @pytest.mark.parametrize("tp_size", [2])

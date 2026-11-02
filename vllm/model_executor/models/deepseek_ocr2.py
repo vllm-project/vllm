@@ -318,7 +318,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         images_spatial_crop = kwargs.pop("images_spatial_crop", None)
         images_crop = kwargs.pop("images_crop", None)
 
-        if pixel_values is None or torch.sum(pixel_values).item() == 0:
+        if pixel_values is None:
             return None
 
         base_size = self.vision_config.image_size
@@ -343,7 +343,7 @@ class DeepseekOCR2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, Support
         return features.view(-1, dim)
 
     def _encode_local_features(self, patches: torch.Tensor) -> torch.Tensor | None:
-        if torch.sum(patches).item() == 0:
+        if patches.numel() == 0:
             return None
 
         local_features = self.sam_model(patches)

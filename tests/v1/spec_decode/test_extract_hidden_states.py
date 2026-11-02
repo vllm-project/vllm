@@ -146,7 +146,7 @@ def test_prepare_next_token_ids_padded():
     mock_input_batch.vocab_size = 100
     mock_input_batch.num_tokens_no_spec = np.array([5] * num_requests)
 
-    mock_requests = {}
+    mock_requests: dict[str, CachedRequestState] = {}
     for req_id in req_ids:
         mock_request = mock.MagicMock(spec=CachedRequestState)
         # Each request will have a backup next token id of 10, 20, 30, 40

@@ -151,6 +151,9 @@ class TranscriptionRequest(OpenAIBaseModel):
     to automatically increase the temperature until certain thresholds are hit.
     """
 
+    watermarking: bool | None = None
+    """Whether to apply the engine's configured watermark to this request."""
+
     top_p: float | None = None
     """Enables nucleus (top-p) sampling, where tokens are selected from the
     smallest possible set whose cumulative probability exceeds `p`.
@@ -205,6 +208,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             request_prompt=self.prompt,
             to_language=self.to_language,
             hotwords=self.hotwords,
+            extra_args=self.vllm_xargs,
         )
 
     def to_beam_search_params(
@@ -226,6 +230,7 @@ class TranscriptionRequest(OpenAIBaseModel):
             beam_width=n,
             max_tokens=max_tokens,
             temperature=temperature,
+            watermarking=self.watermarking,
             length_penalty=self.length_penalty,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
@@ -264,6 +269,7 @@ class TranscriptionRequest(OpenAIBaseModel):
 
         return SamplingParams.from_optional(
             temperature=temperature,
+            watermarking=self.watermarking,
             max_tokens=max_tokens,
             seed=self.seed,
             top_p=top_p,

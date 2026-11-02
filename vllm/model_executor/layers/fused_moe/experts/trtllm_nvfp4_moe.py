@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
     has_flashinfer_situ_activation,
+    quantize_nvfp4_per_token_input,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -36,10 +37,6 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
-
-# Base scale for per-token NVFP4 activation quant; the kernel folds the
-# per-token global scale (from the activation amax) on top of it.
-_PER_TOKEN_BASE_GLOBAL_SCALE = 1.0 / (448.0 * 6.0)
 
 
 class TrtLlmNvFp4ExpertsBase:
@@ -259,23 +256,6 @@ class TrtLlmNvFp4ExpertsBase:
     def expects_unquantized_inputs(self) -> bool:
         return self.per_token_activation
 
-    def _quantize_per_token_input(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """NVFP4-quantize activations with a per-token global scale.
-
-        Returns ``(packed_fp4, block_scale, per_token_scale)``.
-        """
-        from flashinfer import SfLayout, nvfp4_quantize
-
-        hs_fp4, hs_block_scale, per_token_scale = nvfp4_quantize(
-            hidden_states,
-            _PER_TOKEN_BASE_GLOBAL_SCALE,
-            sfLayout=SfLayout.layout_linear,
-            per_token_activation=True,
-        )
-        return hs_fp4, hs_block_scale, per_token_scale
-
     def _get_chunk_size(self) -> int:
         MAX_GRID_Y = 65535
         MAX_TILE_TOKENS_DIM = 128
@@ -361,13 +341,15 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
 
         # Per-token: input is unquantized, quantize it here. Otherwise it was
         # already quantized in prepare() with the static global scale.
-        if self.per_token_activation:
+        if self.expects_unquantized_inputs:
             hidden_states, block_scale, per_token_scale = (
-                self._quantize_per_token_input(hidden_states)
+                quantize_nvfp4_per_token_input(hidden_states)
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
         output1_scale_gate_scalar = self.quant_config.g1_alphas
+        # With output=None the caller consumes the UnfinalizedMoEOutput itself.
+        defer = output is not None and self._uses_post_gemm2_hook(topk_ids.shape[0])
 
         # Invoke kernel.
         flashinfer_output = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
@@ -398,14 +380,25 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
             routing_method_type=1,  # not used
-            do_finalize=output is not None,
+            do_finalize=output is not None and not defer,
             activation_type=activation_to_flashinfer_int(activation),
             per_token_scale=per_token_scale,
-            output=output,
+            output=None if defer else output,
             tune_max_num_tokens=min(
                 fi_moe_largest_bucket(self.moe_config), self._get_chunk_size()
             ),
         )
+        if defer:
+            self._run_post_gemm2_hook(
+                convert_flashinfer_moe_output(
+                    flashinfer_output,
+                    do_finalize=False,
+                    num_tokens=topk_ids.shape[0],
+                    top_k=self.topk,
+                ),
+                output,
+            )
+            return None
         if output is not None:
             return None
         routed_output = convert_flashinfer_moe_output(
@@ -437,7 +430,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
     ) -> UnfinalizedMoEOutput | None:
         assert self._supports_activation(activation)
         # Per-token defers input quant to _invoke_kernel, so a1q_scale is None.
-        assert a1q_scale is not None or self.per_token_activation
+        assert a1q_scale is not None or self.expects_unquantized_inputs
 
         # DeepEP produces int64 indexes.
         topk_ids = topk_ids.to(dtype=torch.int32)
@@ -449,7 +442,10 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             # Each launch permutes into its own buffer, so only a run that fits
             # in one launch can leave the top-k reduction to a deferring
             # consumer.
-            defer = self.moe_config.should_defer_moe_finalize(M)
+            defer = (
+                self.post_gemm2_hook is None
+                and self.moe_config.should_defer_moe_finalize(M)
+            )
             return self._invoke_kernel(
                 None if defer else output,
                 hidden_states,
@@ -509,7 +505,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
             RoutingMethodType.SigmoidRenorm,
             RoutingMethodType.Sigmoid,
             RoutingMethodType.MiniMax2,
-            RoutingMethodType.Simulated,
         ]
 
     @staticmethod
@@ -535,11 +530,12 @@ class TrtLlmNvFp4ExpertsMonolithic(
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
         assert self._supports_activation(activation)
-        assert a1q_scale is not None or self.per_token_activation
+        assert a1q_scale is not None or self.expects_unquantized_inputs
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
         assert (
@@ -551,9 +547,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
         )
 
         # Per-token: input is unquantized, quantize it here (see modular apply).
-        if self.per_token_activation:
+        if self.expects_unquantized_inputs:
             hidden_states, block_scale, per_token_scale = (
-                self._quantize_per_token_input(hidden_states)
+                quantize_nvfp4_per_token_input(hidden_states)
             )
         else:
             block_scale, per_token_scale = a1q_scale, None
@@ -561,14 +557,11 @@ class TrtLlmNvFp4ExpertsMonolithic(
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         num_tokens = hidden_states.shape[0]
+        hooked = self._uses_post_gemm2_hook(num_tokens)
         # The runner divides by the token count on the host, so an idle rank's
         # dummy 0-token forward has to keep the finalized (empty) form.
-        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        defer = hooked or self.moe_config.should_defer_moe_finalize(num_tokens)
 
-        routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=num_tokens,
-            device=hidden_states.device,
-        )
         # Invoke kernel.
         # NOTE: Activation padding and output
         # truncation are handled by the MoE runner's
@@ -612,5 +605,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
             num_tokens=num_tokens,
             top_k=self.topk,
         )
-        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        if hooked:
+            return self._run_post_gemm2_hook(routed_output)
         return routed_output
