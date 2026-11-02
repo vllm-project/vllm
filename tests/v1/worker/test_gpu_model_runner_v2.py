@@ -43,7 +43,10 @@ from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.gpu.sample.logits_processor import LogitsProcRequestState
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.spec_decode.standalone_ar import speculator as ar_module
-from vllm.v1.worker.gpu.spec_decode.utils import get_drafter_hidden_states
+from vllm.v1.worker.gpu.spec_decode.utils import (
+    DraftTokensHandler,
+    get_drafter_hidden_states,
+)
 from vllm.v1.worker.gpu.states import RequestState
 
 
@@ -574,6 +577,7 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
 
     class ModelStateProbe:
         def postprocess_state(self, _idx_mapping, num_sampled, _computed) -> None:
+            assert req_states.draft_tokens[req_idx].tolist() == [31, 31]
             events.append(
                 (
                     "postprocess",
@@ -600,10 +604,9 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
     runner.pooling_runner = None
     runner.encoder_cache = None
     runner.aux_output_connector = None
+    runner.draft_tokens_handler = DraftTokensHandler(device)
 
-    def get_prev_sampled_outputs(draft_tokens_to_update):
-        assert draft_tokens_to_update is req_states.draft_tokens
-        draft_tokens_to_update[req_idx] = 31
+    def get_prev_sampled_outputs():
         return {
             "idx_mapping": torch.tensor([req_idx], dtype=torch.int32, device=device),
             "sampled_tokens": torch.tensor(
@@ -611,6 +614,7 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
             ),
             "num_sampled": torch.tensor([2], dtype=torch.int32, device=device),
             "num_rejected": torch.zeros(1, dtype=torch.int32, device=device),
+            "draft_tokens": torch.tensor([[31, 31]], dtype=torch.int64, device=device),
         }
 
     runner.pp_handler = SimpleNamespace(
@@ -636,9 +640,12 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
         num_output_tokens=[1],
         rewound_req_ids={"req"},
     )
-    scheduler_output = SimpleNamespace(
+    scheduler_output = SchedulerOutput(
         scheduled_new_reqs=[],
         scheduled_cached_reqs=cached,
+        num_scheduled_tokens={},
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
         finished_req_ids=set(),
         preempted_req_ids=set(),
         free_encoder_mm_hashes=[],
