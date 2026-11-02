@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for the fused_qk_norm_rope helion kernel
+"""Tests for the fused_qk_norm_rope helion kernel.
 
 Run `pytest tests/kernels/helion/test_fused_qk_norm_rope.py`.
 """
@@ -127,7 +127,7 @@ class TestFusedQkNormRopeConfigPicker:
         )
 
     def test_config_picker_no_configs(self):
-        config_keys: list[dict] = []
+        config_keys: list[CaseKey] = []
 
         args = _generate_fake_input(16, 4096, 128)
         selected_key = pick_config(args, config_keys)

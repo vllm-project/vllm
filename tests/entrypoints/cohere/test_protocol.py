@@ -95,6 +95,27 @@ class TestCohereChatV2Request:
                 tool_choice="ANY",  # not REQUIRED/NONE
             )
 
+    @pytest.mark.parametrize("tool_fields", [{}, {"tools": None}, {"tools": []}])
+    def test_required_tool_choice_requires_tools(self, tool_fields):
+        with pytest.raises(VLLMValidationError, match="REQUIRED.*tools") as exc_info:
+            CohereChatV2Request(
+                model="m",
+                messages=[{"role": "user", "content": "hi"}],
+                tool_choice="REQUIRED",
+                **tool_fields,
+            )
+        assert exc_info.value.parameter == "tool_choice"
+
+    @pytest.mark.parametrize("tool_choice", [None, "NONE"])
+    def test_nonrequired_tool_choice_allows_empty_tools(self, tool_choice):
+        request = CohereChatV2Request(
+            model="m",
+            messages=[{"role": "user", "content": "hi"}],
+            tool_choice=tool_choice,
+            tools=[],
+        )
+        assert request.tool_choice == tool_choice
+
     def test_stop_sequences_bounded_by_env_limit(self):
         messages = [{"role": "user", "content": "hi"}]
         limit = envs.VLLM_MAX_STOP_STRINGS
@@ -136,7 +157,7 @@ class TestCohereChatV2Response:
         with pytest.raises(ValidationError):
             CohereChatV2Response(
                 id="r1",
-                finish_reason="NOT_A_REASON",  # type: ignore[arg-type]
+                finish_reason="NOT_A_REASON",
                 message=msg,
             )
 
@@ -246,5 +267,5 @@ class TestStreamingEventTypeField:
             MessageStartEvent(
                 id="a",
                 delta={"message": {"role": "assistant"}},
-                type="other",  # type: ignore[arg-type]
+                type="other",
             )

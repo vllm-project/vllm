@@ -1,28 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import TYPE_CHECKING
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.distributed import get_ep_group
-from vllm.distributed.device_communicators.base_device_communicator import (
-    All2AllManagerBase,
+from vllm.distributed.device_communicators.all2all import (
+    FlashInferNVLinkOneSidedManager,
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
 
+if TYPE_CHECKING:
+    from flashinfer.fused_moe import QuantFormat
 
-def get_local_sizes():
+
+def get_local_sizes() -> list[int] | None:
     dp_metadata = get_forward_context().dp_metadata
-    assert dp_metadata is not None
+    if dp_metadata is None:  # PCP with DP=1
+        return None
     return dp_metadata.get_chunk_sizes_across_dp_rank()
 
 
 class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
-    """FlashInfer implementation using the Moe AlltoAll kernel."""
+    """FlashInfer implementation using the MoE EP communication wrapper."""
 
-    all2all_manager: All2AllManagerBase
+    all2all_manager: FlashInferNVLinkOneSidedManager
 
     def __init__(
         self,
@@ -30,8 +36,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         top_k: int,
         num_experts: int,
         hidden_size: int,
-        x_bytes_per_token: int,
-        x_sf_bytes_per_token: int,
+        dispatch_format: "QuantFormat | None" = None,
+        extra_payload_bytes_per_token: int = 0,
         num_dispatchers: int = 1,
     ):
         super().__init__()
@@ -44,15 +50,15 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         device_communicator = get_ep_group().device_communicator
         assert device_communicator is not None
         all2all_manager = device_communicator.all2all_manager
-        assert all2all_manager is not None
+        assert isinstance(all2all_manager, FlashInferNVLinkOneSidedManager)
         self.all2all_manager = all2all_manager
-        self.all2all_manager.initialize(  # type: ignore[attr-defined]
+        self.all2all_manager.initialize(
             max_num_tokens=self.max_num_tokens,
             top_k=self.top_k,
             num_experts=self.num_experts,
             hidden_size=self.hidden_size,
-            x_bytes_per_token=x_bytes_per_token,
-            x_sf_bytes_per_token=x_sf_bytes_per_token,
+            dispatch_format=dispatch_format,
+            extra_payload_bytes_per_token=extra_payload_bytes_per_token,
         )
 
     @property
@@ -109,23 +115,16 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
                 mx_alignment=quant_config.mx_alignment,
             )
 
-        payloads = [dispatch_x]
-        if dispatch_x_sf is not None:
-            payloads.append(dispatch_x_sf)
-        topk_ids_payload_index = len(payloads)
-        payloads.append(topk_ids)
-        payloads.append(topk_weights)
-
-        assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
-        recv_payloads = self.all2all_manager.moe_alltoall.dispatch(  # type: ignore[attr-defined]
-            token_selected_experts=topk_ids,
-            input_payloads=payloads,
-            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
-            invalid_token_expert_id=-1,  # Follow TRTLLM Pattern
-            expert_id_payload_index=topk_ids_payload_index,
+        communication = self.all2all_manager.get_communication()
+        received = communication.dispatch(
+            dispatch_x,
+            topk_ids,
+            topk_weights,
+            hidden_states_scale=dispatch_x_sf,
+            max_tokens_per_rank=self.runtime_max_tokens_per_rank,
         )
-        if dispatch_x_sf is not None:
-            recv_x, recv_x_sf, topk_ids_recv, topk_weights_recv = recv_payloads
+        recv_x_sf = received.hidden_states_scale
+        if recv_x_sf is not None:
             x_sf_width = recv_x_sf.shape[-1]
             # Apply scale interleaving only for CUTLASS (not TRT-LLM)
             if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
@@ -133,19 +132,12 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
                 recv_x_sf = recv_x_sf.view(torch.uint8)
                 recv_x_sf = nvfp4_block_scale_interleave(recv_x_sf)
             recv_x_sf = recv_x_sf.view(-1, x_sf_width)
-        else:
-            recv_x, topk_ids_recv, topk_weights_recv = recv_payloads
-            recv_x_sf = None
-        recv_x = recv_x.view(-1, recv_x.shape[-1])
-        topk_ids_recv = topk_ids_recv.view(-1, topk_ids_recv.shape[-1])
-        topk_weights_recv = topk_weights_recv.view(-1, topk_weights_recv.shape[-1])
-
         return (
-            recv_x,
+            received.hidden_states,
             recv_x_sf,
             None,
-            topk_ids_recv,
-            topk_weights_recv,
+            received.topk_ids,
+            received.topk_weights,
         )
 
     def finalize(
@@ -157,16 +149,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
-
-        ep_size = self.all2all_manager.world_size
-        hidden_size = fused_expert_output.shape[-1]
-        fused_expert_output = fused_expert_output.view(
-            ep_size, self.runtime_max_tokens_per_rank, hidden_size
-        )
-
-        self.all2all_manager.combine_into(  # type: ignore[attr-defined]
-            payload=fused_expert_output,
-            runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
+        communication = self.all2all_manager.get_communication()
+        communication.combine(
+            fused_expert_output,
             output=output,
         )

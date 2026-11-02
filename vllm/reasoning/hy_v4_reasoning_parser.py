@@ -46,23 +46,20 @@ def detect_token_suffix(tokenizer: TokenizerLike) -> str:
         RuntimeError: The tokenizer declares the structural tokens through
             ``model_specific_special_tokens``, which transformers 5 no longer
             round-trips.
+
     """
-
-    import transformers
-
-    if int(transformers.__version__.split(".")[0]) >= 5:
-        init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
-        think_begin_as_special = init_kwargs.get(
-            "model_specific_special_tokens", {}
-        ).get("think_begin_token", "")
-        if think_begin_as_special:
-            raise RuntimeError(
-                "This checkpoint declares HYV4 structural tokens (think_begin_token"
-                "/toolcalls_begin_token/argkey_begin_token) in "
-                "tokenizer_config.json, which transformers 5 no longer supports. "
-                "Remove those fields and keep the tokens in the tokenizer's own "
-                "token definitions so the suffix can be read from the vocab."
-            )
+    init_kwargs = getattr(tokenizer, "init_kwargs", None) or {}
+    think_begin_as_special = init_kwargs.get("model_specific_special_tokens", {}).get(
+        "think_begin_token", ""
+    )
+    if think_begin_as_special:
+        raise RuntimeError(
+            "This checkpoint declares HYV4 structural tokens (think_begin_token"
+            "/toolcalls_begin_token/argkey_begin_token) in "
+            "tokenizer_config.json, which transformers 5 no longer supports. "
+            "Remove those fields and keep the tokens in the tokenizer's own "
+            "token definitions so the suffix can be read from the vocab."
+        )
 
     structural_token_re = re.compile(
         r"<(?:think|tool_calls|tool_call|arg_key|arg_value)(:[^\s>]+)?>"

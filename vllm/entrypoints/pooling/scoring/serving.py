@@ -79,7 +79,12 @@ class ServingScores(PoolingServing):
         final_res_batch = ctx.final_res_batch
         request_id = ctx.request_id
         created_time = ctx.created_time
-        model_name = self.models.model_name()
+        model_name = ctx.model_name
+        assert ctx.engine_inputs is not None
+        num_prompt_tokens = sum(
+            self._extract_prompt_len(engine_input["prompts"])
+            for engine_input in ctx.engine_inputs
+        )
 
         if isinstance(ctx.request, ScoreRequest):
             return self._request_output_to_score_response(
@@ -87,6 +92,7 @@ class ServingScores(PoolingServing):
                 request_id,
                 created_time,
                 model_name,
+                num_prompt_tokens,
             )
         elif isinstance(ctx.request, RerankRequest):
             return self._request_output_to_rerank_response(
@@ -95,6 +101,7 @@ class ServingScores(PoolingServing):
                 model_name,
                 ctx.request.documents,
                 ctx.request.top_n if ctx.request.top_n > 0 else len(final_res_batch),
+                num_prompt_tokens,
             )
         else:
             raise ValueError(f"Invalid {self.request_id_prefix} request type")
@@ -105,9 +112,9 @@ class ServingScores(PoolingServing):
         request_id: str,
         created_time: int,
         model_name: str,
+        num_prompt_tokens: int,
     ) -> JSONResponse:
         items: list[ScoreResponseData] = []
-        num_prompt_tokens = 0
 
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
@@ -116,10 +123,7 @@ class ServingScores(PoolingServing):
                 index=idx,
                 score=classify_res.outputs.score,
             )
-            prompt_token_ids = final_res.prompt_token_ids
-
             items.append(item)
-            num_prompt_tokens += len(prompt_token_ids)
 
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
@@ -143,12 +147,12 @@ class ServingScores(PoolingServing):
         model_name: str,
         documents: ScoreInput | list[ScoreInput],
         top_n: int,
+        num_prompt_tokens: int,
     ) -> JSONResponse:
         if not isinstance(documents, list):
             documents = [documents]
 
         results: list[RerankResult] = []
-        num_prompt_tokens = 0
         for idx, final_res in enumerate(final_res_batch):
             classify_res = ScoringRequestOutput.from_base(final_res)
 
@@ -166,8 +170,6 @@ class ServingScores(PoolingServing):
                 relevance_score=classify_res.outputs.score,
             )
             results.append(result)
-            prompt_token_ids = final_res.prompt_token_ids
-            num_prompt_tokens += len(prompt_token_ids)
 
         # sort by relevance, then return the top n if set
         results.sort(key=lambda x: x.relevance_score, reverse=True)
@@ -193,12 +195,35 @@ class ServingScores(PoolingServing):
         ctx = await self._init_ctx(self.io_processor, *args, **kwargs)
         await self._preprocessing(self.io_processor, ctx)
 
-        # stage 1: encode queries and cache token embeddings on workers.
-        await self._flash_late_interaction_encode_queries(ctx)
-        # stage 2: encode docs and return scalar scores from workers.
-        await self._flash_late_interaction_encode_docs(ctx)
+        try:
+            # stage 1: encode queries and cache token embeddings on workers.
+            await self._flash_late_interaction_encode_queries(ctx)
+            # stage 2: encode docs and return scalar scores from workers.
+            await self._flash_late_interaction_encode_docs(ctx)
+        except BaseException:
+            try:
+                await self._cleanup_flash_late_interaction(ctx)
+            except Exception:
+                logger.exception("Failed to clean up late-interaction query cache.")
+            raise
 
         return await self._postprocessing_async(self.io_processor, ctx)
+
+    async def _cleanup_flash_late_interaction(self, ctx: ScoringServeContext) -> None:
+        query_keys = ctx.late_interaction_query_keys
+        if not query_keys:
+            return
+
+        doc_keys = ctx.late_interaction_doc_keys or []
+
+        try:
+            # Stop documents before removing the query tensors they reference.
+            await self.engine_client.abort([*query_keys, *doc_keys])
+        finally:
+            await self.engine_client.collective_rpc(
+                "release_late_interaction_query_cache",
+                args=(query_keys,),
+            )
 
     async def _flash_late_interaction_encode_queries(self, ctx: ScoringServeContext):
         assert ctx.n_queries is not None
@@ -257,7 +282,9 @@ class ServingScores(PoolingServing):
         query_keys = ctx.late_interaction_query_keys
         if query_keys is None:
             raise RuntimeError("Late-interaction query keys were not initialized.")
-        doc_keys = [f"{ctx.request_id}-doc-{i}" for i in range(n_docs)]
+        doc_namespace = random_uuid()
+        doc_keys = [f"late-interaction-{doc_namespace}-doc-{i}" for i in range(n_docs)]
+        ctx.late_interaction_doc_keys = doc_keys
 
         for i in range(n_docs):
             query_idx = 0 if n_queries == 1 else i

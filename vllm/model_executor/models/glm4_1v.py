@@ -28,7 +28,7 @@
 compatible with HuggingFace weights."""
 
 import math
-from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -36,9 +36,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import transformers
 from einops import rearrange
-from packaging.version import Version
 from transformers import BatchFeature, Glm4vProcessor
 from transformers.image_processing_base import ImageProcessingMixin
 from transformers.models.glm4v.configuration_glm4v import (
@@ -54,7 +52,7 @@ from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoMetadata
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions, VideoDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -63,6 +61,10 @@ from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer, Conv3dLayer
+from vllm.model_executor.layers.fusion.mm_input_norm import (
+    IdentityInputNorm,
+    build_mm_input_norm,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -83,10 +85,16 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
+    MultiModalKwargsItem,
     MultiModalKwargsItems,
     VideoItem,
 )
-from vllm.multimodal.parse import ImageSize, MultiModalDataItems, MultiModalDataParser
+from vllm.multimodal.parse import (
+    DictEmbeddingItems,
+    ImageSize,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -131,8 +139,6 @@ logger = init_logger(__name__)
 # For profile run
 _MAX_FRAMES_PER_VIDEO = 600
 
-TRANSFORMERS_WITH_GA = Version(transformers.__version__) >= Version("5.10.0.dev0")
-
 
 def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
     return VideoMetadata(
@@ -144,12 +150,11 @@ def _to_video_metadata(metadata: Mapping[str, Any]) -> VideoMetadata:
 
 
 class Glm4vImagePixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - cpp: Number of channels * patch_size * patch_size
-        - ni: Number of images
-        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
+    """Dimensions:
+    - np: Number of patches
+    - cpp: Number of channels * patch_size * patch_size
+    - ni: Number of images
+    - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
 
     type: Literal["pixel_values"] = "pixel_values"
@@ -159,12 +164,11 @@ class Glm4vImagePixelInputs(TensorSchema):
 
 
 class Glm4vImageEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - f: Number of image features (varies based on image resolution)
-        - h: Hidden size (must match language model backbone)
-        - n: Number of images
-        - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
+    """Dimensions:
+    - f: Number of image features (varies based on image resolution)
+    - h: Hidden size (must match language model backbone)
+    - n: Number of images
+    - g: Grid dimensions (3 for grid_t, grid_h, grid_w)
     """
 
     type: Literal["image_embeds"] = "image_embeds"
@@ -177,14 +181,13 @@ Glm4vImageInputs: TypeAlias = Glm4vImagePixelInputs | Glm4vImageEmbeddingInputs
 
 
 class Glm4vVideoPixelInputs(TensorSchema):
-    """
-    Dimensions:
-        - np: Number of patches
-        - ctpp: Number of channels * temporal_patch_size *
-            patch_size * patch_size
-        - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
-          video, grid_h, grid_w)
+    """Dimensions:
+    - np: Number of patches
+    - ctpp: Number of channels * temporal_patch_size *
+        patch_size * patch_size
+    - f: Number of frames
+    - g: Grid dimensions (3 for grid_t which is usually 1 for processed
+      video, grid_h, grid_w)
     """
 
     type: Literal["pixel_values_videos"] = "pixel_values_videos"
@@ -194,13 +197,12 @@ class Glm4vVideoPixelInputs(TensorSchema):
 
 
 class Glm4vVideoEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
-        - p: Number of video patches across all frames
-        - h: Hidden size (must match language model backbone)
-        - f: Number of frames
-        - g: Grid dimensions (3 for grid_t which is usually 1 for processed
-          video, grid_h, grid_w)
+    """Dimensions:
+    - p: Number of video patches across all frames
+    - h: Hidden size (must match language model backbone)
+    - f: Number of frames
+    - g: Grid dimensions (3 for grid_t which is usually 1 for processed
+      video, grid_h, grid_w)
     """
 
     type: Literal["video_embeds"] = "video_embeds"
@@ -623,6 +625,7 @@ class Glm4vVisionTransformer(nn.Module):
         vision_config: Glm4vVisionConfig,
         norm_eps: float = 1e-6,
         quant_config: QuantizationConfig | None = None,
+        input_norm: nn.Module | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -649,6 +652,7 @@ class Glm4vVisionTransformer(nn.Module):
             in_channels=in_channels,
             hidden_size=self.hidden_size,
         )
+        self.input_norm = input_norm if input_norm is not None else IdentityInputNorm()
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
@@ -770,7 +774,6 @@ class Glm4vVisionTransformer(nn.Module):
         forward graph compatible with CUDA graph replay. Coordinate generation matches
         `rot_pos_emb` exactly to guarantee spatial alignment.
         """
-
         device = self.embeddings.position_embedding.weight.device
         dtype = self.dtype
         all_embeds = []
@@ -849,6 +852,7 @@ class Glm4vVisionTransformer(nn.Module):
                 instead of computing from cu_seqlens (needed for CUDA
                 graph capture to cover worst-case replay scenarios).
             device: Device to place tensors on. Defaults to self.device.
+
         """
         if device is None:
             device = self.device
@@ -931,7 +935,7 @@ class Glm4vVisionTransformer(nn.Module):
             encoder_metadata = self.prepare_encoder_metadata(grid_thw)
 
         # patchify
-        x = x.to(device=self.device, dtype=self.dtype)
+        x = self.input_norm(x.to(device=self.device), self.dtype)
         x = self.patch_embed(x)
         x = self.post_conv_layernorm(x)
 
@@ -962,6 +966,118 @@ class Glm4vVisionTransformer(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+
+class Glm4vMultiModalDataParser(MultiModalDataParser):
+    """Placeholder metadata shared by GLM-4V and GLM-5.3-Flash.
+
+    The patch grid sizes image placeholders. Video placeholders also embed one
+    timestamp string per temporal patch, so those timestamps travel with the
+    grid when embeddings arrive through the EC connector.
+    """
+
+    embedding_fields = {
+        "image": {"image_embeds": "values", "image_grid_thw": "metadata"},
+        "video": {
+            "video_embeds": "values",
+            "video_grid_thw": "metadata",
+            "timestamps": "metadata",
+        },
+    }
+
+    def __init__(self, spatial_merge_size: int, *args, **kwargs):
+        self._spatial_merge_size = spatial_merge_size
+        super().__init__(*args, **kwargs)
+
+    def _embed_row_count(self, grid_thw: torch.Tensor) -> int:
+        grid = grid_thw
+        if grid.ndim == 1:
+            grid = grid.unsqueeze(0)
+        if grid.ndim != 2 or grid.shape[-1] != 3:
+            raise ValueError(
+                f"grid_thw must have shape (N, 3), got {tuple(grid_thw.shape)}"
+            )
+        merge = self._spatial_merge_size**2
+        # Sum per item. grid.prod() would multiply the items together.
+        return int((grid.prod(dim=-1) // merge).sum().item())
+
+    def _check_supplied_embeds(
+        self,
+        data: dict,
+        *,
+        embed_key: str,
+        grid_key: str,
+        modality: str,
+    ) -> None:
+        """Reject dict embeddings whose shape cannot match this grid.
+
+        Metadata-only requests omit the embedding tensor and stay valid.
+        """
+        if embed_key not in data:
+            return
+        embeds = data[embed_key]
+        if not isinstance(embeds, torch.Tensor) or embeds.ndim != 2:
+            got = tuple(embeds.shape) if isinstance(embeds, torch.Tensor) else None
+            raise ValueError(
+                f"{modality.capitalize()} embedding must be 2D "
+                f"(num_tokens, hidden_size), got {type(embeds).__name__} "
+                f"with shape {got}"
+            )
+        if (
+            self.expected_hidden_size is not None
+            and embeds.shape[-1] != self.expected_hidden_size
+        ):
+            raise ValueError(
+                f"{modality.capitalize()} embedding hidden dimension mismatch: "
+                f"got {embeds.shape[-1]}, but model expects "
+                f"{self.expected_hidden_size}. "
+                f"Embedding shape: {tuple(embeds.shape)}"
+            )
+        if grid_key not in data:
+            return
+        expected_rows = self._embed_row_count(data[grid_key])
+        if embeds.shape[0] != expected_rows:
+            raise ValueError(
+                f"{modality.capitalize()} embedding row count mismatch: "
+                f"got {embeds.shape[0]}, but grid_thw requires {expected_rows}. "
+                f"Embedding shape: {tuple(embeds.shape)}"
+            )
+
+    def _parse_image_data(self, data):
+        if isinstance(data, dict):
+            self._check_supplied_embeds(
+                data,
+                embed_key="image_embeds",
+                grid_key="image_grid_thw",
+                modality="image",
+            )
+            required, optional = self.embedding_field_sets("image")
+            return DictEmbeddingItems(
+                data,
+                modality="image",
+                required_fields=required,
+                optional_fields=optional,
+                fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
+            )
+        return super()._parse_image_data(data)
+
+    def _parse_video_data(self, data):
+        if isinstance(data, dict):
+            self._check_supplied_embeds(
+                data,
+                embed_key="video_embeds",
+                grid_key="video_grid_thw",
+                modality="video",
+            )
+            required, optional = self.embedding_field_sets("video")
+            return DictEmbeddingItems(
+                data,
+                modality="video",
+                required_fields=required,
+                optional_fields=optional,
+                fields_factory=_create_qwen2vl_field_factory(self._spatial_merge_size),
+            )
+        return super()._parse_video_data(data)
 
 
 class Glm4vProcessingInfo(BaseProcessingInfo):
@@ -1037,9 +1153,11 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         return result
 
     def get_data_parser(self):
-        return MultiModalDataParser(
+        return Glm4vMultiModalDataParser(
+            self.get_hf_config().vision_config.spatial_merge_size,
             video_needs_metadata=True,
             expected_hidden_size=self._get_expected_hidden_size(),
+            allow_missing_mm_embeddings=self.allow_missing_mm_embeddings,
         )
 
     def _get_vision_info(
@@ -1392,16 +1510,52 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         timestamps_list = full_second_idxs[::2]
         return list(timestamps_list)
 
-    def _get_video_frame_embed_token_id(self, hf_processor: object) -> int:
-        attr = (
-            "image_token_id"
-            if isinstance(hf_processor, Glm4vProcessor) or TRANSFORMERS_WITH_GA
-            else "video_token_id"
+    def _video_timestamps(self, video_array: np.ndarray, metadata: dict[str, Any]):
+        hf_processor = self.get_hf_processor()
+        n_frames = len(video_array)
+        if isinstance(hf_processor, Glm4vProcessor):
+            return self._get_video_second_idx_glm4v(metadata, n_frames)
+        if self._is_glmga_model(hf_processor):
+            return self._get_video_second_idx_glmga(metadata, n_frames)
+        return self._get_video_second_idx_glm46v(metadata, n_frames)
+
+    def _placeholder_from_timestamps(
+        self,
+        timestamps: torch.Tensor | list,
+        grid_thw: torch.Tensor,
+    ) -> list[int]:
+        hf_processor = self.get_hf_processor()
+        tokenizer = self.get_tokenizer()
+        hf_config = self.get_hf_config()
+        merge_length = hf_processor.image_processor.merge_size**2
+        if isinstance(timestamps, torch.Tensor):
+            timestamp_values = timestamps.flatten().tolist()
+        else:
+            timestamp_values = list(timestamps)
+        grid_t = int(grid_thw[0])
+        if len(timestamp_values) != grid_t:
+            raise ValueError(
+                "Video timestamp count does not match video_grid_thw[0]: "
+                f"{len(timestamp_values)} timestamps for grid_t={grid_t}."
+            )
+        timestamp_format = (
+            "{}" if isinstance(hf_processor, Glm4vProcessor) else "{:.1f} seconds"
         )
-        token_id = getattr(hf_processor, attr, None)
-        if not isinstance(token_id, int):
-            raise ValueError(f"Processor has no valid {attr}")
-        return token_id
+        frames_idx_token = [
+            tokenizer.encode(timestamp_format.format(ts), add_special_tokens=False)
+            for ts in timestamp_values
+        ]
+        _, height, width = grid_thw
+        num_tokens_per_frame = int(height * width) // merge_length
+        frame_embed_token_id = hf_processor.image_token_id
+        placeholder = [hf_config.video_start_token_id]
+        for frame_idx in frames_idx_token:
+            placeholder.append(hf_config.image_start_token_id)
+            placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
+            placeholder.append(hf_config.image_end_token_id)
+            placeholder.extend(frame_idx)
+        placeholder.append(hf_config.video_end_token_id)
+        return placeholder
 
     def _construct_video_placeholder(
         self,
@@ -1409,46 +1563,10 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
         metadata: dict[str, Any],
         grid_thw: torch.Tensor,
     ) -> list[int]:
-        hf_processor = self.get_hf_processor()
-        tokenizer = self.get_tokenizer()
-        image_processor = hf_processor.image_processor
-
-        hf_config = self.get_hf_config()
-        boi_token_id = hf_config.image_start_token_id
-        eoi_token_id = hf_config.image_end_token_id
-        bov_token_id = hf_config.video_start_token_id
-        eov_token_id = hf_config.video_end_token_id
-        merge_length = image_processor.merge_size**2
-
-        assert isinstance(grid_thw, torch.Tensor)
-
-        if isinstance(hf_processor, Glm4vProcessor):
-            timestamps = self._get_video_second_idx_glm4v(metadata, len(video_array))
-        elif self._is_glmga_model(hf_processor):
-            timestamps = self._get_video_second_idx_glmga(metadata, len(video_array))
-        else:
-            timestamps = self._get_video_second_idx_glm46v(metadata, len(video_array))
-
-        timestamp_format = (
-            "{}" if isinstance(hf_processor, Glm4vProcessor) else "{:.1f} seconds"
+        return self._placeholder_from_timestamps(
+            self._video_timestamps(video_array, metadata),
+            grid_thw,
         )
-        frames_idx_token = [
-            tokenizer.encode(timestamp_format.format(i), add_special_tokens=False)
-            for i in timestamps
-        ]
-        T, H, W = grid_thw
-        num_tokens_per_frame = int(H * W) // merge_length
-        placeholder = []
-        placeholder.append(bov_token_id)
-        frame_embed_token_id = self._get_video_frame_embed_token_id(hf_processor)
-        for frame_idx in frames_idx_token:
-            placeholder.append(boi_token_id)
-            placeholder.extend([frame_embed_token_id] * num_tokens_per_frame)
-            placeholder.append(eoi_token_id)
-            placeholder.extend(frame_idx)
-        placeholder.append(eov_token_id)
-
-        return placeholder
 
 
 class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
@@ -1473,33 +1591,26 @@ class Glm4vDummyInputsBuilder(BaseDummyInputsBuilder[Glm4vProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image")
-        video_overrides = mm_options.get("video")
-        assert video_overrides is None or isinstance(video_overrides, VideoDummyOptions)
-
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
             "video": self._get_dummy_videos(
                 width=target_width,
                 height=target_height,
                 num_frames=target_num_frames,
-                num_videos=num_videos,
-                overrides=video_overrides,
+                num_videos=mm_counts.get("video", 0),
+                overrides=mm_options.get("video"),
             ),
         }
 
@@ -1584,59 +1695,120 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
 
         return prepared_data, prepared_kwargs
 
+    @staticmethod
+    def _sampled_frame_metadata_overrides(mm_items, video_metadata):
+        """Build timestamp-helper metadata from HF-sampled frame indices.
+
+        Input ``frames_indices`` can be the pre-sample range. The processor
+        returns a ``VideoMetadata`` with the sample it kept. GLM-5.3's direct
+        path must feed those indices into the timestamp helper and clear
+        ``do_sample_frames`` so the helper keeps them instead of sampling again.
+
+        Overrides are returned and never written back onto ``mm_items``. The
+        same items are reused by ``test_processing_correctness`` (baseline then
+        cache); persisting ``do_sample_frames=False`` while the video tensor
+        stays full-length made pass-2 HF emit ``grid_t != len(timestamps)`` for
+        odd-length videos.
+        """
+        if not video_metadata:
+            return None
+        video_items = mm_items.get("video")
+        if video_items is None:
+            return None
+        overrides: list[dict[str, Any] | None] = [None] * video_items.get_count()
+        for index, meta_obj in enumerate(video_metadata):
+            indices = getattr(meta_obj, "frames_indices", None)
+            if indices is None or index >= video_items.get_count():
+                continue
+            raw = video_items.data[index]
+            if not (
+                isinstance(raw, tuple) and len(raw) == 2 and isinstance(raw[1], dict)
+            ):
+                continue
+            if hasattr(indices, "tolist"):
+                indices = indices.tolist()
+            new_meta = dict(raw[1])
+            new_meta["frames_indices"] = [int(idx) for idx in indices]
+            new_meta["do_sample_frames"] = False
+            overrides[index] = new_meta
+        if not any(override is not None for override in overrides):
+            return None
+        return overrides
+
+    def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
+        return self.dummy_inputs.get_dummy_text(mm_counts)
+
     def _apply_hf_processor_main(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        hf_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        valid_mm_items = mm_items.select(
-            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        hf_data, hf_kwargs, passthrough_data = self._get_hf_mm_inputs(
+            mm_items, hf_kwargs
         )
-        mm_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
-        if not mm_data:
-            return BatchFeature(dict(passthrough_data))
+        if not hf_data:
+            return self._with_video_timestamps(
+                self._finalize_hf_mm_data(hf_data, hf_kwargs, passthrough_data),
+                mm_items,
+            )
 
-        prompt_text = self.dummy_inputs.get_dummy_text(mm_items.get_all_counts())
+        prompt_text = hf_data.pop("text")
+        assert isinstance(prompt_text, str)
 
-        mm_data = dict(mm_data)
+        processor = self.info.get_hf_processor(**hf_kwargs)
 
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-
-        use_direct_path = (
-            not isinstance(processor, Glm4vProcessor) and TRANSFORMERS_WITH_GA
-        )
-        if use_direct_path:
+        if not isinstance(processor, Glm4vProcessor):
             prepared_data, prepared_kwargs = self._get_direct_path_inputs(
-                mm_data, hf_processor_mm_kwargs
+                hf_data, hf_kwargs
             )
             processed_data = self.info.ctx.call_hf_processor(
                 self.info.get_hf_processor(**prepared_kwargs),
                 dict(text=prompt_text, **prepared_data),
                 prepared_kwargs,
             )
-            processed_data.update(passthrough_data)
-            return processed_data
+            # The processor returns a new VideoMetadata whose frames_indices
+            # are the sample it kept. The object we passed in still holds the
+            # pre-sample range.
+            sampled_metadata = (
+                processed_data.get("video_metadata")
+                if hasattr(processed_data, "get")
+                else None
+            )
+            metadata_overrides = self._sampled_frame_metadata_overrides(
+                mm_items, sampled_metadata
+            )
+            return self._with_video_timestamps(
+                self._finalize_hf_mm_data(
+                    hf_data, hf_kwargs, passthrough_data, processed_data
+                ),
+                mm_items,
+                metadata_overrides=metadata_overrides,
+            )
 
-        videos = mm_data.get("videos")
-        if isinstance(videos, list) and videos:
+        if (
+            "videos" in hf_data
+            and isinstance(videos := hf_data["videos"], list)
+            and len(videos) > 0
+        ):
+            # Videos are processed item-wise below; remove them from hf_data so
+            # the combined call at the end does not re-sample the raw frames.
+            del hf_data["videos"]
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
-            frame_embed_token_id = self.info._get_video_frame_embed_token_id(processor)
-            swap_video_frame_tokens = frame_embed_token_id == processor.image_token_id
-            mm_data.pop("videos")
             for item in videos:
                 video_array, metadata = item
 
                 # don't update mm_kwargs inplace
-                video_mm_kwargs = dict(**hf_processor_mm_kwargs)
+                video_mm_kwargs = dict(**hf_kwargs)
                 video_mm_kwargs["do_sample_frames"] = metadata.get(
                     "do_sample_frames", True
                 )
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
-                video_mm_data["video_metadata"] = [[_to_video_metadata(metadata)]]
+                video_metadata = _to_video_metadata(metadata)
+                video_mm_data["video_metadata"] = [[video_metadata]]
 
                 video_outputs = self.info.ctx.call_hf_processor(
                     self.info.get_hf_processor(**video_mm_kwargs),
@@ -1646,11 +1818,28 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
                     ),
                     video_mm_kwargs,
                 )
-                input_ids = video_outputs.pop("input_ids")
-                if swap_video_frame_tokens:
-                    input_ids[input_ids == processor.image_token_id] = (
-                        processor.video_token_id
+                sampled_indices = None
+                out_meta = (
+                    video_outputs.get("video_metadata")
+                    if hasattr(video_outputs, "get")
+                    else None
+                )
+                if out_meta:
+                    first = (
+                        out_meta[0][0] if isinstance(out_meta[0], list) else out_meta[0]
                     )
+                    sampled_indices = getattr(first, "frames_indices", None)
+                if sampled_indices is None:
+                    sampled_indices = getattr(video_metadata, "frames_indices", None)
+                if sampled_indices is not None and isinstance(metadata, dict):
+                    if hasattr(sampled_indices, "tolist"):
+                        sampled_indices = sampled_indices.tolist()
+                    metadata["frames_indices"] = [int(idx) for idx in sampled_indices]
+                input_ids = video_outputs.pop("input_ids")
+
+                input_ids[input_ids == processor.image_token_id] = (
+                    processor.video_token_id
+                )
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
                 prompt_text = prompt_text.replace(
                     "<|begin_of_video|><|video|><|end_of_video|>",
@@ -1666,22 +1855,49 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             )
         else:
             video_outputs = dict()
-            swap_video_frame_tokens = False
 
         processed_data = self.info.ctx.call_hf_processor(
-            self.info.get_hf_processor(**hf_processor_mm_kwargs),
-            dict(text=prompt_text, **mm_data),
-            hf_processor_mm_kwargs,
+            self.info.get_hf_processor(**hf_kwargs),
+            dict(text=prompt_text, **hf_data),
+            hf_kwargs,
         )
-        if swap_video_frame_tokens:
-            input_ids = processed_data["input_ids"]
-            input_ids[input_ids == processor.video_token_id] = processor.image_token_id
-            processed_data["input_ids"] = input_ids
+        input_ids = processed_data["input_ids"]
+        input_ids[input_ids == processor.video_token_id] = processor.image_token_id
+        processed_data["input_ids"] = input_ids
 
         processed_data.update(video_outputs)
-        processed_data.update(passthrough_data)
+        return self._with_video_timestamps(
+            self._finalize_hf_mm_data(
+                hf_data, hf_kwargs, passthrough_data, processed_data
+            ),
+            mm_items,
+        )
 
-        return processed_data
+    def _with_video_timestamps(
+        self,
+        processed,
+        mm_items: MultiModalDataItems,
+        metadata_overrides: list[dict[str, Any] | None] | None = None,
+    ):
+        video_items = mm_items.get("video")
+        if (
+            video_items is not None
+            and video_items.get_count() > 0
+            and not isinstance(video_items, DictEmbeddingItems)
+            and "timestamps" not in processed
+        ):
+            timestamps = []
+            for i in range(video_items.get_count()):
+                video_array, metadata = video_items.get(i)
+                if (
+                    metadata_overrides is not None
+                    and i < len(metadata_overrides)
+                    and metadata_overrides[i] is not None
+                ):
+                    metadata = metadata_overrides[i]
+                timestamps.append(self.info._video_timestamps(video_array, metadata))
+            processed["timestamps"] = timestamps
+        return processed
 
     def _get_mm_fields_config(
         self,
@@ -1717,14 +1933,19 @@ class Glm4vMultiModalProcessor(BaseMultiModalProcessor[Glm4vProcessingInfo]):
             out_item = out_mm_kwargs["video"][item_idx]
             grid_thw = out_item["video_grid_thw"].data
             assert isinstance(grid_thw, torch.Tensor)
-
-            video, metadata = mm_items["video"][item_idx]
-            placeholder = self.info._construct_video_placeholder(
-                video, metadata, grid_thw
-            )
+            timestamps = out_item.get("timestamps")
+            if timestamps is not None:
+                placeholder = self.info._placeholder_from_timestamps(
+                    timestamps.data, grid_thw
+                )
+            else:
+                video, metadata = mm_items["video"][item_idx]
+                placeholder = self.info._construct_video_placeholder(
+                    video, metadata, grid_thw
+                )
             return PromptUpdateDetails.select_token_id(
                 placeholder,
-                embed_token_id=self.info._get_video_frame_embed_token_id(hf_processor),
+                embed_token_id=hf_processor.image_token_id,
             )
 
         return [
@@ -1780,6 +2001,7 @@ class Glm4vForConditionalGeneration(
 
     supports_encoder_tp_data = True
     supports_tower_connector_lora = True
+    supports_mm_device_do_normalize = True
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1811,6 +2033,7 @@ class Glm4vForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-5),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -1892,7 +2115,7 @@ class Glm4vForConditionalGeneration(
         if image_input["type"] == "image_embeds":
             image_embeds = image_input["image_embeds"].type(self.visual.dtype)
         else:
-            pixel_values = image_input["pixel_values"].type(self.visual.dtype)
+            pixel_values = image_input["pixel_values"]
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual, pixel_values, grid_thw.tolist(), rope_type="rope_3d"
@@ -1913,9 +2136,7 @@ class Glm4vForConditionalGeneration(
         if video_input["type"] == "video_embeds":
             video_embeds = video_input["video_embeds"].type(self.visual.dtype)
         else:
-            pixel_values_videos = video_input["pixel_values_videos"].type(
-                self.visual.dtype
-            )
+            pixel_values_videos = video_input["pixel_values_videos"]
             if self.use_data_parallel:
                 return run_dp_sharded_mrope_vision_model(
                     self.visual,
@@ -2077,6 +2298,7 @@ class Glm4vForConditionalGeneration(
         device: torch.device,
         dtype: torch.dtype,
         path: str = "default",
+        axis_keys: tuple[Hashable, ...] | None = None,
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -2122,8 +2344,11 @@ class Glm4vForConditionalGeneration(
         flattened_patch_size = (
             in_channels * temporal_patch_size * patch_size * patch_size
         )
-        dummy_pixel_values = torch.randn(
-            total_patches, flattened_patch_size, device=device, dtype=dtype
+        dummy_pixel_values = torch.zeros(
+            total_patches,
+            flattened_patch_size,
+            device=device,
+            dtype=self.visual.input_norm.input_dtype or dtype,
         )
 
         # Override max_seqlen with a safe upper bound for capture.
@@ -2345,6 +2570,7 @@ class Glm4vForConditionalGeneration(
                 parallelism.
             inputs_embeds: Optional pre-computed input embeddings.
             **kwargs: Additional keyword arguments.
+
         """
         if intermediate_tensors is not None:
             inputs_embeds = None
@@ -2368,28 +2594,23 @@ class Glm4vForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model.model",
             connector="visual.merger.",
             tower_model="visual.",
         )
 
-    def get_num_mm_encoder_tokens(
+    def get_mm_lora_token_counts(
         self,
-        num_image_tokens: int,
-    ) -> int:
+        *,
+        modality: str,
+        mm_kwargs: MultiModalKwargsItem | None,
+        num_mm_embeds: int,
+    ) -> tuple[int, int | None]:
+        del modality, mm_kwargs
         merge_size = self.config.vision_config.spatial_merge_size
-        return num_image_tokens * (merge_size**2)
-
-    def get_num_mm_connector_tokens(
-        self,
-        num_vision_tokens: int,
-    ) -> int:
-        merge_size = self.config.vision_config.spatial_merge_size
-        return num_vision_tokens // (merge_size**2)
+        return num_mm_embeds * (merge_size**2), num_mm_embeds
 
 
 @MULTIMODAL_REGISTRY.register_processor(

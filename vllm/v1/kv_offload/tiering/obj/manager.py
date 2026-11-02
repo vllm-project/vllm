@@ -22,6 +22,7 @@ from vllm.v1.kv_offload.base import (
 )
 from vllm.v1.kv_offload.file_mapper import FileMapper
 from vllm.v1.kv_offload.tiering.async_lookup import AsyncLookupManager
+from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
@@ -112,22 +113,29 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         io_threads: int = 4,
         enable_kv_events: bool = False,
         locality: str | None = None,
+        backpressure_detector: BackpressureDetector | None = None,
     ):
+        """Args:
+        offloading_spec: Offloading configuration.
+        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        tier_type: Tier type identifier, set by SecondaryTierFactory.
+        store_config: Object store connection parameters (see ObjStoreConfig).
+        prefix: Key prefix prepended to all object keys.
+        io_threads: Number of NIXL I/O threads.
+        enable_kv_events: Emit BlockStored KV events for blocks
+            successfully stored to this tier. Effective only when KV
+            cache events are enabled globally (kv_events_config).
+        locality: Whether this tier's storage is LOCAL or REMOTE relative
+            to the publishing vLLM instance.
+        backpressure_detector: Optional backpressure detector.
+
         """
-        Args:
-            offloading_spec: Offloading configuration.
-            primary_kv_view: Memoryview of the primary tier's CPU KV cache.
-            tier_type: Tier type identifier, set by SecondaryTierFactory.
-            store_config: Object store connection parameters (see ObjStoreConfig).
-            prefix: Key prefix prepended to all object keys.
-            io_threads: Number of NIXL I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
-                successfully stored to this tier. Effective only when KV
-                cache events are enabled globally (kv_events_config).
-            locality: Whether this tier's storage is LOCAL or REMOTE relative
-                to the publishing vLLM instance.
-        """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        super().__init__(
+            offloading_spec,
+            primary_kv_view,
+            tier_type,
+            backpressure_detector,
+        )
         self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
@@ -141,13 +149,12 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
-        # Keys of in-flight store jobs, tracked only when events are enabled.
-        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        self._store_jobs: dict[JobId, TransferJob] = {}
         # Keys of in-flight load (promotion) jobs, so a failed download can
         # mark its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
 
-        agent_config = nixl_agent_config(backends=[])
+        agent_config = nixl_agent_config(backends=[], capture_telemetry=True)
         self._agent = nixl_agent("ObjAgent", agent_config)
         obj_config = ObjStoreConfig(**store_config)
         params = {**obj_config.to_nixl_params(), "num_threads": str(io_threads)}
@@ -162,7 +169,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         root_dir = f"{prefix}/" if prefix else ""
         # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self._file_mapper = FileMapper.from_offloading_spec(
-            root_dir, offloading_spec, parallel_agnostic=True
+            root_dir,
+            offloading_spec,
+            blocks_per_file=offloading_spec.blocks_per_chunk,
+            parallel_agnostic=True,
         )
         self._next_obj_dev_id: int = 1  # dev_id=0 is reserved for _exists() probes
 
@@ -284,7 +294,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
     def submit_store(self, job_metadata: TransferJob) -> None:
         if self.events is not None:
-            self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
+            self._store_jobs[job_metadata.job_id] = job_metadata
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
         self._submit_transfer(
             job_metadata.job_id, job_metadata.chunk_ids, obj_keys, NIXL_WRITE
@@ -326,8 +336,18 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
             transfer_time = None
             if success:
-                telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
-                transfer_time = telemetry.xferDuration / 1e6
+                # Telemetry is optional: some NIXL builds are compiled without
+                # it and raise here. A metrics failure must not fail a transfer
+                # that already completed.
+                try:
+                    telemetry = self._agent.get_xfer_telemetry(entry.xfer_handle)
+                except Exception:
+                    logger.warning_once(
+                        "NIXL transfer telemetry is unavailable; offload "
+                        "transfer timings will be omitted."
+                    )
+                else:
+                    transfer_time = telemetry.xferDuration / 1e6
 
             try:
                 self._agent.release_xfer_handle(entry.xfer_handle)
@@ -369,14 +389,15 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         self._pending_results = []
         for result in results:
             if self.events is not None:
-                keys = self._store_job_keys.pop(result.job_id, None)
-                if result.success and keys:
+                job = self._store_jobs.pop(result.job_id, None)
+                if result.success and job is not None and job.keys:
                     self.events.append(
                         OffloadingEvent(
-                            keys=keys,
+                            keys=list(job.keys),
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            req_context=job.req_context,
                         )
                     )
             # Mark only the keys that did not load as a miss; the request

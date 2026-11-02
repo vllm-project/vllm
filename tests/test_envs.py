@@ -18,6 +18,11 @@ from vllm.envs import (
 from vllm.exceptions import VLLMValidationError
 
 
+def test_object_storage_shm_default_name():
+    """The generated name must fit macOS's shared-memory name limit."""
+    assert len(envs._generate_shm_name()) <= 30
+
+
 def test_getattr_without_cache(monkeypatch: pytest.MonkeyPatch):
     assert envs.VLLM_HOST_IP == ""
     assert envs.VLLM_PORT is None
@@ -43,39 +48,19 @@ def test_api_key_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
     assert "VLLM_API_KEY" not in envs.compile_factors()
 
 
-def test_scale_out_endpoints_flag_is_runtime_only(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "1")
+def test_ray_bundle_indices_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    # Engines sharing a placement group get different bundle indices but
+    # compile the same graphs, so they must share a cache key.
+    monkeypatch.setenv("VLLM_RAY_BUNDLE_INDICES", "4,5,6,7")
 
-    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is True
-    assert "VLLM_ENABLE_SCALE_OUT_ENDPOINTS" not in envs.compile_factors()
-
-
-def test_scale_out_endpoints_flag_distinguishes_unset_from_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.delenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", raising=False)
-    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is None
-
-    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "0")
-    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is False
+    assert "VLLM_RAY_BUNDLE_INDICES" not in envs.compile_factors()
 
 
-def test_scale_out_endpoints_flag_treats_empty_as_unset(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", "")
+def test_chat_template_fuel_is_not_compile_factor(monkeypatch: pytest.MonkeyPatch):
+    # Only bounds chat template rendering in the Rust frontend.
+    monkeypatch.setenv("VLLM_CHAT_TEMPLATE_FUEL", "2000000")
 
-    assert envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS is None
-
-
-@pytest.mark.parametrize("value", ["-1", "2", "01", "+1", "invalid", " "])
-def test_scale_out_endpoints_flag_rejects_values_other_than_zero_or_one(
-    monkeypatch: pytest.MonkeyPatch, value: str
-):
-    monkeypatch.setenv("VLLM_ENABLE_SCALE_OUT_ENDPOINTS", value)
-
-    with pytest.raises(ValueError, match="must be 0 or 1"):
-        _ = envs.VLLM_ENABLE_SCALE_OUT_ENDPOINTS
+    assert "VLLM_CHAT_TEMPLATE_FUEL" not in envs.compile_factors()
 
 
 def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch):
@@ -88,6 +73,24 @@ def test_p2p_side_channel_defaults_and_override(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5799")
     assert envs.VLLM_P2P_SIDE_CHANNEL_HOST == "10.0.0.20"
     assert envs.VLLM_P2P_SIDE_CHANNEL_PORT == 5799
+
+
+def test_p2p_resource_limit_defaults_and_override(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.delenv("VLLM_P2P_MAX_PEERS", raising=False)
+    monkeypatch.delenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", raising=False)
+    monkeypatch.delenv("VLLM_P2P_IDLE_TIMEOUT_S", raising=False)
+    assert envs.VLLM_P2P_MAX_PEERS == 128
+    assert envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S == 30
+    assert envs.VLLM_P2P_IDLE_TIMEOUT_S == 300
+
+    monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "64")
+    monkeypatch.setenv("VLLM_P2P_HANDSHAKE_TIMEOUT_S", "15")
+    monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "60")
+    assert envs.VLLM_P2P_MAX_PEERS == 64
+    assert envs.VLLM_P2P_HANDSHAKE_TIMEOUT_S == 15
+    assert envs.VLLM_P2P_IDLE_TIMEOUT_S == 60
 
 
 def test_getattr_with_cache(monkeypatch: pytest.MonkeyPatch):

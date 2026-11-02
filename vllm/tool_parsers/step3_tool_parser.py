@@ -32,8 +32,7 @@ logger = init_logger(__name__)
 
 
 class Step3ToolParser(ToolParser):
-    """
-    Tool parser for a model that uses a specific XML-like format for tool calls.
+    """Tool parser for a model that uses a specific XML-like format for tool calls.
     This version uses a robust, stateful, cursor-based streaming parser and
     consolidates tool arguments into a single message.
     """
@@ -71,8 +70,9 @@ class Step3ToolParser(ToolParser):
 
         params: dict[str, str] = {}
         param_matches = re.findall(
-            r'<steptml:parameter name="([^"]+)">([^<]*)</steptml:parameter>',
+            r'<steptml:parameter name="([^"]+)">(.*?)</steptml:parameter>',
             action_text,
+            re.DOTALL,
         )
         for name, value in param_matches:
             params[name] = value.strip()

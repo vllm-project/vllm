@@ -6,6 +6,17 @@ prefill completes. `NixlPushConnector` adds a **push-based** alternative
 in which P writes the KV blocks directly into D's pre-allocated memory
 via `NIXL WRITE`.
 
+Enable push with `"kv_connector": "NixlPushConnector"`. Alternatively, use
+`"kv_connector": "NixlConnector"` and set
+`"kv_connector_extra_config": {"transfer_mode": "push"}`.
+
+For the built-in `NixlConnector`, `transfer_mode` defaults to `"pull"` and accepts
+only `"pull"` or `"push"`; other values raise `ValueError`.
+Explicit `NixlPullConnector` and `NixlPushConnector` names ignore this option.
+`kv_connector_module_path` takes precedence over built-in selection.
+Under `MultiConnector`, set `transfer_mode` in the NIXL child's
+`kv_connector_extra_config`.
+
 This document describes the threading, queues, and scheduling
 interactions specific to the push design. The pull-mode design is
 unchanged; the push connector reuses the same handshake, NIXL agent
@@ -180,6 +191,80 @@ The completion notif sent from P to D after a WRITE is the existing
 `<request_id>:<tp_size>` format used in pull mode (here ``request_id``
 is D's own request id, taken from the registration), so the D-side
 accounting code is unchanged.
+
+## Pipeline parallelism and hybrid KV caches
+
+A peer's KV regions do not line up with the local ones by index under
+pipeline parallelism (PP) or a hybrid (HMA) KV layout:
+
+* a PP-sharded prefiller (**P**) holds only a slice of the model's
+  layers while the `PP=1` decoder (**D**) holds them all, so region
+  counts differ;
+* with HMA, layers of several cache groups can share one region, and
+  which layers share a region can differ between P and D.
+
+Both connectors therefore pair regions **by layer**, for every peer. Each
+worker advertises which layers back each of its NIXL regions in the
+handshake metadata (`NixlAgentMetadata.region_members`). On the
+handshake, `_pair_regions` looks each layer up on both sides and records
+one pair (remote region, local region, cache group) per layer,
+deduplicated; a layer registered as two regions (K and V apart) pairs
+them in order. The remote descriptor list keeps only the remote regions
+that pair, and a transfer reads or writes each pair at its cache group's
+blocks. A region shared by several groups thus transfers once per group
+it holds a layer of, from one descriptor list.
+
+```text
+D (PP=1):  region 0 = [L0, L0.swa]   region 1 = [L1]   region 2 = [L2]
+P stage 1: region 0 = [L2]
+
+pairs (remote, local, group) on P: (2, 0, 0)  ->  D's region 2 only
+```
+
+Region capacities stay per region on both sides, so P and D need not
+allocate the same number of blocks. Physical allocations are still
+registered once, even when multiple layers share them. Mamba/SSM hybrids
+pair the same way: each SSM region's conv and SSM-state descriptors are
+built from the peer region its layers pair with, so P and D may group the
+same layers into regions differently. A layer in different cache groups on
+P and D is refused at the handshake for these models.
+
+Packed MLA caches (block-outermost layouts such as DeepSeek-V4's) store the
+pages of every layer for one block in a single row. A PP stage holds only its
+own layers, so its rows are shorter and each layer sits at a different offset:
+
+```text
+D (PP=1),    block b: | L0 | L1 | L2 | L3 | L4 | L5 |
+P (stage 2), block b: | L3 | L4 | L5 |
+```
+
+`PP=1` peers transfer whole rows. They also advertise where each layer's page
+sits in the row (`NixlAgentMetadata.packed_member_layouts`). A PP producer
+registers one region per layer, so it views each of D's rows as one region per
+layer and pairs its pages with those. Page sizes must match; offsets, row
+strides, and block counts may differ. Because PP stages can list the same
+attention backends in a different order, packed push compares the sorted set of
+backend names during the handshake.
+
+Invariants enforced when pairing:
+
+* the remote must hold every local layer; a missing layer fails the
+  handshake rather than silently leaving that layer's KV stale. Layers
+  only the remote holds are skipped on a PP stage (other stages own
+  them) and fail the handshake otherwise;
+* a remote that does not advertise its layers fails the handshake
+  instead of falling back to pairing by index;
+* a layer must span the same number of regions on both sides;
+* every TP rank of one remote engine must pair the same way;
+* a layer in different cache groups on P and D is refused by push. Each
+  worker advertises every layer's cache group
+  (`NixlAgentMetadata.layer_group_ids`), so this is caught even when the
+  layer's region is shared by several groups.
+
+Decode-side PP is unsupported because completions are counted per
+consumer rank. Mamba/SSM hybrids are unsupported under PP. Packed PP push
+requires MLA caches and equal P/D block sizes. MLA pages are replicated
+across TP ranks, so producer TP1 to consumer TP2 is supported.
 
 ## Scheduler-side responsibilities
 

@@ -161,7 +161,7 @@ class TurboQuantAttentionBackend(AttentionBackend):
         return (KVCacheLayout.LBNHC,)
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         return [16, 32, 64, 128]
 
     @classmethod
@@ -1140,6 +1140,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 and self.tq_config.effective_value_quant_bits == 4
                 and self.head_size == 128
                 and flydsl_gqa_ok
+                and kv_cache.shape[1] in (16, 32)
                 and self.sinks is None
                 and not (self.sliding_window and self.sliding_window > 0)
             )

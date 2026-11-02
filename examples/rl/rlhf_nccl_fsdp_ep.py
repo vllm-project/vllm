@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-RLHF with FSDP2 training (4 GPUs) and vLLM expert-parallel inference (4 GPUs).
+"""RLHF with FSDP2 training (4 GPUs) and vLLM expert-parallel inference (4 GPUs).
 
 8-GPU layout:
   Training  — 4 GPUs, PyTorch FSDP2 (fully_shard), as Ray actors
@@ -74,8 +73,7 @@ BASE_URL = f"http://localhost:{SERVER_PORT}"
 
 @ray.remote(num_gpus=1)
 class FSDPTrainWorker:
-    """
-    One FSDP2 training worker per GPU.  Four of these form the FSDP group.
+    """One FSDP2 training worker per GPU.  Four of these form the FSDP group.
     Rank 0 additionally drives weight transfer to the vLLM server.
     """
 

@@ -20,7 +20,7 @@ def fast_tokenizer():
     """gpt2 ships a Fast tokenizer; use it to test the offsets happy path."""
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained("openai-community/gpt2", use_fast=True)
+    return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
 def _make_base_renderer_with(tokenizer):

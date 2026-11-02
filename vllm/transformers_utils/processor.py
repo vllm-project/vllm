@@ -22,7 +22,10 @@ from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
 from vllm.transformers_utils import processors
-from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+from vllm.transformers_utils.repo_utils import (
+    get_hf_file_to_dict,
+    get_non_weight_snapshot_path,
+)
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
@@ -80,9 +83,7 @@ _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
 
 
 class HashableDict(dict):
-    """
-    A dictionary that can be hashed by lru_cache.
-    """
+    """A dictionary that can be hashed by lru_cache."""
 
     # NOTE: pythonic dict is not hashable,
     # we override on it directly for simplicity
@@ -91,9 +92,7 @@ class HashableDict(dict):
 
 
 class HashableList(list):
-    """
-    A list that can be hashed by lru_cache.
-    """
+    """A list that can be hashed by lru_cache."""
 
     def __hash__(self) -> int:  # type: ignore[override]
         return hash(tuple(self))
@@ -185,7 +184,11 @@ def get_video_processor_cls_name_from_config(
     # given type when torchvision is unavailable; callers then use opencv.
     model_config = get_hf_file_to_dict("config.json", processor_name, revision=revision)
     if model_config and "model_type" in model_config:
-        return VIDEO_PROCESSOR_MAPPING_NAMES.get(model_config["model_type"])
+        video_processor = VIDEO_PROCESSOR_MAPPING_NAMES.get(model_config["model_type"])
+        # Transformers >= 5.19 maps to {"torchvision": name}
+        if isinstance(video_processor, dict):
+            video_processor = video_processor.get("torchvision")
+        return video_processor
     return None
 
 
@@ -214,7 +217,12 @@ def get_processor(
     if revision is None:
         revision = "main"
     try:
-        processor_name = convert_model_repo_to_path(processor_name)
+        processor_name = requested_name = convert_model_repo_to_path(processor_name)
+        # A snapshot pinned to `revision` would shadow remote code at `code_revision`
+        if kwargs.get("code_revision") in (None, revision):
+            processor_name = get_non_weight_snapshot_path(
+                processor_name, revision=revision, token=kwargs.get("token")
+            )
         registered_cls_name = get_processor_cls_name_from_config(
             processor_name, revision=revision
         )
@@ -268,6 +276,11 @@ def get_processor(
             f"Expected type: {processor_cls}, but "
             f"found type: {type(processor)}"
         )
+
+    # Report the Hub ID rather than the local snapshot it was loaded from
+    tokenizer = getattr(processor, "tokenizer", processor)
+    if hasattr(tokenizer, "name_or_path"):
+        tokenizer.name_or_path = requested_name
 
     return processor
 

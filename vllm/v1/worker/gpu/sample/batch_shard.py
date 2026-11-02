@@ -2,11 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 import torch.distributed
+import torch.nn as nn
 
+from vllm.config import VllmConfig
 from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_tp_group
 from vllm.triton_utils import tl, triton
@@ -14,6 +17,10 @@ from vllm.v1.core.sched.output import GrammarOutput
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
+
+if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
+    from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 
 
 @dataclass
@@ -45,6 +52,54 @@ class BatchShardMetadata:
     # tensor. Derived from the global cu_num_logits, so each rank agrees
     # ont he gather shapes, including empty shards.
     max_num_logits_per_req: int
+    adaptive_verification_enabled: bool
+
+
+def batch_sharded_sampling_enabled(
+    vllm_config: VllmConfig, target_model: nn.Module
+) -> bool:
+    """Whether the target's sampling and verification are batch-sharded."""
+    return bool(
+        vllm_config.parallel_config.enable_batch_sharded_sampling
+        and hasattr(target_model, "compute_logits_local")
+    )
+
+
+def get_tp_pynccl_comm() -> "PyNcclCommunicator | None":
+    """The TP group's PyNCCL communicator, or None if it is unavailable."""
+    pynccl_comm = getattr(get_tp_group().device_communicator, "pynccl_comm", None)
+    if pynccl_comm is None or pynccl_comm.disabled:
+        return None
+    return pynccl_comm
+
+
+@triton.jit
+def shard_owner(req_idx, NUM_SHARDS: tl.constexpr):
+    """TP rank that samples the request at a batch position.
+
+    Mirrored on the host by `shard_owners`.
+    """
+    return req_idx % NUM_SHARDS
+
+
+def shard_owners(num_reqs: int, num_shards: int) -> np.ndarray:
+    """[num_reqs] The `shard_owner` of each batch position."""
+    return np.arange(num_reqs) % num_shards
+
+
+@triton.jit
+def shard_row(req_idx, NUM_SHARDS: tl.constexpr):
+    """Row of the request at a batch position in its `shard_owner`'s sharded
+    draft logits cache.
+
+    Mirrored on the host by `shard_rows`.
+    """
+    return req_idx // NUM_SHARDS
+
+
+def shard_rows(num_reqs: int, num_shards: int) -> np.ndarray:
+    """[num_reqs] The `shard_row` of each batch position."""
+    return np.arange(num_reqs) // num_shards
 
 
 @triton.jit(
@@ -63,6 +118,7 @@ def _build_shard_plan_kernel(
     local_expanded_idx_mapping_ptr,
     local_expanded_local_pos_ptr,
     local_seq_lens_ptr,
+    owners_ptr,
     num_reqs,
     local_logits_start,
     max_num_reqs_per_rank,
@@ -73,14 +129,22 @@ def _build_shard_plan_kernel(
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    owner = req_state_idx % TP_SIZE
     num_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - tl.load(
         cu_num_logits_ptr + req_idx
     )
 
     req_block = tl.arange(0, PADDED_NUM_REQS)
     req_mask = req_block < num_reqs
-    owners = tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0) % TP_SIZE
+    if owners_ptr is None:
+        owner = shard_owner(req_idx, TP_SIZE)
+        owners = shard_owner(req_block, TP_SIZE)
+    else:
+        owner = tl.load(owners_ptr + req_state_idx)
+        owners = tl.load(
+            owners_ptr + tl.load(idx_mapping_ptr + req_block, mask=req_mask, other=0),
+            mask=req_mask,
+            other=0,
+        )
     num_logits_per_req = tl.load(
         cu_num_logits_ptr + req_block + 1, mask=req_mask, other=0
     ) - tl.load(cu_num_logits_ptr + req_block, mask=req_mask, other=0)
@@ -150,11 +214,15 @@ class BatchSharder:
         max_num_reqs: int,
         max_num_logits_per_req: int,
         device: torch.device,
+        adaptive_verification_enabled: bool,
+        draft_logits: "DraftLogitsCache | None" = None,
     ):
         tp_group = get_tp_group()
         self.tp_rank = tp_group.rank_in_group
         self.tp_size = tp_group.world_size
         self.device = device
+        self.adaptive_verification_enabled = adaptive_verification_enabled
+        self.draft_logits = draft_logits
         self._padded_num_reqs = triton.next_power_of_2(max_num_reqs)
         self._padded_num_logits_per_req = triton.next_power_of_2(max_num_logits_per_req)
         self._num_warps = max(1, min(8, self._padded_num_reqs // 128))
@@ -175,21 +243,38 @@ class BatchSharder:
         tp_rank = self.tp_rank
         tp_size = self.tp_size
         num_reqs = input_batch.idx_mapping_np.shape[0]
-        num_logits = int(input_batch.cu_num_logits_np[-1])
 
-        # Deterministically assign requests to ranks, round-robin over slot
-        # indices so ownership stays balanced when the slot allocator fills
-        # low slots first (partial occupancy).
+        # Deterministically assign requests to ranks: to the rank that cached
+        # their draft logits, or else round-robin over batch positions.
         # NOTE: This mirrors the assignment used in _build_shard_plan_kernel.
-        req_owner_np = input_batch.idx_mapping_np % tp_size
+        if self.draft_logits is None:
+            req_owner_np, req_owner = shard_owners(num_reqs, tp_size), None
+        else:
+            req_owner_np, req_owner = self.draft_logits.owners_of(
+                input_batch.idx_mapping_np
+            )
         local_req_indices_np = np.flatnonzero(req_owner_np == tp_rank)
         local_idx_mapping_np = input_batch.idx_mapping_np[local_req_indices_np]
         num_local_reqs = local_req_indices_np.shape[0]
         num_reqs_per_rank_np = np.bincount(req_owner_np, minlength=tp_size)
         max_num_reqs_per_rank = int(num_reqs_per_rank_np.max()) if num_reqs else 1
+        # Get the number of logits per request on the host.
+        num_logits_per_req_np = np.diff(input_batch.cu_num_logits_np)
+        num_admitted_draft_tokens_np = None
+        if input_batch.num_admitted_draft_tokens is not None:
+            # Under adaptive verification, cu_num_logits_np holds the scheduled counts.
+            # When the budget binds, the admitted counts are copied to the host so the
+            # plan matches the device layout.
+            assert input_batch.num_draft_tokens_per_req is not None
+            num_admitted_draft_tokens_np = input_batch.num_admitted_draft_tokens.wait()
+            num_logits_per_req_np = (
+                num_logits_per_req_np
+                - input_batch.num_draft_tokens_per_req
+                + num_admitted_draft_tokens_np
+            )
+        num_logits = int(num_logits_per_req_np.sum())
         # Derive the number of logits owned by each rank, as well as the
         # local rank.
-        num_logits_per_req_np = np.diff(input_batch.cu_num_logits_np)
         num_logits_per_rank_np = np.bincount(
             req_owner_np, weights=num_logits_per_req_np, minlength=tp_size
         ).astype(np.int64)
@@ -200,6 +285,9 @@ class BatchSharder:
             num_logits_per_req_np[local_req_indices_np], out=local_cu_num_logits_np[1:]
         )
         max_num_logits_per_req = int(num_logits_per_req_np.max()) if num_reqs else 1
+        local_seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound[
+            torch.from_numpy(local_req_indices_np)
+        ]
 
         # Shard the input batch GPU tensors.
         sorted_logits_indices = torch.empty(
@@ -211,21 +299,15 @@ class BatchSharder:
         local_logits_indices = torch.empty(
             num_local_logits, dtype=torch.int64, device=self.device
         )
-        local_idx_mapping = torch.empty(
-            num_local_reqs, dtype=torch.int32, device=self.device
+        local_idx_mapping = input_batch.idx_mapping.new_empty(num_local_reqs)
+        local_cu_num_logits = input_batch.cu_num_logits.new_empty(num_local_reqs + 1)
+        local_expanded_idx_mapping = input_batch.expanded_idx_mapping.new_empty(
+            num_local_logits
         )
-        local_cu_num_logits = torch.empty(
-            num_local_reqs + 1, dtype=torch.int32, device=self.device
+        local_expanded_local_pos = input_batch.expanded_local_pos.new_empty(
+            num_local_logits
         )
-        local_expanded_idx_mapping = torch.empty(
-            num_local_logits, dtype=torch.int32, device=self.device
-        )
-        local_expanded_local_pos = torch.empty(
-            num_local_logits, dtype=torch.int32, device=self.device
-        )
-        local_seq_lens = torch.empty(
-            num_local_reqs, dtype=torch.int32, device=self.device
-        )
+        local_seq_lens = input_batch.seq_lens.new_empty(num_local_reqs)
         if num_reqs > 0:
             _build_shard_plan_kernel[(num_reqs,)](
                 input_batch.idx_mapping,
@@ -240,6 +322,7 @@ class BatchSharder:
                 local_expanded_idx_mapping,
                 local_expanded_local_pos,
                 local_seq_lens,
+                req_owner,
                 num_reqs,
                 local_logits_start,
                 max_num_reqs_per_rank,
@@ -257,7 +340,15 @@ class BatchSharder:
             num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req[
                 local_req_indices_np
             ]
-            num_draft_tokens = int(num_draft_tokens_per_req.sum())
+            if num_admitted_draft_tokens_np is not None:
+                # Under adaptive verification num_draft_tokens_per_req holds the
+                # scheduled counts. Follow the admitted counts so every rank picks
+                # the same sampler as the replicated path, including a budget of 0.
+                num_draft_tokens = int(
+                    num_admitted_draft_tokens_np[local_req_indices_np].sum()
+                )
+            elif input_batch.num_draft_tokens > 0:
+                num_draft_tokens = int(num_draft_tokens_per_req.sum())
 
         local_req_ids = [input_batch.req_ids[i] for i in local_req_indices_np.tolist()]
         local_batch = replace(
@@ -269,6 +360,7 @@ class BatchSharder:
             expanded_idx_mapping=local_expanded_idx_mapping,
             expanded_local_pos=local_expanded_local_pos,
             seq_lens=local_seq_lens,
+            seq_lens_cpu_upper_bound=local_seq_lens_cpu_upper_bound,
             logits_indices=local_logits_indices,
             cu_num_logits=local_cu_num_logits,
             cu_num_logits_np=local_cu_num_logits_np,
@@ -277,9 +369,7 @@ class BatchSharder:
         )
         local_grammar_output = None
         if grammar_output is not None:
-            local_grammar_output = _shard_grammar_output(
-                grammar_output, input_batch, local_req_ids
-            )
+            local_grammar_output = _shard_grammar_output(grammar_output, local_req_ids)
         metadata = BatchShardMetadata(
             tp_size=tp_size,
             num_logits_per_rank=num_logits_per_rank_np.tolist(),
@@ -288,56 +378,64 @@ class BatchSharder:
             max_num_reqs_per_rank=max_num_reqs_per_rank,
             gathered_src_indices=gathered_src_indices,
             max_num_logits_per_req=max_num_logits_per_req,
+            adaptive_verification_enabled=self.adaptive_verification_enabled,
         )
         return local_batch, sorted_logits_indices, local_grammar_output, metadata
 
 
-def all_to_all_logits(
-    logits_shard: torch.Tensor,
-    metadata: BatchShardMetadata,
+def all_to_all_vocab_shards(
+    logits_shard: torch.Tensor, send_splits: list[int], num_local_rows: int
 ) -> torch.Tensor:
-    recv = logits_shard.new_empty(
-        metadata.tp_size * metadata.num_local_logits, logits_shard.shape[-1]
-    )
-    torch.distributed.all_to_all_single(
-        recv,
-        logits_shard.contiguous(),
-        output_split_sizes=[metadata.num_local_logits] * metadata.tp_size,
-        input_split_sizes=metadata.num_logits_per_rank,
-        group=get_tp_group().device_group,
-    )
+    """Exchange vocab-shard logits so each rank gets full-vocab logits for its
+    own rows. `send_splits[r]` rows of `logits_shard` go to rank r.
+
+    Returns:
+        [num_local_rows, tp_size * shard_width] logits of this rank's rows.
+
+    """
+    tp_size = len(send_splits)
+    recv = logits_shard.new_empty(tp_size * num_local_rows, logits_shard.shape[-1])
+    recv_splits = [num_local_rows] * tp_size
+    pynccl_comm = get_tp_pynccl_comm()
+    if pynccl_comm is not None:
+        # The TP collectives' communicator: a c10d all-to-all would make NCCL
+        # allocate a second set of point-to-point buffers.
+        pynccl_comm.all_to_all_single(
+            recv, logits_shard.contiguous(), recv_splits, send_splits
+        )
+    else:
+        torch.distributed.all_to_all_single(
+            recv,
+            logits_shard.contiguous(),
+            output_split_sizes=recv_splits,
+            input_split_sizes=send_splits,
+            group=get_tp_group().device_group,
+        )
     shard_width = recv.shape[-1]
     return (
-        recv.view(metadata.tp_size, metadata.num_local_logits, shard_width)
+        recv.view(tp_size, num_local_rows, shard_width)
         .permute(1, 0, 2)
-        .reshape(metadata.num_local_logits, metadata.tp_size * shard_width)
+        .reshape(num_local_rows, tp_size * shard_width)
     )
 
 
 def _shard_grammar_output(
     grammar_output: GrammarOutput,
-    input_batch: InputBatch,
     local_req_ids: list[str],
 ) -> GrammarOutput | None:
     owned = set(local_req_ids)
-    req_id_to_idx = {req_id: i for i, req_id in enumerate(input_batch.req_ids)}
-    cu_num_logits_np = input_batch.cu_num_logits_np
-
-    local_ids: list[str] = []
-    keep_indices: list[int] = []
-    cursor = 0
-    for req_id in grammar_output.structured_output_request_ids:
-        req_idx = req_id_to_idx[req_id]
-        num_req_logits = int(cu_num_logits_np[req_idx + 1] - cu_num_logits_np[req_idx])
-        if req_id in owned:
-            local_ids.append(req_id)
-            keep_indices.extend(range(cursor, cursor + num_req_logits))
-        cursor += num_req_logits
-    if not local_ids:
+    grammar_req_ids = grammar_output.structured_output_request_ids
+    keep = [i for i, req_id in enumerate(grammar_req_ids) if req_id in owned]
+    if not keep:
         return None
+    local_ids = [grammar_req_ids[i] for i in keep]
+    # Each request owns a fixed-width block of rows.
+    bitmask = grammar_output.grammar_bitmask
+    blocks = bitmask.reshape(len(grammar_req_ids), -1, bitmask.shape[-1])
+    local_bitmask = blocks[keep].reshape(-1, bitmask.shape[-1])
     return GrammarOutput(
         structured_output_request_ids=local_ids,
-        grammar_bitmask=grammar_output.grammar_bitmask[keep_indices],
+        grammar_bitmask=local_bitmask,
     )
 
 
@@ -586,7 +684,14 @@ def _gather_logprobs_tensors(
         logprobs=logprobs,
         selected_token_ranks=selected_token_ranks,
         cu_num_generated_tokens=(
-            global_batch.cu_num_logits_np.tolist() if num_logits != num_reqs else None
+            None
+            if metadata.adaptive_verification_enabled or num_logits == num_reqs
+            else global_batch.cu_num_logits_np.tolist()
+        ),
+        cu_num_generated_tokens_tensor=(
+            global_batch.cu_num_logits.clone()
+            if metadata.adaptive_verification_enabled
+            else None
         ),
     )
 
@@ -613,8 +718,6 @@ def gather_sampler_output(
         device=device,
     )
     if local_output is not None:
-        assert local_output.num_sampled is not None
-        assert local_output.num_rejected is not None
         assert not gather_num_nans or local_output.num_nans is not None
         num_src_cols = min(
             local_output.sampled_token_ids.shape[1], max_num_logits_per_req

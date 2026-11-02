@@ -4,18 +4,30 @@
 from collections.abc import Iterator
 from enum import Enum
 from typing import NamedTuple
+from unittest.mock import MagicMock
 
 import regex as re
 import torch
 
 from vllm import CompletionOutput
+from vllm.config import ReasoningConfig
 from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.sample.logits_processor import BatchUpdate, LogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 
 
+def create_mock_reasoning_config(
+    start_token_ids: list[int], end_token_ids: list[int]
+) -> ReasoningConfig:
+    return MagicMock(
+        spec=ReasoningConfig,
+        reasoning_start_token_ids=start_token_ids,
+        reasoning_end_token_ids=end_token_ids,
+    )
+
+
 class BatchLogprobsComposition(Enum):
-    """Types of logprobs configs to include in test batch"""
+    """Types of logprobs configs to include in test batch."""
 
     NONE = 0
     SAMPLE = 1
@@ -29,7 +41,7 @@ BatchLogprobsSpecType = list[tuple[int | None, int | None]]
 def get_test_batch(
     batch_logprobs_composition: BatchLogprobsComposition,
 ) -> BatchLogprobsSpecType:
-    """Generate logprobs configs for a batch of requests
+    """Generate logprobs configs for a batch of requests.
 
     A given request's logprobs configuration is (1) num_sample_logprobs and (2)
     num_prompt_logprobs. The batch logprobs configuration is the list of request
@@ -53,9 +65,9 @@ def get_test_batch(
       batch_logprobs_composition: types of logprobs configs to include in batch
 
     Returns:
-
       list of (Optional[num_sample_logprobs], Optional[num_prompt_logprobs])
       tuples
+
     """
     if batch_logprobs_composition == BatchLogprobsComposition.NONE:
         # No requests with sample or prompt logprobs
@@ -101,7 +113,7 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
     non_incremental_detokenization_str: str,
     msg: str,
 ) -> None:
-    """Compare incrementally detok. text to non-incrementally detok. text
+    """Compare incrementally detok. text to non-incrementally detok. text.
 
     Fail if the strings mismatch after non-alphanumeric characters are stripped
     out.
@@ -120,6 +132,7 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
       non_incremental_detokenization_str: non-incrementally-detokenized logprob
                                           tokens
       msg: error message if `assert` fails
+
     """
     rgx = r"[^a-zA-Z0-9]+"
     assert re.sub(rgx, "", incremental_detokenization_str) == re.sub(
@@ -128,18 +141,23 @@ def assert_incr_detok_str_matches_non_incr_detok_str(
 
 
 def compute_correct_cumulative_logprob(completion_output: CompletionOutput) -> float:
-    """Compute known-good value for evaluating cumulative logprob
+    """Compute known-good value for evaluating cumulative logprob.
 
     Args:
       completion_output: completion output from engine
 
     Returns:
       Known-good cumulative logprob value
+
     """
     token_ids = completion_output.token_ids
     logprobs = completion_output.logprobs
     assert logprobs is not None
-    return sum([lp[tok_id].logprob for tok_id, lp in zip(token_ids, logprobs)])
+    values: list[float] = []
+    for tok_id, lp in zip(token_ids, logprobs):
+        assert lp is not None
+        values.append(lp[tok_id].logprob)
+    return sum(values)
 
 
 def create_fake_logits(batch_size: int, vocab_size: int) -> torch.Tensor:
@@ -170,7 +188,7 @@ def create_prompt_tokens_tensor(
 
 
 class LogitsprocsTestFakes(NamedTuple):
-    """Wraps fake data structures to support testing"""
+    """Wraps fake data structures to support testing."""
 
     logits: torch.Tensor
     sampling_metadata: SamplingMetadata
@@ -186,6 +204,7 @@ class LogitsprocsTestFakes(NamedTuple):
 
         Returns:
           Iterator over logits processors
+
         """
         return (
             lp for lp in self.sampling_metadata.logitsprocs.all if isinstance(lp, cls)

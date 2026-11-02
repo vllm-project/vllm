@@ -57,6 +57,7 @@ def load_hidden_states(path: str) -> dict[str, torch.Tensor]:
 
     Returns:
         Dict with "hidden_states" and "token_ids" tensors.
+
     """
     lock_path = path + ".lock"
     with open(lock_path) as lf:
@@ -96,12 +97,23 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
 
 
 class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
-    """
-    Simple debug implementation of a HiddenStatesConnector.
+    """Simple debug implementation of a HiddenStatesConnector.
 
     Simply extracts the hidden states from the kv cache and stores them to disk.
     Must be used in conjunction with the `extract_hidden_states` spec decoding method.
     """
+
+    def get_finished_count(self) -> int:
+        """Number of ``finished_sending`` notifications expected per request.
+
+        Only TP rank 0 writes hidden states to disk, so each request yields a
+        single notification. The default (``None``) makes ``KVOutputAggregator``
+        wait for every worker in the world size; since ranks 1..N-1 never submit
+        a copy, the request would never be reported as finished and its blocks
+        would be leaked forever (the scheduler then spins on
+        ``has_finished_requests()``).
+        """
+        return 1
 
     @classmethod
     def _find_cache_kv_group_id(cls, kv_cache_config: "KVCacheConfig | None") -> int:
@@ -436,8 +448,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         num_computed_tokens: int,
     ) -> tuple[int | None, bool]:
-        """
-        Get number of new tokens that can be loaded from the
+        """Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
 
         Args:
@@ -448,6 +459,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         Returns:
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
+
         """
         # This connector is store-only, so we don't need to load any tokens
         return 0, False
@@ -471,6 +483,7 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
 
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
+
         """
         meta = ExampleHiddenStatesConnectorMetadata()
 
@@ -509,15 +522,20 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
-        """
-        Called exactly once when a request has finished, before its blocks are
+        """Called exactly once when a request has finished, before its blocks are
         freed.
 
         Returns True to delay block freeing until get_finished extracts
         the hidden states from the KV cache.
         """
         req_id = request.request_id
-        filename = self._request_filenames.pop(req_id)
+        filename = self._request_filenames.pop(req_id, None)
+        if filename is None:
+            # Request was aborted before it was ever scheduled, so
+            # build_connector_meta never recorded a filename for it. There are
+            # no hidden states to save and no blocks worth delaying.
+            self._pending_saves.pop(req_id, None)
+            return False, None
         kv_params = request.kv_transfer_params or {}
         if kv_params.get("include_output_tokens", False):
             # Exclude the final token — it was the model's output, never an
@@ -566,15 +584,18 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         done_sending: set[str] = set()
         for req_id in list(self._accumulated_finished_req_ids):
             event = self._req_copy_events.get(req_id)
-            if event is None or event.query():
-                self._req_copy_events.pop(req_id, None)
+            if event is not None and not event.query():
+                continue  # DtoH copy still in flight
+            self._req_copy_events.pop(req_id, None)
+            self._accumulated_finished_req_ids.discard(req_id)
+            # Only report requests we actually tracked for sending.
+            if event is not None:
                 done_sending.add(req_id)
-                self._accumulated_finished_req_ids.discard(req_id)
-                # Clean up any leftover lock fds (e.g. aborted requests
-                # that never went through _submit_async_write).
-                lock_fd = self._lock_fds.pop(req_id, None)
-                if lock_fd is not None:
-                    os.close(lock_fd)
+            # Clean up any leftover lock fds (e.g. aborted requests that never
+            # went through _submit_async_write).
+            lock_fd = self._lock_fds.pop(req_id, None)
+            if lock_fd is not None:
+                os.close(lock_fd)
 
         return done_sending or None, None
 
@@ -583,20 +604,24 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
         request: "Request",
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        if not 0 <= self._cache_kv_group_id < len(block_ids):
+            # No per-group block table (e.g. a request that was never
+            # scheduled); treat as a no-op instead of indexing out of bounds.
+            return False, None
         return self.request_finished(request, block_ids[self._cache_kv_group_id])
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
-        """
-        Get the required KV cache layout for this connector.
+        """Get the required KV cache layout for this connector.
+
         Args:
             vllm_config (VllmConfig): the vllm config.
 
         Returns:
             str: the required KV cache layout. e.g. HND, or NHD.
             None if the connector does not require a specific layout.
-        """
 
+        """
         if cls is KVConnectorBase_V1:
             raise TypeError(
                 "get_required_kvcache_layout should not be called "

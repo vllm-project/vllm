@@ -57,6 +57,8 @@ def server():
         # the conversation to surface a thinking block (SmolLM2 doesn't
         # emit Cohere-style reasoning tokens out of the box).
         "--no-cohere-is-reasoning-model",
+        # Registers /cohere/v2/chat/render alongside /cohere/v2/chat.
+        "--enable-scale-out",
     ]
 
     # Cap the CPU KV-cache pool the vLLM CPU backend reserves at
@@ -71,7 +73,6 @@ def server():
     env_dict = {
         "VLLM_CPU_KVCACHE_SPACE": "1",
         "VLLM_ENABLE_COHERE_API": "1",
-        "VLLM_ENABLE_SCALE_OUT_ENDPOINTS": "1",
     }
 
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:

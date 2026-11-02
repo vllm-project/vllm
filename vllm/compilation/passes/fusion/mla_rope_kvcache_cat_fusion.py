@@ -35,7 +35,10 @@ def fused_rope_unified_mla_kv_cache_update_impl(
     layer_name: LayerNameType,
 ) -> torch.Tensor:
     layer_name = _resolve_layer_name(layer_name)
-    attn_metadata, _, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
+    attn_layer.prepare_kv_cache_update(attn_metadata)
     if layer_slot_mapping is not None:
         ops.concat_and_cache_mla_rope_fused(
             positions,

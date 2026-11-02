@@ -1,10 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-EPLB communicator implementations and factory.
-"""
+"""EPLB communicator implementations and factory."""
 
 import contextlib
+import itertools
 import time
 import uuid
 from abc import ABC, abstractmethod
@@ -24,9 +23,11 @@ from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import (
     ncclDataTypeEnum,
 )
+from vllm.distributed.eplb.eplb_utils import device_stream
 from vllm.distributed.parallel_state import (
     GroupCoordinator,
     get_pp_group,
+    in_the_same_node_as,
     is_local_first_rank,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
@@ -34,6 +35,8 @@ from vllm.distributed.utils import is_weak_contiguous
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
@@ -74,13 +77,33 @@ class EplbCommunicator(ABC):
         """
 
     def set_transfer_context(  # noqa: B027
-        self, old_indices: np.ndarray, layer_idx: int
+        self,
+        old_indices: np.ndarray,
+        layer_idx: int,
+        recv_rows: Sequence[dict[int, int]] | None = None,
     ) -> None:
-        """Pre-set layer context before add_recv calls.
+        """Pre-set layer context before add_send/add_recv calls.
 
         Default is a no-op; overridden by backends (e.g. NIXL) that need
         layer-level context to issue transfers inside add_recv.
+
+        Args:
+            old_indices: Global physical-to-logical map before the move.
+            layer_idx: Index of the MoE layer being transferred.
+            recv_rows: Per EP rank, the ``expert_buffer`` row each expert
+                received by that rank lands in. Only push backends need it.
+
         """
+
+    @property
+    def needs_recv_rows(self) -> bool:
+        """Whether set_transfer_context must be given every rank's recv rows."""
+        return False
+
+    @property
+    def owned_expert_buffer(self) -> list[torch.Tensor] | None:
+        """Backend-allocated receive buffer, or ``None`` to use the caller's."""
+        return None
 
     @property
     def needs_profile_buffer_reservation(self) -> bool:
@@ -88,8 +111,8 @@ class EplbCommunicator(ABC):
         communication buffers."""
         return True
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
-        self._cuda_stream = cuda_stream
+    def set_stream(self, stream: torch.Stream | None) -> None:
+        self._stream = stream
 
     def _log_initialized(self) -> None:
         if is_local_first_rank():
@@ -102,10 +125,10 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         ep_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        stream: torch.Stream | None = None,
     ) -> None:
         self._ep_group = ep_group
-        self._cuda_stream = cuda_stream
+        self._stream = stream
         self._p2p_ops: list[P2POp] = []
         self._log_initialized()
 
@@ -120,8 +143,8 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                 P2POp(
                     torch.distributed.isend,
                     tensor,
-                    dst_rank,
-                    self._ep_group,
+                    group=self._ep_group,
+                    group_peer=dst_rank,
                 )
             )
 
@@ -136,8 +159,8 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
                 P2POp(
                     torch.distributed.irecv,
                     tensor,
-                    src_rank,
-                    self._ep_group,
+                    group=self._ep_group,
+                    group_peer=src_rank,
                 )
             )
 
@@ -145,7 +168,7 @@ class TorchDistNcclEplbCommunicator(EplbCommunicator):
         if not self._p2p_ops:
             return
         try:
-            with torch.cuda.stream(self._cuda_stream):
+            with device_stream(self._stream):
                 reqs = batch_isend_irecv(self._p2p_ops)
                 for req in reqs:
                     req.wait()
@@ -159,10 +182,10 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         cpu_group: ProcessGroup,
-        cuda_stream: torch.cuda.Stream | None = None,
+        stream: torch.Stream | None = None,
     ) -> None:
         self._cpu_group = cpu_group
-        self._cuda_stream = cuda_stream
+        self._stream = stream
         self._ops: list[tuple[str, torch.Tensor, int]] = []
         self._log_initialized()
 
@@ -199,24 +222,26 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
                         P2POp(
                             torch.distributed.isend,
                             cpu_tensor,
-                            peer_rank,
-                            self._cpu_group,
+                            group=self._cpu_group,
+                            group_peer=peer_rank,
                         )
                     )
                     continue
-                cpu_tensor = torch.empty_like(tensor, device="cpu")
+                cpu_tensor = torch.empty_like(
+                    tensor, device="cpu", pin_memory=PIN_MEMORY
+                )
                 p2p_ops.append(
                     P2POp(
                         torch.distributed.irecv,
                         cpu_tensor,
-                        peer_rank,
-                        self._cpu_group,
+                        group=self._cpu_group,
+                        group_peer=peer_rank,
                     )
                 )
                 recv_staging.append((tensor, cpu_tensor))
 
         try:
-            with torch.cuda.stream(self._cuda_stream):
+            with device_stream(self._stream):
                 build_ops()
         finally:
             self._ops.clear()
@@ -224,10 +249,10 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
         # Wait for all D2H copies to finish
         # before issuing gloo batch_isend_irecv operations.
         with gpu_sync_allowed():
-            if self._cuda_stream is not None:
-                self._cuda_stream.synchronize()
+            if self._stream is not None:
+                self._stream.synchronize()
             else:
-                torch.cuda.current_stream().synchronize()
+                torch.accelerator.current_stream().synchronize()
 
         reqs = batch_isend_irecv(p2p_ops)
         for req in reqs:
@@ -235,9 +260,67 @@ class TorchDistGlooStagedEplbCommunicator(EplbCommunicator):
 
         if not recv_staging:
             return
-        with torch.cuda.stream(self._cuda_stream):
+        with device_stream(self._stream):
             for dst_tensor, cpu_tensor in recv_staging:
                 dst_tensor.copy_(cpu_tensor, non_blocking=True)
+
+
+class TorchDistXCCLStagedEplbCommunicator(EplbCommunicator):
+    """EPLB communicator using XCCL device-to-device P2P on XPU."""
+
+    def __init__(
+        self,
+        ep_group: ProcessGroup,
+        stream: torch.Stream | None = None,
+    ) -> None:
+        self._ep_group = ep_group
+        self._stream = stream
+        self._ops: list[tuple[str, torch.Tensor, int]] = []
+        self._log_initialized()
+
+    def add_send(
+        self,
+        tensors: list[torch.Tensor],
+        dst_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._ops.append(("send", tensor, dst_rank))
+
+    def add_recv(
+        self,
+        tensors: list[torch.Tensor],
+        src_rank: int,
+        expert_id: int,  # unused by this backend
+    ) -> None:
+        for tensor in tensors:
+            self._ops.append(("recv", tensor, src_rank))
+
+    def execute(self) -> None:
+        if not self._ops:
+            return
+
+        p2p_ops: list[P2POp] = []
+        try:
+            for op, tensor, peer_rank in self._ops:
+                send_or_recv = (
+                    torch.distributed.isend if op == "send" else torch.distributed.irecv
+                )
+                p2p_ops.append(
+                    P2POp(
+                        send_or_recv,
+                        tensor,
+                        peer_rank,
+                        self._ep_group,
+                    )
+                )
+        finally:
+            self._ops.clear()
+
+        with device_stream(self._stream):
+            reqs = batch_isend_irecv(p2p_ops)
+            for req in reqs:
+                req.wait()
 
 
 class NixlEplbCommunicator(EplbCommunicator):
@@ -255,6 +338,7 @@ class NixlEplbCommunicator(EplbCommunicator):
             cpu_group: CPU process group for metadata exchange.
             all_expert_weights: Expert weight tensors for all MoE layers.
             expert_buffer: Pre-allocated receive buffer tensors.
+
         """
         assert all_expert_weights, (
             "NixlEplbCommunicator requires non-empty all_expert_weights."
@@ -293,6 +377,7 @@ class NixlEplbCommunicator(EplbCommunicator):
         # Per-rank expert_id -> physical row; set by set_transfer_context.
         self._expert_to_src_row: list[dict[int, int]] | None = None
         self._layer_idx: int | None = None
+        self.set_stream(None)
 
         nixl_agent_config = nixl_utils.nixl_agent_config
         config = (
@@ -341,8 +426,8 @@ class NixlEplbCommunicator(EplbCommunicator):
         uid = uuid.uuid4().hex[:8]
         return f"eplb-{self._rank}{pp_suffix}-{uid}"
 
-    def set_stream(self, cuda_stream: torch.cuda.Stream | None) -> None:
-        pass
+    def set_stream(self, stream: torch.Stream | None) -> None:
+        self._stream = stream
 
     def add_send(
         self,
@@ -354,12 +439,24 @@ class NixlEplbCommunicator(EplbCommunicator):
         # weights are pre-registered and always readable in-place.
         pass
 
-    def set_transfer_context(self, old_indices: np.ndarray, layer_idx: int) -> None:
+    def set_transfer_context(
+        self,
+        old_indices: np.ndarray,
+        layer_idx: int,
+        recv_rows: Sequence[dict[int, int]] | None = None,
+    ) -> None:
         assert not self._xfer_entries, (
             f"set_transfer_context() called with {len(self._xfer_entries)} "
             f"pending transfers from layer {self._layer_idx}; "
             f"execute() was not called after previous add_recv() calls"
         )
+        # NIXL READs bypass device streams; wait for pending copies out of
+        # the receive buffer before add_recv overwrites it.
+        if current_platform.is_rocm():
+            with gpu_sync_allowed():
+                torch.accelerator.current_stream().synchronize()
+                if self._stream is not None:
+                    self._stream.synchronize()
         self._layer_idx = layer_idx
         n = self._num_local_experts
         rank_experts = old_indices[: self._world_size * n].reshape(self._world_size, n)
@@ -600,10 +697,10 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     def __init__(
         self,
         pynccl_comm: PyNcclCommunicator,
-        cuda_stream: torch.cuda.Stream | None = None,
+        stream: torch.Stream | None = None,
     ) -> None:
         self._pynccl_comm = pynccl_comm
-        self._cuda_stream = cuda_stream
+        self._stream = stream
         self._group_started = False
         self._log_initialized()
 
@@ -620,7 +717,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         self._ensure_group_started()
         for tensor in tensors:
-            self._pynccl_comm.send(tensor, dst_rank, stream=self._cuda_stream)
+            self._pynccl_comm.send(tensor, dst_rank, stream=self._stream)
 
     def add_recv(
         self,
@@ -630,7 +727,7 @@ class PyNcclEplbCommunicator(EplbCommunicator):
     ) -> None:
         self._ensure_group_started()
         for tensor in tensors:
-            self._pynccl_comm.recv(tensor, src_rank, stream=self._cuda_stream)
+            self._pynccl_comm.recv(tensor, src_rank, stream=self._stream)
 
     def execute(self) -> None:
         if self._group_started:
@@ -638,11 +735,124 @@ class PyNcclEplbCommunicator(EplbCommunicator):
             self._group_started = False
 
 
+class SymmMemEplbCommunicator(EplbCommunicator):
+    """Push expert rows into peers' receive buffers over symmetric memory.
+
+    Senders copy from their live weights into the receiver's ``expert_buffer``
+    row, which every rank derives from the global placements; ``execute`` is
+    collective. CPU barriers only: GPU spin barriers can deadlock MegaMoE
+    cooperative launches.
+    """
+
+    def __init__(
+        self,
+        group_coordinator: GroupCoordinator,
+        layer: Sequence[torch.Tensor],
+    ) -> None:
+        import torch.distributed._symmetric_memory as symm_mem
+
+        from vllm.distributed.device_communicators.custom_all_reduce import (
+            _group_can_attempt_mnnvl,
+        )
+
+        ep_group = group_coordinator.device_group
+        cpu_group = group_coordinator.cpu_group
+        device = layer[0].device
+        if not current_platform.is_cuda():
+            raise ValueError("symm_mem EPLB requires CUDA")
+        if all(in_the_same_node_as(cpu_group, source_rank=0)):
+            physical_ids = [0] * cpu_group.size()
+            torch.distributed.all_gather_object(
+                physical_ids,
+                current_platform.visible_device_id_to_physical_device_id(device.index),
+                group=cpu_group,
+            )
+            in_nvlink_domain = current_platform.is_fully_connected(physical_ids)
+        else:
+            in_nvlink_domain = _group_can_attempt_mnnvl(cpu_group, device)
+        if not in_nvlink_domain:
+            raise ValueError(
+                "symm_mem EPLB requires all EP ranks in one NVLink domain "
+                "(MNNVL across nodes); use nixl or torch_gloo instead."
+            )
+
+        # One buffer and one rendezvous cover all of the layer's tensors.
+        offsets = [0, *itertools.accumulate(round_up(w.nbytes, 256) for w in layer)]
+
+        def as_layer(buffer: torch.Tensor) -> list[torch.Tensor]:
+            return [
+                buffer[o : o + w.nbytes].view(w.dtype).view(w.shape)
+                for o, w in zip(offsets, layer)
+            ]
+
+        buffer = symm_mem.empty(offsets[-1], dtype=torch.uint8, device=device)
+        # For MNNVL, rendezvous is what confirms all ranks share one NVLink domain.
+        self._handle = symm_mem.rendezvous(buffer, ep_group.group_name)
+        self._peer_buffers = [
+            as_layer(self._handle.get_buffer(rank, buffer.shape, torch.uint8))
+            for rank in range(ep_group.size())
+        ]
+        self._buffer = as_layer(buffer)
+
+        self._stream = None
+        self._group_coordinator = group_coordinator
+        self._recv_rows: Sequence[dict[int, int]] = []
+        self._sends: list[tuple[list[torch.Tensor], int, int]] = []
+        self._log_initialized()
+
+    @property
+    def needs_profile_buffer_reservation(self) -> bool:
+        return False
+
+    @property
+    def needs_recv_rows(self) -> bool:
+        return True
+
+    @property
+    def owned_expert_buffer(self) -> list[torch.Tensor]:
+        return self._buffer
+
+    def set_transfer_context(
+        self,
+        old_indices: np.ndarray,
+        layer_idx: int,
+        recv_rows: Sequence[dict[int, int]] | None = None,
+    ) -> None:
+        assert recv_rows is not None
+        self._recv_rows = recv_rows
+
+    def add_send(
+        self, tensors: list[torch.Tensor], dst_rank: int, expert_id: int
+    ) -> None:
+        row = self._recv_rows[dst_rank][expert_id]
+        self._sends.append((tensors, dst_rank, row))
+
+    def add_recv(
+        self, tensors: list[torch.Tensor], src_rank: int, expert_id: int
+    ) -> None:
+        # No-op: senders push into this rank's buffer in execute().
+        pass
+
+    def execute(self) -> None:
+        with device_stream(self._stream):
+            self._barrier()  # Every peer's buffer rows are free to overwrite.
+            for tensors, dst_rank, row in self._sends:
+                for src, peer in zip(tensors, self._peer_buffers[dst_rank]):
+                    peer[row].copy_(src, non_blocking=True)
+            self._barrier()  # Every push has landed in its receiver's buffer.
+        self._sends.clear()
+
+    def _barrier(self) -> None:
+        with gpu_sync_allowed():
+            torch.accelerator.current_stream().synchronize()
+        self._group_coordinator.cpu_all_reduce_(torch.zeros(1, dtype=torch.int32))
+
+
 def create_eplb_communicator(
     group_coordinator: GroupCoordinator,
     backend: str,
     expert_weights: Sequence[Sequence[torch.Tensor]],
-    expert_buffer: Sequence[torch.Tensor],
+    expert_buffer: Sequence[torch.Tensor] | None,
 ) -> EplbCommunicator:
     """Create an EPLB communicator for the given backend.
 
@@ -650,7 +860,7 @@ def create_eplb_communicator(
         group_coordinator: Process-group coordinator that provides the
             device and CPU communication groups.
         backend: Communicator backend name (``"torch_nccl"``,
-            ``"torch_gloo"``, ``"pynccl"``, or ``"nixl"``).
+            ``"torch_gloo"``, ``"pynccl"``, ``"nixl"``, or ``"symm_mem"``).
             Falls back to ``"torch_nccl"`` when *None*.
             Stateless (elastic EP) groups support ``"torch_nccl"``,
             ``"pynccl"``, and ``"nixl"``; ``"torch_nccl"`` is silently
@@ -662,7 +872,9 @@ def create_eplb_communicator(
             NixlEplbCommunicator registers all layers with NIXL for
             zero-copy RDMA reads.
         expert_buffer: Pre-allocated receive buffer tensors (one per
-            weight tensor in a single layer).
+            weight tensor in a single layer). ``symm_mem`` ignores it and
+            uses its own ``owned_expert_buffer``.
+
     """
     first_layer = expert_weights[0] if expert_weights else []
     tensor_device_type = first_layer[0].device.type if first_layer else "cpu"
@@ -723,7 +935,9 @@ def create_eplb_communicator(
             backend = "pynccl"
         return _create_pynccl()
 
-    if backend == "nixl":
+    if backend == "symm_mem":
+        return SymmMemEplbCommunicator(group_coordinator, first_layer)
+    elif backend == "nixl":
         if not has_nixl():
             raise RuntimeError(
                 "EPLB communicator 'nixl' requested but NIXL is unavailable."
@@ -733,6 +947,7 @@ def create_eplb_communicator(
                 "EPLB communicator 'nixl' supports only cuda-like devices "
                 f"(got {tensor_device_type})."
             )
+        assert expert_buffer is not None
         try:
             return NixlEplbCommunicator(
                 cpu_group=group_coordinator.cpu_group,
@@ -747,6 +962,8 @@ def create_eplb_communicator(
         return TorchDistGlooStagedEplbCommunicator(
             cpu_group=group_coordinator.cpu_group,
         )
+    elif backend == "torch_xccl":
+        return TorchDistXCCLStagedEplbCommunicator(ep_group=torch_group)
     elif backend == "torch_nccl":
         return TorchDistNcclEplbCommunicator(ep_group=torch_group)
     elif backend == "pynccl":
