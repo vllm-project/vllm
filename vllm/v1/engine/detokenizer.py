@@ -58,12 +58,44 @@ class IncrementalDetokenizer:
             # No tokenizer => skipping detokenization.
             return IncrementalDetokenizer()
 
-        if uses_fast_detokenizer(tokenizer):
+        if uses_fast_detokenizer(tokenizer) and not _prompt_ends_mid_utf8(
+            tokenizer, request
+        ):
             # Fast tokenizer => use tokenizers library DecodeStream.
             return FastIncrementalDetokenizer(tokenizer, request)
 
         # Fall back to slow python-based incremental detokenization.
         return SlowIncrementalDetokenizer(tokenizer, request)
+
+
+def _prompt_ends_mid_utf8(tokenizer: TokenizerLike, request: EngineCoreRequest) -> bool:
+    """Whether the prompt token ids decode to text ending in an incomplete
+    UTF-8 sequence (trailing U+FFFD).
+
+    `DecodeStream(ids=...)` only establishes its text prefix when the decoded
+    prompt does not end in U+FFFD, so such a prompt would leak into the first
+    streamed delta. This happens with token-id prompts whose last tokens hold
+    part of a multi-byte character, as byte-level BPE tokens and
+    byte-fallback `<0xNN>` tokens can.
+    """
+    prompt_ids = request.prompt_token_ids or []
+    assert request.sampling_params is not None
+    skip_special_tokens = request.sampling_params.skip_special_tokens
+    end = len(prompt_ids)
+    if skip_special_tokens:
+        # Skipped trailing special tokens must not fill the tail window.
+        special_ids = set(tokenizer.all_special_ids)
+        while end and prompt_ids[end - 1] in special_ids:
+            end -= 1
+    if not end:
+        return False
+    # A UTF-8 character spans at most 4 bytes, and each token holds at least
+    # one byte.
+    tail = tokenizer.decode(
+        prompt_ids[max(0, end - 8) : end],
+        skip_special_tokens=skip_special_tokens,
+    )
+    return tail.endswith("\ufffd")
 
 
 class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
