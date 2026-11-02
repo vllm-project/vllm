@@ -13,7 +13,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.b12x import B12xWarmupUnit
+from vllm.utils.b12x import B12xWarmupUnit, reuse_packed_weight_storage
 from vllm.utils.b12x import (
     get_b12x_blockscaled as _import_b12x_blockscaled,
 )
@@ -225,7 +225,9 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
             recipe="nvfp4",
             global_scale=layer.weight_global_scale,
         )
-        layer.b12x_nvfp4_packed_weight = packed
+        layer.b12x_nvfp4_packed_weight = reuse_packed_weight_storage(
+            getattr(layer, "b12x_nvfp4_packed_weight", None), packed
+        )
         # Declare every serving shape now. An undeclared token count is
         # prepared on first use, and that preparation evicts kernels other
         # layers compiled earlier in the same forward, which then fails CUDA
