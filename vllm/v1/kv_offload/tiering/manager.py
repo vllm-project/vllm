@@ -681,28 +681,21 @@ class TieringOffloadingManager(OffloadingManager):
             _maybe_update_load_sources(set(transfer_job.requested_keys))
             return
 
-        successful_keys = completed_job.successful_keys
-        failed_keys: Collection[OffloadKey]
         if completed_job.success:
             successful_keys = transfer_job.keys
-            failed_keys = ()
-        elif successful_keys:
-            failed_keys_set = set(transfer_job.keys)
-            assert failed_keys_set.issuperset(successful_keys), (
+        else:
+            successful_keys = completed_job.successful_keys or ()
+            assert set(transfer_job.keys).issuperset(successful_keys), (
                 f"Finished promotion job_id {completed_job.job_id} "
                 "reported unknown successful keys"
             )
-            failed_keys_set.difference_update(successful_keys)
-            failed_keys = failed_keys_set
-        else:
-            successful_keys = ()
-            failed_keys = transfer_job.keys
+        failed_keys = set(transfer_job.keys) - set(successful_keys)
 
         # Keys the promotion skipped because they were already in the
         # primary and were not fetched from the tier for this request; drop
         # their entries so they are reported as host hits.
         already_in_primary = set(transfer_job.requested_keys) - set(transfer_job.keys)
-        _maybe_update_load_sources(set(failed_keys) | already_in_primary)
+        _maybe_update_load_sources(failed_keys | already_in_primary)
 
         if successful_keys:
             self.primary_tier.complete_write(

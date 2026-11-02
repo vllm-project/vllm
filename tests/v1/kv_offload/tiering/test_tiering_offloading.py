@@ -467,7 +467,7 @@ class TestTieringOffloadingManager:
             patch.object(self.primary_tier, "complete_write") as completed,
         ):
             self.manager._process_finished_jobs()
-        completed.assert_called_once_with(to_keys([1, 2]), _CTX, False)
+        completed.assert_called_once_with(set(to_keys([1, 2])), _CTX, False)
 
     def test_promotion_failure_flags_request_while_live(self, manager_setup):
         """A promotion that fails while its request is still live marks the
