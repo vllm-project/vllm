@@ -125,15 +125,23 @@ ONLINE_SHARED_EXPERT_DEQUANTIZERS: dict[
 
 
 def _resolved_target(target: str | QuantSpec) -> tuple:
-    """Comparable (linear, moe) specs of a target, where an omitted activation
-    (method default) differs from an explicit one (e.g. `null`)."""
+    """Comparable identity of a `quantization_config.targets` value.
+
+    Returns one `(weight, activation, activation was explicit)` triple per layer
+    kind (linear, MoE), or `None` for a kind the target does not define: a
+    shorthand name and the equivalent `QuantSpec` therefore compare equal, while
+    an omitted activation still differs from an explicit `null`.
+    """
     if isinstance(target, str):
-        specs = (_ONLINE_SHORTHANDS[target].linear, _ONLINE_SHORTHANDS[target].moe)
+        shorthand = _ONLINE_SHORTHANDS[target]
+        specs = (shorthand.linear, shorthand.moe)
     else:
         specs = (target, target)
     return tuple(
-        None if s is None else (s.weight, s.activation, "activation" in s.fields_set)
-        for s in specs
+        None
+        if spec is None
+        else (spec.weight, spec.activation, "activation" in spec.fields_set)
+        for spec in specs
     )
 
 
