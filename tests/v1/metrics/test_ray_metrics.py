@@ -220,6 +220,17 @@ def test_ray_histogram_labels_returns_independent_children_and_forwards_tags():
     assert mock.observe.call_args_list[1].kwargs["tags"]["bucket"] == "y"
 
 
+def test_ray_histogram_drops_zero_bound():
+    """Ray rejects a non-positive boundary, which `--custom-histogram-buckets`
+    allows for the Prometheus count histograms."""
+    wrapper = RayHistogramWrapper(
+        name="vllm_test_histogram_zero_bound",
+        documentation="",
+        buckets=[0.0, 1.0, 2.0],
+    )
+    assert wrapper.metric.boundaries == [1.0, 2.0]
+
+
 def test_ray_counter_labels_accepts_non_string_label_values():
     """RayPrometheusStatLogger passes ``str(idx)`` for engine indexes; this
     covers the coercion path for any caller that passes a non-string label
