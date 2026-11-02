@@ -64,6 +64,8 @@ CUDA_DEVICES = ["cuda:0"]
             TorchNvFp4LinearKernel,
             FlashInferCutlassNvFp4LinearKernel,
             FlashInferCudnnNvFp4LinearKernel,
+            FlashInferCuteDslNvFp4LinearKernel,
+            FlashInferB12xNvFp4LinearKernel,
         )
     ],
 )
