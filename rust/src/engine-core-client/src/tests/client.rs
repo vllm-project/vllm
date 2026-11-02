@@ -3489,9 +3489,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
     let indexer_outputs =
         decode_engine_core_outputs(&[bytes::Bytes::from(indexer_outputs_bytes)]).unwrap();
     assert_eq!(
-        indexer_outputs.as_request_batch().unwrap().outputs[0]
-            .indexer_topk
-            .as_deref(),
+        indexer_outputs.as_request_batch().unwrap().outputs[0].indexer_topk.as_deref(),
         Some(&WireNdArray::from_raw(
             NumpyDtype::little(TensorDtype::I32),
             vec![2, 1, 2],
