@@ -140,6 +140,14 @@ class Sampler:
             or self.get_logprobs_dims(idx_mapping_np) is None
         )
 
+    def wants_fp32_logits(self, idx_mapping_np: np.ndarray) -> bool:
+        """Whether sampling the given requests would copy their logits to FP32
+        and may then process them in place: only then may the model runner
+        have the TP gather write FP32 logits directly (exact), which the
+        sampler then processes in place instead of copying. Otherwise the
+        logits stay in the head dtype."""
+        return self.can_process_logits_in_place(idx_mapping_np)
+
     def __call__(
         self,
         logits: torch.Tensor,
