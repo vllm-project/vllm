@@ -195,6 +195,11 @@ context provides each key's token position through `get_offload_key_position(key
 so a policy can establish prefix ordering during insertion. Policies that do not
 use request-specific insertion ordering can accept and ignore `req_context`.
 
+Custom policies must also implement `on_request_finished`, which receives the
+request's keys per KV cache group in head-to-tail order and applies the request's
+cache access once, when it finishes. `CachePolicy` no longer has a `touch` method;
+recency updates belong in this hook.
+
 `eviction_policy` is checked against the built-in registry first; if it isn't a registered name, vLLM imports `cache_policy_module_path` and looks up `eviction_policy` as a class name in that module — the same fallback `spec_module_path` provides for a custom `OffloadingSpec`. No import or registration call needs to run before the server starts.
 
 ### Registering a friendly short name (in-process only)
