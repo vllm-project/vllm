@@ -632,8 +632,8 @@ def maybe_build_ubatch_runner(
 ) -> UBatchRunner | None:
     """Build the microbatch runner, or None when DBO is not in use.
 
-    Microbatching needs the DP handshake to agree on it, so it is only
-    available with more than one DP rank (as in the V1 runner).
+    With more than one DP rank, the DP handshake agrees on each split. With one
+    DP rank, only pure-TP DBO splits, as a local decision.
     """
     parallel_config = vllm_config.parallel_config
     if not parallel_config.use_ubatching:

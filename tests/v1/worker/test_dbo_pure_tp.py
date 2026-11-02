@@ -105,6 +105,7 @@ def test_dbo_unsupported_features(monkeypatch, kwargs, rejected):
 def _parallel(threshold_prefill=8192, threshold_decode=32768):
     return SimpleNamespace(
         use_ubatching=True,
+        dbo_tp_only=True,
         num_ubatches=2,
         dbo_prefill_token_threshold=threshold_prefill,
         dbo_decode_token_threshold=threshold_decode,
