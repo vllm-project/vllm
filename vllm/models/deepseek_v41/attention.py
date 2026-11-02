@@ -550,15 +550,21 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         ):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
+        # CDNA4 (MI350/MI355, gfx950) is where prefix-cache SWA replay is
+        # validated. The AITER sparse-MLA path and the default Triton gather
+        # path both clamp to replay_start. CDNA3 and other ROCm archs have
+        # not been validated, so the sliding-window cache stays in the prefix
+        # cache there. The CDNA version is imported only on ROCm: loading the
+        # ROCm platform resolves the GPU arch and fails when no GPU is visible.
         if swa_bounded_replay and current_platform.is_rocm():
-            logger.warning_once(
-                "Prefix-cache SWA replay is off on ROCm (the sparse SWA "
-                "metadata builders forward replay_start, but the window clamp "
-                "it relies on lives in the FlashInfer and FlashMLA prefill "
-                "kernels, so the padded slots fault); the sliding-window cache "
-                "takes part in prefix caching instead."
-            )
-            swa_bounded_replay = False
+            from vllm.platforms.rocm import get_cdna_version
+
+            if get_cdna_version() != 4:
+                logger.warning_once(
+                    "Prefix-cache SWA replay is only enabled on ROCm CDNA4; the "
+                    "sliding-window cache takes part in prefix caching instead."
+                )
+                swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -1604,3 +1610,18 @@ class DeepseekV4Indexer(nn.Module):
         # ReplicatedLinear returns (output, bias); bias is None.
         q, _ = self.wq_b(qr)
         return q
+
+
+def autotune_indexer_wq_b(model: nn.Module, num_tokens: int) -> None:
+    """Short-context dummy runs skip wq_b, so tune it directly."""
+    for module in model.modules():
+        if isinstance(module, DeepseekV4Indexer):
+            # Run every wq_b: FlashInfer keys on op, runner, shapes and dtype,
+            # and skips profiling on a cache hit, so duplicates are cheap.
+            qr = torch.randn(
+                num_tokens,
+                module.q_lora_rank,
+                dtype=module.vllm_config.model_config.dtype,
+                device=next(module.weights_proj.parameters()).device,
+            )
+            module.wq_b(qr)
