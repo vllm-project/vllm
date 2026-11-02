@@ -660,7 +660,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
             and not self.quantization_emulation
             and lora_context is None
         ):
-            assert cache2_dim * 2 == N
+            assert cache2_dim * 2 == N, (
+                "silu_mul_token_quant fuses SiLU-and-mul, which halves N "
+                f"(got N={N}, activation output dim={cache2_dim}). An activation "
+                "that does not halve N needs its own kernel or a condition on "
+                "this branch."
+            )
             # Under EP the first GEMM never writes the rows of remote routes and the
             # second never reads them, so they are skipped here too.
             qintermediate_cache2, a2q_scale = silu_mul_token_quant(
