@@ -361,7 +361,6 @@ steps:
       # and a CUDA source check whose files are absent from the AMD test image.
       commands:
       - pytest -v -s
-          kernels/attention/test_minimax_m3_nvfp4_index.py
           kernels/test_apply_repetition_penalties.py
           kernels/test_awq_int4_to_int8.py
           kernels/test_bf16_skinny_gemm.py
@@ -680,6 +679,10 @@ steps:
       source_file_dependencies:
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
+      - tests/kernels/attention/test_minimax_m3_nvfp4_index.py
+      commands:
+      - pytest -v -s tests/kernels/attention/test_minimax_m3.py
+          tests/kernels/attention/test_minimax_m3_nvfp4_index.py
 
 - label: ":nvidia: (H100) MiniMax-M3 Sparse Prefill Kernels"
   key: kernels-minimax-m3-sparse-prefill-h100
