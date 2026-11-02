@@ -2899,3 +2899,33 @@ def test_sparse_indexer_resolved_persistent_bf16(
     actual_scores = fp32.gather(1, output.long()).sort(1).values.view(torch.int32)
     reference_scores = fp32.gather(1, reference.long()).sort(1).values.view(torch.int32)
     assert torch.equal(actual_scores, reference_scores)
+
+
+@pytest.mark.parametrize(
+    "rows,capacity",
+    [(33, 32), (65, 64), (96, 64), (1025, 512), (8192, 1536), (8193, 2048)],
+)
+def test_decode_chunk_ranges_cover_rows_with_bounded_balanced_slices(rows, capacity):
+    """No query is lost/duplicated; small tails share work with preceding chunks."""
+    from vllm.model_executor.layers.sparse_attn_indexer import _decode_chunk_ranges
+
+    width = 1024
+    ranges = _decode_chunk_ranges(rows, width, capacity * width * 2)
+    assert ranges[0][0] == 0 and ranges[-1][1] == rows
+    assert all(a[1] == b[0] for a, b in zip(ranges, ranges[1:]))
+    lengths = [end - start for start, end in ranges]
+    assert all(0 < n <= capacity for n in lengths)
+    assert all(start % 16 == 0 for start, _ in ranges)
+    assert max(lengths) - min(lengths) < 32
+    assert lengths == sorted(lengths, reverse=True)
+
+
+def test_decode_chunk_budget_disabled_fitting_and_invalid():
+    from vllm.model_executor.layers.sparse_attn_indexer import _decode_chunk_ranges
+
+    assert _decode_chunk_ranges(8192, 1024, 0) == []
+    assert _decode_chunk_ranges(32, 1024, 65536) == []
+    with pytest.raises(ValueError):
+        _decode_chunk_ranges(32, 1024, -1)
+    with pytest.raises(ValueError, match="16 BF16 rows"):
+        _decode_chunk_ranges(32, 1024, 1024)
