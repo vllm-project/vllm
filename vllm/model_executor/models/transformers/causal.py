@@ -100,10 +100,10 @@ def to_output_head(
     """Turn `model`, a `ForCausalLM`, into its output head in place.
 
     The base model, the submodule of type `base_model_cls`, is replaced with
-    `_OpaqueBaseModel`, so `model(inputs_embeds=h)`
-    applies everything the `ForCausalLM` applies after its base model (e.g. a dense
-    -> act -> norm transform, a soft cap, a scale), with `project` in place of the
-    output embeddings.
+    `_OpaqueBaseModel`, so `model(inputs_embeds=h)` applies everything the
+    `ForCausalLM` applies after its base model (e.g. a dense -> act -> norm
+    transform, a soft cap, a scale), with `project` in place of the output
+    embeddings.
 
     Returns the replaced output embeddings and the checkpoint name -> `lm_head` name
     of their parameters, or `None` (leaving `model` unchanged) if this is not
