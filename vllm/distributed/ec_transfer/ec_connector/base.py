@@ -25,6 +25,7 @@ The class provides the following primitives:
 
 import enum
 from abc import ABC, abstractmethod
+from collections.abc import Collection
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -257,7 +258,10 @@ class ECConnectorBase(ABC):
         pass
 
     def ensure_cache_available(
-        self, request: "Request", num_computed_tokens: int
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+        local_cache_hashes: Collection[str] | None = None,
     ) -> bool:
         """Ensure encoder cache items are available for the given request.
         May initiate asynchronous transfers for items not yet local.
@@ -265,6 +269,8 @@ class ECConnectorBase(ABC):
         Args:
             request: the request whose multimodal features to check.
             num_computed_tokens: tokens already covered by cached KV blocks.
+            local_cache_hashes: reusable runner-cache entries that do not need
+                to be transferred. Connectors may ignore this hint.
 
         Returns:
             True if all items are ready or no transfer is needed.
