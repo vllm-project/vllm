@@ -35,7 +35,7 @@ from vllm.entrypoints.pooling.offline import PoolingOfflineMixin
 from vllm.entrypoints.rl.offline import RLOfflineMixin
 from vllm.inputs import PromptType
 from vllm.logger import configure_logging_if_needed, init_logger
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, LoRARequestLike
 from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.platforms import current_platform
@@ -420,7 +420,7 @@ class LLM(
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        lora_request: Sequence[LoRARequestLike | None] | LoRARequestLike | None = None,
         priority: int | Sequence[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
@@ -444,7 +444,10 @@ class LLM(
                 If a callable (e.g., `functools.partial(tqdm, leave=False)`),
                 it is used to create the progress bar.
                 If `False`, no progress bar is created.
-            lora_request: LoRA request to use for generation, if any.
+            lora_request: Adapter or fixed-weight composition to use for generation.
+                A single request applies to every prompt; a sequence selects one
+                request per prompt. Compositions require eager execution and
+                max_loras_per_request large enough for all component adapters.
             priority: The priority of the requests, if any.
                 Only applicable when priority scheduling policy is enabled.
                 When it is a single value, it is applied to every prompt.

@@ -328,7 +328,7 @@ class RequestState:
             external_req_id=request.external_req_id,
             parent_req=parent_req,
             request_index=request_index,
-            lora_request=request.lora_request,
+            lora_request=request.resolved_lora_request,
             output_kind=output_kind,
             prompt=prompt,
             prompt_token_ids=request.prompt_token_ids,

@@ -16,7 +16,12 @@ from vllm.inputs import (
     split_enc_dec_input,
 )
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest, LoRARequestLike
+from vllm.lora.request import (
+    LoRARequest,
+    LoRARequestLike,
+    LoRARoutingRequest,
+    iter_lora_requests,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -294,6 +299,22 @@ class InputProcessor:
                 f"Got lora_request {lora_request} but LoRA is not enabled!"
             )
 
+        if (
+            len(iter_lora_requests(lora_request))
+            > self.lora_config.max_loras_per_request
+        ):
+            raise VLLMValidationError(
+                "LoRA request exceeds max_loras_per_request="
+                f"{self.lora_config.max_loras_per_request}"
+            )
+        if isinstance(lora_request, LoRARoutingRequest):
+            if self.model_config.runner_type != "generate":
+                raise VLLMValidationError("Routed LoRA only supports generation")
+            if not self.model_config.enforce_eager:
+                raise VLLMValidationError("Routed LoRA requires enforce_eager=True")
+            if self.model_config.is_multimodal_model:
+                raise VLLMValidationError("Routed LoRA supports text-only models")
+
         if self.tokenizer is not None:
             logger.warning_once(
                 "vLLM has deprecated support for supporting different "
@@ -386,7 +407,7 @@ class InputProcessor:
         params: SamplingParams | PoolingParams,
         supported_tasks: tuple[SupportedTask, ...],
         arrival_time: float | None = None,
-        lora_request: LoRARequest | None = None,
+        lora_request: LoRARequestLike | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
@@ -397,6 +418,10 @@ class InputProcessor:
     ) -> EngineCoreRequest:
         watermarking = self._validate_params(params, supported_tasks)
         self._validate_lora(lora_request)
+        if isinstance(lora_request, LoRARoutingRequest) and isinstance(
+            params, PoolingParams
+        ):
+            raise VLLMValidationError("Routed LoRA does not support pooling")
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size
@@ -560,7 +585,12 @@ class InputProcessor:
             sampling_params=sampling_params,
             pooling_params=pooling_params,
             arrival_time=arrival_time,
-            lora_request=lora_request,
+            lora_request=lora_request
+            if isinstance(lora_request, LoRARequest)
+            else None,
+            lora_routing_request=(
+                lora_request if isinstance(lora_request, LoRARoutingRequest) else None
+            ),
             cache_salt=decoder_input.get("cache_salt"),
             priority=priority,
             data_parallel_rank=data_parallel_rank,

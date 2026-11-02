@@ -939,6 +939,26 @@ def test_generate_block_hash_extra_keys_lora():
     assert extra_keys is None
 
 
+def test_routed_lora_cache_identity_tracks_computation_not_display_name():
+    from vllm.lora.request import LoRARoutingRequest
+
+    first = LoRARequest("first", 1, "/path/first")
+    second = LoRARequest("second", 2, "/path/second")
+    request = make_request(request_id="route", prompt_token_ids=list(range(32)))
+
+    def keys(adapters, weights, name="mix", route_id=10):
+        request.lora_request = LoRARoutingRequest(name, route_id, adapters, weights)
+        return generate_block_hash_extra_keys(request, 0, 16, 0)[0]
+
+    original = keys((first, second), (0.7, 0.3))
+    assert original == keys((first, second), (0.7, 0.3), "renamed", 20)
+    assert original != keys((first, second), (0.3, 0.7))
+    assert original != keys((second, first), (0.3, 0.7))
+    assert original != keys((first, LoRARequest("second", 2, "/new")), (0.7, 0.3))
+    assert original != keys((first, second), (1.0, 0.0))
+    assert to_event_extra_keys([original]) == [(original[0][1],)]
+
+
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 def test_lora_name_and_cache_salt_block_hashes_do_not_collide(hash_fn):
     """A cache_salt equal to a LoRA name must not share that LoRA's blocks."""

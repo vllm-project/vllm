@@ -21,6 +21,7 @@ from typing import (
 from vllm import envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.lora.request import LoRARoutingRequest
 from vllm.multimodal.utils import get_mm_features_in_window
 from vllm.utils.hashing import xxhash, xxhash_cbor
 from vllm.utils.math_utils import cdiv
@@ -587,7 +588,7 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str, str]]:
+def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, ...]]:
     """Generate extra keys related to LoRA for block hash computation.
 
     The adapter path is included so that re-pointing a LoRA name at a different
@@ -604,6 +605,8 @@ def _gen_lora_extra_hash_keys(request: Request) -> list[tuple[str, str, str]]:
     lora_request = request.lora_request
     if not lora_request:
         return []
+    if isinstance(lora_request, LoRARoutingRequest):
+        return [("lora_route", lora_request.cache_fingerprint)]
     return [("lora", lora_request.lora_name, lora_request.lora_path)]
 
 
