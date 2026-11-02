@@ -228,11 +228,13 @@ def test_bf16_triton_sparse_mla_attn_sink(h_q, num_valid, sink_mode):
     # lse is reported over the selected keys only (sink excluded).
     assert torch.allclose(lse, ref_lse, atol=1e-3, rtol=1e-3)
 
+    # An ignored sink must be detectable in every case, including the small
+    # effects of checkpoint-range sinks on long rows: the sink-aware output
+    # has to be closer to the sink-aware reference than the sink-free one.
     out_nosink, _, _ = triton_bf16_mla_sparse_interface(
         q, kv, indices, sm_scale, 512, block_dpe=0
     )
-    if sink_mode == "comparable_mass" or num_valid <= 16:
-        assert _rel_l2(out_nosink, ref_out) > 1e-2
+    assert _rel_l2(out, ref_out) < _rel_l2(out_nosink, ref_out)
 
 
 @pytest.mark.parametrize("h_q", [8, 64])
@@ -251,6 +253,59 @@ def test_bf16_triton_sparse_mla_attn_sink_empty_row(h_q):
     assert out.isfinite().all()
     assert torch.equal(out[0], torch.zeros_like(out[0]))
     assert _rel_l2(out[1:], ref_out[1:]) < 1e-2
+
+
+@pytest.mark.parametrize("h_q", [8, 64])
+@requires_xpu
+def test_bf16_triton_sparse_mla_attn_sink_all_neg_inf_empty_row(h_q):
+    """A -inf sink on a row without valid keys gives zeros, not NaN."""
+    q, kv, indices, sm_scale = _dsv4_inputs(4, h_q, 16)
+    indices[0] = -1
+    sink = torch.full((h_q,), float("-inf"), device=q.device)
+    out, _, _ = triton_bf16_mla_sparse_interface(
+        q, kv, indices, sm_scale, 512, block_dpe=0, attn_sink=sink
+    )
+    assert torch.equal(out[0], torch.zeros_like(out[0]))
+    assert out[1:].isfinite().all()
+
+
+@requires_xpu
+def test_bf16_triton_sparse_mla_attn_sink_longer_than_heads():
+    """A sink padded beyond num_heads_q uses its first num_heads_q entries."""
+    q, kv, indices, sm_scale = _dsv4_inputs(4, 8, 64, seed=3)
+    sink = torch.rand(16, device=q.device) * 4.7 - 2.2
+    full, _, _ = triton_bf16_mla_sparse_interface(
+        q, kv, indices, sm_scale, 512, block_dpe=0, attn_sink=sink
+    )
+    exact, _, _ = triton_bf16_mla_sparse_interface(
+        q, kv, indices, sm_scale, 512, block_dpe=0, attn_sink=sink[:8].contiguous()
+    )
+    assert torch.equal(full, exact)
+
+
+@requires_xpu
+def test_bf16_triton_sparse_mla_attn_sink_rejects_bad_input():
+    q, kv, indices, sm_scale = _dsv4_inputs(2, 8, 16)
+    with pytest.raises(TypeError):
+        triton_bf16_mla_sparse_interface(
+            q,
+            kv,
+            indices,
+            sm_scale,
+            512,
+            block_dpe=0,
+            attn_sink=torch.zeros(8, dtype=torch.bfloat16, device=q.device),
+        )
+    with pytest.raises(ValueError):
+        triton_bf16_mla_sparse_interface(
+            q,
+            kv,
+            indices,
+            sm_scale,
+            512,
+            block_dpe=0,
+            attn_sink=torch.zeros(4, device=q.device),
+        )
 
 
 @requires_xpu
@@ -273,7 +328,7 @@ _H = 8
 
 
 def _sink():
-    # Longer than the head count, as the module-level parameter is.
+    # Padded beyond the head count; call sites must forward it unsliced.
     return torch.arange(2 * _H, dtype=torch.float32, device="xpu") * 0.1
 
 
@@ -347,7 +402,7 @@ def test_v4_prefill_call_site_passes_attn_sink(monkeypatch):
         swa_metadata,
     )
     assert seen["attn_sink"] is not None
-    assert torch.equal(seen["attn_sink"], sink[:_H])
+    assert seen["attn_sink"] is sink
 
 
 @requires_xpu
@@ -384,7 +439,7 @@ def test_v4_decode_call_sites_pass_attn_sink(monkeypatch):
         out=torch.empty_like(q),
     )
     assert seen["attn_sink"] is not None
-    assert torch.equal(seen["attn_sink"], sink[:_H])
+    assert seen["attn_sink"] is sink
 
     # DeepseekV4XPUAttention._forward_decode -> xpu_sparse_decode_fp8
     seen_layer = {}
