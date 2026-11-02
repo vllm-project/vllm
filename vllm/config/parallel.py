@@ -212,7 +212,8 @@ class ParallelConfig:
     effect on 3D fused-expert checkpoints (e.g. GPT-OSS) or non-MoE
     models."""
     enable_eplb: bool = False
-    """Enable expert parallelism load balancing for MoE layers."""
+    """Enable expert parallelism load balancing for MoE layers. Models managed by
+    EPLB reject `reload_weights` and weight updates."""
     eplb_config: EPLBConfig = Field(default_factory=EPLBConfig)
     """Expert parallelism configuration."""
     expert_placement_strategy: ExpertPlacementStrategy = "linear"

@@ -1529,7 +1529,7 @@ class Worker(WorkerBase):
             )
 
     def _check_eplb_weight_update(self, *, is_draft: bool = False) -> None:
-        eplb_state = self.model_runner.eplb_state
+        eplb_state = getattr(self.model_runner, "eplb_state", None)
         if eplb_state is None:
             return
 
