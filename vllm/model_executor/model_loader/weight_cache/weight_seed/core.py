@@ -1,19 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Daemon-to-daemon weight shard seeding for the IPC weight cache.
-
-A second replica's daemons can fill their shards from an already-loaded
-replica instead of reading the checkpoint again. The two movers live in
-:mod:`.peer_ipc` (CUDA IPC, same host) and :mod:`.rdma` (Mooncake
-TransferEngine, cross-host); this core holds the mover interface and the
-mover registry, with the manifest helpers in :mod:`.utils`.
-
-Both move storages rather than tensors. Post-processing leaves strided views
-that share one allocation (MLA's ``W_UV`` and ``W_UK_T`` are transposed
-slices of ``kv_b_proj``), so the mirror copies each storage once and rebuilds
-every tensor on it at the source's offset and strides. Values, layout and
-aliasing then match the source, and so does the memory footprint.
-"""
+"""Weight movers: copy whole storages so views keep their sharing and footprint."""
 
 import time
 from abc import ABC, abstractmethod

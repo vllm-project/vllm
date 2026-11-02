@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Daemon-to-daemon weight shard seeding: movers, and both ends.
-
-- :mod:`.core`: the mover interface and the factory.
-- :mod:`.utils`: the storage manifest wire format and fingerprint helpers.
-- :mod:`.peer_ipc` / :mod:`.rdma`: the two movers (CUDA IPC / Mooncake).
-- :mod:`.seed`: :class:`WeightShardSeed`, the source side served by a daemon.
-- :mod:`.loader`: :class:`PeerModelLoader`, the ``peer_cache`` load format
-  that fills a mirror daemon's model from a source replica.
-"""
+"""Daemon-to-daemon weight shard seeding (movers, the seedable, the peer loader)."""
 
 from vllm.model_executor.model_loader.weight_cache.weight_seed.core import (
     PEER_IPC_BACKEND,

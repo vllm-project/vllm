@@ -1,23 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Peer model loader: fills a weight cache daemon's model with the
-post-processed weights of a source replica's daemon instead of reading the
-checkpoint.
-
-Set internally by ``vllm preload --weight-cache-seed``: a mirror daemon is an
-ordinary weight cache daemon whose ``load_format`` is ``peer_cache``. It
-builds its model on the meta device like any other daemon (own world group,
-config finalization, warmup), then fetches this rank's shard from the source
-daemon through the ``weights`` seedable: the fingerprint and metadata
-travel on the D2D seed transport, and the weights themselves move through a
-mover — ``peer_ipc`` copies through CUDA IPC handles on one host, ``rdma``
-pulls through the Mooncake TransferEngine
-across hosts. The mover always copies into memory this process owns, so the
-source can release independently.
-
-There is no disk fallback: a mirror host may not have the checkpoint, so any
-fetch, fingerprint or transfer failure is fatal.
-"""
+"""Fill a daemon's model with a source replica's post-processed weights."""
 
 from copy import copy
 
@@ -61,26 +44,7 @@ logger = init_logger(__name__)
 
 
 class PeerModelLoader(BaseModelLoader):
-    """Loads a daemon's model from a source replica's weight cache daemon.
-
-    The payload the source resolves (see ``WeightShardSeed.resolve``) is a
-    JSON-safe storage manifest plus a mover seed; only the fingerprint and
-    metadata travel on the control plane, the weights themselves move through
-    the mover named by ``seed["backend"]``.
-
-    The loading daemon injects its own D2D endpoint (`loader.transport =
-    self.d2d`), so the fetch is daemon-to-daemon over the same connection the
-    warmup caches use. Standalone construction falls back to extra config keys
-    (via --model-loader-extra-config):
-
-    - peer_source: the source daemon's address — a Unix socket path for a
-      same-host source, or a [host, port] list for a remote one.
-    - peer_backend: "peer_ipc" or "rdma"; inferred from the source form
-      when unset (Unix socket → peer_ipc, remote → rdma).
-    - peer_token: shared token authenticating a remote source (None for Unix
-      sockets, which are owner-verified).
-    - is_draft: internal flag routing to the source's draft daemon group.
-    """
+    """Loads a daemon's model from a source replica's weight cache daemon."""
 
     loads_pre_processed_weights = True
 
@@ -110,9 +74,6 @@ class PeerModelLoader(BaseModelLoader):
                 f"list, got {source!r}"
             )
         self.peer_source: str | tuple[str, int] | None = source
-        # The daemon injects its own D2D endpoint (get_model); standalone
-        # construction (tests, engine-side) builds a client from the extra
-        # config instead.
         self.transport: SeedTransport | None = None
         if backend is None and source is not None:
             # The address form already decides the mover: a Unix socket is

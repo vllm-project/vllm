@@ -426,23 +426,7 @@ def build_model_from_processed_weights(
     attrs: dict[str, Any],
     load_config: LoadConfig,
 ) -> nn.Module:
-    """Build a model on meta and install already post-processed weights.
-
-    Shared by :class:`IpcModelLoader`, which maps or clones the tensors from
-    the local weight cache daemon, and by the peer loader, which copies them
-    from a source replica's daemon. Both hold tensors that already went
-    through the source's process_weights_after_loading, so the model is
-    constructed on the meta device, every parameter/buffer is replaced by
-    registration, and process_weights_after_loading re-runs in pre-processed
-    mode so quant methods only rebuild Python-side state (e.g. the MoE
-    kernel). Leftover meta tensors are materialized afterwards so that
-    placeholders the source-side post-processing consumed are dropped rather
-    than filled with uninitialized memory.
-
-    Returns:
-        The model with the weights installed, in eval mode.
-
-    """
+    """Build a model on meta and install already post-processed weights."""
     target_device, device_index = _load_device(load_config, vllm_config)
     with set_default_torch_dtype(model_config.dtype):
         with torch.device("meta"):
@@ -487,14 +471,7 @@ def _register_processed_tensors(
     kinds: dict[str, TensorKind],
     aliases: dict[str, str],
 ) -> None:
-    """Replace the meta model's parameters and buffers with ``tensors``.
-
-    Registration is used rather than param.data assignment, which fails for
-    meta tensors; post-quantization tensors absent from the meta model are
-    introduced the same way. Tied-weight aliases re-register the *same*
-    object their canonical name resolved to, so parameter identity (and the
-    tie) is preserved instead of allocating uninitialized memory.
-    """
+    """Replace the meta model's parameters and buffers, keeping ties."""
     # remove_duplicate=False keeps tied module aliases reachable by name:
     # a tied lm_head *is* the embedding module, so the deduplicated view
     # would not contain "lm_head" at all.
@@ -536,12 +513,7 @@ def _register_processed_tensors(
 
 
 def _materialize_remaining_meta_tensors(model: nn.Module, device: torch.device) -> None:
-    """Allocate any tensors the daemon did not provide.
-
-    These are typically parameters removed on the daemon side by
-    process_weights_after_loading; they are not expected to be read at
-    runtime, so they are left uninitialized.
-    """
+    """Allocate tensors the daemon did not provide (left uninitialized)."""
     for module_name, module in model.named_modules():
         for leaf, param in list(module._parameters.items()):
             if param is not None and param.device.type == "meta":

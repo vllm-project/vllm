@@ -1,29 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Daemon-to-daemon seeding over an authenticated JSON channel.
-
-A :class:`Seedable` is one kind of state a daemon can seed to or from a
-peer daemon; kinds are bidirectional (a warmup cache is served and
-adopted by the same object). The target names what it wants by kind and
-key fields; the source resolves the key to a payload; the target validates
-and installs it:
-
-    request:  {"kind": "flashinfer_autotune", <key fields>..., "token": "..."}
-    response: {"status": "ok", "payload": <kind-specific>}
-              {"status": "miss"} | {"status": "error", "message": "..."}
-
-Payloads are JSON values on the remote plane. Large binary state (weights)
-must not be inlined: the payload then describes the transfer (a storage
-manifest plus a mover's seed) and the fetching side drives the data plane
-itself.
-
-A same-host source is addressed by its Unix socket path instead and speaks
-the local pickle protocol (owner-verified, no token), which is what lets the
-``peer_ipc`` weight mover ship real CUDA IPC handles.
-
-The connection is unencrypted beyond the shared token; keep the listener on a
-trusted network.
-"""
+"""Daemon-to-daemon seeding over authenticated JSON/TCP or local pickle."""
 
 import contextlib
 import hmac
@@ -48,39 +25,23 @@ logger = init_logger(__name__)
 # Requests carry a kind and small key fields; payloads flow in responses.
 _MAX_REMOTE_REQUEST_SIZE = 64 << 10
 _REQUEST_TIMEOUT_S = 30.0
-# An unauthenticated peer gets a whole-message deadline, not a per-read
-# timeout: per-read timeouts let a peer trickle bytes forever and stall the
-# serial accept loop. Authenticated handlers (e.g. weight manifests) may be
-# slow, so the budget relaxes once the token checks out.
+# Whole-message deadline for unauthenticated peers: a per-read timeout
+# would let a peer trickle bytes forever and stall the serial accept loop.
 _REMOTE_REQUEST_TIMEOUT_S = 10.0
 _AUTHENTICATED_TIMEOUT_S = 300.0
 
 
 class Seedable(Protocol):
-    """One kind of state that can flow between peer daemons.
-
-    A kind is bidirectional: the same seedable answers peers (``resolve``)
-    and fetches from them (``request_params``/``validate_payload``).
-    """
+    """One kind of state that can flow between peer daemons, both ways."""
 
     kind: str
 
     def resolve(self, request: dict[str, Any]) -> Any | None:
-        """Source side: produce the payload named by ``request``.
-
-        Validate the wire key first — raise an error on any malformed field
-        (``ValueError`` for bad values, ``KeyError`` for missing ones), before
-        touching local state. The transport turns it into an error response.
-        Return None on a miss.
-        """
+        """Source side: the payload named by ``request``; None on a miss."""
         ...
 
     def validate_remote(self, request: dict[str, Any]) -> None:
-        """Refuse to serve ``request`` on the remote JSON plane.
-
-        Raise ValueError to refuse the request; the default serves remote
-        requests the same as local ones.
-        """
+        """Raise ValueError to refuse the request on the remote JSON plane."""
         return None
 
     def request_params(self, ctx: Any) -> dict[str, Any]:
@@ -97,13 +58,7 @@ class Seedable(Protocol):
 
 
 class SeedConfig(NamedTuple):
-    """One daemon's D2D seeding configuration: its listener, its source
-    replica, and the shared token authenticating both.
-
-    A source that is a plain string is the source daemon's Unix socket path
-    (same-host, owner-verified, no token); a ``(host, port)`` tuple dials the
-    remote JSON control plane, which requires a token, as does any listener.
-    """
+    """A daemon's D2D endpoints and shared token (Unix paths need none)."""
 
     listen: tuple[str, int] | None = None
     source: str | tuple[str, int] | None = None
@@ -128,12 +83,7 @@ class SeedTransport:
         self._server: socket.socket | None = None
 
     def fetch(self, seedable: Seedable, ctx: Any) -> Any | None:
-        """Fetch and validate a seed payload from the source daemon.
-
-        Returns the validated payload, or None on a miss (the source has no
-        such seed). Raises ``RuntimeError`` on any other failure — the entry
-        point for callers with no local path to degrade to.
-        """
+        """Fetch and validate a seed payload; None on a miss, else raise."""
         response = self.request(
             {"kind": seedable.kind, **seedable.request_params(ctx)},
         )
@@ -186,12 +136,7 @@ class SeedTransport:
         logger.info("Adopted remote %s seed", seedable.kind)
 
     def handle_request(self, request: Any, *, remote: bool = False) -> dict[str, Any]:
-        """Source side: answer one authenticated seed request.
-
-        ``remote`` marks a request from the untrusted JSON control plane; a
-        seedable may then restrict what it serves (e.g. refuse a node-local
-        mover) through ``Seedable.validate_remote``.
-        """
+        """Source side: answer one request; remote=True applies validate_remote."""
         kind_name = request.get("kind") if isinstance(request, dict) else None
         seedable = next((s for s in self._seedables if s.kind == kind_name), None)
         if seedable is None:
@@ -207,11 +152,7 @@ class SeedTransport:
         return {"status": "ok", "payload": payload}
 
     def request(self, payload: dict[str, Any]) -> dict[str, Any] | None:
-        """Send one authenticated request to the source daemon.
-
-        Returns the response, or None with a log line on any transport
-        failure; the caller falls back to its local path then.
-        """
+        """Send one request to the source daemon; None with a log line on failure."""
         source = self._seed_config.source
         if source is None:
             return None
@@ -243,13 +184,7 @@ class SeedTransport:
         return response
 
     def _request_local(self, path: str, payload: dict[str, Any]) -> Any:
-        """Fetch from a same-host source over its Unix socket.
-
-        The socket is owner-verified rather than token-authenticated, and it
-        speaks the local pickle protocol, which is what carries ``peer_ipc``
-        CUDA handles. The daemon routes the ``seed`` command to
-        :meth:`handle_request`.
-        """
+        """Fetch over the source's owner-verified Unix socket (pickle)."""
         verify_socket_owner(path, strict_perms=False)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
             sock.settimeout(_REQUEST_TIMEOUT_S)
@@ -260,10 +195,7 @@ class SeedTransport:
             return recv_msg(sock)
 
     def start_listener(self) -> tuple[str, int] | None:
-        """Start serving this rank's seedables to peer daemons.
-
-        Returns the bound address, or None when no listener is configured.
-        """
+        """Serve this rank's seedables to peers; None when unconfigured."""
         listen = self._seed_config.listen
         if listen is None:
             return None

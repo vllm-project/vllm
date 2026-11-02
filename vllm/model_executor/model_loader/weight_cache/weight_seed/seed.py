@@ -1,14 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The weights seedable: one kind of state, both ends on the same daemon.
-
-Every weight cache daemon serves its shard to peers (``resolve``) and, when
-it is itself a mirror, fetches its shard from a peer (``request_params`` /
-``validate_payload``); the daemon is both ends of the exchange over its
-lifetime. The ``peer_cache`` model loader (:mod:`.loader`) only installs a
-fetched payload into a model: it drives the mover's data plane and builds
-the model around the tensors.
-"""
+"""The weights seedable: a daemon both serves and fetches its shard."""
 
 from typing import TYPE_CHECKING, Any
 
@@ -37,16 +29,7 @@ if TYPE_CHECKING:
 
 
 class WeightShardSeed(Seedable):
-    """This daemon's weight shard, seedable to and from a peer daemon.
-
-    The payload is JSON-safe except for a ``peer_ipc`` seed: TensorEntry
-    CUDA handles only ever flow over the local pickle plane, because
-    ``validate_remote`` refuses node-local movers on the remote JSON plane.
-
-    Owns the mover registry: each mover is created on first use and held
-    for the daemon's lifetime so source-side state (e.g. Mooncake's
-    registered regions) serves every later mirror.
-    """
+    """This daemon's weight shard: served to and fetched from peer daemons."""
 
     kind = "weights"
 

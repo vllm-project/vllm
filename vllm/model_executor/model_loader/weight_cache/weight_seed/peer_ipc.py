@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ``peer_ipc`` weight mover: copy storages through CUDA IPC on one host.
-
-The mirror opens the source daemon's CUDA IPC handles and copies each
-storage into its own memory, so it does not depend on the source staying
-alive afterwards. CUDA IPC handles name devices by index, so this mover is
-node-local by construction.
-"""
+"""The ``peer_ipc`` weight mover: copy storages through CUDA IPC on one host."""
 
 from collections.abc import Mapping
 

@@ -1152,7 +1152,9 @@ def test_ipc_cache_key_tracks_kernel_backends(
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(ipc_loader, "get_tensor_model_parallel_rank", lambda: 0)
     monkeypatch.setattr(ipc_loader, "get_current_vllm_config", lambda: config)
-    monkeypatch.setattr(ipc_loader, "check_ipc_platform_support", lambda: None)
+    monkeypatch.setattr(
+        ipc_loader, "check_weight_cache_loader_support", lambda *a, **k: None
+    )
     monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
     requested_keys: list[WeightCacheKey] = []
 
@@ -1354,21 +1356,19 @@ def test_d2d_weight_seeding_same_host(vllm_runner, tmp_path, monkeypatch):
     """
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
 
     # Engines (baseline and mirror-serving) run on the mirror's GPU 1; the
     # mirror daemon itself keeps full visibility (below) because a CUDA IPC
     # handle names the source's device by its index.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
 
-    baseline_outputs = generate(vllm_runner, K3_CASE, None, fallback=True)
+    baseline_outputs = generate(vllm_runner, QWEN_CASE, None, fallback=True)
     assert all(text for _, texts in baseline_outputs for text in texts)
 
     with WeightCacheDaemon(
-        K3_CASE.model,
+        QWEN_CASE.model,
         tp_size=1,
-        extra_args=K3_CASE.daemon_args,
+        extra_args=QWEN_CASE.daemon_args,
         # Pinned to GPU 0, so its IPC handles name index 0, which the mirror
         # (full visibility) resolves to the same physical GPU.
         env_extra={"CUDA_VISIBLE_DEVICES": "0"},
@@ -1381,10 +1381,10 @@ def test_d2d_weight_seeding_same_host(vllm_runner, tmp_path, monkeypatch):
         )
         assert len(source_socks) == 1
         with WeightCacheDaemon(
-            K3_CASE.model,
+            QWEN_CASE.model,
             tp_size=1,
             extra_args=[
-                *K3_CASE.daemon_args,
+                *QWEN_CASE.daemon_args,
                 "--weight-cache-seed",
                 ",".join(source_socks),
             ],
@@ -1396,9 +1396,13 @@ def test_d2d_weight_seeding_same_host(vllm_runner, tmp_path, monkeypatch):
             mirror.wait_until_ready()
             # The mover reported a completed copy, through CUDA IPC.
             assert " over peer_ipc " in mirror.logs
-            assert "Mirrored" in mirror.logs
+            transfer = re.search(r"Mirrored .* in ([\d.]+)s", mirror.logs)
+            assert transfer is not None
+            # The copy of a tiny model takes ~1s; a pathological transport
+            # (or a silent disk fallback) would take far longer.
+            assert float(transfer.group(1)) < 10.0
             mirror_outputs = generate(
-                vllm_runner, K3_CASE, mirror.socket_dir, fallback=False
+                vllm_runner, QWEN_CASE, mirror.socket_dir, fallback=False
             )
 
     assert mirror_outputs == baseline_outputs
@@ -1416,28 +1420,26 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, tmp_path, monkeypatch):
     engines serving from it run there too (the whole test process pins
     itself to GPU 1, as in the same-host test). Mooncake's dmabuf path is
     used for GPU-buffer registration on hosts without a working
-    nvidia-peermem module (the launcher exports WITH_NVIDIA_PEERMEM=0, which
-    the daemon subprocesses inherit).
+    nvidia-peermem module (export WITH_NVIDIA_PEERMEM=0 in the job
+    environment; the daemon subprocesses inherit it).
     """
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
-    if not current_platform.is_device_capability_family(100):
-        pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
     pytest.importorskip("mooncake.engine")
 
     # Engines (baseline and mirror-serving) run on the mirror's GPU 1.
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "1")
 
-    baseline_outputs = generate(vllm_runner, K3_CASE, None, fallback=True)
+    baseline_outputs = generate(vllm_runner, QWEN_CASE, None, fallback=True)
     assert all(text for _, texts in baseline_outputs for text in texts)
 
     token = "d2d-rdma-test-token"
     base_port = get_open_port()
     with WeightCacheDaemon(
-        K3_CASE.model,
+        QWEN_CASE.model,
         tp_size=1,
         extra_args=[
-            *K3_CASE.daemon_args,
+            *QWEN_CASE.daemon_args,
             "--seed-listen-host",
             "127.0.0.1",
             "--seed-listen-port",
@@ -1448,10 +1450,10 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, tmp_path, monkeypatch):
     ) as source:
         source.wait_until_ready()
         with WeightCacheDaemon(
-            K3_CASE.model,
+            QWEN_CASE.model,
             tp_size=1,
             extra_args=[
-                *K3_CASE.daemon_args,
+                *QWEN_CASE.daemon_args,
                 "--weight-cache-seed",
                 f"127.0.0.1:{base_port}",
                 "--seed-token",
@@ -1463,9 +1465,12 @@ def test_d2d_weight_seeding_cross_host(vllm_runner, tmp_path, monkeypatch):
         ) as mirror:
             mirror.wait_until_ready()
             assert " over rdma " in mirror.logs
-            assert "Mirrored" in mirror.logs
+            transfer = re.search(r"Mirrored .* in ([\d.]+)s", mirror.logs)
+            assert transfer is not None
+            # Loopback RDMA is latency-dominated (~1s); bound stalls, not bandwidth.
+            assert float(transfer.group(1)) < 10.0
             mirror_outputs = generate(
-                vllm_runner, K3_CASE, mirror.socket_dir, fallback=False
+                vllm_runner, QWEN_CASE, mirror.socket_dir, fallback=False
             )
 
     assert mirror_outputs == baseline_outputs

@@ -103,12 +103,7 @@ def check_ipc_platform_support() -> None:
 def check_weight_cache_loader_support(
     vllm_config: VllmConfig, model_config: ModelConfig, *, is_draft: bool
 ) -> None:
-    """Reject deployments a weight cache loader cannot serve.
-
-    Shared by the IPC and peer loaders: the platform and EPLB gates, plus
-    the draft-role cross-check — routing a draft load to the target group
-    (or vice versa) would fetch the wrong group's shard.
-    """
+    """Reject deployments a weight cache loader cannot serve (platform, EPLB, role)."""
     check_ipc_platform_support()
     if vllm_config.parallel_config.enable_eplb:
         raise ValueError("The weight cache loader does not support EPLB.")
@@ -490,26 +485,14 @@ class WeightCacheState(NamedTuple):
 
 
 def parse_seed_address(address: str) -> str | tuple[str, int]:
-    """Split a seed address into a Unix socket path or a ``(host, port)``.
-
-    Anything containing a slash, or no colon, is a socket path, so relative
-    paths such as ``run/sock0`` stay local. Otherwise it must be
-    ``host:port``, with an IPv6 host in brackets.
-    """
+    """Split a seed address into a Unix socket path or a ``(host, port)``."""
     if "/" in address or ":" not in address:
         return os.path.expanduser(address)
     return split_host_port(address)
 
 
 def json_to_dataclass(cls: type[_DataclassT], payload: Any) -> _DataclassT:
-    """Rebuild a flat, JSON-safe dataclass, rejecting anything undeclared.
-
-    Used on the remote control plane, where the payload is untrusted: only
-    the declared fields are accepted, so a peer cannot smuggle extra state
-    into the daemon. JSON arrays that name a tuple field (e.g.
-    ``WeightCacheKey.kv_cache_dtype_skip_layers``) are coerced back to
-    tuples, or every fingerprint comparison would report them mismatched.
-    """
+    """Rebuild a flat dataclass from untrusted JSON, coercing tuples back."""
     if not isinstance(payload, dict):
         raise ValueError(f"Expected a JSON object for {cls.__name__}")
     declared = {f.name: f for f in fields(cls)}  # type: ignore[arg-type]

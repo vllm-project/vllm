@@ -1,9 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Helper functions for weight shard seeding: the storage manifest wire
-format, the fingerprint comparison, and the launcher's address/placement
-logic, shared by the source side (:mod:`.seed`), the movers, the peer
-loader (:mod:`.loader`), and ``vllm preload``."""
+"""Helpers for weight shard seeding (manifest format, fingerprint, launcher logic)."""
 
 import socket
 from collections.abc import Mapping
@@ -46,13 +43,7 @@ class WeightsSeedPayload(TypedDict):
 def build_manifest(
     tensors: Mapping[str, torch.Tensor], kinds: Mapping[str, TensorKind]
 ) -> tuple[dict[str, Any], list[torch.UntypedStorage]]:
-    """Describe ``tensors`` as views over their unique storages.
-
-    Returns:
-        The JSON-safe manifest a mirror rebuilds the tensors from, and the
-        storages it indexes, in order, for the mover to publish.
-
-    """
+    """Describe ``tensors`` as views over their unique storages."""
     storages: list[torch.UntypedStorage] = []
     index_by_storage: dict[tuple[torch.device, int], int] = {}
     views: dict[str, dict[str, Any]] = {}
@@ -108,12 +99,7 @@ def _view_extent(view: Mapping[str, Any], itemsize: int) -> int:
 def rebuild_tensors(
     manifest: Mapping[str, Any], buffers: list[torch.Tensor]
 ) -> dict[str, torch.Tensor]:
-    """Recreate every manifest tensor on the mirror's copies of the storages.
-
-    ``set_`` silently grows a storage too small for the view, which would
-    move the buffer away from the other views on it, so a manifest from a
-    remote peer is checked against the buffers first.
-    """
+    """Recreate every manifest tensor on the mirror's copies; bounds-checked first."""
     tensors: dict[str, torch.Tensor] = {}
     for name, view in manifest["tensors"].items():
         index = view["storage"]
@@ -146,13 +132,7 @@ def seed_mismatches(
     model: str,
     source_model: str | None,
 ) -> list[str]:
-    """Fields on which a seed source's shard differs from this daemon's.
-
-    A mirror on a host without the checkpoint's safetensors cannot hash
-    them, so its fingerprint falls back to the model path. It then matches
-    the source by that path, as an engine without the files matches its
-    daemon, rather than refusing every source that could hash its files.
-    """
+    """Fields on which a seed source's shard differs (model-path fallback)."""
     mismatched = local.mismatched_fields(source)
     if "checkpoint" in mismatched and local.checkpoint == model == source_model:
         mismatched.remove("checkpoint")
@@ -166,15 +146,7 @@ def split_addresses(value: str | None) -> list[str]:
 def seed_address(
     value: str | None, local_rank: int, global_rank: int, port_offset: int = 0
 ) -> str | tuple[str, int] | None:
-    """Resolve one daemon's seed source address.
-
-    One address per local GPU, in ``local_rank`` order, names each source's
-    Unix socket, which is the same-host form. A single ``host:base_port``
-    instead makes every rank dial ``base_port + port_offset + its global
-    rank``, matching how ``--seed-listen-port`` lays a source's listeners
-    out, so one flag covers a whole cross-host replica and both daemon
-    groups.
-    """
+    """Resolve one daemon's seed source address (per-GPU sockets or host:base_port)."""
     addresses = split_addresses(value)
     if not addresses:
         return None
@@ -199,14 +171,7 @@ def seed_address(
 
 
 def peer_cache_config(config: "VllmConfig", *, is_draft: bool) -> "VllmConfig":
-    """Switch one daemon's config to loading from a source replica.
-
-    The daemon stays a normal weight cache daemon; only its loader changes
-    to ``peer_cache``, which pulls the post-processed weights from the
-    source daemon instead of reading the checkpoint. The source address and
-    token ride in the daemon's own ``SeedConfig`` (used by the warmup-cache
-    adoption too), and the daemon injects its D2D endpoint into the loader.
-    """
+    """Switch one daemon's config to the ``peer_cache`` load format."""
     extra = dict(config.load_config.model_loader_extra_config or {})
     extra["is_draft"] = is_draft
     return replace(
@@ -220,14 +185,7 @@ def peer_cache_config(config: "VllmConfig", *, is_draft: bool) -> "VllmConfig":
 
 
 def mirror_device_indices(seed_value: str, num_local: int) -> list[int]:
-    """Local GPU indices for a same-host mirror's daemons, by free index.
-
-    A same-host mirror keeps every GPU visible (a CUDA IPC handle names its
-    device by index) and places its ranks on the GPUs the source replica
-    does not use. The source's GPUs are identified by UUID through its
-    sockets, so the operator does not place the mirror by hand, and an
-    arbitrary source placement (not just a leading block) works.
-    """
+    """A same-host mirror's GPU indices: the free ones past the source's."""
     source_uuids = set()
     for address in split_addresses(seed_value):
         # The launcher only calls this for the all-Unix-socket form.

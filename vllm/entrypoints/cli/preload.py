@@ -17,11 +17,8 @@ Tensor, expert and data parallelism are supported, including across nodes;
 see vllm/model_executor/model_loader/weight_cache/daemon.py for the rank
 layout and rendezvous details.
 
-A second replica's daemons can fill their weights from an already-loaded
-replica instead of the checkpoint: ``--weight-cache-seed`` switches the
-affected daemons to the ``peer_cache`` load format, so each daemon still
-builds its model locally (config files required, safetensors not) and pulls
-the post-processed weights from its rank-matched source daemon.
+A second replica's daemons can instead pull their weights from a loaded
+replica (``--weight-cache-seed``); see ``docs/features/preload.md``.
 """
 
 import argparse

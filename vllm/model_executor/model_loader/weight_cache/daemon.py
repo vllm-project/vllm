@@ -78,53 +78,8 @@ cached and keep loading from disk in the engine.
 Seeding a replica from another
 ==============================
 
-A second replica's daemons can fill their shards from a replica that is
-already loaded instead of reading the checkpoint again. Such a "mirror"
-replica is just a normal preload whose daemons load with the ``peer_cache``
-load format: each builds its model on the meta device (the checkpoint's
-config files are needed locally, but not its safetensors), forms its world
-group and finalizes its config like any other daemon, then pulls this
-rank's post-processed weights from the source replica's daemons. Two movers
-carry the weights directly between the daemons: ``peer_ipc`` (the default)
-copies through CUDA IPC on one host, and ``rdma`` pulls through the
-Mooncake TransferEngine across hosts. Because the mirror really constructs
-its model, it warms up like any other daemon and adopts the source's
-FlashInfer autotune table through the ordinary warmup-cache seeding from
-the same source.
-
-Same host (source replica on GPUs 0-3 already serving)::
-
-    vllm preload \\
-        --model /path/to/model --tensor-parallel-size 4 \\
-        --weight-cache-socket-dir /run/vllm-b \\
-        --weight-cache-seed /run/vllm-a/sock0,...,/run/vllm-a/sock3
-
-``--weight-cache-seed`` takes one source Unix socket per local GPU, in
-device order; rank *i* of the mirror is filled from rank *i* of the source,
-and the cache fingerprints are compared first, so a mismatched pairing is
-rejected rather than silently mirroring the wrong shard. The mirror keeps
-every GPU visible (a CUDA IPC handle names its device by index, so the
-source's indices must resolve) and the launcher places its ranks on the
-GPUs the source does not use, inferred from the source's GPU UUIDs.
-
-Cross host, the source exposes its daemon-to-daemon listener and the
-mirror's ``host:base_port`` seed address pulls over Mooncake RDMA::
-
-    # source host
-    vllm preload \\
-        --model /path/to/model --tensor-parallel-size 8 \\
-        --seed-listen-host 0.0.0.0 --seed-listen-port 29700 \\
-        --seed-token "$TOKEN"
-    # mirror host
-    vllm preload \\
-        --model /path/to/model --tensor-parallel-size 8 \\
-        --weight-cache-seed 10.0.0.1:29700 --seed-token "$TOKEN"
-
-Each rank binds and dials ``base_port + its global rank``, so one flag
-covers a whole replica; the draft daemon group's listeners sit past the
-target group's block, so the same ``host:base_port`` seeds the draft group
-too. The remote seed plane is unencrypted beyond the shared token; keep it
-on a trusted network.
+A second replica's daemons can seed their shards from a loaded replica
+with ``--weight-cache-seed``; see ``docs/features/preload.md``.
 """
 
 import contextlib
@@ -488,12 +443,7 @@ class WeightCacheDaemon:
         return self.model is not None
 
     def _export_state(self) -> tuple[dict[str, TensorEntry], dict[str, str], dict]:
-        """Export this rank's tensors, aliases and flags for one client.
-
-        Entries are built per request because PyTorch registers a reference
-        for each IPC mapping's lifetime, so every client needs its own
-        handles.
-        """
+        """Export this rank's tensors, aliases and flags for one client."""
         assert self.model is not None
         entries, aliases = export_entries(self.model)
         return entries, aliases, export_model_attrs(self.model)

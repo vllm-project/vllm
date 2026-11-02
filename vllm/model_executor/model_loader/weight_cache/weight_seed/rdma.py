@@ -1,10 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The ``rdma`` weight mover: pull storages through the Mooncake TransferEngine.
-
-The seed it publishes is plain JSON (a session string and integer regions),
-so it is the only mover usable on the remote control plane.
-"""
+"""The ``rdma`` weight mover: pull storages through the Mooncake TransferEngine."""
 
 from collections.abc import Mapping
 
