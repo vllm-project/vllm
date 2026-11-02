@@ -23,6 +23,9 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
 )
+from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
+    CUTLASS_BLOCK_FP8_SUPPORTED,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
@@ -38,8 +41,11 @@ from vllm.utils.flashinfer import (
 from vllm.utils.import_utils import has_deep_gemm
 
 capability = current_platform.get_device_capability()
-if capability is None or capability < (9, 0):
-    pytest.skip("FP8 Triton requires CUDA 9.0 or higher", allow_module_level=True)
+if capability is None or capability < (8, 9):
+    pytest.skip(
+        "FP8 block tests require compute capability 8.9 or higher",
+        allow_module_level=True,
+    )
 
 vllm_config = VllmConfig()
 
@@ -101,24 +107,17 @@ def test_per_token_group_quant_fp8(
         tma_aligned_scales=tma_aligned_scales,
     )
 
-    if current_platform.is_rocm():
-        # On gfx950 the Triton and PyTorch FP8 kernels can round in opposite
-        # directions when an element lands at the midpoint between two adjacent
-        # e4m3fn values (1-ULP tie-breaking). Verify: (1) no element is more
-        # than 1 FP8 ULP away, and (2) fewer than 0.05% of elements have any
-        # mismatch. Observed worst case across all parameter combos: 0.049%,
-        # max ULP = 1.
-        ulp = fp8_ulp_distance(out, ref_out)
-        assert (ulp <= 1).all(), (
-            f"FP8 mismatch > 1 ULP: {int((ulp > 1).sum())} elements"
-        )
-        assert float((ulp > 0).float().mean()) < 5e-4, (
-            f"Too many 1-ULP mismatches: {int((ulp > 0).sum())}/{ulp.numel()}"
-        )
-    else:
-        assert torch.allclose(
-            out.to(torch.float32), ref_out.to(torch.float32), rtol=0.15
-        )
+    # The kernel and the PyTorch reference can round in opposite directions
+    # when an element lands at the midpoint between two adjacent e4m3fn values
+    # (1-ULP tie-breaking). Seen on ROCm gfx950 (worst case 0.049% of elements)
+    # and on SM89 (1 element in 28.3M, in the subnormal range). Verify: (1) no
+    # element is more than 1 FP8 ULP away, and (2) fewer than 0.05% of elements
+    # have any mismatch.
+    ulp = fp8_ulp_distance(out, ref_out)
+    assert (ulp <= 1).all(), f"FP8 mismatch > 1 ULP: {int((ulp > 1).sum())} elements"
+    assert float((ulp > 0).float().mean()) < 5e-4, (
+        f"Too many 1-ULP mismatches: {int((ulp > 0).sum())}/{ulp.numel()}"
+    )
     assert torch.allclose(scale, ref_scale)
 
     if column_major_scales:
@@ -162,6 +161,10 @@ def test_w8a8_block_fp8_matmul(M, N, K, block_size, out_dtype, seed):
 
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="CUTLASS only supported on CUDA platform."
+)
+@pytest.mark.skipif(
+    not CUTLASS_BLOCK_FP8_SUPPORTED,
+    reason="CUTLASS block FP8 is not supported on this GPU.",
 )
 @pytest.mark.parametrize(
     # 65/66/67 cover all M%4 residue classes above the SM100 swapAB
@@ -280,6 +283,10 @@ def test_w8a8_block_fp8_torch_scaled_mm_matmul():
     itertools.product(M, N, K, BLOCK_SIZE, OUT_DTYPES, SEEDS),
 )
 @pytest.mark.skipif(not has_deep_gemm(), reason="DeepGemm kernels not available.")
+@pytest.mark.skipif(
+    not current_platform.has_device_capability(90),
+    reason="DeepGemm requires compute capability 9.0 or higher.",
+)
 @torch.inference_mode()
 def test_w8a8_block_fp8_deep_gemm_matmul(M, N, K, block_size, out_dtype, seed):
     torch.manual_seed(seed)
