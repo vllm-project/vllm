@@ -98,6 +98,8 @@ struct Fp4GemmSm120 {
   using PerSmTileShape_MNK = typename Config::PerSmTileShape_MNK;
 
   // D = alpha * acc, plus a per-column (per output channel) bias if HasBias.
+  // Without a bias, LinearCombination is used because LinCombPerColBias still
+  // runs its row broadcast on every tile when bias_ptr is null.
   using FusionOp =
       std::conditional_t<HasBias,
                          cutlass::epilogue::fusion::LinCombPerColBias<
