@@ -6,8 +6,8 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .indexer_norm_rope import _indexer_norm_rope
-from .summary_update import summary_layout
+from ...common.ops.indexer_norm_rope import _indexer_norm_rope
+from ...common.ops.summary_update import summary_layout
 
 
 @triton.jit(do_not_specialize=["SLOT_ROWS"])
