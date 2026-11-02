@@ -77,7 +77,8 @@ class KVTransferConfig:
 
     kv_role: KVRole | None = None
     """Whether this vLLM instance produces, consumes KV cache, or both. Choices
-    are 'kv_producer', 'kv_consumer', and 'kv_both'."""
+    are 'kv_producer', 'kv_consumer', and 'kv_both'. With MultiConnector, the
+    roles of its connectors decide this instead."""
 
     kv_port: int = 14579
     """The KV connector port, used to build distributed connection."""
@@ -136,11 +137,23 @@ class KVTransferConfig:
 
     @property
     def is_kv_producer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in get_args(KVProducer)
+        return any(role in get_args(KVProducer) for role in self._connector_roles())
 
     @property
     def is_kv_consumer(self) -> bool:
-        return self.kv_connector is not None and self.kv_role in get_args(KVConsumer)
+        return any(role in get_args(KVConsumer) for role in self._connector_roles())
+
+    def _connector_roles(self) -> list[str | None]:
+        """The kv_role of each connector. MultiConnector does not pass its own
+        kv_role to its connectors, so only theirs count."""
+        if self.kv_connector is None:
+            return []
+        if self.kv_connector == "MultiConnector":
+            return [
+                child.get("kv_role")
+                for child in self.kv_connector_extra_config.get("connectors", [])
+            ]
+        return [self.kv_role]
 
     def get_from_extra_config(self, key, default) -> Any:
         return self.kv_connector_extra_config.get(key, default)
