@@ -2620,6 +2620,7 @@ def mx_worker(mx_client, monkeypatch):
     worker.weight_transfer_engine = _make_modelexpress_engine()
     worker.vllm_config = worker.weight_transfer_engine.vllm_config
     worker._weight_update_active = False
+    worker._incomplete_weight_updates = set()
     worker._weight_update_is_draft = False
     worker._kv_cache_reclaimable = False
     worker._weight_update_kv_cache_loan = ExitStack()
