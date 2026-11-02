@@ -225,6 +225,11 @@ def mhc_fused_post_pre_delayed_aiter(
     """gfx942 delayed mHC seam: post, collapse, and the next pre gates.
 
     Returns residual_out, post_mix, comb_mix, layer_input, next_pre_mix.
+    ``residual_out`` is contiguous: aiter copies ``residual`` before the
+    kernel. ``post_layer_mix`` and ``pre_mix`` must already be fp32 of shape
+    ``(T, hc)`` or ``(T, hc, 1)`` (``pre_mix`` may be None). The merged
+    aiter op checks that and raises; it does not cast or reshape another
+    layout.
     """
     from vllm._aiter_ops import rocm_aiter_ops
 
@@ -261,8 +266,10 @@ def _mhc_fused_post_pre_delayed_aiter_fake(
     comb_res_mix: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     num_tokens, hc_mult, hidden_size = residual.shape
+    # aiter copies residual contiguous before the store. empty_like would
+    # keep a permuted residual's strides, and torch.compile rejects that.
     return (
-        torch.empty_like(residual),
+        torch.empty(residual.shape, dtype=residual.dtype, device=residual.device),
         torch.empty(
             num_tokens, hc_mult, 1, dtype=torch.float32, device=residual.device
         ),

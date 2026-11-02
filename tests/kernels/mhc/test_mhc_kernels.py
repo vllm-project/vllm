@@ -1929,6 +1929,46 @@ def test_hc_expand_preserves_bits_in_eager_and_graph(
     check(captured)
 
 
+def test_mhc_fused_post_pre_delayed_aiter_fake_residual_is_contiguous():
+    """The compile fake agrees with the merged aiter op on a permuted residual.
+
+    aiter copies ``residual`` contiguous before the store. ``empty_like``
+    would keep the permuted strides, and torch.compile rejects that fake.
+    """
+    from vllm.model_executor.kernels.mhc.aiter import (
+        _mhc_fused_post_pre_delayed_aiter_fake,
+    )
+
+    base = torch.empty(5, 9, 4, dtype=torch.bfloat16)
+    residual = base.permute(0, 2, 1)
+    assert residual.shape == (5, 4, 9)
+    assert not residual.is_contiguous()
+    residual_out, post, comb, layer_input, pre = (
+        _mhc_fused_post_pre_delayed_aiter_fake(
+            residual,
+            residual,
+            residual,
+            residual,
+            1e-2,
+            1e-3,
+            1e-4,
+            2.0,
+            20,
+            None,
+            residual,
+            residual,
+            residual,
+        )
+    )
+    assert residual_out.is_contiguous()
+    assert residual_out.shape == residual.shape
+    assert residual_out.dtype == torch.bfloat16
+    assert post.shape == (5, 4, 1) and post.dtype == torch.float32
+    assert comb.shape == (5, 4, 4) and comb.dtype == torch.float32
+    assert layer_input.shape == (5, 9) and layer_input.dtype == torch.bfloat16
+    assert pre.shape == (5, 4) and pre.dtype == torch.float32
+
+
 @pytest.mark.skipif(
     not (
         current_platform.is_rocm()
@@ -1936,18 +1976,44 @@ def test_hc_expand_preserves_bits_in_eager_and_graph(
     ),
     reason="AITER gfx942 mHC seam required",
 )
-@pytest.mark.parametrize("num_tokens", [63, 64])
-def test_gfx942_mhc_seam_dispatch(num_tokens, default_vllm_config, monkeypatch):
-    """VLLM calls the ASM seam from 64 tokens, and it matches post then pre."""
+@pytest.mark.parametrize(
+    "num_tokens,strided", [(63, False), (64, False), (64, True)]
+)
+@pytest.mark.parametrize("carried", [False, True])
+def test_gfx942_mhc_seam_dispatch(
+    num_tokens, strided, carried, default_vllm_config, monkeypatch
+):
+    """The ASM seam runs from 64 tokens and matches post then pre.
+
+    63 stays on the folded post GEMM. A strided residual is the case aiter
+    copies contiguous before the kernel. The identity and carried pre gates
+    are the shapes the op still accepts, and the three eps values differ so
+    a swapped argument fails.
+    """
     set_random_seed(0)
     hc, h = 4, 5120
     residual, fn, scale, base, _ = _rocm_mhc_inputs(
         num_tokens=num_tokens, hidden_size=h, hc_mult=hc
     )
+    if strided:
+        padded = torch.empty(
+            num_tokens, hc, h + 8, dtype=residual.dtype, device=residual.device
+        )
+        residual = padded[..., :h]
+        residual.copy_(torch.randn_like(residual))
+        assert not residual.is_contiguous()
     x = torch.randn((num_tokens, h), dtype=torch.bfloat16, device=DEVICE)
-    post = torch.rand(num_tokens, hc, 1, device=DEVICE) + 0.5
-    comb = torch.rand(num_tokens, hc, hc, device=DEVICE) + 0.2
-    pre_args = (fn, scale, base, 1e-6, 1e-6, 1e-6, 1.0, 20)
+    post = torch.rand(num_tokens, hc, 1, dtype=torch.float32, device=DEVICE) + 0.5
+    comb = torch.rand(num_tokens, hc, hc, dtype=torch.float32, device=DEVICE) + 0.2
+    pre_mix = (
+        torch.rand(num_tokens, hc, dtype=torch.float32, device=DEVICE) + 0.5
+        if carried
+        else None
+    )
+    # Distinct, as in aiter's test_mhc_seam. DeepSeek-V4.1-Flash uses the
+    # same value for the pre and Sinkhorn eps; these do not.
+    rms_eps, hc_pre_eps, hc_sinkhorn_eps = 1e-2, 1e-3, 1e-4
+    pre_args = (fn, scale, base, rms_eps, hc_pre_eps, hc_sinkhorn_eps, 2.0, 20)
     fused = torch.ops.vllm.mhc_fused_post_pre_delayed_aiter
     calls = []
 
@@ -1957,11 +2023,21 @@ def test_gfx942_mhc_seam_dispatch(num_tokens, default_vllm_config, monkeypatch):
 
     monkeypatch.setattr(torch.ops.vllm, "mhc_fused_post_pre_delayed_aiter", spy)
     actual = MHCPreDelayedOp().forward_hip(
-        residual, *pre_args, sublayer_out=x, post_layer_mix=post, comb_res_mix=comb
+        residual,
+        *pre_args,
+        pre_mix=pre_mix,
+        sublayer_out=x,
+        post_layer_mix=post,
+        comb_res_mix=comb,
     )
 
     assert len(calls) == (num_tokens >= 64)
+    if strided:
+        assert actual[0].is_contiguous()
     next_residual = mhc_post_torch(x, residual, post, comb)
-    expected = (next_residual, *mhc_pre_delayed_torch(next_residual, *pre_args))
+    expected = (
+        next_residual,
+        *mhc_pre_delayed_torch(next_residual, *pre_args, pre_mix=pre_mix),
+    )
     for got, want in zip(actual, expected, strict=True):
         torch.testing.assert_close(got, want.reshape(got.shape), atol=2e-2, rtol=8e-3)

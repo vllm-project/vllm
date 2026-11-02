@@ -16,8 +16,9 @@ from vllm.utils.import_utils import has_tilelang
 logger = init_logger(__name__)
 
 # AITER's few-token kernel runs below 60 tokens (MHC_SEAM_SMALL_MAX_T).
-# The b40 in the gates binary is not that cutoff. vLLM calls the seam from
-# 64 tokens; that number is not AITER's 60.
+# That switch was timed on 304-CU gfx942. The b40 in the gates binary is
+# not that cutoff. vLLM calls the seam from 64 tokens; that number is not
+# AITER's 60.
 _AITER_SEAM_MIN_TOKENS = 64
 
 
@@ -97,7 +98,11 @@ def _has_aiter_mhc_fused_post_pre_delayed(hidden_size: int, hc_mult: int) -> boo
 
 
 def warmup_mhc_fused_post_pre_delayed(hidden_size: int, hc_mult: int) -> None:
-    """Compile ``module_mhc_seam_asm``. Both kernels are in that one module."""
+    """Load ``module_mhc_seam_asm``: few-token seam, fused seam, and gates.
+
+    One launch compiles the module. ``pre_mix`` None takes aiter's cached
+    identity gate, which that op keeps alive for a later CUDA graph.
+    """
     if not _has_aiter_mhc_fused_post_pre_delayed(hidden_size, hc_mult):
         return
     from aiter.ops.mhc import mhc_fused_post_pre_delayed
