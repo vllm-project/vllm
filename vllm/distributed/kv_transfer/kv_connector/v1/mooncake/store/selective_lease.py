@@ -16,6 +16,8 @@ from typing import Any, Protocol
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     ChunkedTokenDatabase,
     MooncakeLookupResult,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (  # noqa: E501
     PoolKey,
 )
 from vllm.logger import init_logger
@@ -128,7 +130,9 @@ class SelectiveLookupLease:
         """Keys a load of ``hit`` reads, in every rank namespace, and their
         ``(group, hash)`` pairs.
 
-        Uses the same chunk iterator and tail keys as the receive path.
+        Mirrors ``KVCacheStoreRecvingThread._handle_request``: each group's
+        load mask (one entry per Store block), with the tail chunk keyed by the
+        hit's tail boundary.
         """
         hit_length = hit.hit_length
         tail_tokens = {b.group_id: b.num_tokens for b in hit.tail_key_boundaries}
@@ -137,13 +141,17 @@ class SelectiveLookupLease:
         for g_idx, db in enumerate(self.token_dbs):
             if not self.kv_cache_groups[g_idx].kv_cache_spec.prefix_cacheable:
                 continue
+            mask = load_masks[g_idx]
+            store_block_size = db.store_layout.block_size
             key_prefixes = self.lookup_key_prefixes[g_idx]
-            for _, _, block_hash in db.process_tokens(
+            for start, _, block_hash in db.process_tokens(
                 hit_length,
                 block_hashes,
-                chunk_mask=load_masks[g_idx],
                 tail_key_boundary=tail_tokens.get(g_idx),
             ):
+                block_index = start // store_block_size
+                if block_index >= len(mask) or not mask[block_index]:
+                    continue
                 hash_hex = block_hash.hex()
                 keys.extend(
                     PoolKey.build_key_string(key_prefix, hash_hex)
