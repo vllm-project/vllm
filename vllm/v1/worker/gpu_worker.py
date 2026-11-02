@@ -570,6 +570,9 @@ class Worker(WorkerBase):
             alloc_context=lambda: self._maybe_get_memory_pool_context("workspace"),
         )
         self.model_runner: GPUModelRunner = self._make_model_runner()
+        from vllm.v1.metrics.request_energy import WorkerEnergyTrace
+
+        self._energy_trace = WorkerEnergyTrace(self.device, self.rank)
         if self.rank == 0:
             # If usage stat is enabled, collect relevant info.
             report_usage_stats(self.vllm_config)
@@ -1334,7 +1337,11 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        return self.model_runner.sample_tokens(grammar_output)
+        trace_key = self._energy_trace.begin_sample()
+        try:
+            return self.model_runner.sample_tokens(grammar_output)
+        finally:
+            self._energy_trace.end(trace_key)
 
     @torch.inference_mode()
     @with_gpu_sync_check
@@ -1364,9 +1371,13 @@ class Worker(WorkerBase):
             )
 
         with self.annotate_profile(scheduler_output):
-            output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
-            )
+            trace_key = self._energy_trace.begin_forward(scheduler_output)
+            try:
+                output = self.model_runner.execute_model(
+                    scheduler_output, intermediate_tensors
+                )
+            finally:
+                self._energy_trace.end(trace_key)
             if (
                 self.use_v2_model_runner
                 and self.model_runner.is_pooling_model

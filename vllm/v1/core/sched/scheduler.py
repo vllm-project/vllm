@@ -63,6 +63,7 @@ from vllm.v1.kv_cache_interface import (
     is_mamba_prefill_checkpoint_valid,
 )
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
+from vllm.v1.metrics.request_energy import SchedulerEnergyTrace
 from vllm.v1.metrics.stats import (
     KV_FETCH_COMPLETED_WAITING,
     KV_FETCH_IN_PROGRESS,
@@ -96,6 +97,7 @@ class Scheduler(SchedulerInterface):
         log_stats: bool = False,
     ) -> None:
         self.vllm_config = vllm_config
+        self._energy_trace = SchedulerEnergyTrace(vllm_config)
         self.scheduler_config = vllm_config.scheduler_config
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
@@ -1793,6 +1795,7 @@ class Scheduler(SchedulerInterface):
         self._pending_encoder_input_ids.pop(request.request_id, None)
         self._inflight_prefills.discard(request)
         request.status = RequestStatus.PREEMPTED
+        self._energy_trace.release(request)
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
@@ -1826,6 +1829,7 @@ class Scheduler(SchedulerInterface):
         #    scheduling step.
         # 3. If some tokens (e.g. spec tokens) are rejected later, the number of
         #    computed tokens will be adjusted in update_from_output.
+        self._energy_trace.snapshot(self, scheduler_output)
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
             request = self.requests[req_id]
@@ -2646,6 +2650,7 @@ class Scheduler(SchedulerInterface):
                 engine_core_outputs[0] = eco = EngineCoreOutputs()
             eco.scheduler_stats = stats
 
+        self._energy_trace.complete(scheduler_output)
         return engine_core_outputs
 
     def _ec_transfer_pending(self, request: Request, num_computed_tokens: int) -> bool:
@@ -2920,6 +2925,7 @@ class Scheduler(SchedulerInterface):
                 request.streaming_queue = deque()
             self._enqueue_waiting_request(request)
             self.requests[request.request_id] = request
+            self._energy_trace.arrive(request)
             if self.spec_decode_metrics_level != "none":
                 request.spec_decode_metrics = RequestSpecDecodeMetrics.new(
                     self.num_spec_tokens
@@ -3003,6 +3009,7 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         assert request.is_finished()
+        self._energy_trace.finish(request)
 
         if self.aux_output_connector is not None:
             self.aux_output_connector.request_finished(request)

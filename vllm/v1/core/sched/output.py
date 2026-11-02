@@ -4,7 +4,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
@@ -323,6 +323,9 @@ class SchedulerOutput:
     # (non-final prefill chunks, or requests sure to reach max_tokens), so the
     # drafter can skip proposing them.
     skip_drafts: bool = False
+
+    # Engine-independent trace payload; contains no prompts, token IDs, or joules.
+    request_energy_trace: dict[str, Any] | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
