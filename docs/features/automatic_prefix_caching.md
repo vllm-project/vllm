@@ -36,6 +36,9 @@ vllm serve <qwen-gdn-model> \
     --gdn-prefill-backend triton
 ```
 
+An unsplit prefill can delay decode tokens of other requests. Reserving
+checkpoint state can also reduce effective KV cache capacity.
+
 Set `--additional-config '{"gdn_prefill_checkpoint": false}'` to disable internal
 GDN checkpoints and restore the split prefill. The Triton/FLA backend still
 uses direct paged-state I/O when checkpoints are disabled.

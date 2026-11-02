@@ -131,6 +131,10 @@ _BA_PROJ_OVERLAP_MAX_TOKENS = 256
 FUSED_GDN_STATE_DTYPES = (torch.float32, torch.bfloat16)
 
 
+def _prefill_on_paged_state(backend: str) -> bool:
+    return backend == "triton" and current_platform.is_cuda_alike()
+
+
 def supports_fused_mtp_decode() -> bool:
     """ROCm runs the Triton port; elsewhere the CUDA op must be built."""
     return current_platform.is_rocm() or hasattr(
@@ -845,10 +849,6 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.gdn_prefill_backend = self.chunk_gated_delta_rule.gdn_prefill_backend
         self._prefill_kernels_warmed_up = False
         self.vllm_config = vllm_config
-        # The Triton/FLA prefill reads and writes the paged state rows itself.
-        self._prefill_on_paged_state = (
-            self.gdn_prefill_backend == "triton" and current_platform.is_cuda_alike()
-        )
         # FlashInfer's prefill emits mid-prefill states and the Triton/FLA one
         # stores them into the paged state cache, so an align-mode checkpoint
         # needs no split prefill.
@@ -860,7 +860,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         ):
             if self.gdn_prefill_backend == "flashinfer":
                 self._checkpoint_alignment = FLASHINFER_GDN_CHECKPOINT_ALIGNMENT
-            elif self._prefill_on_paged_state:
+            elif _prefill_on_paged_state(self.gdn_prefill_backend):
                 self._checkpoint_alignment = FLA_CHUNK_SIZE
         if self._checkpoint_alignment is not None:
             self._max_num_batched_tokens = (
@@ -1629,7 +1629,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             )
             if self.gdn_prefill_backend == "flashinfer":
                 self._warmup_flashinfer_prefill_variants(q, k, v, g, beta, state)
-            elif self._prefill_on_paged_state:
+            elif _prefill_on_paged_state(self.gdn_prefill_backend):
                 self._warmup_paged_state_prefill_variants(
                     dummy_mixed_qkv.shape[-1], dtype, state
                 )
@@ -2126,7 +2126,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     )
                 )
                 prefill_in_place = prefill_out is not None
-            elif self._prefill_on_paged_state:
+            elif _prefill_on_paged_state(self.gdn_prefill_backend):
                 # The kernel reads and writes the prefill rows of the paged
                 # state cache and stores each checkpoint's recurrent state into
                 # its block; the exporter adds the conv window.
@@ -2190,7 +2190,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
                     use_qk_l2norm_in_kernel=False,
                     aiter_prefill_metadata=attn_metadata.aiter_prefill_metadata,
                 )
-            if not self._prefill_on_paged_state:
+            if not _prefill_on_paged_state(self.gdn_prefill_backend):
                 scatter_states(ssm_state, last_recurrent_state, prefill_state_indices)
 
             if split_non_spec and prefill_in_place:
