@@ -87,8 +87,6 @@ class MuseSparkDSparkDecoderLayer(MuseSpark1xDecoderLayer):
 class MuseSparkDSparkModel(DFlashQwen3Model):
     """Muse draft backbone with independently cached context K/V."""
 
-    _stacked_kv_weight: torch.Tensor
-
     def __init__(
         self,
         *,
@@ -97,6 +95,8 @@ class MuseSparkDSparkModel(DFlashQwen3Model):
         prefix: str = "",
     ) -> None:
         nn.Module.__init__(self)
+        # derived from the weights after loading, refilled in place on reloads
+        self._stacked_kv_weight: torch.Tensor
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         if not isinstance(config, MuseSparkDSparkConfig):

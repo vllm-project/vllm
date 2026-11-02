@@ -419,9 +419,6 @@ class DFlashQwen3DecoderLayer(nn.Module):
 
 @support_torch_compile
 class DFlashQwen3Model(nn.Module):
-    _fused_kv_weight: torch.Tensor | None = None
-    _fused_kv_bias: torch.Tensor | None = None
-    _k_norm_weights: torch.Tensor
     decoder_layer_cls = DFlashQwen3DecoderLayer
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -457,6 +454,10 @@ class DFlashQwen3Model(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        # derived from the weights after loading, refilled in place on reloads
+        self._fused_kv_weight: torch.Tensor | None = None
+        self._fused_kv_bias: torch.Tensor | None = None
+        self._k_norm_weights: torch.Tensor
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
         self.config = speculative_config.draft_model_config.hf_config

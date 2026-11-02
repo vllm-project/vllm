@@ -147,11 +147,11 @@ class Gemma4DSparkDecoderLayer(Gemma4MTPDecoderLayer):
 class Gemma4DSparkModel(DFlashQwen3Model):
     """Gemma4 DSpark draft backbone (Gemma4 layers + DSpark Markov head)."""
 
-    _fused_k_weight: torch.Tensor | None = None
-    _fused_k_bias: torch.Tensor | None = None
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         nn.Module.__init__(self)
+        # derived from the weights after loading, refilled in place on reloads
+        self._fused_k_weight: torch.Tensor | None = None
+        self._fused_k_bias: torch.Tensor | None = None
         assert vllm_config.speculative_config is not None
         config = vllm_config.speculative_config.draft_model_config.hf_config
         self.config = config

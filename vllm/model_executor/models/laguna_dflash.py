@@ -64,10 +64,6 @@ def _get_dflash_layer_types(config) -> tuple[str, ...]:
 
 @support_torch_compile
 class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
-    _kv_weights: torch.Tensor
-    _kv_biases: torch.Tensor | None = None
-    _input_layernorm_weights: torch.Tensor
-
     def __init__(
         self,
         *,
@@ -75,6 +71,10 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         prefix: str = "",
     ) -> None:
         nn.Module.__init__(self)
+        # derived from the weights after loading, refilled in place on reloads
+        self._kv_weights: torch.Tensor
+        self._kv_biases: torch.Tensor | None = None
+        self._input_layernorm_weights: torch.Tensor
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
         self.config = speculative_config.draft_model_config.hf_config
