@@ -576,6 +576,51 @@ def _mock_config_for_cudagraph_sizes(
     return config
 
 
+@pytest.mark.parametrize(
+    ("speculative_config", "expected"),
+    [
+        (None, 0),
+        (
+            SimpleNamespace(
+                num_speculative_tokens=5,
+                use_eagle=lambda: True,
+                use_multi_module_mtp=lambda: False,
+                use_dspark=lambda: False,
+            ),
+            1,
+        ),
+        (
+            SimpleNamespace(
+                num_speculative_tokens=5,
+                use_eagle=lambda: True,
+                use_multi_module_mtp=lambda: True,
+                use_dspark=lambda: False,
+            ),
+            5,
+        ),
+        (
+            SimpleNamespace(
+                num_speculative_tokens=5,
+                use_eagle=lambda: True,
+                use_multi_module_mtp=lambda: False,
+                use_dspark=lambda: True,
+            ),
+            5,
+        ),
+    ],
+)
+def test_num_prefill_lookahead_tokens_for_speculative_methods(
+    speculative_config, expected
+):
+    config = MagicMock(spec=VllmConfig)
+    config.speculative_config = speculative_config
+    config.num_speculative_tokens = (
+        0 if speculative_config is None else speculative_config.num_speculative_tokens
+    )
+
+    assert VllmConfig.num_prefill_lookahead_tokens.fget(config) == expected
+
+
 @pytest.mark.parametrize("max_num_seqs", [100, 101])
 def test_default_cudagraph_capture_sizes_cover_off_stride_max_num_seqs(
     max_num_seqs: int,

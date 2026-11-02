@@ -626,6 +626,8 @@ class CudaGraphManager:
         # while those copies are still in flight.
         get_offloader().sync_prev_onload()
         self.graphs[desc].replay()
+        if current_platform.is_rocm():
+            current_stream().synchronize()
 
     def init_breakable_cg_runner(
         self, model: nn.Module, key_fn: Callable[..., Hashable] | None = None
@@ -691,7 +693,8 @@ class ModelCudaGraphManager(CudaGraphManager):
             self.init_breakable_cg_runner(model)
 
         if self.cudagraph_mode.has_piecewise_cudagraphs() and not (
-            self.use_breakable_cg or has_compiled_submodule(model)
+            self.use_breakable_cg
+            or has_compiled_submodule(model)
         ):
             raise RuntimeError(
                 f"{type(model).__name__}: piecewise CUDA graphs "
@@ -803,7 +806,6 @@ class ModelCudaGraphManager(CudaGraphManager):
                 full_cudagraph=desc.cg_mode == CUDAGraphMode.FULL,
                 max_query_len=desc.max_query_len or desc.uniform_token_count,
                 pcp_manager=pcp_manager,
-                max_model_len=self.vllm_config.model_config.max_model_len,
             )
 
             # Capture with dummy rows marked as padding.
@@ -896,7 +898,6 @@ def prepare_inputs_to_capture(
     full_cudagraph: bool,
     max_query_len: int | None = None,
     pcp_manager: "PCPManager | None" = None,
-    max_model_len: int | None = None,
 ) -> AttentionState:
     if full_cudagraph and max_query_len is None:
         # Mixed graphs can replay a single prefill spanning the entire batch,
@@ -911,12 +912,12 @@ def prepare_inputs_to_capture(
     block_table_provider = pcp_manager or block_tables
     input_block_tables = block_table_provider.get_dummy_block_tables(num_reqs)
 
-    if full_cudagraph and max_model_len is not None:
+    if full_cudagraph:
         _apply_full_capture_capacity_hint(
             input_batch,
             block_tables,
             kv_cache_config,
-            max_model_len,
+            model_state.max_model_len,
         )
 
     slot_mappings = block_table_provider.get_dummy_slot_mappings(num_tokens)

@@ -29,6 +29,32 @@ GLOBAL_POOL = "global-pool"
 THROWAWAY_POOL = "throwaway-pool"
 
 
+@pytest.mark.parametrize(
+    ("num_tokens", "num_reqs", "max_query_len", "valid"),
+    [
+        (8, 2, 4, True),
+        (8, 2, 3, False),
+        (8, 8, 1, True),
+        (8, None, 3, True),
+        (8, 0, 3, False),
+    ],
+)
+def test_full_dummy_descriptor_valid(
+    num_tokens: int,
+    num_reqs: int | None,
+    max_query_len: int | None,
+    valid: bool,
+) -> None:
+    assert (
+        cgu._full_dummy_descriptor_valid(
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+            max_query_len=max_query_len,
+        )
+        is valid
+    )
+
+
 class _FakeCudaGraphManager:
     def __init__(
         self, needs_capture: bool, num_full_descs: int, piecewise_only: bool = False
