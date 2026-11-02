@@ -7,7 +7,7 @@ import torch.nn as nn
 from transformers import PreTrainedConfig
 
 from vllm.config.lora import LoRAConfig
-from vllm.distributed import tensor_model_parallel_all_gather
+from vllm.distributed import get_dcp_group, tensor_model_parallel_all_gather
 from vllm.distributed.utils import divide
 from vllm.model_executor.custom_op import maybe_get_oot_by_class
 from vllm.model_executor.layers.linear import (
@@ -128,6 +128,45 @@ class ColumnParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
             lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
 
+    def apply_mla_absorbed_kv_b_lora(
+        self,
+        x: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        qk_nope_head_dim: int,
+        is_query: bool,
+        gather_dcp: bool = False,
+    ) -> None:
+        """Add this ``kv_b_proj`` adapter to MLA's absorbed, head-major projection.
+
+        Args:
+            x: ``[num_heads, num_tokens, dim]`` input of the absorbed ``W_UK``
+                (query) or ``W_UV`` (value) BMM.
+            out: The token-major BMM output, updated in place.
+            qk_nope_head_dim: Per-head rows of LoRA-B before the value rows.
+            is_query: Whether ``x`` is the query side.
+            gather_dcp: Gather LoRA-B heads across decode context parallel ranks.
+
+        """
+        lora_a = self.lora_a_stacked[0]
+        lora_b = self.lora_b_stacked[0]
+        if self.lora_config.fully_sharded_loras and self.tp_size > 1:
+            lora_a = tensor_model_parallel_all_gather(lora_a, dim=2)
+        if gather_dcp:
+            lora_b = get_dcp_group().all_gather(lora_b, dim=2)
+        # MQA may consume only the decode prefix of the mapped batch.
+        indices = self.punica_wrapper.token_lora_indices[: x.shape[1]]
+        for slot in range(lora_a.shape[0]):
+            a = lora_a[slot, 0]
+            b = lora_b[slot, 0].view(x.shape[0], -1, lora_b.shape[-1])
+            if is_query:
+                delta = torch.matmul(x, b[:, :qk_nope_head_dim]) @ a
+            else:
+                delta = torch.matmul(x @ a.T, b[:, qk_nope_head_dim:].transpose(1, 2))
+            out.add_(
+                torch.where((indices == slot)[:, None, None], delta.transpose(0, 1), 0)
+            )
+
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
@@ -202,7 +241,11 @@ class MergedColumnParallelLinearWithLoRA(ColumnParallelLinearWithLoRA):
             divide(output_size, self.tp_size) for output_size in self.output_sizes
         )
         self.n_slices = len(self.output_slices)
-        self.output_ids = (self.tp_rank,) * self.n_slices
+        replicated_shard_ids = getattr(self.base_layer, "replicated_shard_ids", ())
+        self.output_ids = tuple(
+            0 if i in replicated_shard_ids else self.tp_rank
+            for i in range(self.n_slices)
+        )
 
     def create_lora_weights(
         self,

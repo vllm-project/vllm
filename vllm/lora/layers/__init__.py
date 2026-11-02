@@ -18,6 +18,7 @@ from vllm.lora.layers.column_parallel_linear import (
     QKVParallelLinearWithShardedLoRA,
 )
 from vllm.lora.layers.custom_layer import (
+    Glm5NextIndexerWkWeightsWithLoRA,
     Step5FusedQKVIndexerWithLoRA,
     Step5SparseIndexerWWithLoRA,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "BaseLayerWithLoRA",
     "Step5FusedQKVIndexerWithLoRA",
     "Step5SparseIndexerWWithLoRA",
+    "Glm5NextIndexerWkWeightsWithLoRA",
     "VocabParallelEmbeddingWithLoRA",
     "LogitsProcessorWithLoRA",
     "ColumnParallelLinearWithLoRA",

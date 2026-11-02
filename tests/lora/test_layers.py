@@ -31,6 +31,7 @@ from vllm.lora.layers import (
 )
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.punica_wrapper import get_punica_wrapper
+from vllm.lora.utils import from_layer
 from vllm.model_executor.layers.fusion.quant_activation import (
     get_input_quant_key,
 )
@@ -48,6 +49,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     get_masked_input_and_mask,
 )
 from vllm.model_executor.models.deepseek_v2 import DeepSeekV2FusedQkvAProjLinear
+from vllm.models.glm5next.common.kda import _Glm5NextMergedColumnParallelLinear
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -58,6 +60,139 @@ TOLERANCES = {
     torch.float32: (5e-3, 5e-3),
     torch.bfloat16: (3e-2, 2e-2),
 }
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA LoRA projection")
+@pytest.mark.parametrize("is_query", [False, True])
+@pytest.mark.parametrize("num_tokens", [1, 7])
+def test_mla_absorbed_projection_applies_updated_adapters(
+    default_vllm_config, dist_init, is_query, num_tokens
+):
+    """Cached MLA projections must track adapters, including a decode prefix."""
+    torch.manual_seed(53)
+    heads, latent, key_dim, value_dim, rank = 2, 32, 16, 16, 8
+    config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
+    with torch.device("cuda"), torch.inference_mode():
+        base = ColumnParallelLinear(
+            latent,
+            heads * (key_dim + value_dim),
+            bias=False,
+            params_dtype=torch.bfloat16,
+        )
+        base.weight.copy_(torch.randn_like(base.weight) / latent**0.5)
+        layer = from_layer(base, 2, config, [])
+        punica = get_punica_wrapper(7, 7, base.weight.device, lora_config=config)
+        layer.set_mapping(punica)
+        ids = [2, 0, 1, 2, 1, 0, 2]
+        punica.update_metadata(LoRAMapping(ids, [1], is_prefill=True), [1, 2], 3, 128)
+        w = base.weight.view(heads, key_dim + value_dim, latent)
+        x = torch.randn(
+            heads, num_tokens, key_dim if is_query else latent, dtype=torch.bfloat16
+        )
+        baseline = torch.bmm(
+            x, w[:, :key_dim] if is_query else w[:, key_dim:].transpose(1, 2)
+        )
+        active_ids = torch.tensor(ids[:num_tokens])
+
+        def project():
+            actual = baseline.transpose(0, 1).clone()
+            layer.apply_mla_absorbed_kv_b_lora(
+                x, actual, qk_nope_head_dim=key_dim, is_query=is_query
+            )
+            return actual
+
+        project()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            actual = project()
+        for _ in range(2):
+            expected = baseline.transpose(0, 1).clone()
+            for slot in range(2):
+                a = torch.randn(rank, latent, dtype=torch.bfloat16) / 8
+                b = (
+                    torch.randn(
+                        heads * (key_dim + value_dim), rank, dtype=torch.bfloat16
+                    )
+                    / 8
+                )
+                layer.set_lora(slot, a, b)
+                delta_w = (b.float() @ a.float()).view(
+                    heads, key_dim + value_dim, latent
+                )
+                delta = torch.bmm(
+                    x.float(),
+                    delta_w[:, :key_dim]
+                    if is_query
+                    else delta_w[:, key_dim:].transpose(1, 2),
+                ).transpose(0, 1)
+                mask = active_ids == slot + 1
+                expected[mask] += delta[mask].to(expected.dtype)
+            graph.replay()
+            torch.testing.assert_close(actual, expected, rtol=0.02, atol=0.02)
+            inactive = active_ids == 0
+            torch.testing.assert_close(
+                actual[inactive], baseline.transpose(0, 1)[inactive], rtol=0, atol=0
+            )
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA LoRA projection")
+def test_indexer_gate_applies_lora_with_fp32_base(default_vllm_config, dist_init):
+    """Indexer ``k`` and gate adapters must apply without rounding the gate's
+    base to BF16."""
+    from vllm.lora.layers import Glm5NextIndexerWkWeightsWithLoRA
+    from vllm.models.glm5next.common.attention import Glm5NextIndexerWkWeightsLinear
+
+    torch.manual_seed(53)
+    tokens, columns, heads, dim, rank = 7, 32, 32, 128, 8
+    config = LoRAConfig(max_loras=2, max_lora_rank=rank, lora_dtype=torch.bfloat16)
+    with torch.device("cuda"), torch.inference_mode():
+        base = Glm5NextIndexerWkWeightsLinear(
+            columns,
+            [dim, heads],
+            bias=False,
+            disable_tp=True,
+            params_dtype=torch.bfloat16,
+        )
+        base.weight.copy_(torch.randn_like(base.weight) / columns**0.5)
+        x = torch.randn(tokens, columns, dtype=torch.bfloat16)
+        base_k, base_gate = base(x)
+        assert base_gate.dtype == torch.float32
+        torch.testing.assert_close(
+            base_gate, F.linear(x.float(), base.weight[dim:].float()), rtol=0, atol=0
+        )
+
+        layer = from_layer(base, 2, config, ["wk", "weights_proj"])
+        assert isinstance(layer, Glm5NextIndexerWkWeightsWithLoRA)
+        punica = get_punica_wrapper(
+            tokens, tokens, base.weight.device, lora_config=config
+        )
+        layer.set_mapping(punica)
+        ids = [2, 0, 1, 2, 1, 0, 2]
+        punica.update_metadata(LoRAMapping(ids, [1], is_prefill=True), [1, 2], 3, 128)
+        inactive = torch.tensor(ids) == 0
+        for _ in range(2):
+            expected_k, expected_gate = base_k.clone(), base_gate.clone()
+            for slot in range(2):
+                a = [
+                    torch.randn(rank, columns, dtype=torch.bfloat16) / 8
+                    for _ in range(2)
+                ]
+                b = [
+                    torch.randn(size, rank, dtype=torch.bfloat16) / 8
+                    for size in (dim, heads)
+                ]
+                layer.set_lora(slot, a, b)
+                mask = torch.tensor(ids) == slot + 1
+                expected_k[mask] += F.linear(F.linear(x, a[0]), b[0])[mask]
+                expected_gate[mask] += F.linear(F.linear(x, a[1]), b[1]).float()[mask]
+            k, gate = layer(x)
+            assert gate.dtype == torch.float32
+            torch.testing.assert_close(k, expected_k, rtol=0.02, atol=0.02)
+            torch.testing.assert_close(gate, expected_gate, rtol=0.02, atol=0.002)
+            torch.testing.assert_close(k[inactive], base_k[inactive], rtol=0, atol=0)
+            torch.testing.assert_close(
+                gate[inactive], base_gate[inactive], rtol=0, atol=0
+            )
 
 
 def test_lora_linear_requires_unquantized_input() -> None:
@@ -1089,6 +1224,55 @@ def test_merged_column_parallel_variable_slice(
 
         rtol, atol = TOLERANCES[lora_result.dtype]
         torch.testing.assert_close(lora_result, expected_result, rtol=rtol, atol=atol)
+
+
+@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize("replicated", [False, True])
+@pytest.mark.parametrize("partial_adapter", [False, True])
+def test_merged_lora_b_replicated_shards(
+    default_vllm_config, dist_init, tp_size, replicated, partial_adapter
+):
+    """Replicated projections retain all B rows on every rank during loading."""
+    sizes = [32, 32, 32, 8, 8, 8]
+    names = ["q_proj", "k_proj", "v_proj", "b_proj", "f_a_proj", "g_a_proj"]
+    config = LoRAConfig(max_loras=1, max_lora_rank=8, lora_dtype=torch.float32)
+    lora_a: list[torch.Tensor | None] = [torch.ones(8, 16) for _ in sizes]
+    lora_b: list[torch.Tensor | None] = [
+        torch.arange(size * 8).reshape(size, 8).float() + 1 for size in sizes
+    ]
+    if partial_adapter:
+        lora_a[4] = lora_b[4] = None
+
+    for tp_rank in range(tp_size):
+        with (
+            patch(
+                "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank",
+                return_value=tp_rank,
+            ),
+            patch(
+                "vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size",
+                return_value=tp_size,
+            ),
+            torch.device("cpu"),
+        ):
+            if replicated:
+                base = _Glm5NextMergedColumnParallelLinear(
+                    16, sizes, (4, 5), tp_size=tp_size, bias=False
+                )
+            else:
+                base = MergedColumnParallelLinear(16, sizes, bias=False)
+            layer = from_layer(base, 1, config, names)
+            layer.set_lora(0, lora_a, lora_b)
+
+        for i, b in enumerate(lora_b):
+            stored = layer.lora_b_stacked[i][0, 0]
+            if b is None:
+                assert torch.count_nonzero(stored) == 0
+            else:
+                expected = (
+                    b if replicated and i in (4, 5) else b.chunk(tp_size)[tp_rank]
+                )
+                torch.testing.assert_close(stored, expected, rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])

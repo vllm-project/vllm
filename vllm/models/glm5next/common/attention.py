@@ -184,6 +184,25 @@ class Glm5NextTailCache(DeepseekV32IndexerCache):
         return KpoolTailBackend
 
 
+class Glm5NextIndexerWkWeightsLinear(MergedColumnParallelLinear):
+    """Fused ``wk``/``weights_proj``: returns ``k`` and the FP32 head gate.
+
+    BF16 error in the gate can change near-tie pool rankings on long-context
+    tasks, so it is recomputed in FP32 from a copy cached on first use.
+    """
+
+    _gate_weight_fp32: torch.Tensor | None = None
+
+    def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        head_dim = self.output_sizes[0]
+        kw, _ = super().forward(input_)
+        if self._gate_weight_fp32 is None:
+            self._gate_weight_fp32 = (
+                self.weight.data[head_dim:, :].t().contiguous().float()
+            )
+        return kw[:, :head_dim], torch.mm(input_.float(), self._gate_weight_fp32)
+
+
 class Indexer(nn.Module):
     def __init__(
         self,
@@ -235,7 +254,7 @@ class Indexer(nn.Module):
         )
         # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
         # FP8 wk weights are upcasted to BF16 during loading to maintain fusion.
-        self.wk_weights_proj = MergedColumnParallelLinear(
+        self.wk_weights_proj = Glm5NextIndexerWkWeightsLinear(
             hidden_size,
             [self.head_dim, self.n_head],
             bias=False,
@@ -252,7 +271,6 @@ class Indexer(nn.Module):
         self.scale_fmt = "ue8m0"
         self.quant_block_size = 128  # TODO: get from config
         self.topk_indices_buffer = topk_indices_buffer
-        self._wp_fp32: torch.Tensor | None = None
 
         # NOTE: (zyongye) we use fp8 naive cache,
         #       where we store value in fp8 and scale in fp32
@@ -300,18 +318,7 @@ class Indexer(nn.Module):
         q, _ = self.wq_b(qr)
         q = q.view(-1, self.n_head, self.head_dim)
 
-        # Compute the head gate in fp32; bf16 error can change near-tie pool
-        # rankings on long-context tasks. Cache it after weights are loaded.
-        kw, _ = self.wk_weights_proj(hidden_states)
-        k = kw[:, : self.head_dim]
-        if self._wp_fp32 is None:
-            self._wp_fp32 = (
-                self.wk_weights_proj.weight.data[self.head_dim :, :]
-                .t()
-                .contiguous()
-                .float()
-            )
-        weights = torch.mm(hidden_states.float(), self._wp_fp32)
+        k, weights = self.wk_weights_proj(hidden_states)
 
         k = _fused_indexer_k_norm(
             k, self.k_norm.weight, self.k_norm.bias, self.head_dim, self.k_norm.eps

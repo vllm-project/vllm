@@ -21,6 +21,7 @@ from vllm.lora.layers import (
     ColumnParallelLinearWithShardedLoRA,
     FusedMoE3DWithLoRA,
     FusedMoEWithLoRA,
+    Glm5NextIndexerWkWeightsWithLoRA,
     LogitsProcessorWithLoRA,
     MergedColumnParallelLinearVariableSliceWithLoRA,
     MergedColumnParallelLinearWithLoRA,
@@ -83,6 +84,7 @@ def get_lora_id():
 _all_lora_classes: tuple[type[BaseLayerWithLoRA], ...] = (
     Step5FusedQKVIndexerWithLoRA,
     Step5SparseIndexerWWithLoRA,
+    Glm5NextIndexerWkWeightsWithLoRA,
     VocabParallelEmbeddingWithLoRA,
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
