@@ -996,10 +996,15 @@ class MoriAll2AllManager(All2AllManagerBase):
     ):
         import mori  # type: ignore[import-not-found]
 
-        from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
+        from vllm.platforms.rocm import (
+            get_cdna_version,
+            on_gfx942,
+            on_gfx950,
+            on_gfx1250,
+        )
 
-        assert on_gfx942() or on_gfx950() or on_gfx1250(), (
-            "mori currently only support arch gfx942 and gfx950"
+        assert get_cdna_version() >= 3, (
+            "mori is currently only supported on gfx942 and newer"
         )
 
         if not self.internode:

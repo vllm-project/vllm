@@ -167,9 +167,10 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8, gfx1250_scale_kwidth=4):
             f"got {tuple(scale.shape)}"
         )
         scale = shuffle_scale_moe(
-            scale, arch="gfx1250", 
-            preshuffle_factor=32, 
-            scale_kwidth=gfx1250_scale_kwidth
+            scale,
+            arch="gfx1250",
+            preshuffle_factor=32,
+            scale_kwidth=gfx1250_scale_kwidth,
         )
 
     quant_tensor = convert_layout(
