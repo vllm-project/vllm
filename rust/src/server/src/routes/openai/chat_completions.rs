@@ -95,7 +95,7 @@ pub async fn chat_completions(
     // is configured to count them.
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
 
-    let chat_stream =
+    let mut chat_stream =
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
             Ok(stream) => stream,
             Err(error) => {
@@ -104,8 +104,10 @@ pub async fn chat_completions(
         };
 
     if stream {
+        let prompt_text = chat_stream.take_prompt_text();
         let chunk_stream = chat_completion_chunk_stream(
             chat_stream,
+            prompt_text,
             prepared.request_id,
             prepared.response_model,
             created,
@@ -178,6 +180,7 @@ async fn collect_chat_completion(
     let CollectedAssistantMessage {
         message,
         prompt_token_ids,
+        prompt_text,
         prompt_logprobs,
         logprobs,
         token_ids,
@@ -305,7 +308,7 @@ async fn collect_chat_completion(
         system_fingerprint: None,
         prompt_logprobs,
         prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
-        prompt_text: None,
+        prompt_text,
         kv_transfer_params,
         ec_transfer_params,
     })
@@ -315,6 +318,7 @@ async fn collect_chat_completion(
 #[try_stream]
 async fn chat_completion_chunk_stream(
     mut stream: impl ChatEventStreamTrait + Unpin,
+    mut prompt_text: Option<String>,
     request_id: String,
     response_model: String,
     created: u64,
@@ -388,7 +392,7 @@ async fn chat_completion_chunk_stream(
                 let mut chunk = start_chunk(&envelope);
                 chunk.prompt = Some(ChatCompletionStreamPrompt {
                     prompt_token_ids: return_token_ids.then(|| prompt_token_ids.to_vec()),
-                    prompt_text: None,
+                    prompt_text: prompt_text.take(),
                 });
                 yield_chunk!(chunk);
                 // When echo=true, emit the last assistant message content as a delta chunk.
@@ -1260,6 +1264,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1356,6 +1361,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1408,6 +1414,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1473,6 +1480,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1557,6 +1565,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1693,6 +1702,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1775,6 +1785,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1840,6 +1851,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1923,6 +1935,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -1998,6 +2011,7 @@ mod tests {
 
         let chunks = chat_completion_chunk_stream(
             stream,
+            None,
             "chatcmpl-1".to_string(),
             "model".to_string(),
             1,
@@ -2062,6 +2076,7 @@ mod tests {
 
             let chunks = chat_completion_chunk_stream(
                 stream,
+                None,
                 "chatcmpl-1".to_string(),
                 "model".to_string(),
                 1,
