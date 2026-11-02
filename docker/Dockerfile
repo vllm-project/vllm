@@ -1100,6 +1100,18 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi \
     fi
 
+# KV connectors for the P/D and connector suites, so CI jobs never install them
+# at runtime. The lock is hash-pinned and compiled against requirements/test/cuda.txt,
+# so it only adds packages; it targets the stable x86_64 CUDA 13 image.
+COPY requirements/test/kv_connectors_cuda.txt requirements/test/kv_connectors_cuda.txt
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
+        && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
+        uv pip install --system --require-hashes --no-deps \
+            -r requirements/test/kv_connectors_cuda.txt \
+            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+    fi
+
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
 FROM test-deps AS test
@@ -1228,7 +1240,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         ); \
         # The default mooncake wheel links libcudart.so.12, so on CUDA 13 swap in the
         # cuda13 variant. Uninstall first; both ship the `mooncake` package.
-        # Mirrors .buildkite/scripts/install-kv-connectors.sh.
+        # The CI image does the same via requirements/test/kv_connectors_cuda.in.
         MOONCAKE_VERSION=$(python3 -c "import importlib.metadata as m; print(m.version('mooncake-transfer-engine'))" 2>/dev/null || true) && \
         if [ "${CUDA_MAJOR}" = "13" ] && [ -n "${MOONCAKE_VERSION}" ]; then \
             uv pip uninstall --system mooncake-transfer-engine 2>/dev/null || true; \

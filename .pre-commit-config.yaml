@@ -55,6 +55,22 @@ repos:
       ]
       files: ^requirements/(common|cuda|test/cuda)\.(in|txt)$
     - id: pip-compile
+      alias: pip-compile-kv-connectors
+      name: pip-compile-kv-connectors
+      args: [
+        requirements/test/kv_connectors_cuda.in,
+        -c, requirements/test/cuda.txt,
+        -o, requirements/test/kv_connectors_cuda.txt,
+        --generate-hashes,
+        # nixl pulls both CUDA variants; the CUDA 13 image keeps only nixl-cu13.
+        --no-emit-package, nixl-cu12,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, cu130,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/(common|cuda|test/(cuda|kv_connectors_cuda))\.(in|txt)$
+    - id: pip-compile
       alias: pip-compile-rocm
       name: pip-compile-rocm
       args: [
