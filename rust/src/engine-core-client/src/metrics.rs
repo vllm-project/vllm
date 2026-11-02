@@ -6,20 +6,49 @@ use std::collections::BTreeSet;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use vllm_metrics::{
-    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, F64Gauge, Family, HistogramMetric,
-    LoraAdapterNames, LoraInfoLabels, MooncakeOperationCounterFamily,
-    MooncakeOperationHistogramFamily, MooncakeOperationLabels, RequestMetrics,
-    SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge, WaitingReasonLabels,
+    CacheHitSourceLabels, EngineLabels, EnginePositionLabels, EngineSleepStateLabels, F64Gauge,
+    Family, HistogramMetric, KvFetchStageLabels, LoraAdapterNames, LoraInfoLabels,
+    MooncakeOperationCounterFamily, MooncakeOperationHistogramFamily, MooncakeOperationLabels,
+    RequestMetrics, SchedulerLogStatsAccumulator, SchedulerMetrics, U64Counter, U64Gauge,
+    UmbpOperationCounterFamily, UmbpOperationLabels, WaitingReasonLabels,
 };
 
 use crate::protocol::stats::{
-    CachedTokensBySource, KvConnectorStats, MooncakeStats, MooncakeTransferStats,
-    MultiConnectorStats, NixlStats, SchedulerStats,
+    CachedTokensBySource, KvConnectorStats, KvFetchReqsByStage, MooncakeStats,
+    MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats, UmbpStats,
 };
+use crate::protocol::utility::SleepLevel;
 use crate::transport::ConnectedEngine;
 
 const WAITING_REASON_CAPACITY: &str = "capacity";
 const WAITING_REASON_DEFERRED: &str = "deferred";
+
+/// `sleep_state` label values of `vllm:engine_sleep_state`, in the order of
+/// [`EngineSleepState::gauge_values`].
+const SLEEP_STATES: [&str; 3] = ["awake", "weights_offloaded", "discard_all"];
+
+/// Engine sleep state exported as `vllm:engine_sleep_state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EngineSleepState {
+    Awake,
+    Asleep(SleepLevel),
+    /// After `release_kv_cache_memory`, which Python records like a level-0
+    /// sleep.
+    KvCacheReleased,
+}
+
+impl EngineSleepState {
+    /// Gauge values for the `awake`, `weights_offloaded` and `discard_all`
+    /// series, as Python's `PrometheusStatLogger.record_sleep_state` sets them.
+    fn gauge_values(self) -> [u64; 3] {
+        match self {
+            Self::Awake => [1, 0, 0],
+            Self::Asleep(SleepLevel::PauseOnly) | Self::KvCacheReleased => [0, 0, 0],
+            Self::Asleep(SleepLevel::OffloadWeights) => [0, 1, 0],
+            Self::Asleep(SleepLevel::DiscardAll) => [0, 0, 1],
+        }
+    }
+}
 
 /// Cached output-batch metric handles for one model and engine index.
 pub(crate) struct IterationMetricHandles {
@@ -54,7 +83,11 @@ struct SchedulerStatsHandles {
     scheduler_waiting: U64Gauge,
     scheduler_waiting_capacity: U64Gauge,
     scheduler_waiting_deferred: U64Gauge,
+    /// One handle per `KvFetchReqsByStage::STAGES` entry.
+    scheduler_kv_fetch_by_stage: [U64Gauge; 3],
     kv_cache_usage: F64Gauge,
+    /// One handle per [`SLEEP_STATES`] entry.
+    engine_sleep_state: [U64Gauge; 3],
 
     // Prefix-cache counters, including the connector-backed external cache path.
     prefix_cache_queries: U64Counter,
@@ -97,6 +130,14 @@ struct SchedulerStatsHandles {
     mooncake_num_failed_recvs: U64Counter,
     mooncake_num_kv_expired_reqs: U64Counter,
 
+    // UMBP store connector telemetry, decoded from `kv_connector_stats`.
+    // Kept as `Family` like the Mooncake store telemetry: an operation's
+    // series appears once the connector first reports it, as in Python.
+    umbp_transfer_submitted_total: UmbpOperationCounterFamily,
+    umbp_transfer_completed_total: UmbpOperationCounterFamily,
+    umbp_transfer_failed_total: UmbpOperationCounterFamily,
+    umbp_transfer_bytes_total: UmbpOperationCounterFamily,
+
     // NIXL connector telemetry, decoded from `kv_connector_stats`.
     nixl_xfer_time_seconds: HistogramMetric,
     nixl_post_time_seconds: HistogramMetric,
@@ -105,6 +146,7 @@ struct SchedulerStatsHandles {
     nixl_num_failed_transfers: U64Counter,
     nixl_num_failed_notifications: U64Counter,
     nixl_num_kv_expired_reqs: U64Counter,
+    nixl_num_notifications_after_expiry: U64Counter,
 
     // Non-Prometheus interval accumulator for periodic text-log helpers.
     log_stats: SchedulerLogStatsAccumulator,
@@ -128,7 +170,21 @@ impl SchedulerStatsRecorder {
             })
             .collect();
 
-        Self { engines }
+        let recorder = Self { engines };
+        // Engines start awake, as Python sets when it creates the stat logger.
+        recorder.record_sleep_state(EngineSleepState::Awake);
+        recorder
+    }
+
+    /// Record the sleep state of every connected engine. Sleep and wake are
+    /// utility calls on all engines, so the state is not per engine.
+    pub(crate) fn record_sleep_state(&self, state: EngineSleepState) {
+        let values = state.gauge_values();
+        for handles in self.engines.values() {
+            for (gauge, value) in handles.engine_sleep_state.iter().zip(values) {
+                gauge.set(value);
+            }
+        }
     }
 
     /// Record one scheduler-stats payload for the given engine index.
@@ -169,7 +225,21 @@ fn resolve_scheduler_stats_handles(
         scheduler_waiting_deferred: metrics
             .scheduler_waiting_by_reason
             .get_or_create_owned(&deferred),
+        scheduler_kv_fetch_by_stage: KvFetchReqsByStage::STAGES.map(|stage| {
+            metrics.scheduler_kv_fetch_by_stage.get_or_create_owned(&KvFetchStageLabels {
+                model_name: model_name.to_string(),
+                engine,
+                stage,
+            })
+        }),
         kv_cache_usage: metrics.kv_cache_usage.get_or_create_owned(&labels),
+        engine_sleep_state: SLEEP_STATES.map(|sleep_state| {
+            metrics.engine_sleep_state.get_or_create_owned(&EngineSleepStateLabels {
+                model_name: model_name.to_string(),
+                engine,
+                sleep_state,
+            })
+        }),
         prefix_cache_queries: metrics.prefix_cache_queries.get_or_create_owned(&labels),
         prefix_cache_hits: metrics.prefix_cache_hits.get_or_create_owned(&labels),
         external_prefix_cache_queries: metrics
@@ -223,6 +293,10 @@ fn resolve_scheduler_stats_handles(
         mooncake_num_kv_expired_reqs: metrics
             .mooncake_num_kv_expired_reqs
             .get_or_create_owned(&labels),
+        umbp_transfer_submitted_total: metrics.umbp_transfer_submitted_total.clone(),
+        umbp_transfer_completed_total: metrics.umbp_transfer_completed_total.clone(),
+        umbp_transfer_failed_total: metrics.umbp_transfer_failed_total.clone(),
+        umbp_transfer_bytes_total: metrics.umbp_transfer_bytes_total.clone(),
         nixl_xfer_time_seconds: metrics.nixl_xfer_time_seconds.get_or_create_owned(&labels),
         nixl_post_time_seconds: metrics.nixl_post_time_seconds.get_or_create_owned(&labels),
         nixl_bytes_transferred: metrics.nixl_bytes_transferred.get_or_create_owned(&labels),
@@ -232,6 +306,9 @@ fn resolve_scheduler_stats_handles(
             .nixl_num_failed_notifications
             .get_or_create_owned(&labels),
         nixl_num_kv_expired_reqs: metrics.nixl_num_kv_expired_reqs.get_or_create_owned(&labels),
+        nixl_num_notifications_after_expiry: metrics
+            .nixl_num_notifications_after_expiry
+            .get_or_create_owned(&labels),
         labels,
     }
 }
@@ -245,6 +322,13 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
         .set(stats.num_waiting_reqs + stats.num_skipped_waiting_reqs);
     handles.scheduler_waiting_capacity.set(stats.num_waiting_reqs);
     handles.scheduler_waiting_deferred.set(stats.num_skipped_waiting_reqs);
+    for (handle, count) in handles
+        .scheduler_kv_fetch_by_stage
+        .iter()
+        .zip(stats.num_kv_fetch_reqs_by_stage.counts())
+    {
+        handle.set(count);
+    }
     handles.kv_cache_usage.set(stats.kv_cache_usage);
 
     // Prefix-cache counters, including the connector-backed external cache path.
@@ -335,6 +419,7 @@ fn record_scheduler_stats_with_handles(handles: &SchedulerStatsHandles, stats: &
                 record_mooncake_transfer_stats(handles, stats)
             }
             KvConnectorStats::Mooncake(stats) => record_mooncake_stats(handles, stats),
+            KvConnectorStats::Umbp(stats) => record_umbp_stats(handles, stats),
             KvConnectorStats::Multi(stats) => record_multi_connector_stats(handles, stats),
             KvConnectorStats::Other(_) => {}
         }
@@ -350,6 +435,9 @@ fn record_multi_connector_stats(handles: &SchedulerStatsHandles, stats: &MultiCo
     }
     if let Some(mooncake) = &stats.mooncake {
         record_mooncake_stats(handles, mooncake);
+    }
+    if let Some(umbp) = &stats.umbp {
+        record_umbp_stats(handles, umbp);
     }
 }
 
@@ -402,6 +490,29 @@ fn record_mooncake_stats(handles: &SchedulerStatsHandles, stats: &MooncakeStats)
     }
 }
 
+fn record_umbp_stats(handles: &SchedulerStatsHandles, stats: &UmbpStats) {
+    for (operation, counts) in &stats.0 {
+        let labels = UmbpOperationLabels {
+            model_name: handles.labels.model_name.clone(),
+            engine: handles.labels.engine,
+            operation: operation.as_str(),
+        };
+        handles
+            .umbp_transfer_submitted_total
+            .get_or_create(&labels)
+            .inc_by(counts.submitted);
+        handles
+            .umbp_transfer_completed_total
+            .get_or_create(&labels)
+            .inc_by(counts.completed);
+        handles.umbp_transfer_failed_total.get_or_create(&labels).inc_by(counts.failed);
+        handles
+            .umbp_transfer_bytes_total
+            .get_or_create(&labels)
+            .inc_by(counts.num_bytes);
+    }
+}
+
 fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
     for value in &stats.transfer_duration {
         handles.nixl_xfer_time_seconds.observe(*value);
@@ -415,13 +526,21 @@ fn record_nixl_stats(handles: &SchedulerStatsHandles, stats: &NixlStats) {
     for value in &stats.num_descriptors {
         handles.nixl_num_descriptors.observe(*value as f64);
     }
-    handles
-        .nixl_num_failed_transfers
-        .inc_by(stats.num_failed_transfers.iter().sum());
+    handles.nixl_num_failed_transfers.inc_by(
+        stats
+            .num_failed_transfers
+            .iter()
+            .chain(&stats.num_failed_handshakes)
+            .chain(&stats.num_failed_notifications)
+            .sum(),
+    );
     handles
         .nixl_num_failed_notifications
         .inc_by(stats.num_failed_notifications.iter().sum());
     handles.nixl_num_kv_expired_reqs.inc_by(stats.num_kv_expired_reqs.iter().sum());
+    handles
+        .nixl_num_notifications_after_expiry
+        .inc_by(stats.num_notifications_after_expiry.iter().sum());
 }
 
 /// Exports `vllm:lora_requests_info` as a single series covering all LoRA
@@ -475,12 +594,13 @@ mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
     use expect_test::expect;
+    use itertools::Itertools as _;
     use vllm_metrics::Metrics;
 
     use crate::metrics::LoraInfoExporter;
     use crate::protocol::stats::{
-        KvConnectorStats, MooncakeOperation, MooncakeRecord, MooncakeStats, MooncakeStatus,
-        MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
+        KvConnectorStats, KvFetchReqsByStage, MooncakeOperation, MooncakeRecord, MooncakeStats,
+        MooncakeStatus, MooncakeTransferStats, MultiConnectorStats, NixlStats, SchedulerStats,
     };
 
     fn names(values: &[&str]) -> BTreeSet<String> {
@@ -543,8 +663,10 @@ mod tests {
             bytes_transferred: vec![4096, 8192],
             num_descriptors: vec![2, 4],
             num_failed_transfers: vec![],
-            num_failed_notifications: vec![],
+            num_failed_notifications: vec![1],
+            num_failed_handshakes: vec![1],
             num_kv_expired_reqs: vec![1],
+            num_notifications_after_expiry: vec![2],
         }
     }
 
@@ -608,6 +730,91 @@ mod tests {
         .assert_eq(&mooncake_transfer_series);
     }
 
+    /// Records a bare `UMBPStoreConnector` payload, in the shape Python's
+    /// `UMBPStoreConnectorStats` sends, into the `vllm:umbp_transfer_*`
+    /// counters, one series per reported operation.
+    #[test]
+    fn umbp_stats_are_recorded_into_umbp_transfer_metrics() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        // Series of one family render in hash order, so sort them.
+        let umbp_series = || {
+            metrics
+                .render()
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("vllm:umbp_transfer_"))
+                .sorted()
+                .join("\n")
+        };
+
+        // Like Python, no series before the connector reports an operation.
+        expect![[""]].assert_eq(&umbp_series());
+
+        let kv_connector_stats: KvConnectorStats = serde_json::from_value(serde_json::json!({
+            "load": {"submitted": 3, "completed": 2, "failed": 1, "num_bytes": 8192},
+            "store": {"submitted": 1, "completed": 0, "failed": 0, "num_bytes": 0},
+        }))
+        .unwrap();
+        let stats = SchedulerStats {
+            kv_connector_stats: Some(kv_connector_stats),
+            ..Default::default()
+        };
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        expect![[r#"
+            vllm:umbp_transfer_bytes_total{model_name="model",engine="0",operation="load"} 16384
+            vllm:umbp_transfer_bytes_total{model_name="model",engine="0",operation="store"} 0
+            vllm:umbp_transfer_completed_total{model_name="model",engine="0",operation="load"} 4
+            vllm:umbp_transfer_completed_total{model_name="model",engine="0",operation="store"} 0
+            vllm:umbp_transfer_failed_total{model_name="model",engine="0",operation="load"} 2
+            vllm:umbp_transfer_failed_total{model_name="model",engine="0",operation="store"} 0
+            vllm:umbp_transfer_submitted_total{model_name="model",engine="0",operation="load"} 6
+            vllm:umbp_transfer_submitted_total{model_name="model",engine="0",operation="store"} 2"#]]
+        .assert_eq(&umbp_series());
+    }
+
+    /// Exports every engine's KV fetch stage gauges from startup and sets them
+    /// from each `SchedulerStats` update.
+    #[test]
+    fn kv_fetch_reqs_by_stage_are_recorded_into_stage_gauges() {
+        let metrics = Metrics::new();
+        let handles = super::resolve_scheduler_stats_handles(&metrics.scheduler, "model", 0);
+        // Series of one family render in hash order, so sort them.
+        let kv_fetch_series = || {
+            metrics
+                .render()
+                .unwrap()
+                .lines()
+                .filter(|line| line.starts_with("vllm:num_requests_kv_fetch_by_stage{"))
+                .sorted()
+                .join("\n")
+        };
+
+        expect![[r#"
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="completed_waiting"} 0
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="in_progress"} 0
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="waiting_to_start"} 0"#]]
+        .assert_eq(&kv_fetch_series());
+
+        let stats = SchedulerStats {
+            num_kv_fetch_reqs_by_stage: KvFetchReqsByStage {
+                waiting_to_start: 3,
+                in_progress: 1,
+                completed_waiting: 2,
+            },
+            ..Default::default()
+        };
+        super::record_scheduler_stats_with_handles(&handles, &stats);
+
+        expect![[r#"
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="completed_waiting"} 2
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="in_progress"} 1
+            vllm:num_requests_kv_fetch_by_stage{model_name="model",engine="0",stage="waiting_to_start"} 3"#]]
+        .assert_eq(&kv_fetch_series());
+    }
+
     /// Records one MultiConnector payload into Mooncake and NIXL metrics.
     #[test]
     fn kv_connector_stats_are_recorded_into_mooncake_and_nixl_metrics() {
@@ -650,6 +857,14 @@ mod tests {
                 "vllm:nixl_num_kv_expired_reqs_total{model_name=\"model\",engine=\"0\"} 1"
             )
         );
+        assert!(
+            rendered.contains(
+                "vllm:nixl_num_failed_transfers_total{model_name=\"model\",engine=\"0\"} 2"
+            )
+        );
+        assert!(rendered.contains(
+            "vllm:nixl_num_notifications_after_expiry_total{model_name=\"model\",engine=\"0\"} 2"
+        ));
         assert!(
             rendered
                 .contains("vllm:nixl_xfer_time_seconds_count{model_name=\"model\",engine=\"0\"} 2")
