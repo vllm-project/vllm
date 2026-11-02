@@ -4,7 +4,7 @@
 
 import pytest
 
-from vllm.utils.func_utils import supports_kw
+from vllm.utils.func_utils import get_allowed_kwarg_only_overrides, supports_kw
 
 
 @pytest.mark.parametrize(
@@ -13,6 +13,12 @@ from vllm.utils.func_utils import supports_kw
         # Tests for positional argument support
         (lambda foo: None, "foo", True, True, False),
         (lambda foo: None, "foo", False, True, True),
+        # Positional-only names can be independent keys in **kwargs
+        (lambda foo, /, **kwargs: None, "foo", True, True, True),
+        (lambda foo, /, **kwargs: None, "foo", True, False, False),
+        (lambda foo, /: None, "foo", True, True, False),
+        (lambda foo, /, **kwargs: None, "foo", False, True, True),
+        (lambda foo, /, **kwargs: None, "foo", False, False, True),
         # Tests for positional or keyword / keyword only
         (lambda foo=100: None, "foo", True, True, False),
         (lambda *, foo: None, "foo", False, True, True),
@@ -38,3 +44,13 @@ def test_supports_kw(
         )
         == is_supported
     )
+
+
+def test_keyword_only_override_can_match_positional_only_name():
+    def processor(value, /, **kwargs):
+        return value, kwargs
+
+    overrides = get_allowed_kwarg_only_overrides(
+        processor, {"value": "override"}, allow_var_kwargs=True
+    )
+    assert processor("positional", **overrides) == ("positional", {"value": "override"})
