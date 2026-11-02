@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """DBO under pure tensor parallelism (one DP rank, no EP), without GPUs."""
 
-import threading
 from types import SimpleNamespace
 
 import pytest
@@ -157,20 +156,22 @@ def test_workspace_id_shared_across_microbatches(monkeypatch, num_ubatches, expe
     "kwargs",
     [dict(dp=2), dict(ep=True), dict(dbo=False)],
 )
-def test_hook_not_installed_outside_pure_tp_dbo(monkeypatch, kwargs):
-    monkeypatch.setattr(parallel_state, "_dbo_tp_all_reduce_hook", None)
-    monkeypatch.setattr(ubatching, "_TP_UBATCH_COMMS", None)
+def test_no_ubatch_comms_outside_pure_tp_dbo(monkeypatch, kwargs):
+    tp = SimpleNamespace(ubatch_comms=None)
+    monkeypatch.setattr(parallel_state, "_TP", tp)
     dbo = kwargs.pop("dbo", True)
     pc = _parallel_config(**kwargs) if dbo else ParallelConfig(tensor_parallel_size=4)
     ubatching.init_dbo_tp_comms(pc)
-    assert parallel_state._dbo_tp_all_reduce_hook is None
-    assert ubatching._TP_UBATCH_COMMS is None
+    assert tp.ubatch_comms is None
 
 
-def test_hook_is_inert_outside_a_microbatch(monkeypatch):
-    # Outside a microbatch thread or for a non-TP group the hook returns None.
+def test_all_reduce_uses_device_communicator_outside_a_microbatch(monkeypatch):
+    # With or without microbatch communicators, a step that is not split takes
+    # the normal all-reduce.
     monkeypatch.setattr(ubatching, "_THREAD_ID_TO_CONTEXT", {})
-    assert ubatching._dbo_tp_all_reduce(object(), torch.ones(2)) is None
-    monkeypatch.setattr(ubatching, "_THREAD_ID_TO_CONTEXT", {threading.get_ident(): 0})
-    monkeypatch.setattr(parallel_state, "_TP", object())
-    assert ubatching._dbo_tp_all_reduce(object(), torch.ones(2)) is None
+    group = parallel_state.GroupCoordinator.__new__(parallel_state.GroupCoordinator)
+    group.device_communicator = SimpleNamespace(all_reduce=lambda x: x + 1)
+    x = torch.ones(2)
+    assert torch.equal(group._all_reduce_out_place(x), x + 1)
+    group.ubatch_comms = [object(), object()]
+    assert torch.equal(group._all_reduce_out_place(x), x + 1)

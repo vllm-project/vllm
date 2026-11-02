@@ -63,6 +63,7 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
+    from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
 
@@ -451,6 +452,8 @@ class GroupCoordinator:
     # device communicator (if use_device_communicator=True)
     device_communicator: DeviceCommunicatorBase | None
     mq_broadcaster: Any | None  # shared memory broadcaster
+    # one communicator per DBO microbatch, set by init_dbo_tp_comms
+    ubatch_comms: list["PyNcclCommunicator"] | None = None
 
     def __init__(
         self,
@@ -752,8 +755,10 @@ class GroupCoordinator:
 
     def _all_reduce_out_place(self, input_: torch.Tensor) -> torch.Tensor:
         # Under the vllm.all_reduce custom op, so compiled graphs reach it too.
-        if _dbo_tp_all_reduce_hook is not None and not torch.compiler.is_compiling():
-            out = _dbo_tp_all_reduce_hook(self, input_)
+        if self.ubatch_comms is not None and not torch.compiler.is_compiling():
+            from vllm.v1.worker.ubatching import dbo_all_reduce
+
+            out = dbo_all_reduce(self, input_)
             if out is not None:
                 return out
         if self.device_communicator is None:
@@ -1595,16 +1600,6 @@ def _replace_active_groups(
     _EPLB = eplb
     _NODE_COUNT = node_count
     return old_groups
-
-
-# Set by vllm.v1.worker.ubatching.init_dbo_tp_comms.
-_DboTpAllReduceHook = Callable[[GroupCoordinator, torch.Tensor], torch.Tensor | None]
-_dbo_tp_all_reduce_hook: _DboTpAllReduceHook | None = None
-
-
-def set_dbo_tp_all_reduce_hook(hook: _DboTpAllReduceHook | None) -> None:
-    global _dbo_tp_all_reduce_hook
-    _dbo_tp_all_reduce_hook = hook
 
 
 _TP: GroupCoordinator | None = None
