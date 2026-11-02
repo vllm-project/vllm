@@ -21,15 +21,20 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import Any, cast
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
 
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.utils.torch_utils import async_tensor_h2d
 
 from .utils import maybe_prefix
+from .vision import get_multimodal_config
 
 # Checkpoint tensors that the inference path does not use. The speaker
 # encoder's own preprocessor is unused because both encoders read the mel
@@ -261,7 +266,26 @@ class FeatureStacking(nn.Module):
         x = x.reshape(
             batch_size, (num_frames + pad) // self.factor, channels * self.factor
         )
-        return self.proj(x), (lengths + self.factor - 1) // self.factor
+        return self.proj(x), self.output_lengths(lengths)
+
+    def output_lengths(self, lengths: torch.Tensor) -> torch.Tensor:
+        return (lengths + self.factor - 1) // self.factor
+
+
+@dataclass
+class PackedFrames:
+    """The valid frames of a padded ``(B, T)`` batch, packed row after row.
+
+    ``rows`` indexes the flattened batch and ``positions`` holds each frame's
+    position in its row. ``cu_seqlens``, ``max_seqlen`` and ``sequence_lengths``
+    are in the format of the attention backend.
+    """
+
+    rows: torch.Tensor
+    positions: torch.Tensor
+    cu_seqlens: torch.Tensor
+    max_seqlen: torch.Tensor
+    sequence_lengths: torch.Tensor | None
 
 
 class MultiHeadAttention(nn.Module):
@@ -295,25 +319,37 @@ class MultiHeadAttention(nn.Module):
         if self.qk_norm:
             self.q_norm = nn.LayerNorm(self.head_dim)
             self.k_norm = nn.LayerNorm(self.head_dim)
+        self.attn = MMEncoderAttention(
+            num_heads=self.n_heads,
+            head_size=self.head_dim,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: torch.Tensor,
+        packed: PackedFrames,
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        batch_size, num_frames, _ = x.shape
-        qkv = self.w_qkv(x).view(batch_size, num_frames, 3, self.n_heads, self.head_dim)
-        q, k, v = qkv.permute(2, 0, 3, 1, 4).unbind(0)
+        """Attend within each row of the packed ``(N, d_model)`` frames."""
+        num_frames = x.shape[0]
+        qkv = self.w_qkv(x).view(num_frames, 3, self.n_heads, self.head_dim)
+        q, k, v = qkv.unbind(1)
         if self.qk_norm:
             q = self.q_norm(q).to(v.dtype)
             k = self.k_norm(k).to(v.dtype)
         q = self.rope.apply(q, cos.to(q.dtype), sin.to(q.dtype))
         k = self.rope.apply(k, cos.to(k.dtype), sin.to(k.dtype))
-        out = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask)
-        out = out.transpose(1, 2).reshape(batch_size, num_frames, self.d_model)
-        return self.out_proj(out)
+        out = self.attn(
+            q.unsqueeze(0),
+            k.unsqueeze(0),
+            v.unsqueeze(0),
+            cu_seqlens=packed.cu_seqlens,
+            max_seqlen=packed.max_seqlen,
+            sequence_lengths=packed.sequence_lengths,
+        )
+        return self.out_proj(out.reshape(num_frames, self.d_model))
 
 
 class TransformerBlock(nn.Module):
@@ -354,11 +390,11 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        attn_mask: torch.Tensor,
+        packed: PackedFrames,
         cos: torch.Tensor,
         sin: torch.Tensor,
     ) -> torch.Tensor:
-        x = x + self.attn(self.norm1(x), attn_mask, cos, sin)
+        x = x + self.attn(self.norm1(x), packed, cos, sin)
         return x + self.ffn.net(self.norm2(x))
 
 
@@ -367,8 +403,10 @@ class TransformerEncoder(nn.Module):
 
     ``forward`` takes ``(B, C, T)`` mel features, or ``(B, T, d_model)``
     pre-encoded embeddings with ``bypass_pre_encode=True``, and returns
-    ``(B, d_model, T')`` states with their lengths. Only keys are masked, so
-    padded frames never influence valid ones.
+    ``(B, d_model, T')`` states with their lengths. Only each row's valid frames
+    run through the layers, packed for variable-length attention; the padded
+    positions of the output are zero. ``lengths_cpu``, the lengths on the host,
+    lets the packing skip a device-to-host copy.
     """
 
     def __init__(
@@ -401,28 +439,63 @@ class TransformerEncoder(nn.Module):
             ]
         )
         self.final_norm = nn.LayerNorm(self.d_model)
+        self.attn_backend = self.layers[0].attn.attn.attn_backend
 
     def forward(
-        self, x: torch.Tensor, lengths: torch.Tensor, bypass_pre_encode: bool = False
+        self,
+        x: torch.Tensor,
+        lengths: torch.Tensor,
+        bypass_pre_encode: bool = False,
+        lengths_cpu: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not bypass_pre_encode:
             x, lengths = self.pre_encode(x, lengths)
+            if lengths_cpu is not None:
+                lengths_cpu = self.pre_encode.output_lengths(lengths_cpu)
         lengths = lengths.to(torch.int64)
-        if self.xscale:
-            x = x * self.xscale
-        x = self.embed_norm(x)
-        num_frames = x.shape[1]
-        positions = torch.arange(num_frames, device=x.device).unsqueeze(0)
-        # A row with no valid frame (a short clip in a later window) attends to
-        # frame 0 to stay finite; its outputs are discarded.
-        key_mask = (positions < lengths.unsqueeze(1)) | (
-            (positions == 0) & (lengths.unsqueeze(1) == 0)
+        if lengths_cpu is None:
+            lengths_cpu = lengths.cpu()
+        batch_size, num_frames, width = x.shape
+        out = x.new_zeros(batch_size * num_frames, width)
+        packed = self.pack(lengths_cpu, num_frames, x.device)
+        if packed.rows.numel():
+            h = x.reshape(-1, width).index_select(0, packed.rows)
+            if self.xscale:
+                h = h * self.xscale
+            h = self.embed_norm(h)
+            cos, sin = self.rope.cos_sin(num_frames, x.dtype, x.device)
+            cos = cos.index_select(0, packed.positions).unsqueeze(1)
+            sin = sin.index_select(0, packed.positions).unsqueeze(1)
+            for layer in self.layers:
+                h = layer(h, packed, cos, sin)
+            out.index_copy_(0, packed.rows, self.final_norm(h))
+        return out.view(batch_size, num_frames, width).transpose(1, 2), lengths
+
+    def pack(
+        self, lengths_cpu: torch.Tensor, num_frames: int, device: torch.device
+    ) -> PackedFrames:
+        """Index each row's valid frames; rows without any are left out."""
+        lengths_cpu = lengths_cpu.to(torch.int64).clamp(min=0, max=num_frames)
+        valid = torch.arange(num_frames) < lengths_cpu.unsqueeze(1)
+        rows = valid.flatten().nonzero().squeeze(1)
+        positions = torch.arange(num_frames).expand_as(valid)[valid]
+        seq_lens = lengths_cpu[lengths_cpu > 0].numpy()
+        cu_seqlens = np.concatenate(([0], np.cumsum(seq_lens))).astype(np.int32)
+        backend = self.attn_backend
+        return PackedFrames(
+            rows=async_tensor_h2d(rows, device=device),
+            positions=async_tensor_h2d(positions, device=device),
+            cu_seqlens=MMEncoderAttention.maybe_recompute_cu_seqlens(
+                backend, cu_seqlens, self.d_model, 1, device
+            ),
+            max_seqlen=torch.tensor(
+                MMEncoderAttention.compute_max_seqlen(backend, cu_seqlens),
+                dtype=torch.int32,
+            ),
+            sequence_lengths=MMEncoderAttention.maybe_compute_seq_lens(
+                backend, cu_seqlens, device
+            ),
         )
-        attn_mask = key_mask[:, None, None, :]
-        cos, sin = self.rope.cos_sin(num_frames, x.dtype, x.device)
-        for layer in self.layers:
-            x = layer(x, attn_mask, cos, sin)
-        return self.final_norm(x).transpose(1, 2), lengths
 
 
 def downsample_preds(preds: torch.Tensor, factor: int) -> torch.Tensor:
@@ -718,6 +791,7 @@ class SortformerSpeakerEncoder(nn.Module):
         state: SpeakerCacheState,
         left_offset: int,
         right_offset: int,
+        lengths_cpu: torch.Tensor | None = None,
     ) -> tuple[SpeakerCacheState, torch.Tensor]:
         """Process one window of ``(B, C, T)`` mel features.
 
@@ -730,7 +804,14 @@ class SortformerSpeakerEncoder(nn.Module):
         embs = torch.cat([state.spkcache, state.fifo, chunk_embs], dim=1)
         context_len = state.spkcache.shape[1] + state.fifo.shape[1]
         emb_lengths = context_len + chunk_lengths
-        states, state_lengths = self.encoder(embs, emb_lengths, bypass_pre_encode=True)
+        emb_lengths_cpu = (
+            None
+            if lengths_cpu is None
+            else context_len + self.encoder.pre_encode.output_lengths(lengths_cpu)
+        )
+        states, state_lengths = self.encoder(
+            embs, emb_lengths, bypass_pre_encode=True, lengths_cpu=emb_lengths_cpu
+        )
         hidden = modules.encoder_proj(states.transpose(1, 2))
         high_res_preds = modules.speaker_probs(hidden, state_lengths)
 
@@ -818,7 +899,11 @@ class ParallelExpertEncoder(nn.Module):
         return self.asr_norm.weight.dtype
 
     def forward(
-        self, mel: torch.Tensor, mel_lengths: torch.Tensor, max_feat_len: int
+        self,
+        mel: torch.Tensor,
+        mel_lengths: torch.Tensor,
+        max_feat_len: int,
+        mel_lengths_cpu: torch.Tensor | None = None,
     ) -> torch.Tensor:
         total_feat_len = min(mel.shape[-1], max_feat_len)
         num_windows = max(1, math.ceil(total_feat_len / self.window_feat_len))
@@ -837,9 +922,18 @@ class ParallelExpertEncoder(nn.Module):
             window_lengths = (mel_lengths - context_start).clamp(
                 min=0, max=context_end - context_start
             )
+            window_lengths_cpu = (
+                None
+                if mel_lengths_cpu is None
+                else (mel_lengths_cpu - context_start).clamp(
+                    min=0, max=context_end - context_start
+                )
+            )
 
             encoded, _ = self.asr_encoder(
-                asr_signal[:, :, context_start:context_end], window_lengths
+                asr_signal[:, :, context_start:context_end],
+                window_lengths,
+                lengths_cpu=window_lengths_cpu,
             )
             left_drop = left_offset // self.subsampling_factor
             core_len = self._output_boundary(end) - self._output_boundary(start)
@@ -852,6 +946,7 @@ class ParallelExpertEncoder(nn.Module):
                 state,
                 left_offset,
                 right_offset,
+                lengths_cpu=window_lengths_cpu,
             )
             speaker_windows.append(align_frames(window_preds, core_len))
 
@@ -890,6 +985,14 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
+        mm_config = get_multimodal_config()
+        if mm_config is not None and mm_config.mm_encoder_attn_dtype == "fp8":
+            raise ValueError(
+                "Nemotron-3.5-Transcribe does not support "
+                "mm_encoder_attn_dtype='fp8': the audio tower's attention runs in "
+                "the model dtype. The FP8 checkpoints quantize the tower's linear "
+                "layers without this setting."
+            )
         self.preprocessor = AudioPreprocessor(audio_config["preprocessor"])
         self.encoder = ParallelExpertEncoder(
             audio_config, quant_config, maybe_prefix(prefix, "encoder")
@@ -961,7 +1064,9 @@ class Nemotron3_5TranscribeAudioTower(nn.Module):
         mel_lengths_cpu = self.preprocessor.featurizer.get_seq_len(
             num_samples_cpu
         ).clamp(max=mel.shape[-1])
-        encoded = self.encoder(mel, mel_lengths, int(mel_lengths_cpu.max()))
+        encoded = self.encoder(
+            mel, mel_lengths, int(mel_lengths_cpu.max()), mel_lengths_cpu
+        )
         encoded_lengths = (
             mel_lengths_cpu + self.subsampling_factor - 1
         ) // self.subsampling_factor
