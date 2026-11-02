@@ -69,6 +69,7 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.repo_utils import with_retry
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
+from vllm.utils.platform_utils import cuda_is_initialized, xpu_is_initialized
 from vllm.utils.torch_utils import set_default_torch_num_threads
 
 from torch._inductor.utils import fresh_cache
@@ -280,6 +281,23 @@ def should_do_global_cleanup_after_test(request) -> bool:
 def cleanup_fixture(should_do_global_cleanup_after_test: bool):
     yield
     if should_do_global_cleanup_after_test:
+        cleanup_dist_env_and_memory()
+
+
+@pytest.fixture(autouse=True, scope="module")
+def cleanup_after_module():
+    """Release GPU and distributed state between test files.
+
+    Runs even where a directory skips the per-test cleanup: runtime sharding
+    changes which files share a pytest process from build to build, so no
+    file may inherit memory or process groups another file left behind.
+    """
+    yield
+    if (
+        cuda_is_initialized()
+        or xpu_is_initialized()
+        or torch.distributed.is_initialized()
+    ):
         cleanup_dist_env_and_memory()
 
 
