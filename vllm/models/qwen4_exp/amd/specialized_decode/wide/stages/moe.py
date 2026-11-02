@@ -168,24 +168,28 @@ def router(g, gemm, w_gate, x, part):
 def quantize_rows(g, x, x4, x4s, rows: int):
     """``x`` [rows, HIDDEN] bf16 as MXFP4: a thread a 32-value group, four code
     words to ``x4`` and the scale code to ``x4s`` (a word each)."""
-    for unit in range(g.bid * THREADS + g.tid, rows * XGROUPS, BLOCKS * THREADS):
-        at = unit * (mx.GROUP // 2)  # i32 words: two bf16 a word
-        words = [ld_i32x4(x, at + 4 * m, CM_DEV) for m in range(4)]
-        pairs = [words[m][j] for m in range(4) for j in range(4)]
-        vals = []
-        for p in pairs:
-            vals += [
-                (fx.Int32(p) << 16).bitcast(fx.Float32),
-                (fx.Int32(p) & i32(-65536)).bitcast(fx.Float32),
-            ]
-        code = mx.scale_code(mx.amax(vals))
-        st(
-            x4,
-            unit * 4,
-            fx.Vector.from_elements(mx.quant_bf16_group(pairs, code), fx.Int32),
-            CM_DEV,
-        )
-        st(x4s, unit, code, CM_DEV)
+    groups = rows * XGROUPS
+    # runs of 64 groups a wave, spread (``Grid.spread``)
+    for run in range(g.spread, -(-groups // 64), BLOCKS * WAVES):
+        unit = run * 64 + g.lane
+        if unit < groups:
+            at = unit * (mx.GROUP // 2)  # i32 words: two bf16 a word
+            words = [ld_i32x4(x, at + 4 * m, CM_DEV) for m in range(4)]
+            pairs = [words[m][j] for m in range(4) for j in range(4)]
+            vals = []
+            for p in pairs:
+                vals += [
+                    (fx.Int32(p) << 16).bitcast(fx.Float32),
+                    (fx.Int32(p) & i32(-65536)).bitcast(fx.Float32),
+                ]
+            code = mx.scale_code(mx.amax(vals))
+            st(
+                x4,
+                unit * 4,
+                fx.Vector.from_elements(mx.quant_bf16_group(pairs, code), fx.Int32),
+                CM_DEV,
+            )
+            st(x4s, unit, code, CM_DEV)
 
 
 @traced
@@ -197,7 +201,8 @@ def route(g, part, route_buf, rows: int):
     plan = router_plan()
     first = g.lane * PER
     index = [first + i32(p) for p in range(PER)]
-    for row in range(g.bid * WAVES + g.wave, rows, BLOCKS * WAVES):
+    # mirrored (``Grid.mirror``): off quantize_rows' waves in the same phase
+    for row in range(g.mirror, rows, BLOCKS * WAVES):
         vec = [
             [
                 ld(
@@ -679,7 +684,7 @@ def combine(g, xch, route_buf, part, part2, flags, rows: int):
     lpg = ex_.lines_per_group(rows)
     lines = ex_.GROUPS * lpg
     row = xch._row(xch.rank)
-    for line in range(g.bid * WAVES + g.wave, lines, BLOCKS * WAVES):
+    for line in range(g.spread, lines, BLOCKS * WAVES):  # ``Grid.spread``
         grp, blk = line // lpg, line % lpg
         token = blk * ex_.TOKENS + g.lane // 8
         tk = (token < rows).select(token, i32(rows - 1))

@@ -385,9 +385,10 @@ def _hc_kernel(rows, codec="bf16", combine=True, cold=False):
             grid_sync(g)
             hc.mix_down(g, gemm, state, rrms, norm_w, w_di, part)
             grid_sync(g)
+            pre = hc.UpLoads(g, up, w_up, state, rrms, norm_w, rows)
             hc.mix_reduce(g, part, down, inj, rows, True)
             grid_sync(g)
-            hc.mix_up(g, up, sm.red.ptr, down, w_up, state, rrms, norm_w, x_out, rows)
+            hc.mix_up(g, up, sm.red.ptr, down, w_up, x_out, rows, pre)
         if fx.const_expr(combine):
             grid_sync(g)
             # y through a one-rank exchange (a 64-column group a CTA), then the

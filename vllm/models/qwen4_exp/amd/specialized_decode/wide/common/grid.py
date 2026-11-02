@@ -43,7 +43,7 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import (
     traced,
     uniform,
 )
-from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import BLOCKS
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import BLOCKS, WAVES
 
 STRIPES = 64  # arrival counters: wave 0's lanes poll them all at once
 STRIPE_WORDS = 64  # one 256-byte line a counter
@@ -99,6 +99,16 @@ class Grid(TraceInvariant):
         self.stripe = (self.bid % fx.Int32(8)) * fx.Int32(8) + (
             self.bid // fx.Int32(8)
         ) % fx.Int32(8)
+        # a phase of few independent items (a row, a (row, stream), a run of
+        # 64 items) takes item i on CTA i % BLOCKS, wave i // BLOCKS: one wave
+        # a CU first, so a CU's memory pipe queues one wave's loads where four
+        # waves of a quarter of the CUs did. ``mirror``: CTA BLOCKS - 1 - i %
+        # BLOCKS, wave WAVES - 1 - i // BLOCKS, for a phase that shares the
+        # CTAs with another. Loop ``range(g.spread, items, BLOCKS * WAVES)``.
+        self.spread = self.wave * fx.Int32(BLOCKS) + self.bid
+        self.mirror = (fx.Int32(WAVES - 1) - self.wave) * fx.Int32(BLOCKS) + (
+            fx.Int32(BLOCKS - 1) - self.bid
+        )
 
 
 @traced

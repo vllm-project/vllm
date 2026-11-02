@@ -409,9 +409,10 @@ def build(key: LayerBuild):
                 return end_phase(f"{tag}.mix_down+up", then)
             hc.mix_down(g, gemm, state, scr.rrms, norm, di, scr.part)
             end_phase(f"{tag}.mix_down")
+            pre = hc.UpLoads(g, up_gemm, up, state, scr.rrms, norm, S)
             hc.mix_reduce(g, scr.part, scr.down, inj, S, True)
             end_phase(f"{tag}.mix_reduce")
-            hc.mix_up(g, up_gemm, aux_f32, scr.down, up, state, scr.rrms, norm, x, S)
+            hc.mix_up(g, up_gemm, aux_f32, scr.down, up, x, S, pre)
             return end_phase(f"{tag}.mix_up", then)
 
         def back(weights, source, k, pending=None, name="out+allreduce+combine"):

@@ -107,9 +107,10 @@ class Bf16Weights(TraceInvariant):
     def koff(m, g):
         return i32(32 * m) + g * i32(8)
 
-    def issue(self, row, chunk, g):
+    def issue(self, row, chunk, g, mask=None):
         """The lane's four 16-byte loads of chunk ``chunk``; a row past ``rows``
-        reads the last row, a column past ``cols`` loads as zero."""
+        reads the last row, a column past ``cols`` loads as zero. With
+        ``mask`` false, no request (zeros)."""
         row = (row < i32(self.rows)).select(row, i32(self.rows - 1))
         out = []
         for m in range(SLICES):
@@ -117,11 +118,17 @@ class Bf16Weights(TraceInvariant):
             at = (row * i32(self.cols) + k) // i32(2)  # i32 words
             if self.cols % CHUNK:
                 live = k < i32(self.cols)
-                w = ld_i32x4(self.addr, live.select(at, i32(0)), self.cm)
+                w = self._ld(live.select(at, i32(0)), mask)
                 out.append(live.select(w, zeros(4, fx.Int32)))
             else:
-                out.append(ld_i32x4(self.addr, at, self.cm))
+                out.append(self._ld(at, mask))
         return out
+
+    def _ld(self, at, mask):
+        if mask is None:
+            return ld_i32x4(self.addr, at, self.cm)
+        nbytes = self.rows * self.cols * 2
+        return ld(self.addr, at, fx.Int32, 4, cm=self.cm, nbytes=nbytes, mask=mask)
 
     @staticmethod
     def operands(loaded):
@@ -350,25 +357,35 @@ class Gemm(TraceInvariant):
         operands ``a`` ([mtile][slice])."""
         return self.mma_tiles(acc, a, lambda t: self.operands(buf, t, weights.koff))
 
-    def stage(self, source, weights, rows, first, count: int, i):
-        """The activation and weight loads of chunk ``first + min(i, count - 1)``."""
+    def stage(self, source, weights, rows, first, count: int, i, pre=None):
+        """The activation and weight loads of chunk ``first + min(i, count - 1)``;
+        ``pre``: its weight loads, already issued (``preload``)."""
         chunk = first + (i < i32(count)).select(i, i32(count - 1))
-        return self.fill(source, chunk), [
-            weights.issue(r, chunk, self.group) for r in rows
+        if pre is None:
+            pre = [weights.issue(r, chunk, self.group) for r in rows]
+        return self.fill(source, chunk), pre
+
+    def preload(self, weights, rows, first, count: int, mask=None):
+        """The weight loads of ``run``'s first ``min(depth, count)`` chunks, to
+        issue before the phase (weights do not depend on the phase before) and
+        pass to ``run`` as ``pending``."""
+        return [
+            [weights.issue(r, first + i32(i), self.group, mask) for r in rows]
+            for i in range(min(self.depth, count))
         ]
 
     def run(self, source, weights, rows, first, count: int, pending=None):
         """Accumulate chunks ``first .. first + count`` (a trace-time count) into
         one accumulator per (weight tile, token tile); ``rows``: the lane's
-        weight row of each weight tile. ``pending`` (resident widths): the
-        unit's weights already in flight (``issue_chunks``)."""
+        weight row of each weight tile. ``pending``: the unit's weights already
+        in flight, at the resident widths every chunk's (``issue_chunks``),
+        else ``preload``'s of the first chunks."""
         if self.resident:
             return self._resident(source, weights, rows, first, count, pending)
-        if pending is not None:
-            raise ValueError("only a resident GEMM takes prefetched weights")
+        pre = pending or [None] * min(self.depth, count)
         if count <= UNROLL:
-            return self._unrolled(source, weights, rows, first, count)
-        return _gemm_loop(self, source, weights, rows, first, count)
+            return self._unrolled(source, weights, rows, first, count, pre)
+        return _gemm_loop(self, source, weights, rows, first, count, pre)
 
     # resident stage: row ``token`` of the real rows at ``token *
     # resident_stride(count)`` words, its K slice contiguous
@@ -465,11 +482,11 @@ class Gemm(TraceInvariant):
             ops = ahead
         return acc
 
-    def _unrolled(self, source, weights, rows, first, count: int):
+    def _unrolled(self, source, weights, rows, first, count: int, pre):
         depth = min(self.depth, count)
         acc = [[zeros(4) for _ in range(self.tiles)] for _ in range(self.mtiles)]
         staged = [
-            self.stage(source, weights, rows, first, count, i32(i))
+            self.stage(source, weights, rows, first, count, i32(i), pre[i])
             for i in range(depth)
         ]
         self.put(i32(0), staged[0][0], source)
@@ -488,13 +505,14 @@ class Gemm(TraceInvariant):
 
 
 @traced
-def _gemm_loop(gemm, source, weights, rows, first, count):
+def _gemm_loop(gemm, source, weights, rows, first, count, pre):
     """``Gemm.run`` for a long K: chunk ``c + depth`` issued while chunk ``c``
     multiplies; the last ``depth`` iterations re-issue the last chunk."""
     depth = gemm.depth
     acc = [[zeros(4) for _ in range(gemm.tiles)] for _ in range(gemm.mtiles)]
     staged = [
-        gemm.stage(source, weights, rows, first, count, i32(i)) for i in range(depth)
+        gemm.stage(source, weights, rows, first, count, i32(i), pre[i])
+        for i in range(depth)
     ]
     a = staged[0][1]
     gemm.put(i32(0), staged[0][0], source)

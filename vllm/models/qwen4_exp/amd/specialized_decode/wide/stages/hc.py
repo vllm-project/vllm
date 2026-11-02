@@ -29,6 +29,9 @@ from __future__ import annotations
 import flydsl.expr as fx
 from flydsl.expr import const_expr, range_constexpr
 
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.grid import (
+    TraceInvariant,
+)
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import (
     CM_DEV,
     bf16_round,
@@ -308,43 +311,101 @@ def mix_reduce(g, part, down, inj, rows: int, inject: bool):
     plan = down_plan(rows)
     used = MIXED if inject else LOWRANK
     pairs = used // 2
-    for idx in range(g.bid * THREADS + g.tid, rows * pairs, BLOCKS * THREADS):
-        b, r = idx // pairs, idx % pairs * 2
-        loads = [
+    items = rows * pairs
+    # runs of 64 items a wave, mirrored (``Grid.mirror``): off the CTAs whose
+    # mix_up loads are in flight (``UpLoads``)
+    for run in range(g.mirror, -(-items // 64), BLOCKS * WAVES):
+        idx = run * 64 + g.lane
+        if idx < items:
+            b, r = idx // pairs, idx % pairs * 2
+            loads = [
+                ld(
+                    part,
+                    (i32(s * rows) + b) * i32(plan.padded) + r,
+                    fx.Float32,
+                    2,
+                    cm=CM_DEV,
+                )
+                for s in range_constexpr(plan.splits)
+            ]
+            lo, hi = loads[0][0], loads[0][1]
+            for s in range_constexpr(1, plan.splits):
+                lo, hi = lo + loads[s][0], hi + loads[s][1]
+            lo = bf16_round(lo) / fx.Float32(HC)
+            hi = bf16_round(hi) / fx.Float32(HC)
+            if r < LOWRANK:
+                st(
+                    down,
+                    b * (LOWRANK // 2) + r // 2,
+                    pack_bf16(silu(lo), silu(hi)),
+                    CM_DEV,
+                )
+            else:
+                v = fx.Vector.from_elements(
+                    [2.0 * sigmoid(lo), 2.0 * sigmoid(hi)], fx.Float32
+                )
+                st(inj, b * HC + r - LOWRANK, v, CM_DEV)
+
+
+class UpLoads(TraceInvariant):
+    """The loads of the CTA's mix_up unit (a CTA has at most one) that do not
+    depend on ``down``: the first chunks of its W_up rows (``Gemm.preload``)
+    and its epilogue's norm weight, state and rrms. Issued as mix_reduce
+    starts (``mix_up`` waits only for ``down``), so they land while the grid
+    waits for the reduce; a CTA with no unit issues no request. Not at the
+    resident widths, whose mix is one phase (``mix_resident``)."""
+
+    def __init__(self, g, gemm, w_up, state, rrms, norm_w, rows: int):
+        live = g.bid < i32(UP_UNITS)
+        col = g.bid * UP_COLS + g.lane // 16 * 4
+        self.weights = gemm.preload(
+            tiled.Bf16Weights(w_up, HC_HIDDEN, LOWRANK),
+            [_up_row(g, g.bid)],
+            i32(0),
+            UP_CHUNKS,
+            live,
+        )
+        self.tokens = [
+            fx.min(i32(t * 16) + g.lane % 16, i32(rows - 1)) for t in range(gemm.tiles)
+        ]
+        at = g.wave * HIDDEN + col
+        self.norm = ld(norm_w, at // 2, fx.Int32, 2, nbytes=HC_HIDDEN * 2, mask=live)
+        self.state = [
             ld(
-                part,
-                (i32(s * rows) + b) * i32(plan.padded) + r,
-                fx.Float32,
+                state,
+                (tk * HC_HIDDEN + at) // 2,
+                fx.Int32,
                 2,
                 cm=CM_DEV,
+                nbytes=rows * HC_HIDDEN * 2,
+                mask=live,
             )
-            for s in range_constexpr(plan.splits)
+            for tk in self.tokens
         ]
-        lo, hi = loads[0][0], loads[0][1]
-        for s in range_constexpr(1, plan.splits):
-            lo, hi = lo + loads[s][0], hi + loads[s][1]
-        lo = bf16_round(lo) / fx.Float32(HC)
-        hi = bf16_round(hi) / fx.Float32(HC)
-        if r < LOWRANK:
-            st(down, b * (LOWRANK // 2) + r // 2, pack_bf16(silu(lo), silu(hi)), CM_DEV)
-        else:
-            v = fx.Vector.from_elements(
-                [2.0 * sigmoid(lo), 2.0 * sigmoid(hi)], fx.Float32
+        self.rrms = [
+            ld(
+                rrms,
+                tk * HC + g.wave,
+                fx.Float32,
+                cm=CM_DEV,
+                nbytes=rows * HC * 4,
+                mask=live,
             )
-            st(inj, b * HC + r - LOWRANK, v, CM_DEV)
+            for tk in self.tokens
+        ]
 
 
 @traced
-def mix_up(g, gemm, red, down, w_up, state, rrms, norm_w, x_out, rows: int):
+def mix_up(g, gemm, red, down, w_up, x_out, rows: int, pre):
     """``x = bf16(sum_s sigmoid(bf16(down @ W_up[s].T)) xn_s / HC)``: unit
     ``u`` is columns ``16 u ..`` of every stream, wave ``s`` stream ``s``'s
     rows of W_up; ``red`` (LDS, ``up_lds_words`` f32) adds the streams in
-    order."""
+    order. ``pre``: the CTA's ``UpLoads``."""
     weights = tiled.Bf16Weights(w_up, HC_HIDDEN, LOWRANK)
-    source = tiled.Source(down, LOWRANK)
+    src = tiled.Source(down, LOWRANK)
     for unit in range(g.bid, UP_UNITS, BLOCKS):
         _up_unit(
-            g, gemm, red, source, weights, state, rrms, norm_w, x_out, rows, unit, None
+            g, gemm, red, src, weights, None, None, None, x_out, rows, unit, None, pre
         )
 
 
@@ -356,27 +417,49 @@ def _up_row(g, unit):
 
 @traced
 def _up_unit(
-    g, gemm, red, source, weights, state, rrms, norm_w, x_out, rows, unit, pending
+    g,
+    gemm,
+    red,
+    source,
+    weights,
+    state,
+    rrms,
+    norm_w,
+    x_out,
+    rows,
+    unit,
+    pending,
+    pre=None,
 ):
+    """One mix_up unit. ``pending``: its W_up chunks in flight (resident
+    widths); ``pre`` (``mix_up``): the CTA's ``UpLoads``, its epilogue's loads
+    and first W_up chunks already issued (``state``, ``rrms`` and ``norm_w``
+    then unused)."""
     lane = g.lane
     c0 = unit * UP_COLS
     rows_w = [_up_row(g, unit)]
-    col = c0 + lane // 16 * 4
-    # the epilogue's state, norm weight and rrms loads go out before the
-    # GEMM, so their latency hides behind it
-    tks = [fx.min(i32(t * 16) + lane % 16, i32(rows - 1)) for t in range(gemm.tiles)]
-    ww = ld(norm_w, (g.wave * HIDDEN + col) // 2, fx.Int32, 2)
-    xws = [
-        ld(
-            state,
-            (tk * HC_HIDDEN + g.wave * HIDDEN + col) // 2,
-            fx.Int32,
-            2,
-            cm=CM_DEV,
-        )
-        for tk in tks
-    ]
-    rs = [ld(rrms, tk * HC + g.wave, fx.Float32, cm=CM_DEV) for tk in tks]
+    if const_expr(pre is None):
+        col = c0 + lane // 16 * 4
+        # the epilogue's state, norm weight and rrms loads go out before the
+        # GEMM, so their latency hides behind it
+        tks = [
+            fx.min(i32(t * 16) + lane % 16, i32(rows - 1)) for t in range(gemm.tiles)
+        ]
+        ww = ld(norm_w, (g.wave * HIDDEN + col) // 2, fx.Int32, 2)
+        xws = [
+            ld(
+                state,
+                (tk * HC_HIDDEN + g.wave * HIDDEN + col) // 2,
+                fx.Int32,
+                2,
+                cm=CM_DEV,
+            )
+            for tk in tks
+        ]
+        rs = [ld(rrms, tk * HC + g.wave, fx.Float32, cm=CM_DEV) for tk in tks]
+    else:
+        tks, ww, xws, rs = pre.tokens, pre.norm, pre.state, pre.rrms
+        pending = pre.weights
     acc = gemm.run(source, weights, rows_w, i32(0), UP_CHUNKS, pending)[0]
     ws = [
         fx.Int32(ww[0]) << 16,
