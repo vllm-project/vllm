@@ -61,6 +61,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_flashinfer_allreduce = False
             use_flashinfer_pcie_ipc_allreduce = False
             use_aiter_allreduce = False
+            use_aiter_tp_all_gather = False
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
@@ -80,12 +81,18 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 and not envs.VLLM_BATCH_INVARIANT
                 and bool(rocm_aiter_ops.is_custom_all_reduce_enabled())
             )
+            use_aiter_tp_all_gather = False
+            if use_aiter_allreduce:
+                from vllm.platforms.rocm import get_cdna_version
+
+                use_aiter_tp_all_gather = get_cdna_version() == 4
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
         self.use_flashinfer_pcie_ipc_allreduce = use_flashinfer_pcie_ipc_allreduce
         self.use_aiter_allreduce = use_aiter_allreduce
+        self.use_aiter_tp_all_gather = use_aiter_tp_all_gather
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -499,6 +506,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # copy on every step. This is on the hot path for TP forward passes, so
         # keep ROCm on the base-class collective to avoid a decode regression.
         if current_platform.is_rocm():
+            out = self._aiter_all_gather(input_, dim)
+            if out is not None:
+                return out
             return super().all_gather(input_, dim)
 
         input_size = input_.size()
@@ -510,6 +520,31 @@ class CudaCommunicator(DeviceCommunicatorBase):
         output_tensor = output_tensor.reshape((self.world_size,) + input_size)
         output_tensor = output_tensor.movedim(0, dim)
         return output_tensor.reshape(
+            input_size[:dim]
+            + (self.world_size * input_size[dim],)
+            + input_size[dim + 1 :]
+        )
+
+    def _aiter_all_gather(self, input_: torch.Tensor, dim: int) -> torch.Tensor | None:
+        aiter_comm = self.aiter_ar_comm
+        if (
+            not self.use_aiter_tp_all_gather
+            or aiter_comm is None
+            or self.world_size not in (2, 4, 8)
+            or input_.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+            or input_.numel() == 0
+            or not input_.is_contiguous()
+            or not aiter_comm.should_custom_ag(input_)
+        ):
+            return None
+        input_size = input_.size()
+        if dim > 0:
+            row = input_size[dim:].numel()
+            if row * input_.element_size() % 16 != 0:
+                return None
+            input_ = input_.view(-1, row)
+        output = aiter_comm.all_gather_unreg(input_, dim=0 if dim == 0 else -1)
+        return output.view(
             input_size[:dim]
             + (self.world_size * input_size[dim],)
             + input_size[dim + 1 :]
