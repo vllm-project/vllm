@@ -557,6 +557,26 @@ class TestMockObjTierFailures:
         assert not tier._transfers
         assert list(tier.get_finished_jobs()) == []
 
+    def test_telemetry_failure_does_not_lose_successful_transfer(self, monkeypatch):
+        """Telemetry is optional, so a raise must not fail a completed store."""
+        tier, agent = _make_tier(num_blocks=4)
+        monkeypatch.setattr(
+            agent,
+            "get_xfer_telemetry",
+            MagicMock(side_effect=RuntimeError("nixlNoTelemetryError")),
+        )
+
+        tier.submit_store(make_job(1, [key(1)], [0]))
+        results = list(tier.get_finished_jobs())
+
+        assert len(results) == 1
+        assert results[0].job_id == 1
+        assert results[0].success
+        # Only the timing is lost.
+        assert results[0].transfer_time is None
+        assert not tier._transfers
+        assert list(tier.get_finished_jobs()) == []
+
     def test_xfer_cleanup_retry_finalizes_parent_job_and_primary_pin(self, monkeypatch):
         num_blocks = 4
         tensor = torch.zeros((num_blocks, _BLOCK_ELEMENTS), dtype=_DTYPE)
@@ -647,6 +667,7 @@ class TestObjTierKVEvents:
         assert events[0].medium == Medium.STORAGE
         assert events[0].locality is Locality.REMOTE
         assert not events[0].removed
+        assert events[0].req_context is _CTX
         # take_events drains the buffer.
         assert list(self.tier.take_events()) == []
 
@@ -687,7 +708,7 @@ class TestObjTierKVEvents:
         events = list(self.tier.take_events())
         assert len(events) == 1
         assert events[0].keys == [key(2)]
-        assert self.tier._store_job_keys == {}
+        assert self.tier._store_jobs == {}
 
     def test_load_job_emits_no_event(self):
         self.tier.submit_store(make_job(1, [key(1)], [0]))
@@ -708,7 +729,7 @@ class TestObjTierKVEvents:
         results = drain(self.tier)
         assert not results[0].success
         assert list(self.tier.take_events()) == []
-        assert self.tier._store_job_keys == {}
+        assert self.tier._store_jobs == {}
 
     def test_submission_failure_emits_no_event(self):
         self.agent.make_prepped_xfer = lambda *a, **k: None
@@ -716,7 +737,7 @@ class TestObjTierKVEvents:
         results = list(self.tier.get_finished_jobs())
         assert not results[0].success
         assert list(self.tier.take_events()) == []
-        assert self.tier._store_job_keys == {}
+        assert self.tier._store_jobs == {}
 
     def test_events_disabled_by_default(self):
         tier, _ = _make_tier()
@@ -725,7 +746,7 @@ class TestObjTierKVEvents:
         assert len(results) == 1
         assert results[0].success
         assert tier.events is None
-        assert tier._store_job_keys == {}
+        assert tier._store_jobs == {}
         assert list(tier.take_events()) == []
 
     def test_events_require_global_kv_events_flag(self):
@@ -739,7 +760,7 @@ class TestObjTierKVEvents:
         assert len(results) == 1
         assert results[0].success
         assert tier.events is None
-        assert tier._store_job_keys == {}
+        assert tier._store_jobs == {}
         assert list(tier.take_events()) == []
 
 

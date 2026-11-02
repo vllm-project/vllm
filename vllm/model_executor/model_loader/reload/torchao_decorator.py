@@ -10,7 +10,7 @@ import torch
 from vllm.config import ModelConfig
 
 from .layerwise import (
-    finalize_layerwise_reload,
+    finalize_layerwise_processing,
     initialize_layerwise_reload,
 )
 
@@ -53,7 +53,7 @@ def support_quantized_model_reload_from_hp_weights(
 
         initialize_layerwise_reload(model)
         loaded_weights = original_load_weights(self, *args, **kwargs)
-        finalize_layerwise_reload(model, model._model_config)
+        finalize_layerwise_processing(model, model._model_config)
 
         return loaded_weights
 

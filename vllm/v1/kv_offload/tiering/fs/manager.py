@@ -154,6 +154,8 @@ class FileSystemTierManager(SecondaryTierManager):
         # invalidate this tier's cached absent verdicts for those keys (and,
         # when enabled, emit KV events).
         self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Event metadata is retained only when this tier emits KV events.
+        self._store_jobs: dict[JobId, TransferJob] = {}
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
         self._load_job_keys: dict[JobId, list[OffloadKey]] = {}
@@ -225,6 +227,8 @@ class FileSystemTierManager(SecondaryTierManager):
     def submit_store(self, job_metadata: TransferJob) -> None:
         keys = list(job_metadata.keys)
         self._store_job_keys[job_metadata.job_id] = keys
+        if self.events is not None:
+            self._store_jobs[job_metadata.job_id] = job_metadata
         task = functools.partial(
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in keys],
@@ -285,16 +289,18 @@ class FileSystemTierManager(SecondaryTierManager):
             block_count = self._job_block_counts.pop(job_id, 0)
             transfer_bytes = block_count * self._block_size if block_count else None
             keys = self._store_job_keys.pop(job_id, None)
+            job = self._store_jobs.pop(job_id, None)
             if keys and success:
                 # Successful store makes previously absent keys known-present.
                 self._lookup_manager.mark_present(keys)
-                if self.events is not None:
+                if self.events is not None and job is not None and job.keys:
                     self.events.append(
                         OffloadingEvent(
                             keys=keys,
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
+                            req_context=job.req_context,
                         )
                     )
             load_keys = self._load_job_keys.pop(job_id, None)

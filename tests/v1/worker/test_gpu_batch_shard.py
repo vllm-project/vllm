@@ -323,7 +323,7 @@ def test_all_to_all_reassembly_simulated(tp_size: int):
             [sends[src][bounds[rank] : bounds[rank + 1]] for src in range(tp_size)]
         )
         # Reassemble source-rank-major chunks into full-vocab rows, mirroring
-        # all_to_all_logits (source-rank order is vocab-shard order).
+        # all_to_all_vocab_shards (source-rank order is vocab-shard order).
         reassembled = (
             recv.view(tp_size, metadata.num_local_logits, shard_w)
             .permute(1, 0, 2)
