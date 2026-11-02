@@ -695,6 +695,21 @@ steps:
     - pytest -v -s tests/kernels/attention/test_minimax_m3.py -k prefill_sparse_attention_correctness
     - pytest -v -s tests/kernels/test_minimax_m3_sparse_attn_fp8_scale.py
 
+- label: ":nvidia: (H100) MiniMax-M3 NVFP4 MoE"
+  key: kernels-minimax-m3-nvfp4-moe-h100
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
+  - vllm/model_executor/layers/quantization/compressed_tensors/compressed_tensors_moe/compressed_tensors_moe_w4a4_nvfp4.py
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/utils/humming/
+  - tests/kernels/moe/test_minimax_m3_hopper_nvfp4_moe.py
+  commands:
+    - pytest -v -s tests/kernels/moe/test_minimax_m3_hopper_nvfp4_moe.py
+
 - label: ":nvidia: (B200) Kernels"
   key: kernels-b200
   automatic_shard: true

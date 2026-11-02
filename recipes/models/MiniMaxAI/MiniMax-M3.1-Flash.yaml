@@ -235,6 +235,8 @@ variants:
       - '{"indexer_kv_dtype": "fp8"}'
       - "--compilation-config"
       - '{"cudagraph_mode": "FULL_AND_PIECEWISE"}'
+      - "--moe-backend"
+      - "marlin"
 
 compatible_strategies:
   - single_node_tp
@@ -1616,7 +1618,8 @@ guide: |
   ```
 
   - Hopper has no FP4 tensor cores: the KV cache and the indexer K cache use
-    FP8, and the NVFP4 experts run on the Marlin MoE kernel.
+    FP8, and the NVFP4 experts run as W4A16 on the Marlin MoE kernel. Without
+    `--moe-backend`, they run as W4A16 on Humming.
   - `--limit-mm-per-prompt '{"video": 0}'` turns off video inputs; images
     still work.
   - DSpark speculative decoding is not enabled on Hopper.

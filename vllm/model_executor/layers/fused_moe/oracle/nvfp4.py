@@ -638,8 +638,12 @@ def make_nvfp4_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
-    # Marlin consumes A16 and must not receive per-token A4 metadata.
-    if backend == NvFp4MoeBackend.MARLIN and moe_quant_config.use_nvfp4_w4a16:
+    # Marlin, and Humming without activation quantization (SM90), consume A16
+    # and must not receive per-token A4 metadata.
+    if (
+        backend in (NvFp4MoeBackend.MARLIN, NvFp4MoeBackend.HUMMING)
+        and moe_quant_config.quant_dtype is None
+    ):
         per_token_activation = False
 
     # Create Prepare/Finalize.
