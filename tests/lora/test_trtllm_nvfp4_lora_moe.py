@@ -1,14 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
 
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.config import LoRAConfig
+from vllm.lora.layers.utils import LoRAMapping
+from vllm.lora.punica_wrapper import get_punica_wrapper
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
 from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
     TrtLlmNvFp4LoRAExperts,
 )
@@ -54,19 +62,31 @@ def _dequant_nvfp4(packed, block_scale, global_scale):
     return values * scale * global_scale
 
 
-def _make_experts():
-    w13 = torch.randint(0, 256, (E, 2 * N, K // 2), dtype=torch.uint8, device="cuda")
-    w2 = torch.randint(0, 256, (E, K, N // 2), dtype=torch.uint8, device="cuda")
-    s13 = (torch.rand(E, 2 * N, K // 16, device="cuda") + 0.5).to(torch.float8_e4m3fn)
-    s2 = (torch.rand(E, K, N // 16, device="cuda") + 0.5).to(torch.float8_e4m3fn)
-    gs13 = (torch.rand(E, device="cuda") + 0.5) / 64
-    gs2 = (torch.rand(E, device="cuda") + 0.5) / 64
-    a13 = torch.ones(E, device="cuda")
-    a2 = torch.ones(E, device="cuda")
+def _make_experts(num_local: int = E, ep_rank: int = 0, clamp: float | None = None):
+    L = num_local
+    w13 = torch.randint(0, 256, (L, 2 * N, K // 2), dtype=torch.uint8, device="cuda")
+    w2 = torch.randint(0, 256, (L, K, N // 2), dtype=torch.uint8, device="cuda")
+    s13 = (torch.rand(L, 2 * N, K // 16, device="cuda") + 0.5).to(torch.float8_e4m3fn)
+    s2 = (torch.rand(L, K, N // 16, device="cuda") + 0.5).to(torch.float8_e4m3fn)
+    gs13 = (torch.rand(L, device="cuda") + 0.5) / 64
+    gs2 = (torch.rand(L, device="cuda") + 0.5) / 64
+    a13 = torch.ones(L, device="cuda")
+    a2 = torch.ones(L, device="cuda")
 
     config = make_dummy_moe_config(
-        num_experts=E, experts_per_token=TOPK, hidden_dim=K, intermediate_size=N
+        num_experts=E,
+        num_local_experts=L,
+        experts_per_token=TOPK,
+        hidden_dim=K,
+        intermediate_size=N,
     )
+    if L != E:
+        config.moe_parallel_config = replace(
+            FusedMoEParallelConfig.make_no_parallel(),
+            ep_size=E // L,
+            ep_rank=ep_rank,
+            use_ep=True,
+        )
     layer = SimpleNamespace(activation=MoEActivation.SILU, moe_config=config)
     k13, ks13, kgs13, ka13, k2, ks2, kgs2, ka2 = convert_to_nvfp4_moe_kernel_format(
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
@@ -84,6 +104,7 @@ def _make_experts():
     quant_config = make_nvfp4_moe_quant_config(
         NvFp4MoeBackend.FLASHINFER_TRTLLM, ks13, ks2, kgs13, kgs2, ka13, ka2
     )
+    quant_config.gemm1_clamp_limit = clamp
     experts = TrtLlmNvFp4LoRAExperts(config, quant_config, True)
     fake_layer = torch.nn.Module()
     fake_layer.w13_weight_scale_2 = kgs13
@@ -236,8 +257,6 @@ def test_lora_experts_are_opt_in_for_per_token_activations():
     assert select("auto", True, per_token)[0] != trtllm
     with pytest.raises(ValueError, match="does not support"):
         select("flashinfer_trtllm", True, kNvfp4Dynamic)
-    with pytest.raises(ValueError, match="does not support"):
-        select("flashinfer_trtllm", True, per_token, RoutingMethodType.Llama4)
 
 
 def test_requested_kernel_cls_puts_lora_experts_first():
@@ -252,3 +271,248 @@ def test_requested_kernel_cls_puts_lora_experts_first():
         *backend_to_kernel_cls(trtllm),
     ]
     assert _requested_kernel_cls(cutlass, config) == backend_to_kernel_cls(cutlass)
+
+
+def _make_lora(rank: int, slots: list[int], num_local: int = E):
+    max_loras = 4
+    g = 0.5 / rank**0.5
+
+    def rand(*shape, scale):
+        return (torch.randn(*shape, device="cuda") * scale).to(torch.bfloat16)
+
+    w13_a = tuple(rand(max_loras, num_local, rank, K, scale=K**-0.5) for _ in range(2))
+    w13_b = tuple(rand(max_loras, num_local, N, rank, scale=g) for _ in range(2))
+    w2_a = (rand(max_loras, num_local, rank, N, scale=N**-0.5),)
+    w2_b = (rand(max_loras, num_local, K, rank, scale=g),)
+    adapter_enabled = torch.zeros(max_loras + 1, dtype=torch.int32, device="cuda")
+    adapter_enabled[:max_loras] = 1
+
+    punica = get_punica_wrapper(
+        8192,
+        256,
+        "cuda",
+        lora_config=LoRAConfig(max_loras=max_loras, max_lora_rank=rank),
+    )
+    mapping = tuple(s + 1 for s in slots)
+    punica.update_metadata(
+        LoRAMapping(mapping, mapping, is_prefill=False),
+        list(range(1, max_loras + 1)),
+        max_loras,
+        32000,
+    )
+    context = MoELoRAContext(
+        w13_lora_a_stacked=w13_a,
+        w13_lora_b_stacked=w13_b,
+        w2_lora_a_stacked=w2_a,
+        w2_lora_b_stacked=w2_b,
+        adapter_enabled=adapter_enabled,
+        max_loras=max_loras,
+        top_k=TOPK,
+        w13_num_slices=2,
+        fully_sharded=False,
+        tp_rank=0,
+        tp_size=1,
+        local_num_experts=num_local,
+        punica_wrapper=punica,
+        use_tuned_config=False,
+    )
+    return context
+
+
+def _lora_reference(reference, context, x, ids, weights, slots, offset, clamp):
+    w13, w2 = reference
+    num_local = w13.shape[0]
+    xq, xd = _quant_dequant(x), x.double()
+    s = torch.tensor(slots, device="cuda")
+    has = (s >= 0).double()[:, None]
+    s = s.clamp(min=0)
+    out = torch.zeros(x.shape[0], K, dtype=torch.float64, device="cuda")
+    for k in range(TOPK):
+        local = ids[:, k].long() - offset
+        mask = ((local >= 0) & (local < num_local)).double()[:, None]
+        e = local.clamp(0, num_local - 1)
+        h = torch.einsum("tk,tnk->tn", xq, w13[e])
+        halves = []
+        for i, half in enumerate((h[:, :N], h[:, N:])):
+            a = context.w13_lora_a_stacked[i][s, e].double()
+            b = context.w13_lora_b_stacked[i][s, e].double()
+            delta = torch.einsum("tr,tnr->tn", torch.einsum("tk,trk->tr", xd, a), b)
+            halves.append(half + has * delta)
+        gate, up = halves
+        if clamp is not None:
+            gate, up = gate.clamp(max=clamp), up.clamp(-clamp, clamp)
+        act = (torch.nn.functional.silu(gate) * up).to(torch.bfloat16)
+        base = torch.einsum("tn,tkn->tk", _quant_dequant(act), w2[e])
+        a2 = context.w2_lora_a_stacked[0][s, e].double()
+        b2 = context.w2_lora_b_stacked[0][s, e].double()
+        d2 = torch.einsum("tn,trn->tr", act.double(), a2)
+        d2 = torch.einsum("tr,tkr->tk", d2, b2)
+        out += mask * weights[:, k, None].double() * (base + has * d2)
+    return out
+
+
+def _apply(experts, kernel_weights, context, x, ids, weights, expert_map):
+    experts.set_lora_context(context)
+    output = torch.empty(x.shape[0], K, dtype=torch.bfloat16, device="cuda")
+    empty = torch.empty(0, device="cuda")
+    experts.apply(
+        output,
+        x,
+        kernel_weights[0],
+        kernel_weights[1],
+        weights,
+        ids,
+        MoEActivation.SILU,
+        E,
+        expert_map,
+        None,
+        None,
+        empty,
+        empty,
+        None,
+        False,
+    )
+    return output
+
+
+def _slots(pattern: str, T: int) -> list[int]:
+    return {
+        "none": [-1] * T,
+        "one": [0] * T,
+        "mixed": [(-1, 0, 1)[t % 3] for t in range(T)],
+        "four": [t % 4 for t in range(T)],
+    }[pattern]
+
+
+@pytest.mark.parametrize(
+    "T,rank,pattern,clamp,ep",
+    [
+        (1, 8, "one", None, False),
+        (64, 16, "mixed", None, False),
+        (64, 64, "four", None, False),
+        (33, 16, "none", None, False),
+        (64, 16, "mixed", 1.0, False),
+        (64, 16, "mixed", None, True),
+    ],
+    ids=["1tok-r8", "mixed-r16", "4-adapters-r64", "no-lora", "clamp", "ep2"],
+)
+@torch.inference_mode()
+def test_apply_with_lora_matches_reference(T, rank, pattern, clamp, ep):
+    set_random_seed(0)
+    num_local, ep_rank = (E // 2, 1) if ep else (E, 0)
+    experts, kernel_weights, reference = _make_experts(num_local, ep_rank, clamp)
+    x = torch.randn(T, K, device="cuda").to(torch.bfloat16)
+    ids = torch.stack([torch.randperm(E, device="cuda")[:TOPK] for _ in range(T)])
+    ids = ids.to(torch.int32)
+    weights = torch.rand(T, TOPK, device="cuda", dtype=torch.float32) + 0.1
+    expert_map = None
+    if ep:
+        expert_map = torch.full((E,), -1, dtype=torch.int32, device="cuda")
+        expert_map[num_local * ep_rank :] = torch.arange(num_local, device="cuda")
+    slots = _slots(pattern, T)
+    context = _make_lora(rank, slots, num_local)
+
+    out = _apply(experts, kernel_weights, context, x, ids, weights, expert_map)
+    offset = num_local * ep_rank
+    ref = _lora_reference(reference, context, x, ids, weights, slots, offset, clamp)
+    no_lora = [-1] * T
+    ref_base = _lora_reference(
+        reference, context, x, ids, weights, no_lora, offset, clamp
+    )
+    assert _rel_err(out, ref) < 0.05
+    if pattern == "none":
+        base = torch.empty_like(out)
+        experts.invoke_routed_moe(
+            hidden_states=x,
+            w1=kernel_weights[0],
+            w2=kernel_weights[1],
+            topk_ids_and_weights=(ids, weights),
+            gemm1_lora_delta=None,
+            global_num_experts=E,
+            a1q_scale=None,
+            output=base,
+        )
+        assert torch.equal(out, base)
+    else:
+        assert _rel_err(ref, ref_base) > 0.2
+
+
+def test_apply_with_lora_cuda_graph_matches_eager():
+    set_random_seed(0)
+    T = 16
+    experts, kernel_weights, _ = _make_experts()
+    x = torch.randn(T, K, device="cuda").to(torch.bfloat16)
+    ids = torch.stack([torch.randperm(E, device="cuda")[:TOPK] for _ in range(T)])
+    ids = ids.to(torch.int32)
+    weights = torch.rand(T, TOPK, device="cuda", dtype=torch.float32) + 0.1
+    context = _make_lora(16, _slots("mixed", T))
+    with torch.inference_mode():
+        eager = _apply(experts, kernel_weights, context, x, ids, weights, None)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            _apply(experts, kernel_weights, context, x, ids, weights, None)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = _apply(experts, kernel_weights, context, x, ids, weights, None)
+        captured.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+    assert torch.equal(captured, eager)
+
+
+@torch.inference_mode()
+def test_apply_rejects_batches_above_the_launch_limit(monkeypatch):
+    set_random_seed(0)
+    T = 8
+    experts, kernel_weights, _ = _make_experts()
+    monkeypatch.setattr(experts, "_get_chunk_size", lambda: T - 1)
+    x, ids, weights = _make_inputs()
+    context = _make_lora(16, _slots("one", T))
+    with pytest.raises(ValueError, match="launch limit"):
+        _apply(experts, kernel_weights, context, x[:T], ids[:T], weights[:T], None)
+
+
+@pytest.mark.parametrize(
+    "field,value,supported",
+    [
+        ("routing_method", RoutingMethodType.Renormalize, True),
+        ("routing_method", RoutingMethodType.RenormalizeNaive, True),
+        ("routing_method", RoutingMethodType.DeepSeekV3, True),
+        ("routing_method", RoutingMethodType.Sigmoid, True),
+        ("moe_parallel_config", dict(ep_size=2, use_ep=True), True),
+        ("routing_method", RoutingMethodType.Llama4, False),
+        ("activation", MoEActivation.GELU, False),
+        ("moe_parallel_config", dict(dp_size=2), False),
+        ("moe_parallel_config", dict(enable_eplb=True), False),
+    ],
+    ids=[
+        "renormalize",
+        "renormalize-naive",
+        "deepseek-v3",
+        "sigmoid",
+        "ep2",
+        "llama4",
+        "gelu",
+        "dp2",
+        "eplb",
+    ],
+)
+def test_lora_never_falls_back_to_lora_unaware_experts(field, value, supported):
+    config = make_dummy_moe_config(
+        num_experts=E, experts_per_token=TOPK, hidden_dim=K, intermediate_size=N
+    )
+    config.moe_backend = "flashinfer_trtllm"
+    config.is_lora_enabled = True
+    if field == "moe_parallel_config":
+        value = replace(FusedMoEParallelConfig.make_no_parallel(), **value)
+    setattr(config, field, value)
+    if supported:
+        assert select_nvfp4_moe_backend(config, kNvfp4Static, kNvfp4DynamicToken) == (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            TrtLlmNvFp4LoRAExperts,
+        )
+    else:
+        with pytest.raises(ValueError, match="does not support"):
+            select_nvfp4_moe_backend(config, kNvfp4Static, kNvfp4DynamicToken)
