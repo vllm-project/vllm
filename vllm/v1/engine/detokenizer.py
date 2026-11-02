@@ -115,13 +115,20 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
         # 1) Detokenize the new token ids incrementally.
         num_prev_tokens = self.num_output_tokens()
         first_new_token_index = len(self.token_ids)
+        output_text = self.output_text
+        # Drop the attribute's reference so that the appends below can resize
+        # the string in place instead of copying the whole text per token.
+        self.output_text = ""
         # Output text offsets at the boundaries of the new tokens.
-        token_offsets = [len(self.output_text)] if self.stop else None
-        for new_token_id in new_token_ids:
-            self.token_ids.append(new_token_id)
-            self.output_text += self.decode_next(new_token_id)
-            if token_offsets is not None:
-                token_offsets.append(len(self.output_text))
+        token_offsets = [len(output_text)] if self.stop else None
+        try:
+            for new_token_id in new_token_ids:
+                self.token_ids.append(new_token_id)
+                output_text += self.decode_next(new_token_id)
+                if token_offsets is not None:
+                    token_offsets.append(len(output_text))
+        finally:
+            self.output_text = output_text
 
         if skipped_stop_token_id is not None:
             # Cleanup after skipping detokenization.
