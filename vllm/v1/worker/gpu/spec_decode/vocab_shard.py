@@ -1151,5 +1151,27 @@ class VocabShard:
         return logits
 
 
+# Column splits of the top-p tie kernels (a constexpr): (up to rows, splits).
+_TIE_SPLITS = ((64, 16), (128, 8))
+
+
 def _tie_splits(rows: int) -> int:
-    return 16 if rows <= 64 else (8 if rows <= 128 else 4)
+    for max_rows, splits in _TIE_SPLITS:
+        if rows <= max_rows:
+            return splits
+    return 4
+
+
+def warmup_num_logits(max_num_logits: int) -> list[int]:
+    """Logit row counts for the load-time warmup: verification steps of these
+    sizes launch every variant of the sharded kernels that any step size
+    (2 to ``max_num_logits`` rows) launches. Per tie-split count, one size
+    that is a multiple of 16 and one that is not: Triton specializes the
+    exchange strides, which are multiples of the row count, on that."""
+    bounds = [1, *(max_rows for max_rows, _ in _TIE_SPLITS), max_num_logits]
+    sizes = []
+    for lo, hi in zip(bounds, bounds[1:]):
+        for rows in (lo + 1, (lo // 16 + 1) * 16):
+            if rows <= min(hi, max_num_logits):
+                sizes.append(rows)
+    return sizes

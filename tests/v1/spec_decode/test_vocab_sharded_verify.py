@@ -280,6 +280,23 @@ def _run(world_size: int, vocab: int):
         pytest.skip(val)
 
 
+@pytest.mark.parametrize("max_num_logits", [8, 16, 64, 100, 128, 512, 2048])
+def test_warmup_covers_every_step_size(max_num_logits):
+    """The load-time warmup launches every kernel variant a verification step
+    of 2 to max_num_logits rows can launch: the tie-split count (a constexpr)
+    and whether the row count is a multiple of 16 (Triton specializes the
+    exchange strides on that)."""
+
+    def variant(rows):
+        return vocab_shard_mod._tie_splits(rows), rows % 16 == 0
+
+    sizes = vocab_shard_mod.warmup_num_logits(max_num_logits)
+    assert all(2 <= rows <= max_num_logits for rows in sizes)
+    warmed = {variant(rows) for rows in sizes}
+    for rows in range(2, max_num_logits + 1):
+        assert variant(rows) in warmed, rows
+
+
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("vocab", [200064, 151936])
 def test_vocab_sharded_verification_tp2(vocab):
