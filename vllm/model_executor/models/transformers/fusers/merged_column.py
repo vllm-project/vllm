@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, ClassVar
 from torch import fx, nn
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+from vllm.model_executor import hw_agnostic
 from vllm.model_executor.models.transformers.fusers.base import StackedFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     block_chain,
@@ -126,6 +126,9 @@ class MergedColumnParallelFuser(StackedFuser):
     ) -> None:
         """Replace the module's parallel linears with one merged projection."""
         linear_modules = [module.get_submodule(name) for name in self.linear_names]
+        MergedColumnParallelLinear = hw_agnostic.resolve(
+            "linear", "MergedColumnParallelLinear"
+        )
         merged = MergedColumnParallelLinear(
             input_size=linear_modules[0].in_features,
             output_sizes=[linear.out_features for linear in linear_modules],
