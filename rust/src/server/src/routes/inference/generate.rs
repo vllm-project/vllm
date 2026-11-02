@@ -255,8 +255,9 @@ async fn generate_chunk_stream(
                         sampling_mask: output.sampling_mask.map(|mask| mask.rows),
                         weight_versions,
                     }],
-                    usage: include_continuous_usage
-                        .then(|| Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+                    usage: include_continuous_usage.then(|| {
+                        Usage::from_token_usage(usage, enable_prompt_tokens_details, None)
+                    }),
                     mm_placeholders: prompt_token_ids.as_ref().and_then(|_| mm_placeholders.take()),
                     prompt_token_ids,
                     metrics: None,
@@ -278,7 +279,11 @@ async fn generate_chunk_stream(
             request_id,
             output_mode: GenerateOutputMode::Tokens,
             choices: Vec::new(),
-            usage: Some(Usage::from_token_usage(usage, enable_prompt_tokens_details)),
+            usage: Some(Usage::from_token_usage(
+                usage,
+                enable_prompt_tokens_details,
+                None,
+            )),
             prompt_token_ids: None,
             mm_placeholders: None,
             metrics: spec_decode_metrics.map(|speculative_decoding| PerRequestMetrics {
@@ -374,7 +379,7 @@ fn collect_generate(
         request_id,
         model: response_model,
         created,
-        usage: Usage::from_token_usage(collected.usage, enable_prompt_tokens_details),
+        usage: Usage::from_token_usage(collected.usage, enable_prompt_tokens_details, None),
         output_mode: GenerateOutputMode::Tokens,
         choices: vec![GenerateResponseChoice {
             index: 0,

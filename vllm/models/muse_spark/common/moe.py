@@ -65,9 +65,14 @@ class MuseSpark1xRouter(BaseRouter):
         indices_type: torch.dtype | None,
         *,
         input_ids: torch.Tensor | None = None,
+        is_padding: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if not router_logits.is_cuda:
-            return self._compute_routing_native(router_logits, indices_type)
+            weights, ids = self._compute_routing_native(router_logits, indices_type)
+            if is_padding is not None:
+                weights = weights.masked_fill(is_padding[:, None], 0)
+                ids = ids.masked_fill(is_padding[:, None], -1)
+            return weights, ids
 
         topk_weights, topk_ids = fused_musespark1x_routing(
             router_logits,
@@ -77,6 +82,7 @@ class MuseSpark1xRouter(BaseRouter):
             router_output_multiplier=self.router_output_multiplier,
             router_score_normalization=self.router_score_normalization,
             router_score_division_eps=self.router_score_division_eps,
+            is_padding=is_padding,
         )
         if indices_type is not None and indices_type != torch.int32:
             topk_ids = topk_ids.to(indices_type)
