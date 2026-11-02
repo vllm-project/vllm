@@ -158,6 +158,8 @@ vllm serve /path/to/the/model/in/the/container \
   --master-addr <HEAD_NODE_IP> --headless
 ```
 
+When fault tolerance is disabled, a detected remote-worker disconnect fails pending requests and terminates the distributed executor. A coordinator disconnect also terminates headless workers, including workers blocked in a collective. Restart the deployment after such a failure; workers are not automatically recovered. This handling applies after worker communication is established and does not detect a hung worker whose connection remains open.
+
 ## Optimizing network communication for tensor parallelism
 
 Efficient tensor parallelism requires fast internode communication, preferably through high-speed network adapters such as InfiniBand.
