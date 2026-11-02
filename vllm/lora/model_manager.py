@@ -482,6 +482,9 @@ class LoRAModelManager:
             return module_name.rpartition(".")[0]
 
         wrapped_by_id: dict[int, BaseLayerWithLoRA] = {}
+        # Layers that share a suffix with a LoRA layer but are not wrapped,
+        # such as BERT's pooler.dense. Adapters with LoRA on them are refused.
+        self.unsupported_lora_modules: set[str] = set()
 
         for module_name, module in self.model.named_modules(remove_duplicate=False):
             if isinstance(module, PPMissingLayer):
@@ -495,6 +498,11 @@ class LoRAModelManager:
                     module,
                     self.supported_lora_modules,
                 ):
+                    if (
+                        module_name.rsplit(".", 1)[-1] in self.supported_lora_modules
+                        and self._get_punica_wrapper(module_name) is not None
+                    ):
+                        self.unsupported_lora_modules.add(module_name)
                     continue
             elif not self._match_target_modules(module_name) and not is_classifier_head:
                 # Full classification heads bypass the A/B LoRA target filter.

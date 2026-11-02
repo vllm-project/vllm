@@ -11,7 +11,7 @@
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::{StreamExt as _, pin_mut};
 use vllm_engine_core_client::protocol::output::RequestSpecDecodeMetrics;
-use vllm_llm::RequestTimestamps;
+use vllm_llm::{RequestTimestamps, WeightVersionSpan};
 use vllm_text::DecodedLogprobs;
 
 use super::{AssistantEvent, AssistantEventStream};
@@ -157,6 +157,7 @@ impl StructuredEventState {
         finish_reason: FinishReason,
         kv_transfer_params: Option<Box<serde_json::Value>>,
         ec_transfer_params: Option<Box<serde_json::Value>>,
+        weight_versions: Option<Vec<WeightVersionSpan>>,
     ) -> Result<Vec<ChatEvent>> {
         let mut events = Vec::new();
         self.close_open_text_block(&mut events);
@@ -169,6 +170,7 @@ impl StructuredEventState {
             finish_reason,
             kv_transfer_params,
             ec_transfer_params,
+            weight_versions,
         });
         Ok(events)
     }
@@ -324,6 +326,7 @@ pub(crate) async fn structured_chat_event_stream(
                 finish_reason,
                 kv_transfer_params,
                 ec_transfer_params,
+                weight_versions,
             } => {
                 for next in state.finish(
                     usage,
@@ -332,6 +335,7 @@ pub(crate) async fn structured_chat_event_stream(
                     finish_reason,
                     kv_transfer_params,
                     ec_transfer_params,
+                    weight_versions,
                 )? {
                     y.yield_ok(next).await;
                 }
@@ -372,6 +376,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -429,6 +434,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -484,6 +490,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -539,6 +546,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -609,6 +617,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 
@@ -662,6 +671,7 @@ mod tests {
                 finish_reason: FinishReason::stop_eos(),
                 kv_transfer_params: None,
                 ec_transfer_params: None,
+                weight_versions: None,
             }),
         ]);
 

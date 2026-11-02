@@ -237,12 +237,16 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w13, w13_scale = self._quantize_mxfp8_moe_weight(w13_weight)
-        w2, w2_scale = self._quantize_mxfp8_moe_weight(w2_weight)
+        def quantize(w13_weight: torch.Tensor, w2_weight: torch.Tensor):
+            return (
+                *self._quantize_mxfp8_moe_weight(w13_weight),
+                *self._quantize_mxfp8_moe_weight(w2_weight),
+            )
+
+        w13, w13_scale, w2, w2_scale = self.quantize_weights(layer, quantize)
 
         self._setup_kernel(
             layer,

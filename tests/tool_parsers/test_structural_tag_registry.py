@@ -1500,6 +1500,36 @@ def test_tool_strict_level_from_name():
         ToolStrictLevel.from_name("off")
 
 
+@pytest.mark.parametrize("required", [False, True])
+@pytest.mark.parametrize("token_suffix", ["", ":6124c78e"])
+def test_hy_v4_preserves_whitespace_in_argument_keys(
+    sample_tools, required, token_suffix
+):
+    """Argument names must match the schema exactly, including whitespace."""
+    sample_tools[0].function.parameters = {
+        "type": "object",
+        "properties": {" count ": {"type": "integer"}},
+        "required": [" count "] if required else [],
+    }
+    tag = get_model_structural_tag(
+        "hy_v4",
+        sample_tools,
+        "required",
+        reasoning=False,
+        token_suffix=token_suffix,
+    )
+    grammar = Grammar.from_structural_tag(tag)
+    call = (
+        f"<tool_calls{token_suffix}><tool_call{token_suffix}>get_weather"
+        f"<arg_key{token_suffix}> count </arg_key{token_suffix}>"
+        f"<arg_value{token_suffix}>2</arg_value{token_suffix}>"
+        f"</tool_call{token_suffix}></tool_calls{token_suffix}>"
+    )
+
+    assert _is_grammar_accept_string(grammar, call)
+    assert not _is_grammar_accept_string(grammar, call.replace(" count ", "count"))
+
+
 # ---------------------------------------------------------------------------
 # GLM-4.7 structural tag: builtin content for strict tools, shallow otherwise
 # ---------------------------------------------------------------------------
@@ -1612,6 +1642,65 @@ def test_glm47_non_strict_auto_accepts_valid_tool_calls(body: str):
 def test_glm47_non_strict_auto_rejects_invalid(body: str):
     grammar = _glm47_shallow_grammar("auto", auto=True)
     assert not _is_grammar_accept_string(grammar, body)
+
+
+def _glm47_container_tools() -> list[ChatCompletionToolsParam]:
+    return [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "read_files",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "files": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {"path": {"type": "string"}},
+                            },
+                        },
+                        "options": {"type": "object"},
+                        "limit": {"type": ["integer", "null"]},
+                    },
+                },
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        # a Windows path copied with bare backslashes is not valid JSON
+        ("files", r'[{"path": "D:\SVILUPPO\docs\PLAN.md"}]'),
+        # an over-escaped quote leaves a JSON string open; </arg_value> still ends it
+        ("files", r'[{"path\": "docs/PLAN.md"}]'),
+        ("files", '[{"path": "docs/PLAN.md"}]'),
+        ("options", '{"recursive": true}'),
+        ("limit", "20"),
+        ("limit", "null"),
+    ],
+)
+def test_glm47_non_strict_container_values_accept_model_text(key: str, value: str):
+    grammar = _glm47_shallow_grammar("auto", _glm47_container_tools(), auto=True)
+    assert _is_grammar_accept_string(
+        grammar, _glm47_call("read_files", _glm47_arg(key, value))
+    )
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("limit", "twenty"),
+        ("files", "[<arg_key>x</arg_key>]"),
+    ],
+)
+def test_glm47_non_strict_container_tools_reject_invalid(key: str, value: str):
+    grammar = _glm47_shallow_grammar("auto", _glm47_container_tools(), auto=True)
+    assert not _is_grammar_accept_string(
+        grammar, _glm47_call("read_files", _glm47_arg(key, value))
+    )
 
 
 def test_glm47_non_strict_required_requires_at_least_one_call():
