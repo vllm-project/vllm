@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from threading import Lock
 from time import perf_counter
-from typing import Literal
+from typing import Literal, get_args
 
 from prometheus_client import REGISTRY, CollectorRegistry, Gauge, Histogram
 
@@ -29,6 +29,9 @@ class WeightOperationMetrics:
             multiprocess_mode="livesum",
             registry=registry,
         )
+
+        for operation in get_args(Operation):
+            self.in_flight.labels(operation).set(0)
 
     @contextmanager
     def record(self, operation: Operation) -> Iterator[None]:
