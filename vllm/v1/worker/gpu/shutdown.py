@@ -18,3 +18,8 @@ def free_before_shutdown(vllm_config: VllmConfig) -> None:
 
     _ROPE_DICT.clear()
     reset_workspace_manager()
+    from vllm.v1.attention.backends.flashinfer_workspace import (
+        reset_flashinfer_workspace_state,
+    )
+
+    reset_flashinfer_workspace_state()
