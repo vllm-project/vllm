@@ -322,15 +322,12 @@ class KimiK3ForConditionalGeneration(
         values: dict[str, torch.Tensor],
         path: str = "default",
     ) -> torch.Tensor:
-        metadata = {
-            k: v
-            for k, v in values.items()
-            if k not in ("pixel_values", "merge_gather_idx")
-        }
+        metadata = {k: v for k, v in values.items() if k != "pixel_values"}
         hidden_states = self.vision_tower(
             values["pixel_values"], None, encoder_metadata=metadata
         )
-        output = self.mm_projector(hidden_states[values["merge_gather_idx"]])
+        dtype = next(self.mm_projector.parameters()).dtype
+        output = self.mm_projector(hidden_states.to(dtype))
         return output.reshape(-1, output.shape[-1])
 
     def encoder_eager_forward(
