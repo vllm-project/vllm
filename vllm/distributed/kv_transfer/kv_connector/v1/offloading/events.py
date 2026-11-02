@@ -5,7 +5,7 @@
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size. For complete
 chunks, :class:`OffloadingEventsTracker` builds ``BlockStored`` from the
-originating request carried by the raw event. A store may describe multiple
+originating request data carried by the raw event. A store may describe multiple
 blocks, and removals still expand to those block hashes using captured
 metadata. Partial tails also use captured metadata. Opt-in via
 ``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
@@ -20,7 +20,7 @@ prefix is reusable only up to a boundary where every group has a residency.
 Windowed attention groups keep the legacy placeholder payload.
 """
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
         GroupOffloadConfig,
     )
+    from vllm.lora.request import LoRARequest
 
 logger = init_logger(__name__)
 
@@ -117,7 +118,11 @@ class _OffloadEventMetadata(
 class _RequestEventContext:
     """Request data used to describe complete offloaded chunks."""
 
-    request: Request
+    block_hashes: list[BlockHash]
+    all_token_ids: Sequence[int]
+    lora_request: "LoRARequest | None"
+    resumable: bool
+    kv_transfer_params: dict[str, Any] | None
     group_configs: dict[int, "GroupOffloadConfig"]
 
 
@@ -188,11 +193,15 @@ class OffloadingEventsTracker:
         request: Request,
         group_configs: tuple["GroupOffloadConfig", ...],
     ) -> None:
-        """Retain the request for complete-chunk store events."""
+        """Retain only the request fields needed for complete-chunk stores."""
         if self.self_describing_enabled:
             req_context.set_state(
                 _RequestEventContext(
-                    request=request,
+                    block_hashes=request.block_hashes,
+                    all_token_ids=request.all_token_ids,
+                    lora_request=request.lora_request,
+                    resumable=request.resumable,
+                    kv_transfer_params=request.kv_transfer_params,
                     group_configs={
                         config.group_idx: config for config in group_configs
                     },
@@ -214,13 +223,10 @@ class OffloadingEventsTracker:
             or boundary % group_config.tokens_per_chunk != 0
         ):
             return None
-        request = state.request
-        if request.resumable or (request.kv_transfer_params or {}).get(
-            "_p_side_truncated"
-        ):
+        if state.resumable or (state.kv_transfer_params or {}).get("_p_side_truncated"):
             return None
         chunk_idx = boundary // group_config.tokens_per_chunk - 1
-        return self._build_event_metadata(request, group_config, chunk_idx)
+        return self._build_event_metadata(state, group_config, chunk_idx)
 
     def record_store(
         self,
@@ -385,7 +391,7 @@ class OffloadingEventsTracker:
 
     def _build_event_metadata(
         self,
-        req: Request,
+        req: Request | _RequestEventContext,
         group_config: "GroupOffloadConfig",
         chunk_idx: int,
     ) -> _OffloadEventMetadata:

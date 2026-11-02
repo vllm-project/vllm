@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
+import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -375,6 +376,10 @@ def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
         tracker.record_store(request, group_config, 0, key)
         # Reuse the existing snapshot instead of rebuilding from the request.
         tracker._pending_event_metadata[key].token_ids = ()
+    request_ref = weakref.ref(request)
+    del request
+    gc.collect()
+    assert request_ref() is None
 
     [stored] = tracker.take_events(
         [
