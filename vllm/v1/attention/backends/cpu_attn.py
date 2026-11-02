@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm import envs
 from vllm.config import (
     VllmConfig,
@@ -262,7 +262,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
             )
             block_table_tensor = encoder_block_table
 
-        scheduler_metadata = ops.cpu_attn_get_scheduler_metadata(
+        scheduler_metadata = cpu_ops.cpu_attn_get_scheduler_metadata(
             num_reqs=num_reqs,
             num_heads=self.num_heads,
             num_kv_heads=self.num_kv_heads,
@@ -428,7 +428,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
 
         if is_encoder_attention:
-            ops.cpu_attn_reshape_and_cache(
+            cpu_ops.cpu_attn_reshape_and_cache(
                 key,
                 value,
                 key_cache,
@@ -449,7 +449,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
             torch.float32,
         ]:
             self.sinks = self.sinks.to(torch.float32)
-        ops.cpu_attention_with_kv_cache(
+        cpu_ops.cpu_attention_with_kv_cache(
             query=query[:num_actual_tokens],
             key_cache=key_cache,
             value_cache=value_cache,
@@ -486,7 +486,7 @@ class CPUAttentionBackendImpl(AttentionImpl):
         num_blocks, num_kv_heads, block_size, _ = kv_cache.size()
         kv_cache = kv_cache.view((num_blocks, num_kv_heads, block_size * 2, -1))
         key_cache, value_cache = kv_cache.chunk(2, dim=2)
-        ops.cpu_attn_reshape_and_cache(
+        cpu_ops.cpu_attn_reshape_and_cache(
             key,
             value,
             key_cache,

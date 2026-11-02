@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+from vllm import _cpu_ops as cpu_ops
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
@@ -1436,7 +1437,7 @@ class SparseAttnIndexer(CustomOp):
                 # flat-gather buffer this paged path no longer allocates).
                 max_seq_len = int(local_seq_lens.max().item())
 
-                logits = ops.fp8_paged_mqa_logits_cpu(
+                logits = cpu_ops.fp8_paged_mqa_logits_cpu(
                     q_slice,
                     kv_view,
                     weights[chunk.token_start : chunk.token_end],
@@ -1450,7 +1451,7 @@ class SparseAttnIndexer(CustomOp):
                     dtype=torch.int32,
                     device=kv_cache.device,
                 )
-                ops.topk_transform_512_cpu(
+                cpu_ops.topk_transform_512_cpu(
                     logits,
                     local_seq_lens,
                     page_table,
@@ -1487,7 +1488,7 @@ class SparseAttnIndexer(CustomOp):
                 block_size = kv_cache.shape[1]
                 kv_view = kv_cache.view(kv_cache.shape[0], -1)
 
-                logits = ops.fp8_paged_mqa_logits_cpu(
+                logits = cpu_ops.fp8_paged_mqa_logits_cpu(
                     q_quant[:num_decode_tokens],
                     kv_view,
                     weights[:num_decode_tokens],
@@ -1507,7 +1508,7 @@ class SparseAttnIndexer(CustomOp):
                     dtype=torch.int32,
                     device=kv_cache.device,
                 )
-                ops.topk_transform_512_cpu(
+                cpu_ops.topk_transform_512_cpu(
                     logits,
                     seq_lens,
                     block_table,

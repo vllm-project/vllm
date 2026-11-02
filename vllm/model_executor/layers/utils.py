@@ -8,6 +8,7 @@ from dataclasses import dataclass
 
 import torch
 
+from vllm import _cpu_ops as cpu_ops
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
@@ -734,7 +735,7 @@ def dispatch_cpu_unquantized_gemm(
         if (
             (is_arm_bf16 or torch.cpu._is_avx512_bf16_supported())
             and is_causal_conv1d_weight
-            and hasattr(ops, "causal_conv1d_weight_pack")
+            and hasattr(cpu_ops, "causal_conv1d_weight_pack")
         ):
             # prepack conv weight
             unpacked = (
@@ -748,7 +749,7 @@ def dispatch_cpu_unquantized_gemm(
             # Stash the un-packed (dim, width) weight so the speculative-decode
             # and unsupported-layout fallbacks can still use ordinary weights.
             layer._cpu_unpacked_conv_weight = unpacked
-            layer.weight.data = ops.causal_conv1d_weight_pack(unpacked)
+            layer.weight.data = cpu_ops.causal_conv1d_weight_pack(unpacked)
         return
 
     N, K = layer.weight.size()
@@ -797,7 +798,7 @@ def dispatch_cpu_unquantized_gemm(
         packed_weight = torch.ops._C.convert_weight_packed(layer.weight)
         if getattr(layer, "bias", None) is not None:
             layer.bias.data = layer.bias.to(torch.float32)
-        layer.cpu_linear = lambda x, weight, bias: ops.weight_packed_linear_cpu(
+        layer.cpu_linear = lambda x, weight, bias: cpu_ops.weight_packed_linear_cpu(
             x,
             packed_weight,
             N,
@@ -814,13 +815,15 @@ def dispatch_cpu_unquantized_gemm(
         return
 
     if (
-        ops._supports_onednn
+        cpu_ops._supports_onednn
         and current_platform.get_cpu_architecture() != CpuArchEnum.POWERPC
     ):
         try:
             origin_weight = layer.weight
-            handler = ops.create_onednn_mm(origin_weight.t(), 32)
-            layer.cpu_linear = lambda x, weight, bias: ops.onednn_mm(handler, x, bias)
+            handler = cpu_ops.create_onednn_mm(origin_weight.t(), 32)
+            layer.cpu_linear = lambda x, weight, bias: cpu_ops.onednn_mm(
+                handler, x, bias
+            )
             if remove_weight:
                 layer.weight = torch.nn.Parameter(
                     torch.empty(0, dtype=dtype, device=layer.weight.device),

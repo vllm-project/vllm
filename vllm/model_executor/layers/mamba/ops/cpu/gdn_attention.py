@@ -6,7 +6,7 @@ from __future__ import annotations
 import torch
 import torch.nn.functional as F
 
-import vllm._custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
@@ -62,7 +62,7 @@ def _causal_conv1d_fwd_cpu(
     is_weight_packed: bool,
 ) -> torch.Tensor:
     if not is_conv_state_dim_first():
-        return ops.causal_conv1d_fwd_cpu(
+        return cpu_ops.causal_conv1d_fwd_cpu(
             x=x,
             weight=weight,
             bias=bias,
@@ -75,7 +75,7 @@ def _causal_conv1d_fwd_cpu(
         )
 
     scratch, identity_indices = _stage_ds_conv_states(conv_states, cache_indices)
-    out = ops.causal_conv1d_fwd_cpu(
+    out = cpu_ops.causal_conv1d_fwd_cpu(
         x=x,
         weight=weight,
         bias=bias,
@@ -102,7 +102,7 @@ def _causal_conv1d_update_cpu(
     num_accepted_tokens: torch.Tensor | None = None,
 ) -> torch.Tensor:
     if not is_conv_state_dim_first():
-        return ops.causal_conv1d_update_cpu(
+        return cpu_ops.causal_conv1d_update_cpu(
             x=x,
             conv_states=conv_states,
             weight=weight,
@@ -114,7 +114,7 @@ def _causal_conv1d_update_cpu(
         )
 
     scratch, identity_indices = _stage_ds_conv_states(conv_states, conv_state_indices)
-    out = ops.causal_conv1d_update_cpu(
+    out = cpu_ops.causal_conv1d_update_cpu(
         x=x,
         conv_states=scratch,
         weight=weight,
@@ -283,7 +283,7 @@ def _cpu_gdn_attention_nonspec(
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
 
-        attn_out = ops.fused_sigmoid_gating_delta_rule_update_cpu(
+        attn_out = cpu_ops.fused_sigmoid_gating_delta_rule_update_cpu(
             A_log=layer.A_log,
             dt_bias=layer.dt_bias,
             q=query,
@@ -344,7 +344,7 @@ def _cpu_gdn_attention_nonspec(
             ).transpose(0, 1)
 
         query, key, value = layer.rearrange_mixed_qkv(prefill_mixed_qkv)
-        g, beta = ops.fused_gdn_gating_cpu(
+        g, beta = cpu_ops.fused_gdn_gating_cpu(
             A_log=layer.A_log, a=prefill_a, b=prefill_b, dt_bias=layer.dt_bias
         )
 
@@ -354,7 +354,7 @@ def _cpu_gdn_attention_nonspec(
         no_initial_state = prefill_state_indices[~prefill_has_initial_state]
         if no_initial_state.numel() > 0:
             ssm_state[no_initial_state] = 0
-        attn_out, _ = ops.chunk_gated_delta_rule_cpu(
+        attn_out, _ = cpu_ops.chunk_gated_delta_rule_cpu(
             query=query,
             key=key,
             value=value,
@@ -584,7 +584,7 @@ def _spec_forward(
     spec_idx = spec_state_indices[:num_spec_decodes].to(torch.int32).contiguous()
     num_acc = num_accepted[:num_spec_decodes].to(torch.int32).contiguous()
     cu = spec_qsl[: num_spec_decodes + 1].to(torch.int32).contiguous()
-    out_spec = ops.fused_sigmoid_gating_delta_rule_update_spec_cpu(
+    out_spec = cpu_ops.fused_sigmoid_gating_delta_rule_update_spec_cpu(
         A_log=layer.A_log,
         dt_bias=layer.dt_bias,
         q=query,
@@ -658,7 +658,7 @@ def _spec_aware_nonspec(
             )
 
         query, key, value = layer.rearrange_mixed_qkv(decode_mixed_qkv)
-        attn_out = ops.fused_sigmoid_gating_delta_rule_update_cpu(
+        attn_out = cpu_ops.fused_sigmoid_gating_delta_rule_update_cpu(
             A_log=layer.A_log,
             dt_bias=layer.dt_bias,
             q=query,
@@ -717,7 +717,7 @@ def _spec_aware_nonspec(
             ).transpose(0, 1)
 
         query, key, value = layer.rearrange_mixed_qkv(prefill_mixed_qkv)
-        g, beta = ops.fused_gdn_gating_cpu(
+        g, beta = cpu_ops.fused_gdn_gating_cpu(
             A_log=layer.A_log, a=prefill_a, b=prefill_b, dt_bias=layer.dt_bias
         )
         # zero pool slots for sequences without a prior state; the kernel
@@ -726,7 +726,7 @@ def _spec_aware_nonspec(
         no_initial_state = prefill_state_indices[~prefill_has_initial_state]
         if no_initial_state.numel() > 0:
             ssm_state[no_initial_state] = 0
-        attn_out, _ = ops.chunk_gated_delta_rule_cpu(
+        attn_out, _ = cpu_ops.chunk_gated_delta_rule_cpu(
             query=query,
             key=key,
             value=value,
@@ -792,7 +792,7 @@ def _spec_aware_nonspec_subset(
         ).transpose(0, 1)
 
     query, key, value = layer.rearrange_mixed_qkv(conv_out)
-    g, beta = ops.fused_gdn_gating_cpu(
+    g, beta = cpu_ops.fused_gdn_gating_cpu(
         A_log=layer.A_log, a=a, b=b, dt_bias=layer.dt_bias
     )
     # zero pool slots for sequences without a prior state; the kernel
@@ -801,7 +801,7 @@ def _spec_aware_nonspec_subset(
     no_initial_state = prefill_state_indices[~has_initial_state]
     if no_initial_state.numel() > 0:
         ssm_state[no_initial_state] = 0
-    attn_out, _ = ops.chunk_gated_delta_rule_cpu(
+    attn_out, _ = cpu_ops.chunk_gated_delta_rule_cpu(
         query=query,
         key=key,
         value=value,

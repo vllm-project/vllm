@@ -12,7 +12,7 @@ Run `pytest tests/kernels/quantization/test_cpu_fp8_scaled_mm.py -v`.
 import pytest
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
     CPUFp8ChannelWiseScaledMMLinearKernel,
     CPUFp8PerTensorScaledMMLinearKernel,
@@ -31,10 +31,10 @@ if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
 requires_cpu_fp8_w8a16 = pytest.mark.skipif(
-    not ops._supports_cpu_fp8_w8a16, reason="fp8_scaled_mm_cpu op not available"
+    not cpu_ops._supports_cpu_fp8_w8a16, reason="fp8_scaled_mm_cpu op not available"
 )
 requires_cpu_fp8_w8a8 = pytest.mark.skipif(
-    not ops.cpu_has_amx_fp8(),
+    not cpu_ops.cpu_has_amx_fp8(),
     reason="requires native AMX-FP8 hardware",
 )
 
@@ -181,7 +181,7 @@ def test_cpu_fp8_scaled_mm(M: int, N: int, K: int, use_bias: bool):
     )
 
     packed_weight = torch.ops._C.convert_weight_packed(fp8_weight)
-    kernel_out = ops.fp8_scaled_mm_cpu(
+    kernel_out = cpu_ops.fp8_scaled_mm_cpu(
         x,
         packed_weight,
         scales,
@@ -463,7 +463,7 @@ def test_cpu_fp8_w8a8_per_tensor(
 
     if static_activation:
         act_scale = (x.float().abs().max() / FP8_MAX).clamp(min=1e-7).view(1)
-        kernel_out = ops.fp8_scaled_mm_with_quant(
+        kernel_out = cpu_ops.fp8_scaled_mm_with_quant(
             x, act_scale, False, packed_weight, packed_scale, bias, out_dtype
         )
         ref_out = reference_static_fp8_linear(
@@ -471,7 +471,7 @@ def test_cpu_fp8_w8a8_per_tensor(
         )
         atol = 0.05
     else:
-        kernel_out = ops.fp8_scaled_mm_with_quant(
+        kernel_out = cpu_ops.fp8_scaled_mm_with_quant(
             x, None, True, packed_weight, packed_scale, bias, out_dtype
         )
         ref_out = reference_dynamic_fp8_linear(x, w_fp8, w_scale, bias, out_dtype)
@@ -502,7 +502,7 @@ def test_cpu_fp8_w8a8_per_channel(
 
     if static_activation:
         act_scale = (x.float().abs().max() / FP8_MAX).clamp(min=1e-7).view(1)
-        kernel_out = ops.fp8_scaled_mm_with_quant(
+        kernel_out = cpu_ops.fp8_scaled_mm_with_quant(
             x, act_scale, False, packed_weight, packed_scale, bias, out_dtype
         )
         ref_out = reference_static_fp8_linear(
@@ -510,7 +510,7 @@ def test_cpu_fp8_w8a8_per_channel(
         )
         atol = 0.05
     else:
-        kernel_out = ops.fp8_scaled_mm_with_quant(
+        kernel_out = cpu_ops.fp8_scaled_mm_with_quant(
             x, None, True, packed_weight, packed_scale, bias, out_dtype
         )
         ref_out = reference_dynamic_fp8_linear(x, w_fp8, w_scale, bias, out_dtype)
@@ -536,7 +536,7 @@ def test_cpu_fp8_w8a8_per_group(M: int, N: int, K: int, use_bias: bool):
 
     w_fp8, w_scale = quantize_weight_per_group(weight)
     packed_weight, packed_scale = torch.ops._C.float8_linear_prepack_cpu(w_fp8, w_scale)
-    kernel_out = ops.fp8_scaled_mm_with_quant(
+    kernel_out = cpu_ops.fp8_scaled_mm_with_quant(
         x, None, True, packed_weight, packed_scale, bias, out_dtype
     )
     ref_out = reference_dynamic_fp8_linear(x, w_fp8, w_scale, bias, out_dtype)

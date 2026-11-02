@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, NamedTuple
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.utils import random_uuid
 
 if TYPE_CHECKING:
@@ -222,7 +222,7 @@ def prepare_prefill_inputs(
     prefill_len: torch.Tensor,
     num_computed_tokens: torch.Tensor,
 ) -> None:
-    ops.prepare_prefill_inputs_cpu(
+    cpu_ops.prepare_prefill_inputs_cpu(
         input_ids,
         next_prefill_tokens,
         idx_mapping,
@@ -240,7 +240,7 @@ def prepare_pos_seq_lens(
     pos: torch.Tensor,
     seq_lens: torch.Tensor,
 ) -> None:
-    ops.prepare_pos_seq_lens_cpu(
+    cpu_ops.prepare_pos_seq_lens_cpu(
         idx_mapping,
         query_start_loc,
         num_computed_tokens,
@@ -264,7 +264,7 @@ def combine_sampled_and_draft_tokens(
     assert num_new_sampled_tokens in (0, 1), (
         f"num_new_sampled_tokens must be 0 or 1, got {num_new_sampled_tokens}"
     )
-    return ops.combine_sampled_and_draft_tokens_cpu(
+    return cpu_ops.combine_sampled_and_draft_tokens_cpu(
         input_ids,
         idx_mapping,
         last_sampled_tokens,
@@ -317,7 +317,7 @@ def post_update(
     # [max_num_reqs]
     total_len: torch.Tensor,
 ) -> None:
-    ops.post_update_cpu(
+    cpu_ops.post_update_cpu(
         idx_mapping,
         num_computed_tokens,
         last_sampled_tokens,

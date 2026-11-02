@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tests.kernels.utils import to_int8
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.platforms import current_platform
 
 if not current_platform.is_cpu():
@@ -84,7 +84,7 @@ def onednn_int8_gemm_test_helper(
 
     bias = torch.rand((n,), device=device, dtype=out_dtype) * 10 if use_bias else None
 
-    handler = ops.create_onednn_scaled_mm(
+    handler = cpu_ops.create_onednn_scaled_mm(
         b,
         scale_b,
         out_dtype,
@@ -94,7 +94,7 @@ def onednn_int8_gemm_test_helper(
     )
 
     out = torch.zeros((m, n), dtype=out_dtype)
-    ops.onednn_scaled_mm(handler, a, out, scale_a, azp, azp_adj, bias)
+    cpu_ops.onednn_scaled_mm(handler, a, out, scale_a, azp, azp_adj, bias)
     baseline = ref_int8_scaled_mm(a, b, scale_a, scale_b, azp, bias, out_dtype)
 
     torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
@@ -102,7 +102,7 @@ def onednn_int8_gemm_test_helper(
     if use_bias:
         # To test runtime bias setting
         out = torch.zeros((m, n), dtype=out_dtype)
-        ops.onednn_scaled_mm(handler, a, out, scale_a, azp, azp_adj, None)
+        cpu_ops.onednn_scaled_mm(handler, a, out, scale_a, azp, azp_adj, None)
         baseline = ref_int8_scaled_mm(a, b, scale_a, scale_b, azp, None, out_dtype)
 
         torch.testing.assert_close(out, baseline, rtol=1e-1, atol=1e0)
@@ -133,12 +133,12 @@ def onednn_gemm_test_helper(
         bias = None
         bias_f32 = None
 
-    handler = ops.create_onednn_mm(
+    handler = cpu_ops.create_onednn_mm(
         b.t(),
         primitive_cache_size,
     )
 
-    out = ops.onednn_mm(handler, a, bias)
+    out = cpu_ops.onednn_mm(handler, a, bias)
     baseline = torch.nn.functional.linear(a.float(), b.float(), bias_f32).to(
         dtype=a.dtype
     )
@@ -147,7 +147,7 @@ def onednn_gemm_test_helper(
 
     if use_bias:
         # To test runtime bias setting
-        out = ops.onednn_mm(handler, a, None)
+        out = cpu_ops.onednn_mm(handler, a, None)
         baseline = torch.nn.functional.linear(a.float(), b.float(), None).to(
             dtype=a.dtype
         )

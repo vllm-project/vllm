@@ -15,7 +15,7 @@ from vllm.utils.torch_utils import set_random_seed
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
 
-import vllm._custom_ops as ops  # noqa: E402
+from vllm import _cpu_ops as cpu_ops  # noqa: E402
 
 if not hasattr(torch.ops._C, "fused_experts_cpu"):
     pytest.skip("fused_experts_cpu op not available", allow_module_level=True)
@@ -205,14 +205,14 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
 
     # Test writing into a fresh output buffer against reference
     out = torch.empty_like(a)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a.clone(),
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.FP8_W8A16,
+        cpu_ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
         None,
@@ -225,14 +225,14 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
     # Test writing into the input tensor itself (aliased in-place) produces
     # an identical result
     a_inplace = a.clone()
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         a_inplace,
         a_inplace,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.FP8_W8A16,
+        cpu_ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
         None,
@@ -272,21 +272,21 @@ def test_w8a16_block_fp8_cpu_fused_moe_gelu_tanh(M, N, K, E, topk):
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
 
     out = torch.empty_like(a)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a.clone(),
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.FP8_W8A16,
+        cpu_ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
         None,
         None,
         BLOCK_SIZE,
         is_vnni=True,
-        act_method=ops.CPUActMethod.GELU_TANH_AND_MUL,
+        act_method=cpu_ops.CPUActMethod.GELU_TANH_AND_MUL,
     )
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
@@ -307,14 +307,14 @@ def test_w8a16_block_fp8_cpu_fused_moe_small_expert_blocks():
     )
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
     out = torch.empty_like(a)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.FP8_W8A16,
+        cpu_ops.CPUQuantMethod.FP8_W8A16,
         w1_s,
         w2_s,
         None,
@@ -530,14 +530,14 @@ def test_mxfp4_cpu_fused_moe(M, N, K, E, topk, seed):
     # Kernel
     a_in = a.clone()
     out = torch.empty_like(a_in)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a_in,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.MXFP4,
+        cpu_ops.CPUQuantMethod.MXFP4,
         pw1s,  # w1_scale
         pw2s,  # w2_scale
         None,  # w1_zero
@@ -581,20 +581,20 @@ def test_mxfp4_cpu_fused_moe_gelu_tanh(M, N, K, E, topk):
 
     a_in = a.clone()
     out = torch.empty_like(a_in)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a_in,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.MXFP4,
+        cpu_ops.CPUQuantMethod.MXFP4,
         pw1s,  # w1_scale
         pw2s,  # w2_scale
         None,  # w1_zero
         None,  # w2_zero
         None,  # block_size
-        act_method=ops.CPUActMethod.GELU_TANH_AND_MUL,
+        act_method=cpu_ops.CPUActMethod.GELU_TANH_AND_MUL,
     )
 
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
@@ -625,14 +625,14 @@ def test_mxfp4_cpu_fused_moe_small_expert_blocks():
     pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
     out = torch.empty_like(a)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.MXFP4,
+        cpu_ops.CPUQuantMethod.MXFP4,
         pw1s,
         pw2s,
         None,
@@ -684,14 +684,14 @@ def test_mxfp4_cpu_zero_codes_stay_zero(zero_byte, e8m0):
     pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
     out = torch.empty_like(a)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.MXFP4,
+        cpu_ops.CPUQuantMethod.MXFP4,
         pw1s,
         pw2s,
         None,
@@ -746,14 +746,14 @@ def test_mxfp4_cpu_zero_codes_mixed_with_nonzero(e8m0):
     pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
     out = torch.empty_like(a)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.MXFP4,
+        cpu_ops.CPUQuantMethod.MXFP4,
         pw1s,
         pw2s,
         None,
@@ -807,14 +807,14 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
     # Kernel
     a_in = a.clone()
     out = torch.empty_like(a_in)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a_in,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.MXFP4,
+        cpu_ops.CPUQuantMethod.MXFP4,
         pw1s,  # w1_scale
         pw2s,  # w2_scale
         None,  # w1_zero
@@ -824,7 +824,7 @@ def test_mxfp4_cpu_fused_moe_bias_swiglu(M, N, K, E, topk, seed):
         w2_bias=w2_b,
         alpha=alpha,
         limit=limit,
-        act_method=ops.CPUActMethod.SWIGLU,
+        act_method=cpu_ops.CPUActMethod.SWIGLU,
     )
 
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
@@ -947,7 +947,7 @@ def _make_int4_moe_weights(E, N, K, group_size, quant_algo):
     ).abs() + 0.001
     w2_s = (torch.randn(E, num_groups_w2, K, dtype=torch.bfloat16) * 0.01).abs() + 0.001
 
-    if quant_algo == ops.CPUQuantAlgo.GPTQ:
+    if quant_algo == cpu_ops.CPUQuantAlgo.GPTQ:
         # Pack: canonical [E, K, 2*N] → transpose [E, 2*N, K] → GPTQ pack
         # [E, 2*N, K//8] → transpose [E, K//8, 2*N]
         w1_t = w1_int4.transpose(1, 2).contiguous()  # [E, 2*N, K]
@@ -1011,7 +1011,9 @@ INT4_MOE_CONFIGS = [
 
 @pytest.mark.parametrize("M", [1, 2, 64, 121])
 @pytest.mark.parametrize("N,K,E,topk,group_size", INT4_MOE_CONFIGS)
-@pytest.mark.parametrize("quant_algo", [ops.CPUQuantAlgo.GPTQ, ops.CPUQuantAlgo.AWQ])
+@pytest.mark.parametrize(
+    "quant_algo", [cpu_ops.CPUQuantAlgo.GPTQ, cpu_ops.CPUQuantAlgo.AWQ]
+)
 @pytest.mark.parametrize("seed", [0])
 def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, quant_algo, seed):
     """Test fused_experts_cpu INT4 W4A16 for both GPTQ and AWQ quant formats."""
@@ -1067,14 +1069,14 @@ def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, quant_algo, seed
 
     a_in = a.clone()
     out = torch.empty_like(a_in)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a_in,
         blocked_w1,
         blocked_w2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.INT4_W4A8,
+        cpu_ops.CPUQuantMethod.INT4_W4A8,
         blocked_s1,
         blocked_s2,
         blocked_z1,
@@ -1091,7 +1093,9 @@ def test_int4_w4a16_cpu_fused_moe(M, N, K, E, topk, group_size, quant_algo, seed
 
 @pytest.mark.parametrize("M", [1, 64])
 @pytest.mark.parametrize("N,K,E,topk,group_size", [(256, 512, 8, 2, 128)])
-@pytest.mark.parametrize("quant_algo", [ops.CPUQuantAlgo.GPTQ, ops.CPUQuantAlgo.AWQ])
+@pytest.mark.parametrize(
+    "quant_algo", [cpu_ops.CPUQuantAlgo.GPTQ, cpu_ops.CPUQuantAlgo.AWQ]
+)
 def test_int4_w4a16_cpu_fused_moe_gelu_tanh(M, N, K, E, topk, group_size, quant_algo):
     """Test fused_experts_cpu INT4 W4A16 with GELU-tanh activation."""
     set_random_seed(0)
@@ -1147,14 +1151,14 @@ def test_int4_w4a16_cpu_fused_moe_gelu_tanh(M, N, K, E, topk, group_size, quant_
 
     a_in = a.clone()
     out = torch.empty_like(a_in)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a_in,
         blocked_w1,
         blocked_w2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.INT4_W4A8,
+        cpu_ops.CPUQuantMethod.INT4_W4A8,
         blocked_s1,
         blocked_s2,
         blocked_z1,
@@ -1166,7 +1170,7 @@ def test_int4_w4a16_cpu_fused_moe_gelu_tanh(M, N, K, E, topk, group_size, quant_
         None,  # limit
         True,  # is_vnni
         None,  # a1_scale
-        ops.CPUActMethod.GELU_TANH_AND_MUL,
+        cpu_ops.CPUActMethod.GELU_TANH_AND_MUL,
     )
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
@@ -1278,14 +1282,14 @@ def test_int8_w8a8_cpu_fused_moe(M, N, K, E, topk, seed, is_vnni, inplace):
 
     a_in = a.clone()
     out = a_in if inplace else torch.empty_like(a_in)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a_in,
         w1,
         w2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.INT8_W8A8,
+        cpu_ops.CPUQuantMethod.INT8_W8A8,
         w1_s,
         w2_s,
         None,  # w1_zero
@@ -1320,14 +1324,14 @@ def test_int8_w8a8_cpu_fused_moe_small_expert_blocks(dtype):
     ref_out = _ref_int8_moe(a, w1_q, w2_q, w1_s, w2_s, topk_weight, topk_ids)
     pw1, pw2 = _prepack_experts(w1_q), _prepack_experts(w2_q)
     out = torch.empty_like(a)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a,
         pw1,
         pw2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.INT8_W8A8,
+        cpu_ops.CPUQuantMethod.INT8_W8A8,
         w1_s,
         w2_s,
         None,
@@ -1363,14 +1367,14 @@ def test_int8_w8a8_cpu_fused_moe_gelu_tanh(M, N, K, E, topk, is_vnni):
 
     a_in = a.clone()
     out = torch.empty_like(a_in)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         out,
         a_in,
         w1,
         w2,
         topk_weight,
         topk_ids,
-        ops.CPUQuantMethod.INT8_W8A8,
+        cpu_ops.CPUQuantMethod.INT8_W8A8,
         w1_s,
         w2_s,
         None,  # w1_zero
@@ -1382,7 +1386,7 @@ def test_int8_w8a8_cpu_fused_moe_gelu_tanh(M, N, K, E, topk, is_vnni):
         None,  # limit
         is_vnni,
         None,  # a1_scale
-        ops.CPUActMethod.GELU_TANH_AND_MUL,
+        cpu_ops.CPUActMethod.GELU_TANH_AND_MUL,
     )
     torch.testing.assert_close(
         ref_out.bfloat16(),
@@ -1398,7 +1402,7 @@ def test_int8_w8a8_cpu_fused_moe_gelu_tanh(M, N, K, E, topk, is_vnni):
 
 
 requires_cpu_fp8_w8a8 = pytest.mark.skipif(
-    not ops.cpu_has_amx_fp8(),
+    not cpu_ops.cpu_has_amx_fp8(),
     reason="requires native AMX-FP8 hardware",
 )
 
@@ -1558,14 +1562,14 @@ def test_fp8_w8a8_cpu_fused_moe(E: int, N: int, K: int, M: int, top_k: int):
         ].int()
 
     output = torch.empty(M, K, dtype=torch.bfloat16)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         output,
         x_fp8,
         packed_w13,
         packed_w2,
         topk_weights,
         topk_ids,
-        ops.CPUQuantMethod.FP8_W8A8,
+        cpu_ops.CPUQuantMethod.FP8_W8A8,
         packed_w13_scale,  # w1_scale: [E, Nc, G, BLOCK_N]
         w2_scale,  # w2_scale: [E, K//128, N//128]
         None,  # w1_zero
@@ -1621,14 +1625,14 @@ def test_fp8_w8a8_cpu_fused_moe_gelu_tanh(E: int, N: int, K: int, M: int, top_k:
         ].int()
 
     output = torch.empty(M, K, dtype=torch.bfloat16)
-    ops.fused_experts_cpu(
+    cpu_ops.fused_experts_cpu(
         output,
         x_fp8,
         packed_w13,
         packed_w2,
         topk_weights,
         topk_ids,
-        ops.CPUQuantMethod.FP8_W8A8,
+        cpu_ops.CPUQuantMethod.FP8_W8A8,
         packed_w13_scale,  # w1_scale: [E, Nc, G, BLOCK_N]
         w2_scale,  # w2_scale: [E, K//128, N//128]
         None,  # w1_zero
@@ -1640,7 +1644,7 @@ def test_fp8_w8a8_cpu_fused_moe_gelu_tanh(E: int, N: int, K: int, M: int, top_k:
         None,  # limit
         True,  # is_vnni (weights already packed)
         x_scales,  # a1_scale: per-token FP8 activation scales
-        ops.CPUActMethod.GELU_TANH_AND_MUL,
+        cpu_ops.CPUActMethod.GELU_TANH_AND_MUL,
     )
 
     assert not torch.isnan(output).any()

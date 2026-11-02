@@ -13,7 +13,7 @@ from vllm.utils.torch_utils import set_random_seed
 
 # Check if CPU MoE operations are available
 try:
-    from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
+    from vllm._cpu_ops import cpu_fused_moe, cpu_prepack_moe_weight
 except (ImportError, AttributeError) as e:
     print(f"Import error: {e}")
     sys.exit(1)

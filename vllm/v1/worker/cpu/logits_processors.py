@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 import vllm.envs as envs
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
@@ -205,7 +205,7 @@ class CPULogitBiasState(LogitsProcessor):
         enable_stop_token_restore = bool(
             np.any(self.restore_when_all_masked_np[ctx.idx_mapping_np])
         )
-        ops.apply_logit_bias_cpu(
+        cpu_ops.apply_logit_bias_cpu(
             logits,
             ctx.expanded_idx_mapping,
             ctx.pos,

@@ -8,7 +8,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-import vllm._custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.model_executor.layers.mamba.ops.cpu import gdn_attention
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -228,7 +228,7 @@ def test_fused_gdn_gating_cpu(
     dt_bias = tensor_cache(num_v_heads, torch.bfloat16)
 
     g_ref, beta_ref = ref_gdn_gating(A_log, a, b, dt_bias)
-    g, beta = ops.fused_gdn_gating_cpu(A_log, a, b, dt_bias)
+    g, beta = cpu_ops.fused_gdn_gating_cpu(A_log, a, b, dt_bias)
 
     torch.testing.assert_close(g, g_ref.unsqueeze(0), atol=1e-4, rtol=1e-4)
     torch.testing.assert_close(
@@ -278,7 +278,7 @@ def test_fused_sigmoid_gating_delta_rule_update_cpu(
     out_ref = out_ref.transpose(0, 1).contiguous()
 
     state_out = state.clone()
-    out = ops.fused_sigmoid_gating_delta_rule_update_cpu(
+    out = cpu_ops.fused_sigmoid_gating_delta_rule_update_cpu(
         A_log=A_log,
         dt_bias=dt_bias,
         q=q,
@@ -344,7 +344,7 @@ def test_chunk_gated_delta_rule_cpu(
     )
 
     g, beta = ref_gdn_gating(A_log, a, b, dt_bias)
-    out, final_state = ops.chunk_gated_delta_rule_cpu(
+    out, final_state = cpu_ops.chunk_gated_delta_rule_cpu(
         query=q,
         key=k,
         value=v,
@@ -410,7 +410,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
     zero_state = torch.zeros(1, num_v_heads, head_dim, v_head_dim, dtype=state_dtype)
 
     # Reference: whole sequence in one call, no initial state.
-    out_full, final_full = ops.chunk_gated_delta_rule_cpu(
+    out_full, final_full = cpu_ops.chunk_gated_delta_rule_cpu(
         query=q,
         key=k,
         value=v,
@@ -425,7 +425,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
     )
 
     # Call 1: tokens [0:split], no initial state, capture final state.
-    out1, state1 = ops.chunk_gated_delta_rule_cpu(
+    out1, state1 = cpu_ops.chunk_gated_delta_rule_cpu(
         query=q[:, :split],
         key=k[:, :split],
         value=v[:, :split],
@@ -441,7 +441,7 @@ def test_chunk_gated_delta_rule_cpu_two_call_split(
     # Call 2: tokens [split:T] seeded with call 1's final state and a cu_seqlens
     # rebased to start at 0, as cpu_gdn_attention_core continues a prefill chunk.
     tail = total_tokens - split
-    out2, state2 = ops.chunk_gated_delta_rule_cpu(
+    out2, state2 = cpu_ops.chunk_gated_delta_rule_cpu(
         query=q[:, split:],
         key=k[:, split:],
         value=v[:, split:],
@@ -497,7 +497,7 @@ def _sd_conv_states(
 def _maybe_pack_conv_weight(
     weight: torch.Tensor, is_weight_packed: bool
 ) -> torch.Tensor:
-    return ops.causal_conv1d_weight_pack(weight) if is_weight_packed else weight
+    return cpu_ops.causal_conv1d_weight_pack(weight) if is_weight_packed else weight
 
 
 @torch.inference_mode()
@@ -517,7 +517,9 @@ def test_causal_conv1d_update_cpu_preserves_sd_state(
         return x
 
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
-    monkeypatch.setattr(gdn_attention.ops, "causal_conv1d_update_cpu", record_update)
+    monkeypatch.setattr(
+        gdn_attention.cpu_ops, "causal_conv1d_update_cpu", record_update
+    )
     out = gdn_attention._causal_conv1d_update_cpu(
         x=x,
         conv_states=conv_state,
@@ -628,11 +630,13 @@ def test_spec_aware_nonspec_materializes_state_indices(
     monkeypatch.setattr(torch.cpu, "_is_amx_tile_supported", lambda: True)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
-        gdn_attention.ops, "causal_conv1d_fwd_cpu", causal_conv1d_fwd_cpu
+        gdn_attention.cpu_ops, "causal_conv1d_fwd_cpu", causal_conv1d_fwd_cpu
     )
-    monkeypatch.setattr(gdn_attention.ops, "fused_gdn_gating_cpu", fused_gdn_gating_cpu)
     monkeypatch.setattr(
-        gdn_attention.ops,
+        gdn_attention.cpu_ops, "fused_gdn_gating_cpu", fused_gdn_gating_cpu
+    )
+    monkeypatch.setattr(
+        gdn_attention.cpu_ops,
         "chunk_gated_delta_rule_cpu",
         chunk_gated_delta_rule_cpu,
     )
@@ -705,10 +709,10 @@ def test_spec_forward_prepares_native_conv_metadata(
     monkeypatch.setattr(gdn_attention, "is_arm_bf16", lambda: has_arm_bf16)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
-        gdn_attention.ops, "causal_conv1d_update_cpu", causal_conv1d_update_cpu
+        gdn_attention.cpu_ops, "causal_conv1d_update_cpu", causal_conv1d_update_cpu
     )
     monkeypatch.setattr(
-        gdn_attention.ops,
+        gdn_attention.cpu_ops,
         "fused_sigmoid_gating_delta_rule_update_spec_cpu",
         lambda **kwargs: kwargs["q"],
     )
@@ -762,7 +766,7 @@ def test_spec_forward_conv_tracks_accepted_tokens(
         monkeypatch.setattr(gdn_attention, "is_arm_bf16", lambda: False)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     monkeypatch.setattr(
-        gdn_attention.ops,
+        gdn_attention.cpu_ops,
         "fused_sigmoid_gating_delta_rule_update_spec_cpu",
         lambda **kwargs: kwargs["q"],
     )
@@ -925,7 +929,7 @@ def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
     wide_tail = wide_state[:, :, state_len:].clone()
 
     conv_weight = _maybe_pack_conv_weight(weight, is_weight_packed)
-    out_narrow = ops.causal_conv1d_update_cpu(
+    out_narrow = cpu_ops.causal_conv1d_update_cpu(
         x=x,
         conv_states=narrow_state,
         weight=conv_weight,
@@ -934,7 +938,7 @@ def test_causal_conv1d_update_cpu_accepts_wide_state() -> None:
         conv_state_indices=conv_state_indices,
         is_weight_packed=is_weight_packed,
     )
-    out_wide = ops.causal_conv1d_update_cpu(
+    out_wide = cpu_ops.causal_conv1d_update_cpu(
         x=x,
         conv_states=wide_state,
         weight=conv_weight,
@@ -1030,7 +1034,7 @@ def test_causal_conv1d_update_cpu_multi_token_matches_python(
     conv_states = conv_states_ref.clone()
 
     conv_weight = _maybe_pack_conv_weight(weight, is_weight_packed)
-    out = ops.causal_conv1d_update_cpu(
+    out = cpu_ops.causal_conv1d_update_cpu(
         x=x,
         conv_states=conv_states,
         weight=conv_weight,
@@ -1072,7 +1076,7 @@ def test_causal_conv1d_update_cpu_rejects_invalid_accepted_count(
     conv_states = _sd_conv_states(batch_size, state_len, dim)
 
     with pytest.raises(RuntimeError, match="num_accepted_tokens must be in.*seqlen"):
-        ops.causal_conv1d_update_cpu(
+        cpu_ops.causal_conv1d_update_cpu(
             x=x,
             conv_states=conv_states,
             weight=weight,
@@ -1104,7 +1108,7 @@ def test_causal_conv1d_fwd_cpu_two_call_split(total_tokens: int, split: int) -> 
 
     def native(x_seg, conv_states, has_init):
         seq = x_seg.shape[0]
-        return ops.causal_conv1d_fwd_cpu(
+        return cpu_ops.causal_conv1d_fwd_cpu(
             x=x_seg.transpose(0, 1),  # [dim, seq]; stride(-2)==1 (view of [seq,dim])
             weight=weight,
             bias=bias,
@@ -1154,7 +1158,7 @@ def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
     wide_tail = wide_state[:, :, state_len:].clone()
 
     conv_weight = _maybe_pack_conv_weight(weight, is_weight_packed)
-    out_narrow = ops.causal_conv1d_fwd_cpu(
+    out_narrow = cpu_ops.causal_conv1d_fwd_cpu(
         x=x.transpose(0, 1),
         weight=conv_weight,
         bias=bias,
@@ -1165,7 +1169,7 @@ def test_causal_conv1d_fwd_cpu_accepts_wide_state() -> None:
         silu_activation=True,
         is_weight_packed=is_weight_packed,
     )
-    out_wide = ops.causal_conv1d_fwd_cpu(
+    out_wide = cpu_ops.causal_conv1d_fwd_cpu(
         x=x.transpose(0, 1),
         weight=conv_weight,
         bias=bias,
@@ -1282,7 +1286,7 @@ def _run_prefill_torch(x, weight, bias, seq_lens):
 
 def _run_prefill_cpp(x, weight, bias, seq_lens, is_weight_packed=False):
     num_seqs = len(seq_lens)
-    packed_w = ops.causal_conv1d_weight_pack(weight) if is_weight_packed else weight
+    packed_w = cpu_ops.causal_conv1d_weight_pack(weight) if is_weight_packed else weight
     if is_weight_packed:
         # C++-branch layout: kv-cache "SD" [slots, state_len, dim] transposed to
         # [slots, dim, state_len] (a non-contiguous view).
@@ -1294,7 +1298,7 @@ def _run_prefill_cpp(x, weight, bias, seq_lens, is_weight_packed=False):
     qsl = torch.tensor(
         [0, *torch.tensor(seq_lens).cumsum(0).tolist()], dtype=torch.int32
     )
-    out = ops.causal_conv1d_fwd_cpu(
+    out = cpu_ops.causal_conv1d_fwd_cpu(
         x=x.transpose(0, 1),
         weight=packed_w,
         bias=bias,
@@ -1361,7 +1365,7 @@ def test_causal_conv1d_fwd_cpu_ds_adapter_varlen_mixed_initial_state(
         )
         return _python_native_fwd(**kwargs)
 
-    monkeypatch.setattr(gdn_attention.ops, "causal_conv1d_fwd_cpu", record_fwd)
+    monkeypatch.setattr(gdn_attention.cpu_ops, "causal_conv1d_fwd_cpu", record_fwd)
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: False)
     out_sd = gdn_attention._causal_conv1d_fwd_cpu(
         x=x,
@@ -1421,7 +1425,9 @@ def test_causal_conv1d_update_cpu_ds_adapter_wide_multi_token_copyback(
         return torch.zeros_like(kwargs["x"])
 
     monkeypatch.setattr(gdn_attention, "is_conv_state_dim_first", lambda: True)
-    monkeypatch.setattr(gdn_attention.ops, "causal_conv1d_update_cpu", mutate_update)
+    monkeypatch.setattr(
+        gdn_attention.cpu_ops, "causal_conv1d_update_cpu", mutate_update
+    )
     gdn_attention._causal_conv1d_update_cpu(
         x=torch.zeros(state_indices.numel(), seq_len, dim, dtype=state.dtype),
         conv_states=state,
@@ -1545,7 +1551,7 @@ def test_conv_update_cpp_matches_torch(
             activation="silu" if silu_activation else None,
         ).squeeze(-1)
         storage_ref[indices, :_STATE_LEN] = cs_torch.transpose(1, 2)
-        out_cpp = ops.causal_conv1d_update_cpu(
+        out_cpp = cpu_ops.causal_conv1d_update_cpu(
             x=x,
             conv_states=cs_cpp,
             weight=conv_weight,
@@ -1639,7 +1645,7 @@ def test_spec_decode_unpacked_conv_weight_stash():
         [0, *torch.tensor(seq_lens).cumsum(0).tolist()], dtype=torch.int32
     )
     out_cpp = (
-        ops.causal_conv1d_fwd_cpu(
+        cpu_ops.causal_conv1d_fwd_cpu(
             x=x.transpose(0, 1),
             weight=packed_weight.view(CONV_DIM, CONV_KERNEL),
             bias=bias,

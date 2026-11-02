@@ -30,7 +30,7 @@ from typing import ClassVar
 
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -177,7 +177,7 @@ class CPUMLAImpl(MLACommonImpl[MLACommonMetadata]):
         block_table = attn_metadata.decode.block_table.to(torch.int32)
         seq_lens = attn_metadata.decode.seq_lens.to(torch.int32)
 
-        ops.mla_decode_kvcache_cpu(
+        cpu_ops.mla_decode_kvcache_cpu(
             out,
             q,
             kv_c_and_k_pe_cache,

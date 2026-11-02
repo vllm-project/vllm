@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
+from vllm import _cpu_ops as cpu_ops
 from vllm.config.model import LogprobsMode
 from vllm.platforms import current_platform
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
@@ -166,7 +166,7 @@ def get_prompt_logprobs_token_ids(
     num_computed_tokens: torch.Tensor,
     all_token_ids: torch.Tensor,
 ) -> torch.Tensor:
-    return ops.get_prompt_logprobs_token_ids_cpu(
+    return cpu_ops.get_prompt_logprobs_token_ids_cpu(
         num_tokens,
         query_start_loc,
         idx_mapping,
