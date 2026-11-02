@@ -50,6 +50,8 @@ class SpeculatorConfig:
     # Proposes draft tokens (unlike e.g. hidden state extraction).
     proposes_draft_tokens: ClassVar[bool] = True
     adaptive_verification_uses_draft_logits: ClassVar[bool] = True
+    # Generates all draft tokens in one forward pass (e.g. DFlash).
+    parallel_drafting: ClassVar[bool] = False
     # The draft model has its own vocabulary, which must match the target's.
     draft_has_own_vocab: ClassVar[bool] = False
 

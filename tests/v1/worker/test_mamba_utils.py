@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 import torch
 
-from tests.v1.attention.utils import (
-    BatchSpec,
-    MockMambaBuilder,
-    create_common_attn_metadata,
-)
 from tests.v1.worker.test_utils import _TestReplaySSMMixer
 from vllm.config import CacheConfig
 from vllm.config.mamba import MambaConfig
@@ -34,18 +30,16 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.model_states.mamba_hybrid import MambaHybridModelState
 from vllm.v1.worker.mamba_utils import (
-    MambaCopyBuffers,
     MambaSpecDecodeGPUContext,
+    _get_mamba_spec_for_layer,
     _reinterpret_u64_as_i64,
     batch_memcpy,
-    collect_mamba_copy_meta,
-    do_mamba_copy_block,
+    get_mamba_group_ids,
     get_mamba_groups,
-    preprocess_mamba,
-    stage_postprocess_inputs_to_gpu,
 )
 from vllm.v1.worker.replayssm_utils import (
     ReplaySSMModelContext,
@@ -66,6 +60,101 @@ _COPY_FUNCS: MambaStateCopyFuncsByType = {
     MambaAttentionBackendEnum.GDN_ATTN: _DEFAULT_COPY_FUNCS,
     MambaAttentionBackendEnum.SHORT_CONV: (get_conv_copy_spec,),
 }
+
+
+@dataclass
+class MambaCopyBuffers:
+    """Staging buffers for the CPU reference copy path below."""
+
+    src_ptrs: CpuGpuBuffer
+    dst_ptrs: CpuGpuBuffer
+    sizes: CpuGpuBuffer
+    mamba_group_ids: list[int]
+    mamba_spec: MambaSpec
+    offset: int = 0
+
+    @classmethod
+    def create(
+        cls,
+        max_num_reqs: int,
+        kv_cache_config: KVCacheConfig,
+        copy_funcs: MambaStateCopyFuncsByType,
+        make_buffer: Callable[..., Any],
+    ) -> "MambaCopyBuffers":
+        mamba_groups = get_mamba_groups(kv_cache_config)
+        mamba_spec = next(iter(mamba_groups))
+        mamba_group_ids = get_mamba_group_ids(mamba_groups)
+        entries_per_req = sum(
+            len(
+                copy_funcs[
+                    _get_mamba_spec_for_layer(
+                        kv_cache_config.kv_cache_groups[gid], layer_name
+                    ).mamba_type
+                ]
+            )
+            for gid in mamba_group_ids
+            for layer_name in kv_cache_config.kv_cache_groups[gid].layer_names
+        )
+        n = max_num_reqs * entries_per_req
+        return cls(
+            src_ptrs=make_buffer(n, dtype=torch.uint64),
+            dst_ptrs=make_buffer(n, dtype=torch.uint64),
+            sizes=make_buffer(n, dtype=torch.int32),
+            mamba_group_ids=mamba_group_ids,
+            mamba_spec=mamba_spec,
+        )
+
+
+def collect_mamba_copy_meta(
+    copy_bufs: MambaCopyBuffers,
+    kv_cache_config: KVCacheConfig,
+    mamba_state_copy_funcs: MambaStateCopyFuncsByType,
+    mamba_group_ids: list[int],
+    src_block_idx: int,
+    dest_block_idx: int,
+    accept_token_bias: int,
+    req_state: Any,
+    forward_context: dict[str, Any],
+) -> None:
+    """CPU reference: queue the state copies for one request."""
+    if src_block_idx == dest_block_idx and accept_token_bias == 0:
+        return
+
+    src_ptrs_np = copy_bufs.src_ptrs.np
+    dst_ptrs_np = copy_bufs.dst_ptrs.np
+    sizes_np = copy_bufs.sizes.np
+    offset = copy_bufs.offset
+
+    for mamba_group_id in mamba_group_ids:
+        block_ids = req_state.block_ids[mamba_group_id]
+        dest_block_id = block_ids[dest_block_idx]
+        kv_cache_group = kv_cache_config.kv_cache_groups[mamba_group_id]
+        for layer_name in kv_cache_group.layer_names:
+            mamba_spec = _get_mamba_spec_for_layer(kv_cache_group, layer_name)
+            state_copy_funcs = mamba_state_copy_funcs[mamba_spec.mamba_type]
+            kv_caches: list[torch.Tensor] = forward_context[layer_name].kv_cache
+            for state, state_copy_func in zip(kv_caches, state_copy_funcs):
+                copy_spec = state_copy_func(
+                    state, block_ids, src_block_idx, accept_token_bias + 1
+                )
+                src_ptrs_np[offset] = copy_spec.start_addr
+                dst_ptrs_np[offset] = state[dest_block_id].data_ptr()
+                sizes_np[offset] = copy_spec.num_elements * state.element_size()
+                offset += 1
+
+    copy_bufs.offset = offset
+
+
+def do_mamba_copy_block(copy_bufs: MambaCopyBuffers) -> None:
+    """CPU reference: run the queued state copies."""
+    n = copy_bufs.offset
+    if n == 0:
+        return
+    batch_memcpy(
+        copy_bufs.src_ptrs.copy_to_gpu(n),
+        copy_bufs.dst_ptrs.copy_to_gpu(n),
+        copy_bufs.sizes.copy_to_gpu(n),
+    )
 
 
 def postprocess_mamba(
@@ -122,68 +211,6 @@ def postprocess_mamba(
             if src_block_idx == dest_block_idx:
                 num_accepted_tokens_cpu[i] = 1
     do_mamba_copy_block(copy_bufs)
-
-
-def _make_scheduler_output(
-    finished_req_ids: set[str],
-    preempted_req_ids: set[str] | None,
-    resumed_req_ids: set[str],
-) -> SchedulerOutput:
-    cached = CachedRequestData.make_empty()
-    cached.resumed_req_ids = resumed_req_ids
-    return SchedulerOutput(
-        scheduled_new_reqs=[],
-        scheduled_cached_reqs=cached,
-        num_scheduled_tokens={},
-        total_num_scheduled_tokens=0,
-        scheduled_spec_decode_tokens={},
-        scheduled_encoder_inputs={},
-        finished_req_ids=finished_req_ids,
-        free_encoder_mm_hashes=[],
-        preempted_req_ids=preempted_req_ids,
-    )
-
-
-def test_resumed_req_ids_cleared_from_mamba_state_idx():
-    """When a request is force-preempted (e.g. reset_prefix_cache),
-    it appears in resumed_req_ids but NOT in preempted_req_ids.
-    preprocess_mamba must still clear its mamba_state_idx entry,
-    otherwise stale indices can point beyond the new block allocation.
-    """
-    spec = MagicMock(block_size=64, num_speculative_blocks=0)
-    cache_config = MagicMock(enable_prefix_caching=True)
-    input_batch = MagicMock(req_ids=[])
-    copy_bufs = MagicMock(mamba_group_ids=[0], mamba_spec=spec)
-
-    mamba_state_idx: dict[str, int] = {
-        "finished": 1,
-        "preempted": 2,
-        "resumed": 3,  # only in resumed_req_ids, NOT in preempted
-        "keep": 99,
-    }
-    sched = _make_scheduler_output(
-        finished_req_ids={"finished"},
-        preempted_req_ids={"preempted"},
-        resumed_req_ids={"resumed"},
-    )
-
-    with patch(
-        "vllm.v1.worker.mamba_utils.get_mamba_groups",
-        return_value=([0], spec),
-    ):
-        preprocess_mamba(
-            sched,
-            MagicMock(),  # kv_cache_config
-            cache_config,
-            mamba_state_idx,
-            input_batch,
-            {},  # requests
-            {},  # forward_context
-            {},  # mamba_state_copy_funcs
-            copy_bufs,
-        )
-
-    assert mamba_state_idx == {"keep": 99}
 
 
 # -----------------------------------------------------------------------------
@@ -563,7 +590,6 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 @pytest.mark.parametrize(
     (
-        "use_v2",
         "layout",
         "previous_column",
         "computed",
@@ -571,10 +597,10 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
         "destination_column",
     ),
     [
-        (False, KVCacheLayout.LBNHC, 0, 15, 4, 1),
-        (True, KVCacheLayout.BLHNC, 1, 14, 1, 0),
-        (False, KVCacheLayout.BLHNC, 0, 11, 4, 0),
-        (True, KVCacheLayout.LBNHC, -1, 0, 4, 0),
+        (KVCacheLayout.LBNHC, 0, 15, 4, 1),
+        (KVCacheLayout.BLHNC, 1, 14, 1, 0),
+        (KVCacheLayout.BLHNC, 0, 11, 4, 0),
+        (KVCacheLayout.LBNHC, -1, 0, 4, 0),
     ],
     ids=[
         "forward_after_rejection",
@@ -585,7 +611,6 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
 )
 def test_replayssm_precopy_moves_packed_state_and_trackers(
     monkeypatch,
-    use_v2,
     layout,
     previous_column,
     computed,
@@ -660,59 +685,29 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
         kv_config,
         forward_context,
         _COPY_FUNCS,
-        [persistent_table if use_v2 else batch_table],
+        [persistent_table],
         [batch_table],
     )
     initial_accepted = 1 if previous_column < 0 else 3
-    accepted = torch.tensor(
-        [1, initial_accepted] if use_v2 else [initial_accepted],
-        dtype=torch.int32,
-        device=device,
-    )
-    computed_gpu = torch.tensor(
-        [0, computed] if use_v2 else [computed], dtype=torch.int32, device=device
-    )
+    accepted = torch.tensor([1, initial_accepted], dtype=torch.int32, device=device)
+    computed_gpu = torch.tensor([0, computed], dtype=torch.int32, device=device)
     query_start = torch.tensor([0, scheduled], dtype=torch.int32, device=device)
-    if use_v2:
-        model_state = object.__new__(MambaHybridModelState)
-        model_state._align_mode = True
-        model_state._mamba_ctx = ctx
-        monkeypatch.setattr(model_state, "_get_mamba_group_info", lambda _: ([0], spec))
-        model_state._mamba_state_idx_gpu = torch.tensor(
-            [-1, previous_column], dtype=torch.int32, device=device
-        )
-        model_state._mamba_src_col_gpu = torch.empty(
-            2, dtype=torch.int32, device=device
-        )
-        model_state._mamba_src_off_gpu = torch.empty(
-            2, dtype=torch.int32, device=device
-        )
-        model_state.num_accepted_tokens_gpu = accepted
-        batch = SimpleNamespace(
-            num_reqs=1,
-            idx_mapping=torch.tensor([1], dtype=torch.int32, device=device),
-            query_start_loc=query_start,
-        )
-        model_state.preprocess_state(batch, (batch_table,), kv_config, computed_gpu)
-    else:
-        batch = _make_input_batch(["request"], [-99], [previous_column])
-        requests = _make_requests(["request"], [computed], [[1, 2]])
-        preprocess_mamba(
-            _make_postprocess_scheduler_output(["request"], {"request": scheduled}),
-            kv_config,
-            SimpleNamespace(enable_prefix_caching=True),
-            {"request": previous_column},
-            batch,
-            requests,
-            forward_context,
-            _COPY_FUNCS,
-            _make_copy_bufs(cfg, kv_config, device),
-            align_ctx=ctx,
-            num_accepted_tokens_gpu=accepted,
-            num_computed_tokens_gpu=computed_gpu,
-            query_start_loc_gpu=query_start,
-        )
-        assert batch.num_accepted_tokens_cpu.tolist() == [-99]
+    model_state = object.__new__(MambaHybridModelState)
+    model_state._align_mode = True
+    model_state._mamba_ctx = ctx
+    monkeypatch.setattr(model_state, "_get_mamba_group_info", lambda _: ([0], spec))
+    model_state._mamba_state_idx_gpu = torch.tensor(
+        [-1, previous_column], dtype=torch.int32, device=device
+    )
+    model_state._mamba_src_col_gpu = torch.empty(2, dtype=torch.int32, device=device)
+    model_state._mamba_src_off_gpu = torch.empty(2, dtype=torch.int32, device=device)
+    model_state.num_accepted_tokens_gpu = accepted
+    batch = SimpleNamespace(
+        num_reqs=1,
+        idx_mapping=torch.tensor([1], dtype=torch.int32, device=device),
+        query_start_loc=query_start,
+    )
+    model_state.preprocess_state(batch, (batch_table,), kv_config, computed_gpu)
     moved = previous_column >= 0 and previous_column != destination_column
     assert accepted[-1].item() == (1 if moved else initial_accepted)
     for name, mixer in forward_context.items():
@@ -960,128 +955,6 @@ def test_v2_align_ctx_binds_request_slot_tables_for_state_copies():
     ]
 
 
-# -----------------------------------------------------------------------------
-# stage_postprocess_inputs_to_gpu: single-pass staging into pinned views
-# -----------------------------------------------------------------------------
-
-
-def _make_staging_ctx(max_num_reqs: int, device: torch.device) -> MagicMock:
-    """Build a MambaSpecDecodeGPUContext stand-in exposing only the four
-    per-request staging buffers touched by stage_postprocess_inputs_to_gpu."""
-    ctx = MagicMock()
-    ctx.num_scheduled_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
-    ctx.num_computed_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
-    ctx.num_draft_tokens_buf = _MockCpuGpuBuffer(max_num_reqs, torch.int32, device)
-    ctx.is_prefilling_buf = _MockCpuGpuBuffer(max_num_reqs, torch.bool, device)
-    return ctx
-
-
-def _build_staging_metadata(computed, scheduled, prompt_lens, drafts, num_spec=3):
-    # Use the real Mamba split without allocating unused CUDA-graph buffers.
-    builder = object.__new__(MockMambaBuilder)
-    builder.kv_cache_spec = MambaSpec(
-        block_size=16,
-        shapes=((1,), (1,)),
-        dtypes=(torch.float32,) * 2,
-    )
-    builder.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(mamba_cache_mode="none")
-    )
-    builder.num_spec_tokens = num_spec
-    builder.use_spec_decode = num_spec > 0
-    builder.reorder_batch_threshold = 1 + num_spec
-    builder.use_replayssm = builder.use_flashinfer_replayssm = False
-    builder.needs_causal_conv1d_metadata = False
-    builder.decode_bc_pre_scratch = None
-    builder.decode_cudagraph_max_bs = 0
-    common = create_common_attn_metadata(
-        BatchSpec(
-            seq_lens=[c + q for c, q in zip(computed, scheduled)],
-            query_lens=scheduled,
-        ),
-        block_size=16,
-        device=torch.device("cpu"),
-    ).replace(
-        is_prefilling=torch.tensor([c < p for c, p in zip(computed, prompt_lens)])
-    )
-    return builder.build(
-        0,
-        common,
-        num_accepted_tokens=torch.ones(len(computed), dtype=torch.int32)
-        if num_spec
-        else None,
-        num_decode_draft_tokens_cpu=torch.tensor(drafts, dtype=torch.int32)
-        if num_spec
-        else None,
-    )
-
-
-def test_stage_postprocess_inputs_to_gpu_fills_pinned_views():
-    """Stage request counts and prefill flags without changing unused slots."""
-    device = torch.device("cpu")
-    max_num_reqs = 8
-    ctx = _make_staging_ctx(max_num_reqs, device)
-
-    # Counts are non-negative, so unchanged negative values identify unused slots.
-    sentinel = np.int32(-1)
-    bufs = (
-        ctx.num_scheduled_tokens_buf,
-        ctx.num_computed_tokens_buf,
-        ctx.num_draft_tokens_buf,
-    )
-    for buf in bufs:
-        buf.np[:] = sentinel
-        buf.gpu.fill_(int(sentinel))
-    ctx.is_prefilling_buf.np[:] = True
-    ctx.is_prefilling_buf.gpu.fill_(True)
-
-    req_ids = ["req_b", "req_a", "req_c"]
-    num_reqs = len(req_ids)
-    scheduler_output = _make_postprocess_scheduler_output(
-        req_ids=req_ids,
-        num_scheduled_tokens={"req_a": 4, "req_b": 1, "req_c": 8},
-        # req_b intentionally absent -> defaults to 0 drafts.
-        scheduled_spec_decode_tokens={
-            "req_a": [1, 2, 3],
-            "req_c": [],
-        },
-    )
-    requests = _make_requests(
-        req_ids=req_ids,
-        num_computed_tokens=[20, 0, 64],
-        block_ids_per_req=[[0], [0], [0]],
-        num_prompt_tokens=[20, 1, 64],
-    )
-    # A trailing entry past num_reqs must not be read.
-    req_ids_padded = req_ids + ["not_scheduled"]
-
-    stage_postprocess_inputs_to_gpu(
-        ctx,
-        scheduler_output,
-        req_ids_padded,
-        num_reqs,
-        requests,
-        num_decodes=_build_staging_metadata(
-            [20, 0, 64], [1, 4, 8], [20, 1, 64], [0, 3, 0]
-        ).num_decodes,
-    )
-
-    for buf, expected in zip(bufs, ([1, 4, 8], [20, 0, 64], [0, 3, 0]), strict=True):
-        np.testing.assert_array_equal(buf.np[:num_reqs], expected)
-        assert buf.gpu[:num_reqs].tolist() == expected
-        assert (buf.np[num_reqs:] == sentinel).all()
-        assert (buf.gpu[num_reqs:] == sentinel).all()
-    np.testing.assert_array_equal(
-        ctx.is_prefilling_buf.np[:num_reqs], [False, True, True]
-    )
-    assert torch.equal(
-        ctx.is_prefilling_buf.gpu[:num_reqs],
-        torch.tensor([False, True, True]),
-    )
-    assert ctx.is_prefilling_buf.np[num_reqs:].all()
-    assert ctx.is_prefilling_buf.gpu[num_reqs:].all()
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
 @pytest.mark.parametrize(
     ("num_spec", "cache_mode"), [(0, "none"), (3, "align")], ids=["stp", "mtp3"]
@@ -1124,24 +997,12 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         [([mixer], spec, torch.tensor([[1]], dtype=torch.int32, device=device))],
         max_num_reqs=1,
     )
-    metadata = _build_staging_metadata([64], [8], [64], [0], num_spec)
-    ctx = _make_staging_ctx(1, device)
-    stage_postprocess_inputs_to_gpu(
-        ctx,
-        _make_postprocess_scheduler_output(
-            ["req"], {"req": 8}, scheduled_spec_decode_tokens={}
-        ),
-        ["req"],
-        1,
-        _make_requests(["req"], [64], [[1]], [64]),
-        num_decodes=metadata.num_decodes,
-    )
     _postprocess_replayssm_kernel[(1, 1)](
         None,
-        ctx.num_scheduled_tokens_buf.gpu,
-        ctx.num_computed_tokens_buf.gpu,
+        torch.tensor([8], dtype=torch.int32, device=device),  # num_scheduled
+        torch.tensor([64], dtype=torch.int32, device=device),  # num_computed
         torch.ones(1, dtype=torch.int32, device=device),
-        ctx.is_prefilling_buf.gpu,
+        torch.ones(1, dtype=torch.bool, device=device),  # is_prefilling
         None,
         replay.block_table_ptrs,
         replay.ring_start_ptrs,
@@ -2710,7 +2571,7 @@ class TestPostprocessMambaFusedKernel:
         """Regression test for 240723d46: temporal copy_size must be
         inner_size * elem_size, not state_block_stride.
 
-        In production (gpu_model_runner.py), conv and temporal states share
+        In production (the model runner), conv and temporal states share
         a raw buffer via torch.as_strided where stride(0) equals
         page_size_bytes / elem_size — larger than either state's natural
         element count.  Using stride(0) as copy_size for temporal states
@@ -2745,7 +2606,7 @@ class TestPostprocessMambaFusedKernel:
         layer_names = ["layer_0"]
         kv_cache_config = _make_kv_cache_config(cfg, layer_names)
 
-        # --- Production-like packed layout (mirrors gpu_model_runner.py) ---
+        # --- Production-like packed layout (mirrors the model runner) ---
         conv_shape = (cfg.conv_width, cfg.conv_inner_dim)
         temporal_shape = (cfg.temporal_state_dim,)
         dtype = cfg.dtype

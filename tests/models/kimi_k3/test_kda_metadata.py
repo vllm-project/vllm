@@ -218,7 +218,6 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
         speculative_config=SimpleNamespace(
             num_speculative_tokens=2,
-            parallel_drafting=False,
             max_num_new_slots_for_drafting=0,
             enable_adaptive_verification=False,
             use_eagle_block_drop=Mock(return_value=False),
@@ -232,7 +231,6 @@ def test_kda_recoverssm_startup_metadata_flow_without_model(monkeypatch):
         additional_config={},
         num_speculative_tokens=2,
         num_hash_lookahead_tokens=0,
-        use_v2_model_runner=True,
     )
     builder = KimiK3KDAMetadataBuilder(
         kv_cache_spec=kv_cache_spec,

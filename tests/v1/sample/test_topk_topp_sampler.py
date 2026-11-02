@@ -12,7 +12,6 @@ from vllm.v1.sample.ops.topk_topp_sampler import (
     apply_top_k_top_p_pytorch,
     random_sample,
 )
-from vllm.v1.sample.sampler import Sampler
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -59,12 +58,6 @@ def reset_default_device():
     original_device = torch.get_default_device()
     yield
     torch.set_default_device(original_device)
-
-
-def test_sampler_threads_fp64_gumbel_to_topk_topp_sampler():
-    sampler = Sampler(use_fp64_gumbel=True)
-
-    assert sampler.topk_topp_sampler.use_fp64_gumbel
 
 
 @pytest.mark.skipif(

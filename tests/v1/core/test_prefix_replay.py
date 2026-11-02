@@ -78,7 +78,6 @@ def _replay_scheduler(
         log_stats=True,
         structured_output_manager=StructuredOutputManager(vllm_config),
     )
-    scheduler.use_v2_model_runner = True
     assert scheduler.prefix_replay_tokens == WINDOW
     return scheduler
 

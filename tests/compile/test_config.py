@@ -224,10 +224,8 @@ def test_use_cudagraphs(
 
 # A separate process works around
 # https://github.com/vllm-project/vllm/issues/21073
-@pytest.mark.parametrize("use_v2_model_runner", [False, True])
 @create_new_process_for_each_test("spawn")
-def test_stock_torch_compile(vllm_runner, monkeypatch, use_v2_model_runner):
-    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", str(int(use_v2_model_runner)))
+def test_stock_torch_compile(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
@@ -602,7 +600,6 @@ def _mock_config_for_cudagraph_sizes(
     config.get_draft_decode_cudagraph_request_sizes = lambda: (
         VllmConfig.get_draft_decode_cudagraph_request_sizes(config)
     )
-    config.use_v2_model_runner = True
     config._split_cudagraph_capture_sizes = lambda *args: (
         VllmConfig._split_cudagraph_capture_sizes(config, *args)
     )

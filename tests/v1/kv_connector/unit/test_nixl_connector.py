@@ -819,7 +819,7 @@ class TestNixlHandshake:
                 )
             connector.bind_connector_metadata(metadata)
 
-            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
+            # Mimic the model runner collecting the KV connector output.
             dummy_ctx = ForwardContext(
                 no_compile_layers={},
                 attn_metadata={},
@@ -832,7 +832,7 @@ class TestNixlHandshake:
                 f"start_load_kv took {_after_load - _before_load} seconds"
             )
 
-            # Mimic logic in KVConnectorModelRunnerMixin._get_kv_connector_output.
+            # Mimic the model runner collecting the KV connector output.
             _, done_recving = connector.get_finished(finished_req_ids=set())
             if len(done_recving) > 0:
                 assert request_id in done_recving
@@ -4600,7 +4600,6 @@ def _set_test_speculative_config(
     revision: str | None = None,
     code_revision: str | None = None,
     num_speculative_tokens: int = 1,
-    parallel_drafting: bool = False,
     kv_cache_dtype: str | None = None,
     attention_backend: str | None = None,
     auxiliary_layer_ids: tuple[int, ...] = (2, 16, 29),
@@ -4615,7 +4614,6 @@ def _set_test_speculative_config(
         method=method,
         draft_model_config=draft_model_config,
         num_speculative_tokens=num_speculative_tokens,
-        parallel_drafting=parallel_drafting,
         kv_cache_dtype=kv_cache_dtype,
         attention_backend=attention_backend,
     )
@@ -4629,7 +4627,6 @@ def _set_test_speculative_config(
         ({"method": "mtp"}, False),
         ({"model": "test/different-drafter"}, False),
         ({"revision": "different-revision"}, False),
-        ({"parallel_drafting": True}, False),
         ({"kv_cache_dtype": "fp8"}, False),
         # attention_backend is intentionally not part of the compat hash
         # (see _get_speculative_compatibility_factors); overriding it must

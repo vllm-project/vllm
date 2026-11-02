@@ -5438,11 +5438,9 @@ steps:
   - vllm/v1/sample/
   - vllm/model_executor/layers/
   - tests/v1/e2e/spec_decode/
-  - tests/spec_decode/
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s v1/e2e/spec_decode/ngram_suffix/
-  - python3 spec_decode/test_custom_proposer.py
 
 - label: ":amd: (MI355 DPX) V1 Core"
   timeout_in_minutes: 60
