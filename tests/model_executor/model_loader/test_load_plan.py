@@ -543,6 +543,23 @@ def test_view_ops_stay_direct(loader, shape, param_shape):
     assert plan.get_dest("layer.weight") is not None
 
 
+def test_e8m0_scales_into_uint8_stay_direct():
+    """MX scales sent as float8_e8m0fnu into a uint8 parameter: the loader's
+    copy keeps their bytes, so the name is direct and holds the sent bytes."""
+
+    def make():
+        model = _Toy()
+        model.layer = _Layer()
+        model.layer.weight_scale = _param(4, 8, dtype=torch.uint8)
+        return model
+
+    shapes = {"layer.weight_scale": ((4, 8), torch.float8_e8m0fnu)}
+    model, plan = _check_plan_equals_cold_start(make, shapes)
+    assert plan.get_dest("layer.weight_scale") is not None
+    sent = _checkpoint(shapes, seed=2)["layer.weight_scale"]
+    assert torch.equal(model.layer.weight_scale, sent.view(torch.uint8))
+
+
 def test_tensors_sharing_one_storage():
     """Two checkpoint tensors on one storage: each write lands in its own
     tensor, whichever tensor names the storage."""

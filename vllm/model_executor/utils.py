@@ -81,7 +81,9 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
 
     Model-specific weight loaders should call this instead of `.copy_()` when
     copying a checkpoint tensor to the device. Off integrated GPUs it is a
-    plain `copy_`.
+    plain `copy_`, except that `float8_e8m0fnu` (MX scales) copied into
+    `uint8` keeps its bytes: a plain `copy_` would convert the value 2^(b-127)
+    to an integer.
 
     On integrated GPUs, a host-to-device copy straight from a safetensors mmap
     takes its page faults inside the driver copy, which is several times slower
@@ -90,6 +92,8 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     a CPU temporary. Sources with at most one element are skipped: they count
     as contiguous with any stride, which `view(torch.uint8)` rejects.
     """
+    if src.dtype == torch.float8_e8m0fnu and dst.dtype == torch.uint8:
+        src = src.view(torch.uint8)
     if (
         src.device.type == "cpu"
         and src.dtype == dst.dtype
