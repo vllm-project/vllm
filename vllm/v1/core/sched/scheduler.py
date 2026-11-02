@@ -502,6 +502,9 @@ class Scheduler(SchedulerInterface):
             {} if track_kv_fetches and self.connector is not None else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+        # Aborted requests whose async KV load still holds their blocks until the
+        # worker reports it done. They count toward --max-num-inflight-kv-loads.
+        self._aborted_kv_loads: set[str] = set()
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -3022,6 +3025,8 @@ class Scheduler(SchedulerInterface):
                 )
                 self.finished_recving_kv_req_ids.discard(request.request_id)
                 self.failed_recving_kv_req_ids.discard(request.request_id)
+                if delay_free_blocks:
+                    self._aborted_kv_loads.add(request.request_id)
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
@@ -3063,6 +3068,7 @@ class Scheduler(SchedulerInterface):
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
+        self._aborted_kv_loads.discard(request.request_id)
         self._free_request_blocks(request)
         del self.requests[request.request_id]
 
@@ -3431,10 +3437,12 @@ class Scheduler(SchedulerInterface):
 
     def num_inflight_kv_loads(self) -> int:
         """Requests holding blocks for an async KV load before they run: the
-        load in progress, or finished and waiting to be scheduled."""
+        load in progress, finished and waiting to be scheduled, or aborted while
+        in progress and not yet reported done."""
         return (
             self._kv_fetch_counts[KV_FETCH_IN_PROGRESS]
             + self._kv_fetch_counts[KV_FETCH_COMPLETED_WAITING]
+            + len(self._aborted_kv_loads)
         )
 
     def _admits_inflight_kv_load(self) -> bool:

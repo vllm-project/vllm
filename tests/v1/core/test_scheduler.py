@@ -407,6 +407,45 @@ def test_max_num_inflight_kv_loads(max_loads):
     assert scheduler.num_inflight_kv_loads() == max_loads
 
 
+def test_aborted_inflight_kv_load_counts_until_its_blocks_are_freed():
+    """An aborted load keeps its blocks until the worker reports it done, so it
+    keeps its place under --max-num-inflight-kv-loads until then."""
+    BLOCK_SIZE = 16
+    scheduler = create_scheduler(
+        block_size=BLOCK_SIZE,
+        max_num_inflight_kv_loads=1,
+        use_kv_connector=mock_kv(matched_tokens=BLOCK_SIZE * 4, is_async=True),
+    )
+    first, second = create_requests(
+        num_requests=2, num_tokens=BLOCK_SIZE * 5, block_size=BLOCK_SIZE
+    )
+    scheduler.add_request(first)
+    scheduler.add_request(second)
+    output = scheduler.schedule()
+    assert first.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    scheduler.finish_requests(first.request_id, RequestStatus.FINISHED_ABORTED)
+    assert scheduler.num_inflight_kv_loads() == 1
+    scheduler.schedule()
+    assert second.status == RequestStatus.WAITING
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[],
+            req_id_to_index={},
+            sampled_token_ids=[],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+            kv_connector_output=KVConnectorOutput(finished_recving={first.request_id}),
+        ),
+    )
+    assert scheduler.num_inflight_kv_loads() == 0
+    scheduler.schedule()
+    assert second.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
 def _bind_hisparse_connector(scheduler):
     connector = object.__new__(HiSparseConnector)
     connector.connector_scheduler = HiSparseConnectorScheduler(async_speculative=False)
