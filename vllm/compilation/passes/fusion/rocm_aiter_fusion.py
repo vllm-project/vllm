@@ -703,12 +703,17 @@ def _aiter_triton_mxfp4_out_dtype(
     """``out_dtype`` of ``linear`` if it runs AITER's Triton MXFP4 dynamic-quant
     GEMM (the ``gemm_with_dynamic_quant`` call the gated-norm MXFP4 pattern
     matches), else None. The ASM GEMM takes a different scale layout and is
-    not fused."""
+    not fused. The fused quant is validated on CDNA4 (gfx950) only; other
+    archs that run the Triton GEMM, such as gfx1250, keep the unfused ops."""
     if linear is None:
         return None
     from vllm.model_executor.kernels.linear.mxfp4.aiter import (
         AiterMxfp4LinearKernel,
     )
+    from vllm.platforms.rocm import get_cdna_version
+
+    if get_cdna_version() != 4:
+        return None
 
     quant_method = getattr(linear, "quant_method", None)
     scheme = getattr(linear, "scheme", None)

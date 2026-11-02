@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
 
 import pytest
 import torch
@@ -904,6 +905,39 @@ class TestGatedMxfp4Model(torch.nn.Module):
             # GDN's _output_projection: a reshape to the symbolic token count.
             return self.out_proj(normed.flatten(-2))
         return self.out_proj(normed.reshape(-1, self.num_heads * self.head_dim))
+
+
+@pytest.mark.parametrize(
+    "cdna_version, use_asm_gemm, expected",
+    [
+        pytest.param(4, False, torch.bfloat16, id="gfx950-triton-gemm"),
+        pytest.param(4, True, None, id="gfx950-asm-gemm"),
+        pytest.param(5, False, None, id="gfx1250-triton-gemm"),
+        pytest.param(3, False, None, id="gfx942-triton-gemm"),
+    ],
+)
+def test_gated_mxfp4_fusion_is_limited_to_cdna4_triton_gemm(
+    monkeypatch: pytest.MonkeyPatch,
+    cdna_version: int,
+    use_asm_gemm: bool,
+    expected: torch.dtype | None,
+):
+    from types import SimpleNamespace
+
+    from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
+        _aiter_triton_mxfp4_out_dtype,
+    )
+    from vllm.model_executor.kernels.linear.mxfp4.aiter import (
+        AiterMxfp4LinearKernel,
+    )
+
+    kernel = object.__new__(AiterMxfp4LinearKernel)
+    kernel.use_asm_gemm = use_asm_gemm
+    kernel.out_dtype = torch.bfloat16
+    linear: Any = SimpleNamespace(quant_method=SimpleNamespace(kernel=kernel))
+    monkeypatch.setattr("vllm.platforms.rocm.get_cdna_version", lambda: cdna_version)
+
+    assert _aiter_triton_mxfp4_out_dtype(linear) == expected
 
 
 # K=2048. N=2560 runs the Triton GEMM and fuses; N=8192 is in AITER's ASM
