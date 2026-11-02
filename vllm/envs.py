@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     VLLM_CPU_INT4_W4A8: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
+    VLLM_USE_FUSED_MQA_TOPK: bool = True
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_XPU_PP_MICROBATCH: bool = True
@@ -242,8 +243,8 @@ if TYPE_CHECKING:
     VLLM_P2P_HANDSHAKE_TIMEOUT_S: int = 30
     VLLM_P2P_IDLE_TIMEOUT_S: int = 300
     VLLM_P2P_TRANSFER_STALL_TIMEOUT_S: float = 20.0
-    VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
-    VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
+    VLLM_EC_SIDE_CHANNEL_HOST: str = ""
+    VLLM_EC_SIDE_CHANNEL_PORT: int = 0
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
@@ -1125,6 +1126,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
+    # Use the single-launch fused FP8 MQA-logits + top-k kernel for the sparse
+    # MLA indexer prefill chunks it supports on SM100-family GPUs (see
+    # use_fused_mqa_topk / fused_mqa_topk_chunk); other chunks take the dense
+    # path. Default: on (set to 0 for the dense path).
+    "VLLM_USE_FUSED_MQA_TOPK": lambda: bool(
+        int(os.getenv("VLLM_USE_FUSED_MQA_TOPK", "1"))
+    ),
     # Maximum size (in MB) for logits tensor in sparse MLA indexer prefill chunks.
     # Bounds the [M, N] float32 logits tensor to prevent CUDA OOM.
     # Default: 512 MB
@@ -1673,7 +1681,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
-    # treats topk_id == -1 as a skip sentinel
+    # treats topk_id == -1 as a skip sentinel. Supported CUDA grouped routers
+    # fuse this into routing; the existing backend opt-in is still required.
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
     # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
     # instead of replicated weights and local-token computation.
@@ -1813,15 +1822,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_P2P_TRANSFER_STALL_TIMEOUT_S": lambda: float(
         os.getenv("VLLM_P2P_TRANSFER_STALL_TIMEOUT_S", "20")
     ),
-    # IP address used for the EC connector's ZMQ side channel
-    # (producer ROUTER bind, consumer DEALER dial).
-    "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv(
-        "VLLM_EC_SIDE_CHANNEL_HOST", "localhost"
-    ),
-    # Port for the EC connector's ZMQ side channel; advertised to peers
-    # via `ec_transfer_params.peer_port` on the producer's response.
+    # Optional EC control address override; otherwise use get_ip().
+    "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv("VLLM_EC_SIDE_CHANNEL_HOST", ""),
+    # EC control base port plus DP index. Zero requests an OS-assigned port.
     "VLLM_EC_SIDE_CHANNEL_PORT": lambda: int(
-        os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "5601")
+        os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "0")
     ),
     # Per-request timeout (seconds) when a prefiller worker registers with
     # the Mooncake bootstrap server.

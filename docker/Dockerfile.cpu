@@ -446,6 +446,10 @@ ADD ./tools/ ./tools/
 # ship either file, and this stage does not inherit the vllm-src tree.
 ADD ./setup.py ./setup.py
 ADD ./requirements/cpu.txt ./requirements/cpu.txt
+# tests/v1/core/test_prompt_block_hash_vectors.py checks the engine against the
+# prompt block hash vectors that the Rust frontend's unit tests also use.
+ADD ./rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json \
+    ./rust/src/engine-core-client/src/tests/prompt_block_hash_vectors.json
 
 # install development dependencies (for testing)
 RUN --mount=type=cache,target=/root/.cache/uv \
