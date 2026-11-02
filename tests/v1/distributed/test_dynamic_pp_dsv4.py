@@ -72,8 +72,10 @@ def test_real_dsv4_weights_match_fixed_pipeline(vllm_runner, fixed_outputs, offs
     )
 
 
-@pytest.mark.parametrize("offset", [-2, 2])
-def test_real_dsv4_cached_suffix_matches_fixed_pipeline(vllm_runner, offset):
+@pytest.mark.parametrize(
+    "offset,backend", [(-2, "collective"), (2, "collective"), (2, "mooncake")]
+)
+def test_real_dsv4_cached_suffix_matches_fixed_pipeline(vllm_runner, offset, backend):
     """Repeated and shared prefixes must hit cache and preserve output logprobs."""
     params = SamplingParams(temperature=0, seed=7, max_tokens=1, logprobs=5)
     prompts = [PROMPT, PROMPT + " Explain the role of buffering."]
@@ -117,6 +119,8 @@ def test_real_dsv4_cached_suffix_matches_fixed_pipeline(vllm_runner, offset):
             "dynamic_pp_config": {
                 "enabled": True,
                 "allow_prefix_caching": True,
+                "kv_transfer_backend": backend,
+                "mooncake_protocol": "tcp",
                 "initial_offset": offset,
                 "adaptive": False,
             },

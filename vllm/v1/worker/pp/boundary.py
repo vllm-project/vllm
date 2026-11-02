@@ -45,6 +45,9 @@ class DynamicPPConfig:
     allow_mtp_prefill: bool = False
     allow_mtp_decode: bool = False
     allow_prefix_caching: bool = False
+    kv_transfer_backend: str = "collective"
+    mooncake_protocol: str = "rdma"
+    mooncake_device_name: str = ""
     low_watermark: int = 0
     high_watermark: int = 2
     cooldown_steps: int = 8
@@ -74,12 +77,19 @@ class DynamicPPConfig:
                     "allow_mtp_decode",
                     "allow_prefix_caching",
                 )
+                else str
+                if item.name
+                in ("kv_transfer_backend", "mooncake_protocol", "mooncake_device_name")
                 else int
             )
             if type(getattr(result, item.name)) is not expected:
                 raise ValueError(
                     f"dynamic_pp_config.{item.name} must be {expected.__name__}"
                 )
+        if result.kv_transfer_backend not in ("collective", "mooncake"):
+            raise ValueError("Dynamic PP KV backend must be collective or mooncake")
+        if not result.mooncake_protocol:
+            raise ValueError("Dynamic PP Mooncake protocol must not be empty")
         if (
             result.redundant_layers < 1
             or result.max_step < 1
@@ -112,6 +122,14 @@ class DynamicPPConfig:
             raise ValueError("pp_send_buffer_size requires Model Runner V2")
         if not self.enabled:
             return
+        if self.kv_transfer_backend == "mooncake" and not (
+            self.allow_mtp_decode
+            or (
+                self.allow_prefix_caching
+                and vllm_config.cache_config.enable_prefix_caching
+            )
+        ):
+            raise ValueError("Dynamic PP Mooncake needs prefix caching or MTP decode")
         parallel = vllm_config.parallel_config
         model = vllm_config.model_config
         if not vllm_config.use_v2_model_runner or parallel.pipeline_parallel_size != 2:

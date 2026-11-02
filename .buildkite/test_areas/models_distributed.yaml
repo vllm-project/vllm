@@ -118,10 +118,12 @@ steps:
   key: dynamic-pp-dsv4-prefill-4xb200
   optional: true
   timeout_in_minutes: 60
-  working_dir: "/vllm-workspace/tests"
+  working_dir: "/vllm-workspace"
   device: b200-k8s
   num_devices: 4
   source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+  - requirements/kv_connectors.txt
   - vllm/v1/worker/pp/
   - vllm/v1/worker/gpu/attn_utils.py
   - vllm/v1/kv_cache_interface.py
@@ -130,4 +132,19 @@ steps:
   - vllm/models/deepseek_v4/nvidia/model.py
   - tests/v1/distributed/test_dynamic_pp_dsv4.py
   commands:
-  - VLLM_USE_V2_MODEL_RUNNER=1 VLLM_GPU_SYNC_CHECK=error pytest -v -s v1/distributed/test_dynamic_pp_dsv4.py
+  - uv venv --system-site-packages --python 3.12 .venv
+  - |
+    uv pip install --python .venv/bin/python "$(.venv/bin/python - <<'PY'
+    from pathlib import Path
+    import torch
+
+    requirement = next(
+        line for line in Path("requirements/kv_connectors.txt").read_text().splitlines()
+        if line.startswith("mooncake-transfer-engine ")
+    )
+    if torch.version.cuda.split(".")[0] == "13":
+        requirement = requirement.replace("mooncake-transfer-engine", "mooncake-transfer-engine-cuda13")
+    print(requirement)
+    PY
+    )"
+  - VLLM_USE_V2_MODEL_RUNNER=1 VLLM_GPU_SYNC_CHECK=error .venv/bin/python -m pytest -v -s tests/v1/distributed/test_dynamic_pp_dsv4.py

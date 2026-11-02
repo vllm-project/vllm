@@ -3,6 +3,7 @@
 
 import json
 from datetime import timedelta
+from typing import Any
 
 import pytest
 import torch
@@ -186,6 +187,17 @@ def _state_transfer_worker(rank, rendezvous, mode):
                     PPStateTransfer(pp, torch.cpu, state)
                 dist.barrier()
 
+            for mismatch in ("backend", "protocol"):
+                with pytest.raises(ValueError, match="block layout differ"):
+                    PPStateTransfer(
+                        pp,
+                        torch.cpu,
+                        {23: _cache_components()},
+                        backend="collective"
+                        if mismatch == "backend" and rank == 0
+                        else "mooncake",
+                        mooncake_protocol="tcp" if rank == 0 else "rdma",
+                    )
             state = {23: _cache_components(), 24: _cache_components()}
             transfer = PPStateTransfer(pp, torch.cpu, state)
             with pytest.raises(ValueError, match="differs between stages"):
@@ -449,7 +461,86 @@ def test_isolated_movable_pages_keep_ids_padding_and_copy_on_write():
     )
 
 
-def _prefix_handoff_worker(rank, rendezvous):
+class _StoreMooncakeEngine:
+    """External Mooncake API double; copies bytes via Store between real workers."""
+
+    def __init__(self, store, rank, fail_write=False):
+        self.store, self.rank, self.fail_write = store, rank, fail_write
+        self.regions = {}
+        self.sent = self.received = 0
+        self.thread = None
+
+    def initialize(self, hostname, metadata_server, protocol, device_name):
+        import threading
+
+        assert metadata_server == "P2PHANDSHAKE" and protocol == "tcp"
+        self.thread = threading.Thread(target=self._receive, daemon=True)
+        self.thread.start()
+        return 0
+
+    def get_rpc_port(self):
+        return 12000 + self.rank
+
+    def batch_register_memory(self, addresses, sizes):
+        self.regions.update(zip(addresses, sizes))
+        return 0
+
+    def _contains(self, pointer, size):
+        return any(
+            base <= pointer and pointer + size <= base + n
+            for base, n in self.regions.items()
+        )
+
+    def _receive(self):
+        import ctypes
+
+        while True:
+            key = f"test_mooncake/{self.rank}/{self.received}"
+            writes = json.loads(self.store.get(key))
+            self.store.delete_key(key)
+            if writes is None:
+                return
+            for pointer, data in writes:
+                data = data.encode("latin1")
+                assert self._contains(pointer, len(data))
+                ctypes.memmove(pointer, data, len(data))
+            self.received += 1
+            self.store.set(key + "/done", "ok")
+
+    def batch_transfer_sync_write(self, session, sources, targets, sizes):
+        import ctypes
+
+        if self.fail_write:
+            return -1
+        assert len(sources) == len(targets) == len(sizes)
+        assert all(self._contains(pointer, n) for pointer, n in zip(sources, sizes))
+        peer_rank = int(session.rsplit(":", 1)[1]) - 12000
+        key = f"test_mooncake/{peer_rank}/{self.sent}"
+        writes = [
+            (target, ctypes.string_at(source, n).decode("latin1"))
+            for source, target, n in zip(sources, targets, sizes)
+        ]
+        self.store.set(key, json.dumps(writes))
+        assert self.store.get(key + "/done") == b"ok"
+        self.store.delete_key(key + "/done")
+        self.sent += 1
+        return 0
+
+    def stop(self):
+        if self.thread is not None and self.thread.is_alive():
+            self.store.set(f"test_mooncake/{self.rank}/{self.received}", "null")
+            self.thread.join(10)
+            assert not self.thread.is_alive()
+
+    def batch_unregister_memory(self, addresses):
+        for pointer in addresses:
+            del self.regions[pointer]
+        assert not self.regions
+        self.stop()
+        return 0
+
+
+def _prefix_handoff_worker(rank, rendezvous, backend="collective", native=False):
     from vllm import SamplingParams
     from vllm.distributed.parallel_state import GroupCoordinator
     from vllm.utils.hashing import sha256
@@ -481,7 +572,24 @@ def _prefix_handoff_worker(rank, rendezvous):
             bad[23] = {"compressed": ((99, *original[0][1:]), *original[1:])}
         with pytest.raises(ValueError, match="block layout"):
             PPStateTransfer(pp, torch.cpu, state, cache_layout=bad)
-        transfer = PPStateTransfer(pp, torch.cpu, state, cache_layout=description)
+        kwargs: dict[str, Any] = dict(backend=backend, mooncake_protocol="tcp")
+        engines = []
+        if backend == "mooncake" and not native:
+
+            def factory():
+                engine = _StoreMooncakeEngine(pp.cpu_group.get_group_store(), rank)
+                engines.append(engine)
+                return engine
+
+            kwargs["mooncake_engine_factory"] = factory
+        transfer = PPStateTransfer(
+            pp,
+            torch.cpu,
+            state,
+            cache_layout=description,
+            max_chunk_bytes=128,
+            **kwargs,
+        )
         manager = KVCacheManager(
             config,
             max_model_len=64,
@@ -565,16 +673,87 @@ def _prefix_handoff_worker(rank, rendezvous):
         _, count, _ = manager.get_computed_blocks(request("old-again", tokens))
         assert count == 0
         assert transfer.stats()["moves"] == 3
+        assert transfer.stats()["backend"] == backend
+        if backend == "mooncake":
+            assert transfer.stats()["registered_bytes"] == 2 * 16 * 128
+            if not native:
+                assert engines[0].sent > 0 and engines[0].received > 0
+        transfer.close()
+        transfer.close()
+        if engines:
+            assert not engines[0].regions
+        with pytest.raises(RuntimeError, match="closed"):
+            transfer.move(24, 24, 3)
     finally:
         pp.destroy()
         dist.destroy_process_group()
 
 
-def test_completed_and_shared_prefixes_survive_bidirectional_handoff(tmp_path):
+@pytest.mark.parametrize("backend", ["collective", "mooncake"])
+def test_completed_and_shared_prefixes_survive_bidirectional_handoff(tmp_path, backend):
     """Real prefix-manager hits read bytes retained after their request ended."""
     torch.multiprocessing.spawn(
         _prefix_handoff_worker,
-        args=(f"file://{tmp_path / 'prefix'}",),
+        args=(f"file://{tmp_path / 'prefix'}", backend),
+        nprocs=2,
+        join=True,
+    )
+
+
+def _mooncake_failure_worker(rank, rendezvous, failure):
+    from vllm.distributed.parallel_state import GroupCoordinator
+
+    torch.set_num_threads(1)
+    dist.init_process_group(
+        "gloo",
+        init_method=rendezvous,
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=45),
+    )
+    pp = GroupCoordinator([[0, 1]], rank, "gloo", False, group_name="mc_fail")
+    engines = []
+    try:
+
+        def factory():
+            if failure == "initialize" and rank == 1:
+                raise RuntimeError("Mooncake test initialization failed")
+            engine = _StoreMooncakeEngine(
+                pp.cpu_group.get_group_store(), rank, fail_write=True
+            )
+            engines.append(engine)
+            return engine
+
+        kwargs = dict(
+            backend="mooncake", mooncake_protocol="tcp", mooncake_engine_factory=factory
+        )
+        state = {23: _cache_components()}
+        if failure == "initialize":
+            with pytest.raises(ValueError, match="initialization failed"):
+                PPStateTransfer(pp, torch.cpu, state, **kwargs)
+            return
+        transfer = PPStateTransfer(pp, torch.cpu, state, **kwargs)
+        with pytest.raises(ValueError, match="cache write failed"):
+            transfer.move(23, 24, 0)
+        assert transfer.stats()["moves"] == 0
+        assert transfer.stats()["bytes"] == 0
+        assert transfer.stats()["last_move"] is None
+        with pytest.raises(RuntimeError, match="abort runtime"):
+            transfer.move(23, 23, 1)
+        with pytest.raises(RuntimeError, match="retain buffers"):
+            transfer.close()
+    finally:
+        for engine in engines:
+            engine.stop()
+        pp.destroy()
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("failure", ["initialize", "write"])
+def test_mooncake_failure_never_commits_ownership_or_falls_back(tmp_path, failure):
+    torch.multiprocessing.spawn(
+        _mooncake_failure_worker,
+        args=(f"file://{tmp_path / 'rendezvous'}", failure),
         nprocs=2,
         join=True,
     )

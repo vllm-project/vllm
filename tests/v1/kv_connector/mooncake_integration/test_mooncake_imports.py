@@ -20,3 +20,17 @@ def test_mooncake_engine_imports():
         print(f"{package_name}: {version}")
 
     import mooncake.engine  # noqa: F401
+
+
+def test_pp_prefix_handoff_with_native_mooncake_tcp(tmp_path):
+    """Real native engine registration/writes retain cached pages and padding."""
+    import torch
+
+    from tests.v1.worker.test_pp_buffer import _prefix_handoff_worker
+
+    torch.multiprocessing.spawn(
+        _prefix_handoff_worker,
+        args=(f"file://{tmp_path / 'native'}", "mooncake", True),
+        nprocs=2,
+        join=True,
+    )

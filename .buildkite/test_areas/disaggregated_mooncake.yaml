@@ -55,6 +55,10 @@ steps:
   device: l4
   num_devices: 2
   source_file_dependencies:
+    - vllm/v1/worker/pp/
+    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+    - tests/v1/worker/test_pp_buffer.py
+    - tests/v1/kv_connector/mooncake_integration/test_mooncake_imports.py
     - vllm/distributed/ec_transfer/
     - vllm/config/ec_transfer.py
     - vllm/config/multimodal.py
@@ -110,6 +114,7 @@ steps:
       print(requirement)
       PY
       )"
+    - VLLM_TARGET_DEVICE=cpu .venv/bin/python -m pytest --noconftest -v tests/v1/kv_connector/mooncake_integration/test_mooncake_imports.py
     - bash tests/v1/ec_connector/integration/run_epd_mooncake_ec_full_pipeline.sh
   mirror:
     amd:

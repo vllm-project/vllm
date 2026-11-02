@@ -51,6 +51,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer_engine import (
+    batch_write,
+    create_transfer_engine,
+    register_memory,
+    unregister_memory,
+)
 from vllm.distributed.parallel_state import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -1242,7 +1248,6 @@ class MooncakeConnectorWorker:
         self.device_id = torch.accelerator.current_device_index()
         current_platform.set_device(self.device_id)
 
-        self.engine = TransferEngine()
         self.hostname = get_ip()
 
         assert (kv_transfer_config := vllm_config.kv_transfer_config)
@@ -1264,11 +1269,9 @@ class MooncakeConnectorWorker:
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        ret_value = self.engine.initialize(
-            self.hostname, "P2PHANDSHAKE", protocol, device_name
+        self.engine = create_transfer_engine(
+            self.hostname, protocol, device_name, engine_factory=TransferEngine
         )
-        if ret_value != 0:
-            raise RuntimeError("Mooncake Transfer Engine initialization failed.")
 
         self.rpc_port = self.engine.get_rpc_port()
 
@@ -2035,8 +2038,8 @@ class MooncakeConnectorWorker:
         lengths: list[int],
     ) -> int:
         start_time = time.perf_counter()
-        ret_value = self.engine.batch_transfer_sync_write(
-            remote_session, src_ptrs, dst_ptrs, lengths
+        ret_value = batch_write(
+            self.engine, remote_session, src_ptrs, dst_ptrs, lengths
         )
         duration = time.perf_counter() - start_time
         if ret_value == 0:
@@ -2261,9 +2264,7 @@ class MooncakeConnectorWorker:
                 collapsed_views,
             )
 
-        ret_value = self.engine.batch_register_memory(kv_data_ptrs, kv_data_lens)
-        if ret_value != 0:
-            raise RuntimeError("Mooncake batch memory registration failed.")
+        register_memory(self.engine, kv_data_ptrs, kv_data_lens)
 
         self.device_kv_caches = kv_caches
         logger.debug(
@@ -2303,19 +2304,13 @@ class MooncakeConnectorWorker:
     def unregister_kv_caches(self) -> None:
         if self._kv_unregistered or not self.seen_base_addresses:
             return
-        ret_value = self.engine.batch_unregister_memory(self.seen_base_addresses)
-        if ret_value != 0:
-            raise RuntimeError("Mooncake batch memory unregistration failed.")
+        unregister_memory(self.engine, self.seen_base_addresses)
         self._kv_unregistered = True
 
     def restore_kv_caches(self) -> None:
         if not self._kv_unregistered:
             return
-        ret_value = self.engine.batch_register_memory(
-            self.seen_base_addresses, self._kv_data_lens
-        )
-        if ret_value != 0:
-            raise RuntimeError("Mooncake batch memory registration failed.")
+        register_memory(self.engine, self.seen_base_addresses, self._kv_data_lens)
         self._kv_unregistered = False
 
     async def fetch_finished_recving_reqs(self) -> set[ReqId]:

@@ -54,6 +54,9 @@ class PPRuntime:
             dynamic.enabled and config.cache_config.enable_prefix_caching
         )
         self.stateful = self.allow_mtp_decode or self.prefix_caching
+        self.kv_transfer_backend = dynamic.kv_transfer_backend
+        self.mooncake_protocol = dynamic.mooncake_protocol
+        self.mooncake_device_name = dynamic.mooncake_device_name
         self.state_transfer: Any = None
         self.control: Any = None
         self._state_boundary: int | None = None
@@ -167,6 +170,9 @@ class PPRuntime:
                         self.device_module,
                         cache_state,
                         cache_layout=cache_layout,
+                        backend=self.kv_transfer_backend,
+                        mooncake_protocol=self.mooncake_protocol,
+                        mooncake_device_name=self.mooncake_device_name,
                     )
                 assert self._state_boundary is not None
                 assert self.header is not None
@@ -233,6 +239,11 @@ class PPRuntime:
     def drain(self) -> None:
         if self.buffer is not None:
             self.buffer.drain()
+
+    def close(self) -> None:
+        self.drain()
+        if self.state_transfer is not None:
+            self.state_transfer.close()
 
     def stats(self) -> dict[str, Any]:
         return {

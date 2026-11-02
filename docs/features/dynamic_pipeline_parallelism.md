@@ -54,6 +54,9 @@ The following fields belong to `dynamic_pp_config`:
 | `allow_mtp_prefill` | `false` | Opt into the restricted eager DeepSeek-V4 MTP1 fresh-prefill path described below. |
 | `allow_mtp_decode` | `false` | Opt into eager DeepSeek-V4 MTP3 with isolated cache state and acknowledged ownership handoff. |
 | `allow_prefix_caching` | `false` | Enable local prefix reuse with dedicated movable-layer cache pages and ownership handoff. |
+| `kv_transfer_backend` | `"collective"` | Cache handoff transport: `"collective"` or MooncakeConnector's `"mooncake"` memory transport. |
+| `mooncake_protocol` | `"rdma"` | Mooncake transport protocol; `"tcp"` is also useful for functional checks. |
+| `mooncake_device_name` | `""` | Optional Mooncake device filter, with the same meaning as in MooncakeConnector. |
 | `low_watermark` | `0` | Low completed-activation queue depth. |
 | `high_watermark` | `2` | High completed-activation queue depth; must exceed the low watermark. |
 | `cooldown_steps` | `8` | Matching completed timing samples required before a move. |
@@ -185,6 +188,51 @@ ownership handoff, not background incremental replication or pooled KV import.
 For MTP workloads, start with a **positive** `initial_offset` (for example `2`)
 to give PP0 more target layers: PP1 also runs the draft steps. The feedback
 measures that last-stage draft work and can adjust the split further.
+
+### Mooncake transport for ownership handoff
+
+Set `kv_transfer_backend` to `"mooncake"` alongside prefix caching or MTP3
+decode. Install the platform-compatible Mooncake package from
+`requirements/kv_connectors.txt` first; CUDA 13 installations need the
+corresponding `mooncake-transfer-engine-cuda13` wheel. Missing libraries or
+initialization failures abort setup; the runtime never silently substitutes
+the collective backend.
+
+For example, merge these fields into `dynamic_pp_config` for local prefix reuse:
+
+```json
+{
+  "enabled": true,
+  "allow_prefix_caching": true,
+  "kv_transfer_backend": "mooncake",
+  "mooncake_protocol": "rdma",
+  "redundant_layers": 2,
+  "initial_offset": 2
+}
+```
+
+Keep `pp_send_buffer_size=2`, eager PP2, and `--enable-prefix-caching`.
+Do not configure a PD `kv_transfer_config`: this is internal PP ownership,
+and external KV connectors remain unsupported. PP and MooncakeConnector share
+the engine initialization, memory registration/unregistration, and synchronous
+batch-write implementation under `mooncake/transfer_engine.py`. The engine uses
+`P2PHANDSHAKE`; PP exchanges registered addresses through its existing CPU
+group, so a PD bootstrap service, router, or request-release protocol is not
+required.
+
+Each worker registers its dedicated movable cache allocations once. On a cut
+change, the old owner writes the changed layers to its matching TP peer. Both
+stages agree on transfer completion before committing the ownership epoch.
+Writes include all state bytes and padding. A failed write poisons the runtime:
+neither stage commits the new epoch or falls back to another transport, and
+buffers remain alive until worker exit. Normal shutdown unregisters memory
+before releasing allocations. Unchanged cuts perform no Mooncake operation.
+
+This selects the transport for **full-state handoff**. It does not yet send
+only valid or dirty blocks, continuously synchronize replicas, or overlap
+replication with inference. In particular, selecting Mooncake alone does not
+reduce the number of bytes copied. Native TCP and CUDA/RDMA validation are
+separate from protocol unit tests with an external engine double.
 
 Balancing can reduce bubbles caused by unequal stage times. Startup, drain,
 communication, and the indivisibility of layers still impose limits. Measure

@@ -1695,7 +1695,7 @@ class Worker(WorkerBase):
 
     def shutdown(self) -> None:
         if self._pp_runtime is not None:
-            self._pp_runtime.drain()
+            self._pp_runtime.close()
         gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.

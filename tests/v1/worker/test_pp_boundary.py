@@ -448,6 +448,7 @@ def mtp_prefill_config(tmp_path, monkeypatch):
         target="v4",
         prefix=False,
         allow_prefix=False,
+        backend="collective",
     ):
         model = ModelConfig(
             model=str(tmp_path / target),
@@ -489,6 +490,7 @@ def mtp_prefill_config(tmp_path, monkeypatch):
                     "enabled": enabled,
                     "allow_mtp_prefill": allow,
                     "allow_prefix_caching": allow_prefix,
+                    "kv_transfer_backend": backend,
                     **({"allow_mtp_decode": decode} if decode is not None else {}),
                 },
             },
@@ -662,6 +664,35 @@ def test_mtp3_decode_requires_its_separate_state_handoff_opt_in(mtp_prefill_conf
     size, dynamic = get_pp_config(config)
     assert size == 2 and dynamic.allow_mtp_decode and not dynamic.allow_mtp_prefill
     assert dynamic.enabled
+
+
+def test_mooncake_backend_requires_prefix_or_mtp_decode(mtp_prefill_config):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    with pytest.raises(ValueError, match="needs prefix caching or MTP decode"):
+        get_pp_config(mtp_prefill_config(backend="mooncake"))
+    _, dynamic = get_pp_config(
+        mtp_prefill_config(prefix=True, allow_prefix=True, backend="mooncake")
+    )
+    assert dynamic.kv_transfer_backend == "mooncake"
+    _, dynamic = get_pp_config(
+        mtp_prefill_config(allow=False, decode=True, tokens=3, backend="mooncake")
+    )
+    assert dynamic.kv_transfer_backend == "mooncake"
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"kv_transfer_backend": True},
+        {"kv_transfer_backend": "nixl"},
+        {"mooncake_protocol": ""},
+        {"mooncake_device_name": 3},
+    ],
+)
+def test_mooncake_configuration_rejects_invalid_transport_options(values):
+    with pytest.raises(ValueError):
+        DynamicPPConfig.from_mapping(values)
 
 
 @pytest.mark.parametrize(

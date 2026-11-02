@@ -4,7 +4,7 @@
 
 import json
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
@@ -86,6 +86,10 @@ class PPStateTransfer:
         *,
         max_chunk_bytes: int = STATE_TRANSFER_CHUNK_BYTES,
         cache_layout: Mapping | None = None,
+        backend: str = "collective",
+        mooncake_protocol: str = "rdma",
+        mooncake_device_name: str = "",
+        mooncake_engine_factory: Callable[[], Any] | None = None,
     ):
         if pp_group.world_size != 2 or pp_group.rank_in_group not in (0, 1):
             raise ValueError("PP state transfer requires a two-stage PP group")
@@ -100,12 +104,20 @@ class PPStateTransfer:
         self._chunks = 0
         self._seconds = 0.0
         self._last_move: dict[str, Any] | None = None
+        self._backend = backend
+        self._transport: Any = None
+        self._failed = False
+        self._closed = False
         description, storage, error = self._inspect()
+        if backend not in ("collective", "mooncake"):
+            error = "PP cache backend must be collective or mooncake"
         peers = self._gather(
             {
                 "description": description,
                 "chunk_bytes": max_chunk_bytes,
                 "cache_layout": cache_layout,
+                "backend": backend,
+                "protocol": mooncake_protocol if backend == "mooncake" else None,
                 "error": error,
             }
         )
@@ -114,12 +126,49 @@ class PPStateTransfer:
             peers[0]["description"] != peers[1]["description"]
             or peers[0]["chunk_bytes"] != peers[1]["chunk_bytes"]
             or peers[0]["cache_layout"] != peers[1]["cache_layout"]
+            or peers[0]["backend"] != peers[1]["backend"]
+            or peers[0]["protocol"] != peers[1]["protocol"]
         ):
             raise ValueError(
                 "PP cache layer/component shape, dtype, bytes, or block layout differ"
             )
         self._description = description
         self._storage = storage
+        if backend == "mooncake":
+            error = None
+            try:
+                from vllm.v1.worker.pp.mooncake import PPMooncakeTransport
+
+                self._transport = PPMooncakeTransport(
+                    state,
+                    device_module,
+                    mooncake_protocol,
+                    mooncake_device_name,
+                    mooncake_engine_factory,
+                )
+            except Exception as exc:
+                error = str(exc)
+            peers = self._gather(
+                {
+                    "error": error,
+                    "session": self._transport.session if self._transport else None,
+                    "regions": self._transport.regions if self._transport else None,
+                }
+            )
+            if any(peer["error"] is not None for peer in peers):
+                if self._transport is not None:
+                    self._transport.close()
+                self._raise_peer_errors(peers)
+            peer = peers[1 - pp_group.rank_in_group]
+            error = None
+            try:
+                self._transport.bind_peer(peer["session"], peer["regions"])
+            except (TypeError, ValueError) as exc:
+                error = str(exc)
+            peers = self._gather({"error": error})
+            if any(peer["error"] is not None for peer in peers):
+                self._transport.close()
+                self._raise_peer_errors(peers)
 
     def _gather(self, value: dict[str, Any]) -> list[dict[str, Any]]:
         peers: list[Any] = [None, None]
@@ -204,6 +253,8 @@ class PPStateTransfer:
 
     def move(self, oldcut: int, newcut: int, batch_id: int) -> None:
         """Quiesce both stages, then copy each changed layer from its old owner."""
+        if self._failed or self._closed:
+            raise RuntimeError("PP cache transport failed or is closed; abort runtime")
         valid_numbers = all(
             type(value) is int and value >= 0 for value in (oldcut, newcut, batch_id)
         )
@@ -268,11 +319,24 @@ class PPStateTransfer:
             for key in sorted(self.state[layer]):
                 raw = self.state[layer][key]
                 for start in range(0, raw.numel(), self._max_chunk_bytes):
-                    self.pp.broadcast(
-                        raw[start : start + self._max_chunk_bytes], src=owner
-                    )
+                    if self._transport is None:
+                        self.pp.broadcast(
+                            raw[start : start + self._max_chunk_bytes], src=owner
+                        )
                     chunks += 1
                 moved_bytes += raw.nbytes
+        if self._transport is not None:
+            error = None
+            try:
+                owner = 0 if newcut < oldcut else 1
+                if self.pp.rank_in_group == owner:
+                    self._transport.write(layers, self._max_chunk_bytes)
+            except Exception as exc:
+                error = str(exc)
+            peers = self._gather({"error": error})
+            if any(peer["error"] is not None for peer in peers):
+                self._failed = True
+                self._raise_peer_errors(peers)
         self.device_module.synchronize()
         elapsed = time.monotonic() - started
         self._boundary, self._last_batch = newcut, batch_id
@@ -297,9 +361,22 @@ class PPStateTransfer:
             else None
         )
         return {
+            "backend": self._backend,
+            "registered_bytes": self._transport.registered_bytes
+            if self._transport is not None
+            else 0,
             "moves": self._moves,
             "bytes": self._bytes,
             "chunks": self._chunks,
             "seconds": self._seconds,
             "last_move": last_move,
         }
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        if self._failed:
+            raise RuntimeError("Failed PP transfers retain buffers until worker exit")
+        if self._transport is not None:
+            self._transport.close()
+        self._closed = True
