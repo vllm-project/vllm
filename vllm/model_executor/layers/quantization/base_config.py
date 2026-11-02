@@ -3,15 +3,21 @@
 
 import inspect
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import regex as re
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 if TYPE_CHECKING:
+    from vllm.config.cache import CacheDType
     from vllm.model_executor.layers.quantization import QuantizationMethods
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
     from vllm.model_executor.models.utils import WeightsMapper
 else:
     QuantizationMethods = str
@@ -20,11 +26,21 @@ else:
 class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
 
+    requires_device_loading: bool = True
+    """Whether post-load processing requires parameters on the target device."""
+
     uses_meta_device: bool = False
     """
     Whether this method creates weights on meta device for online quantization.
     When True, weights are created on meta device and quantized layer-wise
     in process_weights_after_loading, reducing peak memory during loading.
+    """
+
+    supports_pre_processed_weights: bool = False
+    """
+    Whether ``process_weights_after_loading`` supports running under
+    ``weights_already_processed``. Methods must skip tensor transforms in
+    that mode; the loader driver rejects methods that do not declare support.
     """
 
     @abstractmethod
@@ -71,10 +87,28 @@ class QuantizeMethodBase(ABC):
         """
         return
 
+    def dequantize_weight(
+        self, layer: nn.Module
+    ) -> torch.Tensor | Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Materialize a serialized quantized weight for requantization.
+
+        Args:
+            layer: Layer holding the serialized weights.
+
+        Returns:
+            The dequantized weight for linear layers. For MoE layers, an
+            iterator of ``(experts, w13, w2)`` over groups of experts.
+
+        """
+        raise NotImplementedError(
+            f"The quantization method {type(self)} does not implement "
+            "dequantize_weight, so re-quantization from this checkpoint is "
+            "not supported. Please open an issue."
+        )
+
 
 def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> bool:
-    """
-    Not all quant methods have embedding implemented, so we need to check that
+    """Not all quant methods have embedding implemented, so we need to check that
     it exists for our given method. We check this by making sure the function
     has been changed from the base implementation.
     """
@@ -98,6 +132,7 @@ class QuantizationConfig(ABC):
     """Suffixes of quantization parameters that may be present in the checkpoint but
     not in the model, and should be ignored if unexpected during loading. These are used
     after remapping, so should be in vLLM format (e.g. .q_scale, not .q.scale)."""
+    online_quantization_config: "OnlineQuantizationConfig | None" = None
 
     def __init__(self):
         super().__init__()
@@ -144,8 +179,7 @@ class QuantizationConfig(ABC):
         user_quant: str | None,
         hf_config: Any = None,
     ) -> QuantizationMethods | None:
-        """
-        Detects if this quantization method can support a given checkpoint
+        """Detects if this quantization method can support a given checkpoint
         format by overriding the user specified quantization method --
         this method should only be overwritten by subclasses in exceptional
         circumstances.
@@ -155,6 +189,7 @@ class QuantizationConfig(ABC):
             user_quant: The user-specified quantization method string.
             hf_config: The HuggingFace model config object (e.g. for
                 model_type checks). May be None if not available.
+
         """
         return None
 
@@ -180,7 +215,8 @@ class QuantizationConfig(ABC):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> QuantizeMethodBase | None:
-        """Get the quantize method to use for the quantized layer.
+        """Get the quantize method to use for the quantized layer, from the
+        pre-quantized checkpoint quant_method.
 
         Args:
             layer: The layer for the quant method.
@@ -188,6 +224,7 @@ class QuantizationConfig(ABC):
         Returns:
             The quantize method. None if the given layer doesn't support quant
             method.
+
         """
         raise NotImplementedError
 
@@ -226,16 +263,27 @@ class QuantizationConfig(ABC):
         }
         return WeightsMapper(orig_to_new_regex=orig_to_new_regex)
 
+    @staticmethod
+    def get_checkpoint_weight_mapper() -> "WeightsMapper":
+        """Discard activation-order metadata unused by supported kernels."""
+        from vllm.model_executor.models.utils import WeightsMapper
+
+        return WeightsMapper(orig_to_new_suffix={".g_idx": None})
+
+    def get_kv_cache_dtype(self, prefix: str) -> "CacheDType | None":
+        """Return a checkpoint-selected KV-cache dtype for one layer."""
+        return None
+
     def apply_vllm_mapper(  # noqa: B027
         self, hf_to_vllm_mapper: "WeightsMapper"
     ):
-        """
-        Interface for models to update module names referenced in
+        """Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
         Args:
             hf_to_vllm_mapper: maps from hf model structure (the assumed
                 structure of the qconfig) to vllm model structure
+
         """
         # TODO (@kylesayrs): add implementations for all subclasses
         pass
@@ -243,18 +291,91 @@ class QuantizationConfig(ABC):
     def maybe_update_config(  # noqa: B027
         self,
         model_name: str,
-        hf_config: PretrainedConfig | None = None,
+        hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
-        """
-        Interface to update values after config initialization.
+        """Interface to update values after config initialization.
 
         Args:
             model_name: The name of the model
             hf_config: The Hugging Face config of the model
             revision: The revision of the model
         Returns:
+
         """
         # TODO: revision is never passed currently in vllm.py,
         # but is used in subclasses, should we remove this parameter?
         pass
+
+
+def resolve_quant_method(
+    quant_config: QuantizationConfig, layer: torch.nn.Module, prefix: str
+) -> QuantizeMethodBase | None:
+    """Return the checkpoint method with configured online quantization."""
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+        UnquantizedFusedMoEMethod,
+    )
+    from vllm.model_executor.layers.linear import (
+        LinearBase,
+        UnquantizedLinearMethod,
+    )
+    from vllm.model_executor.layers.quantization.online.fp8 import OnlineLinearBase
+    from vllm.model_executor.layers.quantization.online.moe_base import (
+        OnlineMoEMethodBase,
+    )
+    from vllm.model_executor.layers.quantization.online.requantization import (
+        requantization_source_scope,
+    )
+
+    online_config = quant_config.online_quantization_config
+    # Online quantization currently supports only LinearBase and RoutedExperts.
+    # Embeddings and ParallelLMHead retain their checkpoint quantization method.
+    is_online_supported_layer = isinstance(layer, (LinearBase, RoutedExperts))
+
+    online_target = None
+    if online_config is not None and is_online_supported_layer:
+        online_config.packed_modules_mapping = quant_config.packed_modules_mapping
+        online_target = online_config.resolve_quant_method_cls(type(layer), prefix)
+
+    # The checkpoint method of requantized experts is only a dequantization source.
+    with (
+        requantization_source_scope()
+        if online_target is not None and isinstance(layer, RoutedExperts)
+        else nullcontext()
+    ):
+        base_quant_method = quant_config.get_quant_method(layer, prefix)
+    if online_config is None:
+        # No online configuration: retain the checkpoint method.
+        return base_quant_method
+    if not is_online_supported_layer:
+        # Online quantization only supports linear and routed MoE layers.
+        return base_quant_method
+
+    checkpoint_is_quantized = base_quant_method is not None and not isinstance(
+        base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
+    )
+
+    if checkpoint_is_quantized:
+        if online_target is None:
+            # The checkpoint quant method is applied as there is no online override.
+            return base_quant_method
+
+        online_quant_method = online_config.get_quant_method(layer, prefix)
+
+        assert base_quant_method is not None and not isinstance(
+            base_quant_method, (UnquantizedLinearMethod, UnquantizedFusedMoEMethod)
+        )
+
+        assert isinstance(online_quant_method, (OnlineLinearBase, OnlineMoEMethodBase))
+        online_quant_method.set_requantization_source(base_quant_method)
+
+        # The online method dequantizes the checkpoint method before requantizing.
+        return online_quant_method
+
+    if online_target is None:
+        # The layer is unquantized and no online target applies.
+        return base_quant_method
+
+    # Quantize an unquantized layer with the online method.
+    return online_config.get_quant_method(layer, prefix)

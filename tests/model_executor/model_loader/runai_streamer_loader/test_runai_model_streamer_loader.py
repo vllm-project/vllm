@@ -1,16 +1,23 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import os
 import types
+from datetime import timedelta
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import torch
+from safetensors.torch import load_file, save_file
 
+from tests.utils import create_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.config.load import LoadConfig
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader import runai_streamer_loader as rsl
+from vllm.utils.mem_constants import GiB_bytes
 
 load_format = "runai_streamer"
 test_model = "openai-community/gpt2"
@@ -37,10 +44,128 @@ def test_get_model_loader_with_runai_flag():
     assert model_loader.__class__.__name__ == "RunaiModelStreamerLoader"
 
 
+def test_checkpoint_selection_hook_is_optional_for_model_detection():
+    from vllm.model_executor.models.interfaces import SupportsMultiModal
+    from vllm.model_executor.models.interfaces_base import (
+        VllmModel,
+        is_text_generation_model,
+    )
+
+    class ModelWithoutHook(torch.nn.Module):
+        def __init__(self, vllm_config, prefix=""):
+            super().__init__()
+
+        def embed_input_ids(self, input_ids):
+            return input_ids
+
+        def forward(self, input_ids, positions):
+            return input_ids
+
+        def compute_logits(self, hidden_states):
+            return hidden_states
+
+    assert is_text_generation_model(ModelWithoutHook)
+    assert is_text_generation_model(ModelWithoutHook(None))
+
+    class ModelWithDefaultRule(ModelWithoutHook, VllmModel):
+        pass
+
+    assert not ModelWithDefaultRule(None).is_unused_checkpoint_weight("any.weight")
+
+    # Structural models do not inherit the protocol's optional default hook.
+    for names in ([], ["language_model"]):
+        model = torch.nn.Module()
+        model.language_model = ModelWithoutHook(None)
+        model._language_model_names = names
+        assert SupportsMultiModal.get_language_model(model) is model.language_model
+
+
 def test_runai_model_loader_download_files(vllm_runner):
     with vllm_runner(test_model, load_format=load_format) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
         assert deserialized_outputs
+
+
+# In-process MTP compilation must not retain GPU resources in the pytest worker.
+@create_new_process_for_each_test("spawn")
+def test_runai_mtp_real_checkpoint(vllm_runner, tmp_path, monkeypatch):
+    """Skip main-only shards without changing a real MTP model's generation."""
+    from vllm.models.qwen3_5 import Qwen3_5MTP
+    from vllm.platforms import current_platform
+    from vllm.transformers_utils.repo_utils import hf_api
+    from vllm.v1.metrics.reader import Counter
+
+    if not current_platform.is_cuda_alike():
+        pytest.skip("MTP serving requires CUDA or ROCm")
+
+    checkpoint = tmp_path / "checkpoint"
+    hf_api().snapshot_download(
+        repo_id="Qwen/Qwen3.5-0.8B-Base", local_dir=str(checkpoint)
+    )
+    original_files = list(checkpoint.glob("*.safetensors"))
+    tensors = {}
+    for path in original_files:
+        tensors.update(load_file(path))
+    # Reshard real, unmodified weights so selection cannot pass vacuously on
+    # the published single mixed file. This predicate needs no model state.
+    selector = Qwen3_5MTP.__new__(Qwen3_5MTP)  # type: ignore[type-abstract]
+    main: dict[str, torch.Tensor] = {}
+    draft: dict[str, torch.Tensor] = {}
+    for name, tensor in tensors.items():
+        (main if selector.is_unused_checkpoint_weight(name) else draft)[name] = tensor
+    assert main and draft
+    files = [checkpoint / "main.safetensors", checkpoint / "draft.safetensors"]
+    for path, contents in zip(files, (main, draft)):
+        save_file(contents, path, metadata={"format": "pt"})
+    for path in original_files:
+        path.unlink()
+    (checkpoint / "model.safetensors.index.json").write_text(
+        json.dumps(
+            {
+                "weight_map": {
+                    name: path.name
+                    for path, data in zip(files, (main, draft))
+                    for name in data
+                }
+            }
+        )
+    )
+    del tensors, main, draft
+
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    opened = []
+    real_stream = rsl.runai_safetensors_weights_iterator
+
+    def stream(paths, *args):
+        opened.append(list(paths))
+        yield from real_stream(paths, *args)
+
+    monkeypatch.setattr(rsl, "runai_safetensors_weights_iterator", stream)
+    results = []
+    for load_format in ("auto", "runai_streamer"):
+        with vllm_runner(
+            str(checkpoint),
+            load_format=load_format,
+            block_size=None,
+            enable_chunked_prefill=True,
+            disable_log_stats=False,
+            limit_mm_per_prompt={"image": 0, "video": 0},
+            speculative_config={"method": "mtp", "num_speculative_tokens": 1},
+        ) as runner:
+            outputs = runner.generate_greedy(prompts, max_tokens=32)
+            results.append(outputs)
+            accepted = next(
+                m.value
+                for m in runner.llm.get_metrics()
+                if isinstance(m, Counter)
+                and m.name == "vllm:spec_decode_num_accepted_tokens"
+            )
+            assert accepted > 0
+    assert len(opened) == 2
+    assert set(opened[0]) == {str(path) for path in files}
+    assert opened[1] == [str(files[1])]
+    matches = sum(a == b for a, b in zip(*results))
+    assert matches >= 3, "RunAI MTP generation diverged from the Default loader"
 
 
 @pytest.mark.skip(
@@ -122,3 +247,475 @@ def test_runai_invalid_extra_config_leaves_environ_untouched():
         with pytest.raises(ValueError, match="memory_limit must be an integer >= -1"):
             _runai_loader({"concurrency": 16, "memory_limit": -5})
         assert "RUNAI_STREAMER_CONCURRENCY" not in os.environ
+
+
+@pytest.mark.parametrize(
+    "model_config,expected_source",
+    [
+        # Object storage: model_weights holds the URI, model the pulled config dir.
+        (
+            types.SimpleNamespace(
+                model="/tmp/pulled-config-files",
+                model_weights="s3://bucket/weights",
+                revision="myrev",
+            ),
+            "s3://bucket/weights",
+        ),
+        # HF repo or local path: model_weights is empty, model is the source.
+        (
+            types.SimpleNamespace(
+                model="org/model", model_weights="", revision="myrev"
+            ),
+            "org/model",
+        ),
+    ],
+    ids=["object_storage", "hf_repo"],
+)
+def test_runai_get_all_weights_resolves_source(model_config, expected_source):
+    fake_self = types.SimpleNamespace(
+        _get_weights_iterator=lambda path, revision, is_unused_weight=None: iter(
+            [(f"{path}@{revision}", None)]
+        )
+    )
+
+    weights = list(
+        rsl.RunaiModelStreamerLoader.get_all_weights(
+            fake_self, model_config, model=None
+        )
+    )
+
+    assert weights == [(f"{expected_source}@myrev", None)]
+
+
+@pytest.mark.parametrize("selection", ["draft", "unadapted", "reject_all"])
+def test_runai_selects_shards_before_streaming(tmp_path, monkeypatch, selection):
+    """Unused shards must not reach RunAI; mixed shards retain their tensors."""
+    contents = [
+        {"main.weight": torch.tensor([1.0])},
+        {"main.bias": torch.tensor([2.0]), "draft.weight": torch.tensor([3.0])},
+        {"draft.bias": torch.tensor([4.0])},
+    ]
+    files = []
+    for i, tensors in enumerate(contents):
+        path = str(tmp_path / f"part-{i}.safetensors")
+        save_file(tensors, path)
+        files.append(path)
+    monkeypatch.setattr(rsl, "list_safetensors", lambda path: files)
+
+    opened = []
+    real_stream = rsl.runai_safetensors_weights_iterator
+
+    def stream(paths, *args):
+        opened.extend(paths)
+        yield from real_stream(paths, *args)
+
+    monkeypatch.setattr(rsl, "runai_safetensors_weights_iterator", stream)
+    model = torch.nn.Module()
+    if selection == "draft":
+        model.is_unused_checkpoint_weight = lambda name: not name.startswith("draft.")
+    elif selection == "reject_all":
+        model.is_unused_checkpoint_weight = lambda name: True
+    config = types.SimpleNamespace(model=str(tmp_path), model_weights="", revision=None)
+    loaded = dict(_runai_loader({}).get_all_weights(config, model))
+
+    expected = files[1:] if selection == "draft" else files
+    assert opened == expected
+    assert set(loaded) == {
+        name
+        for tensors in (contents[1:] if selection == "draft" else contents)
+        for name in tensors
+    }
+    for name, tensor in {**contents[1], **contents[2]}.items():
+        torch.testing.assert_close(loaded[name], tensor)
+
+
+def _check_distributed_selection(rank, rendezvous, scenario):
+    torch.distributed.init_process_group(
+        "gloo",
+        init_method=rendezvous,
+        rank=rank,
+        world_size=2,
+        timeout=timedelta(seconds=30),
+    )
+    root = "s3://bucket/weights"
+    if scenario == "different_roots":
+        root += str(rank)
+    files = [root + "/main.safetensors", root + "/draft.safetensors"]
+
+    def pull_files(source, destination, **kwargs):
+        if scenario == "metadata_failure" and rank == 1:
+            raise OSError("Index temporarily unavailable")
+        (Path(destination) / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "weight_map": {
+                        "main.weight": "main.safetensors",
+                        "draft.weight": "draft.safetensors",
+                    }
+                }
+            )
+        )
+
+    try:
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            monkeypatch.setattr(rsl, "list_safetensors", lambda path: files)
+            monkeypatch.setattr(rsl, "runai_pull_files", pull_files)
+            monkeypatch.setattr(
+                rsl,
+                "_get_remote_checkpoint_keys",
+                lambda paths: [
+                    ["main.weight"]
+                    if path.endswith("main.safetensors")
+                    else ["draft.weight"]
+                    for path in paths
+                ],
+            )
+            monkeypatch.setattr(
+                rsl,
+                "get_world_group",
+                lambda: types.SimpleNamespace(
+                    world_size=2, cpu_group=torch.distributed.group.WORLD
+                ),
+                raising=False,
+            )
+            monkeypatch.setattr(
+                rsl,
+                "get_pp_group",
+                lambda: types.SimpleNamespace(
+                    world_size=2 if scenario == "pipeline_draft" else 1
+                ),
+                raising=False,
+            )
+            if scenario == "pipeline_draft" and rank == 0:
+                # Earlier PP stages never invoke the draft loader.
+                torch.distributed.barrier()
+                return
+            # Exercise real selection and Gloo; observe the distributed stream input.
+            monkeypatch.setattr(
+                rsl,
+                "runai_safetensors_weights_iterator",
+                lambda paths, *args: iter((path, None) for path in paths),
+            )
+            model = torch.nn.Module()
+            if not (scenario == "missing_hook" and rank == 1):
+                needed = (
+                    "main." if scenario == "different_roles" and rank == 1 else "draft."
+                )
+                model.is_unused_checkpoint_weight = lambda name: (
+                    not name.startswith(needed)
+                )
+            config = types.SimpleNamespace(model=root, model_weights="", revision=None)
+            selected = [
+                path
+                for path, _ in _runai_loader({"distributed": True}).get_all_weights(
+                    config, model
+                )
+            ]
+            expected = files[1:] if scenario == "healthy" else files
+            assert selected == expected
+            if scenario == "pipeline_draft":
+                torch.distributed.barrier()
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "healthy",
+        "metadata_failure",
+        "different_roles",
+        "missing_hook",
+        "different_roots",
+        "pipeline_draft",
+    ],
+)
+def test_distributed_runai_preserves_every_ranks_required_shards(tmp_path, scenario):
+    """All ranks must stream the same union even if one cannot filter safely."""
+    torch.multiprocessing.spawn(
+        _check_distributed_selection,
+        args=((tmp_path / "rendezvous").as_uri(), scenario),
+        nprocs=2,
+    )
+
+
+@pytest.mark.parametrize("scheme", ["s3", "gs", "az"])
+@pytest.mark.parametrize(
+    "index_kind",
+    [
+        "valid",
+        "missing",
+        "malformed",
+        "unavailable",
+        "unadapted",
+        "missing_shard",
+        "stale",
+        "header_unavailable",
+    ],
+)
+def test_runai_remote_selection_uses_actual_weight_source(
+    tmp_path, monkeypatch, scheme, index_kind
+):
+    root = f"{scheme}://bucket/weights"
+    files = [
+        root + "/main/part.safetensors",
+        root + "/draft/part.safetensors",
+        root + "/mixed.safetensors",
+        root + "/extra.safetensors",
+    ]
+    monkeypatch.setattr(rsl, "list_safetensors", lambda path: files)
+    pulled = []
+
+    def pull_files(source, destination, allow_pattern, ignore_pattern=None):
+        pulled.append((source.rstrip("/"), allow_pattern))
+        if index_kind == "unavailable":
+            # Storage SDKs do not necessarily derive errors from OSError.
+            raise Exception("Object metadata unavailable")
+        index = Path(destination) / "model.safetensors.index.json"
+        if index_kind in ("valid", "missing_shard", "stale", "header_unavailable"):
+            index.write_text(
+                json.dumps(
+                    {
+                        "weight_map": {
+                            "main.weight": "main/part.safetensors",
+                            "draft.weight": (
+                                "absent.safetensors"
+                                if index_kind == "missing_shard"
+                                else "draft/part.safetensors"
+                            ),
+                            "main.bias": "mixed.safetensors",
+                            "draft.bias": "mixed.safetensors",
+                        }
+                    }
+                )
+            )
+        elif index_kind == "malformed":
+            index.write_text("not JSON")
+
+    monkeypatch.setattr(rsl, "runai_pull_files", pull_files, raising=False)
+    headers_checked = []
+
+    def checkpoint_keys(paths):
+        headers_checked.extend(paths)
+        if index_kind == "header_unavailable":
+            raise OSError("Header temporarily unavailable")
+        return [
+            ["main.weight", "draft.unindexed_weight"]
+            if index_kind == "stale"
+            else ["main.weight"]
+            for _ in paths
+        ]
+
+    monkeypatch.setattr(
+        rsl, "_get_remote_checkpoint_keys", checkpoint_keys, raising=False
+    )
+    opened = []
+
+    def stream(paths, *args):
+        opened.extend(paths)
+        return iter(())
+
+    monkeypatch.setattr(rsl, "runai_safetensors_weights_iterator", stream)
+    model = torch.nn.Module()
+    if index_kind != "unadapted":
+        model.is_unused_checkpoint_weight = lambda name: not name.startswith("draft.")
+    # The config directory is not the checkpoint: using its index could drop
+    # tensors from an independent model_weights source.
+    (tmp_path / "model.safetensors.index.json").write_text("not the weights index")
+    config = types.SimpleNamespace(
+        model=str(tmp_path), model_weights=root, revision=None
+    )
+    list(_runai_loader({}).get_all_weights(config, model))
+
+    assert opened == (files[1:] if index_kind == "valid" else files)
+    assert headers_checked == (
+        files[:1] if index_kind in ("valid", "stale", "header_unavailable") else []
+    )
+    assert pulled == (
+        []
+        if index_kind == "unadapted"
+        else [
+            (
+                root,
+                [
+                    "weights/model.safetensors.index.json",
+                    "model.safetensors.index.json",
+                ],
+            )
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "weight_map",
+    [None, {}, [], {"draft.weight": None}, {"draft.weight": "../part.safetensors"}],
+)
+def test_runai_invalid_weight_map_keeps_original_files(monkeypatch, weight_map):
+    files = ["s3://bucket/model/part.safetensors"]
+    monkeypatch.setattr(rsl, "list_safetensors", lambda path: files)
+
+    def pull_files(source, directory, **kwargs):
+        (Path(directory) / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": weight_map})
+        )
+
+    monkeypatch.setattr(rsl, "runai_pull_files", pull_files)
+    monkeypatch.setattr(
+        rsl, "runai_safetensors_weights_iterator", lambda paths, *args: iter(paths)
+    )
+    model = torch.nn.Module()
+    model.is_unused_checkpoint_weight = lambda name: True
+    config = types.SimpleNamespace(
+        model="s3://bucket/model", model_weights="", revision=None
+    )
+    assert list(_runai_loader({}).get_all_weights(config, model)) == files
+
+
+def test_runai_model_rule_error_is_not_hidden_by_metadata_fallback(monkeypatch):
+    files = ["s3://bucket/model/part.safetensors"]
+    monkeypatch.setattr(rsl, "list_safetensors", lambda path: files)
+
+    def pull_files(source, directory, **kwargs):
+        (Path(directory) / "model.safetensors.index.json").write_text(
+            json.dumps({"weight_map": {"draft.weight": "part.safetensors"}})
+        )
+
+    monkeypatch.setattr(rsl, "runai_pull_files", pull_files)
+    model = torch.nn.Module()
+
+    def invalid_rule(name):
+        raise ValueError("Invalid model rule")
+
+    model.is_unused_checkpoint_weight = invalid_rule
+    config = types.SimpleNamespace(
+        model="s3://bucket/model", model_weights="", revision=None
+    )
+    with pytest.raises(ValueError, match="Invalid model rule"):
+        list(_runai_loader({}).get_all_weights(config, model))
+
+
+def test_runai_header_reader_uses_actual_tensor_names(tmp_path):
+    """The RunAI header reader sees names even when an index omits them."""
+    path = tmp_path / "mixed.safetensors"
+    save_file(
+        {
+            "main.weight": torch.tensor([1.0]),
+            "draft.unindexed_weight": torch.tensor([2.0]),
+        },
+        path,
+        metadata={"format": "pt"},
+    )
+    (names,) = rsl._get_remote_checkpoint_keys([str(path)])
+    assert set(names) == {"main.weight", "draft.unindexed_weight"}
+
+
+@pytest.mark.parametrize("stale", [False, True])
+def test_runai_stale_index_keeps_actual_draft_weights(tmp_path, monkeypatch, stale):
+    """Verify excluded headers before dropping a shard with real draft weights."""
+    root = "s3://bucket/checkpoint"
+    main_path = tmp_path / "main.safetensors"
+    draft_path = tmp_path / "draft.safetensors"
+    main_tensors = {"main.weight": torch.tensor([1.0])}
+    if stale:
+        main_tensors["draft.unindexed_weight"] = torch.tensor([2.0])
+    save_file(main_tensors, main_path)
+    save_file({"draft.weight": torch.tensor([3.0])}, draft_path)
+    paths = {
+        root + "/main.safetensors": str(main_path),
+        root + "/draft.safetensors": str(draft_path),
+    }
+    monkeypatch.setattr(rsl, "list_safetensors", lambda path: list(paths))
+
+    def pull_files(source, directory, **kwargs):
+        (Path(directory) / "model.safetensors.index.json").write_text(
+            json.dumps(
+                {
+                    "weight_map": {
+                        "main.weight": "main.safetensors",
+                        "draft.weight": "draft.safetensors",
+                    }
+                }
+            )
+        )
+
+    monkeypatch.setattr(rsl, "runai_pull_files", pull_files)
+    read_headers = rsl._get_remote_checkpoint_keys
+    monkeypatch.setattr(
+        rsl,
+        "_get_remote_checkpoint_keys",
+        lambda files: read_headers([paths[path] for path in files]),
+    )
+    stream = rsl.runai_safetensors_weights_iterator
+
+    def stream_local(files, *args):
+        for name, tensor in stream([paths[path] for path in files], *args):
+            yield name, tensor.clone()
+
+    monkeypatch.setattr(rsl, "runai_safetensors_weights_iterator", stream_local)
+    model = torch.nn.Module()
+    model.is_unused_checkpoint_weight = lambda name: not name.startswith("draft.")
+    config = types.SimpleNamespace(model=root, model_weights="", revision=None)
+    loaded = dict(_runai_loader({}).get_all_weights(config, model))
+    assert set(loaded) == (
+        {"main.weight", "draft.unindexed_weight", "draft.weight"}
+        if stale
+        else {"draft.weight"}
+    )
+    torch.testing.assert_close(loaded["draft.weight"], torch.tensor([3.0]))
+    if stale:
+        torch.testing.assert_close(
+            loaded["draft.unindexed_weight"], torch.tensor([2.0])
+        )
+
+
+@pytest.mark.parametrize(
+    "base_model,mul_model,add_model",
+    [
+        (
+            "Qwen/Qwen3-0.6B",
+            "inference-optimization/Qwen3-0.6B-debug-multiply",
+            "inference-optimization/Qwen3-0.6B-debug-add",
+        ),
+    ],
+)
+def test_runai_deep_sleep_reload_weights(base_model, mul_model, add_model, vllm_runner):
+    free, total = torch.accelerator.get_memory_info()
+    used_bytes_baseline = total - free
+
+    def sleep_and_reload(llm, path):
+        # Level 2 discards the parameter memory, so after wake_up the weights
+        # can only come from the reload: a tensor the streamer fails to
+        # deliver changes the output instead of keeping a stale valid value.
+        llm.get_llm().sleep(level=2)
+        free, total = torch.accelerator.get_memory_info()
+        assert total - free - used_bytes_baseline < 3 * GiB_bytes
+        llm.get_llm().wake_up(tags=["weights"])
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": path})
+        free, total = torch.accelerator.get_memory_info()
+        assert total - free - used_bytes_baseline < 4 * GiB_bytes
+        llm.get_llm().wake_up(tags=["kv_cache"])
+
+    with vllm_runner(
+        model_name=base_model,
+        load_format=load_format,
+        enable_sleep_mode=True,
+        enable_prefix_caching=False,
+        max_model_len=16,
+        max_num_seqs=1,
+    ) as llm:
+        base_output = llm.generate_greedy(["3 4 ="], max_tokens=4)
+
+        sleep_and_reload(llm, mul_model)
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert mul_perp < add_perp
+
+        sleep_and_reload(llm, add_model)
+        mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
+        add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
+        assert add_perp < mul_perp
+
+        # Round trip to the original weights over discarded memory must
+        # reproduce the pre-sleep output.
+        sleep_and_reload(llm, base_model)
+        assert llm.generate_greedy(["3 4 ="], max_tokens=4) == base_output

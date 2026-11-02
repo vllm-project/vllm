@@ -7,6 +7,7 @@ from typing import Any, cast
 import pytest
 import torch
 
+from tests.v1.spec_decode.utils import fake_speculative_config
 from vllm.v1.worker.gpu.spec_decode import extract_hidden_states as spec_module
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.extract_hidden_states import (
@@ -35,17 +36,20 @@ def test_init_speculator_dispatches_extract_hidden_states(monkeypatch):
     vllm_config = cast(
         Any,
         SimpleNamespace(
-            speculative_config=SimpleNamespace(method="extract_hidden_states")
+            speculative_config=fake_speculative_config(method="extract_hidden_states")
         ),
     )
     device = torch.device("cpu")
 
-    def fake_speculator(config, target_device):
-        return config, target_device
+    class FakeSpeculator(ExtractHiddenStatesSpeculator):
+        def __init__(self, config, target_device):
+            self.args = (config, target_device)
 
-    monkeypatch.setattr(spec_module, "ExtractHiddenStatesSpeculator", fake_speculator)
+    monkeypatch.setattr(spec_module, "ExtractHiddenStatesSpeculator", FakeSpeculator)
 
-    assert init_speculator(vllm_config, device) == (vllm_config, device)
+    speculator = init_speculator(vllm_config, device, cast(Any, None))
+    assert isinstance(speculator, FakeSpeculator)
+    assert speculator.args == (vllm_config, device)
 
 
 def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
@@ -60,6 +64,7 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
     layer_name = "cache_only_layers.2"
     speculator = object.__new__(ExtractHiddenStatesSpeculator)
     speculator.vllm_config = cast(Any, SimpleNamespace())
+    speculator.acceptance_estimator = None
     speculator.num_hidden_states = 2
     speculator.hidden_states = torch.zeros(4, 2, 3)
     speculator.draft_attn_layer_names = {layer_name}
@@ -111,6 +116,7 @@ def test_propose_caches_hidden_states_and_returns_sampled_tokens(monkeypatch):
 
 def test_propose_requires_aux_hidden_states():
     speculator = object.__new__(ExtractHiddenStatesSpeculator)
+    speculator.acceptance_estimator = None
     speculator.num_hidden_states = 2
     input_batch = cast(
         Any, SimpleNamespace(idx_mapping=torch.tensor([0], dtype=torch.int32))

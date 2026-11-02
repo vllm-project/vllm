@@ -4,11 +4,12 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
 from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
+from vllm.models.kimi_k3.nvidia.recoverssm.kernels import cute_recoverssm_commit
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID
 
@@ -85,11 +86,11 @@ def _kda_recoverssm_verify_kernel(
     stride_state_head,
     stride_state_v,
     stride_state_k,
-    stride_correction_block,
+    stride_correction_row,
     stride_correction_head,
     stride_correction_pos,
     stride_correction_dim,
-    stride_kg_block,
+    stride_kg_row,
     stride_kg_head,
     stride_kg_pos,
     stride_kg_dim,
@@ -195,7 +196,7 @@ def _kda_recoverssm_verify_kernel(
 
         correction_ptr = (
             correction_cache_ptr
-            + state_idx * stride_correction_block
+            + pid_b * stride_correction_row
             + pid_h * stride_correction_head
             + token_offset * stride_correction_pos
         )
@@ -207,7 +208,7 @@ def _kda_recoverssm_verify_kernel(
         if pid_v == 0:
             kg_ptr = (
                 kg_cache_ptr
-                + state_idx * stride_kg_block
+                + pid_b * stride_kg_row
                 + pid_h * stride_kg_head
                 + token_offset * stride_kg_pos
             )
@@ -284,7 +285,8 @@ def _prepare_commit_plan_kernel(
         )
         final_num_computed = num_computed + commit_len
         final_state_col = tl.minimum(
-            final_num_computed // mamba_block_size, block_table_width - 1
+            tl.maximum(final_num_computed - 1, 0) // mamba_block_size,
+            block_table_width - 1,
         )
         final_state_idx = tl.load(
             block_table_ptr
@@ -471,18 +473,16 @@ def _commit_kda_state_kernel(
     correction_cache_ptr = correction_cache_base_addr.to(
         tl.pointer_type(correction_cache_ref_ptr.dtype.element_ty)
     )
+    # The records are those of request pid_b of the step.
     correction_cache_ptr += (
-        source_state_idx * correction_cache_block_stride
-        + pid_h * stride_correction_cache_head
+        pid_b * correction_cache_block_stride + pid_h * stride_correction_cache_head
     )
     kg_cache_base_addr = tl.load(kg_cache_base_addrs_ptr + pid_l)
     kg_cache_block_stride = tl.load(kg_cache_block_strides_ptr + pid_l)
     kg_cache_ptr = kg_cache_base_addr.to(
         tl.pointer_type(kg_cache_ref_ptr.dtype.element_ty)
     )
-    kg_cache_ptr += (
-        source_state_idx * kg_cache_block_stride + pid_h * stride_kg_cache_head
-    )
+    kg_cache_ptr += pid_b * kg_cache_block_stride + pid_h * stride_kg_cache_head
 
     offs_k = tl.arange(0, BK)
     offs_v = pid_v * BV + tl.arange(0, BV)
@@ -582,6 +582,36 @@ def _commit_kda_state_kernel(
     tl.store(final_ptrs, state, mask=mask_state)
 
 
+@dataclass(frozen=True)
+class KDARecoverSSMRecords:
+    """One KDA layer's RecoverSSM verify records.
+
+    Per request of a speculative step (its row in the step's speculative batch),
+    head and verified token: the FP32 correction ``u_t`` [V] and the activation
+    dtype key and raw gate [2K]. A verify writes them and the commit after sampling
+    reads them; they are not part of a request's state and so are not stored in
+    the KV cache."""
+
+    correction: torch.Tensor  # [max_num_reqs, H, Q, V] float32
+    key_gate: torch.Tensor  # [max_num_reqs, H, Q, 2K] activation dtype
+
+    @classmethod
+    def allocate(
+        cls,
+        max_num_reqs: int,
+        num_heads: int,
+        spec_query_len: int,
+        head_dim: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> "KDARecoverSSMRecords":
+        shape = (max_num_reqs, num_heads, spec_query_len)
+        return cls(
+            torch.empty((*shape, head_dim), dtype=torch.float32, device=device),
+            torch.empty((*shape, 2 * head_dim), dtype=dtype, device=device),
+        )
+
+
 def kda_recoverssm_verify(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -592,14 +622,14 @@ def kda_recoverssm_verify(
     dt_bias: torch.Tensor,
     lower_bound: float | None,
     checkpoint_state: torch.Tensor,
-    correction_cache: torch.Tensor,
-    kg_cache: torch.Tensor,
+    records: "KDARecoverSSMRecords",
     query_start_loc: torch.Tensor,
     state_indices: torch.Tensor,
     spec_query_len: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Verify a KDA speculative window without modifying its checkpoint."""
+    """Verify a KDA speculative window without modifying its checkpoint. Request
+    ``b`` writes its verify records to row ``b`` of ``records``."""
     if q.ndim != 4 or q.shape[0] != 1:
         raise ValueError("KDA RecoverSSM q must have shape [1, tokens, heads, dim]")
     _, total_tokens, num_heads, key_dim = q.shape
@@ -612,32 +642,13 @@ def kda_recoverssm_verify(
         raise ValueError("KDA RecoverSSM q, k, and gate heads must be contiguous")
     if v.stride()[2:] != (value_dim, 1) or raw_beta.stride(2) != 1:
         raise ValueError("KDA RecoverSSM v and beta heads must be contiguous")
-    num_blocks = checkpoint_state.shape[0]
     if checkpoint_state.shape[1:] != (
         num_heads,
         value_dim,
         key_dim,
     ):
         raise ValueError("KDA RecoverSSM checkpoint shape is incompatible")
-    expected_correction_shape = (
-        num_blocks,
-        num_heads,
-        spec_query_len,
-        value_dim,
-    )
-    if correction_cache.shape != expected_correction_shape:
-        raise ValueError(
-            f"KDA RecoverSSM correction buffer needs shape {expected_correction_shape}"
-        )
-    expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
-    if kg_cache.shape != expected_kg_shape:
-        raise ValueError(
-            f"KDA RecoverSSM key/gate buffer needs shape {expected_kg_shape}"
-        )
-    if correction_cache.dtype != torch.float32:
-        raise ValueError("KDA RecoverSSM correction buffer must use float32")
-    if kg_cache.dtype != k.dtype:
-        raise ValueError("KDA RecoverSSM key/gate buffer must match activation dtype")
+    correction_cache, kg_cache = records.correction, records.key_gate
     if A_log.shape != (num_heads,) or dt_bias.numel() != num_heads * key_dim:
         raise ValueError("KDA RecoverSSM gate parameters are incompatible")
     if not A_log.is_contiguous() or not dt_bias.is_contiguous():
@@ -753,6 +764,9 @@ class KDARecoverSSMCommitContext:
     dt_bias: torch.Tensor
     lower_bound: float | None
     spec_query_len: int
+    # The kernel folding the accepted tokens into the state (the commit plan
+    # and the conv state compaction are Triton for both).
+    backend: Literal["cute", "triton"] = "triton"
 
     @classmethod
     def create(
@@ -761,21 +775,16 @@ class KDARecoverSSMCommitContext:
         *,
         spec_query_len: int,
         max_num_reqs: int,
+        backend: Literal["cute", "triton"] = "triton",
     ) -> "KDARecoverSSMCommitContext":
         if not layers:
             raise ValueError("KDA RecoverSSM commit requires at least one layer")
-        if any(len(layer.kv_cache) != 4 for layer in layers):
-            raise ValueError(
-                "KDA RecoverSSM pages must contain conv, state, correction, "
-                "and key/gate"
-            )
-
         conv_states = [layer.kv_cache[0] for layer in layers]
         if not is_conv_state_dim_first():
             conv_states = [state.transpose(-1, -2) for state in conv_states]
         checkpoints = [layer.kv_cache[1] for layer in layers]
-        correction_caches = [layer.kv_cache[2] for layer in layers]
-        kg_caches = [layer.kv_cache[3] for layer in layers]
+        correction_caches = [layer.recoverssm_records.correction for layer in layers]
+        kg_caches = [layer.recoverssm_records.key_gate for layer in layers]
         A_log = [layer.A_log for layer in layers]
         dt_bias = [
             layer.dt_bias.view(layer.local_num_heads, layer.head_dim)
@@ -798,36 +807,6 @@ class KDARecoverSSMCommitContext:
             ):
                 raise ValueError(
                     "KDA RecoverSSM layers need matching checkpoint layout"
-                )
-        expected_correction_shape = (
-            num_blocks,
-            num_heads,
-            spec_query_len,
-            value_dim,
-        )
-        correction_ref = correction_caches[0]
-        for correction_cache in correction_caches:
-            if (
-                correction_cache.shape != expected_correction_shape
-                or correction_cache.dtype != torch.float32
-                or correction_cache.device != state_ref.device
-                or correction_cache.stride()[1:] != correction_ref.stride()[1:]
-            ):
-                raise ValueError(
-                    "KDA RecoverSSM correction buffers need float32 shape "
-                    f"{expected_correction_shape}"
-                )
-        expected_kg_shape = (num_blocks, num_heads, spec_query_len, 2 * key_dim)
-        kg_ref = kg_caches[0]
-        for kg_cache in kg_caches:
-            if (
-                kg_cache.shape != expected_kg_shape
-                or kg_cache.dtype != kg_ref.dtype
-                or kg_cache.device != state_ref.device
-                or kg_cache.stride()[1:] != kg_ref.stride()[1:]
-            ):
-                raise ValueError(
-                    f"KDA RecoverSSM key/gate buffers need shape {expected_kg_shape}"
                 )
         if any(param.shape != (num_heads,) for param in A_log):
             raise ValueError("KDA RecoverSSM A_log shape is incompatible")
@@ -904,6 +883,7 @@ class KDARecoverSSMCommitContext:
             dt_bias=torch.stack(tuple(dt_bias)).contiguous(),
             lower_bound=lower_bounds.pop(),
             spec_query_len=spec_query_len,
+            backend=backend,
         )
 
     def commit(
@@ -1009,6 +989,11 @@ class KDARecoverSSMCommitContext:
             num_warps=4,
         )
 
+        if self.backend == "cute":
+            cute_recoverssm_commit(
+                self, state_indices, batch, align=block_table is not None
+            )
+            return
         state_ref = self.checkpoints[0]
         _, num_heads, value_dim, key_dim = state_ref.shape
         block_k = triton.next_power_of_2(key_dim)

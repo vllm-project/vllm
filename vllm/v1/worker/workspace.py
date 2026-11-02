@@ -3,20 +3,22 @@
 
 import inspect
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
+from collections.abc import Callable, Hashable, Iterator
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from contextvars import ContextVar
 from itertools import accumulate
 from math import prod
+from typing import TypeVar, cast
 
 import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import round_down, round_up
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
+T = TypeVar("T")
 
 
 def _compute_bytes(shape: tuple[int, ...], dtype: torch.dtype) -> int:
@@ -26,6 +28,10 @@ def _compute_bytes(shape: tuple[int, ...], dtype: torch.dtype) -> int:
 # Constants
 _MB = 1024**2
 _GiB = 1024**3
+# Every view starts at a multiple of this, the alignment cudaMalloc guarantees,
+# so kernels see the same alignment as on a standalone allocation. Head views
+# also end on it, so a retained span aligned down to it never overlaps them.
+_VIEW_ALIGNMENT = 256
 
 # Global workspace manager instance
 _manager: "WorkspaceManager | None" = None
@@ -47,8 +53,8 @@ def use_workspace_lane(lane: int) -> Iterator[None]:
 class WorkspaceManager:
     """Manager for workspace allocation.
 
-    Manages one workspace buffer per active ``(ubatch, lane)`` slot.
-    Can be locked to prevent further growth during execution.
+    Manages shared scratch and keyed persistent resources per ``(ubatch, lane)``.
+    Can be locked to prevent growth or new resources during execution.
     """
 
     def __init__(
@@ -56,8 +62,10 @@ class WorkspaceManager:
         device: torch.device,
         num_ubatches: int | None = None,
         num_lanes: int = 1,
+        alloc_context: Callable[[], AbstractContextManager] = nullcontext,
     ):
         self._device = device
+        self._alloc_context = alloc_context
         # Cache num ubatches at init based on configuration (default to 1)
         self._num_ubatches = num_ubatches if num_ubatches is not None else 1
         if num_lanes < 1:
@@ -66,6 +74,14 @@ class WorkspaceManager:
         self._current_workspaces: list[torch.Tensor | None] = [None] * (
             self._num_ubatches * self._num_lanes
         )
+        self._persistent_resources: list[dict[Hashable, object]] = [
+            {} for _ in self._current_workspaces
+        ]
+        # Per slot, (key, start) of the tail span get_retained last handed out;
+        # cleared when a scratch request reaches into it or on reallocation.
+        self._retained: list[tuple[Hashable, int] | None] = [
+            None for _ in self._current_workspaces
+        ]
         self._locked: bool = False
 
     @staticmethod
@@ -76,10 +92,10 @@ class WorkspaceManager:
         return workspace.numel() * workspace.element_size()
 
     def lock(self) -> None:
-        """Lock the workspace to prevent further growth.
+        """Lock the workspace to prevent growth or new persistent resources.
 
-        After locking, any attempt to allocate a larger workspace will raise
-        an assertion error. This ensures workspace size is fixed during execution.
+        Larger scratch requests and new persistent resources raise an assertion
+        error. Existing resources retain their storage throughout execution.
         """
         self._locked = True
         if envs.VLLM_DEBUG_WORKSPACE:
@@ -113,6 +129,64 @@ class WorkspaceManager:
         """Check if workspace is locked."""
         return self._locked
 
+    def _get_workspace_id(self) -> int:
+        lane = _workspace_lane.get()
+        if lane >= self._num_lanes:
+            raise RuntimeError(
+                f"Workspace lane {lane} is not configured; manager has "
+                f"{self._num_lanes} lane(s)."
+            )
+        return dbo_current_ubatch_id() * self._num_lanes + lane
+
+    def get_persistent_resource(self, key: Hashable, factory: Callable[[], T]) -> T:
+        """Return the resource cached for ``key`` in the current ubatch and lane.
+
+        The first request calls ``factory`` and stores its result for the lifetime
+        of this manager. Later requests return the same object without calling
+        the factory again. Each ubatch/lane pair has a separate cache. Once the
+        manager is locked, requesting a key missing from that cache raises an
+        AssertionError.
+
+        Keys must identify the resource type and configuration. Callers must not
+        resize or replace tensor storage held by a cached resource once the
+        manager is locked. Uses of the
+        same resource must not overlap; include the CUDA stream in the key when
+        streams can execute concurrently.
+
+        With torch.compile, call this inside a runtime custom op so resource
+        selection happens during execution.
+        """
+        resources = self._persistent_resources[self._get_workspace_id()]
+        if key not in resources:
+            if self._locked:
+                raise AssertionError(
+                    f"Workspace is locked but {key!r} was not allocated during "
+                    "warmup for the current ubatch and lane."
+                )
+            resources[key] = factory()
+        return cast(T, resources[key])
+
+    def get_persistent(
+        self,
+        key: Hashable,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        *,
+        zero_init: bool = False,
+    ) -> torch.Tensor:
+        """Get a fixed-shape tensor, optionally zeroed on first allocation only."""
+        factory = torch.zeros if zero_init else torch.empty
+        workspace = self.get_persistent_resource(
+            (torch.Tensor, key),
+            lambda: factory(shape, dtype=dtype, device=self._device),
+        )
+        if workspace.shape != shape or workspace.dtype != dtype:
+            raise ValueError(
+                f"Persistent workspace {key!r} has shape={workspace.shape}, "
+                f"dtype={workspace.dtype}; requested shape={shape}, dtype={dtype}."
+            )
+        return workspace
+
     def get_simultaneous(
         self, *shapes_and_dtypes: tuple[tuple[int, ...], torch.dtype]
     ) -> list[torch.Tensor]:
@@ -123,15 +197,20 @@ class WorkspaceManager:
 
         Returns:
             List of tensor views into the workspace buffer, one per shape/dtype pair.
+
         """
         actual_bytes = [_compute_bytes(s, d) for s, d in shapes_and_dtypes]
-        aligned_bytes = [round_up(actual, 256) for actual in actual_bytes]
+        aligned_bytes = [round_up(actual, _VIEW_ALIGNMENT) for actual in actual_bytes]
         total_bytes = sum(aligned_bytes)
 
         # Calculate cumulative offsets using itertools.accumulate
         offsets = list(accumulate([0] + aligned_bytes[:-1]))
 
         current_workspace = self._ensure_workspace_size(total_bytes)
+        workspace_id = self._get_workspace_id()
+        retained = self._retained[workspace_id]
+        if retained is not None and total_bytes > retained[1]:
+            self._retained[workspace_id] = None
 
         return [
             current_workspace[offsets[i] : offsets[i] + actual_bytes[i]]
@@ -139,6 +218,37 @@ class WorkspaceManager:
             .reshape(shapes_and_dtypes[i][0])
             for i in range(len(shapes_and_dtypes))
         ]
+
+    def get_retained(
+        self, key: Hashable, shape: tuple[int, ...], dtype: torch.dtype
+    ) -> tuple[torch.Tensor, bool]:
+        """Get a scratch view at the end of the workspace that can outlive requests.
+
+        ``get_simultaneous`` hands out views from the start of the workspace, so
+        requests smaller than the workspace leave its end alone. This view spans
+        the last bytes of the workspace, and the returned flag says whether they
+        still hold what the previous ``get_retained`` left there: that call used
+        the same key and size, no ``get_simultaneous`` request since reached into
+        the span, and the workspace was not reallocated in between. What the
+        bytes mean is the caller's to track; only the latest key is remembered.
+
+        Args:
+            key: Identifies the caller; another key's call takes the span over.
+            shape: Shape of the view.
+            dtype: Dtype of the view.
+
+        Returns:
+            The view and whether its contents are intact.
+
+        """
+        num_bytes = _compute_bytes(shape, dtype)
+        workspace_id = self._get_workspace_id()
+        current_workspace = self._ensure_workspace_size(num_bytes)
+        start = round_down(current_workspace.numel() - num_bytes, _VIEW_ALIGNMENT)
+        intact = self._retained[workspace_id] == (key, start)
+        self._retained[workspace_id] = (key, start)
+        view = current_workspace[start : start + num_bytes].view(dtype).reshape(shape)
+        return view, intact
 
     def _ensure_workspace_size(self, required_bytes: int) -> torch.Tensor:
         """Ensure workspace is allocated and large enough, return current workspace.
@@ -148,15 +258,9 @@ class WorkspaceManager:
 
         Returns:
             The current workspace tensor.
+
         """
-        ubatch_id = dbo_current_ubatch_id()
-        lane = _workspace_lane.get()
-        if lane >= self._num_lanes:
-            raise RuntimeError(
-                f"Workspace lane {lane} is not configured; manager has "
-                f"{self._num_lanes} lane(s)."
-            )
-        workspace_id = ubatch_id * self._num_lanes + lane
+        workspace_id = self._get_workspace_id()
         current_workspace = self._current_workspaces[workspace_id]
         current_size = self._workspace_size_bytes(current_workspace)
 
@@ -170,12 +274,7 @@ class WorkspaceManager:
                 # Walk up the stack skipping WorkspaceManager frames
                 curr_frame = curr_frame.f_back
                 while curr_frame is not None:
-                    # TODO: This only catches instance methods (self), missing
-                    # classmethods and staticmethods. Once Python 3.11+ is the
-                    # minimum supported version, use co_qualname instead:
-                    #   qualname = curr_frame.f_code.co_qualname
-                    #   if qualname.startswith("WorkspaceManager."):
-                    if isinstance(curr_frame.f_locals.get("self"), WorkspaceManager):
+                    if curr_frame.f_code.co_qualname.startswith("WorkspaceManager."):
                         curr_frame = curr_frame.f_back
                         continue
                     filename = os.path.basename(curr_frame.f_code.co_filename)
@@ -197,6 +296,7 @@ class WorkspaceManager:
             # Resizing all ubatches here would orphan the other ubatch's
             # old tensor when it still holds views into it (DBO leak).
             self._current_workspaces[workspace_id] = None
+            self._retained[workspace_id] = None
             del current_workspace
             # Release the freed segment back to CUDA so the caching
             # allocator can reuse the GPU memory for the larger
@@ -204,9 +304,11 @@ class WorkspaceManager:
             # dead segment in reserved memory which can cause higher peak
             # memory usage.
             torch.accelerator.empty_cache()
-            self._current_workspaces[workspace_id] = torch.empty(
-                (required_bytes,), dtype=torch.uint8, device=self._device
-            )
+            # In sleep mode, entering the pool also trims outgrown buffers.
+            with self._alloc_context():
+                self._current_workspaces[workspace_id] = torch.empty(
+                    (required_bytes,), dtype=torch.uint8, device=self._device
+                )
             current_workspace = self._current_workspaces[workspace_id]
 
             if envs.VLLM_DEBUG_WORKSPACE:
@@ -216,8 +318,8 @@ class WorkspaceManager:
                     get_caller_info(),
                     current_size / _MB,
                     required_bytes / _MB,
-                    ubatch_id,
-                    lane,
+                    workspace_id // self._num_lanes,
+                    workspace_id % self._num_lanes,
                 )
 
         return current_workspace
@@ -228,6 +330,7 @@ def is_workspace_manager_initialized() -> bool:
 
     Returns:
         True if workspace manager is initialized, False otherwise.
+
     """
     return _manager is not None
 
@@ -237,6 +340,7 @@ def current_workspace_manager() -> "WorkspaceManager":
 
     Raises:
         AssertionError: If workspace manager has not been initialized.
+
     """
     assert _manager is not None, (
         "WorkspaceManager not initialized. Call init_workspace_manager() "
@@ -249,6 +353,7 @@ def init_workspace_manager(
     device: torch.device,
     num_ubatches: int | None = None,
     num_lanes: int = 1,
+    alloc_context: Callable[[], AbstractContextManager] = nullcontext,
 ) -> None:
     """Initialize the workspace manager with a device.
 
@@ -259,6 +364,8 @@ def init_workspace_manager(
         device: The device to allocate workspace on.
         num_ubatches: Number of workspace ubatch slots. Defaults to 1.
         num_lanes: Number of independent execution lanes per ubatch. Defaults to 1.
+        alloc_context: Factory for the context scratch is allocated in.
+
     """
     global _manager
     if _manager is not None:
@@ -268,16 +375,15 @@ def init_workspace_manager(
             _manager._device,
             device,
         )
-    _manager = WorkspaceManager(device, num_ubatches, num_lanes)
+    _manager = WorkspaceManager(device, num_ubatches, num_lanes, alloc_context)
 
 
 def lock_workspace() -> None:
-    """Lock the workspace to prevent further growth.
+    """Lock the workspace to prevent growth or new persistent resources.
 
-    After calling this function, any attempt to allocate a workspace larger
-    than the current size will raise an AssertionError. This ensures that
-    workspace size is fixed during execution and prevents unexpected memory
-    allocations in the hot path.
+    Larger scratch requests and new persistent resources raise an AssertionError.
+    All required resources must be initialized in each execution slot during
+    warmup, so their storage remains fixed during execution.
 
     Example:
         # During initialization
@@ -289,6 +395,7 @@ def lock_workspace() -> None:
         lock_workspace()
 
         # Now all get_workspace calls must fit in pre-allocated size
+
     """
     current_workspace_manager().lock()
 

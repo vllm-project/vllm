@@ -17,13 +17,21 @@ import math
 import pytest
 import torch
 
+from vllm.platforms import current_platform
+
 pytest.importorskip("triton")
-if not torch.cuda.is_available():
+if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
     pytest.skip("CUDA required for Gumbel sampler tests", allow_module_level=True)
 
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
+from vllm.v1.worker.gpu.sample.gumbel import (
+    _uniform64_from_random53,
+    gumbel_sample,
+    murmur3_hash32,
+)
 
-DEVICE = "cuda"
+DEVICE = current_platform.device_type
 VOCAB_SIZE = 200_000
 NUM_SAMPLES = 500_000
 # Dominant token is exp(HEAD_LOG_GAP)x larger than the unit-count tail, so the
@@ -31,6 +39,103 @@ NUM_SAMPLES = 500_000
 HEAD_LOG_GAP = 18.0
 # 10-sigma band: a correct sampler effectively never trips it.
 Z_TOLERANCE = 10.0
+
+
+@triton.jit
+def _murmur3_known_answer_kernel(
+    seeds_ptr,
+    positions_ptr,
+    offsets_ptr,
+    hashes_ptr,
+    domain_hashes_ptr,
+    numel: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    idx = tl.arange(0, BLOCK_SIZE)
+    mask = idx < numel
+    seed = tl.load(seeds_ptr + idx, mask=mask)
+    pos = tl.load(positions_ptr + idx, mask=mask)
+    offset = tl.load(offsets_ptr + idx, mask=mask)
+    hash32 = murmur3_hash32(seed, pos, offset).to(tl.int64)
+    domain_hash32 = murmur3_hash32(seed, pos, offset, domain=0x9E3779B9).to(tl.int64)
+    tl.store(hashes_ptr + idx, hash32, mask=mask)
+    tl.store(domain_hashes_ptr + idx, domain_hash32, mask=mask)
+
+
+@triton.jit
+def _uniform64_endpoint_kernel(
+    random53_ptr,
+    uniform_ptr,
+    numel: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    idx = tl.arange(0, BLOCK_SIZE)
+    mask = idx < numel
+    random53 = tl.load(random53_ptr + idx, mask=mask).to(tl.uint64)
+    tl.store(uniform_ptr + idx, _uniform64_from_random53(random53), mask=mask)
+
+
+def test_murmur3_known_answers():
+    seeds = torch.tensor(
+        [0, 1, -1, 0x123456789ABCDEF, -(1 << 63), (1 << 63) - 1],
+        dtype=torch.int64,
+        device=DEVICE,
+    )
+    positions = torch.tensor(
+        [0, 2, 17, 123456789, 1 << 30, (1 << 30) + 7],
+        dtype=torch.int64,
+        device=DEVICE,
+    )
+    offsets = torch.tensor(
+        [0, 3, 1023, 199999, 4096, 0xFFFFFFFF],
+        dtype=torch.int64,
+        device=DEVICE,
+    )
+    hashes = torch.empty_like(seeds)
+    domain_hashes = torch.empty_like(seeds)
+
+    _murmur3_known_answer_kernel[(1,)](
+        seeds,
+        positions,
+        offsets,
+        hashes,
+        domain_hashes,
+        numel=seeds.numel(),
+        BLOCK_SIZE=8,
+    )
+
+    assert hashes.tolist() == [
+        0x8134CDF8,
+        0x23B53F91,
+        0xC8C13C14,
+        0x5DDE974F,
+        0xF1A9355B,
+        0xD952F9AA,
+    ]
+    assert domain_hashes.tolist() == [
+        0xD28AD962,
+        0xE3AAF818,
+        0xD223C51C,
+        0x0547D2FE,
+        0x3AED160F,
+        0x49E8EA7F,
+    ]
+
+
+def test_uniform64_excludes_endpoints():
+    random53 = torch.tensor([0, (1 << 53) - 1], dtype=torch.int64, device=DEVICE)
+    uniform = torch.empty(2, dtype=torch.float64, device=DEVICE)
+
+    _uniform64_endpoint_kernel[(1,)](
+        random53,
+        uniform,
+        numel=random53.numel(),
+        BLOCK_SIZE=2,
+    )
+
+    assert torch.isfinite(uniform).all()
+    assert ((uniform > 0.0) & (uniform < 1.0)).all()
+    assert uniform.tolist() == [2.0**-54, 1.0 - 2.0**-53]
 
 
 def _make_heavy_tailed_counts(seed: int = 1234) -> torch.Tensor:
@@ -180,7 +285,7 @@ def test_full_vocab_distribution_fidelity():
 
 
 def test_drafting_uses_a_separate_noise_stream():
-    """is_drafting salts the Philox offset: same inputs, different draws.
+    """is_drafting salts the RNG position: same inputs, different draws.
 
     The draft proposal and the residual resample after a rejection must be
     independent. They key noise by the same (seed, pos), so only the salt keeps
@@ -189,7 +294,7 @@ def test_drafting_uses_a_separate_noise_stream():
     tests/v1/spec_decode/test_rejection_sampler_utils.py for the distributional
     consequence.
 
-    Relocating the offset must not distort the draw either, so both streams are
+    Salting the position must not distort the draw either, so both streams are
     checked against the target's far-tail mass, which sits HEAD_LOG_GAP logits
     below the head -- the regime where fp32 Gumbel precision matters.
     """
@@ -229,7 +334,7 @@ def test_drafting_uses_a_separate_noise_stream():
 
 
 def test_greedy_temperature_zero_returns_argmax():
-    """temperature == 0 skips Gumbel noise and returns the exact argmax."""
+    """Temperature == 0 skips Gumbel noise and returns the exact argmax."""
     torch.manual_seed(0)
     num_reqs = 128
     logits = torch.randn(num_reqs, VOCAB_SIZE, device=DEVICE, dtype=torch.float32)
@@ -424,3 +529,21 @@ def test_logits_cache_narrower_than_logits_is_rejected():
             logits_cache=cache,
             logits_cache_col=torch.tensor(0, dtype=torch.int32, device=DEVICE),
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("vocab", [4096, 4097, 129280])
+def test_greedy_argmax_matches_torch(dtype, vocab):
+    """Random rows, cross-block ties, NaN/inf, masked tails and strided rows."""
+    logits = torch.randn(64, vocab + 1, device=DEVICE, dtype=dtype)[:, 1:]
+    logits[0].zero_()
+    logits[1].fill_(float("-inf"))
+    logits[2, [5, -1]] = float("inf")
+    logits[3, [5, -1]] = float("nan")
+    logits[4].fill_(float("-inf"))
+    logits[4, -1] = 1
+    logits[5].round_().clamp_(max=2)
+    logits[5, :4096].clamp_(max=1)
+    # NaN is treated as -inf, as in the rejection sampler.
+    expected = logits.masked_fill(logits.isnan(), float("-inf")).argmax(-1)
+    torch.testing.assert_close(greedy_argmax(logits), expected, rtol=0, atol=0)

@@ -23,7 +23,6 @@ from vllm.v1.worker.gpu.states import RequestState
 @pytest.fixture
 def mock_model_runner_with_req_states():
     """Create a mock MRv2 GPUModelRunner with a real RequestState."""
-
     runner = Mock(spec=GPUModelRunner)
     runner.req_states = RequestState(
         max_num_reqs=10,
@@ -37,6 +36,7 @@ def mock_model_runner_with_req_states():
     runner.model_state = Mock()
     runner.block_tables = Mock()
     runner.lora_state = Mock()
+    runner.draft_tokens_handler = Mock()
     runner.pp_handler = None
     runner.sampler = None
     runner.prompt_logprobs_worker = None
@@ -61,7 +61,6 @@ def _make_scheduler_output(new_reqs):
         total_num_scheduled_tokens=0,
         scheduled_spec_decode_tokens={},
         scheduled_encoder_inputs={},
-        num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
     )

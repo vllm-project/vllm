@@ -51,8 +51,7 @@ class DummyConfig:
 def make_video_embedding(
     t, h, w, interleave_text_tokens: tuple[int, int], video_pruning_rate: float = 0.0
 ):
-    """
-    Helper function to make a video embedding for a given video size and pruning rate.
+    """Make a video embedding for a given video size and pruning rate.
 
     Args:
         t: Number of frames.
@@ -64,6 +63,7 @@ def make_video_embedding(
 
     Returns:
         Tuple of (unpruned_tokens_sequence, pruned_tokens_sequence, retention_mask)
+
     """
     unpruned_tokens_sequence = []
     population = list(range(1, 100))
@@ -84,7 +84,7 @@ def make_video_embedding(
     unpruned_tokens_sequence = torch.tensor(unpruned_tokens_sequence, dtype=torch.long)
     video_token_mask = unpruned_tokens_sequence == VIDEO_TOKEN_ID
 
-    pruning_mask = torch.bernoulli(video_token_mask.float() * video_pruning_rate).bool()  # type: ignore[attr-defined]
+    pruning_mask = torch.bernoulli(video_token_mask.float() * video_pruning_rate).bool()
     # Sanity check that we don't prune what should not be pruned.
     assert not pruning_mask[~video_token_mask].any()
 

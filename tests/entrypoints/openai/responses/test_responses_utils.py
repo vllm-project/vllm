@@ -4,6 +4,7 @@
 from unittest.mock import patch
 
 import pytest
+from openai.types.responses import CustomTool, FunctionTool, ResponseCustomToolCall
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -16,12 +17,17 @@ from openai.types.responses.response_reasoning_item import (
     Summary,
 )
 
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
+    build_response_output_items,
     construct_chat_messages_with_tool_call,
     construct_input_messages,
+    decode_custom_tool_input,
+    decode_custom_tool_input_prefix,
     should_continue_final_message,
 )
+from vllm.exceptions import VLLMValidationError
 
 
 def _single_chat_message(item):
@@ -147,6 +153,7 @@ class TestResponsesUtils:
         message = messages[0]
         assert message["role"] == "assistant"
         assert message["reasoning"] == "Leroy Jenkins"
+        assert message["tool_calls"] is not None
         assert message["tool_calls"][0]["id"] == "call_123"
         assert message["tool_calls"][0]["function"]["name"] == "python"
         assert (
@@ -223,8 +230,9 @@ class TestResponsesUtils:
             encrypted_content="TOP_SECRET_MESSAGE",
             status=None,
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError) as exc_info:
             construct_chat_messages_with_tool_call([item])
+        assert exc_info.value.parameter == "input"
 
         output_item = ResponseOutputMessage(
             id="msg_bf585bbbe3d500e0",
@@ -244,6 +252,89 @@ class TestResponsesUtils:
         formatted_item = _single_chat_message(output_item)
         assert formatted_item["role"] == "assistant"
         assert formatted_item["content"] == "dongyi"
+
+
+class TestCustomTools:
+    def test_custom_tool_call_output_item(self):
+        tools = [
+            CustomTool(type="custom", name="emit_command", format={"type": "text"}),
+            FunctionTool(
+                type="function", name="get_weather", parameters={}, strict=None
+            ),
+        ]
+        custom, function = build_response_output_items(
+            reasoning=None,
+            content=None,
+            tool_calls=[
+                FunctionCall(
+                    id="call_1", name="emit_command", arguments='{"input": "pwd"}'
+                ),
+                FunctionCall(
+                    id="call_2", name="get_weather", arguments='{"city": "Paris"}'
+                ),
+            ],
+            tools=tools,
+        )
+        assert isinstance(custom, ResponseCustomToolCall)
+        assert (custom.call_id, custom.input) == ("call_1", "pwd")
+        assert custom.id.startswith("ctc_")
+        assert isinstance(function, ResponseFunctionToolCall)
+        assert function.arguments == '{"city": "Paris"}'
+
+    def test_custom_tool_history_replays_through_function_shim(self):
+        messages = construct_chat_messages_with_tool_call(
+            [
+                make_reasoning_item(content_text="Run pwd."),
+                ResponseCustomToolCall(
+                    type="custom_tool_call",
+                    id="ctc_1",
+                    call_id="call_exec",
+                    name="emit_command",
+                    input='echo "hi"',
+                ),
+                {
+                    "type": "custom_tool_call_output",
+                    "call_id": "call_exec",
+                    "output": "hi",
+                },
+                {"role": "user", "content": "Continue"},
+            ]
+        )
+        assert messages == [
+            {
+                "role": "assistant",
+                "reasoning": "Run pwd.",
+                "tool_calls": [
+                    {
+                        "id": "call_exec",
+                        "type": "function",
+                        "function": {
+                            "name": "emit_command",
+                            "arguments": '{"input": "echo \\"hi\\""}',
+                        },
+                    }
+                ],
+            },
+            {"role": "tool", "content": "hi", "tool_call_id": "call_exec"},
+            {"role": "user", "content": "Continue"},
+        ]
+
+    def test_decode_custom_tool_input(self):
+        assert decode_custom_tool_input('{"input": "pwd"}') == "pwd"
+        assert decode_custom_tool_input('{"cmd": "pwd"}') == '{"cmd": "pwd"}'
+        assert decode_custom_tool_input('{"file": "a.py"}') == '{"file": "a.py"}'
+        assert decode_custom_tool_input('{"input": 7}') == '{"input": 7}'
+        assert decode_custom_tool_input("pwd") == "pwd"
+
+    def test_decode_custom_tool_input_prefix(self):
+        assert decode_custom_tool_input_prefix('{"inp') == ""
+        assert decode_custom_tool_input_prefix('{"input": "ls \\"dir') == 'ls "dir'
+        assert decode_custom_tool_input_prefix('{"input": "a\\') == "a"
+        assert decode_custom_tool_input_prefix('{"input": "\\ud83d') == ""
+        assert (
+            decode_custom_tool_input_prefix('{"input": "\\ud83d\\ude00!"}')
+            == "\U0001f600!"
+        )
 
 
 class TestReasoningItemContentPriority:
@@ -350,7 +441,7 @@ class TestReasoningItemContentPriority:
         assert formatted["reasoning"] == ""
 
     def test_encrypted_content_raises(self):
-        """Encrypted content should still raise ValueError."""
+        """Encrypted content should raise VLLMValidationError."""
         item = ResponseReasoningItem(
             id="reasoning_6",
             summary=[
@@ -369,8 +460,9 @@ class TestReasoningItemContentPriority:
             encrypted_content="ENCRYPTED",
             status=None,
         )
-        with pytest.raises(ValueError):
+        with pytest.raises(VLLMValidationError) as exc_info:
             construct_chat_messages_with_tool_call([item])
+        assert exc_info.value.parameter == "input"
 
     @patch("vllm.entrypoints.openai.responses.utils.logger")
     def test_summary_with_multiple_entries_uses_first(self, mock_logger):
@@ -795,6 +887,7 @@ class TestConstructChatMessagesCombinePolicy:
         if expected_tool_call_ids is None:
             assert "tool_calls" not in messages[0]
         else:
+            assert messages[0]["tool_calls"] is not None
             assert [tool_call["id"] for tool_call in messages[0]["tool_calls"]] == (
                 expected_tool_call_ids
             )
@@ -900,3 +993,28 @@ class TestConstructInputMessagesInstructionsLeak:
         assert len(msgs) == 2
         assert msgs[0] == {"role": "system", "content": "be helpful"}
         assert msgs[1] == {"role": "user", "content": "hello"}
+
+
+class TestBuildResponseOutputItemsStatus:
+    """Item ``status`` must follow the finish reason of the generation
+    (#57998): a ``length`` cut marks the item that was cut ``incomplete``."""
+
+    _CALLS = [
+        FunctionCall(name="get_weather", arguments='{"city": "Paris"}'),
+        FunctionCall(name="get_weather", arguments='{"city": "Tok'),
+    ]
+
+    def test_length_marks_truncated_message_incomplete(self):
+        (item,) = build_response_output_items(
+            reasoning=None, content="cut mid sen", tool_calls=[], finish_reason="length"
+        )
+        assert item.type == "message"
+        assert item.status == "incomplete"
+
+    def test_length_marks_only_last_tool_call_incomplete(self):
+        message, first, last = build_response_output_items(
+            reasoning=None, content="hi", tool_calls=self._CALLS, finish_reason="length"
+        )
+        assert message.status == "completed"
+        assert first.status == "completed"
+        assert last.status == "incomplete"

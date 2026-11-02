@@ -1,12 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::BTreeMap;
-
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::OpaqueValue;
 use crate::protocol::dtype::ModelDtype;
+use crate::protocol::request::BlockHash;
 
 /// Decoded engine startup-handshake payload sent on the handshake socket.
 ///
@@ -35,6 +33,25 @@ pub struct KvEventsConfig {
     pub hwm: u32,
     pub max_queue_size: u32,
     pub topic: String,
+}
+
+/// What the frontend needs to compute prompt block hashes itself, reported
+/// only when the engine hashes request blocks.
+///
+/// Original Python definition (`PrefixHashConfig`):
+/// <https://github.com/vllm-project/vllm/blob/main/vllm/v1/engine/__init__.py>
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrefixHashConfig {
+    /// The engine's `--prefix-caching-hash-algo`, e.g. `sha256`.
+    pub hash_algo: String,
+    /// Tokens per hashed block.
+    pub hash_block_size: u64,
+    /// Parent hash of the first block.
+    pub none_hash: BlockHash,
+    /// Tokens after each block that its hash also covers, so a block is
+    /// hashed only once they exist.
+    #[serde(default)]
+    pub num_lookahead_tokens: u64,
 }
 
 /// Post-initialization configuration sent from each engine on the input socket
@@ -104,6 +121,17 @@ pub struct EngineCoreReadyResponse {
     /// Whether the engine has a speculative draft model that can be updated.
     #[serde(default)]
     pub supports_draft_weight_updates: bool,
+    /// Full-attention block size in tokens after initialization, or unavailable.
+    #[serde(default)]
+    pub effective_attention_block_size: Option<u64>,
+    /// JSON-mode dump of this engine's `VllmConfig`, reported only when the
+    /// engine runs with `VLLM_SERVER_DEV_MODE` (for `/server_info`).
+    #[serde(default)]
+    pub vllm_config: Option<serde_json::Value>,
+    /// Set when the engine hashes request blocks and accepts prompt block
+    /// hashes from the frontend.
+    #[serde(default)]
+    pub prefix_hash_config: Option<PrefixHashConfig>,
 }
 
 /// Frontend-owned ZMQ addresses that are sent to the engine during startup
@@ -128,5 +156,56 @@ pub struct HandshakeAddresses {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandshakeInitMessage {
     pub addresses: HandshakeAddresses,
-    pub parallel_config: BTreeMap<String, OpaqueValue>,
+    pub parallel_config: HandshakeParallelConfig,
+}
+
+/// `ParallelConfig` fields that the engine overwrites from INIT, encoded as a
+/// map.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HandshakeParallelConfig {
+    /// Sent for coordinated (MoE) DP only; otherwise the map is empty.
+    #[serde(flatten)]
+    pub data_parallel_rendezvous: Option<DataParallelRendezvous>,
+}
+
+/// Where all DP ranks rendezvous to form their cross-rank torch process
+/// groups.
+///
+/// `_coord_store_port` is not sent: no coordination store runs, so engines
+/// take the listed ports.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataParallelRendezvous {
+    pub data_parallel_master_ip: String,
+    pub data_parallel_master_port: u16,
+    /// Free ports that the engine takes one per process group before falling
+    /// back to incrementing `data_parallel_master_port`.
+    #[serde(rename = "_data_parallel_master_port_list")]
+    pub data_parallel_master_port_list: Vec<u16>,
+    pub data_parallel_size: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::{decode_value, encode_msgpack};
+
+    #[test]
+    fn handshake_parallel_config_encodes_rendezvous_fields_or_empty_map() {
+        let encode = |parallel_config: HandshakeParallelConfig| {
+            decode_value(&encode_msgpack(&parallel_config).unwrap()).unwrap().to_string()
+        };
+
+        let rendezvous = DataParallelRendezvous {
+            data_parallel_master_ip: "10.0.0.1".to_string(),
+            data_parallel_master_port: 29500,
+            data_parallel_master_port_list: vec![29501, 29502, 29503, 29504],
+            data_parallel_size: 4,
+        };
+
+        expect_test::expect!["{}"].assert_eq(&encode(HandshakeParallelConfig::default()));
+        expect_test::expect![[r#"{"data_parallel_master_ip": "10.0.0.1", "data_parallel_master_port": 29500, "_data_parallel_master_port_list": [29501, 29502, 29503, 29504], "data_parallel_size": 4}"#]]
+            .assert_eq(&encode(HandshakeParallelConfig {
+                data_parallel_rendezvous: Some(rendezvous),
+            }));
+    }
 }

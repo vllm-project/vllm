@@ -18,7 +18,7 @@ from typing import cast
 import regex as re
 import torch
 from torch import nn
-from transformers import DeepseekV2Config, DeepseekV3Config, PretrainedConfig
+from transformers import DeepseekV2Config, DeepseekV3Config, PreTrainedConfig
 
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
@@ -40,69 +40,31 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.model_loader.weight_utils import make_attention_sink
 from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
+from vllm.model_executor.models.utils import compute_skip_topk_layers
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend, AttentionType
 from vllm.v1.attention.selector import get_attn_backend
 
 logger = init_logger(__name__)
 
-_SPARSE_LAYER_TYPES = ("sparse_attention", "sparse", "deepseek_sparse_attention")
+_SPARSE_LAYER_TYPES = (
+    "sparse_attention",
+    "sparse",
+    "indexed_attention",
+    # TODO: Delete below once Transformers 5.18.0 is the minimum required version.
+    "deepseek_sparse_attention",
+)
 _WEIGHT_LAYER_INDEX_RE = re.compile(r"(?:^|\.)layers\.(\d+)(?:\.|$)")
 
 
-def compute_skip_topk_layers(config: PretrainedConfig) -> set[int]:
-    """Return the backbone layers that reuse a previous layer's top-k indices.
-
-    A "shared" indexer layer performs sparse attention with the indices computed
-    by the closest preceding "full" indexer layer, so it does not build its own
-    indexer and its checkpoint indexer weights must be skipped.
-
-    Args:
-        config: The model config.
-
-    Returns:
-        The set of layer indices that share another layer's top-k indices.
-
-    Raises:
-        ValueError: If ``indexer_types`` has the wrong length or an unknown
-            entry, or if ``index_topk_freq`` is not a positive integer.
-    """
+def sparse_layer_ids(config: PreTrainedConfig) -> set[int]:
+    """Layers that run sparse attention, MTP layers included."""
     if not hasattr(config, "index_topk"):
         return set()
-
-    num_hidden_layers = config.num_hidden_layers
-    indexer_types = getattr(config, "indexer_types", None)
-    if indexer_types is not None:
-        if len(indexer_types) != num_hidden_layers:
-            raise ValueError(
-                "indexer_types must contain one entry per hidden layer: "
-                f"expected {num_hidden_layers}, got {len(indexer_types)}."
-            )
-        invalid_types = sorted(set(indexer_types) - {"full", "shared"})
-        if invalid_types:
-            raise ValueError(
-                f"indexer_types only supports 'full' and 'shared', got {invalid_types}."
-            )
-        return {
-            layer_idx
-            for layer_idx, indexer_type in enumerate(indexer_types)
-            if indexer_type == "shared"
-        }
-
-    freq = getattr(config, "index_topk_freq", 1)
-    if not isinstance(freq, int) or freq <= 0:
-        raise ValueError(f"index_topk_freq must be a positive integer, got {freq!r}.")
-    pattern = getattr(config, "index_topk_pattern", None)
-    offset = getattr(config, "index_skip_topk_offset", 2)
-    skip_layers: set[int] = set()
-    for layer_idx in range(num_hidden_layers):
-        if pattern is None:
-            if max(layer_idx - offset + 1, 0) % freq != 0:
-                skip_layers.add(layer_idx)
-        elif 0 <= layer_idx < len(pattern) and pattern[layer_idx] == "S":
-            skip_layers.add(layer_idx)
-    return skip_layers
+    layer_types = getattr(config, "layer_types", None) or ()
+    return {i for i, t in enumerate(layer_types) if t in _SPARSE_LAYER_TYPES}
 
 
 def is_skip_topk_indexer_weight(weight_name: str, skip_topk_layers: set[int]) -> bool:
@@ -115,6 +77,7 @@ def is_skip_topk_indexer_weight(weight_name: str, skip_topk_layers: set[int]) ->
     Returns:
         True when the weight is an indexer weight of a layer that has no
         indexer module and therefore must be dropped.
+
     """
     if ".indexer." not in weight_name or not skip_topk_layers:
         return False
@@ -164,7 +127,7 @@ class Indexer(nn.Module):
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )
-        self.k_norm = LayerNorm(self.head_dim, eps=1e-6)
+        self.k_norm = LayerNorm(self.head_dim, eps=1e-6, dtype=torch.float32)
         self.softmax_scale = self.head_dim**-0.5
 
         self.scale_fmt = "ue8m0"
@@ -278,7 +241,7 @@ class HYV4MLAAttention(nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -310,13 +273,7 @@ class HYV4MLAAttention(nn.Module):
         self.num_local_heads = num_heads // tp_size
 
         self.layer_id = int(prefix.split(".")[-2])
-        layer_types = getattr(config, "layer_types", None)
-        requested_sparse = (
-            hasattr(config, "index_topk")
-            and layer_types is not None
-            and self.layer_id < len(layer_types)
-            and layer_types[self.layer_id] in _SPARSE_LAYER_TYPES
-        )
+        requested_sparse = self.layer_id in sparse_layer_ids(config)
         # Only actual sparse layers may share another layer's top-k indices.
         self.skip_topk = requested_sparse and self.layer_id in compute_skip_topk_layers(
             config
@@ -485,13 +442,11 @@ class HYV4MLAAttention(nn.Module):
         if self.learnable_sink:
             sink_backend = self._resolve_sink_backend(kv_cache_dtype)
             enable_sink = sink_backend is not None
-            self.learnable_sink_param = nn.Parameter(
-                torch.empty(
-                    self.num_local_heads,
-                    # The kernels require fp32 sinks; the disabled path keeps
-                    # the checkpoint dtype since the value is never consumed.
-                    dtype=torch.float32 if enable_sink else torch.bfloat16,
-                )
+            # The kernels require fp32 sinks; the disabled path keeps the
+            # checkpoint dtype since the value is never consumed.
+            self.learnable_sink_param = make_attention_sink(
+                self.num_local_heads,
+                torch.float32 if enable_sink else torch.bfloat16,
             )
             if enable_sink:
                 sinks = self.learnable_sink_param
@@ -557,6 +512,7 @@ class HYV4MLAAttention(nn.Module):
             The backend class to bind, or None when no sink-capable backend is
             available; the caller then loads the sink weight but disables the
             bias.
+
         """
         head_size = self.kv_lora_rank + self.qk_rope_head_dim
         dtype = torch.get_default_dtype()
@@ -755,6 +711,8 @@ class HYV4MLAAttention(nn.Module):
         """
         if self.indexer is not None and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
+        if self.is_sparse:
+            self.mla_attn.impl.record_logical_topk_ready()  # type: ignore[attr-defined]
         out.copy_(
             self.mla_attn(
                 q,

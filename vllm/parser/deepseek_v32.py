@@ -28,6 +28,7 @@ from vllm.parser.deepseek_v4 import (
     DSML_PARAM_CLOSE,
     DSML_PARAM_START,
     _dsml_arg_converter,
+    _dsml_arg_value_extender,
     _unwrap_wrapper_args,
 )
 from vllm.parser.engine.events import EventType
@@ -53,6 +54,7 @@ def deepseek_v32_config() -> ParserEngineConfig:
     return ParserEngineConfig(
         name="deepseek_v32",
         initial_state=ParserState.CONTENT,
+        wait_for_reasoning=False,
         terminals={
             "TOOL_START": DSML_FUNC_START,
             "TOOL_END": DSML_FUNC_END,
@@ -75,6 +77,10 @@ def deepseek_v32_config() -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            (ParserState.CONTENT, "INVOKE_PREFIX"): Transition(
+                ParserState.TOOL_NAME,
+                (EventType.TOOL_CALL_START,),
+            ),
             (ParserState.TOOL_NAME, "INVOKE_NAME_END"): Transition(
                 ParserState.TOOL_ARGS,
                 (),
@@ -84,7 +90,7 @@ def deepseek_v32_config() -> ParserEngineConfig:
                 (EventType.TOOL_CALL_END,),
             ),
             (ParserState.TOOL_ARGS, "TOOL_END"): Transition(
-                ParserState.CONTENT,
+                ParserState.TOOL_BETWEEN,
                 (EventType.TOOL_CALL_END,),
             ),
             # Parallel tool calls
@@ -92,8 +98,14 @@ def deepseek_v32_config() -> ParserEngineConfig:
                 ParserState.TOOL_NAME,
                 (EventType.TOOL_CALL_START,),
             ),
+            # A tool call ends the turn: stay in TOOL_BETWEEN so any text
+            # after the block is dropped.
             (ParserState.TOOL_BETWEEN, "TOOL_END"): Transition(
-                ParserState.CONTENT,
+                ParserState.TOOL_BETWEEN,
+                (),
+            ),
+            (ParserState.TOOL_BETWEEN, "TOOL_START"): Transition(
+                ParserState.TOOL_PREAMBLE,
                 (),
             ),
         },
@@ -104,6 +116,7 @@ def deepseek_v32_config() -> ParserEngineConfig:
         },
         arg_converter=_dsml_arg_converter,
         arg_structural_chars=frozenset(">"),
+        arg_value_extender=_dsml_arg_value_extender,
         strip_content_whitespace_with_tools=False,
         tool_args_json=False,
     )

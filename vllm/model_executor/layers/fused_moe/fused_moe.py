@@ -110,8 +110,7 @@ def fused_moe_kernel_gptq_awq(
     use_int4_w4a16: tl.constexpr,
     use_int8_w8a16: tl.constexpr,
 ):
-    """
-    Implements the fused computation for a Mixture of Experts (MOE) using
+    """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
 
     Key Parameters:
@@ -300,6 +299,7 @@ def fused_moe_kernel(
     # Pointers to matrices
     a_ptr,
     b_ptr,
+    b_desc,
     c_ptr,
     b_bias_ptr,
     a_scale_ptr,
@@ -352,9 +352,9 @@ def fused_moe_kernel(
     SWAP_AB: tl.constexpr,
     # Tensor-descriptor path for the A gather and B load in the K-loop.
     USE_TD: tl.constexpr = False,
+    USE_TMA_B: tl.constexpr = False,
 ):
-    """
-    Implements the fused computation for a Mixture of Experts (MOE) using
+    """Implements the fused computation for a Mixture of Experts (MOE) using
     token and expert matrices.
 
     Key Parameters:
@@ -443,6 +443,7 @@ def fused_moe_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     # TD gather and the SWAP_AB accumulator layout are mutually exclusive.
     tl.static_assert(not (USE_TD and SWAP_AB))
+    tl.static_assert(not (USE_TD and USE_TMA_B))
     if USE_TD:
         # ``tt.descriptor_gather`` requires block_shape[0] == 1 and i32 idx.
         m_td = num_valid_tokens // top_k
@@ -525,16 +526,26 @@ def fused_moe_kernel(
             b = b_desc.load([pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K]).T
         elif SWAP_AB:
             a_mask = (offs_k[:, None] < K - k * BLOCK_SIZE_K) & token_mask[None, :]
-            b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
             a = tl.load(a_ptrs, mask=a_mask, other=0.0)
-            b = tl.load(b_ptrs, mask=b_mask, other=0.0)
+            if not USE_TMA_B:
+                b_mask = offs_k[None, :] < K - k * BLOCK_SIZE_K
+                b = tl.load(b_ptrs, mask=b_mask, other=0.0)
         else:
             a = tl.load(
                 a_ptrs,
                 mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
                 other=0.0,
             )
-            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
+            if not USE_TMA_B:
+                b = tl.load(
+                    b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0
+                )
+        if USE_TMA_B:
+            b = b_desc.load(
+                [off_experts.to(tl.int32), pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K]
+            ).reshape((BLOCK_SIZE_N, BLOCK_SIZE_K))
+            if not SWAP_AB:
+                b = b.T
         # We accumulate along the K dimension.
         if use_int8_w8a16:
             accumulator = tl.dot(a, b.to(compute_type), acc=accumulator)
@@ -844,6 +855,26 @@ def invoke_fused_moe_triton_kernel(
     BLOCK_SIZE_K = config.pop("BLOCK_SIZE_K")
     if block_shape is not None:
         BLOCK_SIZE_K = min(BLOCK_SIZE_K, min(block_shape[0], block_shape[1]))
+    use_tma_b = (
+        bool(config.pop("USE_TMA", True))
+        and use_fp8_w8a8
+        and block_shape is not None
+        and all(block_shape)
+        and current_platform.is_cuda()
+        and current_platform.is_device_capability(90)
+        and B.device.type == "cuda"
+        and B.is_contiguous()
+        and B.size(1) % config["BLOCK_SIZE_N"] == 0
+        and B.size(2) % BLOCK_SIZE_K == 0
+    )
+    b_desc = None
+    if use_tma_b:
+        from triton.tools.tensor_descriptor import TensorDescriptor
+
+        set_triton_allocator(B.device)
+        b_desc = TensorDescriptor.from_tensor(
+            B, [1, config["BLOCK_SIZE_N"], BLOCK_SIZE_K]
+        )
     if use_td and A.size(1) % BLOCK_SIZE_K != 0:
         # TD gather/load feeding tl.dot with a non-block-aligned K
         # miscompiles (~74% of output elements wrong) on real HW;
@@ -866,6 +897,7 @@ def invoke_fused_moe_triton_kernel(
     fused_moe_kernel[grid](
         A,
         B,
+        b_desc,
         C,
         B_bias,
         A_scale,
@@ -887,9 +919,11 @@ def invoke_fused_moe_triton_kernel(
         C.stride(2),
         A_scale.stride(0) if A_scale is not None and A_scale.ndim == 2 else 0,
         A_scale.stride(1) if A_scale is not None and A_scale.ndim == 2 else 0,
-        B_scale.stride(0) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(0) if B_scale is not None else 0,
         B_scale.stride(2) if B_scale is not None and B_scale.ndim == 3 else 0,
-        B_scale.stride(1) if B_scale is not None and B_scale.ndim >= 2 else 0,
+        B_scale.stride(1)
+        if B_scale is not None and B_scale.ndim >= 2 and B_scale.size(1) > 1
+        else 0,
         B_bias.stride(0) if B_bias is not None else 0,
         B_bias.stride(1) if B_bias is not None else 0,
         0 if block_shape is None else block_shape[0],
@@ -906,6 +940,7 @@ def invoke_fused_moe_triton_kernel(
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         SWAP_AB=SWAP_AB,
         USE_TD=use_td,
+        USE_TMA_B=use_tma_b,
         **config,
     )
 
@@ -1115,15 +1150,13 @@ def get_moe_configs(
     block_n: int | None = None,
     block_k: int | None = None,
 ) -> dict[int, Any] | None:
-    """
-    Return optimized configurations for the fused MoE kernel.
+    """Return optimized configurations for the fused MoE kernel.
 
     The return value will be a dictionary that maps an irregular grid of
     batch sizes to configurations of the fused_moe kernel. To evaluate the
     kernel on a given batch size bs, the closest batch size in the grid should
     be picked and the associated configuration chosen to invoke the kernel.
     """
-
     # Avoid optimizing for the batch invariant case. Use default config
     if envs.VLLM_BATCH_INVARIANT:
         return None
@@ -1187,6 +1220,7 @@ def _ensure_block_size_k_divisible(
 
     Returns:
         A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
+
     """
     # Fast path: already valid
     if size_k % block_size_k == 0 and block_size_k % group_size == 0:
@@ -1288,6 +1322,8 @@ def get_moe_wna16_block_config(
 def should_moe_wna16_use_cuda(
     num_valid_tokens: int, group_size: int, num_experts: int, bit: int
 ):
+    if envs.VLLM_BATCH_INVARIANT:
+        return False
     return (
         current_platform.is_cuda()
         and bit == 4
@@ -1419,6 +1455,51 @@ def get_default_config(
     return config
 
 
+def _moe_config_shape(w2_shape: tuple[int, ...], dtype: str | None) -> tuple[int, int]:
+    """(E, N) as used by both the tuned-config lookup and the default heuristic."""
+    E, _, N = w2_shape
+    if dtype == "int4_w4a16":
+        N = N * 2
+    return E, N
+
+
+def _get_configured_moe_config(
+    w2_shape: tuple[int, ...],
+    dtype: str | None,
+    M: int,
+    block_shape: list[int] | None = None,
+) -> dict[str, int] | None:
+    """Config from an override or a tuned file, or None if neither applies."""
+    from vllm.model_executor.layers.fused_moe import get_config
+
+    override_config = get_config()
+    if override_config:
+        return override_config
+
+    E, N = _moe_config_shape(w2_shape, dtype)
+    block_n = block_shape[0] if block_shape else 0
+    block_k = block_shape[1] if block_shape else 0
+    configs = get_moe_configs(E, N, dtype, block_n, block_k)
+    if configs:
+        # Pick the config tuned for the closest batch size
+        return configs[min(configs.keys(), key=lambda x: abs(x - M))]
+    return None
+
+
+def has_configured_moe_config(
+    w2_shape: tuple[int, ...],
+    dtype: str | None,
+    M: int,
+    block_shape: list[int] | None = None,
+) -> bool:
+    """Whether try_get_optimal_moe_config resolves to an override or a tuned config.
+
+    False means it falls back to get_default_config, so a caller whose layout that
+    heuristic does not model may adjust the tiles it returns.
+    """
+    return _get_configured_moe_config(w2_shape, dtype, M, block_shape) is not None
+
+
 def try_get_optimal_moe_config(
     w1_shape: tuple[int, ...],
     w2_shape: tuple[int, ...],
@@ -1427,27 +1508,10 @@ def try_get_optimal_moe_config(
     M: int,
     block_shape: list[int] | None = None,
 ) -> dict[str, int]:
-    from vllm.model_executor.layers.fused_moe import get_config
-
-    override_config = get_config()
-    if override_config:
-        config = override_config
-    else:
-        # First try to load optimal config from the file
-        E, _, N = w2_shape
-        if dtype == "int4_w4a16":
-            N = N * 2
-        block_n = block_shape[0] if block_shape else 0
-        block_k = block_shape[1] if block_shape else 0
-        configs = get_moe_configs(E, N, dtype, block_n, block_k)
-
-        if configs:
-            # If an optimal configuration map has been found, look up the
-            # optimal config
-            config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
-        else:
-            # Else use the default config
-            config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
+    config = _get_configured_moe_config(w2_shape, dtype, M, block_shape)
+    if config is None:
+        E, N = _moe_config_shape(w2_shape, dtype)
+        config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
     return config
 
 
@@ -1541,6 +1605,12 @@ direct_register_custom_op(
 )
 
 
+def _weights_host_resident(*weights: torch.Tensor) -> bool:
+    """True when any of the expert weights is read from host memory in place,
+    as UVA weight offloading (``--offload-backend uva``) leaves them."""
+    return any(getattr(w, "_vllm_is_uva_offloaded", False) for w in weights)
+
+
 def _prepare_expert_assignment(
     topk_ids: torch.Tensor,
     config: dict[str, Any],
@@ -1553,14 +1623,18 @@ def _prepare_expert_assignment(
     use_int4_w4a16: bool = False,
     block_shape: list[int] | None = None,
     ignore_invalid_experts: bool = False,
+    weights_host_resident: bool = False,
 ) -> tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]:
     """Prepare expert assignments for the aligned and low-latency Triton paths."""
     # SPARSITY_FACTOR is a heuristic margin ensuring tokens_in_chunk * top_k
     # activates only a small fraction of total experts
     # Skips moe_align_block_size and activates the `sorted_token_ids is None`
-    # path of the fused_moe_kernel kernel
+    # path of the fused_moe_kernel kernel, which reads an expert's weights once
+    # per (token, expert) pair. Not for weights in host memory: there every
+    # repeated read crosses PCIe, so group each expert's tokens instead.
     naive_block_assignment = (
         expert_map is None
+        and not weights_host_resident
         and num_tokens * top_k_num * 4 <= global_num_experts
         and not (
             (use_int8_w8a16 or use_int4_w4a16)
@@ -1638,8 +1712,7 @@ def _get_config_quant_dtype(
     use_fp8_w8a8: bool,
     use_int8_w8a8: bool,
 ) -> None | torch.dtype | str:
-    """
-    Get the quantization type based on the quantization strategy flags.
+    """Get the quantization type based on the quantization strategy flags.
     We don't have a quant_config at this point so we need to work backwards.
     A return type of None means no quantization is required because the
     input is unquantized or has been quantized prior to calling
@@ -1786,6 +1859,7 @@ def fused_experts_impl(
         use_int4_w4a16=use_int4_w4a16,
         block_shape=block_shape,
         ignore_invalid_experts=True,
+        weights_host_resident=_weights_host_resident(w1, w2),
     )
 
     dispatch_fused_moe_kernel(

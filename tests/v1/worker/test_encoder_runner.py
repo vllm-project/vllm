@@ -9,12 +9,17 @@ and tolerated (token-embedding fallback) when it is not, while a miss within
 the processed range still fails loudly.
 """
 
-from unittest.mock import MagicMock
+import weakref
+from dataclasses import replace
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
 import torch
 
+from vllm.config.compilation import CUDAGraphMode
+from vllm.model_executor.models.interfaces import SupportsEncoderCudaGraph
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldElem,
@@ -29,6 +34,56 @@ from vllm.v1.worker.gpu.model_states.interface import ModelState
 pytestmark = pytest.mark.cpu_test
 
 HIDDEN = 4
+
+
+@pytest.mark.parametrize(
+    "enabled,enforce_eager,supported,expected",
+    [
+        (True, False, True, True),
+        (False, False, True, False),
+        (True, True, True, False),
+        (True, False, False, False),
+    ],
+)
+def test_encoder_graph_configuration(enabled, enforce_eager, supported, expected):
+    """Encoder graph eligibility is independent of decoder graph mode."""
+    config = MagicMock()
+    config.model_config.enforce_eager = enforce_eager
+    config.model_config.dtype = torch.float32
+    config.model_config.get_inputs_embeds_size.return_value = HIDDEN
+    config.scheduler_config.max_num_batched_tokens = 8
+    config.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+    config.compilation_config.cudagraph_mm_encoder = enabled
+    model = MagicMock(spec=SupportsEncoderCudaGraph) if supported else torch.nn.Module()
+    state = _model_state(EncoderCache())
+    with patch("vllm.v1.worker.gpu.model_states.interface.EncoderCudaGraphManager"):
+        ModelState.__init__(state, config, model, state.encoder_cache, state.device)
+    assert state.encoder_runner.has_cudagraph() is expected
+
+
+def test_encoder_graph_unsupported_modality_uses_eager_output():
+    """An image graph must not intercept another modality's encoder output."""
+    from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
+
+    runner = _make_runner([], [])
+    output = torch.ones(2, HIDDEN)
+    runner.model = MagicMock()
+    runner.model.embed_multimodal.return_value = [output]
+    manager = MagicMock(spec=EncoderCudaGraphManager)
+    manager.config = SimpleNamespace(modalities=["image"])
+    manager.is_captured.return_value = True
+    manager.supports_modality.side_effect = lambda modality: (
+        EncoderCudaGraphManager.supports_modality(manager, modality)
+    )
+    runner.cudagraph_manager = manager
+    with patch(
+        "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
+        return_value=[("audio", 1, {"audio_values": torch.zeros(2)})],
+    ):
+        result = runner.execute_mm_encoder([("audio", MagicMock())])
+    assert len(result) == 1
+    assert result[0] is output
+    manager.execute.assert_not_called()
 
 
 def _model_state(cache: EncoderCache) -> MagicMock:
@@ -80,15 +135,21 @@ def _make_runner(
     )
 
 
-def _gather(runner: EncoderRunner, *, num_scheduled: int, draft_lookahead: int):
-    # Single prefilling request, num_computed_tokens=0, prefill_len large.
+def _gather(
+    runner: EncoderRunner,
+    *,
+    num_scheduled: int,
+    draft_lookahead: int,
+    num_computed: int = 0,
+):
+    # Single prefilling request, prefill_len large.
     return runner.gather_mm_embeddings(
         req_ids=["req0"],
         total_num_scheduled_tokens=num_scheduled,
         num_scheduled_tokens=np.array([num_scheduled]),
         query_start_loc=np.array([0]),
         prefill_lens=np.array([1000]),
-        num_computed_tokens=np.array([0]),
+        num_computed_tokens=np.array([num_computed]),
         draft_lookahead=draft_lookahead,
     )
 
@@ -126,6 +187,31 @@ def test_draft_lookahead_tolerates_missing_boundary_feature():
     assert [e.modality for e in mm_embeds] == ["image"]
     assert not bool(is_mm_embed[7])
     assert int(is_mm_embed.sum()) == 7
+
+
+@pytest.mark.parametrize("draft_lookahead", [1, 3])
+@pytest.mark.parametrize("num_computed", [8, 9])
+def test_draft_lookahead_ignores_freed_feature(draft_lookahead, num_computed):
+    """A consumed feature may be freed without removing its request metadata."""
+    freed = _feature("freed", offset=0, length=8)
+    current = _feature("current", offset=8, length=8)
+    runner = _make_runner([freed, current], cached=[freed, current])
+    runner.encoder_cache.free_encoder_cache(freed.identifier)
+
+    mm_embeds, is_mm_embed = _gather(
+        runner,
+        num_scheduled=4,
+        draft_lookahead=draft_lookahead,
+        num_computed=num_computed,
+    )
+
+    start = num_computed + draft_lookahead - current.mm_position.offset
+    expected = runner.encoder_cache.encoder_outputs[current.identifier][
+        start : start + 4
+    ]
+    assert len(mm_embeds) == 1
+    torch.testing.assert_close(mm_embeds[0], expected)
+    assert is_mm_embed.tolist() == [True] * 4
 
 
 def test_draft_lookahead_raises_on_interior_miss():
@@ -237,6 +323,21 @@ def test_execute_mm_encoder_caches_outputs_without_gathering():
     state.encoder_runner.gather_mm_embeddings.assert_not_called()
 
 
+def test_execute_mm_encoder_sorts_by_modality():
+    """Items are encoded sorted by modality; outputs keep the input order."""
+    mm_kwargs = [("video", 0), ("image", 1), ("video", 2), ("image", 3)]
+    runner = _make_runner([], [])
+    runner.model = MagicMock()
+    runner.model.embed_multimodal.side_effect = lambda x: [torch.full((1, 1), x)]
+    with patch(
+        "vllm.v1.worker.gpu.mm.encoder_runner.group_and_batch_mm_kwargs",
+        side_effect=lambda items, **_: [(m, 1, {"x": x}) for m, x in items],
+    ) as group:
+        outputs = runner.execute_mm_encoder(mm_kwargs)
+    assert group.call_args.args[0] == [mm_kwargs[i] for i in (1, 3, 0, 2)]
+    assert [int(o) for o in outputs] == [0, 1, 2, 3]
+
+
 def test_execute_mm_encoder_is_a_noop_without_scheduled_items():
     """A step that schedules no encoder input must not touch the encoder."""
     cache = EncoderCache()
@@ -325,3 +426,48 @@ def test_encoder_timing_stats_registry():
     assert stats["r1"]["num_encoder_calls"] == 2
     assert stats["r1"]["encoder_forward_secs"] >= 0
     assert runner.get_encoder_timing_stats() == {}
+
+
+def test_consumed_cpu_input_updates_are_request_local_and_replayable():
+    """Release one occurrence, keep layout/embeddings, then restore encode input."""
+    pixels = torch.ones(8, HIDDEN)
+    feature = replace(_feature("same", 0, 8), data=_embeds_item(pixels))
+    later = replace(feature, mm_position=PlaceholderRange(offset=16, length=8))
+    source = [feature, later]
+    cache = EncoderCache()
+    cache.add_request("a", source)
+    cache.add_request("b", source)
+    cache.encoder_outputs["same"] = torch.ones(8, HIDDEN)
+    cache.update_encoder_inputs("a", {0: None})
+    assert cache.mm_features["a"][0].data is None
+    assert cache.mm_features["a"][0].mm_position is feature.mm_position
+    assert cache.mm_features["a"][1].data is feature.data
+    assert cache.mm_features["b"][0].data is feature.data
+    assert source[0].data is not None
+    assert "same" in cache.encoder_outputs
+    cache.free_encoder_cache("same")
+    cache.update_encoder_inputs("a", {0: source[0].data})
+    runner = EncoderRunner(
+        model=torch.nn.Module(),
+        max_num_tokens=32,
+        hidden_size=HIDDEN,
+        encoder_cache=cache,
+        dtype=torch.float32,
+        device=torch.device("cpu"),
+    )
+    hashes, inputs = runner.prepare_mm_inputs({"a": [0]})
+    assert hashes == ["same"]
+    assert inputs == [(feature.modality, feature.data)]
+
+
+def test_consumed_cpu_input_releases_storage_before_request_finishes():
+    """The request may stay alive after its worker-owned storage is freed."""
+    cache = EncoderCache()
+    pixels = torch.ones(8, HIDDEN)
+    ref = weakref.ref(pixels)
+    cache.add_request("a", [replace(_feature("h", 0, 8), data=_embeds_item(pixels))])
+    del pixels
+    assert ref() is not None
+    cache.update_encoder_inputs("a", {0: None})
+    assert ref() is None
+    assert "a" in cache.mm_features

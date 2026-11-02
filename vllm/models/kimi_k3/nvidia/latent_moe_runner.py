@@ -15,6 +15,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner, _unpack
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.platforms import current_platform
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import aux_stream
@@ -115,10 +116,11 @@ class LatentMoERunner(MoERunner):
             experts_cls = getattr(self._quant_method, "experts_cls", None)
             # The kernel instance is built after weight loading, while the tail
             # must register its CuTeDSL warmup units during runner construction.
-            self.moe_config.defer_moe_finalize = (
+            if (
                 experts_cls is TrtLlmMxfp4ExpertsMonolithic
                 or experts_cls is TrtLlmNvFp4ExpertsMonolithic
-            ) and self.moe_config.hidden_dim == self.moe_config.hidden_dim_unpadded
+            ) and self.moe_config.hidden_dim == self.moe_config.hidden_dim_unpadded:
+                self.moe_config.defer_moe_finalize()
             from vllm.models.kimi_k3.nvidia.ops.latent_moe_tail import (
                 KimiK3LatentMoETailOp,
             )
@@ -132,24 +134,17 @@ class LatentMoERunner(MoERunner):
                     else 0
                 ),
                 dtype=norm.weight.dtype,
-                device=norm.weight.device,
+                device=current_platform.current_device(),
                 rms_eps=norm.variance_epsilon,
             )
             self._k3_latent_moe_tail_op = op
-            self.moe_config.defer_moe_finalize_max_num_tokens = (
-                op.contract.max_num_tokens
-                if self.moe_config.use_deferred_moe_finalize
-                else -1
-            )
             if self.moe_config.use_deferred_moe_finalize:
+                self.moe_config.limit_deferred_moe_finalize(op.contract.max_num_tokens)
                 logger.info_once(
                     "K3 latent-MoE tail fusion with deferred top-k finalization "
                     "is enabled for up to %d tokens.",
                     op.contract.max_num_tokens,
                 )
-        else:
-            self.moe_config.defer_moe_finalize = False
-            self.moe_config.defer_moe_finalize_max_num_tokens = -1
 
     def _get_zero_residual(
         self,
@@ -185,6 +180,12 @@ class LatentMoERunner(MoERunner):
             and self._shared_experts is not None
             and not self._fused_output_is_reduced
             and not self.moe_config.is_sequence_parallel
+            # Tail kernels multiply by the raw up_proj.weight (no scales): BF16 only.
+            and self.routed_output_transform is not None
+            and isinstance(
+                self.routed_output_transform.up_proj.quant_method,
+                UnquantizedLinearMethod,
+            )
         )
 
     def _select_tail_tier(
@@ -275,9 +276,7 @@ class LatentMoERunner(MoERunner):
         shared_output: torch.Tensor,
         trunc_size: int | None,
     ) -> torch.Tensor:
-        """
-        Tier 2: column-parallel up-projection folded into the final reduce.
-        """
+        """Tier 2: column-parallel up-projection folded into the final reduce."""
         transform = self.routed_output_transform
         assert transform is not None
 

@@ -2,21 +2,26 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::fmt;
-use std::sync::LazyLock;
 use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, LazyLock};
 
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
 pub use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
-use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
 
+use crate::buckets::BucketConfig;
+
 mod api_server;
+mod buckets;
+mod histogram;
 mod request;
 mod scheduler;
 
 pub use api_server::*;
+pub use buckets::{BucketFamily, CustomHistogramBuckets, FamilyHistogram};
+pub use histogram::Histogram;
 pub use request::*;
 pub use scheduler::*;
 
@@ -29,6 +34,7 @@ pub type F64Gauge = Gauge<f64, AtomicU64>;
 /// Histogram metric handle cloned out of a Prometheus family.
 pub type HistogramMetric = Histogram;
 pub(crate) type HistogramFamily = Family<EngineLabels, Histogram, fn() -> Histogram>;
+pub(crate) type BucketHistogramFamily = Family<EngineLabels, Histogram, FamilyHistogram>;
 
 /// Shared Prometheus registry for frontend metrics.
 ///
@@ -36,6 +42,7 @@ pub(crate) type HistogramFamily = Family<EngineLabels, Histogram, fn() -> Histog
 /// <https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/v1/metrics/loggers.py#L389-L1004>
 pub struct Metrics {
     registry: Registry,
+    buckets: Arc<BucketConfig>,
     pub scheduler: SchedulerMetrics,
     pub request: RequestMetrics,
     pub api_server: ApiServerMetrics,
@@ -45,12 +52,14 @@ impl Metrics {
     /// Construct a new metrics registry.
     pub fn new() -> Self {
         let mut registry = Registry::default();
-        let scheduler = SchedulerMetrics::register(&mut registry);
-        let request = RequestMetrics::register(&mut registry);
+        let buckets = Arc::default();
+        let scheduler = SchedulerMetrics::register(&mut registry, &buckets);
+        let request = RequestMetrics::register(&mut registry, &buckets);
         let api_server = ApiServerMetrics::register(&mut registry);
 
         Self {
             registry,
+            buckets,
             scheduler,
             request,
             api_server,
@@ -63,6 +72,15 @@ impl Metrics {
         let mut output = String::new();
         encode(&mut output, &self.registry)?;
         Ok(output)
+    }
+
+    /// Replace the default buckets of the families in `custom`, as
+    /// `--custom-histogram-buckets` does.
+    ///
+    /// Must be called before the first histogram of those families is
+    /// created; only the first call takes effect.
+    pub fn set_custom_histogram_buckets(&self, custom: CustomHistogramBuckets) {
+        self.buckets.set_custom(custom);
     }
 
     /// Return the registry owned by this metrics object.
