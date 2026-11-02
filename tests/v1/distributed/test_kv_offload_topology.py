@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Offloaded KV from one tensor-parallel size must not serve another."""
 
+import time
+
 from tests.models.utils import check_logprobs_close
 from tests.utils import multi_gpu_marks
 from vllm import SamplingParams, TokensPrompt
@@ -9,11 +11,17 @@ from vllm.config import KVTransferConfig
 
 MODEL = "Qwen/Qwen3-0.6B"
 PROMPT_TOKEN_IDS = list(range(1000, 2000))
+BLOCK_SIZE = 16
 
 pytestmark = multi_gpu_marks(num_gpus=2)
 
 
+def _num_stored_files(root_dir):
+    return sum(1 for _ in root_dir.rglob("*.bin"))
+
+
 def _generate(vllm_runner, tensor_parallel_size, root_dir):
+    stored_before = _num_stored_files(root_dir)
     with vllm_runner(
         MODEL,
         tensor_parallel_size=tensor_parallel_size,
@@ -36,6 +44,13 @@ def _generate(vllm_runner, tensor_parallel_size, root_dir):
             SamplingParams(temperature=0, max_tokens=16, ignore_eos=True, logprobs=5),
             use_tqdm=False,
         )
+        if output.num_cached_tokens == 0:
+            # Engine shutdown cancels queued stores.
+            expected = stored_before + len(PROMPT_TOKEN_IDS) // BLOCK_SIZE
+            deadline = time.monotonic() + 60
+            while _num_stored_files(root_dir) < expected:
+                assert time.monotonic() < deadline, "KV blocks were not stored"
+                time.sleep(0.1)
     completion = output.outputs[0]
     return output.num_cached_tokens, (
         list(completion.token_ids),
@@ -51,7 +66,6 @@ def test_direct_layout_is_not_shared_across_tp_sizes(
 
     cached_by_writer, _ = _generate(vllm_runner, 1, tmp_path)
     assert cached_by_writer == 0
-    assert any(tmp_path.rglob("*.bin"))
 
     cached_cold, cold = _generate(vllm_runner, 2, tmp_path)
     assert cached_cold == 0
