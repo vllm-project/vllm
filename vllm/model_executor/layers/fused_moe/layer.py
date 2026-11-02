@@ -378,6 +378,10 @@ def FusedMoEFactory(
         elastic_ep_max_dp_size=vllm_config.parallel_config.elastic_ep_max_dp_size,
         has_bias=has_bias,
         is_lora_enabled=vllm_config.lora_config is not None,
+        is_lora_fully_sharded=(
+            vllm_config.lora_config is not None
+            and vllm_config.lora_config.fully_sharded_loras
+        ),
         shared_expert_prefix=shared_expert_prefix,
         activation=moe_activation,
         device=vllm_config.device_config.device,

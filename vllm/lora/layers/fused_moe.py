@@ -551,9 +551,6 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         self._create_lora_b_weights(max_loras, lora_config)
 
     def _slice_w13_b(self, w13_lora_b: torch.Tensor):
-        if self.tp_size == 1:
-            return w13_lora_b
-
         # w13_lora_b shape (num_experts,output_size,rank)
         shard_size = self._tp_shard_size
         start_idx = self.tp_rank * shard_size

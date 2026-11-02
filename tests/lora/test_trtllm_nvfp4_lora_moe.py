@@ -255,21 +255,18 @@ def test_lora_experts_are_opt_in_for_per_token_activations():
     assert select("flashinfer_trtllm", False, per_token)[1] is not lora_cls
     assert select("flashinfer_trtllm", True, per_token) == (trtllm, lora_cls)
     assert select("auto", True, per_token)[0] != trtllm
-    with pytest.raises(ValueError, match="does not support"):
+    with pytest.raises(ValueError, match="does not support quantization scheme"):
         select("flashinfer_trtllm", True, kNvfp4Dynamic)
 
 
-def test_requested_kernel_cls_puts_lora_experts_first():
+def test_requested_kernel_cls_with_lora_is_only_lora_experts():
     config = make_dummy_moe_config(num_experts=E, hidden_dim=K, intermediate_size=N)
     trtllm = NvFp4MoeBackend.FLASHINFER_TRTLLM
     cutlass = NvFp4MoeBackend.FLASHINFER_CUTLASS
     assert _requested_kernel_cls(trtllm, config) == backend_to_kernel_cls(trtllm)
 
     config.is_lora_enabled = True
-    assert _requested_kernel_cls(trtllm, config) == [
-        TrtLlmNvFp4LoRAExperts,
-        *backend_to_kernel_cls(trtllm),
-    ]
+    assert _requested_kernel_cls(trtllm, config) == [TrtLlmNvFp4LoRAExperts]
     assert _requested_kernel_cls(cutlass, config) == backend_to_kernel_cls(cutlass)
 
 
@@ -448,9 +445,9 @@ def test_apply_with_lora_matches_reference(T, rank, pattern, clamp, ep):
         assert _rel_err(ref, ref_base) > 0.2
 
 
-def test_apply_with_lora_cuda_graph_matches_eager():
+@pytest.mark.parametrize("T", [16, 800], ids=["one-launch", "split-launches"])
+def test_apply_with_lora_cuda_graph_matches_eager(T):
     set_random_seed(0)
-    T = 16
     experts, kernel_weights, _ = _make_experts()
     x = torch.randn(T, K, device="cuda").to(torch.bfloat16)
     ids = torch.stack([torch.randperm(E, device="cuda")[:TOPK] for _ in range(T)])
@@ -478,7 +475,7 @@ def test_apply_with_lora_cuda_graph_matches_eager():
 )
 @torch.inference_mode()
 def test_apply_with_lora_under_flashinfer_autotune(T):
-    from flashinfer.autotuner import autotune
+    from flashinfer.autotuner import AutoTuner, autotune
 
     set_random_seed(0)
     experts, kernel_weights, reference = _make_experts()
@@ -488,8 +485,12 @@ def test_apply_with_lora_under_flashinfer_autotune(T):
     weights = torch.rand(T, TOPK, device="cuda", dtype=torch.float32) + 0.1
     slots = _slots("mixed", T)
     context = _make_lora(16, slots)
+    tuner = AutoTuner.get()
     with autotune(True):
+        skipped = tuner._effective_skip_ops
         out = _apply(experts, kernel_weights, context, x, ids, weights, None)
+        assert tuner.is_tuning_mode
+        assert tuner._effective_skip_ops == skipped
     ref = _lora_reference(reference, context, x, ids, weights, slots, 0, None)
     assert _rel_err(out, ref) < 0.05
 
@@ -510,17 +511,18 @@ def test_apply_splits_batches_above_the_launch_limit(pattern, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "field,value,supported",
+    "field,value,rejection",
     [
-        ("routing_method", RoutingMethodType.Renormalize, True),
-        ("routing_method", RoutingMethodType.RenormalizeNaive, True),
-        ("routing_method", RoutingMethodType.DeepSeekV3, True),
-        ("routing_method", RoutingMethodType.Sigmoid, True),
-        ("moe_parallel_config", dict(ep_size=2, use_ep=True), True),
-        ("routing_method", RoutingMethodType.Llama4, False),
-        ("activation", MoEActivation.GELU, False),
-        ("moe_parallel_config", dict(dp_size=2), False),
-        ("moe_parallel_config", dict(enable_eplb=True), False),
+        ("routing_method", RoutingMethodType.Renormalize, None),
+        ("routing_method", RoutingMethodType.RenormalizeNaive, None),
+        ("routing_method", RoutingMethodType.DeepSeekV3, None),
+        ("routing_method", RoutingMethodType.Sigmoid, None),
+        ("moe_parallel_config", dict(ep_size=2, use_ep=True), None),
+        ("routing_method", RoutingMethodType.Llama4, "routing method"),
+        ("activation", MoEActivation.GELU, "MoEActivation.GELU activation"),
+        ("moe_parallel_config", dict(dp_size=2), "parallel config"),
+        ("moe_parallel_config", dict(enable_eplb=True), "parallel config"),
+        ("is_lora_fully_sharded", True, "fully sharded LoRA"),
     ],
     ids=[
         "renormalize",
@@ -532,9 +534,10 @@ def test_apply_splits_batches_above_the_launch_limit(pattern, monkeypatch):
         "gelu",
         "dp2",
         "eplb",
+        "fully-sharded",
     ],
 )
-def test_lora_never_falls_back_to_lora_unaware_experts(field, value, supported):
+def test_lora_never_falls_back_to_lora_unaware_experts(field, value, rejection):
     config = make_dummy_moe_config(
         num_experts=E, experts_per_token=TOPK, hidden_dim=K, intermediate_size=N
     )
@@ -543,11 +546,26 @@ def test_lora_never_falls_back_to_lora_unaware_experts(field, value, supported):
     if field == "moe_parallel_config":
         value = replace(FusedMoEParallelConfig.make_no_parallel(), **value)
     setattr(config, field, value)
-    if supported:
+    if rejection is None:
         assert select_nvfp4_moe_backend(config, kNvfp4Static, kNvfp4DynamicToken) == (
             NvFp4MoeBackend.FLASHINFER_TRTLLM,
             TrtLlmNvFp4LoRAExperts,
         )
     else:
-        with pytest.raises(ValueError, match="does not support"):
+        with pytest.raises(ValueError, match=f"does not support {rejection}"):
             select_nvfp4_moe_backend(config, kNvfp4Static, kNvfp4DynamicToken)
+
+
+@pytest.mark.parametrize("fully_sharded", [False, True])
+def test_bf16_lora_experts_require_unsharded_lora(fully_sharded):
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        _trtllm_bf16_lora_supported,
+    )
+
+    config = make_dummy_moe_config(
+        num_experts=E, experts_per_token=TOPK, hidden_dim=K, intermediate_size=N
+    )
+    config.routing_method = RoutingMethodType.Renormalize
+    config.is_lora_enabled = True
+    config.is_lora_fully_sharded = fully_sharded
+    assert _trtllm_bf16_lora_supported(config) is not fully_sharded

@@ -203,14 +203,13 @@ def _requested_kernel_cls(
     backend: NvFp4MoeBackend,
     config: FusedMoEConfig,
 ) -> list[type[mk.FusedMoEExperts]]:
-    candidates = backend_to_kernel_cls(backend)
     if not config.is_lora_enabled or backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
-        return candidates
+        return backend_to_kernel_cls(backend)
     from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
         TrtLlmNvFp4LoRAExperts,
     )
 
-    return [TrtLlmNvFp4LoRAExperts, *candidates]
+    return [TrtLlmNvFp4LoRAExperts]
 
 
 def select_nvfp4_moe_backend(

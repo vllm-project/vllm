@@ -207,6 +207,10 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         return True
 
     @staticmethod
+    def _supports_fully_sharded_lora() -> bool:
+        return False
+
+    @staticmethod
     def _supports_no_act_and_mul() -> bool:
         return False  # gated only
 

@@ -630,6 +630,10 @@ class FusedMoEExperts(ABC):
             return False, _make_reason("batch invariance")
         elif moe_config.is_lora_enabled and not cls.supports_lora():
             return False, _make_reason("LoRA")
+        elif (
+            moe_config.is_lora_fully_sharded and not cls._supports_fully_sharded_lora()
+        ):
+            return False, _make_reason("fully sharded LoRA")
         return True, None
 
     @staticmethod
@@ -793,6 +797,10 @@ class FusedMoEExperts(ABC):
     @property
     def g2_alphas(self) -> torch.Tensor | None:
         return self.quant_config.g2_alphas
+
+    @staticmethod
+    def _supports_fully_sharded_lora() -> bool:
+        return True
 
     @staticmethod
     def supports_lora() -> bool:
