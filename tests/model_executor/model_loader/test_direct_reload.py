@@ -465,6 +465,53 @@ def test_reload_keeps_address_of_padded_or_emptied_weight(monkeypatch, fn):
     assert _ptrs(_state(model)) == ptrs
 
 
+class _FusedModel(torch.nn.Module):
+    """Post-load processing moves two checkpoint weights into one buffer, as
+    the DeepSeek-V4 ROCm compressor GEMM fusion does: the second at an offset."""
+
+    def __init__(self):
+        super().__init__()
+        self.a = torch.nn.Linear(4, 3, bias=False)
+        self.b = torch.nn.Linear(4, 2, bias=False)
+        self.fused: torch.Tensor | None = None
+
+    def load_weights(self, weights):
+        params = dict(self.named_parameters())
+        for name, weight in weights:
+            default_weight_loader(params[name], weight)
+        return set(params)
+
+    def process_weights_after_loading(self) -> None:
+        if self.fused is not None:
+            return  # the weights stay views of the fused buffer
+        fused = torch.cat((self.a.weight, self.b.weight)).detach()
+        self.a.weight.data = fused[:3]
+        self.b.weight.data = fused[3:]
+        self.fused = fused
+
+
+def test_reload_into_weights_moved_into_a_shared_buffer():
+    def checkpoint(value: float) -> dict[str, torch.Tensor]:
+        return {
+            "a.weight": torch.full((3, 4), value),
+            "b.weight": torch.full((2, 4), value + 1),
+        }
+
+    with _DEVICE:
+        model = _FusedModel()
+    model.load_weights(checkpoint(1.0).items())
+    process_weights_after_loading(model, _MODEL_CONFIG, _DEVICE)
+    fused = model.fused
+    assert fused is not None
+    ptr = fused.data_ptr()
+
+    _reload(model, checkpoint(5.0))  # type: ignore[arg-type]
+
+    assert model.fused is fused and fused.data_ptr() == ptr
+    expected = torch.cat(list(checkpoint(5.0).values())).to(fused)
+    torch.testing.assert_close(fused, expected, rtol=0, atol=0)
+
+
 def test_replace_parameter_keeps_the_target_checkpoint_layout():
     # post-load processing may pass another checkpoint parameter as new_tensor
     model = _cold_start(_checkpoint())
