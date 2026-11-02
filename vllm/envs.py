@@ -232,6 +232,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE: bool = False
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
+    VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
@@ -1755,6 +1756,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_REGEX_COMPILATION_TIMEOUT_S": lambda: int(
         os.getenv("VLLM_REGEX_COMPILATION_TIMEOUT_S", "5")
     ),
+    # Maximum number of worker threads for the structured-output grammar
+    # compilation thread pool. 0 (default) sizes the pool automatically as
+    # min(cpu_count // 2, 8), matching the fill-bitmask pool. The pool is
+    # deliberately capped because cpu_count() is not cgroup-aware: sizing by
+    # host CPU count oversubscribes container CPU quotas (CFS throttling)
+    # and stalls decode while grammars compile.
+    "VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS": lambda: int(
+        os.getenv("VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS", "0")
+    ),
     # Control the threshold for msgspec to use 'zero copy' for
     # serialization/deserialization of tensors. Tensors below
     # this limit will be encoded into the msgpack buffer, and
@@ -2455,6 +2465,7 @@ def compile_factors() -> dict[str, object]:
     ignored_factors: set[str] = {
         "MAX_JOBS",
         "VLLM_TRITON_JIT_WARMUP_NUM_THREADS",
+        "VLLM_STRUCTURED_OUTPUT_MAX_COMPILE_WORKERS",
         "VLLM_RPC_BASE_PATH",
         "VLLM_USE_MODELSCOPE",
         "VLLM_RINGBUFFER_WARNING_INTERVAL",
