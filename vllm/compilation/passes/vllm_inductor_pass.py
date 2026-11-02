@@ -298,6 +298,35 @@ def remove_noop_reshapes(gm: fx.GraphModule) -> None:
         gm.graph.erase_node(node)
 
 
+def reshape_symbolic_dim_to_minus_one(graph: fx.Graph) -> int:
+    """Rewrite ``reshape(x, [s, d1, ...])`` to ``reshape(x, [-1, d1, ...])``
+    when ``s`` is the only symbolic size and the rest are ints.
+
+    Patterns are traced with concrete example inputs, so a pattern that
+    flattens with ``reshape(-1, hidden)`` records ``[-1, hidden]``. Model code
+    that flattens with ``x.flatten(-2)`` instead compiles under a dynamic
+    token count to ``reshape(x, [s, hidden])`` with ``s`` a graph input, which
+    the pattern never matches. With one unknown size the two are the same op.
+    Returns the number of rewritten nodes.
+    """
+    aten_reshape = torch.ops.aten.reshape.default
+    rewritten = 0
+    for node in graph.nodes:
+        if not is_func(node, aten_reshape) or len(node.args) != 2:
+            continue
+        shape = node.args[1]
+        if not isinstance(shape, (list, tuple)):
+            continue
+        symbolic = [i for i, s in enumerate(shape) if not isinstance(s, int)]
+        if len(symbolic) != 1 or -1 in shape:
+            continue
+        new_shape = list(shape)
+        new_shape[symbolic[0]] = -1
+        node.args = (node.args[0], new_shape)
+        rewritten += 1
+    return rewritten
+
+
 def _remove_noop_permutes(gm: fx.GraphModule) -> None:
     for node in gm.graph.nodes:
         if not is_func(node, torch.ops.aten.permute.default):
