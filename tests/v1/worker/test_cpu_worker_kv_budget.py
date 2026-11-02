@@ -59,10 +59,28 @@ def test_footprint_above_reservation_asks_for_a_larger_reservation(monkeypatch):
     assert "-0." not in msg
 
 
-def test_short_node_memory_still_asks_to_free_memory(monkeypatch):
+def test_short_node_memory_suggests_a_reservation_that_fits(monkeypatch):
+    # The default reservation on a busy machine: 1 GiB in use plus 2 GiB free
+    # can back at most 3/8 of the node, so 0.37 is the largest fraction to try.
     worker = _worker(monkeypatch, reserved=6 * GiB, rss=1 * GiB, available=2 * GiB)
-    with pytest.raises(ValueError, match="Reduce CPU memory used by other processes"):
+    with pytest.raises(ValueError) as exc:
         worker.determine_available_memory()
+    msg = str(exc.value)
+    assert "decrease `--gpu-memory-utilization` to at most 0.37" in msg
+    assert "--kv-cache-memory-bytes" in msg
+    assert "reduce CPU memory used by other processes" in msg
+
+
+def test_nearly_full_node_only_asks_to_free_memory(monkeypatch):
+    # With almost nothing free, no smaller reservation leaves room for KV.
+    worker = _worker(
+        monkeypatch, reserved=6 * GiB, rss=1 * GiB, available=int(0.01 * GiB)
+    )
+    with pytest.raises(ValueError) as exc:
+        worker.determine_available_memory()
+    msg = str(exc.value)
+    assert "--gpu-memory-utilization` to at most" not in msg
+    assert "To resolve: reduce CPU memory used by other processes" in msg
 
 
 def test_budget_that_fits_sizes_the_kv_cache(monkeypatch):
