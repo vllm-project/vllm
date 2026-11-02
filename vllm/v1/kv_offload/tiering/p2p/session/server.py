@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, NamedTuple
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
@@ -166,6 +167,7 @@ class _InflightXfer:
     # Dummy default for test-seeded entries.
     round: _OutboundRequestState = field(default_factory=_OutboundRequestState)
     round_key: int = 0
+    submitted_at: float = field(default_factory=lambda: time.monotonic())
 
 
 @dataclass
@@ -288,6 +290,9 @@ class ServerRole:
         self._slow_aborts: set[tuple[str, int]] = set()
         # PollResult.peer_fault, once reported; no new WRITE after that.
         self.peer_fault: str | None = None
+        # True once peer_fault came from _check_stalled_transfers.
+        self.transfer_stalled = False
+        self._stall_timeout_s = envs.VLLM_P2P_TRANSFER_STALL_TIMEOUT_S
 
     # ------------------------------------------------------------------
     # State helpers
@@ -839,6 +844,10 @@ class ServerRole:
                 self._finalize_cancelled(xfer.kv_request_id, xfer.round_key)
             self._maybe_prune(xfer.kv_request_id)
 
+        # After the drain, so a transfer this poll resolved is not "stalled".
+        if self.peer_fault is None:
+            self._check_stalled_transfers()
+
         # Finalizing transfers can queue results for supplied but unfetched blocks.
         if self._pending_store_results:
             results.extend(self._pending_store_results)
@@ -1232,6 +1241,26 @@ class ServerRole:
                 and rnd.inflight == 0
             ):
                 self._finalize_outbound(kv_request_id, round_key, success=False)
+
+    def _check_stalled_transfers(self) -> None:
+        """Fault the peer once a transfer outlives the stall timeout.
+
+        An RDMA WRITE posted to a live NIC completes or errors within
+        milliseconds; one NIXL still reports PROC/PEND long after points at
+        a wedged lane or endpoint, which nothing else would ever surface.
+        The fault stops new WRITEs to this peer and ends the session, but
+        releases nothing: the transfer and its pins are retained across
+        teardown until the transport reports it stopped.
+        """
+        if not self._inflight or self._stall_timeout_s <= 0:
+            return
+        now = time.monotonic()
+        oldest = min(x.submitted_at for x in self._inflight.values())
+        age = now - oldest
+        if age < self._stall_timeout_s:
+            return
+        self.peer_fault = f"transfer stalled for {age:.0f}s"
+        self.transfer_stalled = True
 
     def _timeout_pending_store_jobs(self) -> list[StoreResult]:
         if not self._store_jobs:
