@@ -528,10 +528,41 @@ def flash_attn_triton_available() -> bool:
         return False
 
 
+# Head sizes for which ROCM_ATTN runs its custom paged-attention kernel on
+# CDNA (see use_rocm_custom_paged_attention). Outside this set ROCM_ATTN falls
+# back to a generic Triton kernel.
+_ROCM_ATTN_CUSTOM_HEAD_SIZES = (64, 128)
+
+
+def _prefer_aiter_backends(head_size: int | None) -> bool:
+    """Whether to try the AITER backends ahead of ROCM_ATTN.
+
+    ROCM_ATTN is only competitive when it can use its custom paged-attention
+    kernel; otherwise the AITER backends were faster at every concurrency
+    measured on MI300 (gfx942), which is the only architecture the change is
+    scoped to. Disabled with VLLM_DISABLE_AITER_BACKEND_PRIORITY=1.
+    """
+    if envs.VLLM_DISABLE_AITER_BACKEND_PRIORITY:
+        return False
+    if not on_gfx942():
+        return False
+    if head_size in _ROCM_ATTN_CUSTOM_HEAD_SIZES:
+        return False
+
+    logger.info_once(
+        "Trying AITER attention backends before ROCM_ATTN "
+        "(head_size=%s has no ROCm custom paged-attention kernel); set "
+        "VLLM_DISABLE_AITER_BACKEND_PRIORITY=1 to keep the old order.",
+        head_size,
+    )
+    return True
+
+
 def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
     use_kv_connector: bool = False,
+    head_size: int | None = None,
 ) -> list[AttentionBackendEnum]:
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
@@ -564,6 +595,21 @@ def _get_backend_priorities(
             backends.insert(0, AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
         else:
             backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+
+    # Try the AITER backends before ROCM_ATTN when ROCM_ATTN would run its
+    # generic Triton kernel instead of the CDNA custom one.
+    if _prefer_aiter_backends(head_size):
+        aiter_first = [
+            backend
+            for backend in (
+                AttentionBackendEnum.ROCM_AITER_FA,
+                AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
+            )
+            if backend in backends
+        ]
+        backends = aiter_first + [
+            backend for backend in backends if backend not in aiter_first
+        ]
     backends.append(AttentionBackendEnum.TRITON_ATTN)
     backends.append(AttentionBackendEnum.TURBOQUANT)
     backends.append(AttentionBackendEnum.ROCM_OCTAVE)
@@ -741,6 +787,7 @@ class RocmPlatform(Platform):
             attn_selector_config.use_mla,
             attn_selector_config.use_sparse,
             attn_selector_config.use_kv_connector,
+            attn_selector_config.head_size,
         )
         from vllm.config import get_current_vllm_config_or_none
 

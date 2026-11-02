@@ -150,6 +150,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_DISABLE_AITER_BACKEND_PRIORITY: bool = False
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA: bool = False
@@ -1393,6 +1394,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MHA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MHA", "True").lower() in ("true", "1")
+    ),
+    # Keep the previous ROCM_ATTN-first ordering instead of trying the
+    # AITER attention backends first on ROCm.
+    "VLLM_DISABLE_AITER_BACKEND_PRIORITY": lambda: (
+        os.getenv("VLLM_DISABLE_AITER_BACKEND_PRIORITY", "False").lower()
+        in ("true", "1")
     ),
     # Whether sparse MLA prefill and decode run on aiter's Triton kernel, which
     # reads the KV cache as stored (bf16 or fp8, paged or flat). Used by the
