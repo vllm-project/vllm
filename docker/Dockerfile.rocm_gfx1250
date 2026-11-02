@@ -590,8 +590,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Pre-install shared ROCm runtime dependencies.
 COPY requirements/common.txt requirements/rocm.txt /tmp/ci-base-requirements/
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --system -r /tmp/ci-base-requirements/rocm.txt \
-    && rm -rf /tmp/ci-base-requirements
+    python3 -m pip list --format=freeze \
+        | grep -E '^(torch|torchvision|torchaudio|triton|amd-torch-device-gfx1250|amd-torchvision-device-gfx1250)==' \
+        > /tmp/torch-pins.txt \
+    && uv pip install --system -c /tmp/torch-pins.txt -r /tmp/ci-base-requirements/rocm.txt \
+    && rm -rf /tmp/ci-base-requirements /tmp/torch-pins.txt
 
 # Enable fast and less brittle model downloads in tests.
 ENV HF_XET_HIGH_PERFORMANCE=1
@@ -690,7 +693,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=bind,from=export_vllm,src=/,target=/install \
     --mount=type=cache,target=/root/.cache/uv \
     cd /install \
-    && uv pip install --system -r requirements/rocm.txt \
+    && python3 -m pip list --format=freeze \
+        | grep -E '^(torch|torchvision|torchaudio|triton|amd-torch-device-gfx1250|amd-torchvision-device-gfx1250)==' \
+        > /tmp/torch-pins.txt \
+    && uv pip install --system -c /tmp/torch-pins.txt -r requirements/rocm.txt \
+    && rm -f /tmp/torch-pins.txt \
     && pip uninstall -y vllm \
     && uv pip install --system *.whl
 
@@ -738,6 +745,14 @@ RUN pip3 uninstall -y triton && \
     cd triton && \
     git checkout 12225a8 && \
     TRITON_APPEND_CMAKE_ARGS="-DCMAKE_FIND_USE_CMAKE_ENVIRONMENT_PATH=FALSE" pip3 install .
+
+RUN python3 - <<'EOF'
+import torch, torchvision
+assert torch.version.hip, f"torch {torch.__version__} is not a ROCm build"
+assert "+rocm" in torchvision.__version__, f"torchvision {torchvision.__version__} is not a ROCm build"
+torch.ops.torchvision.nms  # raises if torchvision's C++ ops failed to load
+print("torch", torch.__version__, "| torchvision", torchvision.__version__, "| hip", torch.version.hip)
+EOF
 
 CMD ["/bin/bash"]
 
