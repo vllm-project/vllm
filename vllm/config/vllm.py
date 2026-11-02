@@ -3449,6 +3449,16 @@ class VllmConfig:
         return self
 
     @model_validator(mode="after")
+    def validate_nixl_dcp_model(self) -> "VllmConfig":
+        if (
+            envs.VLLM_USE_NIXL_DCP_A2A
+            and self.model_config is not None
+            and not self.model_config.use_mla
+        ):
+            raise ValueError("VLLM_USE_NIXL_DCP_A2A currently supports MLA models only")
+        return self
+
+    @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":
         if self.model_config is None:
             return self

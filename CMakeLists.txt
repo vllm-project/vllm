@@ -506,6 +506,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/attention/dcp_utils/dcp_direct_kv_gather.cu"
       "csrc/attention/dcp_utils/dcp_direct_q_gather.cu")
 
+    option(VLLM_BUILD_NIXL_DCP "Build experimental NIXL GPU Device API DCP" OFF)
+    if(VLLM_BUILD_NIXL_DCP)
+      find_path(NIXL_DCP_INCLUDE_DIR gpu/nixl_device.cuh
+        HINTS "$ENV{NIXL_HOME}/include" REQUIRED)
+      find_path(NIXL_DCP_UCX_INCLUDE_DIR ucp/api/device/ucp_device_impl.h
+        HINTS "$ENV{UCX_HOME}/include" REQUIRED)
+      set(NIXL_DCP_SRC "csrc/attention/dcp_utils/dcp_nixl_a2a.cu")
+      list(APPEND VLLM_STABLE_EXT_SRC "${NIXL_DCP_SRC}")
+      set_source_files_properties("${NIXL_DCP_SRC}" PROPERTIES
+        INCLUDE_DIRECTORIES "${NIXL_DCP_INCLUDE_DIR};${NIXL_DCP_UCX_INCLUDE_DIR}"
+        COMPILE_DEFINITIONS "UCP_DEVICE_ENABLE_PARAMS_CHECK=1")
+      message(STATUS "Building NIXL DCP with ${NIXL_DCP_INCLUDE_DIR} and ${NIXL_DCP_UCX_INCLUDE_DIR}")
+    endif()
+
     SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
     # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
