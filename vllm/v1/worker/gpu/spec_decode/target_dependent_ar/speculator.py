@@ -133,7 +133,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.model_state,
             self.target_input_buffers,
             self.block_tables,
-            self.target_attn_groups,
+            self.target_attn_groups
+            if self.can_reuse_target_attn_metadata
+            else self.attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
         )
@@ -271,6 +273,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             max_query_len=None if input_batch.has_prefill else int(max_query_len),
             need_eager=is_profile,
             dp_sync_state=dp_sync_state,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_across_dp = (
             prefill_batch_sync.num_tokens_across_dp
@@ -279,6 +282,16 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         )
 
         self._prepare_eplb_forward(num_tokens)
+
+        if not skip_attn_for_dummy_run:
+            attn_metadata, slot_mappings = self._build_drafter_attn_metadata(
+                input_batch,
+                attn_metadata,
+                slot_mappings,
+                prefill_batch_desc.cg_mode,
+                for_capture=dummy_run
+                and prefill_batch_desc.cg_mode == CUDAGraphMode.FULL,
+            )
 
         self.on_prefill_begin(num_reqs)
         if prefill_batch_desc.cg_mode == CUDAGraphMode.FULL:
@@ -347,6 +360,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync_state=decode_batch_sync,
+            parallel_config=self.vllm_config.parallel_config,
         )
         if self.decode_cudagraph_manager is not None:
             decode_batch_desc = self.decode_cudagraph_manager.specialize_spec_tokens(
