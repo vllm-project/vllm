@@ -36,7 +36,9 @@ class LoRAConfig:
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
     max_loras_per_request: int = Field(default=1, ge=1)
-    """Maximum adapters combined by one request. Requires eager execution."""
+    """Maximum adapters combined by one request. Values greater than one reserve
+    routed metadata for CUDA graph execution on supported NVIDIA configurations.
+    """
     fully_sharded_loras: bool = False
     """By default, only half of the LoRA computation is sharded with tensor
     parallelism. Enabling this will use the fully sharded layers. At high
@@ -104,6 +106,7 @@ class LoRAConfig:
         factors: list[Any] = []
         factors.append(self.max_lora_rank)
         factors.append(self.max_loras)
+        factors.append(self.max_loras_per_request)
         factors.append(self.fully_sharded_loras)
         factors.append(self.lora_dtype)
         factors.append(self.enable_tower_connector_lora)

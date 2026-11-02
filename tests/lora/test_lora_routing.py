@@ -18,7 +18,7 @@ from vllm.lora.layers import (
     RowParallelLinearWithShardedLoRA,
 )
 from vllm.lora.punica_wrapper.punica_cpu import PunicaWrapperCPU
-from vllm.lora.punica_wrapper.utils import convert_route_mapping
+from vllm.lora.punica_wrapper.utils import RoutedLoRATensors, convert_route_mapping
 from vllm.lora.request import (
     LoRARequest,
     LoRARequestLike,
@@ -45,20 +45,194 @@ pytestmark = pytest.mark.skip_global_cleanup
 
 
 @pytest.fixture
-def tiny_composition_model(tmp_path):
+def routed_kernel_limit(request, monkeypatch):
+    """Simulate hardware limits at the external CUDA driver boundary."""
+    from vllm.platforms import current_platform
+
+    limit = request.param
+    if not current_platform.is_cuda():
+        yield limit
+        return
+    import ctypes
+
+    from vllm.lora.ops.triton_ops import routed_lora_op
+
+    support = getattr(routed_lora_op, "is_routed_lora_supported", None)
+    if support is not None:
+        support.cache_clear()
+    routed_lora_op._resident_capacity.clear()
+    driver = routed_lora_op._libcuda()
+    original_attribute = driver.cuDeviceGetAttribute
+    original_occupancy = driver.cuOccupancyMaxActiveBlocksPerMultiprocessor
+    queries = 0
+
+    def attribute(result, kind, device):
+        if limit == "cooperative_launch" and kind.value == 95:
+            ctypes.cast(result, ctypes.POINTER(ctypes.c_int))[0] = 0
+            return 0
+        return original_attribute(result, kind, device)
+
+    def occupancy(result, function, threads, shared):
+        nonlocal queries
+        queries += 1
+        if limit == "cooperative_launch":
+            raise AssertionError("Unsupported cooperative launch reached preparation")
+        if limit == "driver_error":
+            return 1
+        if limit == "capacity" or (limit == "later_slice" and queries == 2):
+            ctypes.cast(result, ctypes.POINTER(ctypes.c_int))[0] = 0
+            return 0
+        return original_occupancy(result, function, threads, shared)
+
+    monkeypatch.setattr(driver, "cuDeviceGetAttribute", attribute)
+    monkeypatch.setattr(
+        driver, "cuOccupancyMaxActiveBlocksPerMultiprocessor", occupancy
+    )
+    if limit == "bf16_hardware":
+        monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (7, 5))
+    if limit in ("capacity", "graph", "graph_v1"):
+        # Keep the engine in this process so the external driver override applies.
+        monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    if limit in ("graph", "graph_v1"):
+        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1" if limit == "graph" else "0")
+    if limit == "graph":
+        monkeypatch.setenv("VLLM_GPU_SYNC_CHECK", "error")
+    if limit == "shared_memory":
+        from triton.runtime import driver as triton_driver
+        from triton.runtime.errors import OutOfResources
+
+        original_load = triton_driver.active.utils.load_binary
+
+        def load_binary(name, kernel, shared, device):
+            if name == "_routed_lora_kernel":
+                raise OutOfResources(shared, 0, "shared memory")
+            return original_load(name, kernel, shared, device)
+
+        monkeypatch.setattr(triton_driver.active.utils, "load_binary", load_binary)
+    try:
+        yield limit
+    finally:
+        if support is not None:
+            support.cache_clear()
+        routed_lora_op._resident_capacity.clear()
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("tokens", [0, 1, 19, 129, 1500, 8192])
+def test_routed_triton_matches_reference_and_replays_changed_routes(dtype, tokens):
+    """Plans, output slices, absent routes and self-clearing scratch, including
+    batches where each team pipelines several tiles, survive graph replay."""
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda():
+        pytest.skip("Requires an NVIDIA GPU")
+    from vllm.lora.ops.triton_ops.routed_lora_op import routed_lora
+    from vllm.lora.punica_wrapper.utils import make_route_plans
+
+    generator = torch.Generator().manual_seed(42)
+    hidden, output, rank, adapters, routes = 33, 65, 8, 4, 3
+    x = torch.randn(tokens, hidden + 1, generator=generator).cuda().to(dtype)[:, 1:]
+    a = (
+        (torch.randn(adapters, 1, rank, hidden, generator=generator) / hidden**0.5)
+        .cuda()
+        .to(dtype)
+    )
+    b = (
+        (torch.randn(adapters, 1, output, rank, generator=generator) / rank**0.5)
+        .cuda()
+        .to(dtype)
+    )
+    initial = torch.randn(tokens, output + 4, generator=generator).cuda().to(dtype)
+    y = initial.clone()
+
+    def make_slots(shift):
+        # Requests of 7 tokens share a route plan; every third token is idle.
+        slots = (
+            torch.arange(tokens)[:, None] // 7 + torch.arange(routes) + shift
+        ) % adapters
+        slots[:, -1] = -1
+        slots[2::3] = -1
+        return slots
+
+    plans, sorted_tokens, starts = (
+        torch.from_numpy(array).cuda()
+        for array in make_route_plans(make_slots(0).numpy())
+    )
+    weights = torch.zeros(tokens, routes, device="cuda")
+
+    def update(shift):
+        # Shifting every adapter keeps the plan structure, so graph inputs keep
+        # their shapes while slots and coefficients change.
+        slots = make_slots(shift)
+        new_plans, new_sorted, new_starts = make_route_plans(slots.numpy())
+        plans.copy_(torch.from_numpy(new_plans))
+        sorted_tokens.copy_(torch.from_numpy(new_sorted))
+        starts.copy_(torch.from_numpy(new_starts))
+        coefficients = torch.full((tokens, routes), 0.3 + shift * 0.1)
+        coefficients[::2, 0] = 0
+        weights.copy_(coefficients)
+        return slots.cuda()
+
+    def check(slots):
+        expected = initial.float()
+        for route in range(routes):
+            for adapter in range(adapters):
+                rows = slots[:, route] == adapter
+                delta = (
+                    x[rows].float() @ a[adapter, 0].float().T @ b[adapter, 0].float().T
+                )
+                expected[rows, 2 : 2 + output] += weights[rows, route, None] * delta
+        torch.testing.assert_close(y, expected.to(dtype), atol=6e-2, rtol=6e-2)
+        if tokens == 1:
+            assert not torch.equal(y[:, 2 : 2 + output], initial[:, 2 : 2 + output])
+        assert torch.equal(y[:, :2], initial[:, :2])
+        assert torch.equal(y[:, 2 + output :], initial[:, 2 + output :])
+        assert torch.equal(y[2::3], initial[2::3])
+
+    def run():
+        routed_lora(x, a, b, y, weights, plans, sorted_tokens, starts, 2)
+
+    slots = update(0)
+    run()
+    check(slots)
+    # A second eager call verifies the first left scratch and counters clean.
+    y.copy_(initial)
+    run()
+    check(slots)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for shift in (1, 2):
+        slots = update(shift)
+        y.copy_(initial)
+        graph.replay()
+        check(slots)
+
+
+@pytest.fixture(params=["opt", "llama"])
+def tiny_composition_model(tmp_path, request):
     from peft import LoraConfig, get_peft_model
-    from transformers import OPTConfig, OPTForCausalLM
+    from transformers import LlamaConfig, LlamaForCausalLM, OPTConfig, OPTForCausalLM
 
     torch.manual_seed(42)
-    base = OPTForCausalLM(
-        OPTConfig(
+    model_class, config_class = (
+        (OPTForCausalLM, OPTConfig)
+        if request.param == "opt"
+        else (LlamaForCausalLM, LlamaConfig)
+    )
+    dimensions = (
+        {"word_embed_proj_dim": 64, "ffn_dim": 64}
+        if request.param == "opt"
+        else {"intermediate_size": 64, "num_key_value_heads": 2}
+    )
+    base = model_class(
+        config_class(
             vocab_size=64,
             hidden_size=64,
-            word_embed_proj_dim=64,
-            ffn_dim=64,
             num_hidden_layers=2,
             num_attention_heads=2,
             max_position_embeddings=256,
+            **dimensions,
         )
     ).eval()
     model_path = tmp_path / "base"
@@ -102,11 +276,24 @@ def assert_generation_matches_reference(reference, prompt, completion, num_token
     torch.testing.assert_close(actual, expected.cpu(), atol=2e-4, rtol=2e-4)
 
 
-@pytest.mark.parametrize("prefix_caching", [False, True])
+@pytest.mark.parametrize(
+    "prefix_caching,routed_kernel_limit",
+    [
+        (False, "supported"),
+        (True, "supported"),
+        (False, "capacity"),
+        (False, "graph"),
+        (True, "graph"),
+        (False, "graph_v1"),
+    ],
+    indirect=["routed_kernel_limit"],
+)
 def test_generate_composition_matches_peft_and_isolates_prefix_cache(
     tiny_composition_model,
     vllm_runner,
     prefix_caching,
+    routed_kernel_limit,
+    monkeypatch,
 ):
     from vllm import SamplingParams
 
@@ -120,15 +307,42 @@ def test_generate_composition_matches_peft_and_isolates_prefix_cache(
         logprobs=64,
         detokenize=False,
     )
+    graph_mode = routed_kernel_limit in ("graph", "graph_v1")
+    if graph_mode:
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            pytest.skip("Routed CUDA graphs require an NVIDIA GPU")
+    replays = 0
+    if graph_mode:
+        replay = torch.cuda.CUDAGraph.replay
+
+        def count_replays(graph):
+            nonlocal replays
+            replays += 1
+            return replay(graph)
+
+        monkeypatch.setattr(torch.cuda.CUDAGraph, "replay", count_replays)
+    compilation_config = (
+        {
+            "cudagraph_mode": "FULL",
+            "cudagraph_capture_sizes": [1, 2, 4],
+            "max_cudagraph_capture_size": 4,
+        }
+        if graph_mode
+        else {}
+    )
     with vllm_runner(
         model_path,
-        dtype="float32",
-        enforce_eager=True,
+        dtype="float16",
+        enforce_eager=not graph_mode,
+        compilation_config=compilation_config,
         skip_tokenizer_init=True,
         enable_lora=True,
-        max_loras=4,
+        max_loras=2 if graph_mode else 4,
         max_loras_per_request=2,
         max_lora_rank=8,
+        lora_target_modules=["q_proj", "v_proj"],
         max_model_len=192,
         block_size=128,
         kv_cache_memory_bytes=16 * 1024 * 1024,
@@ -147,12 +361,15 @@ def test_generate_composition_matches_peft_and_isolates_prefix_cache(
             )
             reference.set_adapter(name)
             route = make_routing_request(adapters, weights)
+            replays_before_generate = replays
             output = llm.generate(
                 [{"prompt_token_ids": prompt}],
                 params,
                 lora_request=route,
                 use_tqdm=False,
             )[0]
+            if graph_mode:
+                assert replays > replays_before_generate
             assert output.lora_request.lora_weights == weights
             assert (output.num_cached_tokens or 0) == 0
             assert_generation_matches_reference(
@@ -171,12 +388,15 @@ def test_generate_composition_matches_peft_and_isolates_prefix_cache(
             )
 
         selections = [route, adapters[0], None]
+        replays_before_mixed = replays
         mixed = llm.generate(
             [{"prompt_token_ids": prompt}] * 3,
             params,
             lora_request=selections,
             use_tqdm=False,
         )
+        if graph_mode:
+            assert replays > replays_before_mixed
         for output, selection in zip(mixed, selections):
             assert output.lora_request == selection
             if selection is None:
@@ -192,18 +412,38 @@ def test_generate_composition_matches_peft_and_isolates_prefix_cache(
                     reference, prompt, output.outputs[0], num_tokens
                 )
 
+        if graph_mode:
+            alias = LoRARequest("replacement", 3, adapters[0].lora_path)
+            replacement = make_routing_request((adapters[1], alias), (0.7, 0.3))
+            replays_before_replacement = replays
+            replaced = llm.generate(
+                [{"prompt_token_ids": prompt}],
+                params,
+                lora_request=replacement,
+                use_tqdm=False,
+            )[0]
+            reference.set_adapter(name)
+            assert_generation_matches_reference(
+                reference, prompt, replaced.outputs[0], num_tokens
+            )
+            assert replays > replays_before_replacement
+
 
 @pytest.mark.parametrize(
-    "eager,limit,error",
+    "eager,limit,fully_sharded,ubatch_size,error",
     [
-        (False, 2, "enforce_eager"),
-        (True, 1, "max_loras_per_request"),
+        (False, 2, True, 1, "enforce_eager"),
+        (False, 2, False, 2, "microbatching"),
+        (True, 2, False, 2, "microbatching"),
+        (True, 1, False, 1, "max_loras_per_request"),
     ],
 )
 def test_input_processor_rejects_unsupported_composition(
     tiny_composition_model,
     eager,
     limit,
+    fully_sharded,
+    ubatch_size,
     error,
 ):
     from vllm import SamplingParams
@@ -219,6 +459,11 @@ def test_input_processor_rejects_unsupported_composition(
         enable_lora=True,
         max_loras=2,
         max_loras_per_request=limit,
+        fully_sharded_loras=fully_sharded,
+        ubatch_size=ubatch_size,
+        all2all_backend=(
+            "deepep_low_latency" if ubatch_size > 1 else "allgather_reducescatter"
+        ),
     ).create_engine_config()
     processor = InputProcessor(config)
     with pytest.raises(VLLMValidationError, match=error):
@@ -326,8 +571,11 @@ def test_per_request_limit_rejects_invalid_config(limit):
 
 
 def test_per_request_limit_defaults_to_one():
-    assert LoRAConfig(max_loras=4).max_loras_per_request == 1
-    assert LoRAConfig(max_loras=4, max_loras_per_request=2).max_loras_per_request == 2
+    ordinary = LoRAConfig(max_loras=4)
+    routed = LoRAConfig(max_loras=4, max_loras_per_request=2)
+    assert ordinary.max_loras_per_request == 1
+    assert routed.max_loras_per_request == 2
+    assert ordinary.compute_hash() != routed.compute_hash()
 
 
 def test_per_request_limit_cli_plumbing():
@@ -644,6 +892,79 @@ def test_convert_route_mapping_rejects_unloaded_lora_id():
             lora_index_to_id=[11, None],
             device=torch.device("cpu"),
         )
+
+
+def test_convert_route_mapping_groups_tokens_by_route_plan():
+    """Tokens sharing every route's slot form one plan; idle tokens are dropped."""
+    route_mapping = LoRARouteMapping(
+        token_lora_ids=((11, 12), (13, 0), (11, 12), (0, 0), (13, 0)),
+        token_lora_weights=(
+            (0.6, 0.4),
+            (1.0, 0.0),
+            (0.5, 0.5),
+            (0.0, 0.0),
+            (1.0, 0.0),
+        ),
+        prompt_mapping=(0,),
+    )
+
+    tensors = convert_route_mapping(
+        route_mapping,
+        lora_index_to_id=[11, 12, 13, None],
+        device=torch.device("cpu"),
+    )
+
+    assert tensors.token_lora_indices.tolist() == [
+        [0, 1],
+        [2, -1],
+        [0, 1],
+        [-1, -1],
+        [2, -1],
+    ]
+    assert tensors.token_lora_weights.dtype == torch.float32
+    assert tensors.plan_lora_indices.tolist() == [[0, 1], [2, -1]]
+    assert tensors.plan_token_indices.tolist() == [0, 2, 1, 4]
+    assert tensors.plan_token_start_loc.tolist() == [0, 2, 4]
+
+
+def test_route_buffers_preserve_addresses_and_clear_removed_routes():
+    """A smaller batch must not replay stale routes, plans, or coefficients."""
+    buffers = RoutedLoRATensors.make(8, 4, 3, "cpu")
+    pointers = tuple(tensor.data_ptr() for tensor in buffers)
+    for ids, weights in (
+        (((11, 12), (12, 11), (11, 12)), ((0.7, 0.3),) * 3),
+        (((12,),), ((1.0,),)),
+        (((0,),), ((0.0,),)),
+    ):
+        source = convert_route_mapping(
+            LoRARouteMapping(ids, weights, (0,)), [11, 12], "cpu"
+        )
+        buffers.copy_(source)
+        tokens, routes = source.token_lora_indices.shape
+        plans = source.plan_lora_indices.size(0)
+        active = source.plan_token_indices.numel()
+        assert tuple(tensor.data_ptr() for tensor in buffers) == pointers
+        torch.testing.assert_close(
+            buffers.token_lora_indices[:tokens, :routes], source.token_lora_indices
+        )
+        torch.testing.assert_close(
+            buffers.token_lora_weights[:tokens, :routes], source.token_lora_weights
+        )
+        assert (buffers.token_lora_indices[tokens:] == -1).all()
+        assert (buffers.token_lora_indices[:, routes:] == -1).all()
+        assert (buffers.token_lora_weights[tokens:] == 0).all()
+        assert (buffers.token_lora_weights[:, routes:] == 0).all()
+        torch.testing.assert_close(
+            buffers.plan_lora_indices[:plans, :routes], source.plan_lora_indices
+        )
+        assert (buffers.plan_lora_indices[plans:] == -1).all()
+        torch.testing.assert_close(
+            buffers.plan_token_indices[:active], source.plan_token_indices
+        )
+        torch.testing.assert_close(
+            buffers.plan_token_start_loc[: plans + 1], source.plan_token_start_loc
+        )
+        assert (buffers.plan_token_start_loc[plans + 1 :] == active).all()
 
 
 def test_scalar_lora_state_does_not_build_route_mapping():
@@ -1237,6 +1558,137 @@ def test_routed_lora_reference_qkv_parallel_matches_oracle(
         offset += output_slice
 
     torch.testing.assert_close(result, expected)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize(
+    "routed_kernel_limit",
+    [
+        "supported",
+        "cooperative_launch",
+        "bf16_hardware",
+        "capacity",
+        "later_slice",
+        "shared_memory",
+        "dtype",
+        "rank",
+        "layout",
+        "driver_error",
+    ],
+    indirect=True,
+)
+def test_routed_lora_kernel_qkv_parallel_matches_oracle(
+    monkeypatch: pytest.MonkeyPatch,
+    routed_kernel_limit,
+):
+    """Packed slices match an oracle on both fused and unsupported-config paths;
+    preflighting a later slice must not apply an earlier update twice."""
+    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda():
+        pytest.skip("Requires an NVIDIA GPU")
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    dtype = (
+        torch.float32
+        if routed_kernel_limit == "dtype"
+        else torch.float16
+        if routed_kernel_limit == "shared_memory"
+        else torch.bfloat16
+    )
+    device = torch.device("cuda")
+    generator = torch.Generator().manual_seed(0)
+    hidden = 64
+    rank = 256 if routed_kernel_limit == "rank" else 16
+    lora_config = LoRAConfig(max_loras=4, max_lora_rank=rank, lora_dtype=dtype)
+    linear = QKVParallelLinear(
+        hidden_size=hidden,
+        head_size=16,
+        total_num_heads=4,
+        total_num_kv_heads=2,
+        bias=False,
+        params_dtype=dtype,
+        prefix="routed_qkv_kernel_test",
+        disable_tp=True,
+    )
+    linear.weight.data = (
+        torch.randn(linear.weight.shape, generator=generator) / hidden**0.5
+    ).to(dtype)
+    linear = linear.to(device)
+    linear.quant_method.process_weights_after_loading(linear)
+    lora_linear = MergedQKVParallelLinearWithLoRA(linear)
+    lora_linear.create_lora_weights(lora_config.max_loras, lora_config)
+    punica_wrapper = PunicaWrapperGPU(
+        max_num_batched_tokens=64,
+        max_batches=8,
+        device=device,
+        lora_config=lora_config,
+    )
+    lora_linear.set_mapping(punica_wrapper)
+    for slot in range(3):
+        lora_linear.set_lora(
+            slot,
+            [torch.randn(rank, hidden, generator=generator) / hidden**0.5] * 3,
+            [
+                torch.randn(size, rank, generator=generator) / rank**0.5
+                for size in lora_linear.output_slices
+            ],
+        )
+
+    # Three requests: a two-adapter composition, a single adapter, no adapter.
+    route_mapping = LoRARouteMapping(
+        token_lora_ids=((11, 12),) * 15 + ((13, 0),) * 15 + ((0, 0),) * 7,
+        token_lora_weights=((0.7, 0.3),) * 15 + ((1.0, 0.0),) * 15 + ((0.0, 0.0),) * 7,
+        prompt_mapping=(0, 0, 0),
+        is_prefill=True,
+    )
+    punica_wrapper.update_metadata(
+        route_mapping,
+        lora_index_to_id=[11, 12, 13, None],
+        max_loras=lora_config.max_loras,
+        vocab_size=128,
+    )
+    if routed_kernel_limit == "layout":
+        x = torch.randn(37, hidden * 2, generator=generator).to(device, dtype)[:, ::2]
+    else:
+        x = torch.randn(37, hidden, generator=generator).to(device, dtype)
+    base = linear(x)[0]
+    if routed_kernel_limit == "driver_error":
+        with pytest.raises(RuntimeError, match="cuOccupancyMaxActiveBlocks"):
+            lora_linear(x)
+        return
+    assert lora_linear._can_use_routed_lora_kernel(x, base) == (
+        routed_kernel_limit == "supported"
+    )
+
+    result = lora_linear(x)[0]
+
+    route_mapping_tensors = punica_wrapper.lora_route_mapping
+    assert route_mapping_tensors is not None
+    token_lora_indices, token_lora_weights = route_mapping_tensors
+    expected = base.float()
+    offset = 0
+    for slice_idx, size in enumerate(lora_linear.output_slices):
+        lora_a = lora_linear.lora_a_stacked[slice_idx][:, 0].float()
+        lora_b = lora_linear.lora_b_stacked[slice_idx][:, 0].float()
+        for route in range(2):
+            for slot in range(3):
+                rows = token_lora_indices[:, route] == slot
+                delta = x[rows].float() @ lora_a[slot].T @ lora_b[slot].T
+                expected[rows, offset : offset + size] += (
+                    token_lora_weights[rows, route, None] * delta
+                )
+        offset += size
+    torch.testing.assert_close(result.float(), expected, atol=2e-2, rtol=2e-2)
+    assert torch.equal(result[30:], base[30:])
 
 
 @torch.inference_mode()

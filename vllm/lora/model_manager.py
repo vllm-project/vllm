@@ -51,6 +51,7 @@ from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
+from vllm.platforms import current_platform
 from vllm.utils.cache import LRUCache
 from vllm.utils.torch_utils import PIN_MEMORY
 
@@ -211,6 +212,14 @@ class LoRAModelManager:
                 max_batches=self.max_num_seqs,
                 device=self.device,
                 lora_config=self.lora_config,
+                enable_routed_lora_graphs=(
+                    current_platform.is_cuda()
+                    and not vllm_config.model_config.enforce_eager
+                    and self.lora_config.max_loras_per_request > 1
+                    and not self.lora_config.fully_sharded_loras
+                    and not vllm_config.parallel_config.use_ubatching
+                    and vllm_config.parallel_config.prefill_context_parallel_size == 1
+                ),
             )
 
             self.punica_wrapper_mapping[DEFAULT_LANGUAGE_WRAPPER_KEY] = (
