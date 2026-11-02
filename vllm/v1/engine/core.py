@@ -1857,11 +1857,23 @@ class EngineCoreProc(EngineCore):
                     logger.debug("EngineCore waiting for work.")
                     waited = True
             block = self.process_input_queue_block
+            kv_events = self.scheduler.get_kv_event_publisher_config()
+            # External cache invalidations can arrive without an engine step.
+            event_timeout = (
+                0.1
+                if block and kv_events is not None and kv_events.enable_kv_cache_events
+                else None
+            )
+            if event_timeout is not None:
+                get_watch_dog().feed()
+                self.scheduler.publish_kv_events()
             try:
                 with get_watch_dog().disable():
-                    req = self.input_queue.get(block=block)
+                    req = self.input_queue.get(block=block, timeout=event_timeout)
                 self._handle_client_request(*req)
             except queue.Empty:
+                if event_timeout is not None:
+                    continue
                 break
             if not block:
                 break

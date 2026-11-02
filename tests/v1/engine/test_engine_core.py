@@ -6,20 +6,33 @@ import time
 import uuid
 from collections import deque
 from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 from unittest.mock import MagicMock, PropertyMock, patch
 
+import msgspec
 import pytest
 from transformers import AutoTokenizer
 
+from tests.distributed.conftest import MockSubscriber
 from vllm import SamplingParams
 from vllm.config import (
     CacheConfig,
     ECTransferConfig,
+    KVEventsConfig,
     KVTransferConfig,
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
     VllmConfig,
+)
+from vllm.distributed.kv_events import (
+    MEDIUM_CPU,
+    BlockRemoved,
+    BlockStored,
+    KVEventBatch,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (
+    ExampleConnector,
 )
 from vllm.engine.arg_utils import EngineArgs
 from vllm.platforms import current_platform
@@ -57,6 +70,130 @@ PROMPT = "I am Gyoubu Masataka Oniwa"
 PROMPT_TOKENS = TOKENIZER(PROMPT).input_ids
 
 _REQUEST_COUNTER = 0
+
+
+class IdleEventConnector(ExampleConnector):
+    """Model an external cache service queuing events independently of workers."""
+
+    def take_events(self):
+        path = Path(self._storage_path) / "events"
+        if not path.exists():
+            return ()
+        events = msgspec.msgpack.decode(path.read_bytes(), type=KVEventBatch).events
+        path.unlink()
+        return events
+
+
+class IdleEventExecutor(UniProcExecutor):
+    def collective_rpc(self, method, *args, **kwargs):
+        if method in ("execute_model", "execute_dummy_batch"):
+            config = self.vllm_config.kv_transfer_config
+            path = Path(config.kv_connector_extra_config["shared_storage_path"])
+            assert not (path / "idle").exists(), (
+                "Model execution during idle publication"
+            )
+        return super().collective_rpc(method, *args, **kwargs)
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize("enable_events", [False, True])
+def test_idle_connector_events(
+    vllm_runner, tmp_path, unused_tcp_port_factory, async_scheduling, enable_events
+):
+    """External CPU events reach the router while idle and asleep, without a step."""
+    endpoint = f"tcp://127.0.0.1:{unused_tcp_port_factory()}"
+    replay = f"tcp://127.0.0.1:{unused_tcp_port_factory()}"
+    subscriber = MockSubscriber(endpoint, replay, decode_type=KVEventBatch)
+    events = [
+        BlockStored(
+            block_hashes=[123],
+            parent_block_hash=None,
+            token_ids=list(range(16)),
+            block_size=16,
+            lora_id=None,
+            lora_name=None,
+            medium=MEDIUM_CPU,
+        ),
+        BlockRemoved(block_hashes=[123], medium=MEDIUM_CPU),
+    ]
+    pending = tmp_path / "events"
+    idle = tmp_path / "idle"
+    watchdog_dir = tmp_path / "watchdog"
+    try:
+        with vllm_runner(
+            MODEL_NAME,
+            enforce_eager=True,
+            max_model_len=128,
+            gpu_memory_utilization=0.1,
+            kv_cache_memory_bytes=64 * 1024**2,
+            enable_prefix_caching=True,
+            enable_sleep_mode=True,
+            async_scheduling=async_scheduling,
+            distributed_executor_backend=IdleEventExecutor,
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="IdleEventConnector",
+                kv_connector_module_path=__name__,
+                kv_role="kv_both",
+                kv_connector_extra_config={"shared_storage_path": str(tmp_path)},
+            ),
+            kv_events_config=KVEventsConfig(
+                enable_kv_cache_events=enable_events,
+                endpoint=endpoint.replace("127.0.0.1", "*"),
+                replay_endpoint=replay,
+            ),
+            watchdog_config={
+                "timeout": 2,
+                "check_interval": 1,
+                "dump_dir": str(watchdog_dir) if enable_events else "",
+            },
+        ) as runner:
+            idle.touch()
+            next_seq = 0
+            for asleep in (False, True):
+                if asleep:
+                    runner.llm.sleep(level=1)
+                staging = tmp_path / "pending"
+                staging.write_bytes(msgspec.msgpack.encode(KVEventBatch(0, events)))
+                staging.rename(pending)
+
+                if enable_events:
+                    if asleep:
+                        # Utility traffic must not postpone publication or
+                        # make idle CPU progress look stalled to the watchdog.
+                        deadline = time.monotonic() + 4
+                        while time.monotonic() < deadline:
+                            assert runner.llm.llm_engine.is_sleeping()
+                        assert not pending.exists()
+                        assert not list(watchdog_dir.glob("*"))
+                    received: list[BlockStored | BlockRemoved] = []
+                    deadline = time.monotonic() + 5
+                    while not received and time.monotonic() < deadline:
+                        subscriber.request_replay(next_seq)
+                        for seq, batch in subscriber.receive_replay():
+                            next_seq = seq + 1
+                            received.extend(
+                                event
+                                for event in batch.events
+                                if getattr(event, "medium", None) == MEDIUM_CPU
+                            )
+                    assert received == events
+                    assert not pending.exists()
+                else:
+                    assert subscriber.receive_one(timeout=300) is None
+                    assert pending.exists(), (
+                        "Disabled events must not poll the connector"
+                    )
+
+            runner.llm.wake_up()
+            idle.unlink()
+            output = runner.llm.generate(
+                [{"prompt_token_ids": list(range(16))}],
+                SamplingParams(temperature=0, max_tokens=1),
+                use_tqdm=False,
+            )
+            assert len(output[0].outputs[0].token_ids) == 1
+    finally:
+        subscriber.close()
 
 
 def make_request() -> EngineCoreRequest:

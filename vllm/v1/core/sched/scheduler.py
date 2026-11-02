@@ -2630,22 +2630,7 @@ class Scheduler(SchedulerInterface):
                     else scheduler_ec_connector_stats
                 )
 
-        # collect KV cache events from KV cache manager
-        events = self.kv_cache_manager.take_events()
-
-        # collect KV cache events from connector
-        if self.connector is not None:
-            connector_events = self.connector.take_events()
-            if connector_events:
-                if events is None:
-                    events = list(connector_events)
-                else:
-                    events.extend(connector_events)
-
-        # publish collected KV cache events
-        if events:
-            batch = KVEventBatch(ts=time.time(), events=events)
-            self.kv_event_publisher.publish(batch)
+        self.publish_kv_events()
 
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
@@ -3423,6 +3408,21 @@ class Scheduler(SchedulerInterface):
 
     def get_ec_connector(self) -> ECConnectorBase | None:
         return self.ec_connector
+
+    def publish_kv_events(self) -> None:
+        """Publish pending GPU and connector events without a model step."""
+        events = self.kv_cache_manager.take_events()
+        if self.connector is not None:
+            connector_events = self.connector.take_events()
+            if connector_events:
+                if events is None:
+                    events = list(connector_events)
+                else:
+                    events.extend(connector_events)
+
+        if events:
+            batch = KVEventBatch(ts=time.time(), events=events)
+            self.kv_event_publisher.publish(batch)
 
     def get_kv_event_publisher_config(self) -> KVEventsConfig | None:
         return self.kv_event_publisher.get_publisher_config()
