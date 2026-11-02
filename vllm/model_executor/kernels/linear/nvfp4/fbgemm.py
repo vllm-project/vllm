@@ -3,10 +3,8 @@
 
 import torch
 
-from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
-    as_quantized_activation,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
@@ -24,6 +22,8 @@ from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FBGEMM."""
+
+    input_quant_backend_name = "fbgemm"
 
     def input_quant_key(self) -> QuantKey:
         return kNvfp4Dynamic
@@ -53,34 +53,19 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
         import fbgemm_gpu  # noqa: F401 - registers torch.ops.fbgemm.*
 
         output_size = layer.output_size_per_partition
-        qa = as_quantized_activation(x, self.input_quant_key())
-        if qa is not None:
-            x_fp4 = qa.data.reshape(-1, qa.data.shape[-1])
-            x_blockscale = qa.scale
-            output_dtype = qa.orig_dtype
-            output_shape = [*qa.orig_shape[:-1], output_size]
-        else:
-            assert isinstance(x, torch.Tensor)
-            output_dtype = x.dtype
-            output_shape = [*x.shape[:-1], output_size]
-            x_fp4, x_blockscale = scaled_fp4_quant(
-                x,
-                layer.input_global_scale_inv,
-                is_sf_swizzled_layout=True,
-                backend="fbgemm",
-            )
+        qa = self.prepare_input(layer, x)
 
         out = torch.ops.fbgemm.f4f4bf16(
-            x_fp4,
+            qa.data,
             layer.weight,
-            x_blockscale.view(-1).view(torch.uint8),
+            qa.scale.view(-1).view(torch.uint8),
             layer.weight_scale,
             layer.alpha,
             use_mx=False,
-        ).to(output_dtype)
+        ).to(qa.orig_dtype)
 
         out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:
             out = out + bias
-        return out.view(*output_shape)
+        return out.view(*qa.orig_shape[:-1], output_size)

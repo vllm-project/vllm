@@ -2,11 +2,23 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from typing import ClassVar
 
 import torch
 
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    pad_nvfp4_activation_for_cutlass,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+)
 
 
 @dataclass
@@ -30,6 +42,8 @@ class NvFp4LinearKernel(ABC):
     match for the current hardware.
     """
 
+    input_quant_backend_name: ClassVar[str]
+
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]
@@ -40,6 +54,37 @@ class NvFp4LinearKernel(ABC):
         does not support input quantization outside of the kernel, return None.
         """
         return None
+
+    def prepare_input(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor | QuantizedActivation,
+        *,
+        padded_n: int | None = None,
+    ) -> QuantizedActivation:
+        """Prepare 2D packed NVFP4 data with swizzled 128x4 block scales.
+
+        Tensor inputs are quantized with optional K padding. Prequantized inputs
+        are validated and padded without modifying the caller's activation.
+        """
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is None:
+            assert isinstance(x, torch.Tensor)
+            data, scale = scaled_fp4_quant(
+                x,
+                layer.input_global_scale_inv,
+                is_sf_swizzled_layout=True,
+                backend=self.input_quant_backend_name,
+                padded_n=padded_n,
+            )
+            return QuantizedActivation(data, scale, x.dtype, x.shape, kNvfp4Dynamic)
+
+        data = qa.data.reshape(-1, qa.data.shape[-1])
+        if padded_n is not None:
+            padding_bytes = padded_n // 2 - data.shape[-1]
+            assert padding_bytes >= 0
+            data = pad_nvfp4_activation_for_cutlass(data, padding_bytes)
+        return replace(qa, data=data)
 
     @classmethod
     @abstractmethod

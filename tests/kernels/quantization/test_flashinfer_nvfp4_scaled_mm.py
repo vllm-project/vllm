@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import replace
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -26,7 +28,10 @@ from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivati
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import kNvfp4Dynamic
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
+    kNvfp4Dynamic,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_scaled_fp4_mm,
@@ -126,6 +131,10 @@ def test_flashinfer_nvfp4_preserves_quantized_input_shape(
     assert actual.shape == (*token_shape, output_size)
     assert actual.dtype == x.dtype
     torch.testing.assert_close(actual.reshape(expected.shape), expected, rtol=0, atol=0)
+    with pytest.raises(AssertionError, match="input_quant_key"):
+        kernel.apply_weights(
+            layer, replace(quantized_input, quant_key=kFp8StaticTensorSym), bias
+        )
 
 
 def get_ref_results(

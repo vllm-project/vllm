@@ -121,22 +121,36 @@ def _probe(cls: type):
     return obj
 
 
-def _resolved_apply_weights(cls: type):
-    for base in cls.__mro__:
-        if "apply_weights" in base.__dict__:
-            return base.__dict__["apply_weights"]
-    raise AssertionError(f"{cls.__name__} has no apply_weights in its MRO")
-
-
 def test_only_known_backends_support_prequantized_input():
     declarers = {c for c in _all_kernel_classes() if _probe(c).input_quant_key()}
     assert declarers == SUPPORTING
 
 
-def test_supporting_backend_declares_consume_via_helper():
-    for cls in SUPPORTING:
-        fn = _resolved_apply_weights(cls)
-        assert "as_quantized_activation" in fn.__code__.co_names, cls.__name__
+def test_nvfp4_prepare_input_pads_data_without_changing_metadata():
+    supported, reason = FlashInferCudnnNvFp4LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    kernel = FlashInferCudnnNvFp4LinearKernel(NvFp4LinearLayerConfig())
+    data = torch.arange(432).to(torch.uint8).reshape(2, 3, 72)
+    qa = QuantizedActivation(
+        data=data,
+        scale=torch.zeros(128, 12, dtype=torch.float8_e4m3fn),
+        orig_dtype=torch.bfloat16,
+        orig_shape=torch.Size([2, 3, 144]),
+        quant_key=kNvfp4Dynamic,
+    )
+
+    prepared = kernel.prepare_input(torch.nn.Module(), qa, padded_n=160)
+
+    assert prepared.data.shape == (6, 80)
+    torch.testing.assert_close(prepared.data[:, :72], data.reshape(6, 72))
+    assert torch.count_nonzero(prepared.data[:, 72:]) == 0
+    assert prepared.scale is qa.scale
+    assert prepared.orig_dtype == qa.orig_dtype
+    assert prepared.orig_shape == qa.orig_shape
+    assert prepared.quant_key == qa.quant_key
+    assert qa.data is data
+    assert qa.data.shape == (2, 3, 72)
 
 
 def test_bridge_marks_supporting_and_skips_others():
