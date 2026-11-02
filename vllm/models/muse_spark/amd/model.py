@@ -1210,6 +1210,14 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             "Materialized residual-path constants for %d gated residual connections",
             n_gates,
         )
+        # Shared RoPE (get_rope) may leave cos_sin_cache on CPU.
+        device = next(self.parameters()).device
+        for layer in self.model.layers:
+            rope = getattr(layer.self_attn, "rotary_emb", None)
+            if rope is not None and hasattr(rope, "cos_sin_cache"):
+                cache = rope.cos_sin_cache
+                if not cache.is_cuda or not cache.is_contiguous():
+                    rope.cos_sin_cache = cache.to(device).contiguous()
         # The experts are in their kernel layout only after the per-layer
         # quant finalize, which runs between load_weights and this hook. The
         # monokernel also needs the cached coefficients and the folded router
