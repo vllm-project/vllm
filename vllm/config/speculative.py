@@ -640,6 +640,12 @@ class SpeculativeConfig:
     """Whether to adaptively size the draft-verification budget from per-request
     confidence. Currently only supported for method="dspark"."""
 
+    adaptive_verification_floor: int = Field(default=0, ge=0)
+    """Verify all scheduled draft tokens when at most this many requests have
+    scheduled drafts, subject to the rejection sampler's logits memory limit.
+    Only applies when enable_adaptive_verification is enabled; 0 disables the
+    floor."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
