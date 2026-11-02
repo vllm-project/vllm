@@ -550,15 +550,21 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         ):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
+        # CDNA4 (MI350/MI355, gfx950) is where prefix-cache SWA replay is
+        # validated. The AITER sparse-MLA path and the default Triton gather
+        # path both clamp to replay_start. CDNA3 and other ROCm archs have
+        # not been validated, so the sliding-window cache stays in the prefix
+        # cache there. The CDNA version is imported only on ROCm: loading the
+        # ROCm platform resolves the GPU arch and fails when no GPU is visible.
         if swa_bounded_replay and current_platform.is_rocm():
-            logger.warning_once(
-                "Prefix-cache SWA replay is off on ROCm (the sparse SWA "
-                "metadata builders forward replay_start, but the window clamp "
-                "it relies on lives in the FlashInfer and FlashMLA prefill "
-                "kernels, so the padded slots fault); the sliding-window cache "
-                "takes part in prefix caching instead."
-            )
-            swa_bounded_replay = False
+            from vllm.platforms.rocm import get_cdna_version
+
+            if get_cdna_version() != 4:
+                logger.warning_once(
+                    "Prefix-cache SWA replay is only enabled on ROCm CDNA4; the "
+                    "sliding-window cache takes part in prefix caching instead."
+                )
+                swa_bounded_replay = False
         self.swa_cache_layer = DeepseekV4SWACache(
             head_dim=self.head_dim,
             window_size=self.window_size,
@@ -1434,10 +1440,12 @@ class DeepseekV4Indexer(nn.Module):
         )
         self.indexer_op: SparseAttnIndexer | SparseMQAIndexer | RocmSparseMQAIndexer
         if use_sparse_logits:
-            if not self.use_fp4_kv:
+            # DeepGEMM's sparse kernels (SM100) take either indexer cache;
+            # aiter's ROCm path is MXFP4-only.
+            if current_platform.is_rocm() and not self.use_fp4_kv:
                 raise ValueError(
-                    "attention_config.indexer_sparse_logits requires the MXFP4 "
-                    "indexer cache (attention_config.indexer_kv_dtype='mxfp4')."
+                    "attention_config.indexer_sparse_logits on ROCm requires the "
+                    "MXFP4 indexer cache (attention_config.indexer_kv_dtype='mxfp4')."
                 )
             assert candidate_block_buffer is not None
             assert topk_indices_buffer is not None
@@ -1468,9 +1476,13 @@ class DeepseekV4Indexer(nn.Module):
                 candidate_write=candidate_write,
             )
         # The fused Q kernel writes the per-head weights in the dtype the
-        # scoring kernels take, so no cast runs per step.
+        # scoring kernels take, so no cast runs per step. Its FP8 path emits
+        # fp32 only (the Q scale is folded in); the sparse layer casts those,
+        # as the dense SM100 path does.
         self.indexer_weights_dtype = (
-            self.mqa_cls.weights_dtype if use_sparse_logits else torch.float32
+            self.mqa_cls.weights_dtype
+            if use_sparse_logits and self.use_fp4_kv
+            else torch.float32
         )
 
     def _produce_k(
@@ -1598,3 +1610,18 @@ class DeepseekV4Indexer(nn.Module):
         # ReplicatedLinear returns (output, bias); bias is None.
         q, _ = self.wq_b(qr)
         return q
+
+
+def autotune_indexer_wq_b(model: nn.Module, num_tokens: int) -> None:
+    """Short-context dummy runs skip wq_b, so tune it directly."""
+    for module in model.modules():
+        if isinstance(module, DeepseekV4Indexer):
+            # Run every wq_b: FlashInfer keys on op, runner, shapes and dtype,
+            # and skips profiling on a cache hit, so duplicates are cheap.
+            qr = torch.randn(
+                num_tokens,
+                module.q_lora_rank,
+                dtype=module.vllm_config.model_config.dtype,
+                device=next(module.weights_proj.parameters()).device,
+            )
+            module.wq_b(qr)
