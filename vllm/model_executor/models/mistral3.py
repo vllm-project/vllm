@@ -48,7 +48,12 @@ from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from .pixtral import PixtralHFEncoderInfo, PixtralHFVisionModel
+from .pixtral import (
+    PixtralEncoderCudaGraphMixin,
+    PixtralHFEncoderInfo,
+    PixtralHFVisionModel,
+    _merge_patches_by_index,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -136,6 +141,15 @@ class Mistral3PatchMerger(nn.Module):
         image_features = self.merging_layer(image_features)
         return image_features
 
+    def forward_packed(
+        self, image_features: torch.Tensor, merge_indices: torch.Tensor | None
+    ) -> torch.Tensor:
+        """Same as `forward`, gathering blocks with `_make_merge_indices`
+        (None when spatial_merge_size is 1)."""
+        if merge_indices is not None:
+            image_features = _merge_patches_by_index(image_features, merge_indices)
+        return self.merging_layer(image_features)
+
 
 class Mistral3MultiModalProjector(nn.Module):
     def __init__(
@@ -179,6 +193,16 @@ class Mistral3MultiModalProjector(nn.Module):
     ) -> torch.Tensor:
         image_features = self.norm(image_features)
         image_features = self.patch_merger(image_features, image_sizes)
+        return self._project(image_features)
+
+    def forward_packed(
+        self, image_features: torch.Tensor, merge_indices: torch.Tensor | None
+    ) -> torch.Tensor:
+        image_features = self.norm(image_features)
+        image_features = self.patch_merger.forward_packed(image_features, merge_indices)
+        return self._project(image_features)
+
+    def _project(self, image_features: torch.Tensor) -> torch.Tensor:
         hidden_states, _ = self.linear_1(image_features)
         hidden_states = self.act(hidden_states)
         hidden_states, _ = self.linear_2(hidden_states)
@@ -422,6 +446,7 @@ class Mistral3ForConditionalGeneration(
     SupportsPP,
     SupportsEagle,
     SupportsEagle3,
+    PixtralEncoderCudaGraphMixin,
 ):
     supports_mm_device_do_normalize = True
 
@@ -557,6 +582,23 @@ class Mistral3ForConditionalGeneration(
         vision_embeddings = self._process_image_input(image_input)
 
         return vision_embeddings
+
+    # -- SupportsEncoderCudaGraph --
+
+    encoder_cudagraph_pixel_key = "pixel_values"
+
+    @property
+    def encoder_cudagraph_vision_tower(self) -> PixtralHFVisionModel:
+        return self.vision_tower
+
+    @property
+    def encoder_cudagraph_spatial_merge_size(self) -> int:
+        return self.config.spatial_merge_size
+
+    def project_packed_image_features(
+        self, features: torch.Tensor, merge_indices: torch.Tensor | None
+    ) -> torch.Tensor:
+        return self.multi_modal_projector.forward_packed(features, merge_indices)
 
     def forward(
         self,
