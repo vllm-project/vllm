@@ -21,7 +21,9 @@ from vllm.entrypoints.pooling.typing import (
     PoolingEngineInput,
     PoolingServeContext,
 )
-from vllm.inputs import tokens_input
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import mm_input, tokens_input
+from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 
 
@@ -462,6 +464,33 @@ class TestChunkedEmbeddingProcessing:
             num_cached_tokens=0,
             finished=True,
         )
+
+    @pytest.mark.parametrize(
+        ("chunking_enabled", "num_tokens"), [(True, 2), (True, 5), (False, 2)]
+    )
+    def test_multimodal_input_requires_chunking_disabled(
+        self, chunking_enabled, num_tokens
+    ):
+        """Reject images before changing a mixed batch, including short inputs."""
+        handler = self._make_handler()
+        handler.enable_chunked_processing = chunking_enabled
+        ctx = self._make_context()
+        assert ctx.engine_inputs is not None
+        image_prompt = mm_input(
+            prompt_token_ids=list(range(num_tokens)),
+            mm_kwargs=MultiModalKwargsItems({"image": [None]}),
+            mm_hashes={"image": ["cached-image"]},
+            mm_placeholders={"image": [PlaceholderRange(offset=0, length=1)]},
+        )
+        ctx.engine_inputs[1]["prompts"] = image_prompt
+
+        if chunking_enabled:
+            with pytest.raises(VLLMValidationError, match="multimodal inputs"):
+                handler.maybe_pre_process_chunked(ctx)
+        else:
+            handler.maybe_pre_process_chunked(ctx)
+        assert ctx.engine_inputs[1]["prompts"] is image_prompt
+        assert ctx.original_engine_inputs is None
 
     def test_aggregation_uses_metadata_not_request_id_parsing(self):
         handler = self._make_handler()

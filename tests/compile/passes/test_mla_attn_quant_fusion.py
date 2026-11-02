@@ -8,6 +8,7 @@ import torch._dynamo
 from tests.compile.backend import LazyInitPass, TestBackend
 from tests.utils import TestFP8Layer, flat_product
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
+from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm._custom_ops import cutlass_scaled_fp4_mm, scaled_fp4_quant
 from vllm.compilation.passes.fusion.matcher_utils import QUANT_OPS
 from vllm.compilation.passes.fusion.mla_attn_quant_fusion import (
@@ -208,6 +209,18 @@ class TestMLAAttentionFp8StaticQuantPatternModel(MLAAttentionQuantPatternModel):
             output_shape=(q.shape[0], self.output_dim),
         )
         return self.fp8_linear(attn_output)
+
+
+class TestMLAAttentionAiterFp8StaticQuantPatternModel(
+    TestMLAAttentionFp8StaticQuantPatternModel
+):
+    aiter_quant = True
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fp8_linear.kernel.quant_fp8.use_aiter = True
+        assert self.fp8_linear.input_scale is not None
+        self.fp8_linear.input_scale.fill_(0.125)
 
 
 class TestMLAAttentionNvfp4QuantPatternModel(MLAAttentionQuantPatternModel):
@@ -550,12 +563,16 @@ def test_mla_attention_quant_pattern(
 
     # Check quantization ops in the graph
     is_per_group = quant_key.scale.group_shape.is_per_group()
-    quant_op = (
-        torch.ops.aten.reciprocal
-        if "-quant_fp8" in custom_ops_list
-        else QUANT_OPS[quant_key]
+    aiter_quant = getattr(model_class, "aiter_quant", False)
+    if "-quant_fp8" in custom_ops_list:
+        quant_op = torch.ops.aten.reciprocal
+    elif aiter_quant or rocm_aiter_ops.is_linear_fp8_enabled():
+        quant_op = torch.ops.vllm.rocm_aiter_per_tensor_quant.default
+    else:
+        quant_op = QUANT_OPS[quant_key]
+    test_backend.check_before_ops(
+        [quant_op], fully_replaced=is_per_group or aiter_quant
     )
-    test_backend.check_before_ops([quant_op], fully_replaced=is_per_group)
 
     assert attn_pass.pass_.matched_count == sum(attn_fusion_supported)
 
@@ -588,3 +605,31 @@ def test_mla_attention_quant_pattern(
 
     # Check numerical correctness
     torch.testing.assert_close(result_unfused, result_fused, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm() or not is_aiter_found_and_supported(),
+    reason="Requires ROCm AITER MLA attention and quantization",
+)
+def test_rocm_aiter_static_quant_mla_attention(
+    dist_init, disable_vllm_compile_cache, workspace_init, monkeypatch
+):
+    """Fuse AITER's static FP8 quant into the AITER MLA attention output."""
+    try:
+        with monkeypatch.context() as patch:
+            patch.setenv("VLLM_ROCM_USE_AITER", "1")
+            rocm_aiter_ops.refresh_env_variables()
+            test_mla_attention_quant_pattern(
+                *MLA_DIMS[0],
+                batch_size=8,
+                dtype=torch.bfloat16,
+                custom_ops="+quant_fp8",
+                model_name="deepseek-ai/DeepSeek-V2-Lite",
+                model_class=TestMLAAttentionAiterFp8StaticQuantPatternModel,
+                backend=AttentionBackendEnum.ROCM_AITER_MLA,
+                dist_init=dist_init,
+                disable_vllm_compile_cache=disable_vllm_compile_cache,
+                workspace_init=workspace_init,
+            )
+    finally:
+        rocm_aiter_ops.refresh_env_variables()

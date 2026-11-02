@@ -32,6 +32,7 @@ from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import SiluAndMul, get_act_and_mul_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
+from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -122,7 +123,9 @@ def position_ids_in_meshgrid(
     for patch in patch_embeds_list:
         height, width = patch.shape[-2:]
         h_ids, w_ids = torch.meshgrid(
-            torch.arange(height), torch.arange(width), indexing="ij"
+            torch.arange(height, device=patch.device),
+            torch.arange(width, device=patch.device),
+            indexing="ij",
         )
         positions.append(torch.stack([h_ids.flatten(), w_ids.flatten()], dim=-1))
     return torch.cat(positions, dim=0)
@@ -668,20 +671,6 @@ class VisionEncoderArgs:
     mm_projector_id: str = ""
 
 
-def _reshape_for_broadcast(freqs_cis: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
-    """freqs_cis: complex - (seq_len, head_dim / 2)
-    x: complex - (bsz, seq_len, head_dim / 2)
-    """
-    ndim = x.ndim
-    assert ndim > 1
-    assert freqs_cis.shape == (x.shape[1], x.shape[-1]), (
-        freqs_cis.shape,
-        (x.shape[1], x.shape[-1]),
-    )
-    shape = [d if i == 1 or i == ndim - 1 else 1 for i, d in enumerate(x.shape)]
-    return freqs_cis.view(*shape)
-
-
 def precompute_freqs_cis_2d(
     dim: int,
     height: int,
@@ -709,18 +698,60 @@ def precompute_freqs_cis_2d(
     return torch.polar(torch.ones_like(freqs_2d), freqs_2d)
 
 
+def _apply_rotary_emb_vit_complex(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    freqs = torch.view_as_complex(freqs_cis)[None, :, None, :]
+    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
+    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
+    xq_out = torch.view_as_real(xq_ * freqs).flatten(3)
+    xk_out = torch.view_as_real(xk_ * freqs).flatten(3)
+    return xq_out.type_as(xq), xk_out.type_as(xk)
+
+
+def _apply_rotary_emb_vit_real(
+    xq: torch.Tensor,
+    xk: torch.Tensor,
+    freqs_cis: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    cos = freqs_cis[None, :, None, :, 0]
+    sin = freqs_cis[None, :, None, :, 1]
+
+    def rotate(x: torch.Tensor) -> torch.Tensor:
+        x_ = x.float().reshape(*x.shape[:-1], -1, 2)
+        x_re, x_im = x_[..., 0], x_[..., 1]
+        rotated = torch.stack(
+            (x_re * cos - x_im * sin, x_re * sin + x_im * cos), dim=-1
+        )
+        return rotated.flatten(3).type_as(x)
+
+    return rotate(xq), rotate(xk)
+
+
 def apply_rotary_emb_vit(
     xq: torch.Tensor,
     xk: torch.Tensor,
     freqs_cis: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    xq_ = torch.view_as_complex(xq.float().reshape(*xq.shape[:-1], -1, 2))
-    xk_ = torch.view_as_complex(xk.float().reshape(*xk.shape[:-1], -1, 2))
-    assert freqs_cis.dtype == torch.complex64
-    freqs_cis = _reshape_for_broadcast(freqs_cis, xq_)
-    xq_out = torch.view_as_real(xq_ * freqs_cis).flatten(3)
-    xk_out = torch.view_as_real(xk_ * freqs_cis).flatten(3)
-    return xq_out.type_as(xq), xk_out.type_as(xk)
+    """Rotate `xq`/`xk` of shape (bsz, seq_len, n_heads, head_dim).
+
+    `freqs_cis` is the real view (seq_len, head_dim / 2, 2) of the complex
+    frequencies.
+    """
+    assert freqs_cis.dtype == torch.float32
+    assert freqs_cis.shape == (xq.shape[1], xq.shape[-1] // 2, 2), (
+        freqs_cis.shape,
+        xq.shape,
+    )
+    if torch.compiler.is_compiling():
+        # Inductor does not generate code for complex operators and would
+        # fall back to eager around RoPE.
+        return _apply_rotary_emb_vit_real(xq, xk, freqs_cis)
+    # In eager mode the complex multiply is a single kernel per tensor, while
+    # the real formulation launches several elementwise kernels.
+    return _apply_rotary_emb_vit_complex(xq, xk, freqs_cis)
 
 
 class FeedForward(nn.Module):
@@ -758,7 +789,7 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x)
+        x = maybe_fused_act_quant(self.act_fn, x, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 
@@ -935,8 +966,8 @@ def position_meshgrid(
         [
             torch.stack(
                 torch.meshgrid(
-                    torch.arange(p.shape[-2]),
-                    torch.arange(p.shape[-1]),
+                    torch.arange(p.shape[-2], device=p.device),
+                    torch.arange(p.shape[-1], device=p.device),
                     indexing="ij",
                 ),
                 dim=-1,
@@ -991,11 +1022,13 @@ class VisionTransformer(nn.Module):
     @property
     def freqs_cis(self) -> torch.Tensor:
         if self._freqs_cis is None:
-            self._freqs_cis = precompute_freqs_cis_2d(
-                dim=self.args.hidden_size // self.args.num_attention_heads,
-                height=self.max_patches_per_side,
-                width=self.max_patches_per_side,
-                theta=self.args.rope_theta,
+            self._freqs_cis = torch.view_as_real(
+                precompute_freqs_cis_2d(
+                    dim=self.args.hidden_size // self.args.num_attention_heads,
+                    height=self.max_patches_per_side,
+                    width=self.max_patches_per_side,
+                    theta=self.args.rope_theta,
+                )
             )
 
         if self._freqs_cis.device != self.device:
@@ -1029,7 +1062,7 @@ class VisionTransformer(nn.Module):
         patch_embeds = self.ln_pre(patch_embeds)
 
         # positional embeddings
-        positions = position_meshgrid(patch_embeds_list).to(self.device)
+        positions = position_meshgrid(patch_embeds_list)
         freqs_cis = self.freqs_cis[positions[:, 0], positions[:, 1]]
 
         attention = self.transformer.layers[0].attention.attn
@@ -1259,7 +1292,7 @@ class PixtralHFMLP(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_and_mul(gate_up)
+        x = maybe_fused_act_quant(self.act_and_mul, gate_up, self.down_proj)
         x, _ = self.down_proj(x)
         return x
 

@@ -42,7 +42,6 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
 )
 from .utils import (
@@ -499,7 +498,6 @@ class FalconH1ForCausalLM(
     SupportsLoRA,
     SupportsPP,
     IsHybrid,
-    SupportsMambaPrefixCaching,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],

@@ -201,7 +201,7 @@ impl ActiveRequest {
 
         let finished = self.generated >= self.max_tokens;
         EngineCoreOutput {
-            prefill_stats,
+            prefill_stats: prefill_stats.map(Box::new),
             ..request_output(
                 self.request_id.clone(),
                 new_token_ids,

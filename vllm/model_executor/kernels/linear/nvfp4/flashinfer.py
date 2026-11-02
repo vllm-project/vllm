@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_prepare_bf16_fp4_weights,
@@ -71,11 +72,9 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
         )
         assert global_scale is not None
 
-        layer.weight = torch.nn.Parameter(weight, requires_grad=False)
-        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
-        layer.weight_global_scale = torch.nn.Parameter(
-            global_scale, requires_grad=False
-        )
+        replace_parameter(layer, "weight", weight)
+        replace_parameter(layer, "weight_scale", weight_scale)
+        replace_parameter(layer, "weight_global_scale", global_scale)
         layer.weights_padding_cols = weights_padding_bytes
 
     def apply_weights(
@@ -112,6 +111,9 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
 
+    def input_quant_key(self) -> QuantKey | None:
+        return kNvfp4Dynamic
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -128,28 +130,37 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # cutedsl uses the same swizzled + padded layout as cutlass.
-        layer.weight_scale = torch.nn.Parameter(
-            swizzle_blockscale(layer.weight_scale.data), requires_grad=False
+        replace_parameter(
+            layer,
+            "weight_scale",
+            swizzle_blockscale(layer.weight_scale.data),
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
-        layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
+        replace_parameter(layer, "weight", padded_weight)
 
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
-
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="flashinfer-cutedsl",
-        )
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            x_fp4, x_blockscale = qa.data, qa.scale
+            x_fp4 = x_fp4.reshape(-1, x_fp4.shape[-1])
+            output_dtype = qa.orig_dtype
+            output_shape = [*qa.orig_shape[:-1], output_size]
+        else:
+            assert isinstance(x, torch.Tensor)
+            output_dtype = x.dtype
+            output_shape = [*x.shape[:-1], output_size]
+            x_fp4, x_blockscale = scaled_fp4_quant(
+                x,
+                layer.input_global_scale_inv,
+                is_sf_swizzled_layout=True,
+                backend="flashinfer-cutedsl",
+            )
 
         x_fp4 = pad_nvfp4_activation_for_cutlass(
             x_fp4, nvfp4_weight_padding_bytes(layer)
@@ -201,11 +212,13 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale = torch.nn.Parameter(
-            swizzle_blockscale(layer.weight_scale.data), requires_grad=False
+        replace_parameter(
+            layer,
+            "weight_scale",
+            swizzle_blockscale(layer.weight_scale.data),
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
-        layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
+        replace_parameter(layer, "weight", padded_weight)
 
     def apply_weights(
         self,
@@ -219,6 +232,7 @@ class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
         qa = as_quantized_activation(x, self.input_quant_key())
         if qa is not None:
             x_fp4, x_blockscale = qa.data, qa.scale
+            x_fp4 = x_fp4.reshape(-1, x_fp4.shape[-1])
             x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes)
             output_dtype = qa.orig_dtype
             output_shape = [*qa.orig_shape[:-1], output_size]
@@ -273,15 +287,17 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
         weight_scale = layer.weight_scale.data
         epilogue_tile_m = 128
 
-        layer.weight = torch.nn.Parameter(
+        replace_parameter(
+            layer,
+            "weight",
             shuffle_matrix_a(weight.view(torch.uint8), epilogue_tile_m),
-            requires_grad=False,
         )
-        layer.weight_scale = torch.nn.Parameter(
+        replace_parameter(
+            layer,
+            "weight_scale",
             shuffle_matrix_sf_a(weight_scale.view(torch.uint8), epilogue_tile_m)
             .reshape(weight_scale.shape)
             .view(torch.float8_e4m3fn),
-            requires_grad=False,
         )
 
     def apply_weights(
@@ -335,11 +351,13 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # cuDNN uses the same swizzled + padded layout as CUTLASS
-        layer.weight_scale = torch.nn.Parameter(
-            swizzle_blockscale(layer.weight_scale.data), requires_grad=False
+        replace_parameter(
+            layer,
+            "weight_scale",
+            swizzle_blockscale(layer.weight_scale.data),
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
-        layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
+        replace_parameter(layer, "weight", padded_weight)
 
     def apply_weights(
         self,
@@ -397,11 +415,11 @@ class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale = torch.nn.Parameter(
-            swizzle_blockscale(layer.weight_scale.data), requires_grad=False
+        replace_parameter(
+            layer, "weight_scale", swizzle_blockscale(layer.weight_scale.data)
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
-        layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
+        replace_parameter(layer, "weight", padded_weight)
 
     def apply_weights(
         self,

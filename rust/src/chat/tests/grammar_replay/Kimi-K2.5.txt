@@ -44,3 +44,23 @@ sequence
         `<|tool_call_argument_begin|>`
         json({ location: string })
     `<|tool_calls_section_end|>`
+
+# auto_schema_calls (from_token_zero)
+sequence
+  tag `` text `</think>`
+  or
+    sequence
+      `<|tool_calls_section_begin|>`
+      tags_with_separator `` at_least_one
+        tag `<|tool_call_begin|>functions.get_weather:` .. `<|tool_call_end|>`
+          sequence
+            /\d+/
+            `<|tool_call_argument_begin|>`
+            json({ location: string })
+        tag `<|tool_call_begin|>functions.add:` .. `<|tool_call_end|>`
+          sequence
+            /\d+/
+            `<|tool_call_argument_begin|>`
+            json({ y: number, x: number, items: string[] })
+      `<|tool_calls_section_end|>`
+    json({ answer: string })
