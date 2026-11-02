@@ -28,7 +28,7 @@ def _small_config():
         "index_head_dim": 128,
         "index_n_heads": 64,
         "index_topk": 512,
-        "compress_ratios": [1, 4, 128],
+        "compress_ratios": [0, 4, 128],
         "compress_rope_theta": 160000,
         "sliding_window": 128,
         "n_routed_experts": 8,
