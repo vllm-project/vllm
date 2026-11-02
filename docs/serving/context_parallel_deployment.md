@@ -16,6 +16,32 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### DeepSeek V4 on NVIDIA GPUs
+
+DeepSeek V4 supports eager PCP with Model Runner V2 and FlashMLA sparse
+attention. Each rank computes its local queries and retains the full SWA and
+compressed KV caches. Compressor inputs are gathered before pooling so that
+C4 overlapping windows and C128 groups can cross PCP shard boundaries.
+This implementation repeats compression on each rank and does not reduce KV
+cache memory per rank.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/DeepSeek-V4 \
+    --prefill-context-parallel-size 2 \
+    --attention-backend FLASHMLA_SPARSE \
+    --kv-cache-dtype fp8_ds_mla \
+    --moe-backend triton \
+    --enforce-eager \
+    --no-enable-prefix-caching
+```
+
+Use DCP, PP, and DP sizes of one. Prefix caching, speculative decoding, KV
+transfer, microbatching, and MegaMoE are not supported in this path. Keep the
+scheduled token capacity a multiple of eight to satisfy the existing CuTeDSL
+compressor's slot-mapping alignment. Validate numerical quality with real
+weights before deploying; reduced-expert dummy-weight tests exercise execution
+and shard-boundary consistency, not model accuracy.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

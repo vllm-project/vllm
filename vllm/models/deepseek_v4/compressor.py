@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -58,6 +59,10 @@ def _get_c128_boundary(metadata: CommonAttentionMetadata) -> bool | None:
 
 
 class CompressorBackend(AttentionBackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     def __init__(self):
         super().__init__()
 
@@ -87,6 +92,7 @@ class CompressorMetadata:
     token_to_req_indices: torch.Tensor | None = None  # [num_tokens]
     num_decode_tokens: int | None = None
     c128_boundary: bool | None = None
+    cache_positions: torch.Tensor | None = None
 
 
 class CompressorMetadataBuilder(AttentionMetadataBuilder):
@@ -113,6 +119,27 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         token_to_req_indices = common_attn_metadata.token_to_req_indices(
             self.token_to_req_indices
         )
+        cm = common_attn_metadata
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if pcp_size > 1:
+            group = get_pcp_group()
+            local_tokens = cm.slot_mapping.numel() // pcp_size
+            max_reqs = 2 * self.vllm_config.scheduler_config.max_num_seqs
+            table = cm.block_table_tensor.new_zeros(
+                (max_reqs, cm.block_table_tensor.shape[1])
+            )
+            table[: cm.num_reqs] = cm.block_table_tensor[: cm.num_reqs]
+            req_indices = token_to_req_indices.new_zeros(local_tokens)
+            req_indices[: cm.num_actual_tokens] = token_to_req_indices
+            req_indices += group.rank_in_group * max_reqs
+            assert cm.positions is not None
+            return CompressorMetadata(
+                block_table=group.all_gather(table, dim=0).clamp_(min=0),
+                slot_mapping=cm.slot_mapping,
+                block_size=self.block_size,
+                token_to_req_indices=group.all_gather(req_indices, dim=0),
+                cache_positions=group.all_gather(cm.positions, dim=0),
+            )
         num_decode_tokens = None
         if _prefer_two_stage_compressor():
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
@@ -374,6 +401,14 @@ class DeepseekCompressor(nn.Module):
         state_metadata = cast(
             CompressorMetadata, attn_metadata[self.state_cache.prefix]
         )
+        if state_metadata.cache_positions is not None:
+            # Replicate states before pooling across C4/C128 shard boundaries.
+            # The slot mapping masks padding and duplicate replicated requests.
+            kv_score = get_pcp_group().all_gather(kv_score, dim=0)
+            kv, score = kv_score.split(
+                [self.coff * self.head_dim, self.coff * self.head_dim], dim=-1
+            )
+            positions = state_metadata.cache_positions
         slot_mapping = state_metadata.slot_mapping
         block_size = state_metadata.block_size
 

@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm.distributed import get_pcp_group
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
 from vllm.models.deepseek_v4.common.ops import (
@@ -21,7 +22,7 @@ from vllm.models.deepseek_v4.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
 )
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backend import AttentionCGSupport, CommonAttentionMetadata
 from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekSparseSWABackend,
     DeepseekSparseSWAMetadataBuilder,
@@ -41,8 +42,40 @@ class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekSparseSWAMetadataBuilder)
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if self.pcp_size > 1:
+            self.no_replay_start = self.no_replay_start.new_zeros(
+                2 * self.vllm_config.scheduler_config.max_num_seqs + 1
+            )
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+        replay_start: torch.Tensor | None = None,
+    ) -> "DeepseekSparseSWAMetadata":
+        cm = common_attn_metadata
+        if self.pcp_size > 1:
+            local_slots = cm.slot_mapping.chunk(self.pcp_size)[
+                get_pcp_group().rank_in_group
+            ]
+            cm = cm.replace(slot_mapping=local_slots)
+        metadata = super().build(common_prefix_len, cm, fast_build, replay_start)
+        if self.pcp_size > 1:
+            metadata.cache_slot_mapping = common_attn_metadata.slot_mapping
+            assert cm.positions is not None
+            metadata.cache_positions = get_pcp_group().all_gather(cm.positions, dim=0)
+        return metadata
+
 
 class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_builder_cls() -> type[DeepseekSparseSWAFlashMLAMetadataBuilder]:
         return DeepseekSparseSWAFlashMLAMetadataBuilder
@@ -139,6 +172,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             attn_metadata.get(self.swa_cache_layer.prefix),
         )
         assert swa_metadata is not None
+
+        if self.use_pcp:
+            num_tokens = (
+                swa_metadata.num_decode_tokens + swa_metadata.num_prefill_tokens
+            )
+            output[num_tokens:].zero_()
+            if num_tokens == 0:
+                return
 
         swa_only = self.compress_ratio <= 1
         # SWA-only layers (compress_ratio <= 1) don't have their own KV cache

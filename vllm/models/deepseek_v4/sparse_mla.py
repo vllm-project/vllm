@@ -9,6 +9,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.distributed import get_pcp_group
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -192,10 +193,14 @@ class DeepseekV4SparseMLAMetadataBuilder(
         req_id_per_token = cm.token_to_req_indices(self.req_id_per_token_buffer)
 
         slot_mapping = cm.slot_mapping
+        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        local_slots = slot_mapping
+        if pcp_size > 1:
+            local_slots = slot_mapping.chunk(pcp_size)[get_pcp_group().rank_in_group]
         if self.compress_ratio > 1:
             slot_mapping = get_compressed_slot_mapping(
                 cm.num_actual_tokens,
-                cm.slot_mapping,
+                local_slots,
                 cm.query_start_loc,
                 cm.seq_lens,
                 cm.block_table_tensor.clamp_(min=0),
@@ -203,6 +208,10 @@ class DeepseekV4SparseMLAMetadataBuilder(
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
             )
+            if pcp_size > 1:
+                slot_mapping = get_pcp_group().all_gather(
+                    self.compressed_slot_mapping_buffer[: local_slots.numel()], dim=0
+                )
 
         c128a_fields: dict[str, torch.Tensor | None] = {}
         if self.compress_ratio == 128:
@@ -290,6 +299,10 @@ class DeepseekV4FlashMLAMetadataBuilder(DeepseekV4SparseMLAMetadataBuilder):
 
 
 class DeepseekV4FlashMLABackend(DeepseekV4SparseMLABackend):
+    @classmethod
+    def supports_pcp(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "FLASHMLA_SPARSE_DSV4"
