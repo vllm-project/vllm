@@ -47,7 +47,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode, PassConfig
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
-from vllm.config.mamba import MambaBackendEnum
+from vllm.config.mamba import MambaBackendEnum, MambaConfig
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
@@ -2085,6 +2085,28 @@ def test_engram_hash_tracks_execution_options():
         EngramConfig(disk_offload=True),
     ]
     assert len({config.compute_hash() for config in configs}) == len(configs)
+
+
+def test_mamba_hash_tracks_execution_options():
+    configs = [
+        MambaConfig(),
+        MambaConfig(backend=MambaBackendEnum.FLASHINFER),
+        MambaConfig(stochastic_rounding_philox_rounds=4),
+    ]
+    assert len({config.compute_hash() for config in configs}) == len(configs)
+
+
+def test_vllm_config_hash_covers_mamba_config():
+    # Two configs that differ only in the Mamba settings select different
+    # selective-state-update kernels, so they must not share an AOT/compile
+    # cache identity. Without hashing mamba_config these collide.
+    base = VllmConfig()
+    flashinfer = VllmConfig(
+        mamba_config=MambaConfig(backend=MambaBackendEnum.FLASHINFER)
+    )
+    philox = VllmConfig(mamba_config=MambaConfig(stochastic_rounding_philox_rounds=4))
+    hashes = {base.compute_hash(), flashinfer.compute_hash(), philox.compute_hash()}
+    assert len(hashes) == 3
 
 
 @pytest.mark.parametrize("port", [1, 29550, 65535])

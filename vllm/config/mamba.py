@@ -6,7 +6,7 @@ from typing import Any, Literal, get_args
 
 from pydantic import field_validator
 
-from vllm.config.utils import config
+from vllm.config.utils import config, get_hash_factors, hash_factors
 
 
 class _MambaBackendEnumMeta(EnumMeta):
@@ -102,3 +102,13 @@ class MambaConfig:
                     "specify `--enable-mamba-cache-stochastic-rounding`, "
                     "or set `--mamba-backend flashinfer`."
                 )
+
+    def compute_hash(self) -> str:
+        """Hash settings that affect Mamba kernel selection and graph structure.
+
+        ``backend`` selects between distinct selective-state-update custom ops
+        (FlashInfer vs Triton) in the mixer forward, and the remaining fields
+        specialize the compiled kernel. All of them change the compiled
+        artifact, so they must participate in the AOT/compile cache identity.
+        """
+        return hash_factors(get_hash_factors(self, set()))

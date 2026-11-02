@@ -538,6 +538,10 @@ class VllmConfig:
             if self.engram_config is not None
             else "None"
         )
+        # Mamba backend/kernel-selection settings change the compiled mixer
+        # graph (different selective-state-update custom ops and kernel
+        # specializations), so they must be part of the cache identity.
+        vllm_factors.append(self.mamba_config.compute_hash())
         if self.lora_config:
             vllm_factors.append(self.lora_config.compute_hash())
         else:
