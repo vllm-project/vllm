@@ -26,7 +26,13 @@ class StreamedResponseHandler:
 
     def __init__(self):
         self.buffer = ""
-        self._decoder = codecs.getincrementaldecoder("utf-8")()
+        # IncrementalNewlineDecoder translates \r\n and lone \r to \n, and
+        # correctly handles \r\n split across chunk boundaries (a plain
+        # str.replace would turn a split "r|n" into a spurious separator).
+        self._decoder = io.IncrementalNewlineDecoder(
+            codecs.getincrementaldecoder("utf-8")(),
+            translate=True,
+        )
 
     def add_chunk(self, chunk_bytes: bytes) -> list[str]:
         """Add a chunk of bytes to the buffer and return any complete
@@ -36,24 +42,30 @@ class StreamedResponseHandler:
 
         messages = []
 
-        # Split by double newlines (SSE message separator)
+        # Split by double newlines (SSE message separator). The newline
+        # decoder above has already normalised \r\n / \r to \n, so a
+        # single split covers every spec-compliant framing.
         while "\n\n" in self.buffer:
             message, self.buffer = self.buffer.split("\n\n", 1)
             message = message.strip()
             if message:
                 messages.append(message)
 
-        # if self.buffer is not empty, check if it is a complete message
-        # by removing data: prefix and check if it is a valid JSON
-        if self.buffer.startswith("data: "):
-            message_content = self.buffer.removeprefix("data: ").strip()
+        # Early emit: if the buffer (with any leading newline remnants from
+        # a split separator stripped) looks like a complete SSE message, emit
+        # it immediately instead of waiting for the next separator. This
+        # keeps TTFT / ITL measurements accurate when \n\n is split across
+        # two reads.
+        stripped = self.buffer.lstrip("\n")
+        if stripped.startswith("data: "):
+            message_content = stripped.removeprefix("data: ").strip()
             if message_content == "[DONE]":
-                messages.append(self.buffer.strip())
+                messages.append(stripped.strip())
                 self.buffer = ""
             elif message_content:
                 try:
                     json.loads(message_content)
-                    messages.append(self.buffer.strip())
+                    messages.append(stripped.strip())
                     self.buffer = ""
                 except json.JSONDecodeError:
                     # Incomplete JSON, wait for more chunks.
