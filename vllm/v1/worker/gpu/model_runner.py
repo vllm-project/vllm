@@ -308,7 +308,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Draft tokens propagation - for spec-dec + struct outputs.
-        self.draft_tokens_handler = DraftTokensHandler(self.device)
+        self.draft_tokens_handler = DraftTokensHandler(
+            max_concurrent_batches=self.vllm_config.max_concurrent_batches,
+            device=self.device,
+        )
 
         # Built before memory profiling; block tables are attached at KV init.
         self.pcp_manager = pcp.maybe_build_pcp_manager(
