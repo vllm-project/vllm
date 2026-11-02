@@ -49,6 +49,10 @@ _TRTLLM_GEN_MAX_REQUESTS = 65535
 class _FlashInferMLASparseBackendBase(AttentionBackend):
     """Common metadata for concrete FlashInfer sparse MLA backends."""
 
+    @classmethod
+    def supports_hisparse(cls) -> bool:
+        return True
+
     @staticmethod
     def get_name() -> str:
         return "FLASHINFER_MLA_SPARSE"

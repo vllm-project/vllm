@@ -210,7 +210,9 @@ class KVCacheSpec:
     block_stride_alignment: int | MultipleOf | None = field(default=None, kw_only=True)
     """Required byte alignment between physical blocks, including packed layers.
     ``MultipleOf(n)``: whole kernel blocks, when blocks are split into kernel
-    blocks of up to ``n`` tokens."""
+    blocks of up to ``n`` tokens. An int also certifies that the kernels accept
+    kernel blocks at any multiple of that byte stride, so packed blocks split into
+    kernel blocks need not be whole kernel blocks apart."""
 
     is_draft: bool = field(default=False, kw_only=True, compare=False)
     """Whether a draft model owns this layer; excluded from equality so it never

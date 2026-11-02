@@ -15,6 +15,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.attention import HiSparseConfig
 from vllm.config.cache import CacheDType
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
@@ -812,6 +813,23 @@ def hopper_selection():
         ),
     ):
         yield
+
+
+@blackwell_only
+@pytest.mark.parametrize("use_hisparse", [False, True])
+def test_hopper_sparse_mla_skips_backends_without_hisparse(
+    use_hisparse, hopper_selection
+):
+    """Head-512 sparse MLA prefers FlashInfer on Hopper, which has no HiSparse
+    path; with HiSparse the selector must pass over it."""
+    attention_config = AttentionConfig(
+        hisparse_config=HiSparseConfig() if use_hisparse else None
+    )
+    with set_current_vllm_config(VllmConfig(attention_config=attention_config)):
+        backend = get_attn_backend(
+            512, torch.bfloat16, None, use_mla=True, use_sparse=True
+        )
+    assert (backend.get_name() == "FLASHINFER_MLA_SPARSE_SM90") is not use_hisparse
 
 
 @blackwell_only
