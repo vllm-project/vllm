@@ -1514,8 +1514,9 @@ def finalize_model_weights(model: torch.nn.Module) -> None:
     """Run every module's own post-load hook after a full load or reload,
     each module after all of its submodules.
 
-    Quantization methods and attention layers are skipped: the loader runs
-    them in its earlier per-layer passes.
+    Quantization methods, the submodules of quantized layers (their quant
+    method processes them) and attention layers are skipped: the loader runs
+    them in its earlier per-layer passes, which later passes may read.
     """
     from vllm.model_executor.layers.attention import is_deferred_attention_layer
     from vllm.model_executor.layers.quantization.base_config import (
@@ -1525,8 +1526,11 @@ def finalize_model_weights(model: torch.nn.Module) -> None:
     seen: set[torch.nn.Module] = set()
 
     def children_first(module: torch.nn.Module) -> Iterable[torch.nn.Module]:
+        quantized = isinstance(
+            getattr(module, "quant_method", None), QuantizeMethodBase
+        )
         # a module shared by several parents runs once, before all of them
-        for child in module.children():
+        for child in [] if quantized else module.children():
             if child not in seen:
                 seen.add(child)
                 yield from children_first(child)

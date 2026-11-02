@@ -1609,7 +1609,10 @@ def test_finalize_runs_every_module_hook_after_its_submodules():
         _LoggedHookModule("b", log, shared),
     )
     model.attn = _ReloadableAttentionLayer()
-    model.quant_method = _QuantMethodModule()
+    model.quantized = torch.nn.Module()
+    model.quantized.quant_method = _QuantMethodModule()
+    # owned by the quant method, which processes it in the per-layer pass
+    model.quantized.transform = _LoggedHookModule("transform", log)
 
     finalize_model_weights(model)
 
@@ -1618,6 +1621,61 @@ def test_finalize_runs_every_module_hook_after_its_submodules():
         assert log.index(child) < log.index(parent)
     assert log[-1] == "root"
     assert not model.attn.post_load_called
+
+
+class _TransformReadingAttention(_ReloadableAttentionLayer):
+    def __init__(self, read) -> None:
+        super().__init__()
+        self.read, self.seen = read, None
+
+    def process_weights_after_loading(self) -> None:
+        self.seen = self.read()
+
+
+def test_attention_post_load_reads_normalized_transform(dist_init):
+    """MLA absorbs kv_b_proj, transforms included, in the attention pass, so a
+    quantized layer's Hadamard transform must be normalized before it."""
+    # transform.linear is imported by compressed_tensors and imports it back
+    import vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors  # noqa: F401, E501
+    from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear import (  # noqa: E501
+        CompressedTensorsLinearTransformMethod,
+    )
+    from vllm.model_executor.layers.quantization.compressed_tensors.transform.module import (  # noqa: E501
+        HadamardTransform,
+    )
+    from vllm.model_executor.model_loader.utils import process_weights_after_loading
+    from vllm.model_executor.parameter import SharedWeightParameter
+
+    transform = HadamardTransform.__new__(HadamardTransform)
+    torch.nn.Module.__init__(transform)
+    transform.weight = SharedWeightParameter(weight_loader=default_weight_loader)
+    transform.weight.add_partition(0, object(), (4, 4))
+    transform.weight.partitions[0].data.fill_(1.0)
+
+    method = CompressedTensorsLinearTransformMethod.__new__(
+        CompressedTensorsLinearTransformMethod
+    )
+    method.quant_method = SimpleNamespace(process_weights_after_loading=lambda _: None)
+    linear = torch.nn.Module()
+    linear.quant_method = method
+    linear.transform = transform
+
+    model = torch.nn.Module()
+    model.kv_b_proj = linear
+    model.attn = _TransformReadingAttention(
+        lambda: transform.weight.partitions[0].data[0, 0].item()
+    )
+    config = SimpleNamespace(
+        dtype=torch.float32,
+        quantization=None,
+        word_embeddings_untied_by_checkpoint=False,
+    )
+
+    process_weights_after_loading(model, config, torch.device("cpu"))
+
+    # normalized by 1/sqrt(4) before the attention pass, and only once
+    assert model.attn.seen == 0.5
+    assert transform.weight.partitions[0].data[0, 0].item() == 0.5
 
 
 def _loaded_model() -> _TwoLayerModel:
