@@ -280,3 +280,20 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+@pytest.mark.parametrize("return_aux_outputs", [True, False])
+def test_aux_outputs_opt_out_drops_sample_logprobs(return_aux_outputs):
+    params = SamplingParams(
+        logprobs=5,
+        logprob_token_ids=[1, 2],
+        prompt_logprobs=3,
+        return_aux_outputs=return_aux_outputs,
+    )
+    if return_aux_outputs:
+        assert params.logprobs == 5
+        assert params.logprob_token_ids == [1, 2]
+    else:
+        assert params.logprobs is None
+        assert params.logprob_token_ids is None
+    assert params.prompt_logprobs == 3

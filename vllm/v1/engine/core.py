@@ -28,6 +28,7 @@ from vllm.distributed import (
     cleanup_dist_env_and_memory,
     stateless_destroy_torch_distributed_process_group,
 )
+from vllm.distributed.aux_output_connector.connector import aux_output_cache_salt
 from vllm.distributed.ec_transfer.ec_connector.encoder_output_width import (
     measure_encoder_output_widths,
 )
@@ -1236,7 +1237,17 @@ class EngineCore:
                 request.mm_features
             )
 
-        frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
+        cache_salt = aux_output_cache_salt(
+            request.cache_salt, request.sampling_params, self.vllm_config
+        )
+        # Frontend prompt hashes lack the aux-output salt, so a salted request
+        # is hashed by the engine instead.
+        frontend_hashes = (
+            frontend_block_hashes(request, self.prefix_hash_config)
+            if cache_salt == request.cache_salt
+            else None
+        )
+        request.cache_salt = cache_salt
         req = Request.from_engine_core_request(
             request, self.request_block_hasher, frontend_hashes
         )

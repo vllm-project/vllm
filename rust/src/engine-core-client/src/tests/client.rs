@@ -172,6 +172,7 @@ fn sample_request_with_id(request_id: &str) -> EngineCoreRequest {
             eos_token_id: Some(151645),
             all_stop_token_ids: BTreeSet::from([151643, 151645]),
             routed_experts_prompt_start: 1,
+            return_aux_outputs: true,
             ..EngineCoreSamplingParams::for_test()
         }),
         arrival_time: 42.5,
@@ -3498,6 +3499,7 @@ fn python_msgpack_fixtures_match_rust_encoding_and_record_nixl_metrics() {
             skip_reading_prefix_cache: None,
             extra_args: None,
             routed_experts_prompt_start: 0,
+            return_aux_outputs: true,
             stream_interval: None,
         },
     );

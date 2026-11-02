@@ -38,7 +38,7 @@ A full client is in [examples/scale_out/token_generation_client.py](../../../exa
 | `finish_reason` | `stop`, `length` or `abort`. |
 | `stop_reason` | Stop token ID or string; `null` on EOS, length and abort. |
 | `logprobs` | `{"content": [{"token_id", "logprob", "rank", "top_logprobs": [...]}]}`, one entry per token, sampled token first. `token_id` is an integer, not the older `"token_id:<id>"` string. Needs `sampling_params.logprobs`. |
-| `weight_versions`, `routed_experts`, `sampling_mask` | Optional, see [Weight versions](#weight-versions); the last two need `--enable-return-routed-experts` / `--return-sampling-mask`. |
+| `weight_versions`, `routed_experts`, `sampling_mask` | Optional, see [Weight versions](#weight-versions); the last two need `--enable-return-routed-experts` / `--return-sampling-mask`. `sampling_params.return_aux_outputs: false` drops both, and sample `logprobs`, for one request; see [Routed Experts](../../training/routed_experts.md#return_aux_outputs). |
 
 The top level adds `request_id`, `usage`, `prompt_token_ids` and `prompt_logprobs`. Stream chunks carry the same per-choice fields for the new tokens.
 

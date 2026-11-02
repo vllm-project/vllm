@@ -15,12 +15,30 @@ import numpy as np
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 if TYPE_CHECKING:
+    from vllm.config import VllmConfig
     from vllm.distributed.kv_events import ExternalBlockHash
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
+    from vllm.sampling_params import SamplingParams
     from vllm.v1.core.kv_cache_manager import KVCacheManager
     from vllm.v1.core.kv_cache_utils import BlockHash, KVCacheBlock
     from vllm.v1.core.sched.output import SchedulerOutput
     from vllm.v1.request import Request
+
+
+def aux_output_cache_salt(
+    cache_salt: str | None,
+    sampling_params: SamplingParams | None,
+    vllm_config: VllmConfig,
+) -> str | None:
+    """Salt a request that skips auxiliary outputs on a server recording
+    routed experts: its blocks have no recorded routing to serve."""
+    if (
+        sampling_params is None
+        or sampling_params.return_aux_outputs
+        or not vllm_config.aux_output_config.enable_return_routed_experts
+    ):
+        return cache_salt
+    return f"{cache_salt or ''}\x00aux_outputs=off"
 
 
 @dataclass
@@ -89,8 +107,10 @@ class AuxOutputSchedulerConnector:
         scheduled_requests: dict[str, int] = {}
         block_hashes_by_request: dict[str, PackedBlockHashes] = {}
         for request_id, num_tokens in scheduler_output.num_scheduled_tokens.items():
-            self._sent_hash_counts.setdefault(request_id, 0)
             request = requests[request_id]
+            if self._skips(request):
+                continue
+            self._sent_hash_counts.setdefault(request_id, 0)
             packed = self._take_new_hashes(
                 request, request.num_computed_tokens + num_tokens
             )
@@ -136,6 +156,8 @@ class AuxOutputSchedulerConnector:
         return metadata
 
     def max_cache_hit(self, request: Request) -> int:
+        if self._skips(request):
+            return request.num_tokens - 1
         num_blocks = 0
         for block, keys in self._kv_blocks(request.block_hashes):
             if block in self._kv_cached:
@@ -148,12 +170,16 @@ class AuxOutputSchedulerConnector:
     def cap_external_hit(
         self, request: Request, num_local: int, num_external: int
     ) -> int:
+        if self._skips(request):
+            return num_external
         num_hit = num_local + num_external
         if num_hit % self._block_size == 0 and num_hit <= self.max_cache_hit(request):
             return num_external
         return 0
 
     def request_loading(self, request: Request, num_tokens: int) -> None:
+        if self._skips(request):
+            return
         blocks = islice(
             self._kv_blocks(request.block_hashes), num_tokens // self._block_size
         )
@@ -189,6 +215,8 @@ class AuxOutputSchedulerConnector:
         output: dict[str, AuxRequestOutput] | None,
     ) -> np.ndarray | None:
         """Return the accepted R3 rows for one scheduled request."""
+        if self._skips(request):
+            return None
         request_id = request.request_id
         assert output is not None and request_id in output, (
             f"auxiliary output worker output is missing {request_id}"
@@ -215,6 +243,8 @@ class AuxOutputSchedulerConnector:
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""
+        if self._skips(request):
+            return
         request_id = request.request_id
         self._loading.pop(request_id, None)
         num_blocks = request.num_computed_tokens // self._block_size
@@ -230,6 +260,11 @@ class AuxOutputSchedulerConnector:
             request, request.num_computed_tokens
         )
         del self._sent_hash_counts[request_id]
+
+    @staticmethod
+    def _skips(request: Request) -> bool:
+        params = request.sampling_params
+        return params is not None and not params.return_aux_outputs
 
     @staticmethod
     def _pack_hashes(hashes: Sequence[bytes]) -> PackedBlockHashes | None:
