@@ -3,6 +3,7 @@
 
 //! Minimal OpenAI-compatible HTTP server above [`vllm_chat`].
 
+mod anthropic;
 mod config;
 mod error;
 mod grpc;
