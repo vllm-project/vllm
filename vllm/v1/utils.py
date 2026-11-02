@@ -205,7 +205,10 @@ class APIServerProcessManager:
         self.processes: list[BaseProcess] = []
 
         admission_counters = None
-        if num_servers > 1 and getattr(args, "max_num_queued_reqs", None) is not None:
+        if num_servers > 1 and (
+            getattr(args, "max_num_queued_reqs", None) is not None
+            or getattr(args, "max_num_queued_tokens", None) is not None
+        ):
             from vllm.v1.engine.admission_control import SharedAdmissionStats
 
             admission_counters = spawn_context.RawArray(

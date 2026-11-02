@@ -40,7 +40,7 @@ from vllm.exceptions import (
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils.argparse_utils import human_readable_int
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest
 from vllm.v1.engine.admission_control import SharedAdmissionStats
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -122,10 +122,12 @@ def _make_output_processor(**request_states) -> OutputProcessor:
     return op
 
 
-def _make_engine_request(request_id: str, n: int) -> EngineCoreRequest:
+def _make_engine_request(
+    request_id: str, n: int, prompt_len: int = 1
+) -> EngineCoreRequest:
     return EngineCoreRequest(
         request_id=request_id,
-        prompt_token_ids=[1],
+        prompt_token_ids=[1] * prompt_len,
         mm_features=None,
         sampling_params=SamplingParams(n=n),
         pooling_params=None,
@@ -203,6 +205,59 @@ def test_shared_request_snapshot_enforces_global_limit():
 
     assert server_0.get_num_requests() == 2
     assert _admission_rejection_count("max_num_queued_reqs") == 1
+
+
+def _add_prefill_request(op: OutputProcessor, request_id: str, prompt_len: int) -> None:
+    request = _make_engine_request(request_id, n=1, prompt_len=prompt_len)
+    request.external_req_id = request_id
+    op.add_request(request, None)
+
+
+def _admits(servers: list[AsyncLLM]) -> list[bool]:
+    admitted = []
+    for llm in servers:
+        try:
+            llm.check_admission()
+            admitted.append(True)
+        except MaxQueuedTokensError:
+            admitted.append(False)
+    return admitted
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_token_cap_counts_every_api_server():
+    servers = []
+    for stats in _make_shared_stats():
+        llm = _make_async_llm(max_num_queued_tokens=400)
+        llm.admission_stats = stats
+        llm.output_processor = OutputProcessor(
+            None, log_stats=False, admission_stats=stats
+        )
+        servers.append(llm)
+    _add_prefill_request(servers[0].output_processor, "r0", 150)
+    _add_prefill_request(servers[1].output_processor, "r1", 150)
+    assert _admits(servers) == [True, True]
+
+    _add_prefill_request(servers[1].output_processor, "r2", 150)
+    assert _admits(servers) == [False, False]
+
+
+@pytest.mark.skip_global_cleanup
+def test_shared_token_count_follows_prefill_exit_and_abort():
+    stats_0, stats_1 = _make_shared_stats()
+    op_0 = OutputProcessor(None, log_stats=False, admission_stats=stats_0)
+    op_1 = OutputProcessor(None, log_stats=False, admission_stats=stats_1)
+    _add_prefill_request(op_0, "r0", 300)
+    _add_prefill_request(op_1, "r1", 200)
+    assert stats_0.get_num_queued_tokens() == 500
+
+    # The first token ends r0's prefill.
+    op_0.process_outputs([EngineCoreOutput(request_id="r0", new_token_ids=[7])])
+    assert stats_0.get_num_queued_tokens() == 200
+
+    op_1.abort_requests(["r1"], internal=True)
+    assert stats_0.get_num_queued_tokens() == 0
+    assert stats_0.get_num_requests() == 1
 
 
 # ---------------------------------------------------------------------------
