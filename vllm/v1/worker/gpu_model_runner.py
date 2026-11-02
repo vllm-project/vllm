@@ -7252,18 +7252,25 @@ class GPUModelRunner(
     def _config_for_kv_group(self, kv_cache_group: KVCacheGroupSpec) -> VllmConfig:
         """The config a KV group's cudagraph support must be judged against.
 
-        Draft-side groups take the draft model's config: the target's
-        model_config would hand the target's head counts into the group's
-        arithmetic (see get_cudagraph_support), which is wrong whenever the
-        two models' head ratios differ.
+        Draft-side groups take the draft model and parallel configs: the
+        target's head counts and tensor-parallel size would otherwise feed
+        the group's arithmetic (see get_cudagraph_support).
         """
         draft_config = (
             self.speculative_config.draft_model_config
             if self.speculative_config is not None
             else None
         )
-        if kv_cache_group.is_eagle_group and draft_config is not None:
-            return replace(self.vllm_config, model_config=draft_config)
+        if (
+            kv_cache_group.is_eagle_group
+            and self.speculative_config is not None
+            and draft_config is not None
+        ):
+            return replace(
+                self.vllm_config,
+                model_config=draft_config,
+                parallel_config=self.speculative_config.draft_parallel_config,
+            )
         return self.vllm_config
 
     def _check_and_update_cudagraph_mode(

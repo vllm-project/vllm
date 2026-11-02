@@ -1840,16 +1840,19 @@ def test_config_for_kv_group_uses_draft_heads_for_eagle_groups():
         dtype="float16",
         seed=42,
     )
+    target_parallel_config = ParallelConfig(tensor_parallel_size=2)
     spec_config = SpeculativeConfig(
         method="eagle",
         model="hf-internal-testing/tiny-random-LlamaForCausalLM",
         num_speculative_tokens=1,
         target_model_config=target_config,
         draft_model_config=draft_config,
-        target_parallel_config=ParallelConfig(),
+        target_parallel_config=target_parallel_config,
+        draft_tensor_parallel_size=1,
     )
     vllm_config = VllmConfig(
         model_config=target_config,
+        parallel_config=target_parallel_config,
         speculative_config=spec_config,
         device_config=DeviceConfig(device="cpu"),
     )
@@ -1878,3 +1881,8 @@ def test_config_for_kv_group_uses_draft_heads_for_eagle_groups():
         == "hf-internal-testing/tiny-random-LlamaForCausalLM"
     )
     assert target_cfg.model_config.model == "facebook/opt-125m"
+    assert eagle_cfg.parallel_config.tensor_parallel_size == 1
+    assert target_cfg.parallel_config.tensor_parallel_size == 2
+    assert eagle_cfg.model_config.get_num_attention_heads(
+        eagle_cfg.parallel_config
+    ) == draft_config.get_num_attention_heads(spec_config.draft_parallel_config)
