@@ -1975,19 +1975,8 @@ class VllmConfig:
             breakable_cudagraph_enabled=breakable_cudagraph_enabled
         )
 
-        from vllm.utils.torch_utils import HAS_OPAQUE_TYPE
-
-        if HAS_OPAQUE_TYPE:
-            # On torch >= 2.11 the hoisted OpaqueObject approach supersedes
-            # fast_moe_cold_start, so force it off.
-            self.compilation_config.fast_moe_cold_start = False
-        elif self.compilation_config.fast_moe_cold_start is None:
-            # resolve default behavior: try to be as safe as possible
-            # this config is unsafe if any spec decoding draft model has a MOE.
-            # We'll conservatively turn it off if we see spec decoding.
-            self.compilation_config.fast_moe_cold_start = (
-                self.speculative_config is None
-            )
+        # The hoisted LayerName opaque type supersedes fast_moe_cold_start.
+        self.compilation_config.fast_moe_cold_start = False
 
         self._set_max_num_scheduled_tokens()
 

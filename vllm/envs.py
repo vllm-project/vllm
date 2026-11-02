@@ -388,13 +388,7 @@ def disable_compile_cache() -> bool:
 
 
 def use_aot_compile() -> bool:
-    from vllm.utils.torch_version import is_torch_equal_or_newer
-
-    default_value = (
-        "1"
-        if is_torch_equal_or_newer("2.10.0") and not disable_compile_cache()
-        else "0"
-    )
+    default_value = "0" if disable_compile_cache() else "1"
 
     return os.environ.get("VLLM_USE_AOT_COMPILE", default_value) == "1"
 

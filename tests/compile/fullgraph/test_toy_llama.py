@@ -25,7 +25,6 @@ from vllm.config import (
     set_current_vllm_config,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 from ...utils import create_new_process_for_each_test
 
@@ -343,9 +342,6 @@ def test_toy_llama(
     # We disable the vLLM compile cache into a new tmp dir for 1 reason:
     # 1. To make sure we can properly track the number of Inductor compilations.
     monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
-
-    if use_inductor_graph_partition and not is_torch_equal_or_newer("2.9.0.dev"):
-        pytest.skip("Inductor graph partition only supported in torch>=2.9")
 
     # compare output with and without piecewise compilation
 

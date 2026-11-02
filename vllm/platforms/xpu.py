@@ -379,16 +379,6 @@ class XPUPlatform(Platform):
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
 
-        # lazy import to avoid circular import
-        from vllm.utils.torch_utils import supports_xpu_graph
-
-        if not supports_xpu_graph():
-            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning_once(
-                "XPU Graph is not supported in the current PyTorch version, "
-                "disabling cudagraph_mode."
-            )
-
         if (
             vllm_config.model_config is not None
             and vllm_config.model_config.enable_sleep_mode

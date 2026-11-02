@@ -9,8 +9,6 @@ from typing import Any
 
 import torch
 
-from vllm.utils.torch_utils import is_torch_equal_or_newer
-
 _weights_pre_processed: ContextVar[bool] = ContextVar(
     "weights_pre_processed", default=False
 )
@@ -331,7 +329,7 @@ def get_moe_expert_mapping(
 
 
 def maybe_disable_graph_partition(current_backend: str) -> dict[str, bool]:
-    if current_backend == "inductor" and is_torch_equal_or_newer("2.9.0.dev"):
+    if current_backend == "inductor":
         return {"graph_partition": False}
     else:
         return {}
