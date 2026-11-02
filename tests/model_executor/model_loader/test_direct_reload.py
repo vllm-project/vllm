@@ -289,8 +289,9 @@ class TestRefusals:
     def test_refused_begin_leaves_the_model_untouched(self):
         # proj is viewed back first, in module order; mimo's storage is short
         model = _cold_start(_checkpoint())
-        owner, (_, _, dtype, offset), attrs = model.mimo.weight._ckpt
-        model.mimo.weight._ckpt = (owner, ((64, 64), (64, 1), dtype, offset), attrs)
+        owner, (_, _, dtype, offset), attrs, storage = model.mimo.weight._ckpt
+        layout = ((64, 64), (64, 1), dtype, offset)
+        model.mimo.weight._ckpt = (owner, layout, attrs, storage)
         before = _state(model)
         with pytest.raises(RuntimeError, match="checkpoint layout needs"):
             begin_direct_reload(model)
