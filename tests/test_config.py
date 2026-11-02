@@ -4631,3 +4631,37 @@ def test_hybrid_layer_counts_sparse_attention_as_attention(
             )
             == len(layer_types) - expected_attention
         )
+
+
+@pytest.mark.parametrize("model_type", ["qwen3_5_text", "nemotron_h"])
+@pytest.mark.parametrize("use_v2", [False, True])
+def test_triton_replayssm_v2_model_scope(model_type, use_v2):
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            use_replayssm=True,
+            use_kda_recoverssm=False,
+            mamba_cache_mode="none",
+            replayssm_buffer_len=16,
+        ),
+        num_speculative_tokens=0,
+        model_config=SimpleNamespace(
+            supports_replayssm=True,
+            architecture="Qwen3_5ForConditionalGeneration"
+            if model_type == "qwen3_5_text"
+            else "NemotronHForCausalLM",
+            hf_text_config=SimpleNamespace(model_type=model_type),
+        ),
+        mamba_config=SimpleNamespace(
+            backend=MambaBackendEnum.TRITON,
+            enable_stochastic_rounding=False,
+        ),
+        parallel_config=SimpleNamespace(pipeline_parallel_size=1),
+        kv_transfer_config=None,
+        use_v2_model_runner=use_v2,
+    )
+    if use_v2 and model_type != "qwen3_5_text":
+        with pytest.raises(ValueError, match="only for Qwen3.5 GDN"):
+            VllmConfig.validate_mamba_cached_kernel(config)
+    else:
+        VllmConfig.validate_mamba_cached_kernel(config)
+        assert not config.cache_config.use_kda_recoverssm

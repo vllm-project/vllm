@@ -3740,10 +3740,13 @@ class VllmConfig:
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"
             )
-        elif self.use_v2_model_runner:
+        elif self.use_v2_model_runner and (
+            self.model_config is None
+            or self.model_config.hf_text_config.model_type != "qwen3_5_text"
+        ):
             raise ValueError(
-                "Triton ReplaySSM requires Model Runner V1; use "
-                "--mamba-backend flashinfer or Model Runner V1"
+                "Triton ReplaySSM with Model Runner V2 is currently supported "
+                "only for Qwen3.5 GDN; use Model Runner V1 for other models"
             )
         if (
             self.kv_transfer_config is not None

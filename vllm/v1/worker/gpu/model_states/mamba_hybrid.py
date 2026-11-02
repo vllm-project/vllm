@@ -42,11 +42,17 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    replayssm_decode_base_cpu: torch.Tensor | None = None
 
     def get_extra_common_attn_kwargs(
         self, kv_cache_group_id: int, num_reqs: int
     ) -> dict[str, Any]:
-        return {"is_prefilling": self.is_prefilling[:num_reqs]}
+        metadata = {"is_prefilling": self.is_prefilling[:num_reqs]}
+        if self.replayssm_decode_base_cpu is not None:
+            metadata["replayssm_decode_base_cpu"] = self.replayssm_decode_base_cpu[
+                :num_reqs
+            ]
+        return metadata
 
     def get_extra_attn_kwargs(
         self, attn_metadata_builder: Any, num_reqs: int
@@ -317,8 +323,18 @@ class MambaHybridModelState(DefaultModelState):
                 for group_idx, builder in aligned_index_builders:
                     builder.mamba_aligned_state_indices = all_group_indices[group_idx]
 
+        replayssm_decode_base_cpu = None
+        if self.cache_config.use_replayssm and not self.cache_config.use_kda_recoverssm:
+            # V2 gathers prefill_len in batch order and resets it on resumption.
+            # Pad capture rows so their ring positions cannot reuse stale inputs.
+            replayssm_decode_base_cpu = torch.zeros(num_reqs, dtype=torch.int32)
+            replayssm_decode_base_cpu[: input_batch.num_reqs] = torch.from_numpy(
+                input_batch.prefill_len_np
+            )
+
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
+            replayssm_decode_base_cpu=replayssm_decode_base_cpu,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
         )
