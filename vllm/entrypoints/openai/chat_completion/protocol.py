@@ -1242,6 +1242,22 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
                 "prompt cannot serve several conversations.",
                 parameter="kv_transfer_params.prompt_token_ids",
             )
+        messages = data.get("messages")
+        if (
+            isinstance(kv_transfer_params, dict)
+            and (
+                kv_transfer_params.get("do_remote_prefill")
+                or kv_transfer_params.get("do_remote_decode")
+            )
+            and isinstance(messages, list)
+            and len(messages) > 1
+        ):
+            raise VLLMValidationError(
+                "Batch chat completions with P/D `kv_transfer_params` take a "
+                "single conversation: one KV transfer cannot serve several "
+                "conversations.",
+                parameter="kv_transfer_params",
+            )
         response_format = data.get("response_format")
         if response_format is not None:
             rf_type = (

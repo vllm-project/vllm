@@ -676,6 +676,44 @@ async def test_completion_error_non_stream():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["do_remote_prefill", "do_remote_decode"])
+async def test_completion_pd_kv_transfer_rejects_several_prompts(flag):
+    """One P/D KV transfer covers one prompt. Rejecting a decode request
+    notifies the KV connector so the prefill's blocks are freed."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    mock_engine.notify_kv_transfer_request_rejected = AsyncMock()
+
+    async def mock_generate(*args, **kwargs):
+        yield _make_metrics_request_output()
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+    serving_completion = _build_serving_completion(mock_engine)
+    serving_completion.has_kv_connector = True
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["first prompt", "second prompt"],
+        max_tokens=5,
+        kv_transfer_params={flag: True},
+    )
+    response = await serving_completion.create_completion(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.param == "kv_transfer_params"
+    mock_engine.generate.assert_not_called()
+    if flag == "do_remote_prefill":
+        mock_engine.notify_kv_transfer_request_rejected.assert_awaited_once_with(
+            request.request_id, {flag: True}, data_parallel_rank=None
+        )
+    else:
+        mock_engine.notify_kv_transfer_request_rejected.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_openai_completion_keeps_mm_cache_for_engine_execution(
     monkeypatch: pytest.MonkeyPatch,
 ):

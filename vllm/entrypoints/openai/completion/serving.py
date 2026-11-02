@@ -144,6 +144,18 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         engine_inputs = result
 
+        kv_transfer_params = request.kv_transfer_params or {}
+        if len(engine_inputs) > 1 and (
+            kv_transfer_params.get("do_remote_prefill")
+            or kv_transfer_params.get("do_remote_decode")
+        ):
+            return self.create_error_response(
+                "Completions with P/D `kv_transfer_params` take a single "
+                f"prompt: one KV transfer cannot serve {len(engine_inputs)} "
+                "prompts.",
+                param="kv_transfer_params",
+            )
+
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
         created_time = int(time.time())
 
