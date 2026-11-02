@@ -7,7 +7,7 @@ from transformers import TokenizersBackend
 
 from vllm.renderers.chat_utils import ChatCompletionMessageParam
 
-from .deepseek_v4_encoding import encode_messages
+from .deepseek_v4_encoding import encode_messages, flatten_content_blocks
 from .hf import HfTokenizer, get_cached_tokenizer
 from .protocol import TokenizerLike
 
@@ -66,6 +66,45 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 drop_thinking=kwargs.get("drop_thinking", True),
                 reasoning_effort=reasoning_effort,
             )
+
+            if (
+                thinking_mode == "thinking"
+                and encode_config["drop_thinking"]
+                and not any(message.get("tools") for message in messages)
+            ):
+                # Tool results become user entries before history cleanup.
+                last_user_index = next(
+                    (
+                        index
+                        for index in range(len(messages) - 1, -1, -1)
+                        if messages[index]["role"] in ("user", "developer", "tool")
+                    ),
+                    -1,
+                )
+                prefix_end = next(
+                    (
+                        index
+                        for index, message in enumerate(messages)
+                        if message["role"] not in ("system", "developer")
+                    ),
+                    len(messages),
+                )
+                for index in range(min(prefix_end, last_user_index)):
+                    message = messages[index]
+                    content = flatten_content_blocks(message.get("content"))
+                    if message["role"] == "developer" and content:
+                        if index > 0:
+                            content = "\n\n" + content
+                        if (
+                            index + 1 < prefix_end
+                            and messages[index + 1]["role"] == "system"
+                        ):
+                            content += "\n\n"
+                        messages[index] = {
+                            **message,
+                            "role": "system",
+                            "content": content,
+                        }
 
             prompt_str = encode_messages(messages, **encode_config)  # type: ignore
 
