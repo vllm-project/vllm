@@ -458,6 +458,23 @@ def test_batch_rejects_kv_transfer_prompt_token_ids():
         )
 
 
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("flag", ["do_remote_prefill", "do_remote_decode"])
+def test_batch_rejects_pd_kv_transfer_for_several_conversations(flag):
+    """One P/D KV transfer covers one conversation."""
+    first = [{"role": "user", "content": "first"}]
+    second = [{"role": "user", "content": "second"}]
+    BatchChatCompletionRequest(
+        model="test-model", messages=[first], kv_transfer_params={flag: True}
+    )
+    with pytest.raises(VLLMValidationError, match="cannot serve several"):
+        BatchChatCompletionRequest(
+            model="test-model",
+            messages=[first, second],
+            kv_transfer_params={flag: True},
+        )
+
+
 @pytest.mark.asyncio
 @pytest.mark.skip_global_cleanup
 async def test_batched_parser_receives_each_prompt_prefix() -> None:
