@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Multimodal MoE model with gated delta networks architecture, 397B total / 17B active parameters, up to 262K context"
   date_added: 2026-02-16
-  date_updated: 2026-10-07
+  date_updated: 2026-10-29
   tasks:
     - multimodal
     - text
@@ -264,6 +264,57 @@ strategy_overrides:
     decode:
       env:
         VLLM_SSM_CONV_STATE_LAYOUT: "DS"
+
+presets:
+  b200_tp2_kv_offload:
+    label: "TP2 + KV offload (multi-turn agentic)"
+    hardware: b200
+    strategy: single_node_tp
+    variants: [nvfp4]
+    workload: "Multi-turn agentic coding, ~64k input, KV-reuse-bound (mean ITL under 20 ms)"
+    description: "One TP2 engine with expert parallelism on two of the node's eight B200 GPUs: MTP with three draft tokens, FP8 KV cache, float16 Mamba SSM cache, async scheduling, and a 160 GiB host KV tier so prefixes survive across turns; admission is capped at 48 sequences to hold mean ITL under 20 ms."
+    source: { label: "vLLM #64607", href: "https://github.com/vllm-project/vllm/pull/64607" }
+    image: "vllm/vllm-openai:v0.32.0"
+    tp: 2
+    select:
+      frontend: python
+      features: { spec_decoding: mtp, encoder_parallel: false }
+    args:
+      - "--enable-expert-parallel"
+      - "--async-scheduling"
+      - "--block-size"
+      - "64"
+      - "--mamba-ssm-cache-dtype"
+      - "float16"
+      - "--max-num-batched-tokens"
+      - "16384"
+      # Admission stays at 48 sequences so mean ITL holds under 20 ms up to 64 clients; the rest queue.
+      - "--max-num-seqs"
+      - "48"
+      # Qwen3.5 mixes Gated DeltaNet and attention layers; the hybrid manager keeps prefix caching across both.
+      - "--no-disable-hybrid-kv-cache-manager"
+      # vLLM sums --kv-offloading-size over the TP ranks: 80 GiB of host KV per rank.
+      - "--kv-offloading-backend"
+      - "native"
+      - "--kv-offloading-size"
+      - "160"
+    runbook: |
+      Measured by NVIDIA on vLLM v0.32.0 (`vllm/vllm-openai:v0.32.0`) on two B200 SXM 180 GB with a
+      942-request multi-turn agentic coding trace (about 64k mean input tokens, most prefix tokens
+      reused across turns, outputs capped at 12k tokens), replayed at fixed concurrency with real
+      MTP acceptance (mean acceptance length 3.2 to 3.3). Host: 512 GiB RAM and 200 GiB /dev/shm per
+      server for the 160 GiB offload tier.
+
+      | Concurrency | Output tok/s/GPU | Mean ITL | Mean TTFT |
+      |---|---:|---:|---:|
+      | 16 | 936 | 8.7 ms | 0.70 s |
+
+      Further concurrencies and the comparison against this recipe's baseline command on the same
+      image and trace are being collected and will follow in a separate update.
+
+      The 48-sequence cap trades time to first token for inter-token latency at 64 clients; raise
+      `--max-num-seqs` if TTFT matters more than ITL for your traffic. The offload tier only helps
+      workloads that revisit long prefixes; drop the `--kv-offloading-*` flags for single-turn traffic.
 
 guide: |
   ## Overview

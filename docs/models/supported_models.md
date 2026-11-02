@@ -748,6 +748,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `CanaryForConditionalGeneration` | Canary | `nvidia/canary-1b-v2` | | |
 | `CohereAsrForConditionalGeneration` | Cohere-Transcribe | `CohereLabs/cohere-transcribe-03-2026` | | |
 | `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
 | `FunASRForConditionalGeneration` | FunASR | `FunAudioLLM/Fun-ASR-Nano-2512-vllm`, etc. | | |
@@ -774,6 +775,13 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
     up to one hour, the model's training limit (`--limit-mm-per-prompt '{"audio": {"length": <samples>}}'`
     changes it), and `/v1/audio/transcriptions` splits longer audio into pieces of at most one hour, shorter
     when `--max-model-len` is below 65,536.
+
+    Audio tower: the FP8 and NVFP4 checkpoints quantize the linear layers of its ASR encoder to FP8 through
+    their `quantization_config`. FP8 encoder attention (`--mm-encoder-attn-dtype fp8`) is not supported and
+    raises an error when the model is built. The tower attends through vLLM's multimodal encoder attention
+    backend (FlashAttention on CUDA GPUs that support it; `--mm-encoder-attn-backend` selects another). In
+    bfloat16, its output can depend on that backend and on the other clips in the batch: small rounding
+    differences can flip the thresholded speaker features on some frames.
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.

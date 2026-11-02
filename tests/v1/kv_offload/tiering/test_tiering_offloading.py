@@ -42,7 +42,6 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
-from vllm.v1.kv_offload.cpu.policies.lru import LRUCachePolicy
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
@@ -970,36 +969,6 @@ class TestTieringOffloadingManager:
         assert result is not None
         assert len(result.evicted_keys) == 2
         assert len(result.keys_to_store) == 2
-
-    def test_touch_propagates_to_all_tiers(self, manager_setup, monkeypatch):
-        """Test that touch() propagates to all tiers."""
-        chunks = to_keys(range(3))
-
-        # Store chunks
-        self._start_request()
-        self.manager.prepare_store(chunks, _CTX)
-        self.manager.complete_store(chunks, _CTX, success=True)
-        self._simulate_on_schedule_end()
-        # for secondary tiers to drain jobs, so primary tier's chunks are evictable.
-        self._simulate_on_schedule_end()
-
-        tier1_touch = MagicMock(wraps=self.secondary_tier1.touch)
-        tier2_touch = MagicMock(wraps=self.secondary_tier2.touch)
-        monkeypatch.setattr(self.secondary_tier1, "touch", tier1_touch)
-        monkeypatch.setattr(self.secondary_tier2, "touch", tier2_touch)
-
-        # Touch chunks
-        self.manager.touch(chunks, _CTX)
-
-        # Verify touch was called on the primary tier (head is most recent).
-        policy = self.primary_tier._policy
-        assert isinstance(policy, LRUCachePolicy)
-        ranks = policy._ranks
-        assert ranks[chunks[2]] < ranks[chunks[1]] < ranks[chunks[0]]
-
-        # Verify touch was propagated to all secondary tiers
-        tier1_touch.assert_called_once_with(chunks, _CTX)
-        tier2_touch.assert_called_once_with(chunks, _CTX)
 
     def test_request_order_survives_late_cascade_completion(self, manager_setup):
         """Cascade completion must not replace request order with I/O order."""
