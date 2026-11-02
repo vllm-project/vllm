@@ -226,11 +226,13 @@ def test_varlen_with_paged_kv(
 )
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@pytest.mark.parametrize("num_splits", [1, 4])
 @torch.inference_mode()
 def test_fa4_hd256_paged_call_shape(
     seq_lens: list[tuple[int, int]],
     num_heads: tuple[int, int],
     sliding_window: int | None,
+    num_splits: int,
 ) -> None:
     """Handles excess block-table columns with page-aligned ``max_seqlen_k``."""
     from vllm.v1.attention.backends.fa_utils import FA4_HD256_PAGE_SIZE
@@ -276,7 +278,7 @@ def test_fa4_hd256_paged_call_shape(
         causal=True,
         window_size=list(window_size),
         block_table=block_tables[:, :num_pages],
-        num_splits=1,
+        num_splits=num_splits,
         fa_version=4,
     )
     ref_output = ref_paged_attn(

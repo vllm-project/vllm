@@ -178,7 +178,7 @@ class FA4DenseAttentionKernel(VllmJitKernel["FA4DenseAttentionKernel.CompileKey"
         ):
             q_stages = WarmupChoices(1, 2)
             single_batches = WarmupChoices(True, False)
-            split_counts = WarmupChoices(1)
+            split_counts = WarmupChoices(1, 2)
         elif (
             major == 9 and head_dim == 512 and window_size == (-1, -1) and softcap == 0
         ):
@@ -1412,12 +1412,11 @@ class FlashAttentionImpl(AttentionImpl):
 
             num_splits = attn_metadata.max_num_splits
             if self.fa4_hd256:
-                # hd256 requires page-aligned lengths, exact-width block
-                # tables, and no SplitKV.
+                # hd256 requires page-aligned lengths and exact-width block
+                # tables.
                 num_pages = cdiv(max_seqlen_k, FA4_HD256_PAGE_SIZE)
                 max_seqlen_k = num_pages * FA4_HD256_PAGE_SIZE
                 block_table = block_table[:, :num_pages]
-                num_splits = 1
 
             _FA4_DENSE_ATTENTION_KERNEL(
                 q=query[:num_actual_tokens],
@@ -1724,8 +1723,7 @@ class FlashAttentionImpl(AttentionImpl):
             else None,
             k_descale=layer._k_scale.expand(descale_shape),  # type: ignore[operator]
             v_descale=layer._v_scale.expand(descale_shape),  # type: ignore[operator]
-            # The hd256 kernel does not support SplitKV.
-            num_splits=1 if self.batch_invariant_enabled or self.fa4_hd256 else 0,
+            num_splits=1 if self.batch_invariant_enabled else 0,
             s_aux=self.sinks,
         )
 
