@@ -4,11 +4,15 @@
 from http import HTTPStatus
 
 from fastapi import APIRouter, FastAPI, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
+import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
+from vllm.logger import init_logger
 from vllm.v1.engine import CheckpointState, PauseMode
+
+logger = init_logger(__name__)
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -16,6 +20,7 @@ def engine_client(request: Request) -> EngineClient:
 
 
 router = APIRouter()
+dev_router = APIRouter()
 
 
 class CheckpointStateResponse(BaseModel):
@@ -100,3 +105,37 @@ async def checkpoint_status(raw_request: Request):
 
 def attach_router(app: FastAPI):
     app.include_router(router)
+
+
+@dev_router.post("/suspend")
+async def suspend(raw_request: Request):
+    mode = raw_request.query_params.get("mode", "abort")
+    if mode not in ("abort", "wait", "keep"):
+        return JSONResponse(
+            status_code=400,
+            content={
+                "error": f"Invalid suspend mode '{mode}'. "
+                "Must be one of 'abort', 'wait', 'keep'."
+            },
+        )
+    logger.info("Suspending engine with mode: %s", mode)
+    await engine_client(raw_request).suspend(mode)
+    return Response(status_code=200)
+
+
+@dev_router.post("/resume")
+async def resume(raw_request: Request):
+    logger.info("Resuming engine from checkpoint suspend.")
+    await engine_client(raw_request).resume()
+    return Response(status_code=200)
+
+
+@dev_router.get("/is_suspended")
+async def is_suspended(raw_request: Request):
+    is_suspended = await engine_client(raw_request).is_checkpoint_suspended()
+    return JSONResponse(content={"is_suspended": is_suspended})
+
+
+def attach_dev_router(app: FastAPI):
+    if envs.VLLM_SERVER_DEV_MODE:
+        app.include_router(dev_router)

@@ -220,6 +220,21 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
+    async def suspend(self, mode: "PauseMode" = "abort") -> None:
+        """Suspend the engine using CUDA checkpoint"""
+        ...
+
+    @abstractmethod
+    async def resume(self) -> None:
+        """Resume the engine from CUDA checkpoint suspend"""
+        ...
+
+    @abstractmethod
+    async def is_checkpoint_suspended(self) -> bool:
+        """Check whether the engine is checkpoint-suspended"""
+        ...
+
+    @abstractmethod
     async def checkpoint_prepare(self, mode: "PauseMode" = "wait") -> str | None:
         """Drain with `mode`, then release what a checkpoint must not contain.
         Returns why the engine cannot prepare, with nothing changed, or None."""
