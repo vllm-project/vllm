@@ -4,6 +4,7 @@
 import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
+from dataclasses import replace
 from typing import Annotated, Literal
 
 import pytest
@@ -803,6 +804,11 @@ def test_numa_bind_args():
     assert engine_args.numa_bind_nodes == [0, 0, 1, 1]
     assert engine_args.numa_bind_cpus == ["0-3", "4-7", "8-11", "12-15"]
 
+    # Unset means auto; --no-numa-bind disables explicitly.
+    assert EngineArgs.from_cli_args(args=parser.parse_args([])).numa_bind is None
+    args = parser.parse_args(["--no-numa-bind"])
+    assert EngineArgs.from_cli_args(args=args).numa_bind is False
+
 
 def test_ir_op_priority():
     from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
@@ -819,6 +825,27 @@ def test_ir_op_priority():
             ir_op_priority=ir_op_priority,
             kernel_config=KernelConfig(ir_op_priority=ir_op_priority),
         ).create_engine_config()
+
+
+def test_ir_op_priority_deprecation_warning(caplog_vllm, disable_log_dedup):
+    """Setting ir_op_priority warns users because vLLM IR is being removed."""
+    from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
+
+    msg = "ir_op_priority (--ir-op-priority) is deprecated"
+
+    # Platform defaults fill ir_op_priority; copying the config must not warn.
+    cfg = EngineArgs().create_engine_config()
+    replace(cfg.kernel_config, moe_backend="triton")
+    assert msg not in caplog_vllm.text
+
+    ir_op_priority = IrOpPriorityConfig(rms_norm=["vllm_c"])
+    EngineArgs(ir_op_priority=ir_op_priority).create_engine_config()
+    assert msg in caplog_vllm.text
+
+    caplog_vllm.clear()
+    kernel_config = KernelConfig(ir_op_priority=ir_op_priority)
+    EngineArgs(kernel_config=kernel_config).create_engine_config()
+    assert msg in caplog_vllm.text
 
 
 @pytest.mark.parametrize(

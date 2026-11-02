@@ -3,13 +3,16 @@ meta:
   slug: "qwen3.8-flash-next"
   provider: "Qwen"
   description: "Qwen4 architecture preview with a 125B-parameter main model, supplemented by an additional 51B N-gram embeddings, with 6B parameters activated per token."
-  date_updated: 2026-10-13
+  date_added: 2026-08-26
+  date_updated: 2026-10-27
   tasks:
     - multimodal
     - text
   performance_headline: "Qwen4 architecture preview with 6B active parameters and efficient 262K context"
   related_recipes:
     - "Qwen/Qwen3-Next-80B-A3B-Instruct"
+  default_variant:
+    mi355x: mxfp4
   hardware:
     h200: verified
     h100: verified
@@ -84,6 +87,8 @@ opt_in_features:
 hardware_opt_in_features:
   rtx_pro_6000_4x:
     - spec_decoding
+  mi355x:
+    - spec_decoding
 
 variants:
   default:
@@ -153,6 +158,24 @@ variants:
     precision: bf16
     vram_minimum_gb: 423
     description: "Official BF16 checkpoint"
+  mxfp4:
+    model_id: "amd/Qwen3.8-Flash-Next-Quark-MXFP4"
+    precision: mxfp4
+    label: "MXFP4 (AMD)"
+    vram_minimum_gb: 219
+    description: "AMD Quark MXFP4 checkpoint with MXFP4 routed experts, for MI355X"
+    supported_hardware: [mi355x]
+    tp:
+      mi355x: 2
+    hardware_overrides:
+      mi355x:
+        extra_args:
+          - "--gdn-prefill-backend"
+          - "aiter_flydsl"
+        extra_env:
+          VLLM_ROCM_USE_AITER: "1"
+          VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+          AITER_USE_FLYDSL_MOE_SORTING: "1"
 
 # TP+EP is the default deployment; it benchmarks consistently faster than
 # plain TP for this model, which stays offered as an alternative.
@@ -189,6 +212,25 @@ strategy_overrides:
   single_node_tp:
     tp: 4
 
+notes:
+  - title: "MTP is off by default on MI355X"
+    when: { hardware: [mi355x] }
+    body: |
+      Speculative decoding with MTP is opt-in on MI355X. The MXFP4 checkpoint
+      can't load its MTP module until
+      [its config.json fix](https://huggingface.co/amd/Qwen3.8-Flash-Next-Quark-MXFP4/discussions/1)
+      is merged. FP8 and BF16 can still turn MTP on with the speculative
+      decoding toggle.
+
+troubleshooting:
+  - title: "Timed out waiting for engine core processes to start"
+    when: { variants: [mxfp4] }
+    body: |
+      On nodes with slow weight loading, a cold TP2 start of the MXFP4
+      checkpoint can take longer than the 600 s default ready timeout. On the
+      validation node each TP2 rank took 380–450 s to load its weights. Raise
+      the limit with `VLLM_ENGINE_READY_TIMEOUT_S=1800`.
+
 guide: |
   ## Overview
 
@@ -224,6 +266,8 @@ guide: |
     (288 GB HBM3e).
   - **BF16 memory:** the checkpoint is 335.28 GiB. The validated TP2 configuration
     used about 190 GiB per GB300 GPU.
+  - **MXFP4 memory:** the AMD Quark MXFP4 checkpoint is 169.8 GiB; it fits on a
+    single MI355X GPU (288 GB HBM3E).
   - **Host memory for N-gram Embedding offload:** at least 51 GB plus
     runtime headroom.
 
@@ -314,6 +358,40 @@ guide: |
 
   Benchmark MTP with SPEED-Bench (`--dataset-name speed_bench`), not `random`.
 
+  ### MXFP4 on MI355X
+
+  On MI355X, the MXFP4 variant serves AMD's
+  [`amd/Qwen3.8-Flash-Next-Quark-MXFP4`](https://huggingface.co/amd/Qwen3.8-Flash-Next-Quark-MXFP4)
+  checkpoint, which quantizes the routed experts to MXFP4 with AMD Quark. The
+  variant sets:
+
+  - `VLLM_ROCM_USE_AITER=1`, which turns on the AITER kernels.
+  - `VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`, which fuses the shared
+    expert into the routed-expert MoE kernel.
+  - `AITER_USE_FLYDSL_MOE_SORTING=1`, which sorts MoE tokens with a FlyDSL
+    kernel.
+  - `--gdn-prefill-backend aiter_flydsl`, which runs Gated DeltaNet prefill
+    with a FlyDSL kernel.
+
+  The default deployment is TEP8, and the TP strategy runs TP2. The checkpoint
+  also fits on a single MI355X (288 GB HBM3E), so TP1 with the same flags
+  serves one replica per GPU; the builder offers one TP size per variant, so
+  set `--tensor-parallel-size 1` yourself. TP2 leaves more memory for KV cache
+  and gives slightly lower per-token latency; TP1 gives more throughput per
+  GPU.
+
+  Validated on `vllm/vllm-openai-rocm:nightly-83c078d955cd6e0c63d3b12abe669c8de936a370`
+  with the builder's TEP8 and TP2 commands, and TP1 as the TP2 command with
+  `--tensor-parallel-size 1`. GSM8K is 5-shot over 1,319 questions through
+  chat completions with thinking off; throughput uses random 8k-token prompts
+  and 1k-token outputs.
+
+  | MXFP4 on MI355X | GSM8K | Output tok/s, concurrency 8 / 32 |
+  | --- | --- | --- |
+  | TEP8 | 0.965 | 665 / 1831 |
+  | TP2 | 0.967 | 801 / 1384 |
+  | TP1 | 0.967 | 751 / 1282 |
+
   ### FP8 configuration on a 4x MI355X GPU
   ```bash
   export VLLM_ROCM_USE_AITER=1
@@ -322,9 +400,11 @@ guide: |
   vllm serve Qwen/Qwen3.8-Flash-Next-FP8 \
   --tensor-parallel-size 4 \
   --max-model-len auto \
-  --gpu-memory-utilization 0.9 \
-  --speculative-config '{"method":"mtp","num_speculative_tokens":3}'
+  --gpu-memory-utilization 0.9
   ```
+
+  MTP is opt-in on MI355X; to turn it on, add the option from the MTP
+  speculative decoding section below.
 
   ### Full native context
 
