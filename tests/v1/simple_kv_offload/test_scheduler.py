@@ -11,6 +11,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from tests.v1.spec_decode.utils import attach_speculator_config
 from vllm import SamplingParams
 from vllm.config import (
     CacheConfig,
@@ -62,6 +63,10 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 from vllm.v1.simple_kv_offload.manager import SimpleCPUOffloadScheduler
 from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadWorkerMetadata
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
+from vllm.v1.worker.gpu.spec_decode.multi_module_mtp.config import (
+    MultiModuleMTPSpeculatorConfig,
+)
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -3494,6 +3499,12 @@ def test_eager_store_matches_gpu_cacheable_prefix(
     speculative_config.use_eagle.return_value = True
     speculative_config.use_eagle_block_drop.return_value = True
     speculative_config.use_multi_module_mtp.return_value = prefill_lookahead > 1
+    attach_speculator_config(
+        speculative_config,
+        MultiModuleMTPSpeculatorConfig
+        if prefill_lookahead > 1
+        else MTPSpeculatorConfig,
+    )
     vllm_config.speculative_config = speculative_config
     scheduler = SimpleCPUOffloadScheduler(
         vllm_config=vllm_config,

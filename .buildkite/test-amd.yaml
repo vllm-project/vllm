@@ -1570,8 +1570,6 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 #----------------------------------------------------  mi300 · models / multimodal  ----------------------------------------------------#
@@ -4160,6 +4158,8 @@ steps:
   - vllm/v1/kv_offload/
   - vllm/v1/simple_kv_offload/
   - tests/evals/gsm8k/test_gsm8k_offloading.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - tests/v1/kv_connector/umbp_test_utils.py
   - vllm/platforms/rocm.py
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it"
@@ -4559,11 +4559,11 @@ steps:
     --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
-- label: ":amd: (MI355 DPX) MoE Kernels Shard %N" # TBD
+- label: ":amd: (MI355) MoE Kernels Shard %N" # TBD
   timeout_in_minutes: 55
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
-  agent_pool: mi355_dpx
+  agent_pool: mi355_1
   parallelism: 5
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -4838,7 +4838,7 @@ steps:
   - tests/models/test_hyv4_rocm.py
   - tests/models/test_vision.py
   - tests/models/test_deepseek_v4_vl_rocm.py
-  - tests/models/test_deepseek_v4_vl_stream_weights.py
+  - tests/models/test_deepseek_v4_vl.py
   commands:
   - >-
     pytest -v -s
@@ -4846,7 +4846,7 @@ steps:
     models/transformers/test_backend.py
     models/test_registry.py
     models/test_deepseek_v4_vl_rocm.py
-    models/test_deepseek_v4_vl_stream_weights.py
+    models/test_deepseek_v4_vl.py
   - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
   - pytest -v -s models/test_vision.py::test_simple_mrope_vision_model_spatial_merge
 
@@ -4869,6 +4869,34 @@ steps:
     models/qwen4_exp/test_qsa_prepare_amd.py
   # PLE and QSA import conflicting HC registrations in a shared process.
   - pytest -v -s models/qwen4_exp/test_ple.py
+
+- label: ":amd: (MI355 DPX) Step5"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_dpx
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/models/step5/
+  - tests/models/step5/
+  - vllm/model_executor/models/step3p7.py
+  - vllm/model_executor/models/step3_vl.py
+  - vllm/model_executor/models/step_vl.py
+  - vllm/config/compilation.py
+  - vllm/model_executor/layers/indexer_topk.py
+  - vllm/transformers_utils/configs/step5.py
+  - vllm/model_executor/warmup/step5_dsa_warmup.py
+  - vllm/v1/attention/backends/rocm_aiter_unified_attn.py
+  - vllm/triton_utils/
+  - vllm/platforms/rocm.py
+  - tests/v1/attention/utils.py
+  - tests/models/test_initialization.py
+  - tests/models/registry.py
+  commands:
+  - pytest -v -s models/step5
+  - pytest -v -s models/test_initialization.py -k Step5ForConditionalGeneration
 
 - label: ":amd: (MI355 DPX) GLM5Next"
   timeout_in_minutes: 35
@@ -4970,11 +4998,6 @@ steps:
   - vllm/
   - tests/models/language/generation
   commands:
-  - export GIT_CONFIG_COUNT=1
-  - export GIT_CONFIG_KEY_0=http.version
-  - export GIT_CONFIG_VALUE_0=HTTP/1.1
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'not granite-4.0-tiny-preview' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: ":amd: (MI355 DPX) Granite Language Model Compatibility"
@@ -4990,11 +5013,6 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/language/generation
   commands:
-  - export GIT_CONFIG_COUNT=1
-  - export GIT_CONFIG_KEY_0=http.version
-  - export GIT_CONFIG_VALUE_0=HTTP/1.1
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m hybrid_model -k 'granite-4.0-tiny-preview'
 
 - label: ":amd: (MI355 DPX) Language Models (Extended Generation)" # TBD
@@ -5008,8 +5026,6 @@ steps:
   - tests/models/language/generation
   optional: true
   commands:
-  - MAMBA_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@rocm-7.0-v2.3.0'
-  - CAUSAL_CONV1D_FORCE_BUILD=TRUE uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: ":amd: (MI355 DPX) Language Models (Extended Pooling) Shard %N"
@@ -5600,6 +5616,9 @@ steps:
   - vllm/v1/kv_cache_interface.py
   - tests/v1/kv_connector/unit/test_umbp_
   - tests/v1/kv_connector/umbp_test_utils.py
+  - tests/v1/kv_connector/unit/utils.py
+  - tests/v1/kv_connector/conftest.py
+  - docker/Dockerfile.rocm_base
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   # Fail loudly instead of skipping every test if the image lacks mori.
@@ -5799,6 +5818,26 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -m 'not distributed' tests/v1/kv_connector/extract_hidden_states_integration
+
+- label: ":amd: (MI355 DPX) UMBP Connector Integration"
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_dpx
+  num_gpus: 1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - tests/v1/kv_connector/umbp_integration/
+  - tests/v1/kv_connector/umbp_test_utils.py
+  - tests/v1/kv_connector/conftest.py
+  - tests/v1/kv_connector/rocm_pd_accuracy_utils.py
+  - docker/Dockerfile.rocm_base
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/umbp_integration
 
 - label: ":amd: (MI355 DPX) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 125

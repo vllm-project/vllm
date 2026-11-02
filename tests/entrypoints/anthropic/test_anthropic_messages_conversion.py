@@ -405,6 +405,37 @@ class TestToolResultContent:
             "https://example.com/img2.jpg",
         ]
 
+    def test_tool_result_with_tool_references(self):
+        """A tool_result with tool_reference items stays one tool message, with
+        the references first, so templates pair one result with one call."""
+        request = self._make_tool_result_request(
+            [
+                {"type": "text", "text": "2 tools found"},
+                {"type": "tool_reference", "tool_name": "get_weather"},
+                {"type": "tool_reference", "tool_name": "get_time"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "AAAA",
+                    },
+                },
+            ]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == ["assistant", "tool", "user"]
+        assert result.messages[1] == {
+            "role": "tool",
+            "tool_call_id": "call_001",
+            "content": [
+                {"type": "tool_reference", "name": "get_weather"},
+                {"type": "tool_reference", "name": "get_time"},
+                {"type": "text", "text": "2 tools found"},
+            ],
+        }
+
     def test_tool_result_none_content(self):
         request = self._make_tool_result_request(None)
         result = _convert(request)
@@ -1957,6 +1988,44 @@ class TestClientErrorResponses:
 
         assert response.status_code == HTTPStatus.BAD_REQUEST
         assert response.json()["error"]["type"] == "invalid_request_error"
+
+
+# ======================================================================
+# tool definitions
+# ======================================================================
+
+
+class TestToolDefinitions:
+    @pytest.mark.parametrize(
+        "tool",
+        [
+            {"type": "web_search_20250305", "name": "web_search", "max_uses": 8},
+            {"type": "bash_20250124", "name": "bash"},
+        ],
+    )
+    def test_anthropic_defined_tool_is_rejected_by_type(self, tool):
+        with pytest.raises(ValidationError) as exc_info:
+            _make_request([{"role": "user", "content": "Hi"}], tools=[tool])
+
+        errors = exc_info.value.errors()
+        assert len(errors) == 1
+        assert f"{tool['type']!r} is not supported" in errors[0]["msg"]
+
+    @pytest.mark.parametrize("extra", [{}, {"type": "custom"}])
+    def test_custom_tool_is_accepted(self, extra):
+        request = _make_request(
+            [{"role": "user", "content": "Hi"}],
+            tools=[{"name": "get_weather", "input_schema": {}, **extra}],
+        )
+        assert request.tools is not None
+        assert request.tools[0].input_schema == {"type": "object"}
+
+    def test_custom_tool_still_requires_input_schema(self):
+        with pytest.raises(ValidationError, match="input_schema"):
+            _make_request(
+                [{"role": "user", "content": "Hi"}],
+                tools=[{"type": "custom", "name": "get_weather"}],
+            )
 
 
 # ======================================================================
