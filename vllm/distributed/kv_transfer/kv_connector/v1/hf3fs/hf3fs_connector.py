@@ -353,13 +353,33 @@ class AsyncOperationManager:
         request_id, block_ids, block_hashes, future = task
         start_time = time.perf_counter()
         buffers = None
+        leased = False
+
+        def release_leases() -> None:
+            """Release the leases once; a failed release expires on its own."""
+            nonlocal leased
+            if not leased:
+                return
+            # Clear the flag first: retrying after a failed RPC could drop a
+            # lease another reader has since taken on the same key.
+            leased = False
+            try:
+                self._connector._metadata_client.release_keys(self._rank, block_hashes)
+            except Exception as release_error:  # pragma: no cover - best effort
+                logger.warning("Failed to release page leases: %s", release_error)
+
         try:
-            # Step1: Get block locations from metadata server
-            page_indices = self._connector._metadata_client.get_key_locations(
+            # Step1: Get block locations from the metadata server. Acquire also
+            # leases the keys so that eviction cannot recycle these pages while
+            # they are being read; an abandoned lease expires on its own.
+            locations = self._connector._metadata_client.acquire_keys(
                 self._rank, block_hashes
             )
+            leased = True
+            page_indices = [locations.get(hash_val) for hash_val in block_hashes]
 
             if any(idx is None for idx in page_indices):
+                release_leases()
                 return self._fail_task("Loaded", "Blocks not found", request_id, future)
 
             # Allocate read buffer
@@ -393,9 +413,13 @@ class AsyncOperationManager:
 
             if not read_success:
                 self._load_buffer_allocator.free_buffer(buffers)
+                release_leases()
                 return self._fail_task(
                     "Loaded", "Read operation failed", request_id, future
                 )
+
+            # The data is in host buffers now; the pages may be recycled.
+            release_leases()
 
             # Step3: Scatter data back to KV cache
             with torch.cuda.stream(self._load_stream):
@@ -410,6 +434,7 @@ class AsyncOperationManager:
             )
 
         except Exception as e:
+            release_leases()
             if buffers is not None:
                 self._load_buffer_allocator.free_buffer(buffers)
             return self._fail_task(
