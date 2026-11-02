@@ -24,7 +24,7 @@ pub use output::{
 };
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
-use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::EngineClient;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
@@ -197,7 +197,7 @@ impl TextLlm {
     pub fn new(llm: Llm, backend: DynTextBackend) -> Self {
         // The engine-reported value reflects the post-profiling, auto-fitted
         // KV cache limit used at runtime.
-        let max_model_len = llm.engine_core_client().max_model_len();
+        let max_model_len = llm.engine_client().max_model_len();
 
         Self {
             llm,
@@ -224,8 +224,8 @@ impl TextLlm {
 
     /// Expose the underlying engine-core client for low-level utility/admin
     /// calls.
-    pub fn engine_core_client(&self) -> &EngineCoreClient {
-        self.llm.engine_core_client()
+    pub fn engine_client(&self) -> &dyn EngineClient {
+        self.llm.engine_client()
     }
 
     /// Return the text request processor.

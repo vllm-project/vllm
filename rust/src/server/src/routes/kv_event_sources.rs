@@ -16,7 +16,7 @@ pub async fn kv_event_sources(
 ) -> Json<BTreeMap<u32, KvEventsConfig>> {
     Json(
         state
-            .engine_core_client()
+            .engine_client()
             .ready_responses()
             .into_iter()
             .filter_map(|ready| Some((ready.data_parallel_rank, ready.kv_events_config.clone()?)))

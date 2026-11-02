@@ -43,7 +43,7 @@ fn state_response(
 
 async fn current_state(state: &AppState) -> Result<(CheckpointState, Option<String>), ApiError> {
     state
-        .engine_core_client()
+        .engine_client()
         .checkpoint_state()
         .await
         .map_err(|error| utility_call_error("checkpoint_state", error))
@@ -62,7 +62,7 @@ pub async fn prepare(
     match checkpoint_state {
         CheckpointState::Running => {
             if let Some(refusal) = state
-                .engine_core_client()
+                .engine_client()
                 .checkpoint_prepare(params.mode)
                 .await
                 .map_err(|error| utility_call_error("checkpoint_prepare", error))?
@@ -90,7 +90,7 @@ pub async fn restore(State(state): State<Arc<AppState>>) -> CheckpointResult {
         }
         CheckpointState::Prepared => {
             state
-                .engine_core_client()
+                .engine_client()
                 .checkpoint_restore()
                 .await
                 .map_err(|error| utility_call_error("checkpoint_restore", error))?;

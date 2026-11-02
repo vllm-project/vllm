@@ -42,7 +42,7 @@ pub async fn get_world_size(
     State(state): State<Arc<AppState>>,
     Query(params): Query<WorldSizeParams>,
 ) -> Result<Json<WorldSizeResponse>, ApiError> {
-    let client = state.engine_core_client();
+    let client = state.engine_client();
 
     let ws = client.world_size();
 
