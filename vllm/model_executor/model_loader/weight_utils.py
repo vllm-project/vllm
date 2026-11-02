@@ -207,6 +207,9 @@ def get_quant_config(
         QuantizationConfigArgs,
         resolve_quantization_config,
     )
+    from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+        CompressedTensorsConfig,
+    )
     from vllm.model_executor.layers.quantization.modelopt import (
         ModelOptQuantConfigBase,
     )
@@ -231,7 +234,7 @@ def get_quant_config(
         return checkpoint_config
 
     def make_checkpoint_config(config: dict[str, Any]) -> QuantizationConfig:
-        if issubclass(quant_cls, ModelOptQuantConfigBase):
+        if issubclass(quant_cls, (ModelOptQuantConfigBase, CompressedTensorsConfig)):
             assert online_args is None or isinstance(
                 online_args, QuantizationConfigArgs
             )

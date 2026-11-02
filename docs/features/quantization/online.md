@@ -97,6 +97,14 @@ checkpoints (gpt-oss) where you can opt into FP8 activations:
 vllm serve openai/gpt-oss-20b --quantization-config.moe.activation mxfp8
 ```
 
+For NVFP4 MoE checkpoints (ModelOpt and compressed-tensors), `nvfp4_per_token`
+computes the activation global scale per token at runtime instead of using the
+checkpoint's static input scale. It runs on the FlashInfer TRT-LLM MoE backend:
+
+```bash
+vllm serve RedHatAI/Qwen3-30B-A3B-NVFP4 --quantization-config.moe.activation nvfp4_per_token
+```
+
 Combine with `--moe-backend` to pin a specific kernel family.
 
 For MXFP4 linear layers on RDNA3/RDNA3.5 (gfx11), `int8_per_group_32` selects
