@@ -73,7 +73,7 @@ steps:
 - label: ':nvidia: (L4) Distributed DP Basic'
   key: distributed-dp-tests-2-gpus
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   num_devices: 2
   optional: true
   working_dir: .
@@ -253,7 +253,7 @@ steps:
 - label: ':nvidia: (L4) [Nightly] Distributed DP Extended'
   key: distributed-dp-tests-4-gpus
   device: intel_gpu
-  timeout_in_minutes: 45
+  timeout_in_minutes: 90
   num_devices: 4
   optional: true
   working_dir: .

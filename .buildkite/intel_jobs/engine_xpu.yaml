@@ -128,7 +128,7 @@ steps:
     'cd tests &&
     pytest --continue-on-collection-errors -v -s v1/e2e/general/test_async_scheduling_accuracy.py || true'
 - label: ':nvidia: (H200 MIG 18GB) E2E Core'
-  key: e2e-core-1-gpu
+  key: e2e-core-1-gpu-xpu
   device: intel_gpu
   timeout_in_minutes: 65
   optional: true
