@@ -75,6 +75,8 @@ def _small_config():
 def _generate(model_path, output_path, pcp, tp=1, ep=False):
     from vllm import LLM, SamplingParams
 
+    config = json.loads((Path(model_path) / "config.json").read_text())
+    moe_backend = "triton_unfused" if config["expert_dtype"] == "fp4" else "triton"
     llm = LLM(
         model=model_path,
         load_format="dummy",
@@ -91,7 +93,7 @@ def _generate(model_path, output_path, pcp, tp=1, ep=False):
         gpu_memory_utilization=0.2,
         kv_cache_dtype="fp8_ds_mla",
         attention_config={"backend": "FLASHMLA_SPARSE"},
-        kernel_config={"moe_backend": "triton"},
+        kernel_config={"moe_backend": moe_backend},
     )
     lengths = [3, 4, 5, 7, 8, 9, 127, 128, 129, 513, 2305]
     prompts = [{"prompt_token_ids": [10 + i % 100 for i in range(n)]} for n in lengths]
