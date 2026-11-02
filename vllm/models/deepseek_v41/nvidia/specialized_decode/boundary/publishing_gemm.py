@@ -460,11 +460,17 @@ class PublishingMxfp8Linear:
         self._compiled: dict[tuple[Tactic, int], object] = {}
 
     def supports(self, linear: torch.nn.Module, num_tokens: int) -> bool:
-        """Whether ``linear`` on ``num_tokens`` rows runs the publishing GEMM."""
+        """Whether ``linear`` on ``num_tokens`` rows runs the publishing GEMM.
+        It publishes into the LL mailbox, so it takes no call of the all-reduce's
+        BT sizes."""
+        all_reduce = self.all_reduce
+        max_rows = min(
+            LOW_BATCH_MAX_ROWS, all_reduce.capacity, all_reduce.bt_min_rows - 1
+        )
         return (
             mxfp8_eligible(linear)
-            and 0 < num_tokens <= min(LOW_BATCH_MAX_ROWS, self.all_reduce.capacity)
-            and linear.weight.shape[1] == self.all_reduce.hidden_size
+            and 0 < num_tokens <= max_rows
+            and linear.weight.shape[1] == all_reduce.hidden_size
             and getattr(linear, "bias", None) is None
         )
 

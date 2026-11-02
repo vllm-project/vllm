@@ -44,11 +44,10 @@ from ...flashinfer_sparse import DeepseekV4FlashInferMLAAttention
 from .. import (
     FUSED_MHC_MAX_ROWS,
     LOW_BATCH_MAX_ROWS,
-    MHC_OVERLAP_MAX_ROWS,
     DecodeConfig,
     uses_checked_flashinfer,
 )
-from ..attention.indexer import OVERLAP_MAX_ROWS, CandidateOverlap
+from ..attention.indexer import CandidateOverlap
 from ..attention.sparse_mla import SparseIndexTables, SparseMlaDecode
 from ..attention.step import AttentionStep
 from ..boundary.boundary import Boundaries, BoundaryState
@@ -61,28 +60,23 @@ if TYPE_CHECKING:
 
     from ...model import DeepseekV4DecoderLayer, DeepseekV4Model
 
-# Most rows of a step whose Engram WKV runs ahead of the layers.
-ENGRAM_PREFETCH_MAX_ROWS = 16
-
 DecodeOutput: TypeAlias = torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]
+
+# The executor's all-gather takes up to this much a rank, the custom
+# all-gather's limit at TP4, so the logits gather keeps its sizes: up to 32
+# FP32 (64 BF16) rows of a 129,280-token vocabulary. Larger ones take NCCL.
+ALL_GATHER_RANK_BYTES = 4 << 20
 
 
 class DecodeStep(NamedTuple):
     """The host-side gates of one captured decode step, by its rows."""
 
     rows: int
-    # The next mHC coefficients and aux means run on the mHC side stream;
-    # otherwise inline after the fused all-reduce + mHC.
-    side_stream: bool
     # The low-batch GEMMs: routed experts, MXFP8 projections, ll_bf16 side
     # projections, publishing wo_b.
     low_batch: bool
     # The attention side projections run on aux streams.
     overlap_inputs: bool
-    # The candidate source forks the consumers' candidate expansion.
-    overlap_candidates: bool
-    # The Engram WKV runs ahead of the layers.
-    engram_prefetch: bool
     executor: "SpecializedDecode"
 
     def run(
@@ -92,10 +86,18 @@ class DecodeStep(NamedTuple):
         input_ids: torch.Tensor | None,
         engram_hashes: torch.Tensor | None,
         engram_mask: torch.Tensor | None,
+        streams: torch.Tensor | None = None,
     ) -> DecodeOutput:
-        """The backbone's output after its embedding."""
+        """The backbone's output after its embedding (and, from the
+        executor's ``embedding``, the embedding's hc ``streams``)."""
         return self.executor.run(
-            self, hidden_states, positions, input_ids, engram_hashes, engram_mask
+            self,
+            hidden_states,
+            positions,
+            input_ids,
+            engram_hashes,
+            engram_mask,
+            streams=streams,
         )
 
 
@@ -103,11 +105,8 @@ def step_gates(rows: int, executor: "SpecializedDecode") -> DecodeStep:
     """The step of ``rows`` rows (0 < rows <= ``FUSED_MHC_MAX_ROWS``)."""
     return DecodeStep(
         rows=rows,
-        side_stream=rows <= MHC_OVERLAP_MAX_ROWS,
         low_batch=rows <= LOW_BATCH_MAX_ROWS,
         overlap_inputs=rows <= envs.VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD,
-        overlap_candidates=rows <= OVERLAP_MAX_ROWS,
-        engram_prefetch=rows <= ENGRAM_PREFETCH_MAX_ROWS,
         executor=executor,
     )
 
@@ -167,6 +166,7 @@ class SpecializedDecode:
             )
 
         # The CuTe DSL kernels, imported only when the executor is built.
+        from ...ops.cute_dsl import LamportAllGather
         from ..boundary.all_reduce import BoundaryAllReduce
         from ..boundary.publishing_gemm import PublishingMxfp8Linear
 
@@ -174,6 +174,13 @@ class SpecializedDecode:
         self.all_reduce = BoundaryAllReduce(
             backbone.config,
             uses_checked_flashinfer("the fused kernel's MXFP8 layer input"),
+        )
+        # The row-sharded indexers' gathers, and the logits gather of the
+        # model's specialized logits processor; NVLink multicast is there,
+        # since the fused all-reduce needs it too.
+        self.all_gather = LamportAllGather(
+            rank_capacity_bytes=ALL_GATHER_RANK_BYTES,
+            device=torch.device("cuda", torch.accelerator.current_device_index()),
         )
         self.boundaries = Boundaries(self.all_reduce)
         self.publisher = (
@@ -212,7 +219,14 @@ class SpecializedDecode:
             self.candidates = CandidateOverlap(indexer.indexer_op)
         self.engram = EngramPrefetch(
             [layer.engram for layer in layers if layer.engram is not None],
-            ENGRAM_PREFETCH_MAX_ROWS,
+            FUSED_MHC_MAX_ROWS,
+        )
+        from ..embedding.replicated import ReplicatedEmbedding
+
+        # The steps' embedding and hc streams from a full copy of the table,
+        # without the all-reduce (collective: every TP rank builds it).
+        self.embedding = ReplicatedEmbedding.create(
+            backbone.embed_tokens, backbone.hc_mult
         )
         gemms = build_routed_expert_gemms([layer.ffn.experts for layer in layers])
         quantize = self.all_reduce.quantize_layer_input
@@ -228,6 +242,7 @@ class SpecializedDecode:
                     mxfp8_input=quantize and can_fuse_query_quant([attn.fused_wqa_wkv]),
                     source=self.candidates if attn is source else None,
                     consumer=self.candidates if attn in consumers else None,
+                    all_gather=self.all_gather,
                 ),
                 moe=MoEStep(layer.ffn, gemm, FUSED_MHC_MAX_ROWS),
                 engram=layer.engram,
@@ -277,9 +292,11 @@ class SpecializedDecode:
         input_ids: torch.Tensor | None,
         engram_hashes: torch.Tensor | None,
         engram_mask: torch.Tensor | None,
+        streams: torch.Tensor | None = None,
     ) -> DecodeOutput:
         """The decoder layers and the final collapse of the step, on the
-        embedding ``x``; returns what ``DeepseekV4Model.forward`` returns."""
+        embedding ``x`` (with its hc ``streams`` when the step's embedding
+        wrote them); returns what ``DeepseekV4Model.forward`` returns."""
         backbone = self.backbone
         aux_layers = backbone.aux_hidden_state_layers
         aux: dict[int, torch.Tensor] = {}
@@ -287,14 +304,14 @@ class SpecializedDecode:
         self.tables.reset()
         self.all_reduce.reset()
         try:
-            if engram_hashes is not None and step.engram_prefetch:
+            if engram_hashes is not None:
                 self.engram.start(x.shape[0])
             state: BoundaryState | None = None
             for plan in self.plans:
                 layer = plan.layer
                 quant = None
                 if state is None:
-                    state, layer_input = bound.first(layer, x, step)
+                    state, layer_input = bound.first(layer, x, streams)
                 elif plan.engram is not None and engram_hashes is not None:
                     streams = bound.post_only(state)
                     if plan.layer_id in aux_layers:
@@ -305,23 +322,22 @@ class SpecializedDecode:
                         engram_hashes[:, plan.engram.layer_hash_index],
                         engram_mask,
                     )
-                    state, layer_input = bound.pre(layer, injected, state, step)
+                    state, layer_input = bound.pre(layer, injected, state)
                 else:
                     state, layer_input, quant, layer_aux = bound.sublayer(
                         layer,
                         False,
                         state,
-                        step,
                         quantize=plan.attention.mxfp8_input,
                         capture_aux=plan.layer_id in aux_layers,
                     )
                     if layer_aux is not None:
                         aux[plan.layer_id] = layer_aux
                 state.pending = plan.attention.run(layer_input, quant, positions, step)
-                bound.join(layer, step)
-                state, ffn_input, _, _ = bound.sublayer(layer, True, state, step)
+                bound.join(layer)
+                state, ffn_input, _, _ = bound.sublayer(layer, True, state)
                 state.pending = plan.moe.run(ffn_input, input_ids, step)
-                bound.join(layer, step)
+                bound.join(layer)
             assert state is not None
             streams = bound.post_only(state)
             if backbone.end_layer in aux_layers:

@@ -8,8 +8,7 @@ TP group, mixes it into the hc residual streams (mHC post) and collapses and
 normalizes the streams into the next sublayer's input (mHC pre). Here the
 fused all-reduce + mHC kernel (``BoundaryAllReduce``) does all of that for every
 step the executor runs; the next sublayer's mHC coefficients then come from the
-stock ``mhc_pre_delayed_overlap``, on the shared mHC side stream for up to
-``MHC_OVERLAP_MAX_ROWS`` rows and inline after the fused kernel above.
+stock ``mhc_pre_delayed_overlap`` on the shared mHC side stream.
 
 The fused kernel also finalizes a MoE output left unfinalized, collects a
 ``wo_b`` output the publishing GEMM already stored into its mailbox, writes the
@@ -19,16 +18,12 @@ injection and the final collapse.
 """
 
 from dataclasses import dataclass
-from functools import partial
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.distributed import tensor_model_parallel_all_reduce
-from vllm.model_executor.kernels.mhc.tilelang import (
-    mhc_post_tilelang,
-    mhc_pre_delayed_tilelang,
-)
+from vllm.model_executor.kernels.mhc.tilelang import mhc_post_tilelang
 from vllm.model_executor.layers.fused_moe.moe_output import (
     MoEOutput,
     UnfinalizedMoEOutput,
@@ -42,7 +37,6 @@ from ...ops.mhc import mhc_pre_delayed_overlap
 
 if TYPE_CHECKING:
     from ...model import DeepseekV4DecoderLayer
-    from ..runtime.decode import DecodeStep
     from .all_reduce import BoundaryAllReduce
 
 
@@ -84,30 +78,36 @@ class Boundaries:
         self.all_reduce = all_reduce
 
     def first(
-        self, layer: "DeepseekV4DecoderLayer", x: torch.Tensor, step: "DecodeStep"
+        self,
+        layer: "DeepseekV4DecoderLayer",
+        x: torch.Tensor,
+        streams: torch.Tensor | None = None,
     ) -> tuple[BoundaryState, torch.Tensor]:
         """The first layer's attention entry: the embedding broadcast to the
-        hc streams, whose identity pre-mix selects stream zero."""
+        hc streams (or written with them, ``streams``), whose identity pre-mix
+        selects stream zero."""
         assert layer.hc_attn_fn_broadcast is not None
-        residual = x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
-        return self._pre(layer, residual, layer.hc_attn_fn_broadcast, None, x, step)
+        residual = (
+            x.unsqueeze(1).expand(-1, layer.hc_mult, -1).contiguous()
+            if streams is None
+            else streams
+        )
+        return self._pre(layer, residual, layer.hc_attn_fn_broadcast, None, x)
 
     def pre(
         self,
         layer: "DeepseekV4DecoderLayer",
         residual: torch.Tensor,
         state: BoundaryState,
-        step: "DecodeStep",
     ) -> tuple[BoundaryState, torch.Tensor]:
         """An Engram layer's attention entry, on the injected streams."""
-        return self._pre(layer, residual, layer.hc_attn_fn, state.pre, None, step)
+        return self._pre(layer, residual, layer.hc_attn_fn, state.pre, None)
 
     def sublayer(
         self,
         layer: "DeepseekV4DecoderLayer",
         ffn: bool,
         state: BoundaryState,
-        step: "DecodeStep",
         *,
         quantize: bool = False,
         capture_aux: bool = False,
@@ -119,7 +119,7 @@ class Boundaries:
 
         Returns the new state, the layer input, the same input as MXFP8 with
         ``quantize``, and with ``capture_aux`` the mean of the streams (on the
-        side stream when the coefficients run there: join it before reading).
+        side stream, after the coefficients: join it before reading).
         """
         if ffn:
             fn, scale, base = layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base
@@ -140,14 +140,12 @@ class Boundaries:
             None if quant is None else (quant.data, quant.scale),
         )
         assert layer_input is not None
-        stream = layer.mhc_stream if step.side_stream else torch.cuda.current_stream()
+        stream = layer.mhc_stream
         assert stream is not None
         aux = None
-        if capture_aux and step.side_stream:
+        if capture_aux:
             streams_ready = torch.cuda.Event()
             streams_ready.record()
-        elif capture_aux:
-            aux = residual.mean(dim=1)
         post, comb, layer_input, next_pre = mhc_pre_delayed_overlap(
             residual,
             fn,
@@ -164,7 +162,7 @@ class Boundaries:
             stream=stream,
             layer_input=layer_input,
         )
-        if capture_aux and step.side_stream:
+        if capture_aux:
             # residual.mean(dim=1), after the coefficients on the side stream.
             aux = residual.new_empty(rows, hidden)
             stream.wait_event(streams_ready)
@@ -184,11 +182,10 @@ class Boundaries:
         x = tensor_model_parallel_all_reduce(state.pending)
         return mhc_post_tilelang(x, state.residual, state.post, state.comb)
 
-    def join(self, layer: "DeepseekV4DecoderLayer", step: "DecodeStep") -> None:
+    def join(self, layer: "DeepseekV4DecoderLayer") -> None:
         """Make the current stream wait for the side-stream coefficients."""
-        if step.side_stream:
-            assert layer.mhc_stream is not None
-            torch.cuda.current_stream().wait_stream(layer.mhc_stream)
+        assert layer.mhc_stream is not None
+        torch.cuda.current_stream().wait_stream(layer.mhc_stream)
 
     def _pre(
         self,
@@ -197,16 +194,10 @@ class Boundaries:
         fn: torch.Tensor,
         pre_mix: torch.Tensor | None,
         x: torch.Tensor | None,
-        step: "DecodeStep",
     ) -> tuple[BoundaryState, torch.Tensor]:
         """The stock attention entry without a reduction: mHC pre of
-        ``residual`` on the side stream, or inline with TileLang."""
-        mhc_pre = (
-            partial(mhc_pre_delayed_overlap, stream=layer.mhc_stream)
-            if step.side_stream
-            else mhc_pre_delayed_tilelang
-        )
-        post, comb, layer_input, next_pre = mhc_pre(
+        ``residual`` on the side stream."""
+        post, comb, layer_input, next_pre = mhc_pre_delayed_overlap(
             residual,
             fn,
             layer.hc_attn_scale,
@@ -220,6 +211,7 @@ class Boundaries:
             x=x,
             norm_weight=layer.attn_norm.weight,
             norm_eps=layer.attn_norm.variance_epsilon,
+            stream=layer.mhc_stream,
         )
         return BoundaryState(residual, post, comb, next_pre), layer_input
 

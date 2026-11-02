@@ -984,9 +984,19 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         lookback_token_ids: torch.Tensor | None = None,
         decode_step: "DecodeStep | None" = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # A specialized decode step embeds from the executor's copy of the
+        # table, which writes the first layer's hc streams too.
+        embedding = (
+            decode_step.executor.embedding
+            if decode_step is not None and not self.use_sequence_parallel
+            else None
+        )
+        streams: torch.Tensor | None = None
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+            elif embedding is not None and embedding.accepts(input_ids):
+                hidden_states, streams = embedding(input_ids)
             else:
                 hidden_states = self.embed_input_ids(input_ids)
         else:
@@ -1081,7 +1091,12 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         if decode_step is not None:
             return decode_step.run(
-                hidden_states, positions, input_ids, engram_hashes, engram_mask
+                hidden_states,
+                positions,
+                input_ids,
+                engram_hashes,
+                engram_mask,
+                streams=streams,
             )
 
         residual, post_mix, res_mix = None, None, None
@@ -1714,7 +1729,9 @@ class DeepseekV41LLMForCausalLM(
         self.specialized_decode = SpecializedDecode.for_target(
             self.model, self.specialized_decode_config, self.lm_head
         )
-        self.logits_processor = SpecializedDecodeLogitsProcessor(self.config.vocab_size)
+        self.logits_processor = SpecializedDecodeLogitsProcessor(
+            self.config.vocab_size, self.specialized_decode.all_gather
+        )
         return self.specialized_decode
 
     def get_model_state_cls(self):

@@ -40,7 +40,7 @@
 
 """Routed-expert GEMMs of the DeepSeek-V4.1 low-batch MoE in CuTe DSL.
 
-The low-batch MoE (``routed_expert_gemm.py``) multiplies at most eight token
+The low-batch MoE (``routed_expert_gemm.py``) multiplies at most 192 token
 rows by the weights of the experts they chose. Its routing record
 (``routed_expert_route_cute.py``) lists, for each 8-row token tile, the
 tile's expert and its row limit (the end of the expert's rows within the
@@ -62,22 +62,36 @@ record uses:
 Warps: 0 loads A and its scales, 1 loads B and its scales, 2 issues the MMAs,
 4-7 run the epilogue (warp 3 is idle).
 
-Programmatic dependent launch. GEMM2's weights stream before GEMM1 finishes:
-only its B load warp waits for GEMM1, and it reads the record without waiting
-(the record comes from the kernel before GEMM1, and GEMM1 triggers its
-dependents only after its own wait for that kernel). GEMM1 needs the record to
-pick its experts, so all its warps wait first.
+Programmatic dependent launch. GEMM1 needs the record to pick its experts, so
+all its warps wait for the kernel before it first; it then triggers its
+dependents at once. GEMM2 never waits for the GEMM1 grid. It reads the record
+without waiting (the record comes from the kernel before GEMM1, and GEMM1
+triggers only after its own wait for that kernel). Its CTAs take the SMs that
+GEMM1's CTAs leave (one CTA of either fills an SM's shared memory) and stream
+their weights at once. Its B load warp waits for each item's token tile
+alone: GEMM1 counts a tile's finished items in the record's ready words
+(``record[ready + c]``, zeroed with the record). After an item's epilogue
+stores, GEMM1's four epilogue warps meet at a barrier and one thread adds 1
+with release semantics at GPU scope. GEMM2's B load warp spins with acquire
+loads until tile ``c`` counts all of GEMM1's m tiles, then fences the async
+proxy before its TMA loads of H and HS. So GEMM2 works on the tiles of
+GEMM1's first waves while GEMM1's last, partial wave runs. A record serves
+one GEMM1 and GEMM2 pair: the ready words are zeroed only when the record is
+built. GEMM2 completes only after every GEMM1 item's epilogue, after which
+GEMM1 reads and writes no global memory (its CTAs read the record's tile
+count before triggering, and a release fence precedes the trigger); so a
+kernel that waits for GEMM2 also sees GEMM1's work done.
 
 The weights are those vLLM prepares for the TRT-LLM-gen backend, whose rows are
 shuffled for 128-row epilogue tiles: in each block of 32, shuffled row
 ``s0 + 8 * s1`` (``s0 < 8``, ``s1 < 4``) holds row ``4 * s0 + s1``. Their
 scales are in the 128x4 layout the kernel reads for A.
 
-GEMM1 (:class:`RoutedExpertGemm1`) multiplies the whole routed input (at most
-eight rows) by each tile's expert and keeps, for every row of the tile, the
-column of the token routed to it: clamped SwiGLU of the interleaved up/gate
-rows, quantized to MXFP8 (H and its block scales). The epilogue's arithmetic
-follows the GEMM1 kernel from Cake (vllm-project/vllm#59725).
+GEMM1 (:class:`RoutedExpertGemm1`) gathers each tile's tokens from the
+routed input (``record[4 + 2C + 8c + r]``, the token of tile row ``r``) and
+multiplies them by the tile's expert: clamped SwiGLU of the interleaved
+up/gate rows, quantized to MXFP8 (H and its block scales). The epilogue's
+arithmetic follows the GEMM1 kernel from Cake (vllm-project/vllm#59725).
 
 GEMM2 (:class:`RoutedExpertGemm2`) reads token tile ``c`` of the intermediate
 H, the contiguous rows ``8c .. 8c + 7``, and writes BF16 rows of the output in
@@ -89,7 +103,7 @@ row ``8c + r`` at column ``k``, ``K`` the bytes of one tile's atoms).
 
 from __future__ import annotations
 
-from typing import Optional, cast
+from typing import Optional
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -130,6 +144,15 @@ class RoutedExpertGemm:
 
     # GEMM1 reads the record only after its grid dependency wait.
     route_before_wait = True
+    # GEMM1's B load warp gathers its rows (``gather_b_warp``) instead of
+    # loading B tiles with TMA.
+    gather_b = False
+    # GEMM1 counts each token tile's finished items in the record's ready
+    # words and triggers its dependents right after its wait; GEMM2 waits,
+    # item by item, for its tile's count to reach ``ready_target`` (GEMM1's
+    # m tiles) instead of for the GEMM1 grid (module docstring).
+    signal_ready = False
+    ready_target = 0
     # Operand types, which a subclass's ``__call__`` sets.
     a_dtype: type[cutlass.Numeric]
     b_dtype: type[cutlass.Numeric]
@@ -207,11 +230,13 @@ class RoutedExpertGemm:
         epi: tuple,
         b_side: tuple,
         cta_words: Int32,
+        ready: Int32,
         ctas: Int32,
         stream: cuda.CUstream,
     ):
         """Build the TMA atoms and launch ``ctas`` persistent CTAs. ``sfb``
-        None: the B load warp writes B's scales itself (``b_side``)."""
+        None: the B load warp writes B's scales itself (``b_side``).
+        ``ready``: the record's first ready word."""
         self.mxf8f6f4 = self.a_dtype.width != self.b_dtype.width
         self.smem_alloc_a_dtype = (
             cutlass.Int8 if self.mxf8f6f4 and self.a_dtype.width < 8 else self.a_dtype
@@ -307,6 +332,7 @@ class RoutedExpertGemm:
             epi,
             b_side,
             cta_words,
+            ready,
             self.cluster_layout_vmnk,
             self.a_smem_layout_staged,
             self.b_smem_layout_staged,
@@ -337,6 +363,7 @@ class RoutedExpertGemm:
         epi: tuple,
         b_side: tuple,
         cta_words: Int32,
+        ready: Int32,
         cluster_layout_vmnk: cute.Layout,
         a_smem_layout_staged: cute.ComposedLayout,
         b_smem_layout_staged: cute.ComposedLayout,
@@ -437,6 +464,10 @@ class RoutedExpertGemm:
         count = Int32(0)
         if bid < total:
             count = (total - 1 - bid) // grid + 1
+        if cutlass.const_expr(self.signal_ready):
+            # Every warp has read the tile count before warp 0 triggers
+            # GEMM2, which may finish before a CTA without items exits.
+            cute.arch.barrier()
 
         thr_mma = tiled_mma.get_slice(mma_tile_coord_v)
         if warp_idx == 0:
@@ -466,6 +497,11 @@ class RoutedExpertGemm:
             )
             tAsSFA = cute.filter_zeros(tAsSFA)
             tAgSFA = cute.filter_zeros(tAgSFA)
+            if cutlass.const_expr(self.signal_ready):
+                # A release fence first, so that GEMM2's start synchronizes
+                # with the record (and its zeroed ready words) GEMM1 waited for.
+                cute.arch.fence_acq_rel_gpu()
+                cute.arch.griddepcontrol_launch_dependents()
             policy = Int64(EVICT_FIRST)
             state = make_pipeline_state(PipelineUserType.Producer, AB_Stage)
             for i in cutlass.range(count, unroll=1):
@@ -496,80 +532,46 @@ class RoutedExpertGemm:
                         cache_policy=policy,
                     )
                     state.advance()
-            cute.arch.griddepcontrol_launch_dependents()
+            if cutlass.const_expr(not self.signal_ready):
+                cute.arch.griddepcontrol_launch_dependents()
             # Keep shared memory alive until the MMA warp releases every stage.
             for _ in cutlass.range(AB_Stage, unroll=1):
                 cute.arch.mbarrier_wait(ab_empty_bar + state.index, state.phase)
                 state.advance()
         elif warp_idx == 1:
-            # B and its scales, from the previous kernel.
-            if cutlass.const_expr(self.route_before_wait):
+            if cutlass.const_expr(self.route_before_wait and self.ready_target == 0):
                 cute.arch.griddepcontrol_wait()
-            b_cta_layout = cute.make_layout(
-                cute.slice_(cluster_layout_vmnk, (0, None, 0, 0)).shape
-            )
-            gB_nkl = cute.local_tile(
-                mB_nkl, (self.cta_n, self.cta_k), (None, None, None)
-            )
-            tBsB, tBgB = cpasync.tma_partition(
-                tma_atom_b,
-                block_in_cluster_coord_vmnk[1],
-                b_cta_layout,
-                cute.group_modes(sB, 0, 3),
-                cute.group_modes(thr_mma.partition_B(gB_nkl), 0, 3),
-            )
-            tBsSFB = None
-            tBgSFB = None
-            if cutlass.const_expr(tma_atom_sfb is not None):
-                gSFB_nkl = cute.local_tile(
-                    mSFB_nkl, (128, self.cta_k), (None, None, None)
+            if cutlass.const_expr(self.gather_b):
+                # B and its scales, gathered from the previous kernel's rows.
+                self.gather_b_warp(
+                    sB,
+                    sSFB,
+                    ab_full_bar,
+                    ab_empty_bar,
+                    mRoute,
+                    b_side,
+                    cta_words,
+                    count,
                 )
-                tBsSFB, tBgSFB = cpasync.tma_partition(
+            else:
+                # B and its scales, from the previous kernel.
+                self.load_b_warp(
+                    tma_atom_b,
+                    mB_nkl,
                     tma_atom_sfb,
-                    block_in_cluster_coord_vmnk[1],
-                    b_cta_layout,
-                    cute.group_modes(sSFB, 0, 3),
-                    cute.group_modes(
-                        tiled_mma_sfb.get_slice(mma_tile_coord_v).partition_B(gSFB_nkl),
-                        0,
-                        3,
-                    ),
+                    mSFB_nkl,
+                    tiled_mma_sfb,
+                    thr_mma,
+                    cluster_layout_vmnk,
+                    block_in_cluster_coord_vmnk,
+                    sB,
+                    sSFB,
+                    ab_full_bar,
+                    ab_empty_bar,
+                    mRoute,
+                    ready,
+                    count,
                 )
-                tBsSFB = cute.filter_zeros(tBsSFB)
-                tBgSFB = cute.filter_zeros(tBgSFB)
-            state = make_pipeline_state(PipelineUserType.Producer, AB_Stage)
-            for i in cutlass.range(count, unroll=1):
-                item = bid + i * grid
-                n_tile = item // self.m_tiles
-                b_tile = self.b_tile_index(n_tile)
-                tBgB_item = tBgB[(None, b_tile, None, 0)]
-                for k_tile in cutlass.range(self.k_tiles, unroll=1):
-                    cute.arch.mbarrier_wait(ab_empty_bar + state.index, state.phase)
-                    if cutlass.const_expr(tma_atom_sfb is None):
-                        self.write_b_scales(sSFB, state.index, k_tile, b_side)
-                    with cute.arch.elect_one():
-                        cute.arch.mbarrier_arrive_and_expect_tx(
-                            ab_full_bar + state.index, self.tma_bytes_b
-                        )
-                    cute.copy(
-                        tma_atom_b,
-                        tBgB_item[(None, k_tile)],
-                        tBsB[(None, state.index)],
-                        tma_bar_ptr=ab_full_bar + state.index,
-                    )
-                    if cutlass.const_expr(tma_atom_sfb is not None):
-                        cute.copy(
-                            tma_atom_sfb,
-                            cast(cute.Tensor, tBgSFB)[(None, b_tile, None, 0)][
-                                (None, k_tile)
-                            ],
-                            cast(cute.Tensor, tBsSFB)[(None, state.index)],
-                            tma_bar_ptr=ab_full_bar + state.index,
-                        )
-                    state.advance()
-            for _ in cutlass.range(AB_Stage, unroll=1):
-                cute.arch.mbarrier_wait(ab_empty_bar + state.index, state.phase)
-                state.advance()
         elif warp_idx == 2:
             self.mma_warp(
                 ab_full_bar,
@@ -647,6 +649,13 @@ class RoutedExpertGemm:
                 self.store(
                     tDrAcc, tDcC, epi, mRoute, cta_words, n_tile, m_tile, i, exchange
                 )
+                if cutlass.const_expr(self.signal_ready):
+                    # Every epilogue warp's stores of the item, then one
+                    # release of its tile's count (module docstring).
+                    cute.arch.barrier(barrier_id=2, number_of_threads=128)
+                    if epi_tid == 0:
+                        cute.arch.fence_proxy("async.global")
+                        red_add_release((mRoute.iterator + ready + n_tile).toint())
             cute.arch.mbarrier_arrive(tmem_bar)
             cute.arch.mbarrier_wait(tmem_bar, 1)
         cute.arch.barrier()
@@ -781,11 +790,100 @@ class RoutedExpertGemm:
         raise NotImplementedError
 
     @cute.jit
-    def write_b_scales(
-        self, sSFB: cute.Tensor, stage: Int32, k_tile: Int32, b_side: tuple
+    def load_b_warp(
+        self,
+        tma_atom_b: cute.CopyAtom,
+        mB_nkl: cute.Tensor,
+        tma_atom_sfb: cute.CopyAtom,
+        mSFB_nkl: cute.Tensor,
+        tiled_mma_sfb: cute.TiledMma,
+        thr_mma: cute.ThrMma,
+        cluster_layout_vmnk: cute.Layout,
+        block_in_cluster_coord_vmnk: tuple,
+        sB: cute.Tensor,
+        sSFB: cute.Tensor,
+        ab_full_bar: cute.Pointer,
+        ab_empty_bar: cute.Pointer,
+        mRoute: cute.Tensor,
+        ready: Int32,
+        count: Int32,
     ):
-        """Write B's scales of one stage (a subclass whose B scales are not
-        loaded with TMA)."""
+        """The B load warp: TMA of each item's B tile and its scales, each
+        item's once its token tile's ready count reaches ``ready_target``
+        (when set)."""
+        bid, _, _ = cute.arch.block_idx()
+        grid, _, _ = cute.arch.grid_dim()
+        b_cta_layout = cute.make_layout(
+            cute.slice_(cluster_layout_vmnk, (0, None, 0, 0)).shape
+        )
+        gB_nkl = cute.local_tile(mB_nkl, (self.cta_n, self.cta_k), (None, None, None))
+        tBsB, tBgB = cpasync.tma_partition(
+            tma_atom_b,
+            block_in_cluster_coord_vmnk[1],
+            b_cta_layout,
+            cute.group_modes(sB, 0, 3),
+            cute.group_modes(thr_mma.partition_B(gB_nkl), 0, 3),
+        )
+        gSFB_nkl = cute.local_tile(mSFB_nkl, (128, self.cta_k), (None, None, None))
+        tBsSFB, tBgSFB = cpasync.tma_partition(
+            tma_atom_sfb,
+            block_in_cluster_coord_vmnk[1],
+            b_cta_layout,
+            cute.group_modes(sSFB, 0, 3),
+            cute.group_modes(
+                tiled_mma_sfb.get_slice(Int32(0)).partition_B(gSFB_nkl), 0, 3
+            ),
+        )
+        tBsSFB = cute.filter_zeros(tBsSFB)
+        tBgSFB = cute.filter_zeros(tBgSFB)
+        state = make_pipeline_state(PipelineUserType.Producer, self.num_ab_stage)
+        for i in cutlass.range(count, unroll=1):
+            item = bid + i * grid
+            n_tile = item // self.m_tiles
+            if cutlass.const_expr(self.ready_target > 0):
+                wait_ready(
+                    (mRoute.iterator + ready + n_tile).toint(), self.ready_target
+                )
+            b_tile = self.b_tile_index(n_tile)
+            tBgB_item = tBgB[(None, b_tile, None, 0)]
+            tBgSFB_item = tBgSFB[(None, b_tile, None, 0)]
+            for k_tile in cutlass.range(self.k_tiles, unroll=1):
+                cute.arch.mbarrier_wait(ab_empty_bar + state.index, state.phase)
+                with cute.arch.elect_one():
+                    cute.arch.mbarrier_arrive_and_expect_tx(
+                        ab_full_bar + state.index, self.tma_bytes_b
+                    )
+                cute.copy(
+                    tma_atom_b,
+                    tBgB_item[(None, k_tile)],
+                    tBsB[(None, state.index)],
+                    tma_bar_ptr=ab_full_bar + state.index,
+                )
+                cute.copy(
+                    tma_atom_sfb,
+                    tBgSFB_item[(None, k_tile)],
+                    tBsSFB[(None, state.index)],
+                    tma_bar_ptr=ab_full_bar + state.index,
+                )
+                state.advance()
+        for _ in cutlass.range(self.num_ab_stage, unroll=1):
+            cute.arch.mbarrier_wait(ab_empty_bar + state.index, state.phase)
+            state.advance()
+
+    @cute.jit
+    def gather_b_warp(
+        self,
+        sB: cute.Tensor,
+        sSFB: cute.Tensor,
+        ab_full_bar: cute.Pointer,
+        ab_empty_bar: cute.Pointer,
+        mRoute: cute.Tensor,
+        b_side: tuple,
+        cta_words: Int32,
+        count: Int32,
+    ):
+        """The B load warp of a subclass that gathers B's rows itself
+        (``gather_b``)."""
         raise NotImplementedError
 
 
@@ -800,9 +898,17 @@ class RoutedExpertGemm2(RoutedExpertGemm):
     tile's permuted order."""
 
     def __init__(
-        self, hidden: int, intermediate: int, cta_k: int = 128, num_ab_stage: int = 10
+        self,
+        hidden: int,
+        intermediate: int,
+        gemm1_m_tiles: int,
+        cta_k: int = 128,
+        num_ab_stage: int = 10,
     ) -> None:
+        """``gemm1_m_tiles``: GEMM1's items per token tile, the ready count
+        at which a tile's H is complete."""
         super().__init__(hidden, hidden // 128, intermediate, cta_k, num_ab_stage)
+        self.ready_target = gemm1_m_tiles
 
     @cute.jit
     def __call__(
@@ -845,8 +951,10 @@ class RoutedExpertGemm2(RoutedExpertGemm):
         c = cute.make_tensor(
             c_ptr, cute.make_ordered_layout((self.m, rows), order=(0, 1))
         )
-        route = cute.make_tensor(route_ptr, cute.make_layout(4 + 2 * cta_words))
-        self._launch(a, sfa, b, sfb, route, (c,), (), cta_words, ctas, stream)
+        # The ready words follow the token table (one row per padded row).
+        ready = 4 + 2 * cta_words + rows
+        route = cute.make_tensor(route_ptr, cute.make_layout(ready + cta_words))
+        self._launch(a, sfa, b, sfb, route, (c,), (), cta_words, ready, ctas, stream)
 
     @cute.jit
     def store(
@@ -971,6 +1079,115 @@ def _asm(result, operands: list, text: str, constraints: str, loc, ip):
 
 
 @dsl_user_op
+def cp_async_16(dst: Int32, src: Int64, *, loc=None, ip=None) -> None:
+    """``cp.async`` of 16 bytes from global address ``src`` to shared
+    address ``dst`` (cached in L2 only)."""
+    llvm.inline_asm(
+        None,
+        [Int32(dst).ir_value(loc=loc, ip=ip), Int64(src).ir_value(loc=loc, ip=ip)],
+        "cp.async.cg.shared.global [$0], [$1], 16;",
+        "r,l",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def cp_async_4(dst: Int32, src: Int64, *, loc=None, ip=None) -> None:
+    """``cp.async`` of 4 bytes from global address ``src`` to shared address
+    ``dst``."""
+    llvm.inline_asm(
+        None,
+        [Int32(dst).ir_value(loc=loc, ip=ip), Int64(src).ir_value(loc=loc, ip=ip)],
+        "cp.async.ca.shared.global [$0], [$1], 4;",
+        "r,l",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def red_add_release(addr: Int64, *, loc=None, ip=None) -> None:
+    """Add 1 to the 32-bit word at global address ``addr`` with release
+    semantics at GPU scope."""
+    llvm.inline_asm(
+        None,
+        [Int64(addr).ir_value(loc=loc, ip=ip)],
+        "red.release.gpu.global.add.u32 [$0], 1;",
+        "l",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@dsl_user_op
+def load_acquire(addr: Int64, *, loc=None, ip=None) -> Int32:
+    """The 32-bit word at global address ``addr``, loaded with acquire
+    semantics at GPU scope (never hoisted out of a polling loop)."""
+    return Int32(
+        llvm.inline_asm(
+            T.i32(),
+            [Int64(addr).ir_value(loc=loc, ip=ip)],
+            "ld.acquire.gpu.global.b32 $0, [$1];",
+            "=r,l",
+            has_side_effects=True,
+            is_align_stack=False,
+            asm_dialect=llvm.AsmDialect.AD_ATT,
+            loc=loc,
+            ip=ip,
+        )
+    )
+
+
+@dsl_user_op
+def nanosleep(ns: int, *, loc=None, ip=None) -> None:
+    """Suspend the calling thread for about ``ns`` nanoseconds."""
+    llvm.inline_asm(
+        None,
+        [],
+        f"nanosleep.u32 {ns};",
+        "",
+        has_side_effects=True,
+        is_align_stack=False,
+        asm_dialect=llvm.AsmDialect.AD_ATT,
+        loc=loc,
+        ip=ip,
+    )
+
+
+@cute.jit
+def wait_ready(addr: Int64, target: cutlass.Constexpr[int]):
+    """Spin until the ready count at ``addr`` reaches ``target`` (acquire
+    loads), then fence the async proxy, so that the caller's later TMA loads
+    see what the count's releasing writers stored (module docstring)."""
+    seen = load_acquire(addr)
+    while seen < target:
+        nanosleep(100)
+        seen = load_acquire(addr)
+    cute.arch.fence_proxy("async.global")
+
+
+@cute.jit
+def publish_stage(full_bar: cute.Pointer):
+    """Publish the calling warp's completed shared-memory writes of a stage to
+    the MMA warp: fence them to the async proxy, through which the MMA reads
+    shared memory, then one lane arrives on the stage's full barrier."""
+    cute.arch.fence_proxy("async.shared", space="cta")
+    cute.arch.sync_warp()
+    with cute.arch.elect_one():
+        cute.arch.mbarrier_arrive(full_bar)
+
+
+@dsl_user_op
 def clamped_swiglu_x2(up0, up1, gate0, gate1, limit, neg_limit, *, loc=None, ip=None):
     """``h`` of two tokens: ``up`` clamped to [-limit, limit] and ``gate`` to
     at most ``limit``, then ``up * gate * sigmoid(gate)``."""
@@ -1074,11 +1291,11 @@ class RoutedExpertGemm1(RoutedExpertGemm):
     """GEMM1: ``h = MXFP8(clamped SwiGLU(x @ w13[expert]^T))`` of each token
     tile, in the tile's permuted rows.
 
-    B is the whole routed input ``x`` (at most eight rows; rows past its end
-    read as zero) with its linear UE8M0 scales, which the B load warp writes
-    into the layout the MMA reads. Accumulator column ``t`` is token ``t``;
-    the epilogue writes it to the tile row that token was routed to
-    (``record[4 + 2 C + 8 c + r] == t``), if any. w13's rows interleave up and
+    B is tile ``c``'s rows of the routed input ``x``: tile row ``r`` below
+    the tile's limit is token ``record[4 + 2 C + 8 c + r]``. The B load warp
+    gathers those rows and their linear UE8M0 scales into the layout the MMA
+    reads, so accumulator column ``r`` is tile row ``r``, and the epilogue
+    writes the columns below the limit. w13's rows interleave up and
     gate, so each thread pairs them, clamps them, applies SwiGLU, scales each
     32-column block by its amax / 448 rounded up to a power of two (UE8M0),
     and stores E4M3 values with the block scales in the per-tile layout GEMM2
@@ -1087,6 +1304,8 @@ class RoutedExpertGemm1(RoutedExpertGemm):
     """
 
     route_before_wait = False
+    gather_b = True
+    signal_ready = True
 
     def __init__(
         self,
@@ -1145,42 +1364,129 @@ class RoutedExpertGemm1(RoutedExpertGemm):
             ),
         )
         clamp = cute.make_tensor(clamp_ptr, cute.make_layout(experts))
-        route = cute.make_tensor(
-            route_ptr, cute.make_layout(4 + 2 * cta_words + h_rows)
-        )
+        # The ready words follow the token table (one row per padded row).
+        ready = 4 + 2 * cta_words + h_rows
+        route = cute.make_tensor(route_ptr, cute.make_layout(ready + cta_words))
         self._launch(
-            a, sfa, b, None, route, (h, hs, clamp), (b_scale,), cta_words, ctas, stream
+            a,
+            sfa,
+            b,
+            None,
+            route,
+            (h, hs, clamp),
+            (b, b_scale),
+            cta_words,
+            ready,
+            ctas,
+            stream,
         )
 
     @cute.jit
     def b_tile_index(self, n_tile: Int32) -> Int32:
-        """Every item multiplies all of ``x``."""
+        """B is gathered per item; the epilogue's coordinates stay in tile 0."""
         return Int32(0)
 
     @cute.jit
-    def write_b_scales(
-        self, sSFB: cute.Tensor, stage: Int32, k_tile: Int32, b_side: tuple
+    def gather_b_warp(
+        self,
+        sB: cute.Tensor,
+        sSFB: cute.Tensor,
+        ab_full_bar: cute.Pointer,
+        ab_empty_bar: cute.Pointer,
+        mRoute: cute.Tensor,
+        b_side: tuple,
+        cta_words: Int32,
+        count: Int32,
     ):
-        """Copy the stage's scales of ``x`` (four per 32-bit word) into rows
-        0-7 of B's scale atoms; rows past ``x``'s end get scale 1."""
-        (b_scale,) = b_side
-        atoms = self.cta_k // 128
-        stage_bytes = 512 * atoms
-        words = cute.make_tensor(
-            cute.recast_ptr(sSFB.iterator, dtype=Uint32),
-            cute.make_layout(self.num_ab_stage * stage_bytes // 4),
-        )
+        """Gather each item's tile rows of ``x`` and their scales into B.
+
+        Per stage, lane ``l`` copies the 16-byte chunk ``l % 16`` of tile rows
+        ``l // 16 + 2 j`` (``j < 4``) with ``cp.async``, to its address under
+        the 128-byte swizzle that TMA and the MMA apply to shared addresses,
+        and lane ``l < 8 x atoms`` copies one 32-bit word (four K blocks) of
+        row ``l // atoms``'s scales. Rows at or past the tile's limit are not
+        loaded; their accumulator columns are never stored. The warp never
+        waits for a copy it has just issued: each stage is published two
+        stages late (after issuing a stage's copies, the warp waits for those
+        of two stages before, fences them to the async proxy and arrives on
+        that stage's full barrier)."""
+        x, b_scale = b_side
+        bid, _, _ = cute.arch.block_idx()
+        grid, _, _ = cute.arch.grid_dim()
         lane = cute.arch.lane_idx()
-        if lane < TILE * atoms:
-            row = lane // atoms
-            atom = lane - row * atoms
-            value = Uint32(0x7F7F7F7F)
-            if row < cute.size(b_scale, mode=[0]):
-                value = Uint32(b_scale[row, k_tile * atoms + atom])
-            words[(stage * stage_bytes + atom * 512 + row * 16) // 4] = value
-        # The MMA warp copies them to tensor memory through the async proxy.
-        cute.arch.fence_proxy("async.shared", space="cta")
-        cute.arch.sync_warp()
+        atoms = self.cta_k // 128  # 128-column swizzle atoms and scale words per row
+        b_stage_bytes = TILE * self.cta_k
+        sf_stage_bytes = 512 * atoms
+        b_base = sB.iterator.toint()
+        sf_base = sSFB.iterator.toint()
+        chunk = lane % 16
+        # The chunk's offset in a row of an 8-row stage: atoms of 8 x 128 bytes.
+        chunk_offset = (chunk // 8) * (TILE * 128) + (chunk % 8) * 16
+        sf_row = lane // atoms
+        sf_atom = lane - sf_row * atoms
+        # Row r < 32 of a 128-row scale atom: byte 16 r, four K blocks.
+        sf_offset = sf_atom * 512 + sf_row * 16
+        token = cute.make_rmem_tensor((4,), Int32)
+        state = make_pipeline_state(PipelineUserType.Producer, self.num_ab_stage)
+        older = Int32(-1)  # stages issued but not yet published, oldest first
+        newer = Int32(-1)
+        for i in cutlass.range(count, unroll=1):
+            item = bid + i * grid
+            n_tile = item // self.m_tiles
+            row0 = n_tile * TILE
+            valid = mRoute[4 + cta_words + n_tile] - row0
+            for j in cutlass.range_constexpr(4):
+                token[j] = Int32(-1)
+                if lane // 16 + 2 * j < valid:
+                    token[j] = mRoute[4 + 2 * cta_words + row0 + lane // 16 + 2 * j]
+            sf_token = Int32(-1)
+            if lane < TILE * atoms and sf_row < valid:
+                sf_token = mRoute[4 + 2 * cta_words + row0 + sf_row]
+            for k_tile in cutlass.range(self.k_tiles, unroll=1):
+                cute.arch.mbarrier_wait(ab_empty_bar + state.index, state.phase)
+                if sf_token >= 0:
+                    cp_async_4(
+                        sf_base + state.index * sf_stage_bytes + sf_offset,
+                        (
+                            b_scale.iterator
+                            + sf_token * cute.size(b_scale, mode=[1])
+                            + k_tile * atoms
+                            + sf_atom
+                        ).toint(),
+                    )
+                for j in cutlass.range_constexpr(4):
+                    if token[j] >= 0:
+                        linear = (
+                            b_base
+                            + state.index * b_stage_bytes
+                            + (lane // 16 + 2 * j) * 128
+                            + chunk_offset
+                        )
+                        cp_async_16(
+                            linear ^ (((linear >> 7) & 7) << 4),
+                            (
+                                x.iterator
+                                + token[j] * self.k
+                                + k_tile * self.cta_k
+                                + chunk * 16
+                            ).toint(),
+                        )
+                cute.arch.cp_async_commit_group()
+                if older >= 0:
+                    cute.arch.cp_async_wait_group(2)
+                    publish_stage(ab_full_bar + older)
+                older = newer
+                newer = state.index
+                state.advance()
+        if older >= 0:
+            cute.arch.cp_async_wait_group(1)
+            publish_stage(ab_full_bar + older)
+        if newer >= 0:
+            cute.arch.cp_async_wait_group(0)
+            publish_stage(ab_full_bar + newer)
+        for _ in cutlass.range(self.num_ab_stage, unroll=1):
+            cute.arch.mbarrier_wait(ab_empty_bar + state.index, state.phase)
+            state.advance()
 
     @cute.jit
     def store(
@@ -1195,8 +1501,8 @@ class RoutedExpertGemm1(RoutedExpertGemm):
         item: Int32,
         exchange: cute.Tensor,
     ):
-        """H and HS of the item (class docstring). The thread holds, for
-        tokens ``t, t + 1`` (``t`` = 2 x lane % 4), the up and gate rows of H
+        """H and HS of the item (class docstring). The thread holds, for tile
+        rows ``t, t + 1`` (``t`` = 2 x lane % 4), the up and gate rows of H
         columns ``p`` (registers 0-3) and ``p + 1`` (4-7), ``p`` = 64 x m_tile
         + 16 x warp + 2 x lane / 4."""
         mH, mHS, mClamp = epi
@@ -1207,16 +1513,13 @@ class RoutedExpertGemm1(RoutedExpertGemm):
         limit = mClamp[mRoute[4 + n_tile]]
         row0 = n_tile * TILE
         valid = mRoute[4 + cta_words + n_tile] - row0
-        # The tile rows of the thread's two tokens (-1: not routed here).
+        # The thread's two tile rows (-1: past the tile's limit).
         row_a = Int32(-1)
         row_b = Int32(-1)
-        for r in cutlass.range_constexpr(TILE):
-            if r < valid:
-                routed = mRoute[4 + 2 * cta_words + row0 + r]
-                if routed == token:
-                    row_a = Int32(r)
-                if routed == token + 1:
-                    row_b = Int32(r)
+        if token < valid:
+            row_a = Int32(token)
+        if token + 1 < valid:
+            row_b = Int32(token + 1)
 
         lo_a, lo_b = clamped_swiglu_x2(
             tDrAcc[0], tDrAcc[1], tDrAcc[2], tDrAcc[3], limit, -limit
