@@ -230,6 +230,15 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             return False, None
 
         if is_d_node and not self.is_bidirectional_kv_xfer_enabled:
+            if self.vllm_config.cache_config.kv_cache_host_pinned and any(
+                len(group) > 0 for group in block_ids
+            ):
+                # With a host-pinned KV cache the next pull lands in these
+                # blocks by RDMA, possibly while the GPU work of the step that
+                # finished this request (e.g. the MTP drafter) is still in
+                # flight. Let the worker release them once that work is done.
+                self._reqs_to_release.append(request.request_id)
+                return True, None
             return False, None
 
         if request.status not in (

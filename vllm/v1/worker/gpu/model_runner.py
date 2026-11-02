@@ -830,6 +830,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         allocate_fn = None
         if self.extensible_kv_cache is not None:
             allocate_fn = self.extensible_kv_cache.allocate
+        elif self.cache_config.kv_cache_host_pinned:
+            allocate_fn = torch.ops._C.alloc_host_pinned_tensor
 
         # Capture warmup providers that depend on allocated KV-cache strides.
         with self.jit_warmup_registry.activate():

@@ -3455,6 +3455,10 @@ class VllmConfig:
             )
         elif not self.use_v2_model_runner:
             unsupported = "it requires the V2 model runner"
+        elif cache_config.kv_cache_host_pinned:
+            unsupported = (
+                "kv_cache_host_pinned allocates its KV cache with cudaHostAlloc"
+            )
         elif self.parallel_config.enable_elastic_ep:
             unsupported = (
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
