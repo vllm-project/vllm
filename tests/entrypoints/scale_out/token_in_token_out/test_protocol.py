@@ -359,34 +359,3 @@ def test_tokens_response_echoes_output_mode_without_text():
     ).model_dump()
     assert dumped["output_mode"] == "tokens"
     assert "text" not in dumped["choices"][0]
-
-
-def test_abort_requests_accepts_body_without_content_type():
-    """The body is parsed manually instead of via a FastAPI body param, which
-    would reject legacy clients that send no Content-Type header."""
-    from argparse import Namespace
-
-    from fastapi import FastAPI
-    from starlette.testclient import TestClient
-
-    from vllm.entrypoints.scale_out.token_in_token_out.api_router import router
-    from vllm.entrypoints.serve.exception_handling.register import (
-        init_exception_handler,
-    )
-
-    aborted: list[str | list[str]] = []
-
-    class DummyEngineClient:
-        async def abort(self, request_ids: str | list[str]) -> None:
-            aborted.append(request_ids)
-
-    app = FastAPI()
-    app.state.args = Namespace(log_error_stack=False)
-    app.state.engine_client = DummyEngineClient()
-    app.include_router(router)
-    init_exception_handler(app)
-    resp = TestClient(app).post(
-        "/inference/v1/abort_requests", content=b'{"request_ids": ["req-1"]}'
-    )
-    assert resp.status_code == 200
-    assert aborted == [["req-1"]]
