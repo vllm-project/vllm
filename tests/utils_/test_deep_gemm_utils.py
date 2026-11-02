@@ -58,3 +58,16 @@ def test_deep_gemm_trusts_cuda_home(
     _make_exe(default_cuda_home / "bin" / "nvcc")
     monkeypatch.setenv("CUDA_HOME", str(tmp_path / "missing"))
     assert not dg.is_deep_gemm_supported()
+
+
+@pytest.mark.parametrize(
+    ("release", "supported"), [("12.8", False), ("12.9", True), ("13.0", True)]
+)
+def test_deep_gemm_needs_nvcc_12_9(
+    default_cuda_home: Path, release: str, supported: bool
+):
+    """DeepGEMM's JIT aborts the engine below nvcc 12.9."""
+    nvcc = default_cuda_home / "bin" / "nvcc"
+    _make_exe(nvcc)
+    nvcc.write_text(f"#!/bin/sh\necho 'Cuda compilation tools, release {release}'\n")
+    assert dg.is_deep_gemm_supported() is supported
