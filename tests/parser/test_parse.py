@@ -452,6 +452,7 @@ def reasoning_parser(tokenizer, name="qwen3"):
     parser_cls = ParserManager.get_parser(
         reasoning_parser_name=name, tokenizer=tokenizer
     )
+    assert parser_cls is not None
     return parser_cls(tokenizer, None)
 
 
@@ -555,6 +556,7 @@ def test_parse_prompt_ignored_without_turn_boundaries(tokenizer):
         output, request, model_output_token_ids=encode(tokenizer, output)
     )
 
+    assert reasoning is not None and content is not None
     assert reasoning.strip() == "let me think"
     assert content.strip() == PLAIN_TEXT
 

@@ -107,7 +107,7 @@ pub(super) fn render_request_with_media_order(
         ThinkingMode::Chat
     };
     let reasoning_effort_prompt = reasoning_prompt(reasoning, dialect);
-    let request_tools = request_tools(request);
+    let request_tools = request.initial_tools();
     let synthetic_tool_system = needs_synthetic_tool_system(request, request_tools);
     let drop_thinking = request.parse_template_bool("drop_thinking")?.unwrap_or(true)
         && !rendered_tools_present(request, request_tools);
@@ -326,15 +326,6 @@ fn invalid_v41_reasoning_effort() -> Error {
     Error::InvalidReasoningEffort(
         "DeepSeek V4.1 reasoning_effort must be low, high, xhigh, max, or an integer within [1, 100] in chat_template_kwargs".to_string(),
     )
-}
-
-/// Return request-level tools only when native tool parsing is enabled.
-fn request_tools(request: &ChatRequest) -> &[ChatTool] {
-    if request.tool_parsing_enabled() {
-        request.initial_tools()
-    } else {
-        &[]
-    }
 }
 
 /// Return whether request tools need a synthetic leading system entry.
@@ -807,9 +798,11 @@ fn encode_arguments_to_dsml(
 /// Write chat content directly into the destination buffer without flattening
 /// it into an intermediate `String`.
 ///
-/// The V4.1 dialect inlines the image placeholder at each image part's
-/// position unconditionally (matching the Python encoding's
-/// `IMAGE_PLACEHOLDER`); other dialects reject multimodal parts.
+/// Content parts are joined by a blank line for every role, as the reference
+/// Chat Completions conversion joins content blocks. The V4.1 dialect inlines
+/// the image placeholder at each image part's position unconditionally
+/// (matching the Python encoding's `IMAGE_PLACEHOLDER`); other dialects reject
+/// multimodal parts.
 fn write_chat_content(
     out: &mut String,
     content: &ChatContent,
@@ -821,7 +814,7 @@ fn write_chat_content(
         ChatContent::Text(text) => out.push_str(text),
         ChatContent::Parts(parts) => {
             for (index, part) in parts.iter().enumerate() {
-                if index > 0 && dialect == DsDialect::V41 {
+                if index > 0 {
                     out.push_str("\n\n");
                 }
                 match part {
@@ -849,12 +842,18 @@ fn write_assistant_reasoning(out: &mut String, content: &[AssistantContentBlock]
     }
 }
 
-/// Write all visible assistant text blocks in encounter order.
+/// Write all visible assistant text blocks in encounter order, joined by a
+/// blank line like any other content parts.
 fn write_assistant_text(out: &mut String, content: &[AssistantContentBlock]) {
-    for block in content {
-        if let AssistantContentBlock::Text { text } = block {
-            out.push_str(text);
+    let texts = content.iter().filter_map(|block| match block {
+        AssistantContentBlock::Text { text } => Some(text.as_str()),
+        _ => None,
+    });
+    for (index, text) in texts.enumerate() {
+        if index > 0 {
+            out.push_str("\n\n");
         }
+        out.push_str(text);
     }
 }
 
