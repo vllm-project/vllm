@@ -82,7 +82,7 @@ class TorchMxFp8LinearKernel(Mxfp8LinearKernel):
             out_dtype, input_shape = qa.orig_dtype, qa.orig_shape
         else:
             assert isinstance(x, torch.Tensor)
-            out_dtype, input_shape = x.dtype, x.shape
+            out_dtype, input_shape = layer.params_dtype, x.shape
 
         if current_platform.is_xpu():
             assert isinstance(x, torch.Tensor)
