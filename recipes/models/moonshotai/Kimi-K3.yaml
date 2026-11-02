@@ -432,10 +432,8 @@ presets:
       VLLM_USE_DIRECT_DCP_A2A: "1"
       VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
       VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
-      VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "0"
       VLLM_MOONCAKE_LOAD_RECV_THREADS: "4"
       VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "0"
-      VLLM_RPC_TIMEOUT: "600000"
       MC_SLICE_SIZE: "1048576"
       MC_STORE_MEMCPY: "1"
       MC_WORKERS_PER_CTX: "4"
@@ -501,10 +499,10 @@ presets:
       ```bash
       export VLLM_USE_DIRECT_DCP_A2A=1 VLLM_USE_DIRECT_DCP_Q_GATHER=1 VLLM_USE_DIRECT_DCP_KV_GATHER=1
       export VLLM_ALLREDUCE_USE_FLASHINFER=1 NCCL_CUMEM_ENABLE=1 VLLM_USE_V2_MODEL_RUNNER=1
-      export VLLM_MOONCAKE_LOAD_RECV_THREADS=4 MC_SLICE_SIZE=1048576 VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0
+      export VLLM_MOONCAKE_LOAD_RECV_THREADS=4 MC_SLICE_SIZE=1048576
       export MC_STORE_MEMCPY=1 MC_ENABLE_DEST_DEVICE_AFFINITY=1 MC_WORKERS_PER_CTX=4
       export UCX_MEMTYPE_CACHE=n UCX_MEMTYPE_REG_WHOLE=n VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0
-      export VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800 VLLM_RPC_TIMEOUT=600000
+      export VLLM_ENGINE_READY_TIMEOUT_S=3600 VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800
       vllm serve moonshotai/Kimi-K3 --trust-remote-code \
         --tensor-parallel-size 8 --pipeline-parallel-size 2 \
         --decode-context-parallel-size 8 --dcp-comm-backend a2a \
@@ -576,7 +574,6 @@ presets:
       VLLM_USE_NCCL_SYMM_MEM: "0"
       VLLM_USE_V2_MODEL_RUNNER: "1"
       VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: "0"
-      VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "0"
       NCCL_CUMEM_ENABLE: "1"
       NCCL_MNNVL_ENABLE: "1"
       NCCL_NVLS_ENABLE: "1"
@@ -695,7 +692,7 @@ presets:
 
       For tool calling and reasoning output, add `--reasoning-parser kimi_k3 --dyn-tool-call-parser kimi_k3 --dyn-reasoning-parser kimi_k3 --dyn-enable-structural-tag` to both roles. `python3 -m dynamo.vllm` parses the remaining arguments as vLLM engine arguments only, so `--enable-auto-tool-choice` and `--tool-call-parser` are rejected there.
 
-      - **Environment (both roles):** the three direct-DCP variables, `VLLM_ALLREDUCE_USE_FLASHINFER=1`, `VLLM_USE_V2_MODEL_RUNNER=1`, `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`, `VLLM_USE_NCCL_SYMM_MEM=0`, `VLLM_SSM_CONV_STATE_LAYOUT=DS`, `VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0`, `NCCL_MNNVL_ENABLE=1`, `NCCL_NVLS_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`, `NCCL_NET_PLUGIN=none`, `VLLM_MOONCAKE_LOAD_RECV_THREADS=4`, `MC_SLICE_SIZE=1048576`, `MC_ENABLE_DEST_DEVICE_AFFINITY=1`, `UCX_MEMTYPE_CACHE=n`, `UCX_MEMTYPE_REG_WHOLE=n`, `UCX_RCACHE_MAX_UNRELEASED=1024`, `UCX_TCP_AF_PRIO=inet`, `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`, `VLLM_ENGINE_READY_TIMEOUT_S=3600`, `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`, `ETCD_LEASE_TTL=600`, `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512` and `DYN_REQUEST_PLANE=tcp`.
+      - **Environment (both roles):** the three direct-DCP variables, `VLLM_ALLREDUCE_USE_FLASHINFER=1`, `VLLM_USE_V2_MODEL_RUNNER=1`, `VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT=0`, `VLLM_USE_NCCL_SYMM_MEM=0`, `VLLM_SSM_CONV_STATE_LAYOUT=DS`, `NCCL_MNNVL_ENABLE=1`, `NCCL_NVLS_ENABLE=1`, `NCCL_CUMEM_ENABLE=1`, `NCCL_P2P_LEVEL=NVL`, `NCCL_NET_PLUGIN=none`, `VLLM_MOONCAKE_LOAD_RECV_THREADS=4`, `MC_SLICE_SIZE=1048576`, `MC_ENABLE_DEST_DEVICE_AFFINITY=1`, `UCX_MEMTYPE_CACHE=n`, `UCX_MEMTYPE_REG_WHOLE=n`, `UCX_RCACHE_MAX_UNRELEASED=1024`, `UCX_TCP_AF_PRIO=inet`, `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`, `VLLM_ENGINE_READY_TIMEOUT_S=3600`, `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=1800`, `ETCD_LEASE_TTL=600`, `PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:512` and `DYN_REQUEST_PLANE=tcp`.
       - **Frontend:** the Dynamo frontend runs with `--router-mode least-loaded --router-session-affinity-ttl-secs 900`, so each conversation sticks to one worker and reuses its prefix cache. The Rust frontend is selected with `VLLM_USE_RUST_FRONTEND=1`, with `DYN_ROUTER_ACTIVE_REQUEST_EXPIRY_SECS=3600` and `DYN_TOKENIZER_CACHE_BYTES=8589934592`. AgentX sends the conversation ID in the `X-Dynamo-Session-Id` request header.
       - **Mooncake master:** `--default_kv_lease_ttl=60000 --eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10`, 128GB global segment, 4GB local buffer, RDMA over `mlx5_0..mlx5_3`.
 
@@ -1176,8 +1173,6 @@ presets:
       VLLM_USE_DIRECT_DCP_A2A: "1"
       VLLM_USE_DIRECT_DCP_Q_GATHER: "1"
       VLLM_USE_DIRECT_DCP_KV_GATHER: "1"
-      VLLM_PREFIX_CACHE_RETENTION_INTERVAL: "0"
-      VLLM_RPC_TIMEOUT: "600000"
       VLLM_LOG_STATS_INTERVAL: "1"
     args:
       - "--dcp-comm-backend"
