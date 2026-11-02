@@ -35,6 +35,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8_dequant import Fp8DequantConfig
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -118,12 +119,14 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.wq_b",
         )
         # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-        # FP8 wk weights are upcast to BF16 while loading to keep the fusion.
+        # It runs in BF16; FP8 checkpoint rows are dequantized after loading.
         self.wk_weights_proj = MergedColumnParallelLinear(
             hidden_size,
             [self.head_dim, self.n_head],
             bias=False,
-            quant_config=None,
+            quant_config=Fp8DequantConfig.for_checkpoint(
+                vllm_config.quant_config, any_scale_layout=True
+            ),
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )

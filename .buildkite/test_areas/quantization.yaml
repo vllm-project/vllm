@@ -142,9 +142,16 @@ steps:
   timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/mimo_v2.py
+  - vllm/model_executor/models/deepseek_v2.py
+  - vllm/model_executor/model_loader/reload/
   - tests/models/quantization
+  - tests/quantization/test_fp8_dequant.py
   commands:
-    - pytest -v -s models/quantization
+    - >-
+      pytest -v -s
+      models/quantization
+      quantization/test_fp8_dequant.py
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Quantized Models"

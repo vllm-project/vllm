@@ -1035,6 +1035,48 @@ def test_qwen4_exp_sm121_selected_shapes(
     assert cosine > 0.999
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_glm52_installer_keeps_fp8_dequant_processing(
+    monkeypatch: pytest.MonkeyPatch, dist_init
+) -> None:
+    """The indexer's wk_weights_proj loads block-FP8 into BF16
+    (Fp8DequantLinearMethod): it gets the low-latency GEMM and its FP8 rows
+    are still dequantized after loading."""
+    from vllm.model_executor.layers.linear import MergedColumnParallelLinear
+    from vllm.model_executor.layers.quantization.fp8_dequant import Fp8DequantConfig
+
+    spec = glm52_gemm._SM107_WK_WEIGHTS_PROJECTION
+    monkeypatch.setattr(
+        glm52_gemm.current_platform, "is_device_capability", lambda cc: cc == (10, 7)
+    )
+    monkeypatch.setattr(
+        glm52_gemm.shape_dynamic_skinny_gemm, "is_available", lambda: False
+    )
+    root = nn.Module()
+    with torch.device("cuda"):
+        root.wk_weights_proj = layer = MergedColumnParallelLinear(
+            spec.k,
+            [128, spec.n - 128],
+            bias=False,
+            params_dtype=torch.bfloat16,
+            quant_config=Fp8DequantConfig(None),
+            disable_tp=True,
+        )
+
+    glm52_gemm.enable_glm52_low_latency_gemm(root, torch.bfloat16)
+    assert isinstance(layer.quant_method, glm52_gemm.GLM52LowLatencyLinearMethod)
+
+    wk = torch.randn(128, spec.k, device="cuda").to(torch.float8_e4m3fn)
+    scale = torch.full((1, spec.k // 128), 0.5, device="cuda")
+    wp = torch.randn(spec.n - 128, spec.k, device="cuda").to(torch.bfloat16)
+    layer.weight.weight_loader(layer.weight, wk, 0)
+    layer.weight_scale_inv.weight_loader(layer.weight_scale_inv, scale, 0)
+    layer.weight.weight_loader(layer.weight, wp, 1)
+    layer.quant_method.process_weights_after_loading(layer)
+    expected = torch.cat([(wk.float() * 0.5).to(torch.bfloat16), wp])
+    torch.testing.assert_close(layer.weight, expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize(
     "n,k,num_tokens,config",
     [

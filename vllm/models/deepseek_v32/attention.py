@@ -21,6 +21,7 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8_dequant import Fp8DequantConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
     SparseAttnIndexer,
@@ -79,11 +80,15 @@ class DeepseekV32Indexer(nn.Module):
             prefix=f"{prefix}.wq_b",
         )
 
+        # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
+        # It runs in BF16; FP8 checkpoint rows are dequantized after loading.
         self.wk_weights_proj = MergedColumnParallelLinear(
             hidden_size,
             [self.head_dim, self.n_head],
             bias=False,
-            quant_config=None,
+            quant_config=Fp8DequantConfig.for_checkpoint(
+                vllm_config.quant_config, any_scale_layout=True
+            ),
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )

@@ -28,10 +28,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-    scaled_dequantize,
-)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.deepseek_v2 import (
@@ -626,7 +622,6 @@ class Dots3NoteModel(DeepseekV32Model):
     def _adapt_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterator[tuple[str, torch.Tensor]]:
-        pending_indexer_fp8: dict[tuple[str, str], dict[str, torch.Tensor]] = {}
         for name, weight in weights:
             if name.startswith("mtp."):
                 continue
@@ -639,47 +634,7 @@ class Dots3NoteModel(DeepseekV32Model):
                         and self.config.layer_types[layer_idx] == "sliding_attention"
                     ):
                         continue
-
-                projection = next(
-                    (
-                        candidate
-                        for candidate in ("wk", "weights_proj")
-                        if f".indexer.{candidate}." in name
-                    ),
-                    None,
-                )
-                is_fp8_weight = (
-                    name.endswith(".weight") and weight.dtype == torch.float8_e4m3fn
-                )
-                is_scale = "weight_scale" in name
-                if projection is not None and (is_fp8_weight or is_scale):
-                    layer_prefix = name.rsplit(f".{projection}.", 1)[0]
-                    key = (layer_prefix, projection)
-                    entry = pending_indexer_fp8.setdefault(key, {})
-                    entry["weight" if is_fp8_weight else "scale"] = weight
-                    if "weight" not in entry or "scale" not in entry:
-                        continue
-                    weight_fp8 = entry["weight"]
-                    scale_inv = entry["scale"]
-                    del pending_indexer_fp8[key]
-                    group_shape = GroupShape(
-                        weight_fp8.shape[0] // scale_inv.shape[0],
-                        weight_fp8.shape[1] // scale_inv.shape[1],
-                    )
-                    dequantized = scaled_dequantize(
-                        weight_fp8,
-                        scale_inv,
-                        group_shape=group_shape,
-                        out_dtype=torch.bfloat16,
-                    )
-                    yield f"{layer_prefix}.{projection}.weight", dequantized
-                    continue
             yield name, _pad_dense_mlp_weight(name, weight, self._weight_block_size)
-        if pending_indexer_fp8:
-            missing = ", ".join(
-                f"{prefix}.{proj}" for prefix, proj in pending_indexer_fp8
-            )
-            raise ValueError(f"Incomplete FP8 indexer weights: {missing}")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         return super().load_weights(self._adapt_weights(weights))

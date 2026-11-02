@@ -73,12 +73,12 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8_dequant import (
+    Fp8DequantConfig,
+    load_unneeded_scale,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-    scaled_dequantize,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.sparse_attn_indexer import (
@@ -121,7 +121,6 @@ from .interfaces import (
 )
 from .utils import (
     PPMissingLayer,
-    get_pp_missing_layer_names,
     get_spec_layer_idx_from_weight_name,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
@@ -708,12 +707,14 @@ class Indexer(nn.Module):
             prefix=f"{prefix}.wq_b",
         )
         # Fused wk + weights_proj: single GEMM producing [head_dim + n_head].
-        # FP8 wk weights are upcasted to BF16 during loading to maintain fusion.
+        # It runs in BF16; FP8 checkpoint rows are dequantized after loading.
         self.wk_weights_proj = MergedColumnParallelLinear(
             hidden_size,
             [self.head_dim, self.n_head],
             bias=False,
-            quant_config=None,
+            quant_config=Fp8DequantConfig.for_checkpoint(
+                vllm_config.quant_config, any_scale_layout=True
+            ),
             disable_tp=True,
             prefix=f"{prefix}.wk_weights_proj",
         )
@@ -854,63 +855,16 @@ class Indexer(nn.Module):
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
-def _try_load_fp8_indexer_wk(
-    name, tensor, buf, params_dict, loaded_params, pp_missing_layer_names
-):
-    """We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
-    in FP8 with a separate weight_scale_inv, while weights_proj is stored in BF16.
-    Upcasting to BF16 during loading enables the fusion. This function loads the FP8 WK
-    weights and scale, and when both are available, dequantizes to BF16 and stores into
-    the fused wk_weights_proj.weight parameter.
-    """
-    if "indexer.wk." not in name or "wk_weights" in name:
-        return False  # Weight is not an isolated WK weight for the indexer, ignore.
-    is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
-    is_scale = "weight_scale" in name
-    if not is_weight and not is_scale:
-        return False  # WK is not in FP8 format, ignore.
-    # Buffer this tensor (weight or scale) until both have arrived.
-    layer_prefix = name.rsplit(".wk.", 1)[0]  # e.g. "model.layers.0.self_attn.indexer"
-    fused_name = f"{layer_prefix}.wk_weights_proj.weight"
-    if any(
-        name.startswith(missing_layer_name)
-        for missing_layer_name in pp_missing_layer_names
+def _indexer_checkpoint_name(name: str) -> str:
+    """Quark and compressed-tensors name an FP8 indexer scale ``weight_scale``;
+    the fused ``wk_weights_proj`` loads it as ``weight_scale_inv``. (HY-V4's
+    weights mapper renames ``weights_proj`` to ``wk_weights_proj`` first.)"""
+    if name.endswith(".weight_scale") and any(
+        f".indexer.{proj}." in name
+        for proj in ("wk", "weights_proj", "wk_weights_proj")
     ):
-        return True
-    entry = buf.setdefault(layer_prefix, {})
-    entry["weight" if is_weight else "scale"] = tensor
-    if "weight" not in entry or "scale" not in entry:
-        return True  # still waiting for the other param
-
-    # We have both weight and scale: dequantize FP8 to BF16.
-    weight_fp8, scale_inv = entry["weight"], entry["scale"]
-    del buf[layer_prefix]
-    if scale_inv.dtype in (torch.uint8, torch.float8_e8m0fnu):
-        # MXFP8 checkpoints store power-of-two E8M0 scales, decode them to float.
-        scale_inv = scale_inv.view(torch.float8_e8m0fnu).to(torch.float32)
-    if scale_inv.ndim == 1:
-        # Per-channel scale: one scale per row of [out, in]
-        group_shape = GroupShape(1, weight_fp8.shape[1])
-    else:
-        # Derive the block size independently per dim so that per-channel
-        # ([out, 1]), MX ([out, in / 32]) and 2D block ([out / 128, in / 128])
-        # scale layouts are all handled.
-        group_shape = GroupShape(
-            weight_fp8.shape[0] // scale_inv.shape[0],
-            weight_fp8.shape[1] // scale_inv.shape[1],
-        )
-    weight_bf16 = scaled_dequantize(
-        weight_fp8,
-        scale_inv,
-        group_shape=group_shape,
-        out_dtype=torch.bfloat16,
-    )
-
-    # Load the dequantized weight into shard 0 of the fused buffer.
-    param = params_dict[fused_name]
-    param.weight_loader(param, weight_bf16, 0)
-    loaded_params.add(fused_name)
-    return True
+        return f"{name}_inv"
+    return name
 
 
 def _min_latency_fused_qkv_a_proj_impl(
@@ -1607,10 +1561,6 @@ class DeepseekV2Model(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
-        if _pending_wk_fp8 is None:
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
-
         indexer_fused_mapping = [
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
@@ -1635,7 +1585,6 @@ class DeepseekV2Model(nn.Module):
             num_redundant_experts=self.num_redundant_experts,
         )
 
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         # With index_topk_freq>1 only some layers build an indexer, yet the
@@ -1663,15 +1612,7 @@ class DeepseekV2Model(nn.Module):
                 and extract_layer_index(name) in self.fused_shared_expert_layers
             )
 
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
+            name = _indexer_checkpoint_name(name)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
@@ -1708,6 +1649,7 @@ class DeepseekV2Model(nn.Module):
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
+                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 is_expert_weight = False

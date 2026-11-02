@@ -45,7 +45,13 @@ from .interfaces import (
     SupportsMultiModal,
     _require_is_multimodal,
 )
-from .mimo_v2 import MiMoV2Attention, MiMoV2MLP, _shard_fp8_qkv_proj
+from .mimo_v2 import (
+    MiMoV2Attention,
+    MiMoV2MLP,
+    _fused_qkv_chunks,
+    _load_fused_fp8_qkv,
+    _use_row_scales,
+)
 from .utils import _merge_multimodal_embeddings, maybe_prefix
 
 # MiMo-V2 checkpoints contain multiple MTP layers, but vLLM currently supports
@@ -106,6 +112,13 @@ class MiMoV2MTPLayer(nn.Module):
             partial_rotary_factor=getattr(config, "partial_rotary_factor", 1.0),
             prefix=f"{prefix}.self_attn",
         )
+        # a fused fp8 qkv_proj checkpoint loads as rows and row scales
+        if _fused_qkv_chunks(config, quant_config):
+            _use_row_scales(self.self_attn.qkv_proj)
+        # load_weights cuts a fused qkv_proj checkpoint to this rank's rows
+        if getattr(config, "attention_projection_layout", None) == "fused_qkv":
+            for param in self.self_attn.qkv_proj.parameters():
+                param.weight_loader = default_weight_loader
         self.pre_mlp_layernorm = RMSNorm(
             config.hidden_size, eps=config.layernorm_epsilon
         )
@@ -271,13 +284,6 @@ class MiMoV2MTP(nn.Module):
 
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        # The pairing state must outlive this call: AutoWeightsLoader delegates
-        # per contiguous group of names, so a pair can straddle two calls and
-        # would otherwise be dropped silently.
-        pending_qkv_proj = getattr(self, "_pending_qkv_proj", None)
-        if pending_qkv_proj is None:
-            self._pending_qkv_proj = pending_qkv_proj = {}
-
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -292,11 +298,8 @@ class MiMoV2MTP(nn.Module):
 
             # Fused qkv_proj: the fp8 weight and its block scales arrive as
             # separate tensors and are pre-sharded at `config.num_key_value_heads`
-            # chunks of [Q_c | K_c | V_c] (see _shard_fp8_qkv_proj for the
-            # layout). Shard them together: a plain chunk(tp_size) only happens
-            # to be right when tp_size is that chunk count *and* the scales are
-            # tiled per chunk (they are 4 x 29 = 116 rows for MiMo-V2.5, not
-            # tp_size slices of an even split).
+            # chunks of [Q_c | K_c | V_c] (see _fused_qkv_rank_rows for the
+            # layout); each is loaded on its own.
             if "qkv_proj" in name:
                 is_fp8_weight = (
                     name.endswith("qkv_proj.weight")
@@ -304,43 +307,25 @@ class MiMoV2MTP(nn.Module):
                 )
                 is_fp8_scale = name.endswith("qkv_proj.weight_scale_inv")
                 if is_fp8_weight or is_fp8_scale:
+                    if name not in params_dict:
+                        continue
                     prefix, kind = name.rsplit(".", 1)
-                    if (
-                        f"{prefix}.weight" not in params_dict
-                        or f"{prefix}.weight_scale_inv" not in params_dict
-                    ):
-                        continue
-                    entry = pending_qkv_proj.setdefault(prefix, {})
-                    entry[kind] = loaded_weight
-                    if "weight" not in entry or "weight_scale_inv" not in entry:
-                        # Waiting for the other half of the fused projection.
-                        continue
-                    del pending_qkv_proj[prefix]
-
                     # Geometry comes from the module the weights belong to.
                     attn = self.get_submodule(prefix.rsplit(".", 1)[0])
-                    w_rank, s_rank = _shard_fp8_qkv_proj(
-                        entry["weight"],
-                        entry["weight_scale_inv"],
-                        num_heads=attn.total_num_heads,
-                        num_kv_heads=attn.total_num_kv_heads,
-                        head_dim=attn.head_dim,
-                        v_head_dim=attn.v_head_dim,
-                        tp_rank=tp_rank,
-                        tp_size=tp_size,
+                    _load_fused_fp8_qkv(
+                        attn,
+                        kind,
+                        loaded_weight,
+                        tp_rank,
+                        tp_size,
                         ckpt_tp=self.config.num_key_value_heads,
                     )
-                    for k, tensor in (("weight", w_rank), ("weight_scale_inv", s_rank)):
-                        param = params_dict[f"{prefix}.{k}"]
-                        if tensor.shape[0] > param.shape[0]:
-                            tensor = tensor[: param.shape[0]]
-                        default_weight_loader(param, tensor)
-                        loaded_params.add(f"{prefix}.{k}")
+                    loaded_params.add(name)
                 elif name in params_dict:
                     # Non-fp8 fused checkpoint: unchanged behaviour.
                     param = params_dict[name]
                     loaded_weight = loaded_weight.chunk(tp_size, dim=0)[tp_rank]
-                    default_weight_loader(param, loaded_weight)
+                    param.weight_loader(param, loaded_weight)
                     loaded_params.add(name)
                 continue
 

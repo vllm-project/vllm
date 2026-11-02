@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
+from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     VocabParallelEmbedding,
 )
@@ -29,7 +30,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV2ForCausalLM,
     DeepseekV2MLP,
     DeepseekV2MoE,
-    _try_load_fp8_indexer_wk,
+    _indexer_checkpoint_name,
     get_spec_layer_idx_from_weight_name,
 )
 from vllm.model_executor.models.utils import (
@@ -37,7 +38,6 @@ from vllm.model_executor.models.utils import (
     copy_pp_buffers,
     extract_layer_index,
     get_fused_shared_expert_layers,
-    get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -269,15 +269,8 @@ class DeepseekV32Model(torch.nn.Module):
             num_redundant_experts=self.num_redundant_experts,
         )
 
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
-        # Reordering loaders (e.g. runai_streamer) can split an FP8 indexer wk
-        # weight/scale pair across load_weights() calls; keep the pending
-        # buffer on the model so pairs survive the call boundary.
-        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
-        if _pending_wk_fp8 is None:
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -289,15 +282,7 @@ class DeepseekV32Model(torch.nn.Module):
                 and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
                 and extract_layer_index(name) in self.fused_shared_expert_layers
             )
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                _pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
+            name = _indexer_checkpoint_name(name)
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -318,6 +303,7 @@ class DeepseekV32Model(torch.nn.Module):
                     continue
                 param = params_dict[name]
                 param.weight_loader(param, loaded_weight, shard_id)
+                load_unneeded_scale(name, param, loaded_weight, loaded_params, shard_id)
                 break
             else:
                 is_expert_weight = False

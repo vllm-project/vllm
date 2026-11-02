@@ -42,12 +42,13 @@ from vllm.model_executor.layers.fused_moe import fused_moe_make_expert_params_ma
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.fp8_dequant import load_unneeded_scale
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.deepseek_v2 import _try_load_fp8_indexer_wk
+from vllm.model_executor.models.deepseek_v2 import _indexer_checkpoint_name
 from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -55,7 +56,6 @@ from vllm.model_executor.models.utils import (
     WeightsMapper,
     compute_skip_topk_layers,
     copy_pp_buffers,
-    get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
@@ -456,9 +456,6 @@ class HYV4Model(nn.Module):
         return loaded_local_expert
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # FP8 indexer wk dequant buffer (weight and scale arrive separately).
-        pending_wk_fp8: dict[str, dict[str, torch.Tensor]] = {}
-        pp_missing_layer_names = get_pp_missing_layer_names(self)
         skip_topk_layers = compute_skip_topk_layers(self.config)
 
         # Must not be cached on `self`: `process_weights_after_loading` swaps in
@@ -503,15 +500,7 @@ class HYV4Model(nn.Module):
         for name, loaded_weight in weights:
             if is_skip_topk_indexer_weight(name, skip_topk_layers):
                 continue
-            if _try_load_fp8_indexer_wk(
-                name,
-                loaded_weight,
-                pending_wk_fp8,
-                params_dict,
-                loaded_params,
-                pp_missing_layer_names,
-            ):
-                continue
+            name = _indexer_checkpoint_name(name)
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
             # Names and stacked shard ids are normalized upstream by
@@ -631,6 +620,9 @@ class HYV4Model(nn.Module):
                     weight_loader(param, loaded_weight)
                 else:
                     weight_loader(param, loaded_weight, stacked_shard_id)
+                    load_unneeded_scale(
+                        name, param, loaded_weight, loaded_params, stacked_shard_id
+                    )
             loaded_params.add(name)
 
         return loaded_params
