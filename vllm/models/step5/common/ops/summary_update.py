@@ -12,9 +12,9 @@ reads; it is rewritten when the region closes again.
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tldevice, triton
 
-libdevice = tl.extra.cuda.libdevice
+libdevice = tldevice
 
 
 @triton.jit
