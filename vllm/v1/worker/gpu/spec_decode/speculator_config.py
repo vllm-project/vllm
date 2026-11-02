@@ -209,7 +209,13 @@ class DraftModelSpeculatorConfig(SpeculatorConfig):
             max_model_len=spec.max_model_len,  # type: ignore[arg-type]
             spec_target_max_model_len=target.max_model_len,
             quantization=spec.quantization,
-            enforce_eager=target.enforce_eager,
+            enforce_eager=(
+                # A drafter-only eager override wins over inheriting
+                # the target's setting.
+                spec.enforce_eager
+                if spec.enforce_eager is not None
+                else target.enforce_eager
+            ),
             max_logprobs=target.max_logprobs,
             hf_overrides=draft_hf_overrides,
             config_format=target.config_format,
