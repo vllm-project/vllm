@@ -91,6 +91,9 @@ from vllm.model_executor.kernels.linear.mxfp4.marlin import (
 from vllm.model_executor.kernels.linear.mxfp4.pytorch import (
     TorchMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.rdna3 import (
+    Rdna3MxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.rdna3_hip import (
     Rdna3W4A8MxFp4LinearKernel,
 )
@@ -632,6 +635,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
     ],
     PlatformEnum.ROCM: [
         Rdna3W4A8MxFp4LinearKernel,
+        Rdna3MxFp4LinearKernel,
         AiterMxfp4LinearKernel,
         EmulationMxfp4LinearKernel,
     ],
