@@ -492,9 +492,14 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills: set[Request] = set()
 
         # Requests with an async KV load, by stage (KV_FETCH_STAGES).
-        # None when not tracked (stats disabled or no KV connector).
+        # None when not tracked (no KV connector, or neither stats nor
+        # --max-num-inflight-kv-loads need it).
+        track_kv_fetches = (
+            self.log_stats
+            or self.scheduler_config.max_num_inflight_kv_loads is not None
+        )
         self._kv_fetch_stages: dict[Request, str] | None = (
-            {} if self.log_stats and self.connector is not None else None
+            {} if track_kv_fetches and self.connector is not None else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
 
@@ -1281,6 +1286,11 @@ class Scheduler(SchedulerInterface):
                 # rewriting its cached KV. An async load replays once the KV
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
+
+                if load_kv_async and not self._admits_inflight_kv_load():
+                    # Past --max-num-inflight-kv-loads. Like a load whose blocks
+                    # do not fit, it waits until an in-flight load runs or ends.
+                    break
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -3418,6 +3428,19 @@ class Scheduler(SchedulerInterface):
             if stage is not None:
                 kv_fetch_stages[request] = stage
                 self._kv_fetch_counts[stage] += 1
+
+    def num_inflight_kv_loads(self) -> int:
+        """Requests holding blocks for an async KV load before they run: the
+        load in progress, or finished and waiting to be scheduled."""
+        return (
+            self._kv_fetch_counts[KV_FETCH_IN_PROGRESS]
+            + self._kv_fetch_counts[KV_FETCH_COMPLETED_WAITING]
+        )
+
+    def _admits_inflight_kv_load(self) -> bool:
+        """Whether a new async KV load stays within --max-num-inflight-kv-loads."""
+        limit = self.scheduler_config.max_num_inflight_kv_loads
+        return limit is None or self.num_inflight_kv_loads() < limit
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""

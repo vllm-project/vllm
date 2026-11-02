@@ -620,6 +620,7 @@ class EngineArgs:
     )
     max_num_seqs: int | None = None
     max_num_active_seqs: int | None = SchedulerConfig.max_num_active_seqs
+    max_num_inflight_kv_loads: int | None = SchedulerConfig.max_num_inflight_kv_loads
     max_num_queued_reqs: int | None = None
     max_num_queued_tokens: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
@@ -1766,6 +1767,10 @@ class EngineArgs:
             **scheduler_kwargs["max_num_active_seqs"],
         )
         scheduler_group.add_argument(
+            "--max-num-inflight-kv-loads",
+            **scheduler_kwargs["max_num_inflight_kv_loads"],
+        )
+        scheduler_group.add_argument(
             "--max-num-queued-reqs", **scheduler_kwargs["max_num_queued_reqs"]
         )
         scheduler_group.add_argument(
@@ -2666,6 +2671,7 @@ class EngineArgs:
             max_num_scheduled_tokens=self.max_num_scheduled_tokens,
             max_num_seqs=self.max_num_seqs,
             max_num_active_seqs=self.max_num_active_seqs,
+            max_num_inflight_kv_loads=self.max_num_inflight_kv_loads,
             max_num_queued_reqs=self.max_num_queued_reqs,
             max_num_queued_tokens=self.max_num_queued_tokens,
             max_model_len=model_config.max_model_len,
