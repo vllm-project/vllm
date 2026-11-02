@@ -39,12 +39,29 @@ else()
   FetchContent_Declare(
           vllm-flash-attn
           GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git
-          GIT_TAG b273a02621d3c94bc747df67204f591b67f38fae
+          GIT_TAG 0efe5cabaa1b243aeb0437447ef68ebc2db64c68
           GIT_PROGRESS TRUE
           # Don't share the vllm-flash-attn build between build types
           BINARY_DIR ${CMAKE_BINARY_DIR}/vllm-flash-attn
   )
 endif()
+
+# FA2 is the only vllm-flash-attn backend on SM8x/SM12x. On SM9x/SM10x/SM11x it
+# is just a PTX fallback for configs FA3/FA4 don't cover, so only build it there
+# when requested via VLLM_BUILD_FA2=ON (set VLLM_BUILD_FA2=OFF to always skip).
+if (DEFINED ENV{VLLM_BUILD_FA2})
+  set(VLLM_BUILD_FA2 $ENV{VLLM_BUILD_FA2})
+endif()
+if (NOT DEFINED VLLM_BUILD_FA2)
+  set(VLLM_BUILD_FA2 OFF)
+  foreach(_ARCH ${CUDA_ARCHS})
+    if (_ARCH MATCHES "^(8|12)\\.")
+      set(VLLM_BUILD_FA2 ON)
+    endif()
+  endforeach()
+endif()
+set(FA2_ENABLED ${VLLM_BUILD_FA2})
+message(STATUS "Building vllm-flash-attn FA2: ${FA2_ENABLED}")
 
 # Make sure vllm-flash-attn install rules are nested under vllm/
 # ALL_COMPONENTS ensures the save/modify/restore runs exactly once regardless
@@ -56,6 +73,11 @@ install(CODE "set(CMAKE_INSTALL_PREFIX \"\${CMAKE_INSTALL_PREFIX}/vllm/\")" ALL_
 # Fetch the vllm-flash-attn library
 FetchContent_MakeAvailable(vllm-flash-attn)
 message(STATUS "vllm-flash-attn is available at ${vllm-flash-attn_SOURCE_DIR}")
+
+if (NOT TARGET _vllm_fa2_C)
+  # Empty target so setup.py can still request it
+  add_custom_target(_vllm_fa2_C)
+endif()
 
 # Restore the install prefix after FA's install rules
 install(CODE "set(CMAKE_INSTALL_PREFIX \"\${OLD_CMAKE_INSTALL_PREFIX}\")" ALL_COMPONENTS)

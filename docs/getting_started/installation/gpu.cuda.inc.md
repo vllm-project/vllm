@@ -172,6 +172,8 @@ uv pip install -e . --torch-backend=auto
 !!! note "CUDA Architecture & PTX Flags"
     vLLM normalizes CUDA architectures on a per-source basis to optimize build times and wheel sizes. Global `+PTX` requests in `TORCH_CUDA_ARCH_LIST` (e.g., `TORCH_CUDA_ARCH_LIST="8.0+PTX"`) are ignored for general extension targets; vLLM generates PTX only for specific internal kernels that require it.
 
+    FlashAttention 2 is only built by default when `TORCH_CUDA_ARCH_LIST` includes an SM8x or SM12x architecture. On Hopper/Blackwell-only builds it is skipped since FA3/FA4 are used there; set `VLLM_BUILD_FA2=1` to build it anyway (e.g. for ALiBi models, or head sizes FA4 does not support), or `VLLM_BUILD_FA2=0` to always skip it.
+
 !!! tip
     Building from source requires a lot of compilation. If you are building from source repeatedly, it's more efficient to cache the compilation results.
 

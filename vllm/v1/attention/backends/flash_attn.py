@@ -474,6 +474,17 @@ class FlashAttentionBackend(AttentionBackend):
         if has_sink and device_capability < DeviceCapability(9, 0):
             return "sink not supported on compute capability < 9.0"
         if (
+            current_platform.is_cuda()
+            and get_flash_attn_version(
+                head_size=head_size,
+                has_sinks=has_sink,
+                kv_cache_block_size=block_size,
+                supports_fa4_hd256=True,
+            )
+            is None
+        ):
+            return "no built FlashAttention version supports this configuration"
+        if (
             use_mm_prefix
             and kv_cache_dtype is not None
             and is_quantized_kv_cache(kv_cache_dtype)
@@ -1119,6 +1130,17 @@ class FlashAttentionImpl(AttentionImpl):
             )
             self.vllm_flash_attn_version = 2
             self.fa4_hd256 = False
+        if current_platform.is_cuda() and (
+            self.vllm_flash_attn_version is None
+            or not is_fa_version_supported(self.vllm_flash_attn_version)
+        ):
+            raise NotImplementedError(
+                "No built FlashAttention version supports this layer "
+                f"(head_size={head_size}, alibi={alibi_slopes is not None}, "
+                f"sinks={sinks is not None}). FA2 is only built by default for "
+                "SM8x/SM12x; rebuild with VLLM_BUILD_FA2=ON or use another "
+                "attention backend."
+            )
         logger.info_once(
             "Using FlashAttention version %s",
             self.vllm_flash_attn_version,
