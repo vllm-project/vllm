@@ -403,3 +403,105 @@ class TestAsyncLookupManager:
         with pytest.raises(AssertionError):
             mgr.drain_results()
         mgr.shutdown()
+
+    def test_store_drops_orphaned_in_flight_state(
+        self, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A store must not retain an in-flight state after its request ended."""
+        key = _key(1)
+        mgr = InMemoryLookupManager()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        batch_lookup = mgr.batch_lookup
+
+        def blocking_lookup(keys, req_context):
+            results = list(batch_lookup(keys, req_context))
+            probe_started.set()
+            if not release_probe.wait(timeout=5):
+                raise TimeoutError("Test did not release the backend probe")
+            return results
+
+        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
+        try:
+            assert mgr.lookup(key, _ctx("req_a")) is None
+            mgr.flush()
+            assert probe_started.wait(timeout=5)
+            mgr.cleanup("req_a")
+            assert key in mgr._lookup_state
+            assert not mgr._lookup_state[key].request_ids
+
+            mgr._existing.add(key)
+            mgr.mark_present([key])
+            assert key not in mgr._lookup_state
+            release_probe.set()
+        finally:
+            release_probe.set()
+            mgr.shutdown()
+
+        assert key not in mgr._lookup_state
+
+    def test_mark_present_handles_mixed_phases(self, monkeypatch: pytest.MonkeyPatch):
+        """One call updates pending, in-flight and resolved keys independently."""
+        pending_key, in_flight_key, resolved_key, unknown_key = (
+            _key(1),
+            _key(2),
+            _key(3),
+            _key(99),
+        )
+        mgr = InMemoryLookupManager()
+        probe_started = threading.Event()
+        release_probe = threading.Event()
+        batch_lookup = mgr.batch_lookup
+        calls = 0
+
+        def blocking_lookup(keys, req_context):
+            nonlocal calls
+            calls += 1
+            results = list(batch_lookup(keys, req_context))
+            if calls == 2:
+                probe_started.set()
+                if not release_probe.wait(timeout=5):
+                    raise TimeoutError("Test did not release the backend probe")
+            return results
+
+        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
+        try:
+            # Resolved: a probe delivered a miss.
+            assert mgr.lookup(resolved_key, _ctx("req_c")) is None
+            mgr.flush()
+            assert mgr._results_ready.wait(timeout=5)
+            mgr._results_ready.clear()
+            assert mgr.lookup(resolved_key, _ctx("req_c")) is False
+
+            # In flight: the worker is still inside this probe.
+            assert mgr.lookup(in_flight_key, _ctx("req_b")) is None
+            mgr.flush()
+            assert probe_started.wait(timeout=5)
+
+            # Pending: accumulated this step, not flushed yet.
+            assert mgr.lookup(pending_key, _ctx("req_a")) is None
+
+            mgr.mark_present([pending_key, in_flight_key, resolved_key, unknown_key])
+
+            for key in (pending_key, in_flight_key, resolved_key):
+                state = mgr._lookup_state[key]
+                assert state.result is True
+                assert state.phase is LookupPhase.RESOLVED
+            assert unknown_key not in mgr._lookup_state
+
+            # A stale pending entry is skipped when its batch is flushed.
+            mgr.flush()
+
+            assert mgr.lookup(pending_key, _ctx("req_a")) is True
+            assert mgr.lookup(in_flight_key, _ctx("req_b")) is True
+            assert mgr.lookup(resolved_key, _ctx("req_c")) is True
+            assert mgr.lookup(unknown_key, _ctx("req_d")) is None
+
+            release_probe.set()
+        finally:
+            release_probe.set()
+            mgr.shutdown()
+
+        # Only the two flushed probes ran: the pending batch was dropped, the
+        # in-flight result was ignored, and unknown_key was never probed.
+        assert calls == 2

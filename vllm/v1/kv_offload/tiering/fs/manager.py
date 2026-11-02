@@ -150,6 +150,7 @@ class FileSystemTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
+        # Track in-flight store jobs for lookup invalidation and KV events.
         self._store_jobs: dict[JobId, TransferJob] = {}
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
@@ -221,8 +222,7 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         keys = list(job_metadata.keys)
-        if self.events is not None:
-            self._store_jobs[job_metadata.job_id] = job_metadata
+        self._store_jobs[job_metadata.job_id] = job_metadata
         task = functools.partial(
             batch_store_block,
             [self.file_mapper.get_file_name(key) for key in keys],
@@ -282,9 +282,11 @@ class FileSystemTierManager(SecondaryTierManager):
         for job_id, success, transfer_time in self._pool.get_finished():
             block_count = self._job_block_counts.pop(job_id, 0)
             transfer_bytes = block_count * self._block_size if block_count else None
-            if self.events is not None:
-                job = self._store_jobs.pop(job_id, None)
-                if success and job is not None and job.keys:
+            job = self._store_jobs.pop(job_id, None)
+            if job is not None and success:
+                # Successful store makes previously absent keys known-present.
+                self._lookup_manager.mark_present(job.keys)
+                if self.events is not None and job.keys:
                     self.events.append(
                         OffloadingEvent(
                             keys=list(job.keys),
