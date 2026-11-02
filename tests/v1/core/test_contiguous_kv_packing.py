@@ -81,6 +81,9 @@ def _mock_vllm_config(layout: str | None):
     config.cache_config.num_gpu_blocks_override = None
     config.cache_config.kv_cache_layout = layout
     config.attention_config.hisparse_config = None
+    config.model_config.max_model_len = 16
+    config.max_in_flight_tokens = 16
+    config.parallel_config.decode_context_parallel_size = 1
     return config
 
 
@@ -443,6 +446,9 @@ class TestSlidingWindowBucketCap:
         every block; capped, it splits into groups no wider than the MLA
         page."""
         config = _shared_layout_config()
+        # At a long context the paged MLA group reserves the most blocks per
+        # request, so widening the block past its page cannot pay off.
+        config.model_config.max_model_len = 65536
         specs: dict[str, KVCacheSpec] = {}
         for layer, ratio in ((2, 2), (8, 2), (14, 2), (20, 1)):
             specs[f"layers.{layer}.attn"] = MLAAttentionSpec(
@@ -483,6 +489,77 @@ class TestSlidingWindowBucketCap:
         assert sorted(n for g in swa_groups for n in g.layer_names) == sorted(
             f"layers.{i}.swa" for i in range(43)
         )
+
+    def test_block_widens_when_it_reserves_fewer_bytes_per_request(self):
+        """DeepSeek-V4.1 with the 272 B MXFP4 compressed record beside 528 B
+        SWA records. Every SWA group reserves window + in-flight tokens per
+        request whatever its width, so capping it at the 55808 B MLA group
+        (3 SWA pages, 14 groups) reserves more than widening the block to fit
+        4 SWA pages (10 groups)."""
+        config = _shared_layout_config()
+        config.model_config.max_model_len = 65536
+        config.max_in_flight_tokens = 32768
+        record_rows = lcm(528, 272)
+        specs: dict[str, KVCacheSpec] = {}
+        for layer in range(40):
+            specs[f"layers.{layer}.swa"] = SlidingWindowMLASpec(
+                block_size=32,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.uint8,
+                sliding_window=128,
+                state_content_bytes=528,
+                alignment=512,
+                block_stride_alignment=record_rows,
+            )
+        for layer, ratio in ((2, 2), (8, 2), (14, 2), (20, 1)):
+            specs[f"layers.{layer}.attn"] = MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=512,
+                dtype=torch.uint8,
+                tokens_per_state=ratio,
+                state_content_bytes=272,
+                alignment=512,
+            )
+            specs[f"layers.{layer}.idx"] = MLAAttentionSpec(
+                block_size=64,
+                num_kv_heads=1,
+                head_size=68,
+                dtype=torch.uint8,
+                tokens_per_state=ratio,
+                alignment=512,
+            )
+
+        def reserved_bytes(groups) -> int:
+            blocks = sum(
+                -(
+                    -g.kv_cache_spec.max_memory_usage_bytes(config)
+                    // g.kv_cache_spec.page_size_bytes
+                )
+                for g in groups
+            )
+            return _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) * blocks
+
+        groups = get_kv_cache_groups(config, specs)
+        pages = _pages(groups)
+        swa_groups = [g for g in groups if g.layer_names[0].endswith(".swa")]
+        assert [len(g.layer_names) for g in swa_groups] == [4] * 10
+        main = next(g for g in groups if "layers.2.attn" in g.layer_names)
+        main_bytes = sum(pages[n] for n in main.layer_names)
+        block = _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC)
+        assert block > main_bytes
+        assert block % record_rows == 0
+
+        capped = [main] + [
+            KVCacheGroupSpec(
+                names, UniformTypeKVCacheSpecs.from_specs({n: specs[n] for n in names})
+            )
+            for names in (
+                [f"layers.{i}.swa" for i in range(40)][j::14] for j in range(14)
+            )
+        ]
+        assert reserved_bytes(groups) < reserved_bytes(capped)
 
 
 class TestDensePacking:
@@ -742,7 +819,7 @@ class TestSWABoundedReplayGrouping:
         assert sorted(
             (g.kv_cache_spec.prefix_cacheable, g.kv_cache_spec.prefix_replay_tokens)
             for g in groups
-        ) == [(False, 128)] * 4 + [(True, 0)]
+        ) == [(False, 128)] * (len(groups) - 1) + [(True, 0)]
         kv_cache_config = get_kv_cache_config_from_groups(
             config,
             groups,
