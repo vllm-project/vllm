@@ -1581,17 +1581,18 @@ elseif(VLLM_GPU_LANG STREQUAL "HIP")
 
   # The kernel is specialized on the wavefront size, but ROCm only exposes that
   # value at runtime, so both arms are instantiated unless the build says which
-  # one the targeted archs can select (CDNA/gfx9xx is wave64, RDNA is wave32).
+  # one the targeted archs can select (gfx9xx is wave64, every other supported
+  # arch is wave32 - that is what Utils::get_warp_size() returns).
   set(TOPK_WAVE_ONLY_DEFINE "")
   set(_MOE_WAVE64_ARCHS ${VLLM_GPU_ARCHES})
   list(FILTER _MOE_WAVE64_ARCHS INCLUDE REGEX "^gfx9")
   set(_MOE_WAVE32_ARCHS ${VLLM_GPU_ARCHES})
   list(FILTER _MOE_WAVE32_ARCHS EXCLUDE REGEX "^gfx9")
   if(_MOE_WAVE64_ARCHS AND NOT _MOE_WAVE32_ARCHS)
-    message(STATUS "topk softplus-sqrt: wave64 only (CDNA archs: ${VLLM_GPU_ARCHES})")
+    message(STATUS "topk softplus-sqrt: wave64 only (gfx9 archs: ${VLLM_GPU_ARCHES})")
     set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
   elseif(_MOE_WAVE32_ARCHS AND NOT _MOE_WAVE64_ARCHS)
-    message(STATUS "topk softplus-sqrt: wave32 only (RDNA archs: ${VLLM_GPU_ARCHES})")
+    message(STATUS "topk softplus-sqrt: wave32 only (non-gfx9 archs: ${VLLM_GPU_ARCHES})")
     set(TOPK_WAVE_ONLY_DEFINE VLLM_TOPK_SOFTPLUS_SQRT_WAVE32_ONLY)
   else()
     message(STATUS "topk softplus-sqrt: both wavefront sizes (archs: ${VLLM_GPU_ARCHES})")

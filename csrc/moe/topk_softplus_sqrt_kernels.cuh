@@ -731,11 +731,12 @@ void topkGatingSoftplusSqrtLauncherHelper(
                   "Unsupported warp size. Only 32 is supported for CUDA"); \
     LAUNCH_SOFTPLUS_SQRT_WARP(WARP_SIZE, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)
 #else
-  // The wavefront size is fixed per GPU family: CDNA (gfx9xx) is wave64, RDNA
-  // (gfx10xx/gfx11xx/gfx12xx) is wave32. When the build only targets one of
-  // the two families CMake defines VLLM_TOPK_SOFTPLUS_SQRT_WAVE{64,32}_ONLY, so
-  // only the arm that can actually run is instantiated - compiling both used
-  // to double the number of device kernels emitted for this file.
+  // The wavefront size is fixed per GPU family: gfx9xx is wave64, every other
+  // supported arch is wave32 (see Utils::get_warp_size()). When the build only
+  // targets one of the two families CMake defines
+  // VLLM_TOPK_SOFTPLUS_SQRT_WAVE{64,32}_ONLY, so only the arm that can actually
+  // run is instantiated - compiling both used to double the number of device
+  // kernels emitted for this file.
   #if defined(VLLM_TOPK_SOFTPLUS_SQRT_WAVE64_ONLY)
     #define LAUNCH_SOFTPLUS_SQRT(NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES) \
       LAUNCH_SOFTPLUS_SQRT_WARP(64, NUM_EXPERTS, WARPS_PER_TB, MAX_BYTES)
