@@ -10,6 +10,7 @@ import ctypes
 import glob
 import os
 from collections.abc import Iterable
+from contextlib import suppress
 from functools import cache
 from typing import Any
 
@@ -64,8 +65,13 @@ class _MemFabricHandle(ctypes.Structure):
 
 
 def imex_channel_available() -> bool:
-    """Whether this process can use an IMEX channel, which FABRIC handles take."""
-    return any(os.access(path, os.R_OK) for path in glob.glob(_IMEX_CHANNELS))
+    """Whether this process can open an IMEX channel, which FABRIC handles take.
+    The file alone does not tell: a container's device cgroup can still deny it."""
+    for path in glob.glob(_IMEX_CHANNELS):
+        with suppress(OSError):
+            os.close(os.open(path, os.O_RDONLY))
+            return True
+    return False
 
 
 def _find_loaded_library(

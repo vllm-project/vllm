@@ -8,7 +8,12 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.utils.vmm_driver import CudaVmmDriver, _find_loaded_library
+from vllm.utils import vmm_driver
+from vllm.utils.vmm_driver import (
+    CudaVmmDriver,
+    _find_loaded_library,
+    imex_channel_available,
+)
 
 _CUDART = "/usr/lib/python3.12/site-packages/nvidia/cuda_runtime/lib/libcudart.so.12"
 _MAPS = [
@@ -169,3 +174,15 @@ def test_fabric_handle_requested_only_if_it_can_be_exported(
     assert driver._make_alloc_prop(0).requestedHandleTypes == requested
 
     assert len(released) == (create_rc == 0)
+
+
+def test_imex_channel_available_needs_a_channel_that_opens(monkeypatch, tmp_path):
+    monkeypatch.setattr(vmm_driver, "_IMEX_CHANNELS", str(tmp_path / "channel*"))
+    assert not imex_channel_available()
+
+    # A dangling symlink stands in for a file the process cannot open.
+    (tmp_path / "channel0").symlink_to(tmp_path / "missing")
+    assert not imex_channel_available()
+
+    (tmp_path / "channel1").touch()
+    assert imex_channel_available()
