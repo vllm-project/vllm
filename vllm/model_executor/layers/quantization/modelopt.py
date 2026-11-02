@@ -18,6 +18,9 @@ from vllm.model_executor.kernels.linear import (
     init_mxfp8_linear_kernel,
     init_nvfp4_linear_kernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm import (
+    CutlassFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
@@ -1042,10 +1045,13 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """Convert NVFP4 MoE weights into kernel format and setup the kernel."""
         if is_weights_pre_processed():
-            if self.nvfp4_backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            if self.nvfp4_backend not in (
+                NvFp4MoeBackend.FLASHINFER_TRTLLM,
+                NvFp4MoeBackend.VLLM_CUTLASS,
+            ):
                 raise RuntimeError(
-                    "pre-processed weights require FLASHINFER_TRTLLM backend, "
-                    f"moe backend, got {self.nvfp4_backend}"
+                    "pre-processed weights require FLASHINFER_TRTLLM or "
+                    f"VLLM_CUTLASS MoE backend, got {self.nvfp4_backend}"
                 )
             self._restore_padded_moe_dims(layer)
             self._build_moe_kernel(layer)
@@ -2661,10 +2667,14 @@ class ModelOptLinearMethod(LinearMethodBase):
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
-        # TODO(Isotr0py): support fp8 ModelOpt kernels transpose/repack.
         w = self.spec.weight
         return isinstance(w, QuantKey) and (
             w.dtype == FP4_DTYPE
+            or (
+                w in (kFp8StaticTensorSym, kFp8StaticTokenSym)
+                and isinstance(self.kernel, CutlassFP8ScaledMMLinearKernel)
+                and type(self.fmt) is FormatScheme
+            )
             or (
                 w == kMxfp8Static
                 and self.kernel is not None
@@ -2714,6 +2724,9 @@ class ModelOptLinearMethod(LinearMethodBase):
                 raise RuntimeError(
                     f"{type(self.kernel).__name__} cannot use pre-processed weights"
                 )
+            if self.spec.weight in (kFp8StaticTensorSym, kFp8StaticTokenSym):
+                # IPC restores transposed tensors, but not this Python metadata.
+                layer.processed_weight_dims = (0, 1)
             return
         self.fmt.pre_process(layer)
         self.wkey.process(layer, WEIGHT)

@@ -178,7 +178,13 @@ def test_cutlass_fp8_gemm(
     reason="FP8 is not supported on this GPU type.",
 )
 def test_cutlass_fp8_gemm_padded(
-    m: int, n: int, k: int, a_scale_group_shape, b_scale_group_shape, use_bias: bool
+    default_vllm_config,
+    m: int,
+    n: int,
+    k: int,
+    a_scale_group_shape,
+    b_scale_group_shape,
+    use_bias: bool,
 ):
     """Test CUTLASS FP8 GEMM with padding for non-16-aligned N/K dims.
 
@@ -215,8 +221,36 @@ def test_cutlass_fp8_gemm_padded(
         if pad_n > 0 and scale_b.numel() > 1:
             scale_b = torch.nn.functional.pad(scale_b, (0, pad_n), value=1.0)
 
-    kernel = object.__new__(CutlassFP8ScaledMMLinearKernel)
-    kernel.logical_output_size = n
+    from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
+        FP8ScaledMMLinearLayerConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kFp8DynamicTensorSym,
+        kFp8DynamicTokenSym,
+        kFp8StaticChannelSym,
+        kFp8StaticTensorSym,
+    )
+
+    # A new engine receives already padded weights from the daemon. Its
+    # kernel must recover the logical width without processing them again.
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=(
+            kFp8StaticChannelSym
+            if b_scale_group_shape == PER_OUT_CH_GROUP_SHAPE
+            else kFp8StaticTensorSym
+        ),
+        activation_quant_key=(
+            kFp8DynamicTokenSym
+            if a_scale_group_shape == PER_TOKEN_GROUP_SHAPE
+            else kFp8DynamicTensorSym
+        ),
+        weight_shape=(n, k),
+        input_dtype=out_dtype,
+        out_dtype=out_dtype,
+    )
+    kernel = CutlassFP8ScaledMMLinearKernel(
+        config, ["weight", "weight_scale", "input_scale", "input_scale_ub"]
+    )
     out = kernel.apply_scaled_mm(
         A=a,
         B=b,
