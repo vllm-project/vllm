@@ -1151,7 +1151,7 @@ def safetensors_weights_iterator(
     )
 
     should_prefetch = safetensors_load_strategy == "prefetch"
-    if safetensors_load_strategy is None:
+    if safetensors_load_strategy is None and is_unused_weight is None:
         if is_net_fs and fits_in_ram:
             should_prefetch = True
         elif is_net_fs and not fits_in_ram:
@@ -1260,10 +1260,19 @@ def multi_thread_safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     max_workers: int = 4,
+    *,
+    is_unused_weight: Callable[[str], bool] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Multi-Thread iterate over the weights in the model safetensor files."""
 
     def _load_file(st_file: str):
+        if is_unused_weight is not None:
+            with safe_open(st_file, framework="pt", device="cpu") as f:
+                return {
+                    name: f.get_tensor(name)
+                    for name in f.keys()  # noqa: SIM118
+                    if not is_unused_weight(name)
+                }
         result = load_file(st_file, device="cpu")
         return result
 

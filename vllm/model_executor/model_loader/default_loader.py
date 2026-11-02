@@ -301,6 +301,15 @@ class DefaultModelLoader(BaseModelLoader):
             hf_weights_files = filter_safetensors_files_by_weight_name(
                 hf_weights_files, source.is_unused_weight
             )
+        if source.filter_unused_per_tensor and (
+            source.is_unused_weight is None
+            or not use_safetensors
+            or self.load_config.load_format in ("fastsafetensors", "instanttensor")
+            or self.load_config.safetensors_load_strategy not in (None, "lazy")
+        ):
+            raise ValueError(
+                "Per-tensor checkpoint filtering requires lazy safetensors loading"
+            )
         if self.load_config.load_format == "npcache":
             # Currently np_cache only support *.bin checkpoints
             assert use_safetensors is False
@@ -335,6 +344,11 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         max_workers=extra_config.get(
                             "num_threads", self.DEFAULT_NUM_THREADS
+                        ),
+                        is_unused_weight=(
+                            source.is_unused_weight
+                            if source.filter_unused_per_tensor
+                            else None
                         ),
                     )
                 else:
@@ -384,6 +398,8 @@ class DefaultModelLoader(BaseModelLoader):
     ) -> Generator[tuple[str, torch.Tensor], None, None]:
         filter_per_tensor = getattr(model, "filter_unused_checkpoint_weights", False)
         unused_weight = getattr(model, "is_unused_checkpoint_weight", None)
+        if filter_per_tensor and not callable(unused_weight):
+            raise ValueError("Per-tensor checkpoint filtering requires a predicate")
         if hasattr(model, "filter_unused_checkpoint_weights") and not filter_per_tensor:
             unused_weight = None
         primary_weights = DefaultModelLoader.Source(
@@ -402,6 +418,21 @@ class DefaultModelLoader(BaseModelLoader):
             getattr(model, "secondary_weights", ()),
         )
         for source in secondary_weights:
+            if filter_per_tensor:
+
+                def skip_secondary(
+                    name, prefix=source.prefix, existing=source.is_unused_weight
+                ):
+                    assert unused_weight is not None
+                    return (existing is not None and existing(name)) or unused_weight(
+                        prefix + name
+                    )
+
+                source = dataclasses.replace(
+                    source,
+                    is_unused_weight=skip_secondary,
+                    filter_unused_per_tensor=True,
+                )
             yield from self._get_weights_iterator(source)
 
     def download_model(self, model_config: ModelConfig) -> None:

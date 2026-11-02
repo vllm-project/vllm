@@ -185,6 +185,107 @@ def test_loader_does_not_read_shards_the_model_skips(mtp_checkpoint, monkeypatch
     ]
 
 
+@pytest.mark.parametrize("multithread", [False, True])
+def test_loader_filters_external_weights_in_mixed_shard(
+    tmp_path, multithread, monkeypatch
+):
+    """External tables must not be materialized even in a mixed shard."""
+    save_file(
+        {"model.weight": torch.tensor([2]), "external.weight": torch.tensor([3])},
+        tmp_path / "model.safetensors",
+    )
+    from vllm.model_executor.model_loader import weight_utils
+
+    original_open = weight_utils.safe_open
+    materialized = []
+
+    class TrackingOpen:
+        def __init__(self, *args, **kwargs):
+            self.file = original_open(*args, **kwargs)
+
+        def __enter__(self):
+            self.file.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.file.__exit__(*args)
+
+        def keys(self):
+            return self.file.keys()
+
+        def get_tensor(self, name):
+            materialized.append(name)
+            return self.file.get_tensor(name)
+
+    monkeypatch.setattr(weight_utils, "safe_open", TrackingOpen)
+
+    class Model(torch.nn.Module):
+        filter_unused_checkpoint_weights = True
+
+        def is_unused_checkpoint_weight(self, name: str) -> bool:
+            return name.startswith("external.")
+
+    config = LoadConfig(
+        safetensors_load_strategy="lazy",
+        model_loader_extra_config={"enable_multithread_load": multithread},
+    )
+    loader = DefaultModelLoader(config)
+    model_config = SimpleNamespace(model=str(tmp_path), revision=None)
+    weights = dict(loader.get_all_weights(model_config, Model()))
+    assert list(weights) == ["model.weight"]
+    assert materialized == ["model.weight"]
+    assert torch.equal(weights["model.weight"], torch.tensor([2]))
+
+
+@pytest.mark.parametrize("strategy", ["eager", "prefetch", "torchao"])
+def test_external_weight_filter_rejects_nonlazy_loading(tmp_path, strategy):
+    save_file({"model.weight": torch.tensor([2])}, tmp_path / "model.safetensors")
+
+    class Model(torch.nn.Module):
+        filter_unused_checkpoint_weights = True
+
+        def is_unused_checkpoint_weight(self, name: str) -> bool:
+            return name.startswith("external.")
+
+    loader = DefaultModelLoader(LoadConfig(safetensors_load_strategy=strategy))
+    model_config = SimpleNamespace(model=str(tmp_path), revision=None)
+    with pytest.raises(ValueError, match="requires lazy safetensors"):
+        list(loader.get_all_weights(model_config, Model()))
+
+
+def test_external_weight_filter_handles_secondary_prefix_and_existing_rule(tmp_path):
+    save_file({"main.weight": torch.tensor([1])}, tmp_path / "model.safetensors")
+    secondary = tmp_path / "secondary"
+    secondary.mkdir()
+    save_file(
+        {
+            "external.weight": torch.tensor([2]),
+            "existing.weight": torch.tensor([3]),
+            "keep.weight": torch.tensor([4]),
+        },
+        secondary / "model.safetensors",
+    )
+
+    class Model(torch.nn.Module):
+        filter_unused_checkpoint_weights = True
+        secondary_weights = [
+            DefaultModelLoader.Source(
+                str(secondary),
+                revision=None,
+                prefix="secondary.",
+                is_unused_weight=lambda name: name.startswith("existing."),
+            )
+        ]
+
+        def is_unused_checkpoint_weight(self, name: str) -> bool:
+            return name.startswith("secondary.external.")
+
+    loader = DefaultModelLoader(LoadConfig(safetensors_load_strategy="lazy"))
+    model_config = SimpleNamespace(model=str(tmp_path), revision=None)
+    weights = dict(loader.get_all_weights(model_config, Model()))
+    assert set(weights) == {"main.weight", "secondary.keep.weight"}
+
+
 def test_secondary_source_with_explicit_patterns_skips_backbone_index(tmp_path):
     """A source with explicit allow patterns (e.g. a standalone head file in
     the repo root) must not be validated against the backbone's index."""
