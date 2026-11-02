@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """K1 for Qwen3.8-27B at TP1 or TP2 (``dense_gdn_pre``): one GDN layer of a
 decode step from the layer's input (the previous layer's FFN output + residual;
 at TP2 after its all-reduce) to the gated core (out_proj's input, ``dense_ffn``'s
@@ -58,11 +59,11 @@ import flydsl.expr as fx
 import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import const_expr, gpu
+from flydsl.expr import const_expr, gpu, range_constexpr
 from flydsl.expr import math as fmath
-from flydsl.expr import range_constexpr
 from flydsl.expr.typing import Int32, Int64, T
 
+from vllm.models.qwen3_5.amd.mono import dense_ffn as D
 from vllm.models.qwen3_5.amd.mono.common.ops import (
     CM_DEV,
     CM_NT,
@@ -86,7 +87,6 @@ from vllm.models.qwen3_5.amd.mono.common.plan import (
     pair_layout,
 )
 from vllm.models.qwen3_5.amd.mono.common.sync import Mailbox, publish, sreg
-from vllm.models.qwen3_5.amd.mono import dense_ffn as D
 from vllm.models.qwen3_5.amd.mono.helpers import step_tag
 from vllm.models.qwen3_5.amd.mono.sources import digest
 from vllm.models.qwen3_5.amd.mono.tiling import (  # noqa: F401 (re-exported)
@@ -327,7 +327,7 @@ def front_loads(c, own=None):
 
 @traced
 def front_z(c, raw, own=None):
-    """z = h + residual (fp32; h on the first layer) -> res_out; the chunk's sum
+    """Z = h + residual (fp32; h on the first layer) -> res_out; the chunk's sum
     of squares -> NSUM (owner ``own``, the CTA's first by default). Returns z,
     1 + w."""
     s, tid = c["S"], c["tid"]

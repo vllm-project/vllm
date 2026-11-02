@@ -293,5 +293,7 @@ steps:
   - vllm/model_executor/models/qwen3_5.py
   - vllm/envs.py
   - tests/models/qwen3_5/test_amd_dense_mono.py
+  - tests/models/qwen3_5/test_amd_dense_mono_tiling.py
   commands:
+  - pytest -v -s tests/models/qwen3_5/test_amd_dense_mono_tiling.py
   - pytest -v -s tests/models/qwen3_5/test_amd_dense_mono.py

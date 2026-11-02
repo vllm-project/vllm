@@ -630,11 +630,15 @@ class DenseMono:
         why = _unsupported(model, vllm_config)
         self.tp = get_tp_group().world_size
         self.whole_step = self.tp == 1
-        self.oproj = self.whole_step and _flag("VLLM_ROCM_QWEN38_DENSE_MONO_OPROJ", True)
+        self.oproj = self.whole_step and _flag(
+            "VLLM_ROCM_QWEN38_DENSE_MONO_OPROJ", True
+        )
         k1_flag = _flag("VLLM_ROCM_QWEN38_DENSE_MONO_K1", True)
         self.k1 = k1_flag and (self.oproj or not self.whole_step)
         self.k1_oproj = (
-            self.k1 and not self.whole_step and _flag("VLLM_ROCM_QWEN38_DENSE_MONO_OPROJ", True)
+            self.k1
+            and not self.whole_step
+            and _flag("VLLM_ROCM_QWEN38_DENSE_MONO_OPROJ", True)
         )
         self.k2 = not self.whole_step and _flag("VLLM_ROCM_QWEN38_DENSE_MONO_K2", True)
         self.k1_rows, self.k2_rows = (0, 0) if why else row_caps(self.tp)
@@ -656,8 +660,7 @@ class DenseMono:
             why = "TP2 with neither K1 nor K2"
         if why is not None:
             raise ValueError(
-                "VLLM_ROCM_MONO_DECODE cannot run Qwen3.8-27B dense mono decode: "
-                + why
+                "VLLM_ROCM_MONO_DECODE cannot run Qwen3.8-27B dense mono decode: " + why
             )
         logger.info(
             "Qwen3.8 dense mono row caps at TP%d: K1 %d, K2 %d; %d CTAs",
@@ -724,11 +727,12 @@ class DenseMono:
         if why is not None:
             self.w13, self.w2, self.w_o, self.w_in = [], [], [], []
             raise ValueError(
-                "VLLM_ROCM_MONO_DECODE cannot run Qwen3.8-27B dense mono decode: "
-                + why
+                "VLLM_ROCM_MONO_DECODE cannot run Qwen3.8-27B dense mono decode: " + why
             )
         self._prepared = True
-        shuffled = sum(w.numel() for w in self.w13 + self.w2 + self.w_o if w is not None)
+        shuffled = sum(
+            w.numel() for w in self.w13 + self.w2 + self.w_o if w is not None
+        )
         shuffled += sum(a.numel() + b.numel() for a, b in filter(None, self.w_in))
         logger.info(
             "Qwen3.8 dense mono on for decode steps of <= %d rows at TP%d, "
@@ -858,6 +862,7 @@ class DenseMono:
                 )
                 ws["qkvz"] = attn.in_proj_qkvz.weight_scale.data.clone()
                 ws["ba"] = attn.in_proj_ba.weight_scale.data.clone()
+
     def _wrap_o(self, proj) -> None:
         stock = proj.forward
 
@@ -979,7 +984,9 @@ class DenseMono:
                     return f"K2 partial at width {s}: max abs err {err}"
                 continue
             proj = _o_proj(layer)
-            hidden = _ref_linear(core, proj.weight, proj.weight_scale) if self.oproj else h
+            hidden = (
+                _ref_linear(core, proj.weight, proj.weight_scale) if self.oproj else h
+            )
             x, res_ref = _gemma(hidden, r, layer.post_attention_layernorm.weight, eps)
             ref = _ref_linear(
                 _ref_silu_and_mul(
@@ -1023,9 +1030,13 @@ class DenseMono:
             residual = (
                 None
                 if first
-                else torch.randn(s, K.HIDDEN, generator=g, device=dev).mul_(2).bfloat16()
+                else torch.randn(s, K.HIDDEN, generator=g, device=dev)
+                .mul_(2)
+                .bfloat16()
             )
-            conv = torch.randn(1 + s, geo.conv, K.SL, generator=g, device=dev).bfloat16()
+            conv = torch.randn(
+                1 + s, geo.conv, K.SL, generator=g, device=dev
+            ).bfloat16()
             # vLLM loads weights under a bf16 default dtype. The SSM cache and
             # the kernel are fp32; a bf16 draw fails the launcher assert.
             ssm = torch.randn(
@@ -1074,7 +1085,9 @@ class DenseMono:
                 ssm_state_indices=idx,
                 use_qk_l2norm_in_kernel=True,
             )
-            core_ref = attn.norm(o.view(-1, attn.head_v_dim), z.reshape(-1, attn.head_v_dim))
+            core_ref = attn.norm(
+                o.view(-1, attn.head_v_dim), z.reshape(-1, attn.head_v_dim)
+            )
             core_ref = core_ref.view(s, -1)
             self.epoch.add_(1)
             out = out_ref = None
@@ -1116,7 +1129,11 @@ class DenseMono:
         meta = self._metadata(attn)
         if meta is None:
             return False
-        if meta.num_prefills != 0 or meta.num_decodes <= 0 or meta.spec_sequence_masks is not None:
+        if (
+            meta.num_prefills != 0
+            or meta.num_decodes <= 0
+            or meta.spec_sequence_masks is not None
+        ):
             return False
         if meta.num_spec_decodes:
             return self._skip("spec decode")
@@ -1301,7 +1318,9 @@ class DenseMono:
         out = torch.empty_like(residual)
         res_out = torch.empty_like(residual)
         D.dense_ffn(
-            self._k2_key(D, hidden.size(0), eps=layer.post_attention_layernorm.variance_epsilon),
+            self._k2_key(
+                D, hidden.size(0), eps=layer.post_attention_layernorm.variance_epsilon
+            ),
             hidden=hidden,
             w_o=self.w_o[index] if self.oproj else None,
             w_os=self.ws[index]["o"] if self.oproj else None,

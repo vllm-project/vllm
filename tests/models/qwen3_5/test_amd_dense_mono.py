@@ -174,8 +174,8 @@ def _gemma_norm(x, residual, w):
 @unittest.skipUnless(_gfx950(), "needs FlyDSL and aiter on gfx950")
 class DenseFfnTest(unittest.TestCase):
     def test_bit_exact(self):
-        from vllm.models.qwen3_5.amd.mono import dense_ffn as D
         from vllm.model_executor.layers.activation import SiluAndMul
+        from vllm.models.qwen3_5.amd.mono import dense_ffn as D
 
         act = SiluAndMul()
         for s in _widths(1):
@@ -233,8 +233,8 @@ class DenseFfnTest(unittest.TestCase):
                 self.assertEqual(bad, [])
 
     def test_bit_exact_tp2(self):
-        from vllm.models.qwen3_5.amd.mono import dense_ffn as D
         from vllm.model_executor.layers.activation import SiluAndMul
+        from vllm.models.qwen3_5.amd.mono import dense_ffn as D
 
         act = SiluAndMul()
         inter = D.FGeo(2).inter
@@ -462,8 +462,8 @@ class StockChainTest(unittest.TestCase):
         return w13, w13s, w2, w2s
 
     def test_stock_chains(self):
-        from vllm.models.qwen3_5.amd.mono import dense_ffn as D
         from vllm.model_executor.layers.activation import SiluAndMul
+        from vllm.models.qwen3_5.amd.mono import dense_ffn as D
 
         act = SiluAndMul()
         for tp in D.TP_SIZES:
@@ -579,10 +579,10 @@ def _rank_slice(K, w, tp, rank):
 def _stock_gdn(K, geo, w, h, residual, conv, ssm, idx):
     """The rank's heads (``geo``) -> core, residual out; ``conv`` / ``ssm``
     updated in place."""
+    from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
     from vllm.third_party.flash_linear_attention.ops import (
         fused_recurrent_gated_delta_rule_packed_decode,
     )
-    from vllm.model_executor.layers.mamba.ops.causal_conv1d import causal_conv1d_update
 
     x, res = _gemma_norm(h, residual, w["ln_w"])
     qkvz = _linear(x, w["w_qkvz"], w["w_qkvzs"])

@@ -120,7 +120,7 @@ def _compute_units() -> int:
 
     from vllm.platforms import current_platform
 
-    return current_platform.num_compute_units(torch.cuda.current_device())
+    return current_platform.num_compute_units(torch.accelerator.current_device_index())
 
 
 def device_grid() -> int:
@@ -246,7 +246,11 @@ class FGeo(NamedTuple):
     def d_pass_tiles(self, p: int) -> tuple[int | None, int | None]:
         """Pass p's tiles (even waves, odd waves): tile i < d_per is whole group
         i grid + bid, tile d_per the split group's rows, None none."""
-        return tuple(i if i < self.d_tiles else None for i in (2 * p, 2 * p + 1))
+        even, odd = 2 * p, 2 * p + 1
+        return (
+            even if even < self.d_tiles else None,
+            odd if odd < self.d_tiles else None,
+        )
 
     @property
     def o_passes(self) -> int:

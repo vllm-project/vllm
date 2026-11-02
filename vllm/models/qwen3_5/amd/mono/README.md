@@ -80,13 +80,13 @@ and snapshot 2 for TP1.
 
 Snapshot 1 (TP2) is the current-best stack, FlyDSL + GDN #57560:
 `nightly-aiter-5350-5669-5598-flydsl-qr4970-gdn57560-aiter6218-dense-mono-layer-graphs-tp2-split`.
-That image is AITER #5350, #5669, #5598, FlyDSL QuickReduce #4970, GDN
-#57560, and AITER #6218, plus this decode.
+That image is AITER #5350, #5669, #5598, FlyDSL QuickReduce #4970,
+GDN #57560, and AITER #6218, plus this decode.
 
 Snapshot 2 (TP1) is the baked-control stack:
 `nightly-aiter-5350-5669-5598-flydsl-qr4970-gdn57560-dense-mono-layer-graphs`.
-That image is AITER #5350, #5669, #5598, FlyDSL QuickReduce #4970, and GDN
-#57560, plus this decode.
+That image is AITER #5350, #5669, #5598, FlyDSL QuickReduce #4970,
+and GDN #57560, plus this decode.
 
 The non-mono arm is the same stack on `...-gdn57560-aiter6218`. The TP1
 cells below set both row caps to 8. TP2 uses the default cap of 8.

@@ -31,9 +31,8 @@ from aiter.ops.flydsl.kernels.kernels_common import format_kernel_name
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm
 from flydsl.compiler.ast_rewriter import ASTRewriter
-from flydsl.expr import gpu
+from flydsl.expr import gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import T, as_ir_value
 
 from vllm.models.qwen3_5.amd.mono.common.plan import THREADS, WAVES

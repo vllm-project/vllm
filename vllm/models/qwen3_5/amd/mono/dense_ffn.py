@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """``dense_ffn``: the FFN half of a dense Qwen3.8-27B decoder layer as one
 persistent launch, ``grid`` x ``THREADS``, S <= 8 decode rows (TP1 below):
 
@@ -52,9 +53,8 @@ import flydsl.expr as fx
 import torch
 from aiter.ops.flydsl.kernels import buffer_ops as bo
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import const_expr, gpu
+from flydsl.expr import const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr import math as fmath
-from flydsl.expr import range_constexpr, rocdl
 from flydsl.expr.typing import Int32, Int64, T
 
 from vllm.models.qwen3_5.amd.mono.common.mx import FP4, mfma_scaled
@@ -379,7 +379,7 @@ def chunk_ss(z):
 
 
 def _add_live(x, y):
-    """x + y, None standing for a zero partial."""
+    """X + y, None standing for a zero partial."""
     return x if y is None else y if x is None else x + y
 
 
@@ -388,7 +388,7 @@ def runs_total(runs):
     partials (xor 8, 4, 2, 1; warps past the row hold zeros)."""
     v = list(runs) + [None] * (NORM_WARPS - len(runs))
     for off in (8, 4, 2, 1):
-        v = [_add_live(v[l], v[l + off]) for l in range(off)]
+        v = [_add_live(v[i], v[i + off]) for i in range(off)]
     return v[0]
 
 
@@ -423,7 +423,7 @@ def norm_loads(c):
 
 @traced
 def run_norm(c, raw):
-    """z = h + residual -> res_out (chunk run ch / 16 by CTA run % grid); every
+    """Z = h + residual -> res_out (chunk run ch / 16 by CTA run % grid); every
     row's sum of squares (a wave's 64 chunks a run, as the stock norm) -> rstd
     -> bf16 x -> qdq by 32 columns (four lanes a block) -> the LDS x rows."""
     s, tid, lane, wave, bid = c["S"], c["tid"], c["lane"], c["wave"], c["bid"]
