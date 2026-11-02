@@ -99,6 +99,7 @@ def test_continue_final_message_through_chat_request():
             {"role": "user", "content": "Complete this sentence."},
             {"role": "assistant", "content": "The answer is "},
         ],
+        reasoning_effort="high",
         add_generation_prompt=False,
         continue_final_message=True,
     )
@@ -106,5 +107,5 @@ def test_continue_final_message_through_chat_request():
 
     prompt = render(request.messages, **kwargs)
 
-    assert prompt.endswith("<｜Assistant｜></think>The answer is ")
+    assert prompt.endswith("<｜Assistant｜><think></think>The answer is ")
     assert "<｜end▁of▁sentence｜>" not in prompt
