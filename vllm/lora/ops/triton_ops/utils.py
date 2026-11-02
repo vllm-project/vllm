@@ -8,11 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from packaging.version import Version
 
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import next_power_of_2
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.utils.torch_utils import async_tensor_h2d
 
 logger = init_logger(__name__)
@@ -205,6 +206,7 @@ def get_lora_op_configs(
     # Add support for fused_moe_lora ops
     assert op_type in [
         "shrink",
+        "shrink_multicta",
         "expand",
         "fused_moe_lora_w13_shrink",
         "fused_moe_lora_w13_expand",
@@ -228,6 +230,19 @@ def get_lora_op_configs(
             "group_size_m": 8,
             "num_stages": 2,
             "max_nreg": None,
+        }
+    elif op_type == "shrink_multicta":
+        # Keep K partitioning independent of batch size.
+        block_k = 256
+        k_blocks = max(1, cdiv(hidden_size, block_k))
+        num_ctas = min(8, 1 << (k_blocks.bit_length() - 1))
+        default = {
+            "block_m": 32,
+            "block_n": 16,
+            "block_k": block_k,
+            "split_k": num_ctas,
+            "num_warps": 4,
+            "num_ctas": num_ctas,
         }
     # The default config for fused_moe_lora ops
     elif op_type in [
@@ -313,6 +328,23 @@ def get_lora_op_configs(
 
 
 FUSED_MOE_LORA_TWO_KERNEL_MAX_TOKENS = 64
+
+
+@lru_cache
+def supports_multicta_shrink(device: torch.device | None = None) -> bool:
+    """Check basic device/toolchain requirements for experimental shrink."""
+    supported = False
+    if current_platform.is_cuda() and current_platform.has_device_capability(90):
+        from vllm.triton_utils import triton
+
+        supported = Version(triton.__version__) >= Version("3.8.0")
+    if not supported:
+        logger.warning_once(
+            "Multi-CTA LoRA shrink requires NVIDIA compute capability >= 9.0 "
+            "and Triton >= 3.8.0; "
+            "using the original LoRA shrink implementation."
+        )
+    return supported
 
 
 @lru_cache
