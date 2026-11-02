@@ -37,6 +37,7 @@ class EncoderOnlyModelState(DefaultModelState):
 
     # The V2 pooling path is not wired for prompt embeds.
     supports_prompt_embeds = False
+    supports_tree_verify = False
 
     def __init__(
         self,

@@ -139,6 +139,66 @@ def test_profile_run_creates_aux_output_connector_before_forward(
         assert connector is None
 
 
+def test_target_layer_selection_includes_kv_sharing_layers(monkeypatch):
+    from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.max_model_len = 32
+    runner.is_encoder_decoder = False
+    runner.parallel_config = SimpleNamespace(
+        cp_kv_cache_interleave_size=1, decode_context_parallel_size=1
+    )
+    runner.vllm_config = SimpleNamespace(
+        parallel_config=runner.parallel_config,
+        cache_config=SimpleNamespace(mamba_cache_mode="none"),
+    )
+    runner.device = torch.device("cpu")
+    runner.jit_warmup_registry = JitWarmupRegistry(runner.vllm_config)
+    runner.speculator = Mock(spec=DraftModelSpeculator)
+    runner.batch_sharder = None
+    runner.spec_round = None
+    runner.speculator.draft_attn_layer_names = {"draft"}
+    runner.speculator.enable_adaptive_verification = False
+    runner.model_state = SimpleNamespace(
+        get_additional_cg_support=lambda: (), num_new_sampled_tokens_per_step=1
+    )
+    runner.req_states = []
+    runner.input_buffers = SimpleNamespace(query_start_loc=None)
+    runner.vocab_size = 1
+    cache = KVCacheConfig(
+        num_blocks=1,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=["target", "draft"],
+                kv_cache_spec=FullAttentionSpec(
+                    block_size=16, num_kv_heads=1, head_size=16, dtype=torch.bfloat16
+                ),
+            )
+        ],
+    )
+
+    def init_backend(kv_cache_config, *args, **kwargs):
+        kv_cache_config.kv_cache_groups[0].layer_names.append("sharing")
+        return [], SimpleNamespace(narrow=lambda *args: None), [16]
+
+    class LayersCaptured(Exception):
+        pass
+
+    def capture_layers(**kwargs):
+        assert kwargs["target_layer_names"] == {"target", "sharing"}
+        raise LayersCaptured
+
+    monkeypatch.setattr(model_runner_module, "init_attn_backend", init_backend)
+    monkeypatch.setattr(
+        model_runner_module,
+        "maybe_create_adaptive_verification_manager",
+        capture_layers,
+    )
+    with pytest.raises(LayersCaptured):
+        runner.initialize_kv_cache(cache)
+
+
 def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.max_model_len = 262144
@@ -163,6 +223,7 @@ def test_qsa_circular_group_uses_custom_slot_mapping(monkeypatch):
     )
     runner.speculator = None
     runner.batch_sharder = None
+    runner.spec_round = None
     runner.req_states = []
     runner.input_buffers = SimpleNamespace(query_start_loc=None)
     runner.vocab_size = 1
@@ -361,6 +422,7 @@ def _make_capture_runner(
     runner.lora_config = None
     monkeypatch.setattr(runner, "maybe_setup_dummy_loras", _no_dummy_loras)
     runner.speculator = None
+    runner.spec_round = None
     runner.adaptive_verification = None
     runner.model = None
     runner.input_buffers = object()
@@ -404,6 +466,26 @@ def test_capture_model_locks_workspace_after_capture(monkeypatch):
         runner.kv_cache_config,
         runner.cudagraph_manager.capture_stream,
     )
+
+
+def test_capture_model_runs_the_spec_kernels(monkeypatch):
+    """Capture runs every bound spec kernel for every capture shape
+    (KernelRegistry.capture), so a commit replays inside the graphs."""
+    runner = _make_capture_runner(monkeypatch, captured=True)
+    monkeypatch.setattr(
+        model_runner_module, "freeze_gc_for_cudagraph_capture", contextlib.nullcontext
+    )
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda: (1 << 30, 1 << 30)
+    )
+    monkeypatch.setattr(model_runner_module, "lock_workspace", lambda: None)
+    spec_round = Mock()
+    runner.spec_round = spec_round
+
+    runner.capture_model()
+
+    spec_round.capture.assert_called_once_with()
 
 
 def test_capture_model_skips_lock_when_nothing_captured(monkeypatch):

@@ -340,6 +340,8 @@ class MambaHybridModelState(DefaultModelState):
             model_specific_attn_metadata=mamba_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            tree_parents=input_batch.tree_parents,
+            tree_ancestors=input_batch.tree_ancestors,
         )
         if self.recoverssm is not None:
             self.recoverssm.record_step(
@@ -352,10 +354,25 @@ class MambaHybridModelState(DefaultModelState):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
+        *,
+        accepted_row: torch.Tensor | None = None,
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
         num_reqs = idx_mapping.shape[0]
+        if accepted_row is not None:
+            # A plan that is not a chain: resume from the state its last accepted
+            # row wrote. The kernels read state row num_accepted_tokens - 1.
+            if self.recoverssm is not None or self._align_mode:
+                raise NotImplementedError(
+                    "verify plans that are not chains do not support recoverssm "
+                    "or mamba align prefix caching yet"
+                )
+            if num_reqs:
+                _scatter_accepted_row_kernel[(num_reqs,)](
+                    idx_mapping, accepted_row, self.num_accepted_tokens_gpu
+                )
+            return
         if num_reqs:
             if not isinstance(num_sampled, int):
                 # idx_mapping may contain -1 sentinels (filtered rows) under PP; the
@@ -414,6 +431,19 @@ def _scatter_num_accepted_kernel(
         return
     num_sampled = tl.load(num_sampled_ptr + row)
     tl.store(num_accepted_ptr + req_state_idx, tl.maximum(num_sampled, 1))
+
+
+@triton.jit
+def _scatter_accepted_row_kernel(
+    idx_mapping_ptr,  # [num_reqs] batch_idx -> req_state_idx (-1 to skip)
+    accepted_row_ptr,  # [num_reqs] verify row the request resumes from
+    num_accepted_ptr,  # [max_num_reqs]
+):
+    row = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + row)
+    if req_state_idx < 0:
+        return
+    tl.store(num_accepted_ptr + req_state_idx, tl.load(accepted_row_ptr + row) + 1)
 
 
 @triton.jit

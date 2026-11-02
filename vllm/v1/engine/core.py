@@ -15,7 +15,7 @@ from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from multiprocessing.queues import Queue
-from typing import Any, TypeVar, cast, get_args
+from typing import TYPE_CHECKING, Any, TypeVar, cast, get_args
 
 import msgspec
 import pydantic
@@ -115,6 +115,9 @@ from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.spec_decode.round import SpecResources
+
 logger = init_logger(__name__)
 
 
@@ -130,6 +133,8 @@ class EngineCore:
     # object.__new__.
     _checkpoint_state = CheckpointState.RUNNING
     _checkpoint_error: str | None = None
+    # What speculation runs with, adapted to the model's layers at startup.
+    spec_resources: "SpecResources | None" = None
 
     def __init__(
         self,
@@ -196,6 +201,17 @@ class EngineCore:
             block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
         )
+        if self.spec_resources is not None:
+            from vllm.v1.core.sched.scheduler import Scheduler as V1Scheduler
+
+            if isinstance(self.scheduler, V1Scheduler):
+                self.scheduler.spec_resources = self.spec_resources
+            else:
+                logger.info(
+                    "Scheduler %s does not take the effective spec decode "
+                    "resources; it keeps the declared ones.",
+                    type(self.scheduler).__name__,
+                )
         self._initialize_effective_attention_block_size()
         self.use_spec_decode = vllm_config.speculative_config is not None
         self.check_for_draft_tokens = (
@@ -264,6 +280,35 @@ class EngineCore:
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()
+
+    def _set_spec_resources(self, vllm_config: VllmConfig) -> None:
+        """Lower the speculator's declared resources to what the model's layers
+        verify on every rank (pipeline ranks hold different layers) and run
+        every worker with them. Before capture; memory stays sized for the
+        declared resources, which the effective ones never exceed."""
+        speculative_config = vllm_config.speculative_config
+        if speculative_config is None:
+            return
+        capabilities = [
+            caps
+            for caps in self.model_executor.collective_rpc("get_spec_capabilities")
+            if caps is not None
+        ]
+        if not capabilities:
+            return
+        from vllm.v1.worker.gpu.spec_decode.capabilities import (
+            resolve_spec_resources,
+        )
+
+        speculator_config = speculative_config.speculator_config
+        self.spec_resources = resolve_spec_resources(
+            speculator_config,
+            speculator_config.resources(vllm_config.scheduler_config.max_num_seqs),
+            capabilities,
+        )
+        self.model_executor.collective_rpc(
+            "set_spec_resources", args=(self.spec_resources,)
+        )
 
     @instrument(span_name="Prepare model")
     def _initialize_kv_caches(self, vllm_config: VllmConfig) -> KVCacheConfig:
@@ -388,6 +433,7 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        self._set_spec_resources(vllm_config)
         kv_transfer_config = vllm_config.kv_transfer_config
         if (
             kv_transfer_config is not None

@@ -43,6 +43,7 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowSpec,
 )
+from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -428,4 +429,18 @@ def get_kv_cache_configs(
         kv_cache_specs,
         available_memory,
         kv_cache_planning.get_global_kv_cache_groups(vllm_config, kv_cache_specs),
+    )
+
+
+def runner_output(
+    req_ids: list[str], sampled_token_ids: list[list[int]] | None = None
+) -> ModelRunnerOutput:
+    """A model output for ``Scheduler.update_from_output``: one sampled token
+    (100) per request unless ``sampled_token_ids`` says otherwise."""
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=(
+            [[100] for _ in req_ids] if sampled_token_ids is None else sampled_token_ids
+        ),
     )

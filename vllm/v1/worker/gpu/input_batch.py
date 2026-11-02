@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
         AdmittedDraftCounts,
     )
+    from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, VerifyPlan
 
 
 class InputBuffers:
@@ -37,6 +38,11 @@ class InputBuffers:
         self.dcp_local_seq_lens = torch.zeros(
             max_num_reqs, dtype=torch.int32, device=device
         )
+        # The plan layout's per-token tree buffers, set by the runner when its
+        # speculator branches: every batch then carries them, dummy and capture
+        # batches included, so the captured graphs run the tree code path.
+        self.tree_parents: torch.Tensor | None = None
+        self.tree_ancestors: torch.Tensor | None = None
 
 
 @dataclass
@@ -131,6 +137,25 @@ class InputBatch:
     # adaptive verification with batch-sharded sampling, when the budget binds.
     num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
 
+    # The rows each request verifies, when the batch carries drafts. Positions and
+    # slot mappings are computed from it (see spec_decode/plan_kernels.py).
+    verify_plan: "VerifyPlan | None" = None
+
+    # [num_tokens] views of the plan layout, set when the batch was laid out as a
+    # plan (a plan that is not a chain, or any verify batch of a speculator with
+    # max_branching > 1): each token's parent row within its request (int32), the
+    # plan rows it sees (int64 bits: its ancestors, or the plan's mask; 0 for tokens
+    # that are not plan rows), and its plan position minus its chain position
+    # (int32).
+    tree_parents: torch.Tensor | None = None
+    tree_ancestors: torch.Tensor | None = None
+    tree_pos_delta: torch.Tensor | None = None
+
+    # The round's accepted path, set by the runner after it commits it and before
+    # ``propose``: a drafter that verified a plan that is not a chain reads its
+    # target hidden states at the path's rows.
+    accept_result: "AcceptResult | None" = None
+
     @classmethod
     def make_dummy(
         cls,
@@ -185,6 +210,14 @@ class InputBatch:
         input_buffers.is_padding[:num_tokens].fill_(is_padding)
         is_padding = input_buffers.is_padding[:num_tokens]
 
+        tree_parents = tree_ancestors = None
+        if input_buffers.tree_parents is not None:
+            assert input_buffers.tree_ancestors is not None
+            # Contents are left as they are: any parent in [-1, row) is in range,
+            # which is all a dummy forward needs.
+            tree_parents = input_buffers.tree_parents[:num_tokens]
+            tree_ancestors = input_buffers.tree_ancestors[:num_tokens]
+
         logits_indices = query_start_loc[1:] - 1
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
@@ -225,6 +258,8 @@ class InputBatch:
             has_structured_output_reqs=False,
             prompt_lens=None,
             max_query_len=max_query_len,
+            tree_parents=tree_parents,
+            tree_ancestors=tree_ancestors,
         )
 
 

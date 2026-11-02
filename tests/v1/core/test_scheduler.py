@@ -80,7 +80,13 @@ from vllm.v1.outputs import (
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputGrammar, StructuredOutputManager
 
-from .utils import EOS_TOKEN_ID, create_requests, create_scheduler, mock_kv
+from .utils import (
+    EOS_TOKEN_ID,
+    create_requests,
+    create_scheduler,
+    mock_kv,
+    runner_output,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -8753,3 +8759,73 @@ def test_cpu_encoder_input_updates_preserve_shm_handles(use_v2_model_runner):
         {request.request_id: {1: None}} if use_v2_model_runner else {}
     )
     assert request.mm_features[0].data is handle
+
+
+# --- Candidate budget (SpeculatorConfig.candidate_budget) -------------------
+
+
+def _budget_steps(budget, num_requests: int = 2, num_steps: int = 2):
+    """(num_spec_tokens_to_schedule, skip_drafts, views) per step, for decode
+    requests under a fixed candidate budget (None: the config's default)."""
+    scheduler = create_scheduler(num_speculative_tokens=3, max_num_batched_tokens=64)
+    scheduler.can_skip_drafts = True
+    views = []
+    if budget is not None:
+
+        def candidate_budget(view):
+            views.append(view)
+            return budget
+
+        scheduler.speculator_config.candidate_budget = candidate_budget
+    for request in create_requests(num_requests, num_tokens=8, max_tokens=8):
+        scheduler.add_request(request)
+    steps = []
+    for _ in range(num_steps):
+        output = scheduler.schedule()
+        steps.append((output.num_spec_tokens_to_schedule, output.skip_drafts))
+        scheduler.update_from_output(
+            output, runner_output(list(output.num_scheduled_tokens))
+        )
+    return steps, views
+
+
+def test_default_candidate_budget_drafts_k():
+    """Built-in configs keep today's K and drafting."""
+    steps, _ = _budget_steps(None)
+    assert steps == [(3, False), (3, False)]
+
+
+def test_candidate_budget_one_is_a_plain_decode():
+    """Budget 1 is today's suspension outcome: no drafts proposed (skip_drafts),
+    so the next step is one row per request and replays the plain-decode graph.
+    """
+    steps, views = _budget_steps(1)
+    assert steps == [(0, True), (0, True)]
+    assert len(views) == 2
+
+
+def test_candidate_budget_below_c_caps_the_drafts():
+    steps, views = _budget_steps(2)
+    assert steps == [(1, False), (1, False)]
+    view = views[0]
+    assert (view.num_scheduled_reqs, view.max_num_seqs) == (2, 16)
+    assert view.num_free_blocks >= 0
+
+
+def test_candidate_budget_is_not_asked_without_scheduled_requests():
+    scheduler = create_scheduler(num_speculative_tokens=3)
+    views = []
+
+    def candidate_budget(view):
+        views.append(view)
+        return 4
+
+    scheduler.speculator_config.candidate_budget = candidate_budget
+    scheduler.schedule()
+    assert views == []
+
+
+@pytest.mark.parametrize("budget", [0, 5])
+def test_candidate_budget_outside_one_to_c_is_rejected(budget):
+    with pytest.raises(ValueError, match="candidate_budget returned"):
+        _budget_steps(budget)

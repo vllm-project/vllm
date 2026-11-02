@@ -31,6 +31,7 @@ class BlockTables:
         slot_mapping_enabled: list[bool] | None = None,
         dcp_sharded: list[bool] | None = None,
         sliding_window_reach: list[int] | None = None,
+        null_tail: list[bool] | None = None,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
@@ -61,6 +62,14 @@ class BlockTables:
         assert len(sliding_window_reach) == self.num_kv_cache_groups
         self._sliding_window_reach = sliding_window_reach
         self.has_sliding_window_groups = any(r > 0 for r in sliding_window_reach)
+        # Per group, whether a gathered row reads the null block past the
+        # request's block count. Recurrent-state rows shrink (`truncate`) and
+        # their readers slice a fixed window, so ids a row or batch slot held
+        # before, possibly another live request's blocks now, must not show.
+        if null_tail is None:
+            null_tail = [False] * self.num_kv_cache_groups
+        assert len(null_tail) == self.num_kv_cache_groups
+        self._null_tail = null_tail
 
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
@@ -120,6 +129,9 @@ class BlockTables:
         self.sliding_window_reach = torch.tensor(
             self._sliding_window_reach, dtype=torch.int32, device=self.device
         )
+        self.null_tail = torch.tensor(
+            self._null_tail, dtype=torch.bool, device=self.device
+        )
         self.input_block_table_ptrs = self._make_ptr_tensor(self.input_block_tables)
 
     def append_block_ids(
@@ -142,6 +154,14 @@ class BlockTables:
                 )
             self.block_tables[i].stage_write(req_index, start, block_ids)
             self.num_blocks.np[i, req_index] = end
+
+    def truncate(self, req_index: int, group: int, num_blocks: int) -> None:
+        """Drop a row's trailing blocks; later appends start at the new end."""
+        assert 0 <= num_blocks <= self.num_blocks.np[group, req_index]
+        # The dropped ids stay in this row past `num_blocks` (rewriting them
+        # would race this step's staged appends); the gather nulls them in the
+        # forward-pass tables of `null_tail` groups.
+        self.num_blocks.np[group, req_index] = num_blocks
 
     def apply_staged_writes(self) -> None:
         if self.num_kv_cache_groups == 0:
@@ -205,6 +225,7 @@ class BlockTables:
             num_computed_tokens,
             self.sliding_window_reach,
             self.block_sizes_tensor,
+            self.null_tail,
             MASK_SLIDING_WINDOW=mask_sliding_window,
             BLOCK_SIZE=1024,  # type: ignore
         )
@@ -283,6 +304,7 @@ def _gather_block_tables_kernel(
     num_computed_tokens_ptr,  # [max_num_reqs]
     sliding_window_reach_ptr,  # [num_kv_cache_groups]
     block_sizes_ptr,  # [num_kv_cache_groups]
+    null_tail_ptr,  # [num_kv_cache_groups]
     MASK_SLIDING_WINDOW: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -320,14 +342,19 @@ def _gather_block_tables_kernel(
             reach > 0, tl.maximum(first_pos - reach, 0) // block_size, 0
         )
 
-    for i in tl.range(0, num_blocks, BLOCK_SIZE):
+    # Groups with a null tail write the whole row: the null block past
+    # `num_blocks` (see BlockTables.__init__).
+    num_written = tl.where(
+        tl.load(null_tail_ptr + group_id), max_num_blocks, num_blocks
+    )
+    for i in tl.range(0, num_written, BLOCK_SIZE):
         offset = i + tl.arange(0, BLOCK_SIZE)
         block_ids = tl.load(
             src_row_ptr + offset,
             mask=(offset >= num_null) & (offset < num_blocks),
             other=0,
         )
-        tl.store(dst_row_ptr + offset, block_ids, mask=offset < num_blocks)
+        tl.store(dst_row_ptr + offset, block_ids, mask=offset < num_written)
 
 
 @triton.jit

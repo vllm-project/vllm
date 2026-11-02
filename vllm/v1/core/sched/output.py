@@ -315,6 +315,11 @@ class SchedulerOutput:
     # Number of spec tokens to schedule for the next step.
     num_spec_tokens_to_schedule: int = 0
 
+    # Requests whose recurrent-state tail for draft rows was shortened this
+    # step: request id -> {kv cache group id: new block count}. The worker
+    # shortens those block table rows before appending this step's new blocks.
+    spec_state_block_counts: dict[str, dict[int, int]] | None = None
+
     # Deprecated: cascade attention has been removed, so this is always empty.
     # Kept for out-of-tree schedulers and workers.
     num_common_prefix_blocks: list[int] = field(default_factory=list)

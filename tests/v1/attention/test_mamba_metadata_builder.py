@@ -4,8 +4,16 @@
 
 from types import SimpleNamespace
 
-from tests.v1.attention.utils import MockMambaBuilder
+import pytest
+import torch
+
+from tests.v1.attention.utils import (
+    BatchSpec,
+    MockMambaBuilder,
+    create_common_attn_metadata,
+)
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.kv_cache_interface import MambaSpec
 
 
 def _make_vllm_config(
@@ -57,3 +65,30 @@ def test_mamba_single_token_prompt_runs_as_prefill():
     assert metadata.num_prefills == 1
     assert metadata.has_initial_states_p is not None
     assert metadata.has_initial_states_p.tolist() == [False]
+
+
+@pytest.mark.parametrize("query_len", [1, 2, 4])
+def test_mamba_captures_decode_graphs_up_to_one_plus_k(query_len):
+    """A speculator may declare uniform decode shapes below 1 + K (a tree's
+    chain fallback), and the CUDA graph manager captures one decode graph per
+    shape: each builds decode-only metadata with every row's query length."""
+    num_reqs, num_spec_tokens = 4, 3
+    config = _make_vllm_config(
+        256, 8, num_speculative_tokens=num_spec_tokens, block_size=16
+    )
+    spec = MambaSpec(block_size=16, shapes=((1,), (1,)), dtypes=(torch.float32,))
+    builder = MockMambaBuilder(spec, ["layer0"], config, torch.device("cpu"))
+    common = create_common_attn_metadata(
+        # 1 + K state slots per request.
+        BatchSpec(seq_lens=[64] * num_reqs, query_lens=[query_len] * num_reqs),
+        block_size=16,
+        device=torch.device("cpu"),
+        arange_block_indices=True,
+    ).replace(is_prefilling=torch.zeros(num_reqs, dtype=torch.bool))
+
+    metadata = builder.build_for_cudagraph_capture(common)
+
+    assert metadata.num_decodes == num_reqs
+    assert metadata.num_prefills == 0
+    assert metadata.num_accepted_tokens is not None
+    assert metadata.num_accepted_tokens[:num_reqs].tolist() == [query_len] * num_reqs

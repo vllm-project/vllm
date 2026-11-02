@@ -14,6 +14,7 @@ Parts only needed by the V1 model runner are marked "V1 model runner only", and
 will be removed with it.
 """
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, ClassVar, final, get_args
 
 from vllm.utils.import_utils import resolve_obj_by_qualname
@@ -21,6 +22,8 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
+    from vllm.v1.worker.gpu.spec_decode.capabilities import SpecCapabilities
+    from vllm.v1.worker.gpu.spec_decode.round import BudgetView, SpecResources
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 
@@ -60,6 +63,11 @@ class SpeculatorConfig:
     supports_watermarking: ClassVar[bool] = False
     # Prefill context parallelism.
     supports_pcp: ClassVar[bool] = False
+    # Fully qualified names of `(vllm_config) -> SpecKernelProvider` factories
+    # whose spec kernels overlay the in-tree ones, in order: a later one wins a
+    # key (vllm/v1/worker/gpu/spec_decode/kernels.py). A provider may supply any
+    # subset of keys.
+    spec_kernel_providers: ClassVar[tuple[str, ...]] = ()
 
     # --- SpeculativeConfig setup ---
 
@@ -98,6 +106,8 @@ class SpeculatorConfig:
     def __init__(self, spec_config: "SpeculativeConfig"):
         # Read lazily, since the spec config may still be updated.
         self.spec_config = spec_config
+        # (max_num_seqs, dense batch size -> K) of a Dynamic SD schedule.
+        self._dynamic_sd_lookup: tuple[int, list[int]] | None = None
 
     @property
     @final
@@ -140,6 +150,109 @@ class SpeculatorConfig:
     def hash_factors(self) -> list[Any]:
         """Extra factors of `SpeculativeConfig.compute_hash`."""
         return []
+
+    # --- Resources (the speculative round contract, see spec_decode/round.py) ---
+
+    def resources(self, max_num_seqs: int) -> "SpecResources":
+        """What speculation holds, declared once at startup; memory is sized for
+        it. The engine core may lower it to what the model verifies
+        (`adapt_resources`). The default is a chain of up to K drafts
+        (``max_candidates`` K + 1). Its decode graphs are the uniform K + 1
+        shape, or one uniform shape per K of a Dynamic SD schedule, plus the
+        variable-length shape under adaptive verification.
+        """
+        from vllm.v1.worker.gpu.spec_decode.round import PlanShape, SpecResources
+
+        k = self.num_speculative_tokens
+        if self.spec_config.uses_dynamic_speculative_decoding():
+            counts = {n + 1 for n in self._dynamic_sd_schedule(max_num_seqs)[1:]}
+        else:
+            counts = {k + 1}
+        shapes = tuple(PlanShape(c) for c in sorted(counts))
+        if self.spec_config.enable_adaptive_verification:
+            # The target replays the variable-length graph; the drafter's own
+            # graphs keep the uniform shape.
+            shapes += (PlanShape(None),)
+        return SpecResources(max_candidates=k + 1, capture_shapes=shapes)
+
+    def adapt_resources(
+        self, declared: "SpecResources", caps: "SpecCapabilities"
+    ) -> "SpecResources":
+        """The resources to run with on a model whose layers verify at most
+        ``caps.plan_kind`` (at least ``"chain"``), at most ``declared``.
+
+        The default runs a speculator that branches as a chain of the same
+        length, runs a mask speculator's plans as trees (its plans then carry
+        no mask: rows see their ancestors) on a model that verifies trees. A
+        tree speculator overrides it to pick its chain (a 64-row tree is not a
+        64-token chain); a mask speculator whose masks only make sense as
+        masks overrides it to pick its tree.
+        """
+        if caps.plan_kind == "chain":
+            return replace(declared, max_branching=1, custom_mask=False)
+        if caps.plan_kind == "tree":
+            return replace(declared, custom_mask=False)
+        return declared
+
+    def candidate_budget(self, view: "BudgetView") -> int:
+        """The rows per request, the root included, that the drafts proposed
+        after this step may take, in ``[1, max_candidates]``.
+
+        The scheduler calls it once per `schedule()` that schedules requests,
+        in the scheduler process: state kept on this object stays there. The
+        drafts proposed now are verified next step, so the budget binds one
+        step later, as the Dynamic SD schedule does. 1 proposes no drafts
+        (`skip_drafts`): the next step is a plain decode, which replays the
+        uniform-1 graph when ``PlanShape(1)`` is among ``capture_shapes``.
+        The default is K + 1, or the Dynamic SD schedule's K + 1 at this
+        batch size.
+        """
+        k = self.num_speculative_tokens
+        if not self.spec_config.uses_dynamic_speculative_decoding():
+            return k + 1
+        return self._dynamic_sd_schedule(view.max_num_seqs)[view.num_scheduled_reqs] + 1
+
+    def admit_limit(self, view: "BudgetView") -> int:
+        """The most requests that may be running once this step admits
+        waiting ones, at least 1.
+
+        The scheduler takes the smaller of it and ``max_num_active_seqs``, so
+        it lowers admission and never raises it. It calls it once per
+        `schedule()` that has waiting requests to admit, after the running
+        requests are scheduled (``view.num_scheduled_reqs`` counts them) and
+        before any waiting request is. Requests already running are never
+        preempted for it, and waiting ones (preempted ones included) are
+        admitted in queue order. Under async scheduling ``view.num_running``
+        includes the requests of the step still executing.
+
+        The default means no limit: the scheduler never calls it. An override
+        that wants no limit should not return the default's value, since
+        ``max_num_active_seqs`` can exceed ``max_num_seqs``.
+        """
+        return view.max_num_seqs
+
+    @property
+    def pads_new_decode_rows(self) -> bool:
+        """Whether the scheduler pads a request that starts decoding to the
+        full K + 1 rows, so that its batch stays a uniform decode."""
+        return not self.spec_config.uses_dynamic_speculative_decoding()
+
+    def _dynamic_sd_schedule(self, max_num_seqs: int) -> list[int]:
+        if (
+            self._dynamic_sd_lookup is None
+            or self._dynamic_sd_lookup[0] != max_num_seqs
+        ):
+            from vllm.v1.spec_decode.dynamic.utils import (
+                build_dynamic_sd_schedule_lookup,
+            )
+
+            lookup = build_dynamic_sd_schedule_lookup(
+                self.spec_config.num_speculative_tokens_per_batch_size,
+                vllm_max_batch_size=max_num_seqs,
+                vllm_num_speculative_tokens=self.num_speculative_tokens,
+            )
+            self._dynamic_sd_lookup = (max_num_seqs, lookup)
+        return self._dynamic_sd_lookup[1]
 
     def pcp_unsupported_reason(self, parallel_config: "ParallelConfig") -> str | None:
         """Why prefill context parallelism can't be used, or None."""

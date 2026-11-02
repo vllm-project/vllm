@@ -37,6 +37,8 @@ from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadat
 class ShortConv(MambaBase, PluggableLayer):
     # --8<-- [end:short_conv]
 
+    spec_layer_variant = "short_conv"
+
     def __init__(
         self,
         config,

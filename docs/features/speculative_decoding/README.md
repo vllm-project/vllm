@@ -17,6 +17,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Suffix Decoding](suffix.md)
 - [Hidden State Extraction](extract_hidden_states.md)
 - [Custom Speculators (Experimental)](#custom-speculators-experimental)
+- [Speculative Round Contract (Experimental)](round_contract.md)
 - [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
 - [Adaptive Verification](adaptive_verification.md)
 - [FLy Verification (Lossy)](fly.md)
@@ -109,6 +110,13 @@ The speculator reads its options from
 `speculative_config.custom_method` is the registered name (`"my_spec"`), and
 `speculative_config.method` is the built-in method its config is based on
 (`"eagle3"`), so vLLM treats it like that built-in speculator.
+
+### Owning the speculative round
+
+By default, vLLM verifies a custom speculator's drafts as a chain and accepts them
+with its rejection sampler. A speculator can also own the verify plan (a tree or a
+mask), the accepted rows, the candidate budget, admission and kernels; see
+[The Speculative Round Contract](round_contract.md).
 
 ### V1 Custom Proposer Backend
 

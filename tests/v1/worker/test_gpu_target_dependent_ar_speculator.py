@@ -715,3 +715,91 @@ def test_rebuilt_prefill_metadata_uses_target_batch_slots():
     assert target_slots.data_ptr() == speculator.block_tables.slot_mappings.data_ptr()
     assert target_slots.shape == (1, 6)
     assert slot_mappings["draft"].tolist() == list(range(6))
+
+
+@pytest.mark.parametrize("peers_draft", [False, True])
+def test_propose_without_drafts_writes_only_target_slots(monkeypatch, peers_draft):
+    # Budget 1: `propose(num_speculative_tokens=0)` runs when another data
+    # parallel rank drafts. It runs its prefill on the target's slot mappings
+    # and no draft decode step, so it writes no KV past the target positions.
+    speculator = _make_speculator(monkeypatch, torch.zeros(4, 3))
+
+    def no_decode(*args, **kwargs):
+        raise AssertionError("a draft decode step ran without drafts")
+
+    monkeypatch.setattr(spec_module, "prepare_decode_inputs", no_decode)
+    monkeypatch.setattr(spec_module, "prepare_prefill_inputs", lambda *a, **k: None)
+    monkeypatch.setattr(
+        spec_module, "get_uniform_decode_token_count", lambda *a, **k: None
+    )
+    eager = SimpleNamespace(cg_mode=CUDAGraphMode.NONE, num_tokens=4)
+    monkeypatch.setattr(
+        spec_module, "dispatch_cg_and_sync_dp", lambda *a, **k: (eager, None)
+    )
+    monkeypatch.setattr(speculator, "_multi_step_decode", no_decode)
+    monkeypatch.setattr(speculator, "_fused_multi_step_decode", no_decode)
+    speculator.num_speculative_steps = 3
+    speculator.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(max_model_len=64), parallel_config=None
+    )
+    speculator.max_num_reqs = 2
+    speculator.method = "eagle"
+    speculator.dp_size, speculator.dp_rank = (2, 0) if peers_draft else (1, 0)
+    speculator.prefill_cudagraph_manager = None
+    speculator.last_token_indices = torch.zeros(2, dtype=torch.int64)
+    speculator.current_draft_step = torch.zeros(2, dtype=torch.int32)
+    speculator.draft_tokens = torch.zeros(2, 3, dtype=torch.int64)
+    speculator.sample_src_positions = torch.zeros(2, dtype=torch.int64)
+    monkeypatch.setattr(speculator, "_copy_request_inputs", lambda *a, **k: None)
+    monkeypatch.setattr(speculator, "_prepare_eplb_forward", lambda num_tokens: None)
+    monkeypatch.setattr(speculator, "on_prefill_begin", lambda num_reqs: None)
+    monkeypatch.setattr(speculator, "on_prefill_end", lambda num_reqs: None)
+    monkeypatch.setattr(
+        speculator,
+        "_build_drafter_attn_metadata",
+        lambda batch, attn_metadata, slot_mappings, cg_mode, for_capture=False: (
+            attn_metadata,
+            slot_mappings,
+        ),
+    )
+    prefills = []
+    monkeypatch.setattr(
+        speculator,
+        "_prefill",
+        lambda num_reqs, num_tokens, attn, slots, **kw: prefills.append(
+            (num_tokens, slots, kw["skip_sample"])
+        ),
+    )
+    input_batch = SimpleNamespace(
+        num_reqs=2,
+        num_tokens=4,
+        num_tokens_after_padding=4,
+        num_scheduled_tokens=torch.tensor([2, 2]).numpy(),
+        seq_lens=torch.tensor([9, 7]),
+        seq_lens_cpu_upper_bound=torch.tensor([9, 7]).numpy(),
+        idx_mapping=torch.arange(2, dtype=torch.int32),
+        decode_graph_eligible=True,
+        has_prefill=False,
+    )
+    target_slots = {"draft": torch.arange(4)}
+    zeros = torch.zeros(2, dtype=torch.int32)
+
+    drafts = speculator.propose(
+        input_batch,
+        {"draft": "target metadata"},
+        target_slots,
+        torch.zeros(4, 3),
+        None,
+        zeros,
+        zeros,
+        zeros,
+        zeros,
+        torch.ones(2),
+        zeros,
+        dp_sync_state=SimpleNamespace(skip_drafts=False) if peers_draft else None,
+        num_speculative_tokens=0,
+    )
+
+    assert drafts.tolist() == [[-1, -1, -1]] * 2
+    ((num_tokens, slots, skip_sample),) = prefills
+    assert num_tokens == 4 and slots is target_slots and skip_sample

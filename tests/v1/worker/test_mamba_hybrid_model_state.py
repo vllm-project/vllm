@@ -54,6 +54,8 @@ def test_prepare_attn_forwards_positions(monkeypatch: pytest.MonkeyPatch) -> Non
         num_scheduled_tokens=torch.tensor([1], dtype=torch.int32),
         max_query_len=None,
         seq_lens_cpu_upper_bound=torch.tensor([1537], dtype=torch.int32),
+        tree_parents=None,
+        tree_ancestors=None,
         seq_lens=torch.tensor([1537], dtype=torch.int32),
         is_prefilling_np=torch.tensor([False]).numpy(),
         prefill_runs_as_decode_np=None,
@@ -128,6 +130,8 @@ def test_padded_prompt_tail_builds_as_spec_decode(
         num_draft_tokens_per_req=np.array([k, k, 0], dtype=np.int32),
         max_query_len=None,
         seq_lens_cpu_upper_bound=torch.tensor(seq_lens, dtype=torch.int32),
+        tree_parents=None,
+        tree_ancestors=None,
         seq_lens=torch.tensor(seq_lens, dtype=torch.int32),
         is_prefilling_np=np.array(is_prefilling),
         prefill_runs_as_decode_np=np.array([False, True, False]),
@@ -201,6 +205,8 @@ def _input_batch(
         num_scheduled_tokens=np.array(num_scheduled_tokens, dtype=np.int32),
         max_query_len=None,
         seq_lens_cpu_upper_bound=seq_lens,
+        tree_parents=None,
+        tree_ancestors=None,
         is_prefilling_np=np.array(is_prefilling),
         prefill_runs_as_decode_np=None,
         num_draft_tokens_per_req=None
@@ -243,6 +249,17 @@ def _prepare_attn_metadata(
         kv_cache_config=Mock(),
     )
     return captured["model_specific_attn_metadata"]
+
+
+def test_metadata_carries_speculative_state_for_every_batch(monkeypatch):
+    """A batch at candidate budget 1 (no drafts) still runs with the
+    speculative metadata: there is no target-only path any more."""
+    state = _mamba_hybrid_state(3)
+    batch = _input_batch([1, 3], None, [False, True])
+    metadata = _prepare_attn_metadata(state, monkeypatch, batch)
+    assert metadata.is_prefilling.tolist() == [False, True]
+    assert metadata.num_accepted_tokens.tolist() == [4, 1]
+    assert metadata.num_decode_draft_tokens_cpu.tolist() == [0, -1]
 
 
 def test_prepare_attn_keeps_the_accepted_offset_when_the_batch_drafted_nothing(

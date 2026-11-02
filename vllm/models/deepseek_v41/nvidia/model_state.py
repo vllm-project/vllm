@@ -192,6 +192,9 @@ class DeepseekV41ModelState(DefaultModelState):
     with metadata and a forward context of its own, like a microbatch.
     """
 
+    # prepare_attn builds its own metadata without the tree buffers.
+    supports_tree_verify = False
+
     def __init__(
         self,
         vllm_config: VllmConfig,

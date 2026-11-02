@@ -101,7 +101,11 @@ class RopeState:
         query_start_loc: torch.Tensor,
         prefill_lens: torch.Tensor,
         num_computed_tokens: torch.Tensor,
+        pos_delta: torch.Tensor | None = None,
     ) -> None:
+        """Write the batch's positions. ``pos_delta`` (per token, optional) moves
+        each token from its chain position, the same on every section: a verify
+        plan's row sits at its depth in the plan."""
         num_reqs = idx_mapping.shape[0]
         _prepare_rope_positions_kernel[(num_reqs,)](
             self.positions,
@@ -114,8 +118,10 @@ class RopeState:
             query_start_loc,
             prefill_lens,
             num_computed_tokens,
+            pos_delta if pos_delta is not None else query_start_loc,
             BLOCK_SIZE=1024,
             NUM_DIMS=self.num_dims,
+            HAS_POS_DELTA=pos_delta is not None,
         )
 
 
@@ -153,8 +159,10 @@ def _prepare_rope_positions_kernel(
     query_start_loc_ptr,
     prefill_lens_ptr,
     num_computed_tokens_ptr,
+    pos_delta_ptr,  # [num_tokens] int32: plan position - chain position
     BLOCK_SIZE: tl.constexpr,
     NUM_DIMS: tl.constexpr,
+    HAS_POS_DELTA: tl.constexpr,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -173,6 +181,8 @@ def _prepare_rope_positions_kernel(
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < query_len
         orig_pos = num_computed + block
+        if HAS_POS_DELTA:
+            plan_delta = tl.load(pos_delta_ptr + query_start + block, mask=mask)
 
         for j in tl.static_range(NUM_DIMS):
             if is_prefill:
@@ -185,6 +195,8 @@ def _prepare_rope_positions_kernel(
                 )
             else:
                 pos = orig_pos + delta
+            if HAS_POS_DELTA:
+                pos += plan_delta
             tl.store(
                 positions_ptr + j * positions_stride + query_start + block,
                 pos,

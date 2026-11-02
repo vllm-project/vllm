@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
+from typing import Any, ClassVar
 
 import torch
 import torch.nn as nn
@@ -25,6 +25,7 @@ from vllm.v1.worker.utils import AttentionGroup
 
 
 class DefaultModelState(ModelState):
+    supports_tree_verify: ClassVar[bool] = True
     supports_prompt_embeds = True
 
     def __init__(
@@ -152,6 +153,7 @@ class DefaultModelState(ModelState):
             input_batch.query_start_loc,
             req_states.prefill_len.gpu,
             req_states.num_computed_tokens.gpu,
+            pos_delta=input_batch.tree_pos_delta,
         )
         positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
         return {"positions": positions}
@@ -243,5 +245,7 @@ class DefaultModelState(ModelState):
             ubatch_idx=ubatch_idx,
             fast_prefill=input_batch.fast_prefill,
             model_specific_attn_metadata=model_specific_attn_metadata,
+            tree_parents=input_batch.tree_parents,
+            tree_ancestors=input_batch.tree_ancestors,
         )
         return attn_metadata

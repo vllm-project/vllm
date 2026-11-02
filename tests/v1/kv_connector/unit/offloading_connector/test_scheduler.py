@@ -6206,6 +6206,8 @@ def _shared_kv_mtp_config():
     spec.use_eagle_block_drop.return_value = True
     spec.use_multi_module_mtp.return_value = False
     spec.num_speculative_tokens_per_batch_size = None
+    # Without this, the mock's auto-attribute answers truthy: Dynamic SD on.
+    spec.uses_dynamic_speculative_decoding.return_value = False
     spec.max_num_new_slots_for_drafting = 0
     spec.num_speculative_tokens = 1
     return attach_speculator_config(spec, MTPSpeculatorConfig)

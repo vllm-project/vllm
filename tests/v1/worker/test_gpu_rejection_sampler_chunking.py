@@ -11,11 +11,13 @@ import torch
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
 )
+from vllm.v1.worker.gpu.spec_decode.round import AcceptResult, VerifyPlan
 
 
 def _make_input_batch(
@@ -41,6 +43,8 @@ def _make_input_batch(
             )
         ).to(device),
         seq_lens_cpu_upper_bound=torch.full((num_reqs,), 64, dtype=torch.int32),
+        verify_plan=None,
+        tree_pos_delta=None,
     )
 
 
@@ -50,6 +54,7 @@ def _make_rejection_sampler(
     """RejectionSampler for standard, fixed-boundary, unwatermarked verification."""
     rejection_sampler = object.__new__(RejectionSampler)
     rejection_sampler.sampler = sampler
+    rejection_sampler.accept = None
     rejection_sampler.num_speculative_steps = num_speculative_steps
     rejection_sampler.enable_adaptive_verification = False
     rejection_sampler.synthetic_conditional_rates = None
@@ -110,7 +115,7 @@ def test_chunked_scores_match_full_batch(
     )
     logits = torch.arange(170, dtype=torch.float32, device=device).view(10, 17)
 
-    sampled, num_sampled, chunked_logprobs, sampling_mask_tensors = (
+    sampled, num_sampled, chunked_logprobs, sampling_mask_tensors, _ = (
         rejection_sampler._verify_in_chunks(
             logits,
             input_batch,
@@ -231,7 +236,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     )
 
     rng_before = torch.get_device_module(device).get_rng_state()
-    off_sampled, off_counts, off_logprobs, off_masks = (
+    off_sampled, off_counts, off_logprobs, off_masks, _ = (
         rejection_sampler._verify_in_chunks(
             processed_logits,
             input_batch,
@@ -246,14 +251,16 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     assert pack_calls == []
 
     sampler.return_sampling_mask = True
-    on_sampled, on_counts, on_logprobs, on_masks = rejection_sampler._verify_in_chunks(
-        processed_logits,
-        input_batch,
-        draft_logits,
-        draft_sampled,
-        pos,
-        max_chunk_logits=8,
-        max_num_logprobs=0,
+    on_sampled, on_counts, on_logprobs, on_masks, _ = (
+        rejection_sampler._verify_in_chunks(
+            processed_logits,
+            input_batch,
+            draft_logits,
+            draft_sampled,
+            pos,
+            max_chunk_logits=8,
+            max_num_logprobs=0,
+        )
     )
     rng_after_on = torch.get_device_module(device).get_rng_state()
 
@@ -313,3 +320,54 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     assert masks == expected_masks
     assert all(token_id in mask for token_id, mask in zip(emitted, masks))
     assert torch.equal(on_logprobs.logprobs[mapped_rows, 0], expected_logprobs)
+
+
+def test_chunked_accept_sees_every_plan_field():
+    """Each chunk's ``accept`` gets its requests' slice of every plan tensor."""
+    num_reqs, rows = 3, 3
+    cu_num_logits_np = np.arange(0, num_reqs * rows + 1, rows, dtype=np.int32)
+    input_batch = _make_input_batch(
+        cu_num_logits_np, np.arange(num_reqs, dtype=np.int32), torch.device("cpu")
+    )
+    gen = torch.Generator().manual_seed(0)
+    input_batch.verify_plan = VerifyPlan(
+        parent=torch.tensor([[-1, 0, 0]] * num_reqs, dtype=torch.int32),
+        count=torch.full((num_reqs,), rows, dtype=torch.int32),
+        tokens=torch.randint(0, 100, (num_reqs, rows), dtype=torch.int32),
+        positions=torch.randint(0, 4, (num_reqs, rows), dtype=torch.int32),
+        mask=torch.rand(num_reqs, rows, rows, generator=gen) < 0.5,
+    )
+    seen: list[VerifyPlan] = []
+
+    def accept(plan, output, sampler):
+        seen.append(plan)
+        num = plan.parent.shape[0]
+        return AcceptResult(
+            path=torch.zeros(num, rows, dtype=torch.int32),
+            path_len=torch.ones(num, dtype=torch.int32),
+            sampled=torch.zeros(num, rows, dtype=torch.int64),
+        )
+
+    rejection_sampler = _make_rejection_sampler(
+        SimpleNamespace(logprobs_mode="raw_logprobs", return_sampling_mask=False),
+        num_speculative_steps=rows - 1,
+    )
+    rejection_sampler.accept = accept
+    logits = torch.zeros(num_reqs * rows, 8)
+    pos = torch.arange(num_reqs * rows)
+    for max_chunk_logits in (num_reqs * rows, rows):
+        seen.clear()
+        rejection_sampler._verify_in_chunks(
+            logits,
+            input_batch,
+            draft_logits=None,
+            draft_sampled=pos,
+            pos=pos,
+            max_chunk_logits=max_chunk_logits,
+            max_num_logprobs=NO_LOGPROBS,
+        )
+        for name in ("parent", "count", "tokens", "positions", "mask"):
+            assert torch.equal(
+                torch.cat([getattr(plan, name) for plan in seen]),
+                getattr(input_batch.verify_plan, name),
+            ), name

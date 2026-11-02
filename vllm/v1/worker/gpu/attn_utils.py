@@ -480,6 +480,8 @@ def build_attn_metadata(
     ubatch_idx: int = 0,
     fast_prefill: FastPrefillBatchMetadata | None = None,
     req_idx: np.ndarray | None = None,
+    tree_parents: torch.Tensor | None = None,
+    tree_ancestors: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
     if dcp_local_seq_lens is not None:
@@ -543,6 +545,8 @@ def build_attn_metadata(
             mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             req_idx=req_idx,
+            tree_parents=tree_parents,
+            tree_ancestors=tree_ancestors,
             _token_to_req_indices_cache=token_to_req_indices,
             **common_attn_metadata_extra_kwargs,
         )

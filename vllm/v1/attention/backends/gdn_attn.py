@@ -120,6 +120,9 @@ class GDNAttentionMetadata:
 
     num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
     uniform_spec_sequence_length: int | None = None  # None for ragged batches
+    # The spec rows' parents (``CommonAttentionMetadata.tree_parents``) when
+    # the batch verifies a tree, in the order of the spec rows. None: chains.
+    spec_tree_parents: torch.Tensor | None = None  # shape: [num_spec_tokens,]
 
     # Pre-computed FLA chunk metadata (avoids GPU->CPU sync in prepare_chunk_indices)
     chunk_indices: torch.Tensor | None = None
@@ -688,6 +691,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_query_start_loc = self.non_spec_query_start_loc[: batch_size + 1]
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
+        spec_tree_parents = None
+        if m.tree_parents is not None and num_spec_decodes > 0:
+            if num_prefills == 0 and num_decodes == 0:
+                # Every row is a spec row: the runner's buffer as it is, which
+                # keeps its address for FULL cudagraph replay.
+                spec_tree_parents = m.tree_parents
+            else:
+                assert spec_token_indx is not None
+                spec_tree_parents = m.tree_parents.index_select(
+                    0, spec_token_indx.to(m.tree_parents.device, non_blocking=True)
+                )
+
         attn_metadata = GDNAttentionMetadata(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -715,6 +730,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             non_spec_token_indx=non_spec_token_indx,
             num_accepted_tokens=num_accepted_tokens,
             uniform_spec_sequence_length=uniform_spec_sequence_length,
+            spec_tree_parents=spec_tree_parents,
             nums_dict=nums_dict,
             batch_ptr=batch_ptr,
             token_chunk_offset_ptr=token_chunk_offset_ptr,
