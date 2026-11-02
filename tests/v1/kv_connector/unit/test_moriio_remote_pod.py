@@ -9,7 +9,7 @@ _EXTRA = {"remote_hosts": ["10.0.0.1", "10.0.0.2"], "remote_dp_size_local": 8}
 
 
 def test_serve_config_hosts_fill_the_request():
-    params = {}
+    params: dict[str, object] = {}
     fill_remote_pod_from_config(params, _EXTRA, is_producer=False)
     assert params["remote_hosts"] == ["10.0.0.1", "10.0.0.2"]
     assert params["remote_dp_size_local"] == 8
