@@ -186,6 +186,28 @@ class BatchMemcpyParams(NamedTuple):
     stream_handle: int  # raw cudaStream_t / CUstream
 
 
+def _copy_ptr(tensor: torch.Tensor) -> int:
+    """Address of ``tensor`` to pass to cuMemcpyBatchAsync.
+
+    Host memory pinned with cudaHostRegister can be mapped at a device
+    address that differs from its host address (NVIDIA vGPU, WSL2).
+    cudaMemcpyAsync translates such addresses itself; cuMemcpyBatchAsync
+    needs the device address. On bare-metal Linux the two are equal.
+    """
+    ptr = tensor.data_ptr()
+    if tensor.device.type != "cpu" or not current_platform.is_cuda():
+        return ptr
+    from cuda.bindings import runtime as cudart
+
+    err, attr = cudart.cudaPointerGetAttributes(ptr)
+    if err != cudart.cudaError_t.cudaSuccess:
+        cudart.cudaGetLastError()
+        return ptr
+    if attr.type == cudart.cudaMemoryType.cudaMemoryTypeHost and attr.devicePointer:
+        return int(attr.devicePointer)
+    return ptr
+
+
 def build_params(
     src_caches: dict[str, torch.Tensor],
     dst_caches: dict[str, torch.Tensor],
@@ -205,8 +227,8 @@ def build_params(
     for s, d in zip(src_tensors, dst_tensors):
         s_bpb = s.stride(0) * s.element_size()
         assert s_bpb == d.stride(0) * d.element_size()
-        src_bases.append(s.data_ptr())
-        dst_bases.append(d.data_ptr())
+        src_bases.append(_copy_ptr(s))
+        dst_bases.append(_copy_ptr(d))
         bpb.append(s_bpb)
 
     attrs = _CUmemcpyAttributes(srcAccessOrder=src_access_order)
