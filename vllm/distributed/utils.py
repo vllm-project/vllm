@@ -20,7 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 import torch
-from torch.distributed import ProcessGroup, Store, TCPStore
+from torch.distributed import ProcessGroup, ReduceOp, Store, TCPStore
 from torch.distributed.distributed_c10d import (
     Backend,
     PrefixStore,
@@ -58,6 +58,18 @@ def ensure_divisibility(numerator, denominator):
 
 # P2P tags [base, base + log2(group size) + 1] are reserved for cpu_all_reduce_.
 _CPU_ALL_REDUCE_TAG_BASE = 27100
+
+
+def all_reduce_int(
+    group: ProcessGroup | None, value: int, op: ReduceOp = ReduceOp.MIN
+) -> int:
+    """All-reduce one integer over a CPU process group, e.g. for ranks to agree
+    on a size or a decision; `value` itself without a group or with one rank."""
+    if group is None or group.size() == 1:
+        return value
+    tensor = torch.tensor([value], dtype=torch.int64, device="cpu")
+    torch.distributed.all_reduce(tensor, op=op, group=group)
+    return int(tensor.item())
 
 
 def cpu_all_reduce_(
