@@ -576,7 +576,8 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
         return_lse=True,
     )
     assert reference.dtype == torch.float32
-    if cache_dtype == torch.uint8:
+    # The native e4m3 view compiles only on sm_89+.
+    if cache_dtype == torch.uint8 and current_platform.has_device_capability(89):
         native_out, native_lse = qsa_sparse_paged_attention(
             q,
             k_full.view(torch.float8_e4m3fn),
