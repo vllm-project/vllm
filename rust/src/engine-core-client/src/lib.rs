@@ -3,6 +3,7 @@
 
 mod client;
 mod coordinator;
+mod engine_client;
 mod error;
 mod metrics;
 pub mod mock_engine;
@@ -17,6 +18,7 @@ pub use client::{
     AbortCause, CoordinatorMode, EngineCoreClient, EngineCoreClientConfig, EngineCoreOutputStream,
     EngineCoreStreamDelivery, EngineCoreStreamOutput, TransportMode,
 };
+pub use engine_client::{EngineClient, EngineOutputStream};
 pub use error::{Error, Result};
 pub use transport::{ENGINE_CORE_DEAD_SENTINEL, EngineId};
 

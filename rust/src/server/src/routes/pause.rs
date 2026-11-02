@@ -47,7 +47,7 @@ pub async fn pause(
     let Query(params) = params.map_err(invalid_query)?;
 
     state
-        .engine_core_client()
+        .engine_client()
         .pause_generation(params.mode, params.clear_cache)
         .await
         .map_err(|error| utility_call_error("pause", error))?;
@@ -58,7 +58,7 @@ pub async fn pause(
 /// Resume the scheduler after a pause.
 pub async fn resume(State(state): State<Arc<AppState>>) -> Result<Json<StatusResponse>, ApiError> {
     state
-        .engine_core_client()
+        .engine_client()
         .resume_scheduler()
         .await
         .map_err(|error| utility_call_error("resume", error))?;
@@ -71,7 +71,7 @@ pub async fn is_paused(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<IsPausedResponse>, ApiError> {
     let is_paused = state
-        .engine_core_client()
+        .engine_client()
         .is_scheduler_paused()
         .await
         .map_err(|error| utility_call_error("is_paused", error))?;

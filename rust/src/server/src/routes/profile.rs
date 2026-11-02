@@ -56,7 +56,7 @@ pub async fn start_profile(
     }
     info!("starting profiler");
     if let Err(error) = state
-        .engine_core_client()
+        .engine_client()
         .start_profile(
             body.profile_prefix.as_deref(),
             body.delay_iterations,
@@ -82,7 +82,7 @@ pub async fn start_profile(
 pub async fn stop_profile(State(state): State<Arc<AppState>>) -> Result<StatusCode, ApiError> {
     info!("stopping profiler");
     state
-        .engine_core_client()
+        .engine_client()
         .stop_profile(None)
         .await
         .map_err(|error| utility_call_error("stop_profile", error))?;

@@ -10,7 +10,7 @@ use tokio::runtime::Runtime;
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
-use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::EngineClient;
 use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
 use crate::config::{AccessLogConfig, ApiServerOptions, CorsConfig, LoraModulePath};
@@ -202,7 +202,7 @@ impl AppState {
         self.ensure_lora_enabled()?;
         self.lora_manager
             .load_lora(
-                self.engine_core_client(),
+                self.engine_client(),
                 &self.served_model_names,
                 module,
                 load_inplace,
@@ -220,7 +220,7 @@ impl AppState {
     ) -> Result<LoadedLora, LoadLoraError> {
         self.ensure_lora_enabled()?;
         self.lora_manager
-            .load_static_lora(self.engine_core_client(), &self.served_model_names, module)
+            .load_static_lora(self.engine_client(), &self.served_model_names, module)
             .await
     }
 
@@ -235,22 +235,17 @@ impl AppState {
     ) -> Result<LoadedLora, UnloadLoraError> {
         self.ensure_lora_enabled()?;
         self.lora_manager
-            .unload_lora(self.engine_core_client(), lora_name, lora_int_id)
+            .unload_lora(self.engine_client(), lora_name, lora_int_id)
             .await
     }
 
     fn ensure_lora_enabled(&self) -> Result<(), LoraDisabledError> {
-        self.engine_core_client()
-            .ready_response()
-            .supports_lora
-            .then_some(())
-            .ok_or(LoraDisabledError)
+        self.engine_client().supports_lora().then_some(()).ok_or(LoraDisabledError)
     }
 
-    /// Return a reference to the underlying engine core client for utility
-    /// calls.
-    pub(crate) fn engine_core_client(&self) -> &EngineCoreClient {
-        self.chat.engine_core_client()
+    /// Return the engine client used by request handlers.
+    pub(crate) fn engine_client(&self) -> &dyn EngineClient {
+        self.chat.engine_client()
     }
 
     /// Runtime used by middleware to isolate heavyweight request handlers from

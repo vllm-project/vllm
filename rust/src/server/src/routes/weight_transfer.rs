@@ -65,7 +65,7 @@ pub async fn init_weight_transfer_engine(
 
     let _recorder = METRICS.api_server.record_weight_operation("init");
     state
-        .engine_core_client()
+        .engine_client()
         .init_weight_transfer_engine(init_info)
         .await
         .map_err(|error| utility_call_error("init_weight_transfer_engine", error))?;
@@ -81,7 +81,7 @@ pub async fn shutdown_weight_transfer_engine(
 ) -> Result<Json<MessageResponse>, ApiError> {
     let _recorder = METRICS.api_server.record_weight_operation("shutdown");
     state
-        .engine_core_client()
+        .engine_client()
         .shutdown_weight_transfer_engine()
         .await
         .map_err(|error| utility_call_error("shutdown_weight_transfer_engine", error))?;
@@ -97,7 +97,7 @@ pub async fn start_weight_update(
 ) -> Result<Json<MessageResponse>, ApiError> {
     let _recorder = METRICS.api_server.record_weight_operation("start");
     state
-        .engine_core_client()
+        .engine_client()
         .start_weight_update()
         .await
         .map_err(|error| utility_call_error("start_weight_update", error))?;
@@ -113,7 +113,7 @@ pub async fn start_draft_weight_update(
 ) -> Result<Json<MessageResponse>, ApiError> {
     let _recorder = METRICS.api_server.record_weight_operation("start_draft");
     state
-        .engine_core_client()
+        .engine_client()
         .start_draft_weight_update()
         .await
         .map_err(|error| utility_call_error("start_draft_weight_update", error))?;
@@ -144,7 +144,7 @@ pub async fn update_weights(
 
     let _recorder = METRICS.api_server.record_weight_operation("update");
     state
-        .engine_core_client()
+        .engine_client()
         .update_weights(update_info)
         .await
         .map_err(|error| utility_call_error("update_weights", error))?;
@@ -162,7 +162,7 @@ pub async fn finish_weight_update(
     // HTTPVLLMWeightSyncClient omits the body when no version is supplied.
     let request = body?.map(|Json(request)| request).unwrap_or_default();
 
-    let client = state.engine_core_client();
+    let client = state.engine_client();
     let _recorder = METRICS.api_server.record_weight_operation("finish");
     client
         .finish_weight_update()
@@ -187,7 +187,7 @@ pub async fn update_weight_version(
 ) -> Result<Json<UpdateWeightVersionResponse>, ApiError> {
     let Json(body) = body?;
     state
-        .engine_core_client()
+        .engine_client()
         .set_weight_version(&body.new_version)
         .await
         .map_err(|error| utility_call_error("set_weight_version", error))?;
@@ -203,7 +203,7 @@ pub async fn weight_info(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<WeightInfoResponse>, ApiError> {
     let weight_version = state
-        .engine_core_client()
+        .engine_client()
         .get_weight_version()
         .await
         .map_err(|error| utility_call_error("get_weight_version", error))?;

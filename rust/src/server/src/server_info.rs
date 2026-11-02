@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 
 use serde_json::{Value, json};
-use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::EngineClient;
 
 use crate::config::Config;
 
@@ -30,7 +30,7 @@ pub(crate) struct ServerInfoSnapshot {
 }
 
 impl ServerInfoSnapshot {
-    pub(crate) fn new(config: &Config, client: &EngineCoreClient) -> Self {
+    pub(crate) fn new(config: &Config, client: &dyn EngineClient) -> Self {
         Self {
             vllm_config: engine_vllm_config(client),
             rust_frontend_config: serde_json::to_value(config)
@@ -56,7 +56,7 @@ impl ServerInfoSnapshot {
 }
 
 /// The `VllmConfig` reported by the first engine, as seen from this frontend.
-fn engine_vllm_config(client: &EngineCoreClient) -> Option<Value> {
+fn engine_vllm_config(client: &dyn EngineClient) -> Option<Value> {
     let engine_config = client.ready_response().vllm_config.clone()?;
     Some(frontend_vllm_config(engine_config, client))
 }
@@ -69,7 +69,7 @@ fn engine_vllm_config(client: &EngineCoreClient) -> Option<Value> {
 /// independent dense DP rank, its own `num_gpu_blocks`, and the launcher's API
 /// process fields. The DP size and rank match the gRPC `GetServerInfo`
 /// parallelism view, and this frontend is the only API process.
-fn frontend_vllm_config(mut vllm_config: Value, client: &EngineCoreClient) -> Value {
+fn frontend_vllm_config(mut vllm_config: Value, client: &dyn EngineClient) -> Value {
     let overrides = [
         ("/parallel_config/_api_process_count", json!(1)),
         ("/parallel_config/_api_process_rank", json!(0)),
