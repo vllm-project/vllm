@@ -414,7 +414,7 @@ class NixlBaseConnectorScheduler:
         For Mamba that is the single token needed to yield h(N-1); for
         multi-module MTP it is the drafter's whole lookahead window.
 
-        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        Guarded by ``request._p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         backoff = self._prefill_backoff()
         params = request.kv_transfer_params
@@ -422,7 +422,7 @@ class NixlBaseConnectorScheduler:
             backoff
             and params is not None
             # Guard against repeated truncation after preemption/reschedule.
-            and not params.get("_p_side_truncated")
+            and not request._p_side_truncated
             and request.num_prompt_tokens > backoff
             # A request that skips reading external KV (prompt logprobs)
             # loads nothing on the decoder, which recomputes past its local hit.
@@ -438,7 +438,7 @@ class NixlBaseConnectorScheduler:
             del request._all_token_ids[-backoff:]
             request.num_prompt_tokens -= backoff
             request.max_tokens = 1
-            params["_p_side_truncated"] = True
+            request._p_side_truncated = True
 
     def _build_save_meta(
         self,

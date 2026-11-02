@@ -8,6 +8,7 @@ request transfers fewer bytes (because cached blocks are skipped).
 
 import os
 import time
+import uuid
 
 import openai
 import regex as re
@@ -344,3 +345,29 @@ def test_mamba_prefix_cache_hit():
         f"req2={transfer_req2 / 1e6:.2f} MB (no reduction)."
     )
     assert output1 == output2, f"Outputs differ: {output1!r} vs {output2!r}"
+
+
+def test_client_marker_cannot_skip_prefill_truncation():
+    """The producer exports N-1 computed tokens even with a forged marker."""
+    prefill_client = openai.OpenAI(
+        api_key="MY_KEY",
+        base_url=f"http://{PREFILL_HOST}:{PREFILL_PORT}/v1",
+    )
+    model = prefill_client.models.list().data[0].id
+    prompt = list(range(401))
+    for marker in (False, True):
+        response = prefill_client.completions.create(
+            model=model,
+            prompt=prompt,
+            max_tokens=1,
+            temperature=0,
+            extra_body={
+                "cache_salt": uuid.uuid4().hex,
+                "kv_transfer_params": {
+                    "do_remote_decode": True,
+                    "_p_side_truncated": marker,
+                },
+            },
+        )
+        params = response.model_dump()["kv_transfer_params"]
+        assert params["remote_num_tokens"] == len(prompt) - 1

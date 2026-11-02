@@ -1073,12 +1073,12 @@ class MooncakeConnectorScheduler:
         h(N-1) instead of h(N). The decoder recomputes the last token to
         derive h(N) correctly.
 
-        Guarded by ``_p_side_truncated`` to avoid repeated truncation if the
+        Guarded by ``request._p_side_truncated`` to avoid repeated truncation if the
         request is preempted and rescheduled."""
         params = request.kv_transfer_params
         if (
             params is not None
-            and not params.get("_p_side_truncated")
+            and not request._p_side_truncated
             and request.num_prompt_tokens > 1
             # A request that skips reading external KV (prompt logprobs)
             # loads nothing on the decoder, which recomputes past its local hit.
@@ -1094,7 +1094,7 @@ class MooncakeConnectorScheduler:
             request._all_token_ids.pop()
             request.num_prompt_tokens -= 1
             request.max_tokens = 1
-            params["_p_side_truncated"] = True
+            request._p_side_truncated = True
 
     def on_new_request(self, request: "Request") -> None:
         params = request.kv_transfer_params

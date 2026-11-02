@@ -145,7 +145,7 @@ class TestPushScheduler:
         sched.on_new_request(request)
 
         assert len(request.prompt_token_ids) == original_len - 1
-        assert request.kv_transfer_params["_p_side_truncated"] is True
+        assert request._p_side_truncated is True
 
         with patch.object(
             sched,

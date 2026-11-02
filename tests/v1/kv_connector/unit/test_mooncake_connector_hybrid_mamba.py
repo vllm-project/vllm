@@ -124,7 +124,7 @@ def test_hybrid_gdn_remote_decode_truncates_prefill_before_cache_lookup():
     assert request._all_token_ids == original_tokens[:-1]
     assert request.num_prompt_tokens == len(original_tokens) - 1
     assert request.max_tokens == 1
-    assert request.kv_transfer_params["_p_side_truncated"] is True
+    assert request._p_side_truncated is True
 
     # Re-adding or rescheduling the request must not truncate another token.
     scheduler.on_new_request(request)
