@@ -8,8 +8,10 @@ The gather-group partition itself is ``base.layerwise_groups``: it defines what 
 group index means for any ``WeightSource``, not just this transport.
 """
 
+import math
 from collections.abc import Callable
-from typing import Any
+from numbers import Real
+from typing import Any, Literal
 
 import torch
 
@@ -48,9 +50,55 @@ ALLOWED_OPS = frozenset(SUPPORTED_OPS.values())
 # directly — in 2.55. The floor is the tested version rather than the earliest
 # one that could import; 2.55 has never been run against.
 RDT_MIN_RAY_VERSION = "2.56.0"
+HOST_RDT_MIN_RAY_VERSION = "2.58.0"
+STAGING_DEVICES = ("gpu", "host")
+StagingDevice = Literal["gpu", "host"]
 
 
-def check_ray_rdt_version() -> None:
+def validate_staging_device(value: object) -> None:
+    """Reject a receive-buffer location outside ``STAGING_DEVICES``."""
+    if value not in STAGING_DEVICES:
+        raise ValueError(
+            f"staging_device={value!r}: must be one of {', '.join(STAGING_DEVICES)}"
+        )
+
+
+def validate_int(name: str, value: object, *, minimum: int) -> None:
+    """Reject a non-int (bools included) or an int below ``minimum``."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise ValueError(f"{name}={value!r}: must be an integer >= {minimum}")
+
+
+def validate_nonnegative_real(name: str, value: object) -> None:
+    """Reject a non-number (bools included), NaN, an infinity or a negative."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, Real)
+        or not 0 <= float(value) < math.inf
+    ):
+        raise ValueError(f"{name}={value!r}: must be a finite number >= 0")
+
+
+def validate_sharded_rdt_settings(
+    *,
+    staging_device: object,
+    stages_in_flight: object,
+    num_rdt_buffers: object,
+    buffer_presize_gb: object,
+    num_consumers: object,
+    allow_zero_consumers: bool,
+) -> None:
+    """Validate the typed settings shared by trainer and worker init."""
+    validate_staging_device(staging_device)
+    validate_int("stages_in_flight", stages_in_flight, minimum=1)
+    validate_int("num_rdt_buffers", num_rdt_buffers, minimum=1)
+    validate_nonnegative_real("buffer_presize_gb", buffer_presize_gb)
+    validate_int(
+        "num_consumers", num_consumers, minimum=0 if allow_zero_consumers else 1
+    )
+
+
+def check_ray_rdt_version(staging_device: StagingDevice = "gpu") -> None:
     """Refuse an installed Ray older than the one this backend is tested on.
 
     vLLM does not depend on Ray, so there is no pin to carry this. Without the
@@ -59,18 +107,24 @@ def check_ray_rdt_version() -> None:
     raised deep in the first pull, long after init reported success (below 2.55).
 
     Raises:
-        ValueError: the installed Ray predates ``RDT_MIN_RAY_VERSION``.
+        ValueError: the installed Ray predates the selected staging mode's
+            tested minimum.
 
     """
     import importlib.metadata
 
     from packaging import version
 
-    required = version.parse(RDT_MIN_RAY_VERSION)
+    validate_staging_device(staging_device)
+    required_str = (
+        HOST_RDT_MIN_RAY_VERSION if staging_device == "host" else RDT_MIN_RAY_VERSION
+    )
+    required = version.parse(required_str)
     current = version.parse(importlib.metadata.version("ray"))
     if current < required:
         raise ValueError(
-            f"The 'sharded_rdt' weight transfer backend requires Ray "
+            f"The 'sharded_rdt' weight transfer backend with "
+            f"staging_device={staging_device!r} requires Ray "
             f">= {required}, the version it is tested against; Ray Direct "
             f"Transport (ray.experimental.register_nixl_memory / "
             f"set_target_for_ref) needs at least 2.55. Found {current}. "
@@ -86,6 +140,18 @@ def register_nixl_memory(tensor: torch.Tensor) -> None:
     from ray.experimental import register_nixl_memory as ray_register_nixl_memory
 
     ray_register_nixl_memory(tensor)
+
+
+def deregister_nixl_memory(tensor: torch.Tensor) -> None:
+    """Drop the registration ``register_nixl_memory`` holds for ``tensor``."""
+    from vllm.distributed.nixl_utils import alias_nixl_for_ray
+
+    alias_nixl_for_ray()
+    from ray.experimental import (
+        deregister_nixl_memory as ray_deregister_nixl_memory,
+    )
+
+    ray_deregister_nixl_memory(tensor)
 
 
 def assign_producer_indices(
@@ -310,11 +376,17 @@ class RdtRouter:
             keys, consumer_id=self.consumer_id, seq=seq
         )
 
-    def free_group(self, group_idx: int) -> list:
-        """Signal the group done at every producer holding any of its names."""
+    def free_group(self, group_idx: int, sync_idx: int | None = None) -> list:
+        """Signal the group done at every producer holding any of its names,
+        tagged with the sync it belongs to (``None``: untagged)."""
         self._bound()
+        if sync_idx is None:
+            return [
+                self._actors[p].free_group.remote(group_idx)
+                for p in self.group_owners(group_idx)
+            ]
         return [
-            self._actors[p].free_group.remote(group_idx)
+            self._actors[p].free_group.remote(group_idx, sync_idx)
             for p in self.group_owners(group_idx)
         ]
 
