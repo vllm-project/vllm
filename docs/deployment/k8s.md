@@ -5,6 +5,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
 - [Serving with gRPC](#serving-with-grpc)
+- [Drain Shutdown](#drain-shutdown)
 - [Troubleshooting](#troubleshooting)
     - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
@@ -430,6 +431,99 @@ You can also verify the health service manually with `grpcurl`:
 ```bash
 grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
 ```
+
+## Drain Shutdown
+
+For production deployments, vLLM can drain in-flight requests before it exits, so rolling updates and scale-downs do not cut off requests that are still generating.
+
+### How It Works
+
+When the vLLM process receives `SIGTERM` (sent by Kubernetes when a pod terminates):
+
+1. The server stops taking new requests.
+1. In-flight requests keep running until they finish, for at most `--shutdown-timeout` seconds.
+1. The engine and the server exit.
+
+### Configuration
+
+Enable drain shutdown by setting `--shutdown-timeout` to a non-zero value:
+
+| Argument                     | Default | Description                                                             |
+|------------------------------|---------|-------------------------------------------------------------------------|
+| `--shutdown-timeout=0`       | Yes     | Immediate shutdown: in-flight requests are aborted on `SIGTERM`         |
+| `--shutdown-timeout=SECONDS` |         | Drain shutdown: wait up to SECONDS for in-flight requests to complete   |
+
+With `--shutdown-timeout=0`, an aborted request ends with `finish_reason` set to `"abort"` (followed by `data: [DONE]` when streaming) if the abort reaches the client before the engine process exits; otherwise the connection closes mid-response. Clients should treat either outcome as an incomplete answer rather than a finished one.
+
+### Example Deployment
+
+`SIGTERM` has to reach the vLLM process itself. The `vllm/vllm-openai` image runs `vllm serve` as its entrypoint, so pass the model and flags as `args`. Wrapping the command in `/bin/sh -c` makes the shell the container's main process; the shell does not forward `SIGTERM`, so the drain never starts and the pod is killed when `terminationGracePeriodSeconds` runs out. If you need a shell, start vLLM with `exec vllm serve ...`.
+
+The example uses a `preStop` hook to delay `SIGTERM`, giving Kubernetes time to remove the pod from the Service endpoints before the drain begins. The three timeouts relate as follows:
+
+```text
+terminationGracePeriodSeconds >= preStop sleep + --shutdown-timeout + margin
+```
+
+The margin covers the engine's teardown and the process exit after the drain; leave at least 10 seconds.
+
+<details>
+<summary>Yaml</summary>
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: vllm
+  template:
+    metadata:
+      labels:
+        app: vllm
+    spec:
+      # 15 s preStop + 40 s drain + 15 s margin
+      terminationGracePeriodSeconds: 70
+      containers:
+      - name: vllm
+        image: vllm/vllm-openai:latest
+        # The image's entrypoint is `vllm serve`, which then receives SIGTERM directly.
+        args: ["mistralai/Mistral-7B-Instruct-v0.3", "--shutdown-timeout", "40"]
+        ports:
+        - containerPort: 8000
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sleep", "15"]
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 60
+          periodSeconds: 5
+        resources:
+          limits:
+            nvidia.com/gpu: "1"
+```
+
+</details>
+
+### Key Considerations
+
+- **`terminationGracePeriodSeconds`**: When it runs out, Kubernetes kills the pod regardless of the drain. Keep it above the `preStop` sleep plus `--shutdown-timeout`, with a margin for teardown.
+
+- **Pre-stop hook**: Kubernetes removes a terminating pod from the Service endpoints at the same time as it starts terminating the containers, and the removal takes a few seconds to reach every node. The `preStop` sleep delays `SIGTERM` until then. Do not rely on the readiness probe for this: `/health` reports whether the engine is alive, not whether the server is draining. A value of 15 seconds is typically sufficient.
+
+- **Choosing a timeout**: Pick a value that covers most of your requests, for example the p99 of `vllm:e2e_request_latency_seconds` from `/metrics`. As a rough guide, 40 seconds is enough to generate about 2000 tokens at 50 tokens/s per request. Increase `--shutdown-timeout`, and `terminationGracePeriodSeconds` with it, for workloads with longer requests.
 
 ## Troubleshooting
 
