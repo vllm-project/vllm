@@ -11,6 +11,7 @@ import pytest
 from tests.quantization.utils import is_quant_method_supported
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_kv_cache_dtype
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from ..utils import check_logprobs_close
 
 
@@ -111,6 +112,37 @@ def test_models(
             name_0="fp16_kv_cache",
             name_1="fp8_kv_cache",
         )
+
+
+@pytest.mark.skipif(not has_flashinfer(), reason="FlashInfer is not available.")
+@pytest.mark.parametrize("max_tokens", [4])
+def test_flashinfer_bf16_query_with_checkpoint_q_scale(
+    vllm_runner, example_prompts, max_tokens: int
+) -> None:
+    """A checkpoint q_scale must not descale a BF16 query in FlashInfer."""
+    # Unquantized weights with a per-layer self_attn.q_scale of about 0.03.
+    model = "nm-testing/TinyLlama-1.1B-Chat-v1.0-kvcache-fp8-tensor"
+    outputs = []
+    for attention_config in (
+        {"backend": "TRITON_ATTN"},
+        {"backend": "FLASHINFER", "disable_flashinfer_q_quantization": True},
+    ):
+        with vllm_runner(
+            model,
+            max_model_len=1024,
+            enforce_eager=True,
+            kv_cache_dtype="fp8",
+            attention_config=attention_config,
+        ) as vllm_model:
+            outputs.append(
+                vllm_model.generate_greedy_logprobs(example_prompts, max_tokens, 8)
+            )
+    check_logprobs_close(
+        outputs_0_lst=outputs[0],
+        outputs_1_lst=outputs[1],
+        name_0="triton",
+        name_1="flashinfer",
+    )
 
 
 @pytest.mark.cpu_model
