@@ -684,11 +684,16 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         accumulate in ``_finished_jobs`` and are surfaced by the next
         ``get_finished_jobs()`` call.
 
-        A load already failed with a deferred release stays pending until
-        its AbortAck, or until a missed AbortAck disconnects the session and
-        the reap's close() sets the event, so every event is set on return.
+        Inbound loads are aborted up front rather than waited out: a peer
+        that never writes would otherwise block the reset for the full load
+        timeout. Each is failed at once with a deferred release and stays
+        pending until its AbortAck, or until a missed AbortAck disconnects
+        the session and the reap's close() sets the event, so every event
+        is set on return.
         """
         start = time.monotonic()
+        for session in self._sessions.values():
+            session.abort_loads()
         warned = False
         while True:
             self._poll_once()
