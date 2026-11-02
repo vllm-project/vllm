@@ -1598,6 +1598,7 @@ class TestBidirectionalManager:
         managers: list[P2PSecondaryTierManager] = []
 
         def build() -> tuple[P2PSecondaryTierManager, str]:
+            last_err: Exception | None = None
             for _ in range(8):
                 port = _free_port()
                 try:
@@ -1607,11 +1608,13 @@ class TestBidirectionalManager:
                         host="127.0.0.1",
                         port=port,
                     )
-                except zmq.ZMQError:
+                except (zmq.ZMQError, OSError) as e:
+                    last_err = e
                     continue
                 managers.append(mgr)
                 return mgr, f"127.0.0.1:{port}"
-            pytest.fail("could not bind a ZMQ port")
+            assert last_err is not None
+            raise last_err
 
         def poll_until(condition) -> bool:
             deadline = time.monotonic() + 5.0
