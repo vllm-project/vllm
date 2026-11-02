@@ -10,6 +10,8 @@ import torch.nn.functional as F
 import vllm.model_executor.kernels.mhc  # noqa: F401
 import vllm.model_executor.layers.mhc as mhc_layers
 from vllm.model_executor.kernels.mhc.tilelang import (
+    mhc_fused_post_pre_tilelang,
+    mhc_fused_post_pre_tilelang_reuse_residual,
     mhc_post_tilelang,
     mhc_pre_delayed_tilelang,
 )
@@ -44,6 +46,7 @@ from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
     is_mega_mhc_supported,
     mhc_shifted_post_pre_deep_gemm,
 )
+from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_expand
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -376,7 +379,9 @@ def mhc_fused_post_pre_delayed_ref(
     residual: torch.Tensor,
     post_layer_mix: torch.Tensor,
     comb_res_mix: torch.Tensor,
-    *mix_args,
+    *mix_args: *tuple[
+        torch.Tensor, torch.Tensor, torch.Tensor, float, float, float, float, int
+    ],
     pre_mix: torch.Tensor | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Project the post result before it is rounded to BF16.
@@ -1156,6 +1161,69 @@ def test_mhc_fused_post_pre(num_tokens, hidden_size, hc_mult):
     torch.testing.assert_close(x, layer_input_ref, atol=1e-2, rtol=1e-2)
 
 
+def _mhc_fused_post_pre_inputs(
+    num_tokens: int, hidden_size: int, hc_mult: int = 4
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        float,
+        float,
+        float,
+        float,
+        int,
+    ],
+    torch.Tensor,
+]:
+    hc_mult3 = hc_mult * 2 + hc_mult * hc_mult
+    x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+    residual = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    mixes = (
+        torch.randn((num_tokens, hc_mult, 1), dtype=torch.float32),
+        torch.randn((num_tokens, hc_mult, hc_mult), dtype=torch.float32),
+        torch.randn((hc_mult3, hc_mult * hidden_size), dtype=torch.float32) * 1e-4,
+        torch.randn((3,), dtype=torch.float32) * 0.1,
+        torch.randn((hc_mult3,), dtype=torch.float32) * 0.1,
+        1e-6,
+        1e-6,
+        1e-6,
+        1.0,
+        20,
+    )
+    norm_weight = torch.randn(hidden_size, dtype=torch.bfloat16)
+    return x, residual, mixes, norm_weight
+
+
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("num_tokens", [8, 33, 1024])
+@pytest.mark.parametrize("hidden_size", [4096, 7168])
+def test_mhc_fused_post_pre_reuse_residual_is_exact(num_tokens, hidden_size):
+    """Writing the next residual into the dead input residual changes no
+    output, and the unfused path then allocates no new residual."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    x, residual, mixes, norm_weight = _mhc_fused_post_pre_inputs(
+        num_tokens, hidden_size
+    )
+
+    untouched = residual.clone()
+    expected = mhc_fused_post_pre_tilelang(x, residual, *mixes, norm_weight=norm_weight)
+    assert torch.equal(residual, untouched)
+
+    actual = mhc_fused_post_pre_tilelang_reuse_residual(
+        x, residual, *mixes, norm_weight=norm_weight
+    )
+    for got, want in zip(actual, expected):
+        assert torch.equal(got, want)
+    unfused = mhc_fused_post_pre_split_config(num_tokens, hidden_size, 4) is None
+    assert (actual[0].data_ptr() == residual.data_ptr()) == unfused
+
+
 def _rocm_mhc_inputs(num_tokens=2, hidden_size=256, hc_mult=4):
     residual = torch.randn(
         (num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16, device=DEVICE
@@ -1674,6 +1742,58 @@ def _patch_first_rank_pp_group(monkeypatch):
     )
 
 
+@pytest.mark.skipif(not HAS_TILELANG_MHC, reason="TileLang MHC support required")
+@pytest.mark.parametrize("carried", [False, True])
+def test_deepseek_v4_layer_reuse_residual_keeps_caller_input(carried):
+    """reuse_residual changes no output and never writes the caller's x, even
+    when a first layer starts from ``residual = x``."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    hc_mult, hidden_size, num_tokens = 4, 4096, 64
+    layer = _make_mhc_decoder_layer(hc_mult=hc_mult, hidden_size=hidden_size)
+    _, _, mixes, norm_weight = _mhc_fused_post_pre_inputs(num_tokens, hidden_size)
+    _, _, fn, hc_scale, hc_base, *_ = mixes
+    layer.hc_attn_fn.data.copy_(fn)
+    layer.hc_attn_scale, layer.hc_attn_base = hc_scale, hc_base
+    layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base = fn, hc_scale, hc_base
+    norm = SimpleNamespace(weight=norm_weight, variance_epsilon=1e-6)
+    layer.attn_norm = layer.ffn_norm = norm
+    layer.rms_norm_eps, layer.hc_eps, layer.hc_post_alpha = 1e-6, 1e-6, 1.0
+    layer.hc_sinkhorn_iters = 20
+    layer.use_sequence_parallel = False
+    layer.attn = lambda positions, x, _: x * 0.5
+    layer.ffn = lambda x, input_ids, metadata: x * 2.0
+    positions = torch.arange(num_tokens)
+
+    x = torch.randn((num_tokens, hc_mult, hidden_size), dtype=torch.bfloat16)
+    if carried:
+        residual = torch.randn_like(x)
+        x = torch.randn((num_tokens, hidden_size), dtype=torch.bfloat16)
+        post_mix = torch.rand((num_tokens, hc_mult, 1), dtype=torch.float32)
+        res_mix = torch.rand((num_tokens, hc_mult, hc_mult), dtype=torch.float32)
+    else:
+        residual = post_mix = res_mix = None
+
+    def run(reuse_residual):
+        return DeepseekV4DecoderLayer.forward(
+            layer,
+            x.clone() if carried else x,
+            positions,
+            None,
+            post_mix,
+            res_mix,
+            None if residual is None else residual.clone(),
+            reuse_residual=reuse_residual,
+        )
+
+    x_before = x.clone()
+    expected = run(False)
+    actual = run(True)
+    assert torch.equal(x, x_before)
+    for got, want in zip(actual, expected):
+        assert torch.equal(got, want)
+
+
 def test_deepseek_v4_mhc_broadcast_finalize_sums_hc_streams(monkeypatch):
     """First finalize (at the end of load_weights) allocates
     hc_attn_fn_broadcast as hc_attn_fn summed over hc streams."""
@@ -1770,3 +1890,36 @@ def test_mhc_fused_post_pre_delayed_falls_back_for_large_batches():
 
     assert not rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1)
     assert rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1 << 20)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,hidden_size,hc_mult",
+    [(0, 17, 4), (1, 513, 1), (7, 17, 8), (33, 5137, 4), (8192, 5120, 4)],
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("strided", [False, True])
+def test_hc_expand_preserves_bits_in_eager_and_graph(
+    num_tokens, hidden_size, hc_mult, dtype, strided
+):
+    """Expansion preserves every input bit, including NaNs and signed zero."""
+    set_random_seed(42)
+    storage = torch.randn(num_tokens, 2 * hidden_size + 1, dtype=dtype, device=DEVICE)
+    x = storage[:, 1::2] if strided else storage[:, :hidden_size].contiguous()
+    if num_tokens:
+        x[0, 0] = float("nan")
+        x[0, -1] = -0.0
+
+    def check(actual):
+        expected = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
+        assert actual.shape == expected.shape and actual.dtype == x.dtype
+        assert actual.is_contiguous()
+        if actual.numel():
+            assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
+    check(hc_expand(x, hc_mult))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = hc_expand(x, hc_mult)
+    x.copy_(torch.randn_like(x))
+    graph.replay()
+    check(captured)

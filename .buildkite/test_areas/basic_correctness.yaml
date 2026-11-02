@@ -2,21 +2,22 @@ group: Basic Correctness
 depends_on:
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 18GB) Basic Correctness Models %N"
+- label: ":nvidia: (H200 MIG 18GB) Basic Correctness Models"
   key: basic-correctness
+  automatic_shard: true
   timeout_in_minutes: 68
   device: h200_18gb
-  parallelism: 2
   source_file_dependencies: &basic-correctness-deps
   - vllm/
   - "!vllm/distributed/kv_transfer/"
   - tests/basic_correctness/
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s basic_correctness/models --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
+  - pytest -v -s basic_correctness/models
   mirror:
     amd:
-      label: ":amd: (MI355 DPX) Basic Correctness Models Shard %N"
+      label: ":amd: (MI355 DPX) Basic Correctness Models"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 60

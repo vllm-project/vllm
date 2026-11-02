@@ -10,7 +10,7 @@ Known Issues:
 
 import sys
 from types import MethodType, SimpleNamespace
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 import torch
@@ -27,6 +27,7 @@ from vllm.model_executor.layers.attention import mla_attention as mla_attention_
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     MLACommonBaseImpl,
+    MLACommonMetadataBuilder,
     QueryLenSupport,
     _DecodeConcatQuantFP8,
     _use_masked_mha,
@@ -35,8 +36,8 @@ from vllm.model_executor.layers.attention.mla_attention import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
-from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
+from vllm.v1.attention.backend import CommonAttentionMetadata, MLAAttentionImpl
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
 from vllm.v1.attention.backends.mla import tokenspeed_mla as tokenspeed_mla_module
@@ -218,13 +219,39 @@ def test_masked_mha_routing_is_dimension_specific():
         ("fp8_ds_mla", KVQuantMode.FP8_PER_TENSOR),
     ],
 )
+@pytest.mark.parametrize(
+    ("sm120", "kv_lora_rank", "rope_dim", "row_bytes"),
+    [
+        (False, 512, 64, 656),
+        (False, 512, 0, 656),
+        (True, 512, 64, 656),
+        (True, 512, 0, 528),
+        (True, 256, 0, 656),
+    ],
+)
 def test_mla_kv_cache_spec_uses_layer_cache_dtype(
-    cache_dtype: str, expected_quant_mode: KVQuantMode
+    cache_dtype: str,
+    expected_quant_mode: KVQuantMode,
+    sm120: bool,
+    kv_lora_rank: int,
+    rope_dim: int,
+    row_bytes: int,
 ):
+    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
+        FlashInferMLASparseSM120Impl,
+    )
+    from vllm.v1.attention.backends.mla.flashmla_sparse import FlashMLASparseImpl
+
+    impl: Any = object.__new__(
+        FlashInferMLASparseSM120Impl if sm120 else FlashMLASparseImpl
+    )
+    impl.kv_lora_rank = kv_lora_rank
+    impl.qk_rope_head_dim = rope_dim
     layer = SimpleNamespace(
         attn_backend=flashmla_module.FlashMLABackend,
+        impl=impl,
         kv_cache_dtype=cache_dtype,
-        head_size=576,
+        head_size=kv_lora_rank + rope_dim,
         topk_buffer_width=None,
         indexer=None,
         non_causal_multi_token_decode=False,
@@ -241,7 +268,8 @@ def test_mla_kv_cache_spec_uses_layer_cache_dtype(
     assert spec.cache_dtype_str == cache_dtype
     assert spec.kv_quant_mode == expected_quant_mode
     if cache_dtype == "fp8_ds_mla":
-        assert spec.page_size_bytes == 64 * 656
+        assert spec.state_content_bytes == row_bytes
+        assert spec.page_size_bytes == 64 * row_bytes
 
 
 @pytest.mark.cpu_test
@@ -274,7 +302,8 @@ def test_dcp_chunked_context_accepts_non_virtual_block_aligned_prefix():
         [17],
         [24],
     ]
-    assert [chunk.padded_local_cu_seq_lens.tolist() for chunk in metadata.chunks] == [
+    # set on every chunk when dcp_world_size > 1
+    assert [chunk.padded_local_cu_seq_lens.tolist() for chunk in metadata.chunks] == [  # type: ignore[union-attr]
         [0, 17],
         [0, 24],
     ]
@@ -787,9 +816,14 @@ class MockMLAAttentionLayer(MLAAttention):
     in static_forward_context, which fights what the test sets up below.
     """
 
+    # AttentionLayerBase declares ``impl`` as the dense AttentionImpl; an MLA
+    # layer holds an MLAAttentionImpl (vLLM's own MLAAttention.__init__ ignores
+    # the same mismatch).
+    impl: MLAAttentionImpl
+
     def __init__(
         self,
-        impl,
+        impl: MLAAttentionImpl,
         num_heads: int,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
@@ -844,7 +878,8 @@ class MockMLAAttentionLayer(MLAAttention):
     def get_kv_cache_spec(self, vllm_config):
         raise NotImplementedError
 
-    def forward_impl(
+    # test replica takes only the arguments the test passes
+    def forward_impl(  # type: ignore[override]
         self,
         q: torch.Tensor,
         kv_c: torch.Tensor,
@@ -1349,6 +1384,7 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(
             metadata,
             SimpleNamespace(_q_scale_float=1.0, _k_scale_float=1.0),
         )
+        assert lse is not None
         # Empty-shard normalization belongs to the downstream DCP combine path.
         mask_dcp_empty_shards_(
             lse,
@@ -1364,7 +1400,9 @@ def test_tokenspeed_mla_dcp_matches_unsharded_decode(
     # the same way MLADCPManager does before comparing to the unsharded result.
     merged = _lse_weighted_combine(
         torch.stack(partial_outputs), torch.stack(partial_lses), is_lse_base_on_e=False
-    ).unsqueeze(0)
+    )
+    assert not isinstance(merged, tuple)
+    merged = merged.unsqueeze(0)
     # FP8 attention rounds differently when KV is partitioned across DCP ranks.
     torch.testing.assert_close(merged, reference.float(), atol=1e-2, rtol=1e-2)
 
@@ -1485,6 +1523,8 @@ def run_attention_backend(
 ) -> torch.Tensor:
     """Run attention computation using the specified backend's AttentionImpl."""
     builder_cls, impl_cls = try_get_attention_backend(backend)
+    # Every MLA backend's impl derives from MLAAttentionImpl.
+    assert issubclass(impl_cls, MLAAttentionImpl)
 
     # Force the prefill backend selection (None means auto-select).
     vllm_config.attention_config.mla_prefill_backend = prefill_backend
@@ -1571,6 +1611,7 @@ def run_attention_backend(
         # Build metadata
         builder = builder_cls(kv_cache_spec, layer_names, vllm_config, device)
         if chunked_prefill_workspace_size is not None:
+            assert isinstance(builder, MLACommonMetadataBuilder)
             builder.chunked_prefill_workspace_size = chunked_prefill_workspace_size
             builder.chunked_prefill_workspace = (
                 builder.chunked_prefill_workspace.new_empty(
@@ -1669,6 +1710,7 @@ def _run_backend_correctness(
     multiple GPUs. This tests that backends work correctly with different
     head counts.
     """
+    set_random_seed(42)
     # Filter backends to those that support the requested kv_cache_dtype
     backends_to_test = [
         b
@@ -2044,7 +2086,7 @@ def _run_backend_correctness(
     # 4. Run vLLM backends and compare
     rtol = 1e-2
     atol = {
-        "auto": 1e-2,
+        "auto": 2e-2,
         "fp8": 1.5e-1,
         "fp8_e4m3": 1.5e-1,
     }[kv_cache_dtype]

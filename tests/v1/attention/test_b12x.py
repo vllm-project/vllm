@@ -201,6 +201,8 @@ def test_b12x_attention_fp8_descales_follow_request_batch() -> None:
     k_descale, v_descale = impl._prepare_fp8_descales(
         layer, num_reqs=2, device=torch.device("cpu")
     )
+    assert k_descale is not None
+    assert v_descale is not None
 
     torch.testing.assert_close(k_descale, torch.tensor([2.0, 2.0]))
     torch.testing.assert_close(v_descale, torch.tensor([3.0, 4.0]))

@@ -5,8 +5,22 @@
 import pytest
 import torch
 
-from vllm.model_executor.parameter import ModelWeightParameter, PackedvLLMParameter
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
+    MPLinearKernel,
+)
+from vllm.model_executor.parameter import (
+    ModelWeightParameter,
+    PackedvLLMParameter,
+    permute_param_layout_,
+)
+from vllm.model_executor.utils import (
+    get_live_param,
+    kernel_parameters,
+    move_parameter,
+    replace_parameter,
+    retire_parameter,
+    set_kernel_parameter,
+)
 
 
 @pytest.fixture
@@ -22,11 +36,8 @@ def single_rank_tp(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-@pytest.mark.parametrize("prefer_copy", [False, True])
 @pytest.mark.parametrize("wrap_in_parameter", [False, True])
-def test_replace_parameter_preserves_custom_attribute(
-    prefer_copy: bool, wrap_in_parameter: bool
-) -> None:
+def test_replace_parameter_preserves_custom_attribute(wrap_in_parameter: bool) -> None:
     """`replace_parameter` must carry over attributes attached to the
     replacement tensor (e.g. the `is_shuffled` flag set by AITER weight
     preprocessing in `Fp8MoEMethod.process_weights_after_loading`).
@@ -39,7 +50,8 @@ def test_replace_parameter_preserves_custom_attribute(
     layer.register_parameter(
         "weight", torch.nn.Parameter(torch.zeros(4, 4), requires_grad=False)
     )
-    original_data_ptr = layer.weight.data_ptr()
+    original = layer.weight
+    original_ptr = original.data_ptr()
 
     new_data: torch.Tensor = torch.ones(4, 4).t()
     if wrap_in_parameter:
@@ -50,24 +62,105 @@ def test_replace_parameter_preserves_custom_attribute(
     # reachable through `__dict__`, only user-set custom attributes are.
     assert new_data.__dict__.keys() == {"is_shuffled"}
 
-    replace_parameter(layer, "weight", new_data, prefer_copy=prefer_copy)
+    replace_parameter(layer, "weight", new_data)
 
     assert isinstance(layer.weight, torch.nn.Parameter)
     assert layer.weight.is_shuffled is True
     assert torch.equal(layer.weight.data, new_data)
     assert layer.weight.device == new_data.device
 
-    if prefer_copy:
-        # The existing storage is reused, so addresses captured in CUDA graphs
-        # stay valid across the update.
-        assert layer.weight.data_ptr() == original_data_ptr
-    else:
-        assert layer.weight.stride() == new_data.stride()
-        assert layer.weight.data_ptr() == new_data.data_ptr()
+    assert layer.weight is original
+    assert layer.weight.stride() == new_data.stride()
+    # same byte size: copied into the loaded storage, address kept
+    assert layer.weight.data_ptr() == original_ptr
 
 
-@pytest.mark.parametrize("prefer_copy", [False, True])
-def test_replace_parameter_preserves_weight_loader(prefer_copy: bool) -> None:
+@pytest.mark.parametrize(
+    "new_data,copies",
+    [
+        (torch.ones(4, 4, dtype=torch.float32, device="cpu"), True),
+        (torch.ones(4, 4, dtype=torch.float32, device="cpu").t(), True),
+        (torch.ones(8, 4, dtype=torch.float32, device="cpu"), False),
+        # A result that fits (equal or smaller) goes into the loaded storage,
+        # which never shrinks.
+        (torch.ones(4, 4, dtype=torch.bfloat16, device="cpu"), True),
+        (torch.ones(4, 2, dtype=torch.float32, device="cpu"), True),
+        (torch.tensor(1.0, device="cpu"), True),
+    ],
+    ids=[
+        "same-layout-copies",
+        "new-strides-copies",
+        "larger-shape",
+        "smaller-dtype-copies",
+        "smaller-shape-copies",
+        "scalar-copies",
+    ],
+)
+def test_replace_parameter_keeps_object_by_default(
+    single_rank_tp: None, new_data: torch.Tensor, copies: bool
+) -> None:
+    def weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        pass
+
+    layer = torch.nn.Module()
+    old_param = ModelWeightParameter(
+        data=torch.zeros(4, 4, dtype=torch.float32, device="cpu"),
+        input_dim=1,
+        output_dim=0,
+        weight_loader=weight_loader,
+    )
+    layer.register_parameter("weight", old_param)
+    old_data_ptr = old_param.data_ptr()
+
+    replace_parameter(layer, "weight", new_data)
+
+    assert layer.weight is old_param
+    assert layer.weight.weight_loader is weight_loader
+    assert (layer.weight.input_dim, layer.weight.output_dim) == (1, 0)
+    assert layer.weight.dtype == new_data.dtype
+    assert layer.weight.stride() == new_data.stride()
+    assert torch.equal(layer.weight.data, new_data)
+    # Copying in place keeps addresses captured in CUDA graphs valid.
+    assert (layer.weight.data_ptr() == old_data_ptr) == copies
+    assert layer.weight.untyped_storage().nbytes() >= 4 * 4 * 4
+
+
+def test_replace_parameter_online_quantization_frees_source() -> None:
+    layer = torch.nn.Module()
+    layer.quant_method = type("Online", (), {"uses_meta_device": True})()
+    layer.register_parameter("weight", torch.nn.Parameter(torch.zeros(4, 4)))
+
+    replace_parameter(layer, "weight", torch.ones(4, 4, dtype=torch.bfloat16))
+
+    assert layer.weight.untyped_storage().nbytes() == 4 * 4 * 2
+
+
+def test_humming_replace_keeps_loaded_params(single_rank_tp: None) -> None:
+    """A new tensor in a leftover's storage, or taking a large leftover's place,
+    is written to that leftover param, registered under both names."""
+    from vllm.model_executor.layers.quantization.utils.humming.linear import (
+        replace_layer_parameters,
+    )
+
+    layer = torch.nn.Module()
+    packed = torch.nn.Parameter(torch.ones(64, 8), requires_grad=False)
+    scale_inv = torch.nn.Parameter(torch.ones(4), requires_grad=False)
+    layer.register_parameter("weight_packed", packed)
+    layer.register_parameter("weight_scale_inv", scale_inv)
+    tensors = {
+        "weight": torch.full((32, 8), 2.0),
+        "weight_scale": scale_inv.data.view(2, 2),
+    }
+
+    replace_layer_parameters(layer, tensors, list(layer._parameters))
+
+    assert layer.weight is packed and layer.weight_scale is scale_inv
+    assert torch.equal(layer.weight, torch.full((32, 8), 2.0))
+    assert packed.untyped_storage().nbytes() == 64 * 8 * packed.element_size()
+    assert set(kernel_parameters(layer)) == {"weight", "weight_scale"}
+
+
+def test_replace_parameter_preserves_weight_loader() -> None:
     """The reload path must survive replacement: the old parameter's
     `weight_loader` is carried over as-is, so it is still invoked as
     `weight_loader(param, loaded_weight)`.
@@ -87,7 +180,7 @@ def test_replace_parameter_preserves_weight_loader(prefer_copy: bool) -> None:
     old_param.weight_loader = weight_loader
     layer.register_parameter("weight", old_param)
 
-    replace_parameter(layer, "weight", torch.ones(4, 4), prefer_copy=prefer_copy)
+    replace_parameter(layer, "weight", torch.ones(4, 4))
 
     # Re-binding to the new parameter would shift `loaded_weight` into the
     # `param` slot, so the plain function must not have grown a `__self__`.
@@ -190,94 +283,142 @@ def test_replace_parameter_preserves_bound_method_attribute() -> None:
     assert dispatcher.calls == [7]
 
 
-@pytest.mark.parametrize("param_kind", ["plain", "model_weight", "packed"])
-def test_replace_parameter_attributes_from_the_layers_own_parameter(
-    single_rank_tp: None, param_kind: str
-) -> None:
-    """Several callers hand back the parameter they were given, after mutating
-    its `.data` in place: the HUMMING branch of
-    `convert_to_fp8_moe_kernel_format` (`w13 = layer.w13_weight`), the
-    `AITER_MXFP4_BF16` branch of
-    `convert_gpt_oss_weight_to_mxfp4_moe_kernel_format`, the no-transpose
-    branch of `XPUFP8ScaledMM` (`layer_weight = w`), and `auto_awq`/`auto_gptq`,
-    which pass whatever is currently registered -- possibly still a
-    `BasevLLMParameter` subclass rather than a plain `Parameter`.
+def test_replace_parameter_registers_new_param_for_requantization_source() -> None:
+    layer = torch.nn.Module()
+    old_param = torch.nn.Parameter(torch.zeros(4, 4), requires_grad=False)
+    old_param.requantization_source = True
+    layer.register_parameter("weight", old_param)
 
-    `new_data is old_param` there, so every attribute of the replacement is by
-    definition an attribute of the old parameter; pin exactly which survive.
+    replace_parameter(layer, "weight", torch.ones(4, 4))
 
-    For the vLLM parameter classes only the private backing fields come along.
-    The public names weight loading branches on -- `output_dim`, `input_dim`,
-    `packed_dim` (`getattr(param, "output_dim", None)` in `linear.py`) -- are
-    class-level properties, so they do not survive onto the plain replacement
-    and cannot be read back stale after the layout has changed.
-    """
+    assert layer.weight is not old_param
+    assert torch.equal(old_param, torch.zeros(4, 4))
+    assert torch.equal(layer.weight, torch.ones(4, 4))
 
-    class Layer(torch.nn.Module):
-        def weight_loader(
-            self, param: torch.Tensor, loaded_weight: torch.Tensor
-        ) -> None:
-            pass
 
-    layer = Layer()
-    data = torch.zeros(4, 4)
-    loader = layer.weight_loader
-    vllm_param_attrs = {
-        "_weight_loader": loader,
-        "_input_dim": 1,
-        "_output_dim": 0,
-        "tp_rank": 0,
-        "tp_size": 1,
-    }
+def test_move_parameter_aliases_one_param(single_rank_tp: None) -> None:
+    """Both names refer to the loaded param; a later replace updates both."""
 
-    old_param: torch.nn.Parameter
-    if param_kind == "plain":
-        old_param = torch.nn.Parameter(data, requires_grad=False)
-        old_param.weight_loader = loader
-        # MoE scale marker, read back by `RoutedExperts.weight_loader`.
-        old_param.quant_method = "block"
-        source_attrs = {"weight_loader": loader, "quant_method": "block"}
-    elif param_kind == "model_weight":
-        old_param = ModelWeightParameter(
-            data=data, input_dim=1, output_dim=0, weight_loader=loader
-        )
-        source_attrs = dict(vllm_param_attrs)
-    else:
-        old_param = PackedvLLMParameter(
-            data=data,
-            input_dim=1,
-            output_dim=0,
-            packed_dim=0,
-            packed_factor=8,
-            weight_loader=loader,
-        )
-        source_attrs = dict(vllm_param_attrs)
-        source_attrs |= {
-            "_packed_dim": 0,
-            "_packed_factor": 8,
-            "_marlin_tile_size": None,
-        }
+    def weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        pass
 
+    layer = torch.nn.Module()
+    src = ModelWeightParameter(
+        data=torch.ones(4, 4), input_dim=1, output_dim=0, weight_loader=weight_loader
+    )
+    layer.register_parameter("weight_packed", src)
+
+    move_parameter(layer, "weight_packed", "weight")
+    replace_parameter(layer, "weight", torch.full((2, 8), 2.0))
+
+    assert layer.weight_packed is src and layer.weight is src
+    assert torch.equal(src.data, torch.full((2, 8), 2.0))
+    assert src.weight_loader is weight_loader
+    assert src._input_dim == 1 and src._output_dim == 0
+    assert list(kernel_parameters(layer)) == ["weight"]
+
+    # Kernels writing through the checkpoint name make it the runtime name again.
+    set_kernel_parameter(layer, "weight_packed", torch.ones(2, 8))
+    assert list(kernel_parameters(layer)) == ["weight_packed"]
+
+
+def test_move_parameter_rejects_another_param(single_rank_tp: None) -> None:
+    layer = torch.nn.Module()
+    layer.register_parameter("a", torch.nn.Parameter(torch.ones(2)))
+    layer.register_parameter("b", torch.nn.Parameter(torch.ones(2)))
+    with pytest.raises(ValueError):
+        move_parameter(layer, "a", "b")
+
+
+def test_retired_param_keeps_data_but_is_not_live(single_rank_tp: None) -> None:
+    layer = torch.nn.Module()
+    layer.register_parameter("scale", torch.nn.Parameter(torch.ones(2)))
+    layer.register_parameter("weight", torch.nn.Parameter(torch.ones(4)))
+
+    retire_parameter(layer, "scale")
+
+    assert torch.equal(layer.scale, torch.ones(2))
+    assert get_live_param(layer, "scale") is None
+    assert list(kernel_parameters(layer)) == ["weight"]
+    set_kernel_parameter(layer, "scale", torch.zeros(2))
+    assert get_live_param(layer, "scale") is layer.scale
+
+
+def test_replace_parameter_with_own_parameter_keeps_layout(single_rank_tp) -> None:
+    """Handing back the registered parameter keeps it unchanged."""
+
+    def weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+        pass
+
+    layer = torch.nn.Module()
+    old_param = PackedvLLMParameter(
+        data=torch.zeros(4, 4),
+        input_dim=1,
+        output_dim=0,
+        packed_dim=0,
+        packed_factor=8,
+        weight_loader=weight_loader,
+    )
     layer.register_parameter("weight", old_param)
     old_param.data = torch.ones(4, 4)
 
-    # Pin what the caller hands back: on the vLLM classes `weight_loader` is a
-    # property, so the loader sits under `_weight_loader` instead.
-    assert dict(old_param.__dict__) == source_attrs
-
     replace_parameter(layer, "weight", old_param)
 
-    # Everything carries over by value, except that the loader is re-read from
-    # the old parameter and lands under its public name. Comparing values (not
-    # just keys) is what rules out the loader being re-bound to the new
-    # parameter, which would shift `loaded_weight` into the `param` slot.
-    expected = dict(source_attrs)
-    expected.pop("_weight_loader", None)
-    expected["weight_loader"] = loader
+    assert layer.weight is old_param
+    assert type(layer.weight) is PackedvLLMParameter
+    assert layer.weight.weight_loader is weight_loader
+    assert (layer.weight.input_dim, layer.weight.output_dim) == (1, 0)
+    assert (layer.weight.packed_dim, layer.weight.packed_factor) == (0, 8)
+    assert torch.equal(layer.weight, torch.ones(4, 4))
 
-    assert type(layer.weight) is torch.nn.Parameter
-    assert dict(layer.weight.__dict__) == expected
 
-    if param_kind != "plain":
-        for public_name in ("output_dim", "input_dim", "packed_dim", "packed_factor"):
-            assert getattr(layer.weight, public_name, None) is None
+def test_kept_param_ops_skip_python_torch_function(single_rank_tp: None) -> None:
+    """Kept vLLM params must dispatch eager ops like a plain Parameter: a Python
+    `__torch_function__` would put every op on them through the interpreter."""
+    layer = torch.nn.Module()
+    layer.register_parameter(
+        "weight",
+        ModelWeightParameter(
+            data=torch.zeros(4, 4),
+            input_dim=1,
+            output_dim=0,
+            weight_loader=lambda param, loaded_weight: None,
+        ),
+    )
+    replace_parameter(layer, "weight", torch.ones(4, 4))
+
+    assert type(layer.weight) is ModelWeightParameter
+    # A kept param must dispatch like a plain Parameter. Compare against a
+    # plain Parameter rather than asserting an absolute False: on ROCm,
+    # has_torch_function can return True for plain Parameters too.
+    plain = torch.nn.Parameter(torch.ones(4, 4))
+    assert torch.overrides.has_torch_function(
+        (layer.weight,)
+    ) == torch.overrides.has_torch_function((plain,))
+    out = layer.weight + 1
+    assert type(out) is torch.Tensor
+    assert torch.equal(out, torch.full((4, 4), 2.0))
+
+
+def test_transposed_kept_param_keeps_checkpoint_dims(single_rank_tp: None) -> None:
+    """The loader shards a kept param by its dims on reload, so a kernel transform
+    that transposes it must not leave the post-transform dims on it."""
+    layer = torch.nn.Module()
+    weight = ModelWeightParameter(
+        data=torch.arange(6.0).view(2, 3),
+        input_dim=1,
+        output_dim=0,
+        weight_loader=lambda param, loaded_weight: None,
+    )
+    layer.register_parameter("weight", weight)
+
+    MPLinearKernel._transform_param(
+        None,  # type: ignore[arg-type]
+        layer,
+        "weight",
+        lambda x: permute_param_layout_(x, input_dim=0, output_dim=1),
+    )
+
+    assert layer.weight is weight
+    assert torch.equal(weight, torch.arange(6.0).view(2, 3).t())
+    assert (weight.input_dim, weight.output_dim) == (1, 0)
