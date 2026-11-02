@@ -249,26 +249,17 @@ def render_message(
 
         if thinking_mode == "thinking" and index > last_user_idx:
             if not (reasoning or tool_calls):
-                content_prefill = (
-                    continue_final_message
-                    and index == len(messages) - 1
-                    and bool(summary_content)
+                raise ValueError(
+                    f"ThinkingMode: {thinking_mode}, invalid message without reasoning/tool_calls `{msg}` after last user message"
                 )
-                if not content_prefill:
-                    raise ValueError(
-                        f"ThinkingMode: {thinking_mode}, invalid message without reasoning/tool_calls `{msg}` after last user message"
-                    )
-            if reasoning:
-                thinking_part = thinking_template.format(reasoning=reasoning)
-                if not (
-                    continue_final_message
-                    and index == len(messages) - 1
-                    and not summary_content
-                    and not tool_calls
-                ):
-                    thinking_part += thinking_end_token
-            elif summary_content:
-                thinking_part = thinking_end_token
+            thinking_part = thinking_template.format(reasoning=reasoning or "")
+            if not (
+                continue_final_message
+                and index == len(messages) - 1
+                and not summary_content
+                and not tool_calls
+            ):
+                thinking_part += thinking_end_token
 
         if not tool_calls and is_prefix:
             prompt += summary_content

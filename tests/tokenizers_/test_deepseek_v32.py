@@ -69,19 +69,17 @@ def test_continue_final_reasoning_keeps_thinking_open():
     assert "<｜end▁of▁sentence｜>" not in prompt
 
 
-def test_continue_final_content_works_in_thinking_mode():
-    prompt = render(
-        [
-            {"role": "user", "content": "Complete this sentence."},
-            {"role": "assistant", "content": "The answer is "},
-        ],
-        thinking=True,
-        add_generation_prompt=False,
-        continue_final_message=True,
-    )
-
-    assert prompt.endswith("<｜Assistant｜><think></think>The answer is ")
-    assert "<｜end▁of▁sentence｜>" not in prompt
+def test_continue_final_content_requires_reasoning_in_thinking_mode():
+    with pytest.raises(ValueError, match="without reasoning/tool_calls"):
+        render(
+            [
+                {"role": "user", "content": "Complete this sentence."},
+                {"role": "assistant", "content": "The answer is "},
+            ],
+            thinking=True,
+            add_generation_prompt=False,
+            continue_final_message=True,
+        )
 
 
 def test_continue_final_message_requires_final_assistant_message():
@@ -97,7 +95,7 @@ def test_continue_final_message_through_chat_request():
         model="deepseek-ai/DeepSeek-V3.2",
         messages=[
             {"role": "user", "content": "Complete this sentence."},
-            {"role": "assistant", "content": "The answer is "},
+            {"role": "assistant", "content": None, "reasoning": "Let me consider "},
         ],
         reasoning_effort="high",
         add_generation_prompt=False,
@@ -107,5 +105,5 @@ def test_continue_final_message_through_chat_request():
 
     prompt = render(request.messages, **kwargs)
 
-    assert prompt.endswith("<｜Assistant｜><think></think>The answer is ")
+    assert prompt.endswith("<｜Assistant｜><think>Let me consider ")
     assert "<｜end▁of▁sentence｜>" not in prompt
