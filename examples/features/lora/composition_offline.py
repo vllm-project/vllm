@@ -5,11 +5,12 @@
 From the repository root, run:
     .venv/bin/python examples/features/lora/composition_offline.py \
         --model BASE_MODEL --adapters FIRST_ADAPTER SECOND_ADAPTER \
-        --weights 0.7 0.3 --max-lora-rank 64
+        --weights 0.7 0.3 --max-lora-rank 64 --target-modules q_proj v_proj
 
-Both adapters must target the selected base model. Eager execution and the
-two-adapter per-request limit are enabled by this example. On CPU hosts, set
-VLLM_CPU_KVCACHE_SPACE to a suitable cache size in GiB for the available memory.
+Both adapters must target the selected base model. Supported NVIDIA configurations
+use CUDA graphs by default. For CPU and other backends, add --enforce-eager.
+On CPU hosts, set VLLM_CPU_KVCACHE_SPACE to a suitable cache size in GiB for the
+available memory.
 """
 
 import argparse
@@ -24,14 +25,17 @@ def main():
     parser.add_argument("--adapters", nargs=2, required=True)
     parser.add_argument("--weights", nargs=2, type=float, default=[0.7, 0.3])
     parser.add_argument("--max-lora-rank", type=int, default=64)
+    parser.add_argument("--enforce-eager", action="store_true")
+    parser.add_argument("--target-modules", nargs="+", required=True)
     args = parser.parse_args()
     llm = LLM(
         model=args.model,
         enable_lora=True,
-        enforce_eager=True,
+        enforce_eager=args.enforce_eager,
         max_loras=2,
         max_loras_per_request=2,
         max_lora_rank=args.max_lora_rank,
+        lora_target_modules=args.target_modules,
     )
     mixture = LoRARoutingRequest(
         routing_name="composition",
