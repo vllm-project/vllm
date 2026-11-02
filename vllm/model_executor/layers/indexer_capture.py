@@ -57,7 +57,6 @@ class IndexerCaptureSource:
 @dataclass
 class IndexerSnapshot:
     rows: torch.Tensor
-    slot: int
 
 
 def _get_indexer_capture_sources(
@@ -141,26 +140,21 @@ class IndexerCapturer:
             dtype=torch.int32,
             device=config.device_config.device,
         )
-        num_slots = config.max_concurrent_batches if output_rank else 0
-        self._snapshot_rows = [
-            torch.empty_like(self.device_buffer) for _ in range(num_slots)
-        ]
-        self._free_snapshot_slots = list(range(num_slots))
+        self._output_rank = output_rank
+        self.device_buffer = torch.empty(
+            (
+                config.scheduler_config.max_num_batched_tokens,
+                *self.shape_per_token,
+            ),
+            dtype=torch.int32,
+            device=config.device_config.device,
+        )
 
     def snapshot(self, num_rows: int) -> IndexerSnapshot:
+        """Copy the forwarded rows into a snapshot owned by the caller."""
+        assert self._output_rank, "Indexer snapshots require the output rank"
         assert 0 <= num_rows <= len(self.device_buffer)
-        assert self._free_snapshot_slots, "Indexer snapshots were not consumed in order"
-        slot = self._free_snapshot_slots.pop()
-        rows = self._snapshot_rows[slot][:num_rows]
-        rows.copy_(self.device_buffer[:num_rows])
-        return IndexerSnapshot(rows, slot)
-
-    def release_snapshot(self, slot: int) -> None:
-        assert (
-            0 <= slot < len(self._snapshot_rows)
-            and slot not in self._free_snapshot_slots
-        )
-        self._free_snapshot_slots.append(slot)
+        return IndexerSnapshot(self.device_buffer[:num_rows].clone())
 
     def close(self) -> None:
         """Unbind this capturer's sinks and release its buffers."""
@@ -170,8 +164,6 @@ class IndexerCapturer:
             if source.indexer_capture is sink:
                 source.set_indexer_capture_sink(None)
         self._bindings.clear()
-        self._snapshot_rows.clear()
-        self._free_snapshot_slots.clear()
         del self.device_buffer
         self._closed = True
 

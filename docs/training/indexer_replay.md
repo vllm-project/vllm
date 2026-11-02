@@ -60,8 +60,9 @@ source layers and TopK width identify the SHM namespace. R3-only storage keeps
 its existing format.
 
 The V2 model runner creates the Connector in `profile_run()`. Its constructor
-allocates and binds both capturers before the profiling forward pass, so the
-persistent device buffers and Indexer snapshot pool enter automatic KV budgeting.
+allocates and binds both capturers before the profiling forward pass, so their
+persistent device buffers enter automatic KV budgeting. Indexer snapshots are
+cloned per step at runtime instead of being pre-allocated with the buffer.
 Real KV initialization reuses the Connector and calls `initialize_output_storage()`
 after KV capacity is resolved; only the output TP rank creates SHM storage.
 Initialization paths that skip profiling retain main's Connector fallback.

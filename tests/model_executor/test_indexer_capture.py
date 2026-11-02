@@ -103,9 +103,7 @@ def test_capture_snapshots_survive_shared_buffer_reuse(capture_config):
     first(shared)
     shared.add_(10)
     second(shared)
-    snapshots = [
-        capture.snapshot(2) for _ in range(capture_config.max_concurrent_batches)
-    ]
+    snapshots = [capture.snapshot(2) for _ in range(3)]
     shared.zero_()
     first(shared)
     shared.add_(20)
@@ -113,14 +111,39 @@ def test_capture_snapshots_survive_shared_buffer_reuse(capture_config):
     assert torch.equal(
         snapshots[0].rows, torch.tensor([[[3, 1], [13, 11]], [[4, 2], [14, 12]]])
     )
-    with pytest.raises(AssertionError, match="not consumed"):
-        capture.snapshot(2)
-    capture.release_snapshot(snapshots[0].slot)
-    next_snapshot = capture.snapshot(2)
-    assert next_snapshot.slot == snapshots[0].slot
-    assert torch.equal(
-        next_snapshot.rows, torch.tensor([[[0, 0], [20, 20]], [[0, 0], [20, 20]]])
-    )
+    assert capture.snapshot(2).rows.tolist() == [
+        [[0, 0], [20, 20]],
+        [[0, 0], [20, 20]],
+    ]
+    capture.close()
+
+
+def test_snapshot_is_independent_of_the_capture_buffer(capture_config):
+    source = CaptureSource(2)
+    capture = IndexerCapturer(source, capture_config)
+    capture.device_buffer.fill_(7)
+    snapshot = capture.snapshot(len(capture.device_buffer))
+
+    capture.device_buffer.fill_(123)
+
+    assert snapshot.rows.tolist() == [[[7, 7]], [[7, 7]]]
+    assert snapshot.rows.data_ptr() != capture.device_buffer.data_ptr()
+    capture.close()
+
+
+def test_snapshots_of_different_sizes_stay_independent(capture_config):
+    capture = IndexerCapturer(CaptureSource(2), capture_config)
+    capture.device_buffer[:2] = torch.arange(2, dtype=torch.int32)[:, None, None]
+    small = capture.snapshot(1)
+    large = capture.snapshot(2)
+
+    capture.device_buffer.zero_()
+
+    assert small.rows.shape == (1, 1, 2)
+    assert large.rows.shape == (2, 1, 2)
+    assert small.rows.tolist() == [[[0, 0]]]
+    assert large.rows[:, 0, 0].tolist() == [0, 1]
+    assert small.rows.data_ptr() != large.rows.data_ptr()
     capture.close()
 
 

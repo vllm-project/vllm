@@ -206,7 +206,6 @@ def _make_worker(
             shape_per_token=indexer_shape,
             fixed_bytes_per_token=int(np.prod(indexer_shape)) * 4,
             namespace="synthetic-indexer",
-            release_snapshot=lambda slot: None,
             close=lambda: None,
         )
         if indexer_shape
@@ -2243,15 +2242,10 @@ class _SnapshotIndexer:
     fixed_bytes_per_token = 16
     namespace = "fake-indexer"
 
-    def __init__(self):
-        self.released = []
-
     def snapshot(self, num_rows):
-        rows = torch.full((num_rows, 2, 2), num_rows, dtype=torch.int32)
-        return SimpleNamespace(rows=rows, slot=num_rows)
-
-    def release_snapshot(self, slot):
-        self.released.append(slot)
+        return SimpleNamespace(
+            rows=torch.full((num_rows, 2, 2), num_rows, dtype=torch.int32)
+        )
 
     def close(self):
         pass

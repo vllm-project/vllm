@@ -75,7 +75,6 @@ class PendingAuxOutput:
     num_rejected: np.ndarray | None = None
     indexer_snapshot: torch.Tensor | None = None
     indexer: np.ndarray | None = None
-    indexer_snapshot_slot: int | None = None
 
     def enqueue_cpu_copy(
         self, num_sampled: np.ndarray, num_rejected: np.ndarray
@@ -242,7 +241,6 @@ class AuxOutputWorkerConnector:
                 else None
             ),
             indexer_snapshot=snapshot.rows if snapshot else None,
-            indexer_snapshot_slot=snapshot.slot if snapshot else None,
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (
@@ -265,11 +263,6 @@ class AuxOutputWorkerConnector:
             try:
                 outputs = self._commit_output(pending)
             finally:
-                if (
-                    self._indexer is not None
-                    and pending.indexer_snapshot_slot is not None
-                ):
-                    self._indexer.release_snapshot(pending.indexer_snapshot_slot)
                 self._pending_outputs.remove(pending)
                 for request_id in pending.request_ids:
                     state = self._requests[request_id]
