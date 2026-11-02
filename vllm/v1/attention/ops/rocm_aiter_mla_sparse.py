@@ -4219,6 +4219,14 @@ _DSV4_UNIFIED_KV_BUFFER_STATE: dict[str, object] = {}
 
 
 @triton.jit
+def _dsv4_slot_to_record(slot, base, blk_rows, PAGE: tl.constexpr):
+    """A cache slot -> its row in the shared 640 B record grid: page number
+    times the rows its block stride spans, plus the position inside the page,
+    offset by where that cache starts in the shared allocation."""
+    return base + (slot // PAGE) * blk_rows + (slot % PAGE)
+
+
+@triton.jit
 def _dsv4_merge_streams_kernel(
     out_ptr,
     out_indptr_ptr,
@@ -4294,8 +4302,8 @@ def _dsv4_merge_streams_kernel(
     else:
         slot_b = tl.zeros_like(slot_a)
 
-    rec_a = a_base + (slot_a // A_PAGE) * a_blk_rows + (slot_a % A_PAGE)
-    rec_b = b_base + (slot_b // B_PAGE) * b_blk_rows + (slot_b % B_PAGE)
+    rec_a = _dsv4_slot_to_record(slot_a, a_base, a_blk_rows, A_PAGE)
+    rec_b = _dsv4_slot_to_record(slot_b, b_base, b_blk_rows, B_PAGE)
     rec = tl.where(in_a, rec_a, rec_b)
     # A negative slot must not become a negative record. Nothing upstream
     # should produce one (the packers copy dense prefixes only), so this is a
@@ -4381,6 +4389,62 @@ def _dsv4_record_grid(caches, why=None):
     return cached[1], bases, blk_rows, pages
 
 
+class Dsv4UnifiedKVGrid(NamedTuple):
+    """The SWA cache (stream A) and the compressed cache (stream B) as one flat
+    640 B record grid: the views the aiter kernels read, plus each cache's
+    record base, rows per block and page."""
+
+    kv: torch.Tensor
+    kv_rope: torch.Tensor
+    bases: list[int]
+    blk_rows: list[int]
+    pages: list[int]
+
+
+def dsv4_unified_kv_grid(main_cache, extra_cache) -> Dsv4UnifiedKVGrid | None:
+    """The caches as one record grid, or None when they are not one allocation
+    on the 640 B grid (the reason is kept in the state dict for the warning)."""
+    caches = [main_cache] + ([extra_cache] if extra_cache is not None else [])
+    why: list[str] = []
+    grid = _dsv4_record_grid(caches, why)
+    if grid is None:
+        _DSV4_UNIFIED_KV_BUFFER_STATE["why"] = why[0] if why else "unknown"
+        return None
+    flat, bases, blk_rows, pages = grid
+    if any(p & (p - 1) for p in pages):
+        return None  # the // and % fold to shifts only for powers of two
+    return Dsv4UnifiedKVGrid(
+        flat[:, :512].view(torch.float8_e4m3fn),
+        flat[:, 512:].view(torch.bfloat16),
+        bases,
+        blk_rows,
+        pages,
+    )
+
+
+def _dsv4_index_buffer(key: str, need: int, dev: torch.device) -> torch.Tensor:
+    """A persistent int32 buffer for the unified index stream, grown on demand.
+
+    Allocating ~100 KB per decode step does not merely cost the allocation: it
+    evicts the decode kernel's working set and measured 18 us ON THE DECODE
+    ITSELF, more than the merge kernel costs. Same reason vLLM keeps
+    `*_ragged_*_buffer` around.
+
+    RETIRED, never freed. A CUDA graph captures the buffer's ADDRESS, so a
+    replay reads whatever lives there now. Dropping the last reference to a
+    buffer a captured graph still points at would hand that graph freed
+    memory, so growing keeps the old one alive instead of releasing it.
+    """
+    t = _DSV4_UNIFIED_KV_BUFFER_STATE.get(key)
+    if t is not None and t.numel() >= need and t.device == dev:
+        return t
+    if t is not None:
+        _DSV4_UNIFIED_KV_BUFFER_STATE.setdefault("retired", []).append(t)
+    t = torch.empty(max(need, 1), dtype=torch.int32, device=dev)
+    _DSV4_UNIFIED_KV_BUFFER_STATE[key] = t
+    return t
+
+
 def _dsv4_merge_to_unified_kv_buffer(
     main_cache,
     main_indices,
@@ -4394,42 +4458,16 @@ def _dsv4_merge_to_unified_kv_buffer(
     Returns ``(kv, kv_rope, indices, indptr)`` or None to decline, in which
     case the caller keeps the two-stream path.
     """
-    caches = [main_cache] + ([extra_cache] if extra_cache is not None else [])
-    why: list[str] = []
-    grid = _dsv4_record_grid(caches, why)
+    grid = dsv4_unified_kv_grid(main_cache, extra_cache)
     if grid is None:
-        _DSV4_UNIFIED_KV_BUFFER_STATE["why"] = why[0] if why else "unknown"
         return None
-    flat, bases, blk_rows, pages = grid
+    kv, kv_rope, bases, blk_rows, pages = grid
     has_b = extra_cache is not None
-    if any(p & (p - 1) for p in pages):
-        return None  # the // and % fold to shifts only for powers of two
 
     num_tokens = main_indptr.numel() - 1
     total = main_indices.numel() + (extra_indices.numel() if has_b else 0)
-
-    # Persistent buffers, grown on demand. Allocating ~100 KB per decode step
-    # does not merely cost the allocation: it evicts the decode kernel's
-    # working set and measured 18 us ON THE DECODE ITSELF, more than the merge
-    # kernel costs. Same reason vLLM keeps `*_ragged_*_buffer` around.
     dev = main_indices.device
-    # RETIRED, never freed. A CUDA graph captures the buffer's ADDRESS, so a
-    # replay reads whatever lives there now. Dropping the last reference to a
-    # buffer a captured graph still points at would hand that graph freed
-    # memory, so growing keeps the old one alive instead of releasing it.
-    retired = _DSV4_UNIFIED_KV_BUFFER_STATE.setdefault("retired", [])
-
-    def _grow(key, need):
-        t = _DSV4_UNIFIED_KV_BUFFER_STATE.get(key)
-        if t is not None and t.numel() >= need and t.device == dev:
-            return t
-        if t is not None:
-            retired.append(t)
-        t = torch.empty(max(need, 1), dtype=torch.int32, device=dev)
-        _DSV4_UNIFIED_KV_BUFFER_STATE[key] = t
-        return t
-
-    out_idx = _grow("buf", total)[:total]
+    out_idx = _dsv4_index_buffer("buf", total, dev)[:total]
 
     # The merged indptr is the elementwise SUM of the two stream indptrs:
     #   merged[t] = sum_{i<t} (main_len[i] + extra_len[i])
@@ -4441,7 +4479,7 @@ def _dsv4_merge_to_unified_kv_buffer(
     # too (it loads both indptrs anyway). One stream needs neither: out_indptr
     # is main_indptr.
     if has_b:
-        out_indptr = _grow("indptr", num_tokens + 1)[: num_tokens + 1]
+        out_indptr = _dsv4_index_buffer("indptr", num_tokens + 1, dev)[: num_tokens + 1]
     else:
         out_indptr = main_indptr
 
@@ -4454,7 +4492,8 @@ def _dsv4_merge_to_unified_kv_buffer(
             width += extra_indices.numel() // num_tokens
     if not width and has_b:
         # No indices to merge, so the kernel does not launch and nothing would
-        # write the indptr _grow just handed us -- which is uninitialised.
+        # write the indptr _dsv4_index_buffer just handed us -- which is
+        # uninitialised.
         out_indptr.zero_()
     if width:
         block = 128
@@ -4476,8 +4515,6 @@ def _dsv4_merge_to_unified_kv_buffer(
             BLOCK=block,
         )
 
-    kv = flat[:, :512].view(torch.float8_e4m3fn)
-    kv_rope = flat[:, 512:].view(torch.bfloat16)
     if not _DSV4_UNIFIED_KV_BUFFER_STATE.get("logged"):
         _DSV4_UNIFIED_KV_BUFFER_STATE["logged"] = True
         # First-run confirmation that the real allocator output is one
@@ -4486,14 +4523,70 @@ def _dsv4_merge_to_unified_kv_buffer(
         logger.info(
             "DSV4 unified KV buffer: grid %d records (%.1f GiB), bases=%s "
             "rows_per_block=%s page=%s, merged stream %d indices",
-            flat.shape[0],
-            flat.numel() / 2**30,
+            kv.shape[0],
+            kv.shape[0] * _DSV4_REC_BYTES / 2**30,
             bases,
             blk_rows,
             pages,
             out_idx.numel(),
         )
     return kv, kv_rope, out_idx, out_indptr
+
+
+def dsv4_aiter_sparse_decode_unified(
+    q,
+    grid: Dsv4UnifiedKVGrid,
+    indices,
+    indptr,
+    attn_sink,
+    scale,
+    out,
+    q_packed=None,
+    q_rope=None,
+):
+    """Aiter's sparse decode over one index stream already on the record grid."""
+    kernels = dsv4_aiter_sparse_mla_kernels()
+    assert kernels is not None
+    if q_packed is None or q_rope is None:
+        q_packed, q_rope = kernels.pack_q(q)
+    return kernels.decode(
+        q_packed,
+        grid.kv,
+        indices,
+        indptr,
+        attn_sink,
+        scale,
+        q_rope=q_rope,
+        unified_kv_rope=grid.kv_rope,
+        has_invalid=False,
+        use_lru_cache_partials=True,
+        out=out,
+    )
+
+
+def dsv4_aiter_sparse_prefill_unified(
+    q, grid: Dsv4UnifiedKVGrid, indices, indptr, attn_sink, scale, out
+):
+    """Aiter's sparse prefill over one index stream already on the record grid."""
+    kernels = dsv4_aiter_sparse_mla_kernels()
+    assert kernels is not None
+    q_packed, q_rope = kernels.pack_q(q)
+    sink = None if attn_sink is None else attn_sink[: q.shape[1]]
+    return kernels.prefill(
+        q_packed,
+        grid.kv,
+        indices,
+        indptr,
+        None,
+        None,
+        None,
+        sink,
+        scale,
+        has_invalid=False,
+        out=out,
+        q_rope=q_rope,
+        unified_kv_rope=grid.kv_rope,
+    )
 
 
 def _dsv4_aiter_sparse_decode(
@@ -5353,11 +5446,20 @@ def _prefill_topk_global_slots_kernel(
     block_table_stride,
     token_offset,
     num_compressed,
+    counts_ptr,
+    num_rows_limit,
     TOPK: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     BLOCK_W: tl.constexpr,
+    COUNT: tl.constexpr,
 ):
+    """Top-k rows -> dense compressed-cache slots (-1 where absent) + row_len.
+
+    With COUNT, also stores how many of the row's slots survive compaction
+    (``_count_valid_row_entries_kernel``'s rule), so the unified-index path
+    can scan straight away instead of re-reading the dense rows to count.
+    """
     row = tl.program_id(0)
     token = row + token_offset
     req = tl.load(token_to_req_ptr + token)
@@ -5369,6 +5471,7 @@ def _prefill_topk_global_slots_kernel(
     row_len = tl.minimum((pos + 1) // COMPRESS_RATIO, TOPK)
     row_len = tl.where(tl.load(is_valid_token_ptr + token), row_len, 0)
 
+    count = tl.zeros((), dtype=tl.int32)
     for start in range(0, TOPK, BLOCK_W):
         cols = start + tl.arange(0, BLOCK_W)
         live = cols < row_len
@@ -5382,7 +5485,14 @@ def _prefill_topk_global_slots_kernel(
         )
         slot = tl.where(valid, block * BLOCK_SIZE + local % BLOCK_SIZE, -1)
         tl.store(out_ptr + row * TOPK + cols, slot, mask=cols < TOPK)
+        if COUNT:
+            keep = valid
+            if num_rows_limit >= 0:
+                keep = keep & (slot < num_rows_limit)
+            count += tl.sum(keep.to(tl.int32), axis=0)
     tl.store(lens_ptr + row, row_len)
+    if COUNT:
+        tl.store(counts_ptr + row, count)
 
 
 def build_prefill_topk_ragged_indices(
@@ -5425,11 +5535,169 @@ def build_prefill_topk_ragged_indices(
             block_table.stride(0),
             token_offset,
             num_compressed,
+            lens,
+            -1,
             TOPK=width,
             COMPRESS_RATIO=compress_ratio,
             BLOCK_SIZE=block_size,
             BLOCK_W=min(triton.next_power_of_2(width), 1024),
+            COUNT=False,
         )
     else:
         lens.zero_()
     return build_ragged_indices_from_dense(dense, lens, num_rows=num_rows)
+
+
+@triton.jit
+def _dsv4_unified_prefill_indices_kernel(
+    out_ptr,
+    out_indptr_ptr,
+    swa_idx_ptr,
+    swa_indptr_ptr,
+    dense_ptr,
+    lens_ptr,
+    topk_indptr_ptr,
+    num_rows_limit,
+    a_base,
+    a_blk_rows,
+    b_base,
+    b_blk_rows,
+    num_tokens,
+    TOPK: tl.constexpr,
+    A_PAGE: tl.constexpr,
+    B_PAGE: tl.constexpr,
+    BLOCK_W: tl.constexpr,
+):
+    """One prefill token's row of the unified stream: its SWA records, then
+    its compacted top-k records, at ``swa_indptr[t] + topk_indptr[t]``.
+
+    The top-k half is ``_compact_dense_row_to_ragged_kernel``'s compaction and
+    the record mapping is ``_dsv4_merge_streams_kernel``'s, fused so neither
+    the compact ragged array nor a merge pass over it exists.
+    """
+    t = tl.program_id(0)
+    a_start = tl.load(swa_indptr_ptr + t)
+    a_len = tl.load(swa_indptr_ptr + t + 1) - a_start
+    b_start = tl.load(topk_indptr_ptr + t)
+    out_start = a_start + b_start
+    # Store before any work: a token with no keys still owns its entry.
+    tl.store(out_indptr_ptr + t, out_start)
+    if t == num_tokens - 1:
+        tl.store(
+            out_indptr_ptr + num_tokens,
+            tl.load(swa_indptr_ptr + num_tokens)
+            + tl.load(topk_indptr_ptr + num_tokens),
+        )
+
+    for start in range(0, a_len, BLOCK_W):
+        cols = start + tl.arange(0, BLOCK_W)
+        m = cols < a_len
+        slot = tl.load(swa_idx_ptr + a_start + cols, mask=m, other=0)
+        rec = _dsv4_slot_to_record(slot, a_base, a_blk_rows, A_PAGE)
+        rec = tl.where(rec < 0, 0, rec)
+        tl.store(out_ptr + out_start + cols, rec.to(tl.int32), mask=m)
+
+    row_len = tl.load(lens_ptr + t)
+    written = a_len
+    for start in range(0, TOPK, BLOCK_W):
+        cols = start + tl.arange(0, BLOCK_W)
+        vals = tl.load(dense_ptr + t * TOPK + cols, mask=cols < TOPK, other=-1)
+        keep = (cols < TOPK) & (cols < row_len) & (vals >= 0)
+        if num_rows_limit >= 0:
+            keep = keep & (vals < num_rows_limit)
+        rank = tl.cumsum(keep.to(tl.int32), axis=0) - 1
+        rec = _dsv4_slot_to_record(vals, b_base, b_blk_rows, B_PAGE)
+        rec = tl.where(rec < 0, 0, rec)
+        tl.store(out_ptr + out_start + written + rank, rec.to(tl.int32), mask=keep)
+        written += tl.sum(keep.to(tl.int32), axis=0)
+
+
+def build_dsv4_unified_prefill_indices(
+    topk_indices: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    seq_lens: torch.Tensor,
+    is_valid_token: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    compress_ratio: int,
+    num_compressed: int,
+    token_offset: int,
+    swa_indices: torch.Tensor,
+    swa_indptr: torch.Tensor,
+    grid: Dsv4UnifiedKVGrid,
+    num_rows: int = -1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The prefill's SWA + top-k streams, written once as one stream of
+    record-grid indices.
+
+    Same result as ``build_prefill_topk_ragged_indices`` followed by
+    ``_dsv4_merge_to_unified_kv_buffer``, without the compact top-k array or
+    the merge pass: the slots kernel counts what compaction keeps, one scan
+    gives the top-k indptr, and one kernel per token writes both halves.
+    """
+    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1)
+    num_tokens, width = topk_indices.shape
+    assert width > 0, "a compressed layer always has a top-k row"
+    dev = topk_indices.device
+    swa_indices = _as_int32_contiguous_1d(swa_indices)
+    swa_indptr = _as_int32_contiguous_1d(swa_indptr)
+    assert swa_indptr.numel() == num_tokens + 1
+    dense = torch.empty((num_tokens, width), dtype=torch.int32, device=dev)
+    lens = torch.empty(num_tokens, dtype=torch.int32, device=dev)
+    counts = torch.empty(num_tokens, dtype=torch.int32, device=dev)
+    block_w = min(triton.next_power_of_2(width), 1024)
+    if num_tokens > 0:
+        _prefill_topk_global_slots_kernel[(num_tokens,)](
+            dense,
+            lens,
+            topk_indices,
+            topk_indices.stride(0),
+            token_to_req_indices,
+            query_start_loc,
+            seq_lens,
+            is_valid_token,
+            block_table,
+            block_table.stride(0),
+            token_offset,
+            num_compressed,
+            counts,
+            int(num_rows),
+            TOPK=width,
+            COMPRESS_RATIO=compress_ratio,
+            BLOCK_SIZE=block_size,
+            BLOCK_W=block_w,
+            COUNT=True,
+        )
+    else:
+        lens.zero_()
+        counts.zero_()
+    topk_indptr = torch.zeros(num_tokens + 1, dtype=torch.int32, device=dev)
+    torch.cumsum(counts, dim=0, out=topk_indptr[1:])
+
+    total = swa_indices.numel() + num_tokens * width
+    out_idx = _dsv4_index_buffer("buf", total, dev)[:total]
+    out_indptr = _dsv4_index_buffer("indptr", num_tokens + 1, dev)[: num_tokens + 1]
+    if num_tokens == 0:
+        out_indptr.zero_()
+    else:
+        _dsv4_unified_prefill_indices_kernel[(num_tokens,)](
+            out_idx,
+            out_indptr,
+            swa_indices,
+            swa_indptr,
+            dense,
+            lens,
+            topk_indptr,
+            int(num_rows),
+            grid.bases[0],
+            grid.blk_rows[0],
+            grid.bases[1],
+            grid.blk_rows[1],
+            num_tokens,
+            TOPK=width,
+            A_PAGE=grid.pages[0],
+            B_PAGE=grid.pages[1],
+            BLOCK_W=block_w,
+        )
+    return out_idx, out_indptr

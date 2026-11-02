@@ -53,10 +53,17 @@ from vllm.v1.attention.backends.mla.sparse_swa import (
     DeepseekV4SWACache,
 )
 from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+    Dsv4UnifiedKVGrid,
     _dsv4_aiter_sparse_prefill,
+    _dsv4_index_buffer,
+    _dsv4_slot_to_record,
+    build_dsv4_unified_prefill_indices,
     build_prefill_topk_ragged_indices,
     build_ragged_indices_from_dense,
+    dsv4_aiter_sparse_decode_unified,
     dsv4_aiter_sparse_mla_kernels,
+    dsv4_aiter_sparse_prefill_unified,
+    dsv4_unified_kv_grid,
     rocm_inv_rope_einsum,
     rocm_inverse_rope_rows_,
     rocm_sparse_attn_decode,
@@ -630,6 +637,154 @@ def compute_global_topk_ragged_indices_and_indptr(
             BLOCK_SIZE=block,
         )
     return global_topk_ragged, topk_indptr, topk_lens
+
+
+@triton.jit
+def _dsv4_unified_decode_indices_kernel(
+    out_ptr,
+    out_indptr_ptr,
+    swa_idx_ptr,
+    swa_indptr_ptr,
+    topk_indices_ptr,
+    topk_indices_stride,
+    topk_indptr_ptr,
+    token_to_req_indices_ptr,
+    block_table_ptr,
+    block_table_stride,
+    block_size,
+    a_base,
+    a_blk_rows,
+    b_base,
+    b_blk_rows,
+    num_tokens,
+    A_PAGE: tl.constexpr,
+    B_PAGE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    """One decode token's row of the unified stream: its SWA records, then its
+    top-k records, at ``swa_indptr[t] + topk_indptr[t]``.
+
+    The top-k half is ``_pack_global_topk_ragged_kernel``'s block-table walk
+    and the record mapping is ``_dsv4_merge_streams_kernel``'s, fused so the
+    global-slot ragged array and the merge pass over it are never written.
+    """
+    t = tl.program_id(0)
+    blk = tl.program_id(1)
+    off = blk * BLOCK + tl.arange(0, BLOCK)
+
+    a_start = tl.load(swa_indptr_ptr + t)
+    a_end = tl.load(swa_indptr_ptr + t + 1)
+    a_len = a_end - a_start
+    b_start = tl.load(topk_indptr_ptr + t)
+    b_end = tl.load(topk_indptr_ptr + t + 1)
+    b_len = b_end - b_start
+    total = a_len + b_len
+
+    # Store before the early exit, so a token with no keys keeps its entry;
+    # blk == 0 only, so the row's blocks do not all rewrite it.
+    out_start = a_start + b_start
+    if blk == 0:
+        tl.store(out_indptr_ptr + t, out_start)
+        if t == num_tokens - 1:
+            tl.store(out_indptr_ptr + num_tokens, a_end + b_end)
+
+    if blk * BLOCK >= total:
+        return
+
+    in_a = off < a_len
+    mask = off < total
+
+    a_pos = tl.where(in_a, off, 0)
+    slot_a = tl.load(swa_idx_ptr + a_start + a_pos, mask=mask & in_a, other=0)
+
+    # The top-k row holds local compressed positions; its first b_len entries
+    # are the live ones (b_len counts them), as in the separate packer.
+    b_mask = mask & (~in_a)
+    b_pos = tl.where(in_a, 0, off - a_len)
+    req_idx = tl.load(token_to_req_indices_ptr + t)
+    local_idx = tl.load(
+        topk_indices_ptr + t * topk_indices_stride + b_pos, mask=b_mask, other=-1
+    )
+    valid = b_mask & (local_idx >= 0)
+    block_numbers = tl.load(
+        block_table_ptr + req_idx * block_table_stride + local_idx // block_size,
+        mask=valid,
+        other=0,
+    )
+    slot_b = tl.where(valid, block_numbers * block_size + local_idx % block_size, -1)
+
+    rec_a = _dsv4_slot_to_record(slot_a, a_base, a_blk_rows, A_PAGE)
+    rec_b = _dsv4_slot_to_record(slot_b, b_base, b_blk_rows, B_PAGE)
+    rec = tl.where(in_a, rec_a, rec_b)
+    rec = tl.where(rec < 0, 0, rec)
+    tl.store(out_ptr + out_start + off, rec.to(tl.int32), mask=mask)
+
+
+def compute_dsv4_unified_decode_indices(
+    topk_indices: torch.Tensor,
+    token_to_req_indices: torch.Tensor,
+    block_table: torch.Tensor,
+    block_size: int,
+    is_valid_token: torch.Tensor,
+    swa_indices: torch.Tensor,
+    swa_indptr: torch.Tensor,
+    grid: Dsv4UnifiedKVGrid,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The C4A decode's SWA + top-k streams, written once as one stream of
+    record-grid indices.
+
+    Same result as ``compute_global_topk_ragged_indices_and_indptr`` followed
+    by ``_dsv4_merge_to_unified_kv_buffer``, one launch and one pass shorter.
+    """
+    topk_indices = topk_indices.reshape(topk_indices.shape[0], -1).contiguous()
+    num_tokens, topk = topk_indices.shape
+    dev = topk_indices.device
+
+    topk_lens = torch.empty(num_tokens, dtype=torch.int32, device=dev)
+    _compute_topk_lens_kernel[(num_tokens,)](
+        topk_lens,
+        topk_indices,
+        topk_indices.stride(0),
+        topk,
+        is_valid_token,
+        TRITON_BLOCK_SIZE=1024,
+    )
+    topk_indptr = _build_indptr_from_lengths(topk_lens)
+
+    # The grid bound must NOT come from the lengths: that is a device->host
+    # sync. The SWA stream's dense width and topk bound it exactly.
+    swa_width = swa_indices.numel() // num_tokens if num_tokens else 0
+    total = swa_indices.numel() + num_tokens * topk
+    out_idx = _dsv4_index_buffer("buf", total, dev)[:total]
+    out_indptr = _dsv4_index_buffer("indptr", num_tokens + 1, dev)[: num_tokens + 1]
+    if num_tokens == 0 or swa_width + topk == 0:
+        out_indptr.zero_()
+        return out_idx, out_indptr
+    block = 128
+    _dsv4_unified_decode_indices_kernel[
+        (num_tokens, triton.cdiv(swa_width + topk, block))
+    ](
+        out_idx,
+        out_indptr,
+        swa_indices,
+        swa_indptr,
+        topk_indices,
+        topk_indices.stride(0),
+        topk_indptr,
+        token_to_req_indices,
+        block_table,
+        block_table.stride(0),
+        block_size,
+        grid.bases[0],
+        grid.blk_rows[0],
+        grid.bases[1],
+        grid.blk_rows[1],
+        num_tokens,
+        A_PAGE=grid.pages[0],
+        B_PAGE=grid.pages[1],
+        BLOCK=block,
+    )
+    return out_idx, out_indptr
 
 
 def _copy_ragged_to_graph_buffers(
@@ -1732,6 +1887,42 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             assert swa_metadata.is_valid_token is not None
             block_size = attn_metadata.block_size // self.compress_ratio
             is_valid = swa_metadata.is_valid_token[:num_decode_tokens]
+            if (
+                self.compress_ratio == 4
+                and self._use_gfx1250_aiter_sparse_mla
+                and positions is None
+                and output.dtype == torch.bfloat16
+            ):
+                # The per-layer top-k is packed straight into the unified
+                # record stream, with the SWA stream copied in front of it.
+                assert kv_cache is not None
+                assert self.topk_indices_buffer is not None
+                assert swa_metadata.decode_swa_ragged_indices is not None
+                assert swa_metadata.decode_swa_ragged_indptr is not None
+                grid = dsv4_unified_kv_grid(self.swa_cache_layer.kv_cache, kv_cache)
+                if grid is not None:
+                    indices, indptr = compute_dsv4_unified_decode_indices(
+                        self.topk_indices_buffer[:num_decode_tokens],
+                        swa_metadata.token_to_req_indices,
+                        attn_metadata.block_table[:num_decodes],
+                        block_size,
+                        is_valid,
+                        swa_metadata.decode_swa_ragged_indices,
+                        swa_metadata.decode_swa_ragged_indptr,
+                        grid,
+                    )
+                    dsv4_aiter_sparse_decode_unified(
+                        q,
+                        grid,
+                        indices,
+                        indptr,
+                        None
+                        if self.attn_sink is None
+                        else self.attn_sink[: q.shape[1]],
+                        self.scale,
+                        out=output,
+                    )
+                    return 0
             if self.compress_ratio == 4:
                 assert self.topk_indices_buffer is not None
                 (
@@ -1975,6 +2166,41 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
             else:
                 topk_indices = attn_metadata.c128a_prefill_topk_indices
             assert topk_indices is not None
+            grid = (
+                dsv4_unified_kv_grid(swa_k_cache, compressed_k_cache)
+                if self._use_gfx1250_aiter_sparse_mla
+                else None
+            )
+            if grid is not None:
+                # The top-k is compacted straight into the unified record
+                # stream, with the SWA stream copied in front of it.
+                indices, indptr = build_dsv4_unified_prefill_indices(
+                    topk_indices,
+                    swa_metadata.token_to_req_indices,
+                    swa_metadata.query_start_loc,
+                    swa_metadata.seq_lens,
+                    swa_metadata.is_valid_token,
+                    attn_metadata.block_table,
+                    block_size=attn_metadata.block_size // self.compress_ratio,
+                    compress_ratio=self.compress_ratio,
+                    num_compressed=(self.max_model_len + self.compress_ratio - 1)
+                    // self.compress_ratio,
+                    token_offset=num_decode_tokens,
+                    swa_indices=swa_metadata.prefill_swa_ragged_indices,
+                    swa_indptr=swa_metadata.prefill_swa_ragged_indptr,
+                    grid=grid,
+                    num_rows=compressed_k_cache.shape[0] * compressed_k_cache.shape[1],
+                )
+                dsv4_aiter_sparse_prefill_unified(
+                    q[:num_prefill_tokens],
+                    grid,
+                    indices,
+                    indptr,
+                    self.attn_sink,
+                    self.scale,
+                    out=output[:num_prefill_tokens],
+                )
+                return
             topk_ragged_indices, topk_ragged_indptr = build_prefill_topk_ragged_indices(
                 topk_indices,
                 swa_metadata.token_to_req_indices,
