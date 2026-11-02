@@ -286,6 +286,71 @@ def _online_renderer(cache: MagicMock | None = None) -> OnlineRenderer:
     )
 
 
+def test_engine_input_from_features_preserves_is_embed():
+    """Sparse-embedding masks survive the wire round-trip (Gemma 3/Qwen-VL)."""
+    features = MultiModalFeatures(
+        mm_hashes={"image": ["image_A"]},
+        mm_placeholders={
+            "image": [
+                PlaceholderRangeInfo(
+                    offset=0, length=5, is_embed=[False, True, False, True, True]
+                )
+            ]
+        },
+    )
+    engine_input = engine_input_from_features([1, 2, 3, 4, 5], features, mm_cache=None)
+    placeholder = engine_input["mm_placeholders"]["image"][0]
+    assert placeholder.is_embed is not None
+    assert placeholder.is_embed.tolist() == [False, True, False, True, True]
+    assert placeholder.get_num_embeds() == 3
+
+
+def test_engine_input_from_features_is_embed_none_for_plain_ranges():
+    features = _valid_features()
+    engine_input = engine_input_from_features([5, 6, 7], features, mm_cache=None)
+    assert engine_input["mm_placeholders"]["image"][0].is_embed is None
+
+
+def test_is_embed_length_mismatch_rejected():
+    with pytest.raises(ValueError, match="is_embed must match"):
+        MultiModalFeatures(
+            mm_hashes={"image": ["image_A"]},
+            mm_placeholders={
+                "image": [
+                    PlaceholderRangeInfo(offset=0, length=4, is_embed=[True, False])
+                ]
+            },
+        )
+
+
+def test_malformed_mm_payload_raises_value_error_not_500():
+    """A base64 MessagePack payload that decodes but fails MultiModalKwargsItem
+    reconstruction (e.g. a tensor field carrying a non-tensor value) must map
+    to ValueError so callers return 400, not an unhandled 500."""
+    features = MultiModalFeatures(
+        mm_hashes={"image": ["image_A"]},
+        mm_placeholders={"image": [PlaceholderRangeInfo(offset=0, length=1)]},
+        kwargs_data={
+            "image": [
+                # {"pixel_values": {}} — valid base64, valid MessagePack,
+                # reconstructs to a dict where a tensor is expected.
+                _b64_msgpack({"pixel_values": {}})
+            ]
+        },
+    )
+    with pytest.raises(ValueError, match="malformed multimodal item payload"):
+        engine_input_from_features([1, 2, 3], features, mm_cache=None)
+
+
+def _b64_msgpack(obj) -> str:
+    import base64
+
+    from vllm.v1.serial_utils import MsgpackEncoder
+
+    encoder = MsgpackEncoder(size_threshold=2**62)
+    return base64.b64encode(encoder.encode(obj)[0]).decode("ascii")
+
+
 @pytest.mark.asyncio
 async def test_preprocess_chat_uses_shared_builder_with_features():
     """Forwarded ids + features skip rendering and build a multimodal input."""

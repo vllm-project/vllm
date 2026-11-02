@@ -7,6 +7,8 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Sequence
 from typing import TYPE_CHECKING, Any, cast
 
+import torch
+
 from vllm.entrypoints.generate.base.protocol import MMPayload
 from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import (
     decode_mm_kwargs_item,
@@ -98,6 +100,23 @@ def _encode_mm_kwargs_with_metadata(
     return kwargs_data, mm_metadata
 
 
+def _decode_mm_item(item: str) -> MultiModalKwargsItem:
+    """Decode one serialized item, mapping any decode failure to ValueError.
+
+    A payload that is valid base64 and valid MessagePack can still fail
+    ``MultiModalKwargsItem`` reconstruction (e.g. a tensor field carrying a
+    non-tensor value raises ``KeyError``), and ``pybase64`` raises
+    ``binascii.Error`` on bad base64. Both callers convert ``ValueError`` to
+    HTTP 400; without this wrapper such payloads would surface as 500s.
+    """
+    try:
+        return decode_mm_kwargs_item(item)
+    except ValueError:
+        raise
+    except Exception as error:
+        raise ValueError(f"malformed multimodal item payload: {error}") from error
+
+
 def mm_kwargs_from_features(
     features: MultiModalFeatures,
 ) -> dict[str, list[MultiModalKwargsItem | None]]:
@@ -108,11 +127,11 @@ def mm_kwargs_from_features(
     for modality, hashes in features.mm_hashes.items():
         n = len(hashes)
         kwargs_items = [
-            decode_mm_kwargs_item(item) if item is not None else None
+            _decode_mm_item(item) if item is not None else None
             for item in kwargs_data.get(modality, [None] * n)
         ]
         metadata_items = [
-            decode_mm_kwargs_item(item) if item is not None else None
+            _decode_mm_item(item) if item is not None else None
             for item in mm_metadata.get(modality, [None] * n)
         ]
         mm_kwargs[modality] = [
@@ -215,9 +234,24 @@ def engine_input_from_features(
                 if item is not None:
                     mm_cache.validate_input_item(item, mm_hash)
 
-    # Convert PlaceholderRangeInfo → PlaceholderRange per modality.
+    # Convert PlaceholderRangeInfo → PlaceholderRange per modality. The
+    # sparse-embedding mask is preserved for models (e.g. Gemma 3, Qwen-VL)
+    # whose placeholders interleave text/structural tokens; without it every
+    # position would be treated as an embedding position and the encoder
+    # output would no longer line up with the prompt.
     mm_placeholders: MultiModalPlaceholders = {
-        modality: [PlaceholderRange(offset=p.offset, length=p.length) for p in ranges]
+        modality: [
+            PlaceholderRange(
+                offset=p.offset,
+                length=p.length,
+                is_embed=(
+                    torch.tensor(p.is_embed, dtype=torch.bool)
+                    if p.is_embed is not None
+                    else None
+                ),
+            )
+            for p in ranges
+        ]
         for modality, ranges in features.mm_placeholders.items()
     }
 
@@ -242,7 +276,12 @@ def placeholder_ranges_from_engine_input(
     ]
     return {
         modality: [
-            PlaceholderRangeInfo(offset=p.offset, length=p.length) for p in ranges
+            PlaceholderRangeInfo(
+                offset=p.offset,
+                length=p.length,
+                is_embed=(p.is_embed.tolist() if p.is_embed is not None else None),
+            )
+            for p in ranges
         ]
         for modality, ranges in raw_placeholders.items()
     }

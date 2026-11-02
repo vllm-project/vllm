@@ -109,9 +109,17 @@ class PlaceholderRangeInfo(BaseModel):
     length: int = Field(gt=0)
     """Number of placeholder tokens."""
 
-    # TODO: add `is_embed: list[bool] | None` once the /generate side
-    # consumes features — some models (e.g. Qwen-VL) use sparse
-    # placeholder masks that cannot be recomputed from offset+length alone.
+    is_embed: list[bool] | None = None
+    """Which positions in the range receive embeddings, for models whose
+    placeholders interleave text/structural tokens (e.g. Gemma 3, Qwen-VL).
+    ``None`` means every position in the range is an embedding position.
+    Must match ``length`` when set."""
+
+    @model_validator(mode="after")
+    def _validate_is_embed_length(self) -> "PlaceholderRangeInfo":
+        if self.is_embed is not None and len(self.is_embed) != self.length:
+            raise ValueError("is_embed must match the placeholder length when set")
+        return self
 
 
 class MultiModalFeatures(BaseModel):
