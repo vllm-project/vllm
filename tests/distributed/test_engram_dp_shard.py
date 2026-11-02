@@ -55,6 +55,7 @@ from vllm.models.deepseek_v41.common.engram import (
     gather_engram_hashes,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.configs.deepseek_v41 import DeepseekV41Config
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
 
@@ -243,8 +244,68 @@ def _worker(rank: int, tp_size: int, port: int) -> None:
             _check_table(vllm_config, False, False, 8, False, p2p=False)
         if tp_size == 1:
             _check_fp8_batch(vllm_config)
+        _check_bf16_table(vllm_config)
     finally:
         cleanup_dist_env_and_memory()
+
+
+def _check_bf16_table(vllm_config):
+    """BF16 heads survive shared storage, uneven DP batches and TP padding."""
+    config = DeepseekV41Config(
+        hidden_size=DIM,
+        hc_mult=2,
+        rms_norm_eps=1e-6,
+        engram_layer_ids=[0],
+        engram_num_embeddings=[1024],
+        engram_max_ngram_size=2,
+        engram_n_heads=7,
+        engram_head_dim=DIM,
+        engram_compressed_vocab_size=32,
+        engram_pad_token_id=0,
+        engram_vocab_size=97,
+    )
+    layout = EngramLayout(config)
+    head_sizes = tuple(layout.primes[0][0])
+    rows = sum(head_sizes)
+    weight = (torch.arange(rows * DIM).reshape(rows, DIM) % 257 / 13 - 8).bfloat16()
+    dp_rank = vllm_config.parallel_config.data_parallel_rank
+    tp_size = vllm_config.parallel_config.tensor_parallel_size
+    tp_rank = engram_ops.get_tensor_model_parallel_rank()
+    for cpu_offload, shared in [(False, False), (True, False), (True, True)]:
+        vllm_config.engram_config = EngramConfig(
+            cpu_offload=cpu_offload, dp_shared_memory=shared
+        )
+        with set_current_vllm_config(vllm_config), torch.device("cuda"):
+            module = Engram(config, None, layout, 0, tp_size > 1, "engram")
+            assert EngramBatch.create([module], 8) is None
+        table = module.embed_tokens
+        assert table.weight.dtype == torch.bfloat16
+        assert "weight_scale_inv" not in dict(table.named_parameters())
+        table.weight.weight_loader(table.weight, weight)
+        for counts in _token_counts(vllm_config.parallel_config.data_parallel_size):
+            num_tokens = counts[dp_rank]
+            ids = _make_ids(head_sizes, num_tokens, seed=900 + dp_rank)
+            if num_tokens:
+                ids[-1].fill_(engram_ops.DEAD_ID)
+            with set_forward_context(
+                None,
+                vllm_config,
+                num_tokens=num_tokens,
+                num_tokens_across_dp=torch.tensor(counts, dtype=torch.int32),
+            ):
+                gathered = gather_engram_hashes(ids, dp_shared_memory=shared)
+                module.prepare_embeddings(gathered)
+                actual = module.embed(ids)
+                standalone = table(ids)
+            expected = weight.cuda()[ids.clamp_min(0).long()]
+            expected.masked_fill_(ids.unsqueeze(-1) < 0, 0)
+            assert torch.equal(standalone, expected)
+            chunk = -(-num_tokens // tp_size)
+            expected = torch.nn.functional.pad(
+                expected, (0, 0, 0, 0, 0, chunk * tp_size - num_tokens)
+            )[tp_rank * chunk : (tp_rank + 1) * chunk]
+            assert torch.equal(actual, expected)
+        torch.accelerator.synchronize()
 
 
 def _check_fp8_batch(vllm_config):
@@ -483,6 +544,7 @@ def _check_table(
             engram_compressed_vocab_size=32,
             engram_pad_token_id=0,
             engram_vocab_size=HEAD_SIZES[0],
+            quantization_config={"quant_method": "fp8"},
         )
         with set_current_vllm_config(vllm_config):
             weight, scale_inv = _full_table(rows)
@@ -859,7 +921,9 @@ def test_engram_tables_too_large_for_shm_are_not_shared(monkeypatch, query_fails
     )
     if query_fails:
         monkeypatch.setattr(engram_ops, "check_shm_free_space", query)
-    layout = SimpleNamespace(num_embeddings=(1 << 50,), head_dim=DIM)
+    layout = SimpleNamespace(
+        num_embeddings=(1 << 50,), head_dim=DIM, weight_dtype=torch.float8_e4m3fn
+    )
     assert not engram_ops.can_share_engram_tables(layout)
     assert len(broadcasts) == 1 and broadcasts[0] is not None
 

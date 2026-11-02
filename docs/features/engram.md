@@ -63,13 +63,33 @@ relieved from reconstructing static patterns in its first layers, deep enough
 that vLLM can hide table lookups behind the compute of the preceding layers
 (see below).
 
-In vLLM, hashing, lookup, and gating run as fused Triton kernels over FP8
-rows with ue8m0 block scales. The layer layout — table sizes, n-gram size,
-head count — is fixed by the checkpoint and is not user-configurable. Only the
+In vLLM, hashing, lookup, and gating run as fused Triton kernels over BF16
+rows or FP8 rows with ue8m0 block scales. The layer layout — table sizes,
+n-gram size, head count — is fixed by the checkpoint and is not user-configurable. Only the
 storage and sharding described below are configurable, via
 `--engram-config`, which takes a JSON object and can also be set field by
 field as `--engram-config.<field>`
 ([CLI reference](../cli/serve.md#-engram-config)).
+
+### DeepSeek V4.1 checkpoint precision
+
+DeepSeek V4.1 checkpoints without a quantization configuration, including
+BF16 SFT exports, keep Engram rows in BF16 without scale tensors. Existing
+quantized checkpoints continue to use FP8 rows and ue8m0 scales.
+The table format comes from the checkpoint's quantization configuration,
+independently of runtime quantization; a weight with a different dtype fails
+loading rather than being silently cast.
+
+Both formats support GPU storage, CPU offload, shared host tables and huge
+pages. BF16 tables use the ordinary BF16 head exchange; packed FP8 staging
+and GPU peer-table reads are reserved for FP8 tables. With the same head
+dimension, BF16 storage costs two bytes per element instead of one FP8 byte
+plus one scale byte per 32 elements: about 1.94 times the table memory.
+
+```bash
+vllm serve <bf16-deepseek-v41-checkpoint> --dtype bfloat16 \
+  --engram-config.cpu_offload true
+```
 
 ## CPU offload
 
