@@ -1107,9 +1107,16 @@ COPY requirements/test/kv_connectors_cuda.txt requirements/test/kv_connectors_cu
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
         && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
-        uv pip install --system --require-hashes --no-deps \
+        uv pip freeze --system | sort > /tmp/kv-before.txt \
+        && uv pip install --system --require-hashes --no-deps \
             -r requirements/test/kv_connectors_cuda.txt \
-            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
+            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+        && uv pip freeze --system | sort > /tmp/kv-after.txt \
+        && if comm -23 /tmp/kv-before.txt /tmp/kv-after.txt | grep .; then \
+            echo "kv_connectors_cuda.txt changed the packages above; recompile it" >&2; \
+            exit 1; \
+        fi \
+        && rm -f /tmp/kv-before.txt /tmp/kv-after.txt; \
     fi
 
 # image to run unit testing suite

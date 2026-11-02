@@ -64,6 +64,8 @@ repos:
         --generate-hashes,
         # nixl pulls both CUDA variants; the CUDA 13 image keeps only nixl-cu13.
         --no-emit-package, nixl-cu12,
+        # The image pins NCCL itself (NCCL_VERSION + UV_OVERRIDE).
+        --no-emit-package, nvidia-nccl-cu13,
         --index-strategy, unsafe-best-match,
         --torch-backend, cu130,
         --python-platform, x86_64-manylinux_2_28,
