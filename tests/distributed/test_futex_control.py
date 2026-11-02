@@ -17,7 +17,7 @@ from typing import Any, ClassVar
 
 def native_reader(name, readers, capacity, rank, count, connection):
     """Separate-process consumer checks publication of the shared payload ring."""
-    from vllm._asa_shmwait import Endpoint
+    from vllm._shm_wait import Endpoint
 
     shm = shared_memory.SharedMemory(name=name)
     endpoint = None
@@ -47,7 +47,7 @@ class NativeControlTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from vllm._asa_shmwait import Endpoint
+        from vllm._shm_wait import Endpoint
 
         cls.Endpoint = Endpoint
 
@@ -187,7 +187,7 @@ class NativeControlTests(unittest.TestCase):
         before = sys.getrefcount(self.Endpoint)
         for _ in range(1000):
             endpoint = self.Endpoint(self.shm.buf, 1, 4, 0, False, 128)
-            self.assertEqual(type(endpoint).__module__, "vllm._asa_shmwait")
+            self.assertEqual(type(endpoint).__module__, "vllm._shm_wait")
             del endpoint
         self.assertEqual(sys.getrefcount(self.Endpoint), before)
 

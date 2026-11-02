@@ -506,7 +506,7 @@ class MessageQueue:
         self.n_remote_reader = n_remote_reader
         self.shutting_down = False
         self._event_queue = None
-        from vllm.distributed.device_communicators.asa_event_queue import (
+        from vllm.distributed.device_communicators.shm_event_queue import (
             EventQueue,
             requested,
         )
@@ -667,7 +667,7 @@ class MessageQueue:
             self.remote_socket = None
             event_handle = getattr(handle, "event_handle", None)
             if event_handle is not None:
-                from vllm.distributed.device_communicators.asa_event_queue import (
+                from vllm.distributed.device_communicators.shm_event_queue import (
                     EventQueue,
                 )
 

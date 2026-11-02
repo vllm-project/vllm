@@ -21,7 +21,7 @@ def attach_shared_memory(name: str | None) -> shared_memory.SharedMemory:
 def resolve_shm_wait_backend(mode: str) -> tuple[str, str | None]:
     """Resolve local-writer policy; never hide a broken native installation."""
     if mode not in ("auto", "stock", "futex"):
-        raise ValueError("VLLM_ASA_SHM_WAIT must be auto, stock, or futex")
+        raise ValueError("VLLM_SHM_WAIT_BACKEND must be auto, stock, or futex")
     if mode == "stock":
         return "stock", None
 
@@ -42,9 +42,9 @@ def resolve_shm_wait_backend(mode: str) -> tuple[str, str | None]:
         return "stock", reason
 
     try:
-        importlib.import_module("vllm._asa_shmwait")
+        importlib.import_module("vllm._shm_wait")
     except ModuleNotFoundError as error:
-        if mode != "auto" or error.name != "vllm._asa_shmwait":
+        if mode != "auto" or error.name != "vllm._shm_wait":
             raise
-        return "stock", "optional vllm._asa_shmwait extension is not installed"
+        return "stock", "optional vllm._shm_wait extension is not installed"
     return "futex", None

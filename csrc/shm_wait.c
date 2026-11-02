@@ -289,11 +289,11 @@ static PyType_Slot endpoint_slots[] = {
     {0, NULL}
 };
 static PyType_Spec endpoint_spec = {
-    .name = "vllm._asa_shmwait.Endpoint", .basicsize = sizeof(Endpoint),
+    .name = "vllm._shm_wait.Endpoint", .basicsize = sizeof(Endpoint),
     .flags = Py_TPFLAGS_DEFAULT, .slots = endpoint_slots
 };
-static struct PyModuleDef module = {PyModuleDef_HEAD_INIT, "vllm._asa_shmwait", NULL, -1, NULL};
-PyMODINIT_FUNC PyInit__asa_shmwait(void) {
+static struct PyModuleDef module = {PyModuleDef_HEAD_INIT, "vllm._shm_wait", NULL, -1, NULL};
+PyMODINIT_FUNC PyInit__shm_wait(void) {
     PyObject *endpoint_type = PyType_FromSpec(&endpoint_spec);
     if (!endpoint_type) return NULL;
     PyObject *m = PyModule_Create(&module);

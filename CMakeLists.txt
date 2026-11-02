@@ -141,14 +141,14 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
    CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|aarch64|arm64)$")
   enable_language(C)
   define_extension_target(
-    _asa_shmwait
+    _shm_wait
     DESTINATION vllm
     LANGUAGE C
-    SOURCES csrc/asa_shmwait.c
+    SOURCES csrc/shm_wait.c
     NO_TORCH
     USE_SABI 3.11
     WITH_SOABI)
-  set_target_properties(_asa_shmwait PROPERTIES
+  set_target_properties(_shm_wait PROPERTIES
     C_STANDARD 11 C_STANDARD_REQUIRED ON C_VISIBILITY_PRESET hidden)
 endif()
 
