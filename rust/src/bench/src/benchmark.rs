@@ -645,7 +645,7 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         let total_output_tokens: usize = input_requests.iter().map(|r| r.expected_output_len).sum();
         println!("Dry run stats:");
         println!("  Total prompts: {}", input_requests.len());
-        println!("  Total input tokens: {total_input_tokens}");
+        println!("  Estimated total input tokens: {total_input_tokens}");
         println!("  Total expected output tokens: {total_output_tokens}");
         println!(
             "  Avg input tokens: {:.1}",
@@ -1118,7 +1118,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         (m, Vec::new())
     } else {
         calculate_metrics(
-            &input_requests,
             &outputs,
             benchmark_duration,
             &config.selected_percentiles,
@@ -1148,7 +1147,6 @@ pub async fn run_benchmark(config: &BenchConfig) -> Result<serde_json::Value> {
         ) {
             let ss = steady_state::compute(
                 &outputs,
-                &input_requests,
                 &window,
                 &config.selected_percentiles,
                 config.backend.is_pooling(),
@@ -1392,7 +1390,7 @@ pub(crate) async fn send_profile_request(
     Ok(resp.status().is_success())
 }
 
-/// Parse `vllm:num_requests_running` from the server's `/metrics` Prometheus endpoint.
+/// Fetch total `vllm:num_requests_running` across engines from `/metrics`.
 pub(crate) async fn fetch_num_requests_running(
     client: &reqwest::Client,
     base_url: &str,
@@ -1400,18 +1398,35 @@ pub(crate) async fn fetch_num_requests_running(
     let url = format!("{base_url}/metrics");
     let resp = client.get(&url).send().await.ok()?;
     let text = resp.text().await.ok()?;
+
+    parse_num_requests_running(&text)
+}
+
+/// Parse total running requests across the engine series in `/metrics`.
+fn parse_num_requests_running(text: &str) -> Option<usize> {
+    let mut total: Option<usize> = None;
     for line in text.lines() {
-        if let Some(rest) = line.strip_prefix("vllm:num_requests_running") {
-            // Line format: `vllm:num_requests_running{model_name="..."} 42`
-            // The value is after the last space.
-            if let Some(val_str) = rest.rsplit(' ').next()
-                && let Ok(v) = val_str.parse::<f64>()
-            {
-                return Some(v as usize);
-            }
+        let Some(rest) = line.trim().strip_prefix("vllm:num_requests_running") else {
+            continue;
+        };
+        let sample = if rest.trim_start().starts_with('{') {
+            let Some((_, sample)) = rest.rsplit_once('}') else {
+                continue;
+            };
+            sample
+        } else if rest.starts_with(char::is_whitespace) {
+            rest
+        } else {
+            continue;
+        };
+        if let Some(value) = sample.split_whitespace().next().and_then(|s| s.parse::<f64>().ok())
+            && value.is_finite()
+            && value >= 0.0
+        {
+            total = Some(total.unwrap_or(0).saturating_add(value as usize));
         }
     }
-    None
+    total
 }
 
 /// Poll `/metrics` until `num_requests_running >= threshold`, then start the
@@ -1922,6 +1937,44 @@ async fn sample_verify_prompts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_parse_num_requests_running_sums_dp_engines() {
+        let metrics: String = (0..8)
+            .map(|engine| {
+                format!("vllm:num_requests_running{{model_name=\"m\",engine=\"{engine}\"}} 16.0\n")
+            })
+            .collect();
+
+        assert_eq!(parse_num_requests_running(&metrics), Some(128));
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_matches_exact_metric_name() {
+        let metrics = "\
+vllm:num_requests_running_total{engine=\"0\"} 1024
+vllm:num_requests_running{engine=\"0\"} 16
+vllm:num_requests_waiting{model_name=\"vllm:num_requests_running\"} 256
+vllm:num_requests_running{engine=\"1\"} 16
+";
+
+        assert_eq!(parse_num_requests_running(metrics), Some(32));
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_distinguishes_zero_and_missing() {
+        for (metrics, expected) in [("vllm:num_requests_running 0\n", Some(0)), ("", None)] {
+            assert_eq!(parse_num_requests_running(metrics), expected);
+        }
+    }
+
+    #[test]
+    fn test_parse_num_requests_running_reads_sample_before_timestamp() {
+        let metrics =
+            "vllm:num_requests_running {model_name=\"model with spaces\"}\t4.2e1 123456\n";
+
+        assert_eq!(parse_num_requests_running(metrics), Some(42));
+    }
 
     fn make_metrics(
         drafts: u64,

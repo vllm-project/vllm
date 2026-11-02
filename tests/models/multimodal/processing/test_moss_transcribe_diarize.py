@@ -19,9 +19,12 @@ def _question(request_prompt: str = "", hotwords: str | None = None) -> str:
         hotwords=hotwords,
         request_prompt=request_prompt,
     )
-    prompt = MossTranscribeDiarizeForConditionalGeneration.get_generation_prompt(
+    prompt_data = MossTranscribeDiarizeForConditionalGeneration.get_generation_prompt(
         params
-    )["prompt"]
+    )
+    assert isinstance(prompt_data, dict)
+    prompt = prompt_data.get("prompt")
+    assert isinstance(prompt, str)
     return prompt.split("<|audio_end|>\n", 1)[1].split("<|im_end|>", 1)[0]
 
 

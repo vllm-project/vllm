@@ -72,7 +72,12 @@ from .interfaces import (
     SupportsPP,
     SupportsTranscription,
 )
-from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    init_vllm_registered_model,
+    maybe_prefix,
+)
 
 # NOTE lang support is based on what is written here:
 # https://huggingface.co/ibm-granite/granite-speech-3.3-2b
@@ -567,6 +572,11 @@ class GraniteSpeechForConditionalGeneration(
         ],
     }
 
+    # Checkpoints saved by Transformers v5 nest the text model one level deeper
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={"language_model.model.model.": "language_model.model."}
+    )
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("audio"):
@@ -843,7 +853,7 @@ class GraniteSpeechForConditionalGeneration(
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix in multimodal models."""

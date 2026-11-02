@@ -30,12 +30,15 @@ use vllm_chat::GenerationConfigMode;
 use vllm_chat::ToolStrictLevel;
 use vllm_chat::multimodal::MmLimitPerPrompt;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
+use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    HttpListenerMode, LoraModulePath, ParserSelection, RenderConfig, RendererSelection,
+    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
+    CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
+    OutputLogging, ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -129,6 +132,17 @@ pub struct RenderArgs {
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
+    /// Accept any requested model name. Like Python, it is set only through
+    /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    skip_model_name_validation: bool,
     /// Select the tool-call parser. Use `auto` to infer from the model or
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
@@ -146,11 +160,20 @@ pub struct RenderArgs {
     #[arg(long = "tokenizer-mode", default_value_t)]
     renderer: RendererSelection,
     /// Override the model chat template with a file path or inline template.
+    /// Only the `hf` renderer supports it.
     #[arg(long)]
     chat_template: Option<String>,
     /// Default JSON keyword arguments merged into every chat-template render.
     #[arg(long, value_parser = parse_json::<HashMap<String, Value>>, value_name = "JSON")]
     default_chat_template_kwargs: Option<HashMap<String, Value>>,
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    reasoning_effort_map: Option<ReasoningEffortMap>,
     /// Whether to trust the chat template provided in the request. Only the HF
     /// chat-template renderer honors request templates; native renderers ignore
     /// them.
@@ -190,6 +213,7 @@ impl RenderArgs {
             hf_config,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
+            skip_model_name_validation: self.skip_model_name_validation,
             host: self.host,
             port: self.port,
             tool_call_parser: self.tool_call_parser,
@@ -198,6 +222,7 @@ impl RenderArgs {
             renderer: self.renderer,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs.unwrap_or_default(),
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             chat_template_content_format: self.chat_template_content_format,
@@ -271,6 +296,12 @@ pub struct SharedRuntimeArgs {
     #[arg(long)]
     #[serde(default)]
     pub tool_strict_level: Option<ToolStrictLevel>,
+    /// Structured outputs configuration as a JSON object. The Rust frontend
+    /// reads `backend`, which compiles every constraint (default xgrammar);
+    /// the other fields are forwarded to the engine.
+    #[arg(long, value_parser = parse_json::<StructuredOutputsConfig>, value_name = "JSON")]
+    #[serde(default)]
+    pub structured_outputs_config: Option<StructuredOutputsConfig>,
     /// Select the chat renderer implementation.
     #[arg(long = "tokenizer-mode", default_value_t)]
     #[serde(default, rename = "tokenizer_mode")]
@@ -302,7 +333,7 @@ pub struct SharedRuntimeArgs {
     pub http_timeout_keep_alive: Option<u64>,
 
     /// The file path to the chat template, or the template in single-line form
-    /// for the specified model.
+    /// for the specified model. Only the `hf` renderer supports it.
     #[arg(long)]
     #[serde(default)]
     pub chat_template: Option<String>,
@@ -319,6 +350,15 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub default_chat_template_kwargs: Option<HashMap<String, Value>>,
 
+    /// JSON mapping that rewrites a request's reasoning effort to a value the
+    /// chat template supports. Efforts not listed pass through unchanged, and
+    /// `reasoning_effort` in `chat_template_kwargs` is not rewritten.
+    ///
+    /// Example: `{"medium": "low", "xhigh": "max"}` for a template that only
+    /// knows low, high and max.
+    #[arg(long, value_parser = parse_json::<ReasoningEffortMap>, value_name = "JSON")]
+    #[serde(default)]
+    pub reasoning_effort_map: Option<ReasoningEffortMap>,
     /// Whether to trust the chat template provided in the request. If False,
     /// the server will always use the chat template specified by
     /// `--chat-template` or the ones from tokenizer. Only the HF chat-template
@@ -361,14 +401,54 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub chat_template_content_format: ChatTemplateContentFormatOption,
 
+    /// When `--max-logprobs` is specified, represents single tokens as
+    /// strings of the form 'token_id:{token_id}' so that tokens that are not
+    /// JSON-encodable can be identified.
+    ///
+    /// A request's own `return_tokens_as_token_ids` overrides this default.
+    #[arg(
+        long,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default)]
+    pub return_tokens_as_token_ids: bool,
+
     /// Log a summary line for each completed request, including prompt/output
     /// token counts and finish reason.
     #[arg(long)]
     #[serde(default)]
     pub enable_log_requests: bool,
 
-    /// Include prompt_tokens_details in usage when cached prompt tokens are
-    /// present.
+    /// If set to True, log model outputs (generations). Output text and
+    /// finish reasons are logged at INFO, while output token IDs are logged at
+    /// DEBUG. Requires `--enable-log-requests`.
+    #[arg(long, default_missing_value = "true", num_args = 0..=1)]
+    #[serde(default)]
+    pub enable_log_outputs: bool,
+
+    /// If set to False, output deltas will not be logged. Relevant only if
+    /// `--enable-log-outputs` is set.
+    #[arg(
+        long,
+        action = ArgAction::Set,
+        default_value_t = true,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default = "default_enable_log_deltas")]
+    pub enable_log_deltas: bool,
+
+    /// Max number of prompt characters or prompt ID numbers being printed in
+    /// log. The default of None means unlimited.
+    ///
+    /// Also bounds logged output characters and output token IDs.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_log_len: Option<usize>,
+
+    /// Include prompt_tokens_details in usage, including cached and newly
+    /// cached prompt tokens.
     #[arg(
         long,
         default_missing_value = "true",
@@ -469,6 +549,32 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub disable_request_id_randomization: bool,
 
+    /// Maximum HTTP request body size in bytes (default 32 MiB); `0` removes
+    /// the limit, like the Python frontend, which has none. It is set only
+    /// through `VLLM_HTTP_MAX_REQUEST_BODY_SIZE`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_HTTP_MAX_REQUEST_BODY_SIZE",
+        value_parser = parse_byte_count
+    )]
+    #[serde(skip)]
+    pub http_max_request_body_size: Option<usize>,
+
+    /// Accept any requested model name, served by the base model unless it
+    /// names a loaded LoRA adapter. Like Python, it is set only through
+    /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub skip_model_name_validation: bool,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -504,10 +610,35 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub allow_credentials: bool,
 
+    /// Disable the per-response HTTP access log.
+    #[arg(
+        long,
+        visible_alias = "disable-uvicorn-access-log",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default, alias = "disable_uvicorn_access_log")]
+    pub disable_access_log: bool,
+
+    /// Comma-separated request paths whose responses the HTTP access log
+    /// skips, such as "/health,/metrics" for frequent probes. Paths match
+    /// exactly, without the query string.
+    #[arg(long)]
+    #[serde(default)]
+    pub disable_access_log_for_endpoints: Option<String>,
+
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     #[serde(default, flatten)]
     pub ssl: SslArgs,
+
+    /// Path prefix for a server behind a path-based routing proxy.
+    ///
+    /// Every route is served both under this prefix and at its bare path:
+    /// with `/llm`, `/llm/v1/models` and `/v1/models` reach the same route.
+    #[arg(long)]
+    #[serde(default)]
+    pub root_path: Option<String>,
 
     /// Profiler configuration forwarded by the Python supervisor.
     ///
@@ -569,6 +700,23 @@ impl SharedRuntimeArgs {
             .expect("profiler config serialization should not fail")
     }
 
+    /// Return the backend that compiles every structured-output constraint.
+    pub fn structured_outputs_backend(&self) -> StructuredOutputBackend {
+        self.structured_outputs_config
+            .as_ref()
+            .map(|config| config.backend)
+            .unwrap_or_default()
+    }
+
+    /// Return the structured outputs config JSON for managed Python engine
+    /// forwarding.
+    pub fn structured_outputs_config_json(&self) -> Option<String> {
+        self.structured_outputs_config.as_ref().map(|config| {
+            serde_json::to_string(config)
+                .expect("structured outputs config serialization should not fail")
+        })
+    }
+
     /// Return the per-modality limits as JSON for managed Python engine
     /// forwarding, or `None` when nothing is configured.
     ///
@@ -603,6 +751,14 @@ impl SharedRuntimeArgs {
                 format!("invalid VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: {error}")
             })?;
         }
+        if let Some(value) = lookup("VLLM_HTTP_MAX_REQUEST_BODY_SIZE") {
+            let size = parse_byte_count(&value)
+                .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
+            self.http_max_request_body_size = Some(size);
+        }
+        if let Some(value) = lookup("VLLM_SKIP_MODEL_NAME_VALIDATION") {
+            self.skip_model_name_validation = parse_truthy_flag(&value)?;
+        }
         Ok(())
     }
 
@@ -627,8 +783,10 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let structured_outputs_backend = self.structured_outputs_backend();
         let ModelFileSources {
             model,
             tokenizer,
@@ -660,10 +818,12 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
+            structured_outputs_backend,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
@@ -673,7 +833,9 @@ impl SharedRuntimeArgs {
             stream_interval: self.stream_interval,
             api_server_options,
             cors,
+            access_log,
             tls,
+            root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             custom_histogram_buckets: self.custom_histogram_buckets,
@@ -695,7 +857,7 @@ impl SharedRuntimeArgs {
         grpc_listener_mode: Option<HttpListenerMode>,
         handshake_address: String,
         advertised_host: String,
-        engine_count: usize,
+        topology: &DataParallelTopology,
         local_input_address: Option<String>,
         local_output_address: Option<String>,
         manages_engine: bool,
@@ -706,8 +868,10 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
+        let structured_outputs_backend = self.structured_outputs_backend();
         let ModelFileSources {
             model,
             tokenizer,
@@ -718,7 +882,9 @@ impl SharedRuntimeArgs {
             transport_mode: TransportMode::HandshakeOwner {
                 handshake_address,
                 advertised_host,
-                engine_count,
+                engine_start_index: topology.frontend_engine_start_index(),
+                engine_count: topology.frontend_engine_count(),
+                data_parallel_size: topology.data_parallel_size,
                 ready_timeout,
                 local_input_address,
                 local_output_address,
@@ -736,10 +902,12 @@ impl SharedRuntimeArgs {
             tool_call_parser: self.tool_call_parser,
             reasoning_parser: self.reasoning_parser,
             tool_strict_level: self.tool_strict_level,
+            structured_outputs_backend,
             renderer: self.renderer,
             language_model_only: self.language_model_only,
             chat_template: self.chat_template,
             default_chat_template_kwargs: self.default_chat_template_kwargs,
+            reasoning_effort_map: self.reasoning_effort_map.unwrap_or_default(),
             trust_request_chat_template: self.trust_request_chat_template,
             exclude_tools_when_tool_choice_none: self.exclude_tools_when_tool_choice_none,
             limit_mm_per_prompt: self.limit_mm_per_prompt,
@@ -749,7 +917,9 @@ impl SharedRuntimeArgs {
             stream_interval: self.stream_interval,
             api_server_options,
             cors,
+            access_log,
             tls,
+            root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             custom_histogram_buckets: self.custom_histogram_buckets,
@@ -765,13 +935,40 @@ impl SharedRuntimeArgs {
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
+            log_outputs: OutputLogConfig {
+                outputs: match (self.enable_log_outputs, self.enable_log_deltas) {
+                    (false, _) => OutputLogging::Disabled,
+                    (true, false) => OutputLogging::Complete,
+                    (true, true) => OutputLogging::CompleteAndDeltas,
+                },
+                max_log_len: self.max_log_len,
+            },
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
+            default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
             enable_per_request_metrics: self.enable_per_request_metrics,
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
+            skip_model_name_validation: self.skip_model_name_validation,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
+            request_body_limit_bytes: match self.http_max_request_body_size {
+                None => Some(DEFAULT_REQUEST_BODY_LIMIT_BYTES),
+                Some(0) => None,
+                Some(limit) => Some(limit),
+            },
+        }
+    }
+
+    fn access_log_config(&self) -> AccessLogConfig {
+        AccessLogConfig {
+            enabled: !self.disable_access_log,
+            excluded_paths: (self.disable_access_log_for_endpoints.iter())
+                .flat_map(|paths| paths.split(','))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
@@ -787,6 +984,10 @@ impl SharedRuntimeArgs {
 
 fn default_engine_ready_timeout_secs() -> u64 {
     600
+}
+
+fn default_enable_log_deltas() -> bool {
+    true
 }
 
 fn default_stream_interval() -> NonZeroU32 {
@@ -822,6 +1023,24 @@ pub struct ProfilerConfig {
     pub extra: serde_json::Map<String, Value>,
 }
 
+/// Structured outputs configuration parsed from `--structured-outputs-config`.
+///
+/// Only `backend` is read by the Rust frontend. All other fields are accepted
+/// but ignored — they are consumed by the Python engine layer.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct StructuredOutputsConfig {
+    /// Backend that compiles every structured-output constraint.
+    #[serde(default)]
+    pub backend: StructuredOutputBackend,
+    /// Additional Python structured outputs config fields consumed by the
+    /// engine layer.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
+}
+
+/// Keys are API effort names, so unknown efforts fail at startup.
+type ReasoningEffortMap = HashMap<ReasoningEffort, String>;
+
 /// Parsed `VLLM_LOG_STATS_INTERVAL`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LogStatsInterval {
@@ -852,6 +1071,17 @@ impl FromStr for LogStatsInterval {
 fn parse_int_flag(value: &str) -> Result<bool, String> {
     let value: i64 = value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))?;
     Ok(value != 0)
+}
+
+/// Parse a boolean flag environment variable as Python's
+/// `value.strip().lower() in ("1", "true")`; any other value is `false`.
+fn parse_truthy_flag(value: &str) -> Result<bool, String> {
+    Ok(matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
+}
+
+/// Parse a byte count environment variable as a non-negative decimal integer.
+fn parse_byte_count(value: &str) -> Result<usize, String> {
+    value.trim().parse().map_err(|_| format!("`{value}` is not a number of bytes"))
 }
 
 fn parse_json<T: DeserializeOwned>(value: &str) -> Result<T, String> {
@@ -960,15 +1190,23 @@ pub struct ServeArgs {
     /// Managed Python headless-engine arguments.
     #[command(flatten)]
     pub managed_engine: ManagedEngineArgs,
+
+    /// Data parallel load-balancing arguments.
+    #[command(flatten)]
+    pub data_parallel_lb: DataParallelLbArgs,
 }
 
 impl ServeArgs {
     /// Build the OpenAI-server runtime config used after the managed Python
     /// engine starts.
-    pub fn to_frontend_config(&self, handshake_address: String) -> Config {
+    pub fn to_frontend_config(
+        &self,
+        handshake_address: String,
+        topology: &DataParallelTopology,
+    ) -> Config {
         // Prefer IPC sockets for local engine input/output.
         let (local_input_address, local_output_address) =
-            self.managed_engine.frontend_local_only().then(frontend_ipc_addresses).unzip();
+            topology.frontend_local_only().then(frontend_ipc_addresses).unzip();
         let listener_mode = match &self.uds {
             Some(path) => HttpListenerMode::BindUnix { path: path.clone() },
             None => HttpListenerMode::BindTcp {
@@ -992,7 +1230,7 @@ impl ServeArgs {
             grpc_listener_mode,
             handshake_address,
             self.managed_engine.handshake_host.clone(),
-            self.managed_engine.data_parallel_size,
+            topology,
             local_input_address,
             local_output_address,
             // `--data-parallel-size-local 0` runs the frontend without a local engine.
@@ -1002,7 +1240,12 @@ impl ServeArgs {
 
     /// Build the managed Python-engine spawn configuration with the given
     /// handshake port.
-    pub fn to_managed_engine_config(&self, handshake_port: u16) -> ManagedEngineConfig {
+    pub fn to_managed_engine_config(
+        &self,
+        handshake_port: u16,
+        topology: &DataParallelTopology,
+        client_handshake_address: Option<String>,
+    ) -> ManagedEngineConfig {
         let reasoning_parser = effective_engine_reasoning_parser(
             &self.runtime.reasoning_parser,
             &self.runtime.model.id,
@@ -1025,12 +1268,25 @@ impl ServeArgs {
             handshake_port,
             self.runtime.limit_mm_per_prompt_json(),
             hf_overrides,
+            self.runtime.structured_outputs_config_json(),
+            topology,
+            client_handshake_address,
         )
     }
 }
 
 fn effective_engine_reasoning_parser(selection: &ParserSelection, model: &str) -> Option<String> {
     selection.resolve_reasoning_name(model).map(str::to_owned)
+}
+
+/// Allocate a fresh IPC handshake endpoint for a frontend that serves only its
+/// node's engines (hybrid or external DP LB).
+pub fn frontend_ipc_handshake_address() -> String {
+    let preferred_base_path = std::env::var_os("VLLM_RPC_BASE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let handshake = preferred_base_path.join(format!("vllm-rs-h-{}", Uuid::new_v4().simple()));
+    format!("ipc://{}", handshake.to_string_lossy())
 }
 
 /// Allocate fresh IPC endpoints for one managed frontend instance.

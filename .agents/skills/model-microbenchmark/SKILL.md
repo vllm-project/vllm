@@ -7,8 +7,9 @@ description: Time a vLLM model's forward pass on exact batch shapes (decode, pre
 
 Builds the batch without the scheduler, runs it through MRV2's real
 `execute_model`, and times the forward as a one-shot CUDA graph (prefill
-included). Sampling, the speculator, and CPU step overhead are excluded, so
-expect results somewhat below a serving step.
+included). The configured drafter is included by default; use
+`--exclude-drafter` for target-only timing. All draft tokens are accepted.
+Target sampling, rejection sampling, and CPU step overhead are excluded.
 
 ## Usage
 
@@ -44,7 +45,8 @@ Key flags (plus all `EngineArgs`):
 
 - `--kv-len-jitter 0.5` (default): prefixes drawn within ±50%, same on every
   DP rank, capped at `max_model_len`. Use `0` for exact lengths.
-- `--routing auto|real|balanced`: `auto` = balanced with dummy weights.
+- `--routing auto|real|balanced|zipf`: `auto` = Zipf with dummy weights;
+  `zipf` uses fixed alpha=1.25 skew (target only, no PCP or grouped top-k).
 - `--iters 20 --samples 5`, `--output-json out.json` (per-rank latency stats,
   `samples_us`, graph-vs-eager check).
 - Defaults: `--load-format dummy`, prefix caching off, no torch.compile.
@@ -94,7 +96,7 @@ that the JSON summary excludes.
 ## Caveats
 
 - **Dummy weights lie for data-dependent kernels.** Dummy gates route every
-  token to the same experts (hence balanced routing). Cross-check suspicious
+  token to the same experts (hence synthetic routing). Cross-check suspicious
   kernels with real weights.
 - **torch.compile models (e.g. Qwen3/3.5) look slow**: no compile here. Use
   them for correctness only; trust perf for models under `vllm/models/`.

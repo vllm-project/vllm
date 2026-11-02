@@ -126,7 +126,6 @@ class _KVBProj(torch.nn.Module):
 class _FusedLayer:
     """Only the attributes K3's context loop reads."""
 
-    _compute_prefill_context = MultiHeadLatentAttention._compute_prefill_context
     _gather_context_latent = MultiHeadLatentAttention._gather_context_latent
     _attn_read_kv_cache = MultiHeadLatentAttention._attn_read_kv_cache
 
@@ -144,7 +143,6 @@ class _FusedLayer:
 class _ReferenceImpl:
     """Only the attributes the generic context loop reads."""
 
-    _compute_prefill_context = MLACommonBaseImpl._compute_prefill_context
     _concat_k_nope_k_pe = MLACommonBaseImpl._concat_k_nope_k_pe
     _use_flashinfer_concat_mla_k = False
 
@@ -163,7 +161,7 @@ def _build_prefill_metadata(
     workspace_dtype: torch.dtype,
     q_data_type: torch.dtype,
     backend: _RecordingPrefillBackend,
-) -> MLACommonPrefillMetadata:
+) -> tuple[MLACommonPrefillMetadata, int]:
     query_start_loc_cpu = torch.zeros(len(_QUERY_LENS) + 1, dtype=torch.int32)
     query_start_loc_cpu[1:] = torch.tensor(_QUERY_LENS, dtype=torch.int32).cumsum(0)
     workspace = torch.empty(
@@ -253,13 +251,13 @@ def test_fused_context_matches_generic_impl(
     ).to(q_data_type)
 
     layer = _FusedLayer(kv_b_proj, kv_cache, kv_cache_dtype, k_scale)
-    fused_out, fused_lse = layer._compute_prefill_context(
-        q, SimpleNamespace(prefill=prefill_fused)
+    fused_out, fused_lse = MultiHeadLatentAttention._compute_prefill_context(
+        layer, q, SimpleNamespace(prefill=prefill_fused)
     )
 
     impl = _ReferenceImpl(kv_b_proj, kv_cache_dtype)
-    ref_out, ref_lse = impl._compute_prefill_context(
-        q, kv_cache, SimpleNamespace(prefill=prefill_ref), k_scale
+    ref_out, ref_lse = MLACommonBaseImpl._compute_prefill_context(
+        impl, q, kv_cache, SimpleNamespace(prefill=prefill_ref), k_scale
     )
 
     assert len(backend_fused.calls) == len(backend_ref.calls)
@@ -281,6 +279,7 @@ def test_fused_context_matches_generic_impl(
 
     # Every chunk but the continuation should have been written in place, i.e.
     # straight into the returned accumulator, with no intermediate copy.
+    assert prefill_fused.chunked_context is not None
     wrote_in_place = [
         out is not None and out.data_ptr() == fused_out[chunk.token_slice].data_ptr()
         for out, chunk in zip(
@@ -318,7 +317,9 @@ def test_fused_context_rejects_an_unquantized_query() -> None:
         dtype=torch.bfloat16,
     )
     with pytest.raises(AssertionError, match="new-token epilogue"):
-        layer._compute_prefill_context(q, SimpleNamespace(prefill=prefill))
+        MultiHeadLatentAttention._compute_prefill_context(
+            layer, q, SimpleNamespace(prefill=prefill)
+        )
 
 
 # --------------------------------------------------------------------------

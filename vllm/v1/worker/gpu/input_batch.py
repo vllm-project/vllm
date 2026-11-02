@@ -14,6 +14,10 @@ from vllm.utils.math_utils import cdiv
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.attn_utils import FastPrefillBatchMetadata
     from vllm.v1.worker.gpu.block_table import BlockTables
+    from vllm.v1.worker.gpu.pcp_manager import PCPBatchMetadata
+    from vllm.v1.worker.gpu.spec_decode.adaptive_verification import (
+        AdmittedDraftCounts,
+    )
 
 
 class InputBuffers:
@@ -115,13 +119,17 @@ class InputBatch:
     # (cudagraph capture) batches, which run the KV-sharing layers in full.
     fast_prefill: "FastPrefillBatchMetadata | None" = None
 
-    # [num_reqs] set only under PCP+DCP (see CommonAttentionMetadata).
-    dcp_local_seq_lens_cpu_upper_bound: torch.Tensor | None = None
+    # Set only on a PCP rank-local batch.
+    pcp: "PCPBatchMetadata | None" = None
 
     # [num_reqs] prefilling rows that schedule one new prompt token (excluding
     # drafts) over existing context and so compute exactly like decodes.
     # None if there are no prefills.
     prefill_runs_as_decode_np: np.ndarray | None = None
+
+    # [num_reqs] admitted draft counts in flight to the host. Set only under
+    # adaptive verification with batch-sharded sampling, when the budget binds.
+    num_admitted_draft_tokens: "AdmittedDraftCounts | None" = None
 
     @classmethod
     def make_dummy(
@@ -569,12 +577,22 @@ def _post_update_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     total_len_ptr,
+    draft_tokens_ptr,
+    draft_tokens_out_ptr,
+    num_draft_tokens,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
     if req_state_idx < 0:
         # Filter rows with negative index entries.
         return
+
+    if draft_tokens_ptr is not None:
+        for i in range(num_draft_tokens):
+            token_id = tl.load(draft_tokens_ptr + req_id * num_draft_tokens + i)
+            tl.store(
+                draft_tokens_out_ptr + req_state_idx * num_draft_tokens + i, token_id
+            )
 
     total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
@@ -636,8 +654,17 @@ def post_update(
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
     total_len: torch.Tensor,
+    # [num_reqs, num_speculative_steps], contiguous
+    draft_tokens: torch.Tensor | None = None,
+    # [max_num_reqs, num_speculative_steps], contiguous; required with draft_tokens
+    draft_tokens_out: torch.Tensor | None = None,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
+    if draft_tokens is not None:
+        # The kernel uses num_speculative_steps as the row stride of both.
+        assert draft_tokens_out is not None
+        assert draft_tokens.shape[1] == draft_tokens_out.shape[1]
+        assert draft_tokens.is_contiguous() and draft_tokens_out.is_contiguous()
     _post_update_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
@@ -652,6 +679,9 @@ def post_update(
         all_token_ids,
         all_token_ids.stride(0),
         total_len,
+        draft_tokens,
+        draft_tokens_out,
+        draft_tokens.shape[1] if draft_tokens is not None else 0,
         num_warps=1,
     )
 

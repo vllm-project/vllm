@@ -27,6 +27,7 @@ from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
 
 _EOM = "<|eom|>"
 _EOT = "<|eot|>"
+_TRAILING_RECIPIENT_RE = re.compile(r"to=(?P<recipient>[^\s<]+)\s*$")
 _FUNCTION_CALLS_OPEN = "<atem:function_calls>"
 _REASONING_OPEN = "to=self<|message|>"
 _ASSISTANT_TURN_OPEN = "<|start|>assistant"
@@ -157,6 +158,7 @@ class MuseReasoningParser(ReasoningParser):
         self._emitted_reasoning: str = ""
         self._emitted_content: str = ""
         self._tool_handoff_done: bool = False
+        self._marker_ids: tuple[int | None, set[int]] | None = None
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
@@ -196,6 +198,33 @@ class MuseReasoningParser(ReasoningParser):
         # Content-id slicing is unreliable for multi-token markers; the serving
         # path uses extract_reasoning() for the final split.
         return []
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count reasoning-body tokens, excluding header and marker tokens."""
+        if self._glimmer_compat:
+            return super().count_reasoning_tokens(token_ids)
+        if self._marker_ids is None:
+            vocab = self.vocab
+            boundaries = {vocab[m] for m in (_EOM, _EOT, "<|start|>") if m in vocab}
+            self._marker_ids = (vocab.get("<|message|>"), boundaries)
+        message_id, boundary_ids = self._marker_ids
+
+        count = 0
+        header_start = 0
+        in_reasoning = False
+        for i, token_id in enumerate(token_ids):
+            if token_id == message_id:
+                header = self.model_tokenizer.decode(list(token_ids[header_start:i]))
+                match = _TRAILING_RECIPIENT_RE.search(header)
+                recipient = match.group("recipient") if match else None
+                in_reasoning = recipient in (None, "self")
+                header_start = i + 1
+            elif token_id in boundary_ids:
+                in_reasoning = False
+                header_start = i + 1
+            elif in_reasoning:
+                count += 1
+        return count
 
     @classmethod
     def _scoped_turn(cls, text: str) -> str:

@@ -17,6 +17,27 @@ available to generate structured outputs.
     - `structural_tag` -> `{"structured_outputs": {"structural_tag": ...}}` or `StructuredOutputsParams(structural_tag=...)`
     - `guided_decoding_backend` -> Remove this field from your request
 
+## Migrating from LM Format Enforcer
+
+!!! warning
+    The `lm-format-enforcer` structured outputs backend is deprecated starting
+    in v0.33.0. It remains usable with a warning in v0.33.0, will require an
+    explicit opt-in in v0.34.0, and will be removed in v0.35.0.
+
+For online serving, replace
+`--structured-outputs-config.backend lm-format-enforcer` with
+`--structured-outputs-config.backend auto`, or remove the option to use the
+default. For offline inference, replace
+`structured_outputs_config={"backend": "lm-format-enforcer"}` with
+`structured_outputs_config={"backend": "auto"}` when constructing `LLM`.
+You can also explicitly select `xgrammar` or `guidance`.
+
+Validate your existing JSON schemas, regex patterns, and generated outputs with
+the replacement backend before migrating. Backend support and formatting can
+differ: in particular, LM Format Enforcer uses Python-style regex syntax, while
+XGrammar and Guidance use Rust-style regex syntax. Changing backends can change
+which tokens are allowed and therefore the generated output.
+
 ## Online Serving (OpenAI API)
 
 You can generate structured outputs using the OpenAI's [Completions](https://platform.openai.com/docs/api-reference/completions) and [Chat](https://platform.openai.com/docs/api-reference/chat) API.

@@ -10,6 +10,9 @@ import pytest
 import regex as re
 from mistral_common.protocol.instruct.messages import AssistantMessage
 from mistral_common.protocol.instruct.request import InstructRequest
+from mistral_common.protocol.instruct.request import (
+    ResponseFormats as MistralResponseFormats,
+)
 from mistral_common.protocol.instruct.tool_calls import (
     FunctionCall,
     ToolCall,
@@ -38,7 +41,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
 from vllm.exceptions import VLLMValidationError
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.streaming_parser_engine import StreamingParserEngine
-from vllm.parser.mistral import _DEFAULT_JSON_SCHEMA, MistralParser, mistral_config
+from vllm.parser.mistral import MistralParser, mistral_config
 from vllm.parser.parser_manager import ParserManager
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
@@ -1814,13 +1817,19 @@ def _make_request(**kwargs) -> ChatCompletionRequest:
     return ChatCompletionRequest(**defaults)
 
 
+def _adjusted_grammar(parser: MistralToolParser, request: ChatCompletionRequest) -> str:
+    structured_outputs = parser.adjust_request(request).structured_outputs
+    assert structured_outputs is not None
+    assert isinstance(structured_outputs.grammar, str)
+    return structured_outputs.grammar
+
+
 @pytest.mark.parametrize(
-    "request_kwargs,expected_mode,expected_parallel",
+    "request_kwargs,expected_tool_choice,expected_parallel",
     [
         ({"tool_choice": "auto"}, MistralToolChoiceEnum.auto, True),
         ({"tool_choice": "none"}, MistralToolChoiceEnum.none, True),
         ({"tool_choice": "required"}, MistralToolChoiceEnum.required, True),
-        ({"tool_choice": None, "tools": None}, MistralToolChoiceEnum.auto, True),
         (
             {
                 "tool_choice": {
@@ -1848,7 +1857,6 @@ def _make_request(**kwargs) -> ChatCompletionRequest:
         "auto",
         "none",
         "required",
-        "null_tool_choice",
         "named_tool_choice",
         "parallel_false",
         "response_format_text",
@@ -1857,7 +1865,7 @@ def _make_request(**kwargs) -> ChatCompletionRequest:
 def test_adjust_request_grammar_factory(
     mistral_tool_parser: MistralToolParser,
     request_kwargs: dict,
-    expected_mode: MistralToolChoice,
+    expected_tool_choice: MistralToolChoice,
     expected_parallel: bool,
 ) -> None:
     request = _make_request(**request_kwargs)
@@ -1865,17 +1873,20 @@ def test_adjust_request_grammar_factory(
 
     with patch.object(
         factory,
-        "get_lark_from_jinja",
-        wraps=factory.get_lark_from_jinja,
-    ) as mock_get_lark:
+        "get_grammar_for_chat_request",
+        wraps=factory.get_grammar_for_chat_request,
+    ) as mock_get_grammar:
         result = mistral_tool_parser.adjust_request(request)
 
-        mock_get_lark.assert_called_once()
-        call_kwargs = mock_get_lark.call_args
+        mock_get_grammar.assert_called_once()
+        mistral_request = mock_get_grammar.call_args.kwargs["request"]
 
-        assert call_kwargs.kwargs["mode"] == expected_mode
-        assert call_kwargs.kwargs["json_schema"] is None
-        assert call_kwargs.kwargs["parallel_tool_calls"] == expected_parallel
+        assert mistral_request.tool_choice == expected_tool_choice
+        assert mistral_request.parallel_tool_calls == expected_parallel
+        assert mistral_request.response_format.type == MistralResponseFormats.text
+        if request.tools is not None:
+            assert mistral_request.tools is not None
+            assert len(mistral_request.tools) == len(request.tools)
 
     assert result.structured_outputs is not None
     assert isinstance(result.structured_outputs.grammar, str)
@@ -1975,12 +1986,17 @@ def test_adjust_request_unsupported_response_format(
 
 
 @pytest.mark.parametrize(
-    "so_kwargs,expected_json_schema",
+    "so_kwargs,expected_response_format_type,expected_custom_schema",
     [
-        ({"json_object": True}, _DEFAULT_JSON_SCHEMA),
-        ({"json": '{"type": "object"}'}, {"type": "object"}),
+        ({"json_object": True}, MistralResponseFormats.json_object, None),
+        (
+            {"json": '{"type": "object"}'},
+            MistralResponseFormats.json_schema,
+            {"type": "object"},
+        ),
         (
             {"json": {"type": "object", "properties": {"x": {"type": "integer"}}}},
+            MistralResponseFormats.json_schema,
             {"type": "object", "properties": {"x": {"type": "integer"}}},
         ),
     ],
@@ -1989,7 +2005,8 @@ def test_adjust_request_unsupported_response_format(
 def test_adjust_request_structured_outputs_generates_grammar(
     mistral_tool_parser: MistralToolParser,
     so_kwargs: dict,
-    expected_json_schema: str,
+    expected_response_format_type: MistralResponseFormats,
+    expected_custom_schema: dict | None,
 ) -> None:
     request = _make_request(
         structured_outputs=StructuredOutputsParams(**so_kwargs),
@@ -1998,13 +2015,21 @@ def test_adjust_request_structured_outputs_generates_grammar(
 
     with patch.object(
         factory,
-        "get_lark_from_jinja",
-        wraps=factory.get_lark_from_jinja,
-    ) as mock_get_lark:
+        "get_grammar_for_chat_request",
+        wraps=factory.get_grammar_for_chat_request,
+    ) as mock_get_grammar:
         result = mistral_tool_parser.adjust_request(request)
 
-        mock_get_lark.assert_called_once()
-        assert mock_get_lark.call_args.kwargs["json_schema"] == expected_json_schema
+        mock_get_grammar.assert_called_once()
+        mistral_request = mock_get_grammar.call_args.kwargs["request"]
+        assert mistral_request.response_format.type == expected_response_format_type
+        if expected_custom_schema is not None:
+            assert mistral_request.response_format.json_schema is not None
+            assert (
+                mistral_request.response_format.json_schema.custom_schema
+                == expected_custom_schema
+            )
+            assert mistral_request.response_format.json_schema.strict is True
 
     assert result.structured_outputs is not None
     assert isinstance(result.structured_outputs.grammar, str)
@@ -2024,62 +2049,127 @@ def test_adjust_request_deeply_nested_json_string_rejected(
         mistral_tool_parser.adjust_request(request)
 
 
+_RESPONSE_SCHEMA = {"type": "object", "properties": {"x": {"type": "integer"}}}
+
+
 @pytest.mark.parametrize(
-    "response_format_kwargs,expected_json_schema",
+    "response_format_kwargs,expected_response_format_type,expected_custom_schema,expected_strict",
     [
-        ({"type": "json_object"}, _DEFAULT_JSON_SCHEMA),
+        ({"type": "json_object"}, MistralResponseFormats.json_object, None, None),
+        (
+            {
+                "type": "json_schema",
+                "json_schema": {"name": "my_schema", "schema": _RESPONSE_SCHEMA},
+            },
+            MistralResponseFormats.json_schema,
+            _RESPONSE_SCHEMA,
+            False,
+        ),
         (
             {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "my_schema",
-                    "schema": {
-                        "type": "object",
-                        "properties": {"x": {"type": "integer"}},
-                    },
+                    "schema": _RESPONSE_SCHEMA,
+                    "strict": True,
                 },
             },
-            {"type": "object", "properties": {"x": {"type": "integer"}}},
+            MistralResponseFormats.json_schema,
+            _RESPONSE_SCHEMA,
+            True,
         ),
     ],
-    ids=["json_object", "json_schema_with_schema"],
+    ids=["json_object", "json_schema", "json_schema_strict"],
 )
 def test_adjust_request_response_format_generates_grammar(
     mistral_tool_parser: MistralToolParser,
     response_format_kwargs: dict,
-    expected_json_schema: str,
+    expected_response_format_type: MistralResponseFormats,
+    expected_custom_schema: dict | None,
+    expected_strict: bool | None,
 ) -> None:
+    """The client's response_format, `strict` included, reaches mistral-common
+    unchanged; the grammar then follows mistral-common's defaults."""
     request = _make_request(response_format=response_format_kwargs)
     factory = mistral_tool_parser.model_tokenizer.grammar_factory
 
     with patch.object(
         factory,
-        "get_lark_from_jinja",
-        wraps=factory.get_lark_from_jinja,
-    ) as mock_get_lark:
+        "get_grammar_for_chat_request",
+        wraps=factory.get_grammar_for_chat_request,
+    ) as mock_get_grammar:
         result = mistral_tool_parser.adjust_request(request)
 
-        mock_get_lark.assert_called_once()
-        assert mock_get_lark.call_args.kwargs["json_schema"] == expected_json_schema
+        mock_get_grammar.assert_called_once()
+        mistral_request = mock_get_grammar.call_args.kwargs["request"]
+        assert mistral_request.response_format.type == expected_response_format_type
+        if expected_custom_schema is not None:
+            json_schema = mistral_request.response_format.json_schema
+            assert json_schema is not None
+            assert json_schema.custom_schema == expected_custom_schema
+            assert json_schema.name == "my_schema"
+            assert json_schema.strict is expected_strict
 
+    assert isinstance(result, ChatCompletionRequest)
+    assert result.response_format is None
     assert result.structured_outputs is not None
     assert isinstance(result.structured_outputs.grammar, str)
     assert len(result.structured_outputs.grammar) > 0
 
 
 @pytest.mark.parametrize(
-    "tool_choice, expected_method, not_called_method",
+    "strict, schema_enforced",
+    [(None, False), (False, False), (True, True)],
+    ids=["strict_unset", "strict_false", "strict_true"],
+)
+def test_adjust_request_response_format_strict_controls_schema(
+    mistral_tool_parser: MistralToolParser,
+    strict: bool | None,
+    schema_enforced: bool,
+) -> None:
+    """mistral-common enforces a response_format schema only when `strict` is
+    true; otherwise the grammar accepts any JSON object or array."""
+    json_schema: dict = {"name": "my_schema", "schema": _RESPONSE_SCHEMA}
+    if strict is not None:
+        json_schema["strict"] = strict
+    request = _make_request(
+        tools=None,
+        tool_choice=None,
+        response_format={"type": "json_schema", "json_schema": json_schema},
+    )
+    grammar = _adjusted_grammar(mistral_tool_parser, request)
+
+    assert (f"%json {json.dumps(_RESPONSE_SCHEMA)}" in grammar) is schema_enforced
+
+
+def test_adjust_request_invalid_response_format_is_validation_error(
+    mistral_tool_parser: MistralToolParser,
+) -> None:
+    """A schema mistral-common cannot use is a client error, not a crash."""
+    request = _make_request(
+        tools=None,
+        tool_choice=None,
+        response_format={
+            "type": "json_schema",
+            "json_schema": {"name": "my_schema", "schema": {"type": 1}},
+        },
+    )
+    with pytest.raises(VLLMValidationError):
+        mistral_tool_parser.adjust_request(request)
+
+
+@pytest.mark.parametrize(
+    "tool_choice, expected_tool_choice",
     [
-        ("none", "get_lark_for_json_schema", None),
-        ("auto", "get_lark_from_jinja", "get_lark_for_json_schema"),
+        ("none", MistralToolChoiceEnum.none),
+        ("auto", MistralToolChoiceEnum.auto),
     ],
-    ids=["none_uses_json_schema_factory", "auto_uses_jinja_factory"],
+    ids=["none_with_json_schema", "auto_with_json_schema"],
 )
 def test_adjust_request_tool_choice_with_json_schema_factory_routing(
     mistral_tool_parser: MistralToolParser,
     tool_choice: str,
-    expected_method: str,
-    not_called_method: str | None,
+    expected_tool_choice: MistralToolChoice,
 ) -> None:
     request = _make_request(
         tool_choice=tool_choice,
@@ -2087,35 +2177,81 @@ def test_adjust_request_tool_choice_with_json_schema_factory_routing(
     )
     factory = mistral_tool_parser.model_tokenizer.grammar_factory
 
-    patches = {
-        expected_method: patch.object(
-            factory,
-            expected_method,
-            wraps=getattr(factory, expected_method),
-        ),
-    }
-    if not_called_method:
-        patches[not_called_method] = patch.object(
-            factory,
-            not_called_method,
-            wraps=getattr(factory, not_called_method),
+    with patch.object(
+        factory,
+        "get_grammar_for_chat_request",
+        wraps=factory.get_grammar_for_chat_request,
+    ) as mock_get_grammar:
+        result = mistral_tool_parser.adjust_request(request)
+
+        mock_get_grammar.assert_called_once()
+        mistral_request = mock_get_grammar.call_args.kwargs["request"]
+        assert mistral_request.tool_choice == expected_tool_choice
+        assert (
+            mistral_request.response_format.type == MistralResponseFormats.json_schema
         )
-
-    with patches[expected_method] as mock_expected:
-        ctx = patches[not_called_method] if not_called_method else None
-        if ctx:
-            with ctx as mock_not_called:
-                result = mistral_tool_parser.adjust_request(request)
-                mock_not_called.assert_not_called()
-        else:
-            result = mistral_tool_parser.adjust_request(request)
-
-        mock_expected.assert_called_once()
-        assert mock_expected.call_args.kwargs["json_schema"] == {"type": "object"}
+        assert mistral_request.response_format.json_schema is not None
+        assert mistral_request.response_format.json_schema.custom_schema == {
+            "type": "object"
+        }
 
     assert result.structured_outputs is not None
     assert isinstance(result.structured_outputs.grammar, str)
     assert len(result.structured_outputs.grammar) > 0
+
+
+@pytest.mark.parametrize(
+    "tool_choice, pinned_name",
+    [
+        ("required", None),
+        ({"type": "function", "function": {"name": "get_weather"}}, "get_weather"),
+    ],
+    ids=["required", "named"],
+)
+def test_adjust_request_forced_tool_call_grammar(
+    mistral_tool_parser: MistralToolParser,
+    tool_choice: str | dict,
+    pinned_name: str | None,
+) -> None:
+    """A forced tool call allows no text before the call, and a named choice
+    pins the tool name."""
+    grammar = _adjusted_grammar(
+        mistral_tool_parser, _make_request(tool_choice=tool_choice)
+    )
+
+    assert "body: fcalls\n" in grammar
+    assert "content? fcalls" not in grammar
+    if pinned_name is not None:
+        assert f'"{pinned_name}"' in grammar
+        assert '"add"' not in grammar
+
+
+def test_adjust_request_json_schema_with_tools_auto_grammar(
+    mistral_tool_parser: MistralToolParser,
+) -> None:
+    """JSON schema + tools + auto: the grammar is the schema or tool calls,
+    never free text."""
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
+    request = _make_request(
+        tool_choice="auto", structured_outputs=StructuredOutputsParams(json=schema)
+    )
+    grammar = _adjusted_grammar(mistral_tool_parser, request)
+
+    assert f"%json {json.dumps(schema)}" in grammar
+    assert "body: fcalls\n" in grammar
+    assert "content? fcalls" not in grammar
+
+
+def test_adjust_request_text_auto_no_grammar(
+    mistral_tool_parser: MistralToolParser,
+) -> None:
+    """Text response with no tools and auto tool_choice needs no grammar, so
+    the engine must not treat the request as parser-constrained."""
+    request = _make_request(tools=None, tool_choice=None)
+    result = mistral_tool_parser.adjust_request(request)
+    assert isinstance(result, ChatCompletionRequest)
+    assert result.structured_outputs is None
+    assert result._grammar_from_parser is False
 
 
 def test_grammar_from_parser_default_false() -> None:

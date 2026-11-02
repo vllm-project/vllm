@@ -48,3 +48,29 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       pytest -v -s kernels/core/test_uva.py'
+
+- label: ":intel: (BMG) XPU Sparse MLA Tests"
+  key: xpu-sparse-mla-tests
+  timeout_in_minutes: 20
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/v1/attention/backends/mla/xpu_mla_sparse.py
+    - tests/kernels/attention/test_xpu_mla_sparse.py
+    - tests/v1/attention/test_xpu_mla_sparse_backend.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      pytest -v -s
+      kernels/attention/test_xpu_mla_sparse.py
+      v1/attention/test_xpu_mla_sparse_backend.py'
