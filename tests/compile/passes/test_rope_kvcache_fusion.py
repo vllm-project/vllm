@@ -315,8 +315,8 @@ class QKRoPEStaticQKVCacheTestModel(QKRoPEKVCacheTestModel):
 # must still get the same cache from the fused op as from the unfused write.
 @pytest.mark.parametrize("interleaved_v", [False, True])
 @pytest.mark.skipif(
-    not is_aiter_found_and_supported(),
-    reason="Only test on ROCm with AITER installed and supported",
+    not (is_aiter_found_and_supported() or current_platform.is_cuda()),
+    reason="Requires CUDA or ROCm with AITER installed and supported",
 )
 def test_rope_kvcache_fusion(
     attn_backend: AttentionBackendEnum,
