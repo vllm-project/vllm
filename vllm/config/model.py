@@ -156,7 +156,8 @@ class ModelConfig:
     model: str = "Qwen/Qwen3-0.6B"
     """Name or path of the Hugging Face model to use. It is also used as the
     content for `model_name` tag in metrics output when `served_model_name` is
-    not specified."""
+    not specified. Supports `hf://owner/model` and `modelscope://owner/model`
+    independently of `VLLM_USE_MODELSCOPE`."""
     model_weights: str = ""
     """Original model weights path. Used when the model is pulled from object
     storage (e.g., RunAI) to preserve the original URI while `model` points to
@@ -170,7 +171,7 @@ class ModelConfig:
     adapt a text generation model to be used for pooling tasks."""
     tokenizer: str = None  # type: ignore[assignment]
     """Name or path of the Hugging Face tokenizer to use. If unspecified, model
-    name or path will be used."""
+    name or path will be used. Supports `hf://` and `modelscope://` prefixes."""
     tokenizer_mode: TokenizerMode | str = "auto"
     """Tokenizer mode:
 
@@ -2352,6 +2353,10 @@ def get_served_model_name(model: str, served_model_name: str | list[str] | None)
     empty list, the fallback is to use `self.model`.
     """
     if not served_model_name:
+        from vllm.transformers_utils.model_hub import parse_model_source
+
+        if reference := parse_model_source(model):
+            return reference[1]
         return model
     if isinstance(served_model_name, list):
         return served_model_name[0]

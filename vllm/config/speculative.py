@@ -453,7 +453,7 @@ class SpeculativeConfig:
     number in the draft model config if present, otherwise, it is required."""
     model: str | None = None
     """The name of the draft model, eagle head, or additional weights, if
-    provided."""
+    provided. Supports `hf://owner/model` and `modelscope://owner/model`."""
     method: SpeculativeMethod | str | None = None
     """The name of the speculative method to use. If users provide and set the
     `model` param, the speculative method type will be detected automatically
