@@ -2677,7 +2677,17 @@ def topk_hash_softplus_sqrt(
     is_padding: torch.Tensor | None = None,
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
+    num_fused_shared_experts: int = 0,
+    shared_expert_base: int = 0,
+    shared_expert_weight: float = 1.0,
 ) -> None:
+    """Softplus-sqrt biased top-k.
+
+    With ``num_fused_shared_experts > 0``, ``topk_weights``/``topk_indices``
+    must be (num_tokens, topk + n) buffers and the kernel appends the n
+    shared slots itself (constant id ``shared_expert_base + j``, constant
+    weight ``shared_expert_weight``), so the router avoids the
+    arange/full/cat append kernels."""
     torch.ops._moe_C.topk_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -2691,6 +2701,9 @@ def topk_hash_softplus_sqrt(
         is_padding,
         bias_vl,
         image_sentinel_lo,
+        num_fused_shared_experts,
+        shared_expert_base,
+        shared_expert_weight,
     )
 
 
