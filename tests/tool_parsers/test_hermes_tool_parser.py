@@ -311,6 +311,36 @@ def test_hermes_streaming_boolean_args_with_stream_interval(
     assert json.loads(args_str) == {"trigger": True}
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        '<tool_call>{"arguments": {"a": 1}, "name": "f"}</tool_call>',
+        '<tool_call>{"name": "f", "arguments": {"q": 1}, "id": "x"}</tool_call>',
+    ],
+)
+@pytest.mark.parametrize("stream_interval", [1, 3])
+def test_hermes_streaming_args_match_non_streaming_when_key_follows_args(
+    qwen_tokenizer: TokenizerLike,
+    any_chat_request: ChatCompletionRequest,
+    text: str,
+    stream_interval: int,
+) -> None:
+    """Streamed arguments must equal the non-streaming result even when a key
+    follows "arguments" in the tool call object (regression test for #65242)."""
+    non_streaming = Hermes2ProToolParser(qwen_tokenizer).extract_tool_calls(
+        text, any_chat_request
+    )
+    expected = json.loads(non_streaming.tool_calls[0].function.arguments)
+
+    parser = Hermes2ProToolParser(qwen_tokenizer)
+    deltas = _simulate_streaming(
+        qwen_tokenizer, parser, any_chat_request, text, stream_interval
+    )
+    tool_calls = [tc for d in deltas if d.tool_calls for tc in d.tool_calls]
+    args_str = "".join(get_function_delta(tc).arguments or "" for tc in tool_calls)
+    assert json.loads(args_str) == expected
+
+
 @pytest.mark.parametrize("stream_interval", [2, 3, 5])
 def test_hermes_streaming_just_forward_text_with_stream_interval(
     qwen_tokenizer: TokenizerLike,
