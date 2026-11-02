@@ -28,9 +28,19 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.quantization import QuantizationConfigArgs
 from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import NvFp4MoeBackend
+from vllm.model_executor.layers.quantization.online.base import (
+    OnlineQuantizationConfig,
+)
+from vllm.model_executor.layers.quantization.online.nvfp4 import (
+    Nvfp4OnlineMoEMethod,
+    _quantize_moe_weight_to_nvfp4,
+)
+from vllm.model_executor.offloader import UVAOffloader, set_offloader
 from vllm.models.muse_spark.common.layers import (
     MuseSpark1xRMSNorm,
     MuseSpark1xRMSNormWithInputScale,
@@ -386,6 +396,62 @@ def test_muse_spark_nvfp4_moe_numeric(dist_init, workspace_init):
     # the reference. Measured: rel_q2 ~2.3e-2, rel_full ~1.0e-1.
     assert _rel(out, ref_q2) < 5e-2
     assert _rel(out, ref_full) < 1.5e-1
+
+
+@pytest.mark.parametrize("cpu_offload", [False, True])
+@torch.inference_mode()
+def test_muse_spark_online_nvfp4_moe_numeric(cpu_offload, dist_init, workspace_init):
+    """Experts an NVFP4 checkpoint leaves in BF16 take nvfp4_per_token online
+    quantization and keep the post-expert norm.
+
+    With CPU offloading the BF16 experts are staged on the CPU.
+    """
+    quant_config = nvfp4_quant_config(exclude_modules=["moe.experts"])
+    quant_config.online_quantization_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*moe.experts*": "nvfp4_per_token"})
+    )
+    ckpt = _bf16_checkpoint()
+    if cpu_offload:
+        set_offloader(UVAOffloader(cpu_offload_max_bytes=0))
+    try:
+        router, routed, norm, vllm_config, runner = build_moe(
+            MuseSpark1xRMSNorm,
+            {name: w.to("cpu" if cpu_offload else "cuda") for name, w in ckpt.items()},
+            quant_config,
+        )
+    finally:
+        set_offloader(None)
+    method = routed.quant_method
+    assert isinstance(method, Nvfp4OnlineMoEMethod)
+    assert method.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
+    assert routed.w13_weight.is_cuda and routed.w2_weight.is_cuda
+
+    x, logits = _inputs(1)
+    out = run_moe(runner, vllm_config, x, logits)
+    assert out.shape == (M, K) and out.dtype == torch.bfloat16
+
+    def quantized(weight: torch.Tensor) -> torch.Tensor:
+        q, sf, s2 = _quantize_moe_weight_to_nvfp4(weight)
+        return torch.stack([_dequant(q[e], sf[e], 1.0 / s2[e]) for e in range(E)])
+
+    # The reference uses the exact weights the experts run.
+    w13, w2 = quantized(ckpt["w13_weight"]), quantized(ckpt["w2_weight"])
+    topk_weights, topk_ids = router._compute_routing(x, logits, None)
+    with set_current_vllm_config(vllm_config):
+        ref = swiglu_moe_ref(x, w13, w2, topk_weights, topk_ids, norm.forward_native)
+        unnormed = swiglu_moe_ref(x, w13, w2, topk_weights, topk_ids, lambda y: y)
+    # Per-token NVFP4 activations are the only error left.
+    assert _rel(out, ref) < 2e-1
+    assert _rel(out, unnormed) > 5e-1
+
+
+def test_muse_spark_rejects_unsupported_online_moe(dist_init, workspace_init):
+    """Experts without the post-GEMM2 hook would silently skip the norm."""
+    quant_config = OnlineQuantizationConfig(
+        QuantizationConfigArgs(targets={"*moe.experts*": "fp8_per_tensor"})
+    )
+    with pytest.raises(NotImplementedError, match="nvfp4_per_token"):
+        build_moe(MuseSpark1xRMSNorm, _bf16_checkpoint(), quant_config)
 
 
 @torch.inference_mode()

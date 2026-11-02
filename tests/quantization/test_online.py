@@ -2979,11 +2979,16 @@ def test_online_int8_moe_w2_scale_matches_unsharded(monkeypatch) -> None:
     ),
     reason="NVFP4 weight quantization needs a Blackwell (SM100) GPU.",
 )
-def test_online_nvfp4_quantizes_original_expert_weights() -> None:
+@pytest.mark.parametrize("staging_device", ["cuda", "cpu"])
+def test_online_nvfp4_quantizes_original_expert_weights(staging_device: str) -> None:
+    """CPU-staged experts (CPU weight offloading) quantize on the GPU."""
     torch.manual_seed(0)
     weight = torch.randn(2, 32, 32, device="cuda", dtype=torch.bfloat16)
 
-    quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(weight)
+    quantized, block_scale, global_decode_scale = _quantize_moe_weight_to_nvfp4(
+        weight.to(staging_device)
+    )
+    assert quantized.is_cuda and block_scale.is_cuda and global_decode_scale.is_cuda
     global_encode_scale = 1.0 / global_decode_scale
     expected = [
         scaled_fp4_quant(

@@ -16,6 +16,7 @@ from vllm.config import (
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
+from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseMoERunner,
     MusePostExpertFinalize,
@@ -29,12 +30,12 @@ ROUTE_SCALE = 1.0
 DIVISION_EPS = 1e-15
 
 
-def nvfp4_quant_config() -> ModelOptNvFp4Config:
+def nvfp4_quant_config(exclude_modules: list[str] | None = None) -> ModelOptNvFp4Config:
     return ModelOptNvFp4Config(
         quant_method="NVFP4",
         is_checkpoint_nvfp4_serialized=True,
         kv_cache_quant_algo=None,
-        exclude_modules=[],
+        exclude_modules=exclude_modules or [],
         group_size=16,
     )
 
@@ -55,7 +56,7 @@ def make_runner(
         parallel_config=ParallelConfig(),
         kernel_config=KernelConfig(moe_backend="auto"),
     )
-    with set_current_vllm_config(vllm_config):
+    with set_current_vllm_config(vllm_config), torch.device("cuda"):
         router = MuseSpark1xRouter(
             top_k=top_k,
             num_experts=num_experts,
@@ -81,11 +82,14 @@ def make_runner(
             runner_cls=MuseMoERunner,
             runner_args={"post_expert_norm": norm},
         )
-    runner.cuda()
     routed = runner.routed_experts
     loaded = list(routed.load_weights(list(ckpt.items())))
     assert len(loaded) == len(ckpt)
+    # The loader's order: online layers, then quant methods, then modules.
+    if routed.quant_method.uses_meta_device:
+        finalize_layerwise_processing(runner, vllm_config.model_config)
     routed.quant_method.process_weights_after_loading(routed)
+    runner.process_weights_after_loading()
     moe_kernel = routed.quant_method.moe_kernel
     assert moe_kernel is not None
     experts = moe_kernel.fused_experts

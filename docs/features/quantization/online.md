@@ -181,6 +181,15 @@ vllm serve amd/Qwen3.5-35B-A3B-MXFP4 \
 
 adds MXFP8 quantization to the dense linear layers of a Quark checkpoint where only MOE experts are quantized.
 
+Similarly, the ModelOpt NVFP4 checkpoint of Muse Spark Open keeps the routed experts of layers 0 and 61 in BF16 (24 GiB each). On Blackwell (SM100) GPUs, this quantizes them to NVFP4 with per-token activation scales, so all MoE layers run the FlashInfer TRT-LLM NVFP4 MoE and the weights shrink by about 34 GiB:
+
+```bash
+vllm serve meta-models/Muse-Spark-Open-816B-A42B-NVFP4 \
+  --quantization-config '{"targets":{"*layers.0.feed_forward.experts*":"nvfp4_per_token","*layers.61.feed_forward.experts*":"nvfp4_per_token"}}'
+```
+
+With CPU weight offloading (`--cpu-offload-gb`), `nvfp4_per_token` stages the full-precision experts on the CPU and moves them to the GPU one expert at a time to quantize them. The quantized experts stay on the GPU.
+
 !!! info
     `quantization_config.ignore` is an online-only exclusion: the original `quant_method` relies solely on its own ignore implementation and on the ignored layers specified in `config.json`.
 

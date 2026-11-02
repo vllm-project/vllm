@@ -98,6 +98,10 @@ class UVAOffloader(BaseOffloader):
             # memory), so the marker is the only way to recognize those.
             if p.device.type == "cpu" or getattr(p, "_vllm_is_uva_offloaded", False):
                 continue
+            # Online quantization creates meta weights and replaces them after
+            # loading; they have no data to offload.
+            if p.is_meta:
+                continue
 
             if self.cpu_offload_params:
                 # Check if parameter belongs to the offloading set
