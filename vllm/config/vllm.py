@@ -3222,6 +3222,10 @@ class VllmConfig:
                 "it sizes the KV cache from measured memory, which "
                 "num_gpu_blocks_override overrides"
             )
+        elif cache_config.kv_cache_host_pinned:
+            unsupported = (
+                "kv_cache_host_pinned allocates its KV cache with cudaHostAlloc"
+            )
         elif self.parallel_config.enable_elastic_ep:
             unsupported = (
                 "elastic EP scale-up skips warmup and reuses the profiled KV "
