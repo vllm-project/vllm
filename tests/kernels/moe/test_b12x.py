@@ -1011,9 +1011,10 @@ def _make_b12x_moe_case(
     activation: MoEActivation = MoEActivation.SILU,
     tokens: int = 16,
     seed: int = 19,
+    intermediate_size: int = 128,
 ) -> _B12xMoeCase:
     set_random_seed(seed)
-    num_experts, hidden_size, intermediate_size = 4, 512, 128
+    num_experts, hidden_size = 4, 512
     dtype = torch.bfloat16
     hidden_states = torch.randn((tokens, hidden_size), device="cuda", dtype=dtype) / 10
     w1_rows = 2 * intermediate_size if activation.is_gated else intermediate_size
@@ -1355,3 +1356,37 @@ def test_b12x_block_quant_relu2_moe_graph(codec, tokens, workspace_init):
             )
             assert cosine >= 0.999 and relative_l2 <= 0.01
         graph.reset()
+
+
+@pytest.mark.skipif(not _has_b12x_moe(), reason="requires b12x MoE on SM120")
+@torch.inference_mode()
+def test_b12x_mxfp4_w4a8_compact_n64_runs(workspace_init) -> None:
+    # An intermediate size of 192 is 64 modulo 128, so b12x repacks the weights
+    # to compact N64 and must execute them through the prepared native path.
+    with set_current_vllm_config(
+        VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
+    ):
+        case = _make_b12x_moe_case("mxfp4", "mxfp8", intermediate_size=192)
+        reference = torch_moe(
+            case.hidden_states,
+            case.w1_ref,
+            case.w2_ref,
+            case.score,
+            case.topk,
+            activation=case.activation,
+        )
+        output = _run_b12x_moe(
+            case.hidden_states,
+            case.w1,
+            case.w2,
+            case.score,
+            case.topk,
+            case.activation,
+            case.quant_config,
+        )
+
+    torch.testing.assert_close(output, reference, atol=2e-1, rtol=2e-1)
+    cosine = torch.nn.functional.cosine_similarity(
+        output.flatten().float(), reference.flatten().float(), dim=0
+    )
+    assert cosine > 0.99

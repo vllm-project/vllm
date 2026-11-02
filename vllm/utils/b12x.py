@@ -44,6 +44,7 @@ _B12X_SUBMODULES = {
         "b12x.gemm.mxfp8_linear",
         "b12x.gemm.tensor_fp8_linear",
         "b12x.moe.fused_moe",
+        "b12x.preparation",
     )
 }
 
@@ -75,6 +76,10 @@ def get_b12x_tensor_fp8_linear() -> ModuleType | None:
 
 def get_b12x_fused_moe() -> ModuleType | None:
     return _get_submodule("b12x.moe.fused_moe")
+
+
+def get_b12x_preparation() -> ModuleType | None:
+    return _get_submodule("b12x.preparation")
 
 
 def get_b12x_paged_attention() -> ModuleType | None:

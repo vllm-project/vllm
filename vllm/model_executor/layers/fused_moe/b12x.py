@@ -3,6 +3,7 @@
 """b12x modular tensor-parallel fused MoE backend."""
 
 from collections.abc import Iterable
+from dataclasses import replace
 from typing import Any
 
 import torch
@@ -30,6 +31,7 @@ from vllm.utils.b12x import (
     B12X_BLOCK_CODECS,
     B12xWarmupUnit,
     get_b12x_fused_moe,
+    get_b12x_preparation,
     reuse_packed_weight_storage,
 )
 
@@ -108,19 +110,24 @@ def _run_b12x_moe_plan(
     topk_ids: torch.Tensor,
     output: torch.Tensor,
     unit_scale_contract: bool,
+    native: bool = False,
 ) -> None:
     fused_moe = _require_b12x_fused_moe()
 
+    kwargs = (
+        {}
+        if native
+        else {"experts": prepared, "unit_scale_contract": unit_scale_contract}
+    )
     binding = fused_moe.bind(
         plan,
-        scratch=scratch,
+        scratch=(scratch,) if native else scratch,
         a=hidden_states,
-        experts=prepared,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
         output=output,
         input_scales_static=True,
-        unit_scale_contract=unit_scale_contract,
+        **kwargs,
     )
     fused_moe.run(binding=binding)
 
@@ -237,6 +244,8 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                 f"unsupported b12x MoE quantization scheme {scheme}"
             ) from exc
         self._prepared_experts: Any | None = None
+        self._native_experts: Any | None = None
+        self._preparation_session: Any | None = None
         self._source_parameters_released = False
         self._unit_scales: dict[torch.device, torch.Tensor] = {}
         self._plans: dict[tuple[int, int, MoEActivation, bool], Any] = {}
@@ -306,6 +315,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             raise RuntimeError(
                 "b12x MoE weights must be prepared before CUDA graph capture"
             )
+        self._native_experts = None
         if self._source_format in B12X_BLOCK_CODECS:
             fused_moe = _require_b12x_fused_moe()
             block_size, _ = B12X_BLOCK_CODECS[self._source_format]
@@ -358,6 +368,54 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         else:
             a1_gscale = unit_scale
             a2_gscale = unit_scale
+
+        # W4A8 MXFP4 with an intermediate size of 64 modulo 128 is repacked to
+        # compact N64 weights. Their micro plans need the launchers of the
+        # prepared API, which the legacy plan/bind path cannot build.
+        compact_n64 = (
+            quant_mode == "w4a8_mx"
+            and hasattr(fused_moe, "ExecutionCapacity")
+            and intermediate_size % 128 == 64
+        )
+        if compact_n64:
+            limit, alpha, beta = self._swiglu_params(activation)
+            prepared_plan = fused_moe.plan_weights(
+                source=fused_moe.PackedSource(
+                    format=self._source_format, w13_layout=self._w13_layout
+                ),
+                activation=fused_moe.ActivationSpec(
+                    mode="a8",
+                    nonlinearity=_b12x_activation_name(activation),
+                    io_dtype=params_dtype,
+                    swiglu_limit=limit,
+                    swiglu_alpha=alpha,
+                    swiglu_beta=beta,
+                ),
+                geometry=fused_moe.MoEGeometry(
+                    num_experts=num_experts,
+                    hidden_size=hidden_size,
+                    intermediate_size=intermediate_size,
+                ),
+            )
+            owner = fused_moe.prepare_weights(
+                plan=prepared_plan,
+                weights=fused_moe.PackedWeights(
+                    w13=w1,
+                    w2=w2,
+                    w13_block_scales=self.w1_scale,
+                    w2_block_scales=self.w2_scale,
+                    w13_global_scales=w1_global_scale,
+                    w2_global_scales=w2_global_scale,
+                ),
+            )
+            if owner._impl.representation.value.n64_repack:
+                self._native_experts = owner
+            else:
+                logger.debug(
+                    "b12x compact W4A8 geometry was not N64-repacked; "
+                    "using the legacy execution path"
+                )
+            return owner._impl
 
         weight_plan = fused_moe.plan_weights(
             quant_modes=quant_mode,
@@ -413,7 +471,12 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         previous = getattr(layer, "_b12x_prepared_experts", None)
         prepared = reuse_packed_weight_storage(previous, prepared)
         if prepared is not previous:
+            if self._preparation_session is not None:
+                self._preparation_session.close()
+                self._preparation_session = None
             self._plans.clear()
+        if self._native_experts is not None:
+            self._native_experts = replace(self._native_experts, _impl=prepared)
         self._prepared_experts = prepared
         layer._b12x_prepared_experts = prepared
         return prepared
@@ -433,6 +496,13 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             params_dtype=self.moe_config.in_dtype,
         )
         prepared = self._reuse_prepared_storage(layer, prepared)
+        if self._native_experts is not None:
+            self._plan(
+                tokens=1,
+                topk=self.moe_config.experts_per_token,
+                activation=layer.activation,
+                apply_router_weight_on_input=self._apply_router_weight_on_input,
+            )
         if prepared.plan.discards_source_parameters:
             self._release_source_parameters(layer)
         layer.b12x_warmup_provider = self
@@ -595,17 +665,59 @@ class B12xExperts(mk.FusedMoEExpertsModular):
     ) -> Any:
         fused_moe = _require_b12x_fused_moe()
 
-        key = (
-            max(int(tokens), 1),
-            int(topk),
-            activation,
-            bool(apply_router_weight_on_input),
-        )
+        capacity = max(int(tokens), 1)
+        if self._native_experts is not None:
+            maximum = self.moe_config.max_num_tokens
+            if capacity > maximum:
+                raise ValueError("b12x MoE token count exceeds prepared capacity")
+            capacity = min(1 << (capacity - 1).bit_length(), maximum)
+        key = (capacity, int(topk), activation, bool(apply_router_weight_on_input))
         plan = self._plans.get(key)
         if plan is not None:
             return plan
         if _is_current_stream_capturing():
             raise RuntimeError("b12x MoE plans must be created before CUDA capture")
+
+        if self._native_experts is not None:
+            preparation = get_b12x_preparation()
+            assert preparation is not None
+
+            maximum = self.moe_config.max_num_tokens
+            capacities = sorted(
+                {maximum, *(1 << i for i in range(maximum.bit_length()))}
+            )
+            plans = {
+                count: fused_moe.plan_execution(
+                    experts=self._native_experts,
+                    capacity=fused_moe.ExecutionCapacity(
+                        max_tokens=count, top_k=key[1], route_num_experts=0
+                    ),
+                    routing=fused_moe.RoutingSpec(apply_router_weight_on_input=key[3]),
+                )
+                for count in capacities
+            }
+            if self._preparation_session is None:
+                self._preparation_session = preparation.PreparationSession(
+                    device=self._native_experts.device,
+                    autotune=False,
+                    compile_workers=0,
+                )
+            result = self._preparation_session.prepare(
+                tuple(
+                    plan.request(
+                        name=f"mxfp4-m{count}-k{key[1]}",
+                        prepare_call=lambda state: preparation.PreparedCall(
+                            run=lambda: None
+                        ),
+                    )
+                    for count, plan in plans.items()
+                )
+            )
+            result.close()
+            self._plans.update(
+                ((count, *key[1:]), plan) for count, plan in plans.items()
+            )
+            return self._plans[key]
 
         limit, alpha, beta = self._swiglu_params(activation)
         prepared = self._prepared()
@@ -651,6 +763,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                 self._quant_mode,
                 self._source_format,
                 self._w13_layout,
+                self._native_experts is not None,
                 int(prepared.num_experts),
                 int(prepared.hidden_size),
                 int(prepared.intermediate_size),
@@ -681,6 +794,15 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         device = prepared.w1_fp4.device
         launch_tokens: dict[tuple[Any, ...], int] = {}
         for tokens in sorted({int(count) for count in token_counts if int(count) > 0}):
+            if self._native_experts is not None:
+                self._plan(
+                    tokens=tokens,
+                    topk=topk,
+                    activation=activation,
+                    apply_router_weight_on_input=apply_router_weight_on_input,
+                )
+                launch_tokens[(tokens,)] = tokens
+                continue
             execution_plan = _b12x_moe_execution_plan(
                 tokens=tokens,
                 topk=topk,
@@ -734,6 +856,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                 topk_ids=topk_ids,
                 output=output,
                 unit_scale_contract=self._quant_mode == "w4a16",
+                native=self._native_experts is not None,
             )
         return len(launch_tokens)
 
@@ -807,6 +930,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             topk_ids=topk_ids,
             output=output,
             unit_scale_contract=self._quant_mode == "w4a16",
+            native=self._native_experts is not None,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
