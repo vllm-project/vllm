@@ -6,7 +6,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import torch
@@ -52,11 +51,6 @@ class IndexerCaptureSource:
 
     def set_indexer_capture_sink(self, sink: IndexerCaptureSink | None) -> None:
         self.indexer_capture = sink
-
-
-@dataclass
-class IndexerSnapshot:
-    rows: torch.Tensor
 
 
 def _get_indexer_capture_sources(
@@ -142,11 +136,11 @@ class IndexerCapturer:
             device=config.device_config.device,
         )
 
-    def snapshot(self, num_rows: int) -> IndexerSnapshot:
+    def snapshot(self, num_rows: int) -> torch.Tensor:
         """Copy the forwarded rows into a snapshot owned by the caller."""
         assert self._output_rank, "Indexer snapshots require the output rank"
         assert 0 <= num_rows <= len(self.device_buffer)
-        return IndexerSnapshot(self.device_buffer[:num_rows].clone())
+        return self.device_buffer[:num_rows].clone()
 
     def close(self) -> None:
         """Unbind this capturer's sinks and release its buffers."""

@@ -88,9 +88,7 @@ def test_binding_maps_sparse_layer_ids_before_shared_topk_is_overwritten(
     second(shared)
     shared.zero_()
     snapshot = capture.snapshot(2)
-    assert torch.equal(
-        snapshot.rows, torch.tensor([[[3, -1], [13, 9]], [[4, 2], [14, 12]]])
-    )
+    assert torch.equal(snapshot, torch.tensor([[[3, -1], [13, 9]], [[4, 2], [14, 12]]]))
     capture.close()
 
 
@@ -109,9 +107,9 @@ def test_capture_snapshots_survive_shared_buffer_reuse(capture_config):
     shared.add_(20)
     second(shared)
     assert torch.equal(
-        snapshots[0].rows, torch.tensor([[[3, 1], [13, 11]], [[4, 2], [14, 12]]])
+        snapshots[0], torch.tensor([[[3, 1], [13, 11]], [[4, 2], [14, 12]]])
     )
-    assert capture.snapshot(2).rows.tolist() == [
+    assert capture.snapshot(2).tolist() == [
         [[0, 0], [20, 20]],
         [[0, 0], [20, 20]],
     ]
@@ -126,8 +124,8 @@ def test_snapshot_is_independent_of_the_capture_buffer(capture_config):
 
     capture.device_buffer.fill_(123)
 
-    assert snapshot.rows.tolist() == [[[7, 7]], [[7, 7]]]
-    assert snapshot.rows.data_ptr() != capture.device_buffer.data_ptr()
+    assert snapshot.tolist() == [[[7, 7]], [[7, 7]]]
+    assert snapshot.data_ptr() != capture.device_buffer.data_ptr()
     capture.close()
 
 
@@ -139,11 +137,11 @@ def test_snapshots_of_different_sizes_stay_independent(capture_config):
 
     capture.device_buffer.zero_()
 
-    assert small.rows.shape == (1, 1, 2)
-    assert large.rows.shape == (2, 1, 2)
-    assert small.rows.tolist() == [[[0, 0]]]
-    assert large.rows[:, 0, 0].tolist() == [0, 1]
-    assert small.rows.data_ptr() != large.rows.data_ptr()
+    assert small.shape == (1, 1, 2)
+    assert large.shape == (2, 1, 2)
+    assert small.tolist() == [[[0, 0]]]
+    assert large[:, 0, 0].tolist() == [0, 1]
+    assert small.data_ptr() != large.data_ptr()
     capture.close()
 
 
@@ -160,7 +158,7 @@ def test_close_unbinds_sources_and_preserves_later_binding(capture_config):
     assert rebound.namespace == capture.namespace
     capture.close()
     source(torch.tensor([[7, 1]], dtype=torch.int32))
-    assert torch.equal(rebound.snapshot(1).rows, torch.tensor([[[7, 1]]]))
+    assert torch.equal(rebound.snapshot(1), torch.tensor([[[7, 1]]]))
     rebound.close()
     rebound.close()
     assert source.indexer_capture is None

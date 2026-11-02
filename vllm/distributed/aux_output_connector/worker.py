@@ -243,7 +243,7 @@ class AuxOutputWorkerConnector:
                 if self._routed_experts_capturer
                 else None
             ),
-            indexer_snapshot=snapshot.rows if snapshot else None,
+            indexer_snapshot=snapshot,
         )
         with self._lock:
             assert len(self._pending_outputs) < self._max_concurrent_batches, (

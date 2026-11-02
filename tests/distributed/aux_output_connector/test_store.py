@@ -441,10 +441,7 @@ def _prepare_output(
             torch.from_numpy(rows)
         )
     if worker._indexer is not None:
-        worker._indexer.snapshot = lambda n: SimpleNamespace(
-            rows=torch.from_numpy(indexer_rows[:n].copy()),
-            slot=0,
-        )
+        worker._indexer.snapshot = lambda n: torch.from_numpy(indexer_rows[:n].copy())
     metadata = step.metadata if isinstance(step, _WorkerStep) else step
     worker.begin_step(metadata)
     if query_start_loc is None:
@@ -2247,9 +2244,7 @@ class _SnapshotIndexer:
     namespace = "fake-indexer"
 
     def snapshot(self, num_rows):
-        return SimpleNamespace(
-            rows=torch.full((num_rows, 2, 2), num_rows, dtype=torch.int32)
-        )
+        return torch.full((num_rows, 2, 2), num_rows, dtype=torch.int32)
 
     def close(self):
         pass
