@@ -149,7 +149,7 @@ firewall configuration instructions.
 
 ### Overview
 
-The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for endpoints under the `/v1`, `/v2`, `/inference`, and `/cohere` path prefixes**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
+The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for endpoints under the `/v1`, `/v2`, `/inference`, and `/cohere` path prefixes**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement. API keys are not enforced on gRPC at all; see [gRPC Interface](#grpc-interface).
 
 **Important:** Do not rely exclusively on `--api-key` for securing access to vLLM. Additional security measures are required for production deployments.
 
@@ -395,9 +395,14 @@ vLLM supports loading out-of-tree HTTP routes via the `vllm.endpoint_plugins` en
 
 ## gRPC Interface
 
-vLLM provides optional gRPC `Inference` and `Control` services on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+vLLM can serve gRPC in two ways. When neither is enabled, no gRPC server is started.
+
+- **Rust frontend gRPC services** (`--grpc-port`, requires `VLLM_USE_RUST_FRONTEND=1`): optional `Inference` and `Control` services on a separate TCP port alongside the HTTP server. The gRPC listener binds to the same host address as the HTTP server.
+- **Python gRPC server** (`vllm serve --grpc`, requires `pip install vllm[grpc]`): replaces the HTTP server with the SMG `VllmEngine` service on `--host` and `--port`.
 
 **Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
+
+**`--api-key` and `VLLM_API_KEY` do not protect gRPC.** With `--grpc-port`, API keys only apply to the HTTP endpoints. `vllm serve --grpc` exits at startup when an API key is configured (`--api-key`, `api_key` in a `--config` file, or `VLLM_API_KEY`) instead of running without the authentication it was asked to enforce.
 
 ### Security Implications
 
@@ -410,7 +415,7 @@ An attacker who can reach the gRPC port can:
 
 ### Recommendations
 
-- Only enable `--grpc-port` when you have a specific need for gRPC-based inference
+- Only enable `--grpc-port` or `--grpc` when you have a specific need for gRPC-based inference
 - Ensure the gRPC port is only accessible from trusted hosts or services
 - Use firewall rules to block external access to the gRPC port
 - Consider deploying the gRPC interface on a dedicated internal network interface

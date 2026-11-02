@@ -230,6 +230,7 @@ curl http://localhost:8000/v1/models
 
 You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` to enable the server to check for API key in the header.
 You can pass multiple keys after `--api-key`, and the server will accept any of the keys passed, this can be useful for key rotation.
+API keys only apply to the HTTP server; see [gRPC Interface](../usage/security.md#grpc-interface) for gRPC.
 
 ### OpenAI Completions API with vLLM
 

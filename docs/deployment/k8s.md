@@ -425,6 +425,9 @@ containers:
 !!! note
     The gRPC health service checks the engine status on every probe. If the engine is unhealthy or the server is shutting down, the probe returns `NOT_SERVING`.
 
+!!! warning
+    The `--grpc` server does not implement authentication, so it exits at startup if an API key is configured (`--api-key`, `api_key` in `--config`, or `VLLM_API_KEY` in the container environment). Remove the key and restrict access to the gRPC port, for example with a `NetworkPolicy`. See [gRPC Interface](../usage/security.md#grpc-interface).
+
 You can also verify the health service manually with `grpcurl`:
 
 ```bash
