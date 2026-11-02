@@ -483,16 +483,21 @@ def test_failed_handshake_fails_only_its_requests(monkeypatch):
     assert worker._eager_handshaked_engines == {"prefill:0"}
 
 
-def test_failed_handshake_still_fails_the_step_for_hybrid_models(monkeypatch):
-    heads, layers = MODELS["mla_hybrid"]
+@pytest.mark.parametrize("model", ["mla_hybrid", "sliding"])
+def test_failed_handshake_still_fails_the_step_without_block_recovery(
+    model, monkeypatch
+):
+    """With several KV cache groups or recurrent state the scheduler cannot
+    recover a load error, so a failed handshake still fails the step."""
+    heads, layers = MODELS[model]
     state = _global_state(layers, heads)
-    _, (consumer,) = _ranks("mla_hybrid", 1, 1, True, LAYOUTS[0], state)
+    _, (consumer,) = _ranks(model, 1, 1, True, LAYOUTS[0], state)
     worker = consumer.worker
     worker.moriio_config = SimpleNamespace(backend="xgmi")
     _fail_handshakes_to(worker, "prefill", monkeypatch)
     metadata = MoRIIOConnectorMetadata()
     metadata.reqs_to_recv["req"] = _meta(["full"], 1)
-    with pytest.raises(HandshakeError, match="HMA"):
+    with pytest.raises(HandshakeError, match="single KV cache group"):
         worker._eager_handshake_all_dp_ranks(metadata)
     worker._handshake_initiation_executor.shutdown()
 
