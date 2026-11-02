@@ -161,6 +161,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
             self.prompt_token_id_logprobs_dict = {
                 k: v.to("cpu", non_blocking=True) for k, v in token_id_logprobs.items()
             }
+            token_outputs = self.model_runner_output.token_outputs
+            self.token_outputs: dict[str, dict[str, torch.Tensor]] | None = None
+            if token_outputs:
+                self.token_outputs = {
+                    name: {k: v.to("cpu", non_blocking=True) for k, v in rows.items()}
+                    for name, rows in token_outputs.items()
+                }
             if self.pending_aux_output is not None:
                 self.pending_aux_output.enqueue_cpu_copy(
                     num_sampled=self.num_sampled_tokens_np,
@@ -202,6 +209,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output.prompt_token_id_logprobs_dict = (
             self.prompt_token_id_logprobs_dict
         )
+        if self.token_outputs is not None:
+            self.model_runner_output.token_outputs = self.token_outputs
         if self.pending_aux_output is not None:
             self.model_runner_output.aux_output_connector_output = (
                 self.pending_aux_output.process_output()

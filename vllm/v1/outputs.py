@@ -292,6 +292,11 @@ class ModelRunnerOutput:
     # req_id -> [num_scored_rows, num_token_ids] prompt_logprob_token_ids scores.
     prompt_token_id_logprobs_dict: dict[str, torch.Tensor] = field(default_factory=dict)
 
+    # entry -> req_id -> [num_logits, width]: the token outputs (see
+    # vllm/v1/token_outputs.py) of the requests that asked for them, at the rows
+    # their logits were computed from. None when none did.
+    token_outputs: dict[str, dict[str, torch.Tensor]] | None = None
+
     # [num_reqs, hidden_size]
     pooler_output: list[torch.Tensor | None] | None = None
 
