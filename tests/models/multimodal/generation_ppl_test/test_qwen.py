@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Tuple, List, Dict, Any
+from typing import Any
 
 import pytest
 
@@ -8,7 +8,7 @@ from tests.models.utils import GenerateModelInfo
 
 from .ppl_utils import vqa_ppl_test
 
-MODELS: List[Tuple[GenerateModelInfo, int, Dict[str, Any]]] = [
+MODELS: list[tuple[GenerateModelInfo, int, dict[str, Any]]] = [
     (
         GenerateModelInfo("Qwen/Qwen2-VL-2B-Instruct", hf_ppl=9.810060501098633),
         28,
