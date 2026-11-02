@@ -839,6 +839,82 @@ async def test_completion_logs_outputs_when_enabled(stream: bool):
 
 
 @pytest.mark.asyncio
+async def test_completion_stream_n_echo_logprobs_child_prefilled_later():
+    """Streaming n=2 with echo and logprobs, where child 1 starts a step after
+    child 0. Child 1's first output reaches the server merged into child 0's
+    second output, and the echo needs child 1's prompt logprobs from it."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+    serving_completion = _build_serving_completion(mock_engine)
+
+    def output(index, token_id, finish_reason=None):
+        return CompletionOutput(
+            index=index,
+            text=f"<{token_id}>",
+            token_ids=[token_id],
+            cumulative_logprob=None,
+            logprobs=[{token_id: Logprob(logprob=-0.5)}],
+            finish_reason=finish_reason,
+        )
+
+    async def mock_generate(engine_input, *args, **kwargs):
+        prompt_token_ids = engine_input["prompt_token_ids"]
+        prompt_logprobs = [None] + [
+            {token_id: Logprob(logprob=-1.0)} for token_id in prompt_token_ids[1:]
+        ]
+
+        def request_output(outputs, prompt_logprobs, finished=False):
+            return RequestOutput(
+                request_id="test-id",
+                prompt=None,
+                prompt_token_ids=prompt_token_ids,
+                prompt_logprobs=prompt_logprobs,
+                outputs=outputs,
+                finished=finished,
+            )
+
+        # Step 1: child 0's first token. Step 2: child 0's second token and
+        # child 1's first token, merged as RequestOutputCollector does. In
+        # DELTA mode prompt logprobs come only with each child's first output.
+        yield request_output([output(0, 100)], prompt_logprobs)
+        merged = request_output([output(0, 101, "length")], [])
+        merged.add(request_output([output(1, 200)], prompt_logprobs), aggregate=True)
+        yield merged
+        yield request_output([output(1, 201, "length")], [], finished=True)
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        n=2,
+        echo=True,
+        logprobs=1,
+        max_tokens=2,
+        stream=True,
+    )
+    response = await serving_completion.create_completion(request)
+    chunks = [chunk async for chunk in response]
+
+    assert chunks[-1] == "data: [DONE]\n\n"
+    payloads = [json.loads(chunk.removeprefix("data: ")) for chunk in chunks[:-1]]
+    assert [p for p in payloads if "error" in p] == []
+    choices = [choice for payload in payloads for choice in payload["choices"]]
+    first_chunks: dict[int, dict[str, Any]] = {}
+    for choice in choices:
+        first_chunks.setdefault(choice["index"], choice)
+    assert set(first_chunks) == {0, 1}
+    for choice in first_chunks.values():
+        assert choice["text"].startswith("Test prompt")
+        assert len(choice["logprobs"]["tokens"]) == len(
+            choice["logprobs"]["token_logprobs"]
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("include_usage", [False, True])
 async def test_completion_error_stream(include_usage: bool):
     """Test finish_reason='error' returns 500 InternalServerError (streaming)."""
