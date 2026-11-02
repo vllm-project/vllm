@@ -984,13 +984,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
-        # Compute per-phase Q dtype.  On SM90 (XQA decode), the prefill and
-        # decode phases require different Q dtypes when the KV cache is FP8
-        # (FP8-Q for the FI native prefill, BF16/FP16-Q for XQA decode),
-        # so both values must be tracked independently.
-        self.q_data_type_prefill = self.get_q_data_type(is_prefill=True)
-        self.q_data_type_decode = self.get_q_data_type(is_prefill=False)
-
         # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
         # must be selected statically for FULL cudagraph capture.
         # XQA reads an NVFP4 cache only on SM12x; SM90 decodes it with fa2.
@@ -1041,6 +1034,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.use_xqa = (
             self.flashinfer_trtllm_api_decode_kernel == FlashInferDecodeKernel.XQA
         )
+        # Resolve per-phase query dtypes after all decode fallbacks.
+        self.q_data_type_prefill = self.get_q_data_type(is_prefill=True)
+        self.q_data_type_decode = self.get_q_data_type(is_prefill=False)
         self.use_trtllm_gen_varlen_decode = self._uses_trtllm_gen_varlen_decode(
             vllm_config, self.flashinfer_trtllm_api_decode_kernel, self.use_dcp
         )
@@ -1156,9 +1152,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # if cache_config requests a quantized dtype globally.
         cache_dtype = self.cache_dtype
 
-        # On SM90/SM12x, XQA decode requires BF16/FP16-Q even with FP8 KV cache.
-        # FI native prefill on SM90 still uses FP8-Q in that case; SM12x prefill
-        # is fa2-only and keeps the model dtype (handled below).
+        # NVFP4 XQA requires matching query/output dtypes. Native decode keeps
+        # the dtype required by its FA2 or TRTLLM path after fallbacks.
+        if cache_dtype.startswith("nvfp4") and not is_prefill and self.use_xqa:
+            return self.model_config.dtype
+
+        # On SM90/SM12x, XQA decode requires BF16/FP16-Q even with FP8 KV
+        # cache. FI native prefill on SM90 still uses FP8-Q in that case;
+        # SM12x prefill is fa2-only and keeps the model dtype (handled below).
         if (
             (
                 current_platform.is_device_capability(90)
