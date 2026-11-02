@@ -132,6 +132,20 @@ steps:
       - tests/entrypoints/launchers/api_server/test_multi_api_servers.py
       - vllm/platforms/rocm.py
 
+- label: ":nvidia: (L4) Distributed KV Offload Topology (2 GPUs)"
+  key: distributed-kv-offload-topology
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  device: l4
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - vllm/v1/kv_offload/
+  - tests/v1/distributed/test_kv_offload_topology.py
+  commands:
+  - export NCCL_CUMEM_HOST_ENABLE=0
+  - pytest -v -s v1/distributed/test_kv_offload_topology.py
+
 - label: ":nvidia: (L4) Distributed Compile + RPC"
   key: distributed-compile-rpc-tests-2-gpus
   automatic_shard: true

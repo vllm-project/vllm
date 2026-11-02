@@ -2,14 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+from dataclasses import replace
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers import GPT2Config
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
-from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
@@ -56,8 +64,7 @@ def _make_vllm_config(
     config.model_config.model = "test-model"
     config.model_config.max_model_len = 4096
     config.model_config.use_mla = False
-    # _full_attention_spec's heads at tp=1: the parallelism-agnostic gate
-    # requires the head shard to cover the model's KV heads exactly
+    # Matches _full_attention_spec's heads at tp=1.
     config.model_config.get_total_num_kv_heads.return_value = 4
     world_size = (
         tensor_parallel_size * pipeline_parallel_size * prefill_context_parallel_size
@@ -300,12 +307,10 @@ def _parallelism_agnostic(
     kv_cache_groups: list[KVCacheGroupSpec],
     *,
     canonical: bool = False,
-    v2: bool = True,
 ) -> bool:
     config = _make_vllm_config(
         extra_config={"canonical_layout": True} if canonical else None
     )
-    config.use_v2_model_runner = v2
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
@@ -1188,11 +1193,54 @@ def test_replicated_layout_parallel_gate(kwargs: dict[str, Any], case: str):
     assert not _replicated_layout(_make_mla_kv_cache_config(), **kwargs), case
 
 
-def test_parallelism_agnostic_for_single_full_attention_group():
-    # The direct (non-canonical) parallelism-agnostic layout is MRV1-only.
-    assert _parallelism_agnostic(
-        [KVCacheGroupSpec(["l0"], _full_attention_spec())], v2=False
+@pytest.fixture(scope="module")
+def _head_sharded_model_config(tmp_path_factory: pytest.TempPathFactory) -> ModelConfig:
+    model_path = tmp_path_factory.mktemp("head-sharded-gpt2")
+    GPT2Config(
+        n_embd=512,
+        n_layer=2,
+        n_head=4,
+        n_positions=128,
+        architectures=["GPT2LMHeadModel"],
+    ).save_pretrained(model_path)
+    return ModelConfig(
+        model=str(model_path),
+        max_model_len=32,
+        model_impl="transformers",
     )
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("tensor_parallel_size", [1, 2])
+@pytest.mark.parametrize("canonical", [False, True])
+def test_head_sharded_attention_requires_canonical_layout_for_portability(
+    tensor_parallel_size: int,
+    canonical: bool,
+    _head_sharded_model_config: ModelConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    config = VllmConfig(
+        model_config=_head_sharded_model_config,
+        cache_config=CacheConfig(block_size=16),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=tensor_parallel_size,
+            distributed_executor_backend="uni",
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"canonical_layout": True} if canonical else {},
+        ),
+    )
+    spec = replace(_full_attention_spec(), num_kv_heads=4 // tensor_parallel_size)
+    kv_cache_config = KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["l0", "l1"], spec)],
+    )
+    offloading_config = build_offloading_config(config, kv_cache_config)
+    assert offloading_config.parallel.is_parallelism_agnostic is canonical
 
 
 _SWA_SPEC = _swa_spec()
@@ -1217,20 +1265,6 @@ def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
         names,
         UniformTypeKVCacheSpecs(block_size=16, kv_cache_specs=dict(zip(names, specs))),
     )
-
-
-@pytest.mark.parametrize(
-    "kv_cache_groups",
-    [
-        _groups(_mla_spec(head_size=576)),
-        _groups(_SWA_SPEC),
-        _groups(_full_attention_spec(), _full_attention_spec()),
-    ],
-)
-def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
-    # The direct layout is never parallelism-agnostic on MRV2, so check the
-    # MRV1 gate.
-    assert not _parallelism_agnostic(kv_cache_groups, v2=False)
 
 
 @pytest.mark.parametrize(
@@ -1259,9 +1293,7 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     ],
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):
-    """The canonical layout certifies portability group by group; none of
-    these shapes are portable in the direct layout."""
-    assert not _parallelism_agnostic(kv_cache_groups, v2=False)
+    """The canonical layout certifies portability group by group."""
     assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
 
