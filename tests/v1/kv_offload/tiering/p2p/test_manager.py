@@ -3008,9 +3008,10 @@ def _peer_hit(
 ) -> ReqContext:
     """Drive a consumer lookup until the producer pins key as a HIT."""
     step_end = ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+    host, port = "B", 2
     ctx = ReqContext(
         req_id="req-peer",
-        kv_transfer_params=_remote_kv_source_kv_params("B", 2, "req-peer"),
+        kv_transfer_params=_remote_kv_source_kv_params(host, port, "req-peer"),
     )
     _annotate_req_context(ctx)
     consumer.on_new_request(ctx)
@@ -3020,11 +3021,14 @@ def _peer_hit(
         if step_producer:
             with tiering.lock:
                 tiering.on_schedule_end(step_end)
-        result = consumer.lookup(key, ctx)
-        if result is LookupResult.HIT:
-            return ctx
-        assert result is LookupResult.RETRY
-        consumer.on_schedule_end(step_end)
+        # A probe before the handshake ack falls back to local prefill (MISS).
+        session = consumer._sessions.get(f"{host}:{port}")
+        if session is not None and session.ready:
+            result = consumer.lookup(key, ctx)
+            if result is LookupResult.HIT:
+                return ctx
+            assert result is LookupResult.RETRY
+            consumer.on_schedule_end(step_end)
         time.sleep(0.001)
     raise AssertionError("peer lookup did not reach HIT")
 

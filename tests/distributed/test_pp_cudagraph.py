@@ -32,7 +32,7 @@ def test_pp_cudagraph(
         # ROCm CI can hand this test a device that is still lazily
         # releasing VRAM from a previous process; wait before starting.
         wait_for_memory_to_settle(
-            threshold_ratio=1.0 - CacheConfig.gpu_memory_utilization
+            threshold_ratio=1.0 - CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
         )
 
     cudagraph_args = [

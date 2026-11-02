@@ -54,12 +54,16 @@ from vllm.utils.network_utils import make_zmq_socket
 from vllm.utils.system_utils import decorate_logs, set_process_title
 from vllm.utils.watch_dog import get_watch_dog, start_watch_dog
 from vllm.v1.attention.backends.utils import resolve_kv_cache_layout
+from vllm.v1.core import kv_cache_utils
 from vllm.v1.core.kv_cache_planning import (
+    align_extensible_kv_cache_capacity,
+    finalize_extensible_kv_cache,
     get_global_kv_cache_groups,
     get_kv_cache_configs,
 )
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
+    frontend_block_hashes,
     generate_scheduler_kv_cache_config,
     get_request_block_hasher,
     init_none_hash,
@@ -81,6 +85,7 @@ from vllm.v1.engine import (
     EngineCoreRequestType,
     FinishReason,
     PauseMode,
+    PrefixHashConfig,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -127,6 +132,7 @@ class EngineCore:
     # object.__new__.
     _checkpoint_state = CheckpointState.RUNNING
     _checkpoint_error: str | None = None
+    _kv_cache_reclaimable = False
 
     def __init__(
         self,
@@ -224,6 +230,8 @@ class EngineCore:
         self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
 
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
+        # Lets frontends hash prompt blocks; see EngineCoreRequest.block_hashes.
+        self.prefix_hash_config: PrefixHashConfig | None = None
         if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
@@ -234,6 +242,12 @@ class EngineCore:
                 hash_block_size,
                 caching_hash_fn,
                 vllm_config.num_hash_lookahead_tokens,
+            )
+            self.prefix_hash_config = PrefixHashConfig(
+                hash_algo=vllm_config.cache_config.prefix_caching_hash_algo,
+                hash_block_size=hash_block_size,
+                none_hash=kv_cache_utils.NONE_HASH,
+                num_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             )
 
         self.step_fn = (
@@ -290,6 +304,12 @@ class EngineCore:
         # capture full cudagraphs initialize a minimal KV cache during it.
         # Attention-free models resolve the default so layout reads never precede
         # resolution.
+        if vllm_config.cache_config.enable_extensible_kv_cache:
+            # Disable it, everywhere, where it cannot be used.
+            executor = self.model_executor
+            reason = executor.extensible_kv_cache_unsupported_reason(kv_cache_specs)
+            if reason is not None:
+                executor.disable_extensible_kv_cache(reason)
         layout = resolve_kv_cache_layout(
             vllm_config,
             self.model_executor.get_supported_kv_cache_layouts(),
@@ -356,6 +376,18 @@ class EngineCore:
                 if participating
                 else [g.kv_cache_spec.block_size for g in kv_cache_groups]
             )
+        # With an extensible KV cache, `num_blocks` is the reserved capacity
+        # until the post-warmup measurement below.
+        extensible = vllm_config.cache_config.enable_extensible_kv_cache
+        # A KV connector may register each committed segment for RDMA, which
+        # cannot span physical chunks: keep segment bounds granule-aligned.
+        commit_granule: int | None = None
+        if extensible and kv_cache_groups and vllm_config.kv_transfer_config:
+            commit_granule = max(self.collective_rpc("kv_cache_commit_granule"))
+            align_extensible_kv_cache_capacity(
+                vllm_config, kv_cache_configs, scheduler_kv_cache_config, commit_granule
+            )
+        if kv_cache_groups and not extensible:
             update_kv_cache_capacity(vllm_config, scheduler_kv_cache_config)
 
         vllm_config.validate_block_size()
@@ -377,6 +409,20 @@ class EngineCore:
             kv_cache_config.cache_hit_alignment_tokens = cache_hit_alignment_tokens
 
         self.model_executor.initialize_from_config(kv_cache_configs)
+        compilation_times = []
+        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            compilation_times = self.model_executor.compile_or_warm_up_model()
+        if extensible:
+            num_blocks = finalize_extensible_kv_cache(
+                vllm_config,
+                kv_cache_configs,
+                scheduler_kv_cache_config,
+                compilation_times,
+                commit_granule,
+            )
+            self.model_executor.extend_kv_cache(num_blocks)
+        # Under the extensible KV cache, workers create the connector in
+        # `extend_kv_cache`, so ask for its block count only afterwards.
         kv_transfer_config = vllm_config.kv_transfer_config
         if (
             kv_transfer_config is not None
@@ -392,8 +438,6 @@ class EngineCore:
             vllm_config.cache_config.simple_cpu_offload_num_blocks = (
                 aligned_num_cpu_blocks
             )
-        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-            self.model_executor.compile_or_warm_up_model()
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time
@@ -961,6 +1005,7 @@ class EngineCore:
             self.model_executor.collective_rpc("synchronize_device")
             if clear_cache:
                 self._reset_caches()
+                self._set_kv_cache_reclaimable(True)
             if preparing:
                 self.release_kv_cache_memory()
                 self.collective_rpc("checkpoint_prepare")
@@ -1008,9 +1053,21 @@ class EngineCore:
                 f"Cannot resume scheduling while the checkpoint state is "
                 f"{self._checkpoint_state}"
             )
+        self._set_kv_cache_reclaimable(False)
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
         if self._checkpoint_state == CheckpointState.RESTORING:
             self._checkpoint_state = CheckpointState.RUNNING
+
+    def _set_kv_cache_reclaimable(self, reclaimable: bool) -> None:
+        """Tell the workers whether their extensible KV cache holds nothing to
+        keep, as from a pause that cleared it until the resume, so that a weight
+        reload may borrow its memory."""
+        if reclaimable == self._kv_cache_reclaimable:
+            return
+        self._kv_cache_reclaimable = reclaimable
+        executor = self.model_executor
+        if executor.vllm_config.cache_config.enable_extensible_kv_cache:
+            executor.collective_rpc("set_kv_cache_reclaimable", args=(reclaimable,))
 
     def is_scheduler_paused(self) -> bool:
         """Return whether the scheduler is in any pause state."""
@@ -1179,7 +1236,10 @@ class EngineCore:
                 request.mm_features
             )
 
-        req = Request.from_engine_core_request(request, self.request_block_hasher)
+        frontend_hashes = frontend_block_hashes(request, self.prefix_hash_config)
+        req = Request.from_engine_core_request(
+            request, self.request_block_hasher, frontend_hashes
+        )
         if req.use_structured_output:
             # Note on thread safety: no race condition.
             # `grammar_init` is only invoked in input processing thread. For
@@ -1225,6 +1285,7 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
+
         executor_fail_callback = lambda: self.input_queue.put_nowait(
             (EngineCoreRequestType.EXECUTOR_FAILED, b"")
         )
@@ -1985,6 +2046,7 @@ class EngineCoreProc(EngineCore):
                 if envs.VLLM_SERVER_DEV_MODE
                 else None
             ),
+            prefix_hash_config=self.prefix_hash_config,
         )
 
     def process_input_sockets(
@@ -2508,7 +2570,11 @@ class DPEngineCoreProc(EngineCoreProc):
             self.dp_group, self.scheduler.has_unfinished_requests()
         )
 
-        if has_global_unfinished:
+        # Once a scale_down has disabled the DP coordinator, resume into
+        # always-running — no coordinator wake-up is available.
+        if has_global_unfinished or (
+            self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled
+        ):
             self.engines_running = True
 
     def barrier(self):
@@ -2670,6 +2736,9 @@ class DPEngineCoreProc(EngineCoreProc):
             self.ignore_start_dp_wave = True
             self.pending_pause = False
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
+        elif self.enable_fault_tolerance and self.ft_sentinel.coordinator_disabled:
+            # Coordinator disabled: never idle-pause; engines keep stepping.
+            return True
 
         return has_unfinished
 

@@ -17,7 +17,7 @@ from vllm.logprobs import Logprob
 PPL_TOL = 0.01
 
 
-@torch.inference_mode
+@torch.inference_mode()
 def vqa_ppl_test(
     hf_runner,
     vllm_runner,
