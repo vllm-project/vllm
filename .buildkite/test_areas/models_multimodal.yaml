@@ -248,6 +248,7 @@ steps:
     amd:
       label: ":amd: (MI355 DPX) Multimodal Models (Extended Generation 3)"
       dind: false
+      automatic_shard: true
       device: mi355_dpx
       timeout_in_minutes: 90
       depends_on:

@@ -35,10 +35,10 @@ use vllm_managed_engine::ManagedEngineConfig;
 use vllm_managed_engine::cli::{ManagedEngineArgs, repartition_managed_engine_args};
 use vllm_managed_engine::data_parallel::{DataParallelLbArgs, DataParallelTopology};
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
-    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogging,
-    ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
+    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
+    CorsConfig, CustomHistogramBuckets, DEFAULT_KEEP_ALIVE_TIMEOUT, DEFAULT_LOG_STATS_INTERVAL,
+    DEFAULT_REQUEST_BODY_LIMIT_BYTES, HttpListenerMode, LoraModulePath, OutputLogConfig,
+    OutputLogging, ParserSelection, ReasoningEffort, RenderConfig, RendererSelection,
 };
 use vllm_text::backend::hf::{HfOverrides, ModelFileSources};
 
@@ -132,6 +132,17 @@ pub struct RenderArgs {
     /// Public model names accepted by the API.
     #[arg(long, num_args = 0..)]
     served_model_name: Vec<String>,
+    /// Accept any requested model name. Like Python, it is set only through
+    /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    skip_model_name_validation: bool,
     /// Select the tool-call parser. Use `auto` to infer from the model or
     /// `none` to disable parsing.
     #[arg(long, default_value_t)]
@@ -202,6 +213,7 @@ impl RenderArgs {
             hf_config,
             hf_overrides: self.hf_overrides,
             served_model_name: self.served_model_name,
+            skip_model_name_validation: self.skip_model_name_validation,
             host: self.host,
             port: self.port,
             tool_call_parser: self.tool_call_parser,
@@ -427,6 +439,14 @@ pub struct SharedRuntimeArgs {
     #[serde(default = "default_enable_log_deltas")]
     pub enable_log_deltas: bool,
 
+    /// Max number of prompt characters or prompt ID numbers being printed in
+    /// log. The default of None means unlimited.
+    ///
+    /// Also bounds logged output characters and output token IDs.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_log_len: Option<usize>,
+
     /// Include prompt_tokens_details in usage, including cached and newly
     /// cached prompt tokens.
     #[arg(
@@ -541,6 +561,20 @@ pub struct SharedRuntimeArgs {
     #[serde(skip)]
     pub http_max_request_body_size: Option<usize>,
 
+    /// Accept any requested model name, served by the base model unless it
+    /// names a loaded LoRA adapter. Like Python, it is set only through
+    /// `VLLM_SKIP_MODEL_NAME_VALIDATION`.
+    #[arg(
+        long,
+        hide = true,
+        env = "VLLM_SKIP_MODEL_NAME_VALIDATION",
+        action = ArgAction::Set,
+        value_parser = parse_truthy_flag,
+        default_value = "0"
+    )]
+    #[serde(skip)]
+    pub skip_model_name_validation: bool,
+
     /// The model name(s) used in the API. If multiple names are provided, the
     /// server will respond to any of the provided names. The model name in the
     /// model field of a response will be the first name in this list. If not
@@ -576,10 +610,35 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub allow_credentials: bool,
 
+    /// Disable the per-response HTTP access log.
+    #[arg(
+        long,
+        visible_alias = "disable-uvicorn-access-log",
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    #[serde(default, alias = "disable_uvicorn_access_log")]
+    pub disable_access_log: bool,
+
+    /// Comma-separated request paths whose responses the HTTP access log
+    /// skips, such as "/health,/metrics" for frequent probes. Paths match
+    /// exactly, without the query string.
+    #[arg(long)]
+    #[serde(default)]
+    pub disable_access_log_for_endpoints: Option<String>,
+
     /// TLS options for HTTPS/mTLS.
     #[command(flatten)]
     #[serde(default, flatten)]
     pub ssl: SslArgs,
+
+    /// Path prefix for a server behind a path-based routing proxy.
+    ///
+    /// Every route is served both under this prefix and at its bare path:
+    /// with `/llm`, `/llm/v1/models` and `/v1/models` reach the same route.
+    #[arg(long)]
+    #[serde(default)]
+    pub root_path: Option<String>,
 
     /// Profiler configuration forwarded by the Python supervisor.
     ///
@@ -697,6 +756,9 @@ impl SharedRuntimeArgs {
                 .map_err(|error| format!("invalid VLLM_HTTP_MAX_REQUEST_BODY_SIZE: {error}"))?;
             self.http_max_request_body_size = Some(size);
         }
+        if let Some(value) = lookup("VLLM_SKIP_MODEL_NAME_VALIDATION") {
+            self.skip_model_name_validation = parse_truthy_flag(&value)?;
+        }
         Ok(())
     }
 
@@ -721,6 +783,7 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
@@ -770,7 +833,9 @@ impl SharedRuntimeArgs {
             stream_interval: self.stream_interval,
             api_server_options,
             cors,
+            access_log,
             tls,
+            root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             custom_histogram_buckets: self.custom_histogram_buckets,
@@ -803,6 +868,7 @@ impl SharedRuntimeArgs {
         let log_stats_interval = self.log_stats_interval();
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
+        let access_log = self.access_log_config();
         let tls = self.ssl.tls_config();
         let profiler = self.profiler();
         let structured_outputs_backend = self.structured_outputs_backend();
@@ -851,7 +917,9 @@ impl SharedRuntimeArgs {
             stream_interval: self.stream_interval,
             api_server_options,
             cors,
+            access_log,
             tls,
+            root_path: self.root_path.filter(|root_path| !root_path.is_empty()),
             api_keys: self.api_key,
             disable_log_stats: self.disable_log_stats,
             custom_histogram_buckets: self.custom_histogram_buckets,
@@ -867,10 +935,13 @@ impl SharedRuntimeArgs {
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
-            log_outputs: match (self.enable_log_outputs, self.enable_log_deltas) {
-                (false, _) => OutputLogging::Disabled,
-                (true, false) => OutputLogging::Complete,
-                (true, true) => OutputLogging::CompleteAndDeltas,
+            log_outputs: OutputLogConfig {
+                outputs: match (self.enable_log_outputs, self.enable_log_deltas) {
+                    (false, _) => OutputLogging::Disabled,
+                    (true, false) => OutputLogging::Complete,
+                    (true, true) => OutputLogging::CompleteAndDeltas,
+                },
+                max_log_len: self.max_log_len,
             },
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             default_return_tokens_as_token_ids: self.return_tokens_as_token_ids,
@@ -878,6 +949,7 @@ impl SharedRuntimeArgs {
             enable_request_id_headers: self.enable_request_id_headers,
             enable_scale_out: self.enable_scale_out,
             enable_tokenizer_info_endpoint: self.enable_tokenizer_info_endpoint,
+            skip_model_name_validation: self.skip_model_name_validation,
             sse_keep_alive_interval: (self.sse_keep_alive_interval > 0)
                 .then(|| Duration::from_secs(self.sse_keep_alive_interval)),
             request_body_limit_bytes: match self.http_max_request_body_size {
@@ -885,6 +957,18 @@ impl SharedRuntimeArgs {
                 Some(0) => None,
                 Some(limit) => Some(limit),
             },
+        }
+    }
+
+    fn access_log_config(&self) -> AccessLogConfig {
+        AccessLogConfig {
+            enabled: !self.disable_access_log,
+            excluded_paths: (self.disable_access_log_for_endpoints.iter())
+                .flat_map(|paths| paths.split(','))
+                .map(str::trim)
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned)
+                .collect(),
         }
     }
 
@@ -987,6 +1071,12 @@ impl FromStr for LogStatsInterval {
 fn parse_int_flag(value: &str) -> Result<bool, String> {
     let value: i64 = value.trim().parse().map_err(|_| format!("`{value}` is not an integer"))?;
     Ok(value != 0)
+}
+
+/// Parse a boolean flag environment variable as Python's
+/// `value.strip().lower() in ("1", "true")`; any other value is `false`.
+fn parse_truthy_flag(value: &str) -> Result<bool, String> {
+    Ok(matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
 /// Parse a byte count environment variable as a non-negative decimal integer.
