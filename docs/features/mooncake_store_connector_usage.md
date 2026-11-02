@@ -98,7 +98,7 @@ vllm serve meta-llama/Llama-3.1-8B-Instruct \
     --port 8100 \
     --kv-transfer-config '{
         "kv_connector": "MultiConnector",
-        "kv_role": "kv_producer",
+        "kv_role": "kv_both",
         "kv_connector_extra_config": {
             "connectors": [
                 {

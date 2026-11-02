@@ -195,6 +195,11 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
+    def is_kv_consumer(self) -> bool:
+        """Whether this connector loads external KV into local blocks."""
+        return self._kv_transfer_config.is_kv_consumer
+
+    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 

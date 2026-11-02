@@ -217,6 +217,10 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @property
+    def is_kv_consumer(self) -> bool:
+        return any(c.is_kv_consumer for c in self._connectors)
+
+    @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
 

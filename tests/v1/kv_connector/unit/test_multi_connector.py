@@ -5,14 +5,18 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, PropertyMock, patch
 
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
+from tests.v1.kv_connector.unit.utils import (
+    create_scheduler,
+    create_vllm_config,
+    maybe_update_block_size,
+)
 from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig
+from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -1230,6 +1234,47 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
 
     mixed = _make_multi_connector(["MockDivergentHMAConnector", "MockHMAConnector"])
     assert mixed.supports_divergent_local_hybrid_hits is False
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("child_roles", "defer_block_free"),
+    [
+        (["kv_producer", "kv_both"], True),
+        (["kv_producer", "kv_producer"], False),
+    ],
+    ids=["loading-child", "pure-producers"],
+)
+def test_defer_block_free_follows_child_roles(
+    tmp_path: Path, child_roles: list[str], defer_block_free: bool
+):
+    """A kv_producer MultiConnector whose child loads KV (e.g. a P/D prefiller
+    that also reads a shared KV store) must still defer freeing blocks under
+    overlapping batches, or an in-flight step can overwrite blocks reused by a
+    load. Pure producers never load, so they keep freeing blocks immediately.
+    """
+    connectors = [
+        {
+            "kv_connector": "ExampleConnector",
+            "kv_role": role,
+            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
+        }
+        for role in child_roles
+    ]
+    vllm_config = create_vllm_config(
+        kv_connector="MultiConnector",
+        kv_role="kv_producer",
+        kv_connector_extra_config={"connectors": connectors},
+    )
+    # Async scheduling is disabled on CPU, so force overlapping batches.
+    with patch.object(
+        VllmConfig,
+        "max_concurrent_batches",
+        new_callable=PropertyMock,
+        return_value=2,
+    ):
+        scheduler = create_scheduler(vllm_config)
+    assert scheduler.defer_block_free is defer_block_free
 
 
 @pytest.mark.skipif(
