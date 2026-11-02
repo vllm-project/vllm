@@ -187,13 +187,27 @@ class CpuPlatform(Platform):
             return AttentionBackendEnum.CPU_MLA.get_path()
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
-        if not AttentionBackendEnum.CPU_ATTN.get_class().supports_kv_cache_dtype(
-            kv_cache_dtype
-        ):
+        backend_cls = AttentionBackendEnum.CPU_ATTN.get_class()
+        if not backend_cls.supports_kv_cache_dtype(kv_cache_dtype):
             raise ValueError(
                 f"--kv-cache-dtype {kv_cache_dtype} is not supported by the CPU "
                 "attention backend on this host."
             )
+        head_size = attn_selector_config.head_size
+        if not backend_cls.supports_head_size(head_size):
+            from vllm.v1.attention.backends.zentorch_sdpa import (
+                should_use_zentorch_sdpa,
+            )
+
+            # Encoder layers routed to zentorch SDPA don't use the CPU kernel.
+            if not should_use_zentorch_sdpa(
+                attn_selector_config.attn_type, attn_selector_config.dtype
+            ):
+                raise ValueError(
+                    f"Head size {head_size} is not supported by the CPU attention "
+                    "backend. Supported head sizes: "
+                    f"{backend_cls.get_supported_head_sizes()}."
+                )
         return AttentionBackendEnum.CPU_ATTN.get_path()
 
     @classmethod
