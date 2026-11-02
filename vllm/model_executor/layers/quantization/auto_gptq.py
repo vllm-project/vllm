@@ -39,6 +39,7 @@ from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.gptq_utils import (
     get_dynamic_override,
     get_linear_quant_method,
+    gptq_qzeros_to_standard_format,
     normalize_and_validate_gptq_desc_act,
     override_config,
 )
@@ -59,7 +60,8 @@ from vllm.model_executor.parameter import (
     PackedColumnParameter,
     PackedvLLMParameter,
 )
-from vllm.scalar_type import scalar_types
+from vllm.platforms import current_platform
+from vllm.scalar_type import ScalarType, scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
 from vllm.utils.collection_utils import is_list_of
 
@@ -100,6 +102,22 @@ class AutoGPTQConfig(QuantizationConfig):
         (4, True): scalar_types.uint4b8,
         (8, True): scalar_types.uint8b128,
     }
+    # Asymmetric (sym=false) checkpoints: uint4 + zero points. Only the XPU
+    # WNA16 kernel takes GPTQ zero points so far.
+    XPU_ASYM_TYPE_MAP = {
+        (4, False): scalar_types.uint4,
+    }
+
+    @classmethod
+    def get_quant_type(cls, weight_bits: int, is_sym: bool) -> ScalarType:
+        """Scalar type for (bits, sym); also used for per-module dynamic rules."""
+        if (weight_bits, is_sym) in cls.TYPE_MAP:
+            return cls.TYPE_MAP[(weight_bits, is_sym)]
+        if current_platform.is_xpu() and (weight_bits, is_sym) in cls.XPU_ASYM_TYPE_MAP:
+            return cls.XPU_ASYM_TYPE_MAP[(weight_bits, is_sym)]
+        raise ValueError(
+            f"Unsupported quantization config: bits={weight_bits}, sym={is_sym}"
+        )
 
     def __init__(
         self,
@@ -149,12 +167,12 @@ class AutoGPTQConfig(QuantizationConfig):
         self.lm_head_quantized = lm_head_quantized
         self.full_config = full_config
 
-        if (weight_bits, is_sym) not in self.TYPE_MAP:
-            raise ValueError(
-                f"Unsupported quantization config: bits={weight_bits}, sym={is_sym}"
-            )
-
-        self.quant_type = self.TYPE_MAP[(weight_bits, is_sym)]
+        self.quant_type = self.get_quant_type(weight_bits, is_sym)
+        # "gptq" (v1, default) stores zero points as z - 1; "gptq_v2" stores z.
+        # GPTQModel writes "checkpoint_format"; older/newer exports use "format".
+        self.checkpoint_format = str(
+            full_config.get("checkpoint_format", full_config.get("format", "gptq"))
+        ).lower()
 
         self.modules_in_block_to_quantize = modules_in_block_to_quantize or []
         # used to identify GPTQ model quantized by autoround
@@ -238,6 +256,12 @@ class AutoGPTQConfig(QuantizationConfig):
         if isinstance(layer, RoutedExperts):
             from vllm.model_executor.layers.quantization.moe_wna16 import MoeWNA16Config
 
+            if not self.is_sym:
+                raise NotImplementedError(
+                    "Asymmetric (sym=false) GPTQ is only supported for linear "
+                    f"layers, not MoE experts ('{prefix}')."
+                )
+
             if not check_moe_marlin_supports_layer(
                 layer, self.group_size, allow_tile_padding=True
             ):
@@ -317,6 +341,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         verify_marlin_supported(
             quant_type=self.quant_config.quant_type,
             group_size=self.quant_config.group_size,
+            has_zp=not self.quant_config.is_sym,
         )
 
     def create_weights(
@@ -343,7 +368,7 @@ class AutoGPTQLinearMethod(LinearMethodBase):
             weight_type=self.quant_config.quant_type,
             act_type=params_dtype if input_dtype is None else input_dtype,
             group_size=self.quant_config.group_size,
-            zero_points=False,
+            zero_points=not self.quant_config.is_sym,
         )
 
         kernel_type = choose_mp_linear_kernel(mp_linear_kernel_config)
@@ -436,6 +461,22 @@ class AutoGPTQLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if not self.quant_config.is_sym:
+            # GPTQ qzeros (G, N // pack), maybe z - 1 -> raw zero points in the
+            # (N // pack, G) layout the WNA16 kernels take (as AWQ converts to).
+            qzeros = gptq_qzeros_to_standard_format(
+                layer.qzeros.data,
+                self.quant_config.quant_type.size_bits,
+                stores_zero_minus_one=self.quant_config.checkpoint_format != "gptq_v2",
+            )
+            layer.qzeros = PackedvLLMParameter(
+                data=qzeros,
+                output_dim=0,
+                input_dim=1,
+                packed_dim=0,
+                packed_factor=self.quant_config.pack_factor,
+                weight_loader=lambda *args, **kwargs: None,
+            )
         self.kernel.process_weights_after_loading(layer)
 
     def apply(
