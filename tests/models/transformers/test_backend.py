@@ -481,6 +481,17 @@ def test_replace_plain_embedding(vpe):
     assert type(replace(nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))) is vpe
 
 
+def test_replace_plain_embedding_hw_agnostic(monkeypatch, tp_init):
+    """With `VLLM_USE_HW_AGNOSTIC=1` the plain path builds the hw-agnostic class.
+
+    The rebasing path stays on the in-tree class, see the tests above."""
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    from vllm.model_executor.hw_agnostic.layers import vocab_parallel_embedding
+
+    new_embedding = replace(nn.Embedding(VOCAB_SIZE, HIDDEN_SIZE))
+    assert type(new_embedding) is vocab_parallel_embedding.VocabParallelEmbedding
+
+
 def test_replace_infers_shape_and_dtype(tp_init):
     """Shape and dtype come from the replaced module, not from the config."""
     embedding = nn.Embedding(VOCAB_SIZE * 2, HIDDEN_SIZE + 1, dtype=torch.float16)

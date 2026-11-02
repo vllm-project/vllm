@@ -12,8 +12,7 @@ import pytest
 import torch
 
 
-@pytest.fixture(scope="module")
-def tiny_llama_path(tmp_path_factory):
+def _save_tiny_llama(tmp_path_factory, name: str, *, tie_word_embeddings: bool) -> str:
     """A randomly-initialized microscopic Llama saved to disk (with an ungated
     tokenizer) so vLLM can load it like any local checkpoint."""
     from transformers import AutoTokenizer, LlamaConfig, LlamaForCausalLM
@@ -27,19 +26,38 @@ def tiny_llama_path(tmp_path_factory):
         num_attention_heads=4,
         rms_norm_eps=1e-6,
         hidden_act="silu",
+        tie_word_embeddings=tie_word_embeddings,
     )
     torch.manual_seed(0)
     model = LlamaForCausalLM(config)
 
-    path = tmp_path_factory.mktemp("tiny_llama")
+    path = tmp_path_factory.mktemp(name)
     model.save_pretrained(path)
     tokenizer.save_pretrained(path)
     return str(path)
 
 
+@pytest.fixture(scope="module")
+def tiny_llama_path(tmp_path_factory):
+    return _save_tiny_llama(tmp_path_factory, "tiny_llama", tie_word_embeddings=False)
+
+
+@pytest.fixture(scope="module")
+def tiny_llama_tied_path(tmp_path_factory):
+    return _save_tiny_llama(
+        tmp_path_factory, "tiny_llama_tied", tie_word_embeddings=True
+    )
+
+
 # Registered names of the layers the backend can
 # currently route to hw-agnostic implementations.
-_COVERED_LAYERS = ("rms_norm", "silu_and_mul")
+_COVERED_LAYERS = (
+    "rms_norm",
+    "silu_and_mul",
+    "vocab_parallel_embedding",
+    "parallel_lm_head",
+    "logits_processor",
+)
 
 
 def _layer_providers(model) -> dict[str, str]:
@@ -98,12 +116,39 @@ def test_hw_agnostic_matches_vllm_end_to_end(monkeypatch, vllm_runner, tiny_llam
 
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "0")
     vllm_providers, vllm_outputs = _serve(vllm_runner, tiny_llama_path, prompts)
-    # Both replaceable layers present in a Llama block must be vLLM's here.
-    assert vllm_providers == {"rms_norm": "vllm", "silu_and_mul": "vllm"}
+    assert vllm_providers == dict.fromkeys(_COVERED_LAYERS, "vllm")
 
     monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
     hw_providers, hw_outputs = _serve(vllm_runner, tiny_llama_path, prompts)
-    assert hw_providers == {"rms_norm": "hw_agnostic", "silu_and_mul": "hw_agnostic"}
+    assert hw_providers == dict.fromkeys(_COVERED_LAYERS, "hw_agnostic")
+
+    check_logprobs_close(
+        outputs_0_lst=vllm_outputs,
+        outputs_1_lst=hw_outputs,
+        name_0="vllm",
+        name_1="hw_agnostic",
+    )
+
+
+def test_hw_agnostic_matches_vllm_with_tied_lm_head(
+    monkeypatch, vllm_runner, tiny_llama_tied_path
+):
+    """A tied `lm_head` still matches the vLLM baseline.
+
+    The tie is decided by an `isinstance` check against the embedding class, so a
+    class mismatch would silently leave `lm_head` randomly initialized."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    from ..utils import check_logprobs_close
+
+    prompts = ["The capital of France is", "vLLM is"]
+
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "0")
+    _, vllm_outputs = _serve(vllm_runner, tiny_llama_tied_path, prompts)
+
+    monkeypatch.setenv("VLLM_USE_HW_AGNOSTIC", "1")
+    hw_providers, hw_outputs = _serve(vllm_runner, tiny_llama_tied_path, prompts)
+    assert hw_providers == dict.fromkeys(_COVERED_LAYERS, "hw_agnostic")
 
     check_logprobs_close(
         outputs_0_lst=vllm_outputs,
