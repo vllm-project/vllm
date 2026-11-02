@@ -169,21 +169,30 @@ def _ref_sparse_prefill_ragged(
 
 
 def _pack_fp8_ds_mla_cache(
-    kv: torch.Tensor, block_size: int, use_fnuz: bool
+    kv: torch.Tensor, block_size: int, use_fnuz: bool, record: int = 584
 ) -> torch.Tensor:
     assert kv.shape[-1] == HEAD_DIM
     from vllm.models.deepseek_v4.common.ops.cache_utils import (
         quantize_and_insert_k_cache,
     )
+    from vllm.models.deepseek_v41.common.ops.fused_compress_quant_cache import (
+        rope_quant_insert,
+    )
 
     num_tokens = kv.shape[0]
     num_blocks = (num_tokens + block_size - 1) // block_size
     cache = torch.zeros(
-        (num_blocks, block_size, 584),
+        (num_blocks, block_size, record),
         dtype=torch.uint8,
         device=kv.device,
     )
     slot_mapping = torch.arange(num_tokens, dtype=torch.int64, device=kv.device)
+    if record != 584:
+        # The V4.1 writer; a zero angle leaves the RoPE dims as they are.
+        cos_sin = torch.tensor([[1.0] * 32 + [0.0] * 32], device=kv.device)
+        positions = torch.zeros(num_tokens, dtype=torch.int64, device=kv.device)
+        rope_quant_insert(kv, positions, cos_sin, cache, slot_mapping, 1)
+        return cache
     quantize_and_insert_k_cache(
         kv,
         cache,
@@ -216,6 +225,34 @@ def _read_fp8_ds_mla_cache_rows(
     block_size: int,
     use_fnuz: bool,
 ) -> torch.Tensor:
+    if cache.shape[-1] == 288:
+        # Host NVFP4 decode: e2m1 pairs with the even dim in the low nibble,
+        # then 32 e4m3 scales of 16 dims.
+        rows = cache.reshape(-1, 288)[slots]
+        codes = torch.stack([rows[:, :256] & 0xF, rows[:, :256] >> 4], -1).flatten(1)
+        e2m1 = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device=cache.device)
+        values = e2m1[(codes & 7).long()] * torch.where(codes >= 8, -1.0, 1.0)
+        scales = rows[:, 256:].view(torch.float8_e4m3fn).float()
+        return (values.view(-1, 32, 16) * scales[..., None]).flatten(1)
+    if cache.shape[-1] != 584:
+        from vllm.models.deepseek_v41.common.ops.cache_utils import (
+            dequantize_and_gather_k_cache,
+        )
+
+        # The V4.1 records dequantize exactly into bf16, so the gather is exact.
+        device = cache.device
+        num_blocks, num_slots = cache.shape[0], cache.shape[0] * block_size
+        rows = torch.empty(1, num_slots, HEAD_DIM, dtype=torch.bfloat16, device=device)
+        dequantize_and_gather_k_cache(
+            rows,
+            cache,
+            torch.tensor([num_slots], dtype=torch.int32, device=device),
+            None,
+            torch.arange(num_blocks, dtype=torch.int32, device=device)[None],
+            block_size,
+            0,
+        )
+        return rows[0, slots].float()
     cache_flat = cache.view(torch.uint8).flatten()
     block_idx = slots // block_size
     pos = slots % block_size
@@ -1605,6 +1642,94 @@ def test_sparse_attn_decode_gfx950_outer64_boundaries(
 
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
     assert torch.equal(actual[1], torch.zeros_like(actual[1]))
+
+
+@requires_gfx950
+@pytest.mark.parametrize(("main_record", "extra_record"), [(288, 528), (528, 600)])
+@torch.inference_mode()
+def test_sparse_attn_decode_gfx950_rejects_unknown_records(
+    main_record: int, extra_record: int
+) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    q = torch.zeros(1, 16, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    main_cache, extra_cache = (
+        torch.zeros(1, 64, record, dtype=torch.uint8, device=device)
+        for record in (main_record, extra_record)
+    )
+    indices = torch.zeros(1, dtype=torch.int32, device=device)
+    indptr = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    with pytest.raises(AssertionError, match="KV record width"):
+        mod._rocm_sparse_attn_decode_ragged_triton(
+            q=q,
+            main_cache=main_cache,
+            main_indices=indices,
+            main_indptr=indptr,
+            scale=HEAD_DIM**-0.5,
+            attn_sink=None,
+            nope_head_dim=NOPE_HEAD_DIM,
+            rope_head_dim=ROPE_HEAD_DIM,
+            extra_cache=extra_cache,
+            extra_indices=indices,
+            extra_indptr=indptr,
+        )
+
+
+@requires_gfx950
+@pytest.mark.parametrize(
+    ("main_record", "extra_record"), [(584, 288), (528, 528), (528, 288)]
+)
+@torch.inference_mode()
+def test_sparse_attn_decode_gfx950_v41_records(
+    main_record: int, extra_record: int
+) -> None:
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse as mod
+
+    device = torch.device("cuda")
+    torch.manual_seed(13)
+    block_size, num_heads, num_rows = 64, 16, 128
+    q = torch.randn(2, num_heads, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    q *= 0.125
+    main_cache, extra_cache = (
+        _pack_fp8_ds_mla_cache(
+            torch.randn(num_rows, HEAD_DIM, dtype=torch.bfloat16, device=device),
+            block_size,
+            use_fnuz=False,
+            record=record,
+        )
+        for record in (main_record, extra_record)
+    )
+    main_rows = [list(range(0, num_rows, 3)), list(range(7, 40))]
+    extra_rows = [list(range(num_rows - 1, 0, -2)), list(range(65))]
+    main_indices, main_indptr = _ragged_from_rows(main_rows, device)
+    extra_indices, extra_indptr = _ragged_from_rows(extra_rows, device)
+    attn_sink = torch.linspace(-0.1, 0.1, num_heads, dtype=torch.float32, device=device)
+
+    actual = mod._rocm_sparse_attn_decode_ragged_triton(
+        q=q,
+        main_cache=main_cache,
+        main_indices=main_indices,
+        main_indptr=main_indptr,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=attn_sink,
+        nope_head_dim=NOPE_HEAD_DIM,
+        rope_head_dim=ROPE_HEAD_DIM,
+        extra_cache=extra_cache,
+        extra_indices=extra_indices,
+        extra_indptr=extra_indptr,
+    )
+    expected = _ref_sparse_decode_ragged(
+        q=q,
+        main_cache=main_cache,
+        main_rows=main_rows,
+        scale=HEAD_DIM**-0.5,
+        attn_sink=attn_sink,
+        block_size=block_size,
+        extra_cache=extra_cache,
+        extra_rows=extra_rows,
+    )
+    torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
 @requires_gfx950

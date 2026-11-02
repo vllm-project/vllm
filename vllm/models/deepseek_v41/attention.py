@@ -134,7 +134,11 @@ def _fill_short_context_topk_indices(
 # bytes -- only in its SM100 sparse-decode kernels. Every other arch keeps the
 # V4 record: 448 fp8 NoPE + 64 bf16 RoPE plus 7 UE8M0 scales of 64 dims and a
 # pad byte (584 B, 576 B pages).
-def _use_v41_mxfp8_kv_record() -> bool:
+def _use_v41_mxfp8_kv_record(vllm_config: VllmConfig) -> bool:
+    if current_platform.is_rocm():
+        from vllm.models.deepseek_v41.amd.rocm import _rocm_v41_mxfp8_kv_record
+
+        return _rocm_v41_mxfp8_kv_record(vllm_config)
     return current_platform.is_device_capability_family(100)
 
 
@@ -203,6 +207,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     # bf16 / per-tensor fp8 KV row. Backends can override the instance hook when
     # a single attention class dispatches across arch-specific layouts.
     use_fp8_ds_mla_layout: ClassVar[bool] = True
+    # Whether this layer's kernel decodes an NVFP4 compressed cache. Only that
+    # record changes width; the sliding-window one stays fp8.
+    reads_nvfp4_compressed_cache: ClassVar[bool] = False
     # Prefill is processed in fixed-size chunks; this bounds the bf16 kv-gather
     # workspace allocated in _forward_prefill and is also read by the dummy-run
     # path to pre-reserve that workspace.
@@ -518,7 +525,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             cache_config,
             self.packed_kv_cache_dtype,
         )
-        self.kv_mxfp8 = _use_v41_mxfp8_kv_record()
+        self.kv_mxfp8 = _use_v41_mxfp8_kv_record(vllm_config)
         self.swa_bytes_per_token = 528 if self.kv_mxfp8 else 584
         # nvfp4_ds_mla keeps the MXFP8 sliding-window record and stores the
         # compressed cache as NVFP4 (256 B of e2m1 pairs + 32 e4m3 scales).
@@ -529,7 +536,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         # sum. V4 needs its 576 B TMA stride; V4.1's is on the SWA block
         # stride, and 512 is free (its pages are already 512 B multiples).
         self.kv_page_alignment = 512 if self.kv_mxfp8 else 576
-        if self.kv_cache_dtype == "nvfp4_ds_mla" and not self.kv_mxfp8:
+        if self.kv_cache_dtype == "nvfp4_ds_mla" and not (
+            self.kv_mxfp8 or self.reads_nvfp4_compressed_cache
+        ):
             raise ValueError(
                 "nvfp4_ds_mla needs the V4.1 KV records, which FlashMLA "
                 "decodes only on SM100."
@@ -1287,9 +1296,8 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             "fp8_ds_mla",
             "nvfp4_ds_mla",
         )
-        page_alignment = (
-            576 if uses_fp8_ds_mla_layout and not _use_v41_mxfp8_kv_record() else 512
-        )
+        v41_record = uses_fp8_ds_mla_layout and _use_v41_mxfp8_kv_record(vllm_config)
+        page_alignment = 576 if uses_fp8_ds_mla_layout and not v41_record else 512
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
@@ -1304,12 +1312,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             # DeepGEMM's paged sparse logits need a 256B-aligned block stride;
             # V4 records keep their TMA stride (V4.1's is on the SWA spec).
             block_stride_alignment=(
-                math.lcm(
-                    256,
-                    1
-                    if uses_fp8_ds_mla_layout and _use_v41_mxfp8_kv_record()
-                    else page_alignment,
-                )
+                math.lcm(256, 1 if v41_record else page_alignment)
                 if self.sparse_logits and not self.rocm_mxfp4
                 else None
             ),
