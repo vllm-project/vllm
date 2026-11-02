@@ -71,7 +71,9 @@ class BudgetGraphMetadata:
     output_buffer: torch.Tensor      # encoder hidden states
 ```
 
-Budgets are auto-generated as power-of-2 levels from a model-provided range via `get_encoder_cudagraph_budget_range()`, with the maximum budget always included even if it does not fall on a power-of-2 boundary. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`.
+Budgets are auto-generated from a model-provided range via `get_encoder_cudagraph_budget_range()` on a subdivided grid — quarter-octave steps up to 1024 and half-octave steps above (e.g., `[64, 80, 96, ..., 12288, 16384]`, 25 levels for the range `[64, 16384]`) — with the model-provided minimum and maximum always included even when they do not fall on grid points. Budgets can also be explicitly specified by the user via `encoder_cudagraph_token_budgets` in `CompilationConfig`.
+
+The dense default table is affordable for every model because capture buffers are shared across budgets automatically, with no model opt-in: budgets are captured largest-first, the first capture of each (path, capture-axis) group provides one set of max-size input buffers and one max-size output buffer, and every later capture of the group records its graph into prefix views of them (the same pattern as decoder `input_ids[:num_tokens]`). At capture time the manager checks each probed buffer for prefix compatibility (same trailing dims and dtype, no more rows than the shared buffer; scalars are shared wholesale) and copies it into the shared buffer; buffers that do not fit this pattern keep their own per-budget allocation, so models need no code changes. Buffer memory therefore stays at ~1× the largest budget instead of scaling with the sum of all budgets.
 
 Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured encoder path. A path can provide its own minimum token budget and opt into zero-token batches; the manager generates and stores a separate budget graph set for every configured path.
 
@@ -81,8 +83,8 @@ Each entry in `EncoderCudaGraphConfig.paths` defines an independently captured e
 
 **Budget generation.** Each path gets a separate budget list. For DeepSeek-OCR:
 
-* the `global` path — power-of-2 budgets starting at the global path minimum (e.g., `[272, 544, 1088, 2176, 4352, 8704, 13824]` for DeepSeek-OCR).
-* the `local` path — power-of-2 budgets starting at the local path minimum (e.g., `[0, 100, 200, 400, 800, 1600, 3200, 6400, 12800, 13824]` for DeepSeek-OCR). A budget of `0` is included when `allow_zero_tokens=True` to handle images with no local patches (images ≤ 640×640 that produce only global features).
+* the `global` path — subdivided-grid budgets starting at the global path minimum (e.g., `[272, 320, 384, 448, 512, 640, 768, 896, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 13824]` for DeepSeek-OCR).
+* the `local` path — subdivided-grid budgets starting at the local path minimum (e.g., `[0, 100, 128, 160, 192, 224, 256, 320, 384, 448, 512, 640, 768, 896, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 13824]` for DeepSeek-OCR). A budget of `0` is included when `allow_zero_tokens=True` to handle images with no local patches (images ≤ 640×640 that produce only global features).
 
 Both lists are capped at the same `max_budget`.
 
@@ -167,7 +169,7 @@ Models opt-in to encoder CUDA Graphs by implementing the [SupportsEncoderCudaGra
 Four fields in `CompilationConfig` control encoder CUDA Graphs:
 
 * `cudagraph_mm_encoder` (`bool`, default `False`) — enable CUDA Graph capture for multimodal encoder. When enabled, captures the full encoder forward as a CUDA Graph for each token budget level.
-* `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture as power-of-2 levels. User-provided values override auto-inference.
+* `encoder_cudagraph_token_budgets` (`list[int]`, default `[]`) — token budget levels for capture. If empty (default), auto-inferred from model architecture on the subdivided grid (see above). User-provided values override auto-inference.
 * `encoder_cudagraph_max_vision_items_per_batch` (`int`, default `0`) — maximum number of images/videos per batch during capture. If 0 (default), auto-inferred as `max_budget // min_budget`.
 * `encoder_cudagraph_max_frames_per_batch` (`int`, default `None`) — maximum number of video frames per batch during capture. If `None` (default), auto-inferred as `encoder_cudagraph_max_vision_items_per_batch * max_frames_per_video` (`max_frames_per_video` is a model-specific value from `EncoderCudaGraphConfig`, computed by `get_max_frames_per_video()` on the model). If we limit the video count per prompt to `0`, it will also be set to `0` (i.e., fall back to image-only mode).
 
