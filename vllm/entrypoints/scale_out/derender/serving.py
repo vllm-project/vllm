@@ -180,10 +180,13 @@ class ServingDerender(BaseServing):
         except ValueError as exc:
             return self.create_error_response(str(exc))
 
-        prompt_tokens = (
-            request.prompt_tokens if request.prompt_tokens is not None else 0
-        )
         gen = request.generate_response
+        if request.prompt_tokens is not None:
+            prompt_tokens = request.prompt_tokens
+        elif gen.usage is not None:
+            prompt_tokens = gen.usage.prompt_tokens or 0
+        else:
+            prompt_tokens = 0
         completion_tokens = sum(len(ch.token_ids) for ch in gen.choices if ch.token_ids)
         usage = UsageInfo(
             prompt_tokens=prompt_tokens,
