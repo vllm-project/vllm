@@ -393,6 +393,122 @@ def test_embeddings(
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+def test_embedding_skips_when_active_adapter_has_no_layer_weights(
+    default_vllm_config, dist_init, device
+) -> None:
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+
+    torch.set_default_device(device)
+    max_loras = 2
+    vocab_size = 32
+    embedding_dim = 16
+    rank = 8
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=rank,
+        lora_dtype=torch.float16,
+    )
+    punica_wrapper = get_punica_wrapper(8, 2, device, lora_config=lora_config)
+    embedding = VocabParallelEmbedding(
+        vocab_size, embedding_dim, params_dtype=torch.float16
+    )
+    embedding.weight.data.zero_()
+    lora_embedding = VocabParallelEmbeddingWithLoRA(embedding)
+    lora_embedding.create_lora_weights(max_loras, lora_config)
+    lora_embedding.set_mapping(punica_wrapper)
+    lora_embedding.set_runtime_lora_skip_enabled(True)
+
+    lora_embedding.set_lora_slot(
+        1,
+        torch.rand(rank, vocab_size, dtype=torch.float16, device=device),
+        torch.rand(embedding_dim, rank, dtype=torch.float16, device=device),
+    )
+    punica_wrapper.update_metadata(
+        LoRAMapping((1,), (1,)),
+        [1, 2],
+        max_loras,
+        vocab_size,
+    )
+
+    input_ids = torch.tensor([1], device=device)
+    expected = embedding(input_ids)
+    with patch.object(punica_wrapper, "add_lora_embedding") as add_lora:
+        result = lora_embedding(input_ids)
+        add_lora.assert_not_called()
+    torch.testing.assert_close(result, expected)
+
+
+@torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+def test_logits_skip_uses_prompt_mapping(
+    default_vllm_config, dist_init, device
+) -> None:
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+
+    torch.set_default_device(device)
+    vocab_size = 32
+    hidden_size = 16
+    rank = 8
+    max_loras = 2
+    lora_config = LoRAConfig(
+        max_loras=max_loras,
+        max_lora_rank=rank,
+        lora_dtype=torch.float16,
+    )
+    punica_wrapper = get_punica_wrapper(8, 2, device, lora_config=lora_config)
+    lm_head = ParallelLMHead(
+        num_embeddings=vocab_size,
+        embedding_dim=hidden_size,
+        params_dtype=torch.float16,
+    )
+    lora_logits = LogitsProcessorWithLoRA(
+        LogitsProcessor(vocab_size),
+        hidden_size,
+        torch.float16,
+        torch.device(device),
+        None,
+    )
+    lora_logits.create_lora_weights(max_loras, lora_config)
+    lora_logits.set_mapping(punica_wrapper)
+    lora_logits.set_runtime_lora_skip_enabled(True)
+    lora_logits.set_lora_slot(
+        1,
+        torch.rand(rank, hidden_size, dtype=torch.float16, device=device),
+        torch.rand(vocab_size, rank, dtype=torch.float16, device=device),
+    )
+    hidden_states = torch.rand(1, hidden_size, dtype=torch.float16, device=device)
+
+    # Token-side layers use adapter 1, while logits use adapter 2. Only slot 1,
+    # occupied by adapter 2, has weights for this layer.
+    punica_wrapper.update_metadata(
+        LoRAMapping((1,), (2,)),
+        [1, 2],
+        max_loras,
+        vocab_size,
+    )
+    with patch.object(
+        punica_wrapper,
+        "add_lora_logits",
+        side_effect=lambda logits, *_args: logits,
+    ) as add_lora:
+        lora_logits._get_logits(hidden_states, lm_head)
+        add_lora.assert_called_once()
+
+    punica_wrapper.update_metadata(
+        LoRAMapping((2,), (1,)),
+        [1, 2],
+        max_loras,
+        vocab_size,
+    )
+    with patch.object(punica_wrapper, "add_lora_logits") as add_lora:
+        lora_logits._get_logits(hidden_states, lm_head)
+        add_lora.assert_not_called()
+
+
+@torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("vocab_size", [64000, 256512, 258048])
