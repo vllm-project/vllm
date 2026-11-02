@@ -565,6 +565,64 @@ class FlashAttentionMetadata:
     rswa_window_tensor: torch.Tensor | None = None
 
 
+def _shape_aware_num_splits(
+    num_sms: int, num_kv_heads: int, num_reqs: int, config_cap: int
+) -> int:
+    """Upper bound on FA3 split-KV partitions for a full-CUDA-graph decode step.
+
+    FA3 splits the KV range of a request across ``num_splits`` partitions so that
+    more CTAs can work on one long sequence. The hdim-256 decode kernel occupies
+    ~227 KB of shared memory on Hopper, so at most one CTA is resident per SM, and
+    each (request, kv-head, split) triple is one persistent work item that streams
+    its KV range serially. When ``num_kv_heads * num_reqs * num_splits`` exceeds the
+    SM count, the surplus items form a second wave that runs with only a handful of
+    CTAs resident.
+
+    The FA3 heuristic sizes ``num_splits`` as ``ceil(n_blocks / ceil(total_blocks *
+    1.1 * kv_heads / num_sms))``. Both ceilings round up, so the work item count
+    overshoots the SM count for some batch sizes and the second wave is issued. On
+    H20 (78 SMs) that cost 1.33x on the attention kernel at batch 7-8
+    (1.506 ms -> 1.133 ms per layer) and 1.53x / 1.47x at batch 4 / 5.
+
+    ``num_reqs`` is the batch of the CUDA graph, i.e. the padded capture size, so
+    this value is identical at capture and replay time. That is required: num_splits
+    sizes both the split accumulators and the FA3 combine kernel's grid, and a CUDA
+    graph freezes those at capture.
+    """
+    if config_cap <= 1:
+        # Honour explicit user overrides (e.g. the num_splits=1 workaround for
+        # https://github.com/vllm-project/vllm/issues/62626).
+        return config_cap
+    per_wave = num_kv_heads * max(num_reqs, 1)
+    # Never return 1 here: num_splits == 1 selects a different (Split=false)
+    # kernel instantiation, which is slower at long context than 2 splits.
+    return min(config_cap, max(2, num_sms // per_wave))
+
+
+def _resolve_num_splits(
+    config_cap: int,
+    num_sms: int,
+    num_kv_heads: int,
+    num_reqs: int,
+    enabled: bool,
+) -> int:
+    """Pick the split budget for one build() call.
+
+    Every input is constant for a given CUDA graph (``num_reqs`` is the padded
+    capture size, the rest are engine constants), so the decision is identical at
+    capture and replay time. That matters because ``num_splits`` sizes the split
+    accumulators, the FA3 combine kernel's grid and the layout of the host-built
+    scheduler metadata, all of which a CUDA graph freezes when it is captured.
+
+    ``config_cap <= 1`` is returned verbatim: ``0`` means "let FA3 use its own
+    heuristic" (the value used outside full CUDA graphs and on FA2) and ``1`` is
+    the documented escape hatch for #62626.
+    """
+    if config_cap <= 1 or not enabled:
+        return config_cap
+    return _shape_aware_num_splits(num_sms, num_kv_heads, num_reqs, config_cap)
+
+
 def _get_sliding_window_configs(
     vllm_config: VllmConfig,
 ) -> set[tuple[int, int] | None]:
@@ -706,6 +764,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
 
         self.max_num_splits = 0  # No upper bound on the number of splits.
         self.aot_schedule = get_flash_attn_version() == 3
+        self.num_sms = current_platform.num_compute_units()
         head_size_v = getattr(kv_cache_spec, "head_size_v", None)
         fa_version = get_flash_attn_version(
             head_size=self.headdim,
@@ -862,7 +921,16 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # usage, because the intermediate buffers of size [num_splits,
             # num_heads, num_tokens, head_size] are allocated. Therefore,
             # we only set num_splits when using cuda graphs.
-            max_num_splits = self.max_num_splits
+            # Optionally lower the configured budget so the split work items
+            # stay within one wave of resident CTAs. Opt-in: see
+            # flash_attn_split_cap_for_uniform_decode and _resolve_num_splits.
+            max_num_splits = _resolve_num_splits(
+                config_cap=self.max_num_splits,
+                num_sms=self.num_sms,
+                num_kv_heads=self.num_heads_kv,
+                num_reqs=num_reqs,
+                enabled=self.attention_config.flash_attn_split_cap_for_uniform_decode,
+            )
 
         if envs.VLLM_BATCH_INVARIANT:
             max_num_splits = 1
