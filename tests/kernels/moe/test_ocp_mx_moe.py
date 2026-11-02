@@ -667,7 +667,14 @@ def test_trtllm_gen_mxfp4_fused_moe(
 
 @pytest.mark.parametrize(
     "monolithic,num_tokens,chunk_size",
-    [(False, 1, None), (False, 16, None), (False, 16, 5), (True, 16, None)],
+    [
+        (False, 1, None),
+        (False, 16, None),
+        # Prefill-sized: DeepSeek V4.1 defers every call that fits one launch.
+        (False, 1000, None),
+        (False, 16, 5),
+        (True, 16, None),
+    ],
 )
 @pytest.mark.skipif(
     not TRTLLM_GEN_MXFP4_AVAILABLE,
