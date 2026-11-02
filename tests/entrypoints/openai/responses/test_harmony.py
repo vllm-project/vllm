@@ -125,6 +125,38 @@ async def client(server):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("harmony_format", [False, True])
+async def test_count_input_tokens_includes_stateless_history(client, harmony_format):
+    history = [
+        {"role": "user", "content": "Remember that my favorite city is Seoul."},
+        {"role": "assistant", "content": "I will remember Seoul."},
+    ]
+    if harmony_format:
+        history = [Message.from_dict(message).to_dict() for message in history]
+    payload = {"model": MODEL_NAME, "input": "What city?"}
+    without_history = await client.post(
+        "/responses/input_tokens", cast_to=dict, body=payload
+    )
+    count = await client.post(
+        "/responses/input_tokens",
+        cast_to=dict,
+        body={**payload, "previous_input_messages": history},
+    )
+    response = await client.responses.create(
+        **payload,
+        max_output_tokens=1,
+        temperature=0,
+        store=False,
+        extra_body={"previous_input_messages": history},
+    )
+    assert count == {
+        "object": "response.input_tokens",
+        "input_tokens": response.usage.input_tokens,
+    }
+    assert count["input_tokens"] > without_history["input_tokens"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(

@@ -7,6 +7,9 @@ from openai_harmony import (
 )
 from pydantic import ValidationError
 
+from vllm.entrypoints.openai.responses.harmony import (
+    construct_harmony_previous_input_messages,
+)
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesInputTokensRequest,
     ResponsesRequest,
@@ -65,6 +68,42 @@ def test_input_token_count_preserves_function_call_items() -> None:
     assert isinstance(request.input, list)
     assert request.input[0].type == "function_call"
     assert request.input[1]["type"] == "function_call_output"
+
+
+@pytest.mark.parametrize("history_format", ["chat", "harmony", "message"])
+def test_input_token_count_preserves_stateless_history(history_format: str) -> None:
+    messages = [
+        Message.from_dict(
+            {
+                "role": role,
+                "content": [{"type": "text", "text": text}],
+            }
+        )
+        for role, text in [
+            ("user", "Remember that my favorite city is Seoul."),
+            ("assistant", "I will remember Seoul."),
+        ]
+    ]
+    if history_format == "chat":
+        history = [
+            {"role": "user", "content": "Remember that my favorite city is Seoul."},
+            {"role": "assistant", "content": "I will remember Seoul."},
+        ]
+    elif history_format == "harmony":
+        history = [message.to_dict() for message in messages]
+    else:
+        history = messages
+    request = ResponsesInputTokensRequest.model_validate(
+        {"input": "What city?", "previous_input_messages": history}
+    ).to_responses_request()
+
+    assert serialize_messages(request.previous_input_messages) == serialize_messages(
+        history
+    )
+    assert [
+        message.to_dict()
+        for message in construct_harmony_previous_input_messages(request)
+    ] == [message.to_dict() for message in messages]
 
 
 def test_serialize_message() -> None:

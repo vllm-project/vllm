@@ -926,6 +926,7 @@ class ResponsesInputTokensRequest(OpenAIBaseModel):
     tools: list[Tool] | None = None
     truncation: Literal["auto", "disabled"] = "disabled"
     # vLLM extensions that change the rendered prompt
+    previous_input_messages: list[OpenAIHarmonyMessage | dict] | None = None
     chat_template_kwargs: dict[str, Any] | None = None
     media_io_kwargs: dict[str, dict[str, Any]] | None = None
     mm_processor_kwargs: dict[str, Any] | None = None
@@ -946,6 +947,7 @@ class ResponsesInputTokensRequest(OpenAIBaseModel):
         data = self.model_dump(include=set(type(self).model_fields), exclude_none=True)
         data.update(
             input=self.input if self.input is not None else [],
+            previous_input_messages=self.previous_input_messages,
             store=False,
             stream=False,
             background=False,

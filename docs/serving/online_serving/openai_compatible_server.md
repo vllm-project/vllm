@@ -213,6 +213,10 @@ response. The count uses the model's chat template and includes instructions,
 tool definitions, and history referenced by `previous_response_id` when response
 storage is enabled.
 
+For Harmony models, `previous_input_messages` can supply conversation history
+directly without response storage, as on `/v1/responses`. Do not combine it
+with `previous_response_id`; the request returns HTTP 400.
+
 ```bash
 curl http://localhost:8000/v1/responses/input_tokens \
     -H "Content-Type: application/json" \

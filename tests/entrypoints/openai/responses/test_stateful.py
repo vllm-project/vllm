@@ -163,6 +163,24 @@ async def test_count_input_tokens_rejects_unknown_references(
 
 
 @pytest.mark.asyncio
+async def test_count_input_tokens_rejects_conflicting_history(
+    client: openai.AsyncOpenAI,
+):
+    with pytest.raises(openai.BadRequestError, match="Only one of"):
+        await client.post(
+            "/responses/input_tokens",
+            cast_to=dict,
+            body={
+                "input": "What city?",
+                "previous_response_id": "resp_missing",
+                "previous_input_messages": [
+                    {"role": "user", "content": "My favorite city is Seoul."}
+                ],
+            },
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("parameter", ["conversation", "personality"])
 async def test_count_input_tokens_rejects_unsupported_context(
     client: openai.AsyncOpenAI, parameter: str
