@@ -51,11 +51,7 @@ from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
 from .data import MooncakeStoreConnectorMetadata
-from .metrics import (
-    MooncakeMasterUsagePoller,
-    MooncakeStoreConnectorStats,
-    MooncakeStorePromMetrics,
-)
+from .metrics import MooncakeStoreConnectorStats, MooncakeStorePromMetrics
 from .scheduler import MooncakeStoreScheduler
 from .worker import MooncakeStoreWorker
 
@@ -209,19 +205,11 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         self.connector_scheduler: MooncakeStoreScheduler | None = None
         self.connector_worker: MooncakeStoreWorker | None = None
-        self._master_usage_poller: MooncakeMasterUsagePoller | None = None
 
         if role == KVConnectorRole.SCHEDULER:
             self.connector_scheduler = MooncakeStoreScheduler(
                 vllm_config, kv_cache_config
             )
-            # e.g. "http://<master-host>:9003/metrics"; unset disables the
-            # store usage gauges.
-            master_metrics_url = extra_config.get("mooncake_master_metrics_url")
-            if master_metrics_url:
-                self._master_usage_poller = MooncakeMasterUsagePoller(
-                    master_metrics_url
-                )
         else:
             self.connector_worker = MooncakeStoreWorker(vllm_config, kv_cache_config)
 
@@ -236,9 +224,6 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         worker = getattr(self, "connector_worker", None)
         if worker is not None:
             worker.close()
-        poller = getattr(self, "_master_usage_poller", None)
-        if poller is not None:
-            poller.close()
 
     def __del__(self):
         self.shutdown()
@@ -448,16 +433,7 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
         if self.connector_worker is None:
-            snapshot = (
-                self._master_usage_poller.take()
-                if self._master_usage_poller is not None
-                else None
-            )
-            if not snapshot:
-                return None
-            stats = MooncakeStoreConnectorStats()
-            stats.record_master_usage(snapshot)
-            return stats
+            return None
         return self.connector_worker.get_kv_connector_stats()
 
     @classmethod

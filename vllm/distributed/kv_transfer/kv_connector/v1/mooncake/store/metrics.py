@@ -7,16 +7,21 @@ Records one row per Mooncake RPC (``save_exists``, ``save_put``, ``load_get``,
 count. Exposed to the logger via ``KVConnectorLogging`` and to Prometheus
 via ``MooncakeStorePromMetrics``.
 
-The scheduler role can also attach a snapshot of the Mooncake master's memory
-gauges (see ``MooncakeMasterUsagePoller``), from which the store usage
-fractions are derived.
+``MooncakeStorePromMetrics`` can also poll the Mooncake master's memory
+gauges (see ``poll_master_metrics``) and export the store usage
+fractions. It polls from the frontend process because connector stats only
+arrive on engine steps: an idle engine would freeze the gauges while leases
+expire and puts land in the store.
 """
 
 import threading
+import time
 import urllib.request
 from dataclasses import dataclass
 from statistics import fmean
 from typing import Any
+
+from prometheus_client.parser import text_string_to_metric_families
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
@@ -28,10 +33,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
-
-
-# Reserved ``data`` key for master memory snapshots. It is not an operation.
-MASTER_USAGE_KEY = "master_usage"
 
 # Same buckets as vllm:kv_offload_cpu_allocation_size.
 _ALLOCATION_SIZE_BUCKETS = [1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144]
@@ -73,66 +74,22 @@ def master_usage_fractions(snapshot: dict[str, Any]) -> dict[str, float]:
 def parse_master_metrics(text: str) -> dict[str, int]:
     """Pick the memory gauges out of the master's Prometheus text."""
     snapshot: dict[str, int] = {}
-    for line in text.splitlines():
-        if not line or line.startswith("#"):
-            continue
-        if "{" in line:
-            name, rest = line.split("{", 1)[0], line.rsplit("}", 1)[1]
-        else:
-            name, _, rest = line.partition(" ")
-        field = _MASTER_GAUGES.get(name)
-        if field is None:
-            continue
-        snapshot[field] = snapshot.get(field, 0) + int(float(rest.split()[0]))
+    for family in text_string_to_metric_families(text):
+        for sample in family.samples:
+            field = _MASTER_GAUGES.get(sample.name)
+            if field is not None:
+                snapshot[field] = snapshot.get(field, 0) + int(sample.value)
     return snapshot
 
 
-class MooncakeMasterUsagePoller:
-    """Polls the Mooncake master's /metrics endpoint on a daemon thread.
-
-    The scheduler step must not block on HTTP, so the step only takes the
-    latest snapshot, at most once per poll.
-    """
-
-    def __init__(self, url: str, interval_s: float = 1.0, timeout_s: float = 2.0):
-        self._url = url
-        self._interval_s = interval_s
-        self._timeout_s = timeout_s
-        self._lock = threading.Lock()
-        self._snapshot: dict[str, int] | None = None
-        self._stop = threading.Event()
-        self._warned = False
-        self._thread = threading.Thread(
-            target=self._run, name="mooncake-master-usage", daemon=True
-        )
-        self._thread.start()
-
-    def _run(self) -> None:
-        while not self._stop.is_set():
-            try:
-                with urllib.request.urlopen(self._url, timeout=self._timeout_s) as r:
-                    snapshot = parse_master_metrics(r.read().decode())
-                if "processing_bytes" not in snapshot and not self._warned:
-                    logger.warning(
-                        "Mooncake master at %s publishes no "
-                        "master_mem_processing_bytes/master_mem_leased_bytes; "
-                        "only store occupancy is reported.",
-                        self._url,
-                    )
-                    self._warned = True
-                with self._lock:
-                    self._snapshot = snapshot
-            except Exception as e:
-                logger.debug("Mooncake master metrics poll failed: %s", e)
-            self._stop.wait(self._interval_s)
-
-    def take(self) -> dict[str, int] | None:
-        with self._lock:
-            snapshot, self._snapshot = self._snapshot, None
-        return snapshot
-
-    def close(self) -> None:
-        self._stop.set()
+def poll_master_metrics(url: str) -> dict[str, int] | None:
+    """One snapshot of the master's memory gauges; None if the poll fails."""
+    try:
+        with urllib.request.urlopen(url, timeout=2.0) as r:
+            return parse_master_metrics(r.read().decode())
+    except Exception as e:
+        logger.debug("Mooncake master metrics poll failed: %s", e)
+        return None
 
 
 def _nearest_rank_percentile(values: list[float], percentile: float) -> float:
@@ -170,10 +127,6 @@ class MooncakeStoreConnectorStats(KVConnectorStats):
         reduced: dict[str, int | float] = {}
         for operation, records in sorted(self.data.items()):
             if not records:
-                continue
-            if operation == MASTER_USAGE_KEY:
-                for name, value in master_usage_fractions(records[-1]).items():
-                    reduced[f"store_{name}_perc"] = round(value * 100, 2)
                 continue
             durations = [float(record["duration_seconds"]) for record in records]
             reduced[f"{operation}_count"] = len(records)
@@ -220,9 +173,6 @@ class MooncakeStoreConnectorStats(KVConnectorStats):
                 "num_existing_keys": num_existing_keys,
             }
         )
-
-    def record_master_usage(self, snapshot: dict[str, int]) -> None:
-        self.data.setdefault(MASTER_USAGE_KEY, []).append(dict(snapshot))
 
 
 class MooncakeStorePromMetrics(KVConnectorPromMetrics):
@@ -312,6 +262,42 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
             )
             for name, doc in gauge_docs.items()
         }
+        # Built only for a configured connector, so the config is present.
+        assert self._kv_transfer_config is not None
+        # e.g. "http://<master-host>:9003/metrics"; unset disables the
+        # store usage gauges.
+        master_metrics_url = self._kv_transfer_config.kv_connector_extra_config.get(
+            "mooncake_master_metrics_url"
+        )
+        if master_metrics_url:
+            threading.Thread(
+                target=self._poll_master,
+                args=(master_metrics_url,),
+                name="mooncake-master-usage",
+                daemon=True,
+            ).start()
+
+    def _poll_master(self, url: str) -> None:
+        warned = False
+        while True:
+            snapshot = poll_master_metrics(url)
+            if snapshot is not None:
+                if "processing_bytes" not in snapshot and not warned:
+                    logger.warning(
+                        "Mooncake master at %s publishes no "
+                        "master_mem_processing_bytes/master_mem_leased_bytes; "
+                        "only store occupancy is reported.",
+                        url,
+                    )
+                    warned = True
+                self._set_usage(snapshot)
+            time.sleep(1.0)
+
+    def _set_usage(self, snapshot: dict[str, int]) -> None:
+        # One store backs every engine, so each engine label gets the same value.
+        for name, value in master_usage_fractions(snapshot).items():
+            for labelvalues in self.per_engine_labelvalues.values():
+                self._usage_gauges[name].labels(*labelvalues).set(value)
 
     def _get_metrics(
         self,
@@ -337,12 +323,6 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
         engine_labelvalues = self.per_engine_labelvalues[engine_idx]
         for operation, records in transfer_stats_data.items():
             assert isinstance(records, list)
-            if operation == MASTER_USAGE_KEY:
-                if records:
-                    fractions = master_usage_fractions(records[-1])
-                    for name, value in fractions.items():
-                        self._usage_gauges[name].labels(*engine_labelvalues).set(value)
-                continue
             for record in records:
                 assert isinstance(record, dict)
                 status = str(record["status"])
