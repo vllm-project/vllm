@@ -262,7 +262,7 @@ def dsa_weights(layer: nn.Module, tp: int) -> FlashDsaWeights:
 
 def kda_weights(layer: nn.Module, tp: int) -> FlashKdaWeights:
     """A KDA layer's attention side, as views of vLLM's row-major bf16 projections;
-    the q | k | v conv taps are packed once into one [3P, 4] tensor."""
+    the q | k | v conv taps are a [3P, 4] view of vLLM's fused conv1d."""
     from vllm.models.glm5next.amd.specialized_decode.mono.config import (
         KDA_DIM,
         FlashShard,
@@ -277,12 +277,9 @@ def kda_weights(layer: nn.Module, tp: int) -> FlashKdaWeights:
     def linear(name, rows, cols):
         return _need(f"{name}.weight", getattr(attn, name).weight, (rows, cols), bf16)
 
-    taps = []
-    for name in ("q_conv1d", "k_conv1d", "v_conv1d"):
-        conv = getattr(attn, name)
-        if conv.bias is not None:
-            raise ValueError(f"needs {name} without bias")
-        taps.append(_need(f"{name}.weight", conv.weight, (P, 1, 4), f32).view(P, 4))
+    if attn.conv1d.bias is not None:
+        raise ValueError("needs conv1d without bias")
+    conv = _need("conv1d.weight", attn.conv1d.weight, (3 * P, 1, 4), f32)
     w_on = attn.o_norm.weight
     if w_on is None or tuple(w_on.shape) != (D,):
         raise ValueError("needs o_norm with a weight")
@@ -296,7 +293,7 @@ def kda_weights(layer: nn.Module, tp: int) -> FlashKdaWeights:
         w_in=linear("in_proj_qkvbfg_a", shard.kda_in_rows, HIDDEN),
         w_fb=linear("f_b_proj", P, D),
         w_gb=linear("g_b_proj", P, D),
-        conv_w=torch.cat(taps).contiguous(),
+        conv_w=conv.view(3 * P, 4),
         a_log=_need("A_log", attn.A_log, (1, 1, H, 1), f32).view(H),
         dt_bias=_need("dt_bias", attn.dt_bias, (P,), f32),
         w_on=w_on.float().contiguous(),
