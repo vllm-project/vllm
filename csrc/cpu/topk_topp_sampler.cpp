@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #include "cpu_arch_macros.h"
 #include "cpu_types.hpp"
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <vector>
@@ -13,6 +14,11 @@ constexpr int kMeanStdSampleN = 8192;       // mean/std sample cap
 constexpr int kBsearchMaxIters = 32;        // binary-search iteration cap
 constexpr int kTernarySearchMaxIters = 18;  // matches Triton
 constexpr float kKDuplicateTol = 1e-9f;     // tie tolerance for top-k (Triton)
+#if defined(__powerpc__) || defined(__s390x__)
+constexpr bool kTrimIdleWork = true;  // skip the team and unused dup counts
+#else
+constexpr bool kTrimIdleWork = false;
+#endif
 }  // namespace
 
 // Matches _NORMAL_CDF_TO_SIGMA_TABLE in topk_topp_triton.py (200 entries).
@@ -94,6 +100,44 @@ struct Fp64Acc16 {
     return vaddvq_f64(sum);
   }
 };
+#elif defined(__powerpc__) || defined(__s390x__)
+using vf32 = __vector float;
+using vi32 = __vector signed int;
+
+static inline int hsum_i32(vi32 v) { return v[0] + v[1] + v[2] + v[3]; }
+
+static inline float hmin_f32(vf32 v) {
+  return std::min(std::min(v[0], v[1]), std::min(v[2], v[3]));
+}
+
+struct Fp64Acc16 {
+  __vector double acc[8] = {};
+  inline void add(const vec_op::FP32Vec16& v) {
+    for (int i = 0; i < 4; ++i) {
+      const vf32 x = v.reg.val[i];
+      // vec_doublee widens lanes 0 and 2; rotate by one lane for 1 and 3.
+      acc[2 * i] += vec_doublee(x);
+      acc[2 * i + 1] += vec_doublee(vec_sld(x, x, 4));
+    }
+  }
+  inline double reduce() const {
+    __vector double sum = acc[0];
+    for (int i = 1; i < 8; ++i) sum += acc[i];
+    return sum[0] + sum[1];
+  }
+};
+
+// VSX / VXE exp() clamps its input, so exp(-inf) yields ~1e-38 instead of 0.
+// Zero PAD lanes to match the scalar and NEON paths.
+static inline vec_op::FP32Vec16 zero_pad_lanes(const vec_op::FP32Vec16& v,
+                                               const vec_op::FP32Vec16& e) {
+  const vf32 pad = vec_splats(kPadSentinel);
+  const vf32 zero = vec_splats(0.0f);
+  vec_op::f32x4x4_t out;
+  for (int r = 0; r < 4; ++r)
+    out.val[r] = vec_sel(zero, e.reg.val[r], vec_cmpgt(v.reg.val[r], pad));
+  return vec_op::FP32Vec16(out);
+}
 #endif
 
 FORCE_INLINE static double sum_gt_to_double(const float* buf, int n,
@@ -109,6 +153,19 @@ FORCE_INLINE static double sum_gt_to_double(const float* buf, int n,
     for (int r = 0; r < 4; ++r) {
       const float32x4_t v = vld1q_f32(buf + j + 4 * r);
       masked.val[r] = vbslq_f32(vcgtq_f32(v, thr), v, zero);
+    }
+    acc.add(vec_op::FP32Vec16(masked));
+  }
+  s = acc.reduce();
+#elif defined(__powerpc__) || defined(__s390x__)
+  Fp64Acc16 acc;
+  const vf32 thr = vec_splats(threshold);
+  const vf32 zero = vec_splats(0.0f);
+  for (; j + 16 <= n; j += 16) {
+    vec_op::f32x4x4_t masked;
+    for (int r = 0; r < 4; ++r) {
+      const vf32 v = vec_xl(0, buf + j + 4 * r);
+      masked.val[r] = vec_sel(zero, v, vec_cmpgt(v, thr));
     }
     acc.add(vec_op::FP32Vec16(masked));
   }
@@ -133,6 +190,18 @@ FORCE_INLINE static int count_within_tol(const float* row, int V, float center,
       n += (int)vaddvq_u32(vshrq_n_u32(mask, 31));
     }
   }
+#elif defined(__powerpc__) || defined(__s390x__)
+  const vf32 c = vec_splats(center);
+  const vf32 t = vec_splats(tol);
+  // Mask lanes are all-ones (-1), so subtracting counts matches.
+  vi32 cnt = vec_splats(0);
+  for (; i + 16 <= V; i += 16) {
+    for (int r = 0; r < 4; ++r) {
+      const vf32 v = vec_xl(0, row + i + 4 * r);
+      cnt -= (vi32)vec_cmplt(vec_abs(v - c), t);
+    }
+  }
+  n += hsum_i32(cnt);
 #endif
   for (; i < V; ++i)
     if (fabsf(row[i] - center) < tol) ++n;
@@ -150,6 +219,15 @@ FORCE_INLINE static void mask_write_below(float* row, int V, float threshold,
       float32x4_t v = vld1q_f32(row + i + 4 * r);
       v = vbslq_f32(vcgtq_f32(v, thr), v, fv);
       vst1q_f32(row + i + 4 * r, v);
+    }
+  }
+#elif defined(__powerpc__) || defined(__s390x__)
+  const vf32 thr = vec_splats(threshold);
+  const vf32 fv = vec_splats(fill);
+  for (; i + 16 <= V; i += 16) {
+    for (int r = 0; r < 4; ++r) {
+      const vf32 v = vec_xl(0, row + i + 4 * r);
+      vec_xst(vec_sel(fv, v, vec_cmpgt(v, thr)), 0, row + i + 4 * r);
     }
   }
 #endif
@@ -184,6 +262,30 @@ FORCE_INLINE static void vec_max_min_with_pad_blend(
       vec_op::FP32Vec16 safe(safe_raw);
       minv = minv.min(safe);
     }
+    max_l = maxv.reduce_max();
+    min_l = minv.reduce_min();
+  }
+#elif defined(__powerpc__) || defined(__s390x__)
+  {
+    const float pos_inf_val = std::numeric_limits<float>::infinity();
+    const vf32 pad = vec_splats(pad_sentinel);
+    const vf32 pos_inf = vec_splats(pos_inf_val);
+    vec_op::FP32Vec16 maxv(row[0]);
+    vec_op::FP32Vec16 minv(pos_inf_val);
+    vi32 cnt = vec_splats(0);
+    for (; i + 16 <= V; i += 16) {
+      vec_op::FP32Vec16 v16(row + i);
+      maxv = maxv.max(v16);
+      vec_op::f32x4x4_t safe_raw;
+      for (int r = 0; r < 4; ++r) {
+        const vf32 x = v16.reg.val[r];
+        const auto fin = vec_cmpgt(x, pad);
+        cnt -= (vi32)fin;
+        safe_raw.val[r] = vec_sel(pos_inf, x, fin);
+      }
+      minv = minv.min(vec_op::FP32Vec16(safe_raw));
+    }
+    n_finite = hsum_i32(cnt);
     max_l = maxv.reduce_max();
     min_l = minv.reduce_min();
   }
@@ -320,8 +422,8 @@ static float binary_search_buffer(const float* buf, int n, float p_val,
 }
 
 static void scan_pivot_stats(const float* buf, int n, float pivot, float tol,
-                             int* num_above, float* min_above,
-                             int* num_at_min) {
+                             int min_above_for_dups, int* num_above,
+                             float* min_above, int* num_at_min) {
   float ma = std::numeric_limits<float>::infinity();
   int na = 0;
   int i = 0;
@@ -341,6 +443,23 @@ static void scan_pivot_stats(const float* buf, int n, float pivot, float tol,
     }
     ma = vminvq_f32(vmin);
   }
+#elif defined(__powerpc__) || defined(__s390x__)
+  {
+    const vf32 vpivot = vec_splats(pivot);
+    const vf32 pos_inf = vec_splats(std::numeric_limits<float>::infinity());
+    vf32 vmin = pos_inf;
+    vi32 cnt = vec_splats(0);
+    for (; i + 16 <= n; i += 16) {
+      for (int r = 0; r < 4; ++r) {
+        const vf32 values = vec_xl(0, buf + i + 4 * r);
+        const auto above = vec_cmpgt(values, vpivot);
+        cnt -= (vi32)above;
+        vmin = vec_min(vmin, vec_sel(pos_inf, values, above));
+      }
+    }
+    na = hsum_i32(cnt);
+    ma = hmin_f32(vmin);
+  }
 #endif
   for (; i < n; ++i) {
     if (buf[i] > pivot) {
@@ -353,7 +472,9 @@ static void scan_pivot_stats(const float* buf, int n, float pivot, float tol,
   // count_within_tol runs over the full buf; elements below pivot are all
   // < min_above, so only ULP-equal values fall within kKDuplicateTol and
   // are legitimately counted as boundary duplicates.
-  *num_at_min = count_within_tol(buf, n, ma, tol);
+  *num_at_min = (kTrimIdleWork && na < min_above_for_dups)
+                    ? 0
+                    : count_within_tol(buf, n, ma, tol);
 }
 
 static float ternary_search_topk(const float* buf, int n, int k, float lo,
@@ -367,8 +488,8 @@ static float ternary_search_topk(const float* buf, int n, int k, float lo,
     float p1 = lo + (hi - lo) * (2.0f / 3.0f);
     int na0, na1, nd0, nd1;
     float mn0, mn1;
-    scan_pivot_stats(buf, n, p0, kKDuplicateTol, &na0, &mn0, &nd0);
-    scan_pivot_stats(buf, n, p1, kKDuplicateTol, &na1, &mn1, &nd1);
+    scan_pivot_stats(buf, n, p0, kKDuplicateTol, k, &na0, &mn0, &nd0);
+    scan_pivot_stats(buf, n, p1, kKDuplicateTol, k, &na1, &mn1, &nd1);
 
     bool found0 = (na0 >= k) && (na0 - nd0 < k);
     bool found1 = (na1 >= k) && (na1 - nd1 < k);
@@ -397,7 +518,7 @@ static float ternary_search_topk(const float* buf, int n, int k, float lo,
 
     if (hi - lo < kKDuplicateTol) {
       final_pivot = (lo + hi) * 0.5f;
-      scan_pivot_stats(buf, n, final_pivot, kKDuplicateTol, &num_above,
+      scan_pivot_stats(buf, n, final_pivot, kKDuplicateTol, 0, &num_above,
                        &dup_value, &num_dup);
       break;
     }
@@ -482,18 +603,21 @@ static void _top_p_row_core(float* __restrict__ row, int V, float p_val,
   sigma = sigma + fabsf(sigma) * -0.25f;
   float outlier_logit = st.avg + st.std_v * sigma;
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__powerpc__) || defined(__s390x__)
   DEFINE_FAST_EXP
   vec_op::FP32Vec16 base16(st.max_l);
 #endif
   double sum_exp_d = 0.0;
   {
     int i = 0;
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__powerpc__) || defined(__s390x__)
     Fp64Acc16 acc;
     for (; i + 16 <= V; i += 16) {
       vec_op::FP32Vec16 v16(row + i);
       vec_op::FP32Vec16 e16 = fast_exp(v16 - base16);
+  #if defined(__powerpc__) || defined(__s390x__)
+      e16 = zero_pad_lanes(v16, e16);
+  #endif
       acc.add(e16);
     }
     sum_exp_d += acc.reduce();
@@ -510,11 +634,14 @@ static void _top_p_row_core(float* __restrict__ row, int V, float p_val,
   {
     const float inv_sum = 1.0f / sum_exp;
     int i = 0;
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__powerpc__) || defined(__s390x__)
     vec_op::FP32Vec16 isum16(inv_sum);
     for (; i + 16 <= V; i += 16) {
       vec_op::FP32Vec16 v16(row + i);
       vec_op::FP32Vec16 p16 = fast_exp(v16 - base16) * isum16;
+  #if defined(__powerpc__) || defined(__s390x__)
+      p16 = zero_pad_lanes(v16, p16);
+  #endif
       p16.save(scratch + i);
     }
 #endif
@@ -611,7 +738,9 @@ void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p) {
   const float* pp = p.data_ptr<float>();
 
   // thread_local avoids reallocation across calls; resize skips zero-fill.
-#pragma omp parallel
+  // On POWER and Z, a single row stays on this thread: waking the OpenMP team
+  // costs more than filtering it.
+#pragma omp parallel if (B > 1 || !kTrimIdleWork)
   {
     thread_local std::vector<float> scratch_tls;
     thread_local std::vector<float> outlier_tls;
@@ -636,7 +765,7 @@ void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k) {
   float* lp = logits.data_ptr<float>();
   const int* kp = k.data_ptr<int>();
 
-#pragma omp parallel
+#pragma omp parallel if (B > 1 || !kTrimIdleWork)
   {
     thread_local std::vector<float> outlier_tls;
     if ((int64_t)outlier_tls.size() < V) outlier_tls.resize(V);
@@ -663,7 +792,7 @@ void cpu_topk_topp_sampling(torch::Tensor& logits, const torch::Tensor& k,
   const int* kp = k.data_ptr<int>();
   const float* pp = p.data_ptr<float>();
 
-#pragma omp parallel
+#pragma omp parallel if (B > 1 || !kTrimIdleWork)
   {
     thread_local std::vector<float> scratch_tls;
     thread_local std::vector<float> outlier_tls;
