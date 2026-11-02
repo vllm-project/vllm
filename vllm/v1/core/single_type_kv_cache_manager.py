@@ -53,8 +53,19 @@ class SingleTypeKVCacheManager(ABC):
 
     supports_fine_grained_hash_lookup: ClassVar[bool] = False
 
+    # Whether a running request's step changes nothing beyond the base class
+    # conditions, so ``has_running_step_work`` can rule it out (see there).
+    # Not inherited: a subclass may change those steps, so it opts in itself.
+    running_step_uses_base_conditions: ClassVar[bool] = False
+
     # Keep this group's longer prefix until external cache lookup completes.
     retains_longer_hit: bool = False
+
+    def __init_subclass__(cls, **kwargs) -> None:
+        super().__init_subclass__(**kwargs)
+        cls.running_step_uses_base_conditions = cls.__dict__.get(
+            "running_step_uses_base_conditions", False
+        )
 
     @property
     def has_positionally_stable_blocks(self) -> bool:
@@ -732,12 +743,58 @@ class SingleTypeKVCacheManager(ABC):
         # The default behavior is to not skip any tokens.
         return 0
 
+    def has_running_step_work(
+        self,
+        request: Request,
+        num_tokens: int,
+        processed_computed_tokens: int,
+        num_cacheable_tokens: int,
+    ) -> bool:
+        """Whether ``allocate_slots`` would change this group's state for a
+        running request without new computed tokens, i.e. free blocks below
+        ``processed_computed_tokens``, allocate slots for ``num_tokens`` or cache
+        up to ``num_cacheable_tokens`` (0 when the group is not cached).
+        ``allocate_slots`` skips those steps when every group returns False.
+
+        Returns True unless the class itself sets
+        ``running_step_uses_base_conditions``; a subclass that changes state
+        elsewhere in those steps overrides this method instead.
+        """
+        if not self.running_step_uses_base_conditions:
+            return True
+        request_id = request.request_id
+        blocks = self.req_to_blocks.get(request_id)
+        if not blocks or request_id in self._partial_hit_reqs:
+            return True
+        if cdiv(num_tokens, self.block_size) > len(blocks):
+            return True
+        # `remove_skipped_blocks` frees backward from its last skipped block
+        # and stops at the first null block.
+        num_skipped_blocks = min(
+            self.get_num_skipped_tokens(processed_computed_tokens) // self.block_size,
+            len(blocks),
+        )
+        if num_skipped_blocks > 0 and blocks[num_skipped_blocks - 1] is not (
+            self._null_block
+        ):
+            return True
+        return (
+            self.kv_cache_spec.prefix_cacheable
+            and self.num_cached_block.get(request_id, 0)
+            < min(
+                num_cacheable_tokens,
+                len(request.block_hashes) * self.block_pool.hash_block_size,
+            )
+            // self.block_size
+        )
+
     def new_step_starts(self) -> None:
         return None
 
 
 class FullAttentionManager(SingleTypeKVCacheManager):
     supports_fine_grained_hash_lookup: ClassVar[bool] = True
+    running_step_uses_base_conditions: ClassVar[bool] = True
 
     @classmethod
     def find_longest_cache_hit(
@@ -856,6 +913,22 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             return
         self._cache_partial_tail_block(request, num_tokens)
 
+    def has_running_step_work(
+        self,
+        request: Request,
+        num_tokens: int,
+        processed_computed_tokens: int,
+        num_cacheable_tokens: int,
+    ) -> bool:
+        if num_cacheable_tokens > 0 and self.block_size != (
+            self.block_pool.hash_block_size
+        ):
+            # `cache_blocks` re-registers the prompt's partial tail every call.
+            return True
+        return super().has_running_step_work(
+            request, num_tokens, processed_computed_tokens, num_cacheable_tokens
+        )
+
     def _cache_partial_tail_block(
         self,
         request: Request,
@@ -944,6 +1017,8 @@ class RSWAManager(FullAttentionManager):
 
 
 class SlidingWindowManager(SingleTypeKVCacheManager):
+    running_step_uses_base_conditions: ClassVar[bool] = True
+
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
@@ -1272,8 +1347,20 @@ class CircularBufferManager(FullAttentionManager):
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         return 0
 
+    def has_running_step_work(
+        self,
+        request: Request,
+        num_tokens: int,
+        processed_computed_tokens: int,
+        num_cacheable_tokens: int,
+    ) -> bool:
+        # Only claiming the ring block changes state.
+        return not self.req_to_blocks.get(request.request_id)
+
 
 class ChunkedLocalAttentionManager(SingleTypeKVCacheManager):
+    running_step_uses_base_conditions: ClassVar[bool] = True
+
     def __init__(self, kv_cache_spec: ChunkedLocalAttentionSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.attention_chunk_size = kv_cache_spec.attention_chunk_size
@@ -2197,6 +2284,8 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
 
 
 class SinkFullAttentionManager(FullAttentionManager):
+    running_step_uses_base_conditions: ClassVar[bool] = True
+
     def __init__(
         self,
         kv_cache_spec: SinkFullAttentionSpec,
