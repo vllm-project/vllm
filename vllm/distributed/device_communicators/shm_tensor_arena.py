@@ -36,7 +36,6 @@ import pickle
 import weakref
 from contextlib import suppress
 from multiprocessing import shared_memory
-from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -45,6 +44,7 @@ from vllm.distributed.device_communicators.shm_broadcast import (
     check_shm_free_space,
     memory_fence,
 )
+from vllm.distributed.device_communicators.shm_utils import attach_shared_memory
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -124,17 +124,12 @@ class ShmTensorArena:
                 torch.frombuffer(meta, dtype=torch.uint8).fill_(0)
         else:
             self.is_creator = False
-            # same resource_tracker workaround as ShmRingBuffer
-            with patch(
-                "multiprocessing.resource_tracker.register",
-                lambda *args, **kwargs: None,
-            ):
-                try:
-                    self.shared_memory = shared_memory.SharedMemory(name=name)
-                    assert self.shared_memory.size >= self.total_bytes
-                except FileNotFoundError:
-                    # deserialized on a different node; arena unused there
-                    pass
+            try:
+                self.shared_memory = attach_shared_memory(name)
+                assert self.shared_memory.size >= self.total_bytes
+            except FileNotFoundError:
+                # deserialized on a different node; arena unused there
+                pass
 
     def handle(self):
         return (self.n_reader, self.slot_bytes, self.n_slots, self.shared_memory.name)
