@@ -399,6 +399,72 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
 
 
 @requires_qsa_kernels
+@pytest.mark.parametrize(
+    "num_rows,table_width",
+    [
+        pytest.param(1, 64, id="one_row"),
+        pytest.param(32, 64, id="decode32"),
+        pytest.param(128, 168, id="decode128_wide_table"),
+        pytest.param(1024, 8, id="prefill_chunk"),
+    ],
+)
+def test_qsa_mqa_paged_scores_visible_columns(num_rows: int, table_width: int) -> None:
+    """The scores of each row's visible columns (the ones the top-k reads)
+    match a reference whatever the page table's width; a padding row and
+    unmapped pages are handled."""
+    torch.manual_seed(3)
+    heads, head_dim, page_size, compress_ratio = 4, 128, 64, 4
+    num_requests = 3
+    pages = num_requests * table_width + 1
+    k_cache = torch.randn(
+        pages, page_size, 1, head_dim, device="cuda", dtype=torch.bfloat16
+    )
+    page_table = (
+        torch.randperm(pages - 1, device="cuda")[: num_requests * table_width] + 1
+    ).to(torch.int32)
+    page_table = page_table.view(num_requests, table_width).contiguous()
+    page_table[2, table_width // 2 :] = -1  # a request whose late pages are unmapped
+    q = torch.randn(num_rows, heads, head_dim, device="cuda", dtype=torch.bfloat16)
+    token_to_req = torch.arange(num_rows, device="cuda", dtype=torch.int32) % 3
+    token_to_req[-1] = -1  # a padding row
+    capacity = table_width * page_size * compress_ratio
+    sequence_lengths = torch.tensor(
+        [capacity, capacity // 3, capacity], device="cuda", dtype=torch.int32
+    )
+    query_positions = torch.randint(
+        0, capacity, (num_rows,), device="cuda", dtype=torch.int32
+    )
+
+    logits, visible = qsa_ops.qsa_mqa_paged(
+        q,
+        k_cache,
+        page_table,
+        token_to_req,
+        query_positions,
+        sequence_lengths,
+        compress_ratio,
+    )
+
+    request = token_to_req.clamp_min(0).long()
+    expected_visible = torch.minimum(
+        (query_positions + 1) // compress_ratio,
+        sequence_lengths[request] // compress_ratio,
+    )
+    expected_visible = torch.where(token_to_req >= 0, expected_visible, 0)
+    torch.testing.assert_close(visible, expected_visible.to(torch.int32))
+    table = page_table[request].long()
+    keys = k_cache[table.clamp_min(0), :, 0, :].flatten(1, 2).float()
+    mapped = (table >= 0).repeat_interleave(page_size, dim=1)
+    scores = torch.einsum("rhd,rnd->rnh", q.float(), keys).relu().sum(-1)
+    reference = torch.where(mapped, scores / math.sqrt(head_dim), -torch.inf)
+    for row in range(num_rows):
+        n = int(visible[row])
+        torch.testing.assert_close(
+            logits[row, :n], reference[row, :n], rtol=1e-4, atol=1e-4
+        )
+
+
+@requires_qsa_kernels
 @pytest.mark.parametrize("use_fp8", [False, True])
 @pytest.mark.parametrize(
     "num_rows,num_query_heads,num_kv_heads,page_size",
