@@ -16,8 +16,9 @@ from vllm.v1.attention.backends.triton_attn_diffkv import (
 from vllm.v1.kv_cache_interface import FullAttentionSpec
 
 
-# 64 segments only while num_seqs * num_kv_heads * 16 < 188 SMs on SM12.0 and
-# the 64-segment scratch holds every query token (e.g. multi-query verify).
+# 64 segments only while num_seqs * num_kv_heads * 16 < SMs on SM8.6 (82 SMs) or
+# SM12.0 (188 SMs) and the 64-segment scratch holds every query token. SM8.6
+# keeps 16 for multi-query batches (verification).
 @pytest.mark.parametrize(
     "builder_cls",
     [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
@@ -29,6 +30,10 @@ from vllm.v1.kv_cache_interface import FullAttentionSpec
         ((12, 0), 1, 12, 1, 16),
         ((12, 0), 8, 1, 1, 64),
         ((12, 0), 8, 2, 1, 16),
+        ((8, 6), 2, 2, 1, 64),
+        ((8, 6), 2, 3, 1, 16),
+        ((8, 6), 1, 1, 4, 16),
+        ((8, 6), 1, 2, 4, 16),
         ((9, 0), 1, 1, 1, 16),
         ((12, 0), 1, 2, 4, 64),
         ((12, 0), 1, 10, 4, 16),
@@ -41,7 +46,8 @@ def test_split_k_segments_follow_sm_occupancy(
     monkeypatch.setattr(
         current_platform, "is_device_capability", lambda cap: cap == capability
     )
-    monkeypatch.setattr(current_platform, "num_compute_units", lambda: 188)
+    num_sms = 82 if capability == (8, 6) else 188
+    monkeypatch.setattr(current_platform, "num_compute_units", lambda: num_sms)
     config = SimpleNamespace(
         model_config=SimpleNamespace(
             get_num_attention_heads=lambda _: 8,
@@ -71,6 +77,19 @@ def test_split_k_segments_follow_sm_occupancy(
         metadata.softmax_segm_output.data_ptr()
         == builder.softmax_segm_output.data_ptr()
     )
+
+
+# (capability, SMs): SM8.6 selects 64 segments for these draft batches, SM9.0 16.
+PLATFORMS = [((8, 6), 82), ((9, 0), 132)]
+
+
+def _mock_platform(monkeypatch, platform):
+    capability, num_sms = platform
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    monkeypatch.setattr(
+        current_platform, "is_device_capability", lambda cap: cap == capability
+    )
+    monkeypatch.setattr(current_platform, "num_compute_units", lambda: num_sms)
 
 
 def _draft_builder(builder_cls, rswa_window: int | None):
@@ -104,9 +123,13 @@ def _draft_decode_batch(seq_lens: list[int]):
     [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
 )
 @pytest.mark.parametrize("rswa_window", [None, 64])
-def test_draft_decode_update_flag_matches_build_writes(builder_cls, rswa_window):
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_draft_decode_update_flag_matches_build_writes(
+    monkeypatch, builder_cls, rswa_window, platform
+):
     """The update is a no-op, so the builder may claim support only when
     build() writes no builder-owned tensor that a captured graph reads."""
+    _mock_platform(monkeypatch, platform)
     builder = _draft_builder(builder_cls, rswa_window)
     common_metadata = _draft_decode_batch([5, 9])
     common_metadata.rswa_prefix_lens = torch.tensor([3, 7], dtype=torch.int32)
@@ -132,9 +155,11 @@ def test_draft_decode_update_flag_matches_build_writes(builder_cls, rswa_window)
     "builder_cls",
     [TritonAttentionMetadataBuilder, TritonAttentionDiffKVMetadataBuilder],
 )
-def test_draft_decode_update_matches_fresh_build(builder_cls):
+@pytest.mark.parametrize("platform", PLATFORMS)
+def test_draft_decode_update_matches_fresh_build(monkeypatch, builder_cls, platform):
     """A replayed graph reads metadata built at capture; after an in-place
     update it must match a fresh build of the replayed batch."""
+    _mock_platform(monkeypatch, platform)
     torch.manual_seed(0)
     builder = _draft_builder(builder_cls, rswa_window=None)
     captured = _draft_decode_batch([100, 120])
@@ -152,3 +177,4 @@ def test_draft_decode_update_matches_fresh_build(builder_cls):
     assert torch.equal(metadata.block_table, expected.block_table)
     assert torch.equal(metadata.slot_mapping, expected.slot_mapping)
     assert torch.equal(metadata.query_start_loc, expected.query_start_loc)
+    assert metadata.num_par_softmax_segments == expected.num_par_softmax_segments

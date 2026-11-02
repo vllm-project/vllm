@@ -250,6 +250,8 @@ def test_reduce_segments_leaves_graph_padding_untouched(query_lens, seq_lens) ->
             pytest.param([(w, 128), (w, 129), (w, 257)], (8, 1), None, id=f"w{w}")
             for w in range(2, MAX_3D_QUERY_LEN + 1, 2)
         ],
+        # Single-query decode; short and ragged lengths leave most of 64 segments empty.
+        pytest.param([(1, 1), (1, 17), (1, 129), (1, 4097)], (8, 1), None, id="decode"),
         # Prefill chunk, verification, decode, padding, short query.
         pytest.param(
             [(8, 8), (6, 129), (1, 257), (0, 0), (3, 64)], (8, 1), None, id="mixed"
@@ -266,8 +268,9 @@ def test_reduce_segments_leaves_graph_padding_untouched(query_lens, seq_lens) ->
     ],
 )
 @pytest.mark.parametrize("sliding_window", [None, 32])
+@pytest.mark.parametrize("num_par_softmax_segments", [16, 64])
 def test_speculative_splitk_matches_reference(
-    monkeypatch, seq_lens, num_heads, q_dtype, sliding_window
+    monkeypatch, seq_lens, num_heads, q_dtype, sliding_window, num_par_softmax_segments
 ):
     reduce_grids = _spy_reduce_segments(monkeypatch)
     test_triton_unified_attn(
@@ -281,11 +284,13 @@ def test_speculative_splitk_matches_reference(
         num_blocks=8,
         q_dtype=q_dtype,
         seq_threshold_3D=32,
+        num_par_softmax_segments=num_par_softmax_segments,
     )
     assert len(reduce_grids) == 1
 
 
-def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
+@pytest.mark.parametrize("num_par_softmax_segments", [16, 64])
+def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch, num_par_softmax_segments):
     reduce_grids = _spy_reduce_segments(monkeypatch)
     test_triton_unified_attn_bf16_query_fp8_kv(
         seq_lens=[(6, 128), (6, 129), (6, 4097)],
@@ -294,6 +299,7 @@ def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
         block_size=128,
         num_blocks=64,
         seq_threshold_3D=16,
+        num_par_softmax_segments=num_par_softmax_segments,
     )
     assert len(reduce_grids) == 1
 
@@ -677,6 +683,7 @@ def test_triton_unified_attn(
     num_blocks: int,
     q_dtype: torch.dtype | None,
     seq_threshold_3D: int,
+    num_par_softmax_segments: int = 16,
 ) -> None:
     torch.set_default_device(DEVICE_TYPE)
 
@@ -730,7 +737,6 @@ def test_triton_unified_attn(
         maybe_quantized_value_cache = (value_cache / v_scale).to(q_dtype)
         kv_quant_mode = KVQuantMode.FP8_PER_TENSOR
 
-    num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
     scratch_rows = seq_threshold_3D * (
         max_query_len if max_query_len <= MAX_3D_QUERY_LEN else 1
@@ -809,6 +815,7 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
     block_size: int,
     num_blocks: int,
     seq_threshold_3D: int,
+    num_par_softmax_segments: int = 16,
 ) -> None:
     """Test bf16 Q with FP8 per-tensor KV cache (dequant via _cast_kv_tile)."""
     torch.set_default_device(DEVICE_TYPE)
@@ -853,7 +860,6 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 
     output = torch.empty_like(query)
 
-    num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
     scratch_rows = seq_threshold_3D * (
         max_query_len if max_query_len <= MAX_3D_QUERY_LEN else 1
