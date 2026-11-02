@@ -9,7 +9,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-from .sparse_indexer import PagedPrefillMetadata
+from ...common.ops.sparse_indexer import PagedPrefillMetadata
 
 
 @triton.jit(do_not_specialize=["REGION_COUNT", "REGION_ROW"])

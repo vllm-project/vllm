@@ -316,6 +316,10 @@ impl ChatRenderer for HfChatRenderer {
     fn render(&self, request: &ChatRequest) -> Result<RenderedPrompt> {
         self.apply_chat_template(request)
     }
+
+    fn renders_request_chat_template(&self) -> bool {
+        true
+    }
 }
 
 /// Chat message in the JSON shape expected by Jinja chat templates.

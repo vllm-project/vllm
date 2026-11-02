@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import replace
@@ -11,6 +12,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.compilation import CUDAGraphMode
+from vllm.config.speculative import _DRAFT_VLLM_CONFIG_OVERRIDES
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -34,6 +36,7 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.batch_shard import batch_sharded_sampling_enabled
+from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
@@ -62,9 +65,23 @@ def _target_feeds_hc_residual(vllm_config: VllmConfig) -> bool:
 
 
 class BaseSpeculator(ABC):
+    """Base class for V2 model runner speculators.
+
+    This is also the interface for custom speculators, named by the
+    `speculator_class` of their registered `SpeculatorConfig` (see
+    `register_speculative_method`). Speculators that run a draft model
+    should subclass `DraftModelSpeculator` (or `TargetDependentARSpeculator` if
+    drafting consumes target model state), which the model runner loads and
+    allocates draft KV cache for.
+    """
+
     num_query_per_req: int = 1
     # Extra query slots reserved per request outside the regular queries.
     num_extra_query_per_req: int = 0
+    supports_mm_inputs: bool = False
+    # Draft logits for probabilistic rejection sampling, or None for
+    # greedy-draft verification and for speculators without a draft model.
+    draft_logits: DraftLogitsCache | None = None
 
     @abstractmethod
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
@@ -104,6 +121,12 @@ class BaseSpeculator(ABC):
         num_speculative_tokens: int | None = None,
     ) -> torch.Tensor:
         pass
+
+    def prepare_watermarking(
+        self, sampler: "GPUWatermarkSampler", idx_mapping: torch.Tensor
+    ) -> None:
+        """Prepare draft-side watermarking before `propose`. No-op by default."""
+        return
 
 
 class DraftModelSpeculator(BaseSpeculator):
@@ -317,7 +340,16 @@ class DraftModelSpeculator(BaseSpeculator):
     def attn_vllm_config(self) -> VllmConfig:
         """Config for the draft's attention metadata builders. Overridden by
         speculators whose attention mode differs from the target's."""
-        return self.vllm_config
+        # Shallow copies instead of apply_draft_overrides: its replace()
+        # rebuilds each sub-config and drops engine-resolved init=False state
+        # such as cache_config.kv_cache_layout.
+        config = copy.copy(self.vllm_config)
+        for src, config_name, dst in _DRAFT_VLLM_CONFIG_OVERRIDES:
+            if (value := getattr(self.speculative_config, src)) is not None:
+                sub_config = copy.copy(getattr(config, config_name))
+                setattr(sub_config, dst, value)
+                setattr(config, config_name, sub_config)
+        return config
 
     def set_attn(
         self,
@@ -556,7 +588,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_row_mapping=draft_logits.row_mapping,
             )
         else:
-            sampled = logits.argmax(dim=-1)
+            sampled = greedy_argmax(logits)
         self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
         return sampled
 

@@ -262,6 +262,7 @@ steps:
       pytest -v -s
       v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_tensor_parallelism
       v1/e2e/spec_decode/draft_model/test_draft_model.py::test_draft_model_engine_args_tensor_parallelism
+      v1/e2e/spec_decode/draft_model/test_structured_output_pp.py::test_specdec_pp_structured_output
   mirror:
     amd:
       label: ":amd: (MI300) V1 E2E"

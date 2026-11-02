@@ -6,29 +6,14 @@ import torch
 import torch.nn as nn
 
 from vllm.config import SpeculativeConfig
-from vllm.config.speculative import pard2_is_target_dependent
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsEagle3, supports_eagle3
 
 logger = init_logger(__name__)
 
 
-def requires_aux_hidden_states(spec_config: SpeculativeConfig) -> bool:
-    if spec_config.method == "eagle3":
-        eagle_config = (
-            getattr(spec_config.draft_model_config.hf_config, "eagle_config", None)
-            or {}
-        )
-        return eagle_config.get("use_aux_hidden_state", True)
-    if spec_config.method == "pard2":
-        # Target-independent PARD-2 drafts from embeddings alone.
-        return pard2_is_target_dependent(spec_config.draft_model_config.hf_config)
-    return spec_config.method in ("dflash", "dspark", "extract_hidden_states")
-
-
 def set_eagle3_aux_hidden_state_layers(
-    model: nn.Module,
-    spec_config: SpeculativeConfig,
+    model: nn.Module, spec_config: SpeculativeConfig, use_pp: bool = False
 ) -> None:
     if not supports_eagle3(model):
         raise RuntimeError("Model does not support EAGLE3 interface")
@@ -44,6 +29,10 @@ def set_eagle3_aux_hidden_state_layers(
         logger.info("Using Eagle3 auxiliary layers from model: %s", aux_layers)
     eagle3_model.set_aux_hidden_state_layers(aux_layers)
     reserve_aux_intermediate_tensor_slots(model)
+
+    if use_pp:
+        assert spec_config.method is not None
+        verify_supports_aux_hidden_states_over_pp(model, spec_config.method)
 
 
 def _inner_decoder(model: nn.Module) -> nn.Module | None:
