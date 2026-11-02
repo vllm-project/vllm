@@ -3491,6 +3491,70 @@ def test_pause_new_drains_async_kv_loads(load_done_before_pause: bool):
     assert queued.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
+def test_stats_report_admission_reserved_blocks():
+    """SchedulerStats report the reserves admissions currently face: the
+    watermark while requests are running, and the blocks in-flight prefills
+    still need, which an async KV load admission must leave free."""
+    block_size = 16
+    scheduler = create_scheduler(
+        use_kv_connector=mock_kv(matched_tokens=2 * block_size, is_async=True),
+        block_size=block_size,
+    )
+    scheduler.kv_cache_manager.watermark_blocks = 7
+    loading, running = create_requests(
+        num_requests=2, num_tokens=4 * block_size, block_size=block_size
+    )
+
+    # Nothing running or in flight: nothing is held back.
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_watermark_blocks == 0
+    assert stats.num_inflight_load_reserved_blocks == 0
+
+    # An in-progress async load is an in-flight prefill. Its reserve is
+    # reported on every update while it lasts, not only once.
+    scheduler.add_request(loading)
+    scheduler.schedule()
+    assert loading.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    expected = scheduler._inflight_prefill_reserved_blocks()
+    assert expected > 0
+    for _ in range(2):
+        stats = scheduler.make_stats()
+        assert stats is not None
+        # Nothing is running, so the watermark doesn't apply.
+        assert stats.num_watermark_blocks == 0
+        assert stats.num_inflight_load_reserved_blocks == expected
+
+    # Once a request is running, the watermark applies.
+    scheduler.connector.get_num_new_matched_tokens = lambda *args: (0, False)
+    scheduler.add_request(running)
+    scheduler.schedule()
+    assert running.status == RequestStatus.RUNNING
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_watermark_blocks == 7
+    assert (
+        stats.num_inflight_load_reserved_blocks
+        == scheduler._inflight_prefill_reserved_blocks()
+    )
+
+
+def test_stats_report_no_inflight_load_reserve_without_connector():
+    """Without a KV connector there are no async loads to reserve for, even
+    while a chunked prefill is in flight."""
+    block_size = 16
+    scheduler = create_scheduler(block_size=block_size, max_num_batched_tokens=32)
+    (request,) = create_requests(
+        num_requests=1, num_tokens=4 * block_size, block_size=block_size
+    )
+    scheduler.add_request(request)
+    scheduler.schedule()
+    assert scheduler._inflight_prefill_reserved_blocks() > 0
+    stats = scheduler.make_stats()
+    assert stats is not None
+    assert stats.num_inflight_load_reserved_blocks == 0
+
+
 def test_pause_new_ignores_streaming_session_waiting_for_input():
     """A session idle in WAITING_FOR_STREAMING_REQ cannot progress, so it must
     not keep a PAUSED_NEW drain from completing."""
