@@ -74,10 +74,12 @@ implementations.
 
 The routed/shared expert fusion is optional. It requires a companion
 `vllm-xpu-kernels` build providing
-`vllm_xpu_kernels.moe_shared_fused_interface` and the native
+`vllm_xpu_kernels.moe_shared_fused_interface.XpuFusedMoeWithSharedExpert` and the native
 `torch.ops._xpu_C.moe_shared_fused_decode_interface` operator. A build without
-this provider uses the existing MoE implementation; missing-provider import
-failures are cached for subsequent decode calls.
+this provider uses the existing MoE implementation. The model's
+`xpu/specialized_decode` modules qualify loaded weights and bind an executor
+after quantization, before graph capture. Runtime token-row eligibility is
+checked in vLLM before dispatching the fused operator.
 
 Fusion applies to eligible calls with **1–8 input token rows**, contiguous,
 64-byte-aligned FP16/BF16 activations, FP8-e4m3 routed/shared weights with FP32
@@ -100,9 +102,10 @@ vllm serve Qwen/Qwen3.5-35B-A3B \
 
 To run eager inference without graph capture, set
 `--compilation-config '{"mode":0,"cudagraph_mode":"NONE"}'`. This keeps the XPU
-model implementation and eligible MoE fusion. After a weight reload/update,
-fused weight copies are refreshed in place so captured addresses remain valid;
-changes to weight metadata or fusion eligibility require graph recapture.
+model implementation and eligible MoE fusion. The executor reads model-owned
+parameters directly, so in-place weight reloads/updates are visible to captured
+graphs without a worker refresh callback. Changes to weight storage, metadata
+or fusion eligibility require rebuilding the executor and recapturing graphs.
 
 ### Embedding and Reranker Language Models
 

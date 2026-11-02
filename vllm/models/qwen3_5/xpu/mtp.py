@@ -37,6 +37,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from .model import Qwen3_5DecoderLayer, Qwen3_5Model, Qwen3_5RMSNorm
+from .specialized_decode.hooks import initialize_specialized_decode
 
 logger = init_logger(__name__)
 
@@ -173,6 +174,9 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 
 
 class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
+    def process_weights_after_loading(self) -> None:
+        initialize_specialized_decode(self)
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
