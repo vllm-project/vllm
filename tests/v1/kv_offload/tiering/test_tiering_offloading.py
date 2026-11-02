@@ -53,6 +53,7 @@ from vllm.v1.kv_offload.config import (
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    ParentContext,
     SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
@@ -71,6 +72,10 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 
 _CTX = ReqContext(req_id="test")
 _MOCK_OFFLOADING_SPEC = MagicMock()
+
+
+def _parent_ctx(view, lock=None):
+    return ParentContext(lock or threading.Lock(), view)
 
 
 def _mock_mmap_region(num_chunks: int, row_bytes: int = 16):
@@ -205,14 +210,14 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
         assert metrics[metric_name].labelnames == ("tier",)
 
 
-def test_tiering_manager_aggregates_secondary_stats():
+def test_tiering_manager_aggregates_secondary_stats(manager_lock):
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5, mmap_region=mock_region
     )
     secondary_tier = MetricsSecondaryTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=mock_region.create_kv_memoryview(),
+        parent_ctx=_parent_ctx(mock_region.create_kv_memoryview(), manager_lock),
         tier_type="test_metrics",
     )
     secondary_stats = OffloadingConnectorStats()
@@ -221,6 +226,7 @@ def test_tiering_manager_aggregates_secondary_stats():
     )
     secondary_tier.stats = secondary_stats
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=primary_tier,
         secondary_tiers=[secondary_tier],
     )
@@ -330,7 +336,7 @@ class TestExampleSecondaryTierManager:
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
         tier = ExampleSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=_parent_ctx(mock_view),
             tier_type="example",
             custom_param=67,
         )
@@ -355,7 +361,7 @@ class TestExampleSecondaryTierManager:
         mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
         tier = ExampleSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=_parent_ctx(mock_view),
             tier_type="example",
             custom_param=67,
         )
@@ -397,7 +403,7 @@ class TestTieringOffloadingManager:
     """Tests for TieringOffloadingManager."""
 
     @pytest.fixture
-    def manager_setup(self):
+    def manager_setup(self, manager_lock):
         # Create primary tier (CPU-based)
         mock_region = _mock_mmap_region(5)
         self.primary_tier = CPUPrimaryTierOffloadingManager(
@@ -407,19 +413,21 @@ class TestTieringOffloadingManager:
         mock_view = mock_region.create_kv_memoryview()
 
         # Create secondary tiers with the primary view
+        parent_ctx = _parent_ctx(mock_view, manager_lock)
         self.secondary_tier1 = ExampleSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=parent_ctx,
             tier_type="example",
         )
         self.secondary_tier2 = ExampleSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=parent_ctx,
             tier_type="example",
         )
 
         # Create tiered manager
         self.manager = TieringOffloadingManager(
+            lock=manager_lock,
             primary_tier=self.primary_tier,
             secondary_tiers=[self.secondary_tier1, self.secondary_tier2],
         )
@@ -1634,7 +1642,7 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.manager.primary_tier,
             "lookup",
-            lambda key, req_context: (LookupResult.RETRY),
+            lambda key, req_context: LookupResult.RETRY,
         )
 
         with pytest.raises(AssertionError):
@@ -1739,8 +1747,8 @@ class TestTieringOffloadingManager:
         monkeypatch.setattr(
             self.secondary_tier1,
             "on_new_request",
-            lambda req_context: (
-                RequestOffloadingContext(policy=OffloadPolicy.REQUEST_LEVEL)
+            lambda req_context: RequestOffloadingContext(
+                policy=OffloadPolicy.REQUEST_LEVEL
             ),
         )
         rl_ctx = ReqContext(req_id="rl")
@@ -1906,7 +1914,7 @@ class TestTieringOffloadingWithoutSecondaryTiers:
 
         # Create manager with no secondary tiers
         manager = TieringOffloadingManager(
-            primary_tier=primary_tier, secondary_tiers=[]
+            lock=threading.Lock(), primary_tier=primary_tier, secondary_tiers=[]
         )
 
         chunks = to_keys(range(3))
@@ -1999,29 +2007,34 @@ def test_parse_tier_filter_skips_bad_entries():
 class TestPromotionAllocation:
     """Unit tests for TieringOffloadingManager._promotion_allocation."""
 
-    def _make_manager(self, num_chunks: int):
+    def _make_manager(self, num_chunks: int, manager_lock: threading.Lock):
         mmap = _mock_mmap_region(num_chunks)
         primary = CPUPrimaryTierOffloadingManager(
             num_chunks=num_chunks, mmap_region=mmap
         )
 
+        parent_ctx = _parent_ctx(mmap.create_kv_memoryview(), manager_lock)
         secondary_tiers = [
             ExampleSecondaryTierManager(
                 offloading_spec=_MOCK_OFFLOADING_SPEC,
-                primary_kv_view=mmap.create_kv_memoryview(),
+                parent_ctx=parent_ctx,
                 tier_type="example",
             )
         ]
 
         return TieringOffloadingManager(
-            primary_tier=primary, secondary_tiers=secondary_tiers
+            lock=manager_lock,
+            primary_tier=primary,
+            secondary_tiers=secondary_tiers,
         ), mmap
 
-    def test_returns_none_and_fires_failure_metric_when_primary_full(self):
+    def test_returns_none_and_fires_failure_metric_when_primary_full(
+        self, manager_lock
+    ):
         """When prepare_write returns None (primary full), _promotion_allocation
         returns None and increments the allocation-failure counter."""
         num_chunks = 1
-        manager, mmap = self._make_manager(num_chunks)
+        manager, mmap = self._make_manager(num_chunks, manager_lock)
 
         req_ctx = ReqContext(req_id="req")
         key = to_keys([1])[0]
@@ -2041,12 +2054,12 @@ class TestPromotionAllocation:
         # Release blocks by completing the store
         manager.primary_tier.complete_store([key], req_ctx, success=True)
 
-    def test_allocation_records_chunk_count_metric(self):
+    def test_allocation_records_chunk_count_metric(self, manager_lock):
         """_promotion_allocation records the chunk count for every promotion:
         eager tiers call it at initiate, deferred tiers via the job's alloc_fn
         when materialize() redeems the claim."""
         num_chunks = 4
-        manager, mmap = self._make_manager(num_chunks)
+        manager, mmap = self._make_manager(num_chunks, manager_lock)
         req_ctx = ReqContext(req_id="req")
         key = to_keys([1])[0]
 
@@ -2086,7 +2099,7 @@ class TestPromotionAllocation:
         )
 
 
-def test_tiering_manager_reports_one_config_info_series_for_each_tier():
+def test_tiering_manager_reports_one_config_info_series_for_each_tier(manager_lock):
     """The info metric holds one series for each tier, and the tier label tells
     the series apart. A tier cannot know its own index, so the manager adds the
     label. A tier fills the names it owns only. The primary tier here gets no
@@ -2097,15 +2110,17 @@ def test_tiering_manager_reports_one_config_info_series_for_each_tier():
     primary_tier = CPUPrimaryTierOffloadingManager(
         num_chunks=5, mmap_region=mock_region
     )
+    parent_ctx = _parent_ctx(mock_region.create_kv_memoryview(), manager_lock)
     secondary_tiers = [
         MetricsSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_region.create_kv_memoryview(),
+            parent_ctx=parent_ctx,
             tier_type="test_metrics",
         )
         for _ in range(2)
     ]
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=primary_tier,
         secondary_tiers=secondary_tiers,
     )
@@ -2123,6 +2138,7 @@ def test_tiering_manager_reports_the_primary_series_with_no_secondary_tier():
     the frontend publishes one series and not a bare metric."""
     mock_region = _mock_mmap_region(5)
     manager = TieringOffloadingManager(
+        lock=threading.Lock(),
         primary_tier=CPUPrimaryTierOffloadingManager(
             num_chunks=5, mmap_region=mock_region
         ),
@@ -2144,6 +2160,7 @@ def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():
 
     mock_region = _mock_mmap_region(5)
     manager = TieringOffloadingManager(
+        lock=threading.Lock(),
         primary_tier=_TwoMappingPrimary(num_chunks=5, mmap_region=mock_region),
         secondary_tiers=[],
     )
@@ -2152,7 +2169,7 @@ def test_tiering_manager_rejects_a_primary_tier_with_two_info_mappings():
         manager.config_info()
 
 
-def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping():
+def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping(manager_lock):
     """The manager adds the tier label to a copy. A tier that returns a stored
     mapping must not gain a foreign key that outlives the call."""
 
@@ -2165,12 +2182,14 @@ def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping():
             return self.info
 
     mock_region = _mock_mmap_region(5)
+    parent_ctx = _parent_ctx(mock_region.create_kv_memoryview(), manager_lock)
     tier = _StoredInfoTier(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=mock_region.create_kv_memoryview(),
+        parent_ctx=parent_ctx,
         tier_type="test_metrics",
     )
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=CPUPrimaryTierOffloadingManager(
             num_chunks=5, mmap_region=mock_region
         ),
@@ -2182,7 +2201,7 @@ def test_tiering_manager_keeps_the_tier_label_out_of_the_tier_mapping():
     assert tier.info == {"path": "/mnt/a"}
 
 
-def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
+def test_tiering_spec_declares_the_config_info_keys_the_manager_fills(manager_lock):
     """The spec declares the info label names in the API-server process, and
     the manager fills the values in the engine process. A drift between the two
     empties every declared label and drops every filled value, so this pins
@@ -2190,7 +2209,9 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
     so the order of the names does not have to agree."""
     tier_configs = [{"type": "test_metrics"}, {"type": "test_metrics"}]
     mock_region = _mock_mmap_region(5)
+    parent_ctx = _parent_ctx(mock_region.create_kv_memoryview(), manager_lock)
     manager = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=CPUPrimaryTierOffloadingManager(
             num_chunks=5,
             mmap_region=mock_region,
@@ -2203,7 +2224,7 @@ def test_tiering_spec_declares_the_config_info_keys_the_manager_fills():
         secondary_tiers=[
             MetricsSecondaryTierManager(
                 offloading_spec=_MOCK_OFFLOADING_SPEC,
-                primary_kv_view=mock_region.create_kv_memoryview(),
+                parent_ctx=parent_ctx,
                 tier_type=tier_config["type"],
             )
             for tier_config in tier_configs
@@ -2282,7 +2303,9 @@ class TestTieringOffloadingManagerWithFsTier:
     """Integration tests for TieringOffloadingManager backed by a real FS tier."""
 
     @staticmethod
-    def _make_fs_tier(mmap_region, root_dir: str) -> FileSystemTierManager:
+    def _make_fs_tier(
+        mmap_region, root_dir: str, lock: threading.Lock
+    ) -> FileSystemTierManager:
         """Construct a FileSystemTierManager wired to the given mmap region."""
         offloading_spec = MagicMock()
         offloading_spec.blocks_per_chunk = 1
@@ -2313,7 +2336,7 @@ class TestTieringOffloadingManagerWithFsTier:
         )
         return FileSystemTierManager(
             offloading_spec=offloading_spec,
-            primary_kv_view=mmap_region.create_kv_memoryview(),
+            parent_ctx=ParentContext(lock, mmap_region.create_kv_memoryview()),
             tier_type="fs",
             root_dir=root_dir,
             n_read_threads=4,
@@ -2321,7 +2344,7 @@ class TestTieringOffloadingManagerWithFsTier:
         )
 
     @pytest.fixture
-    def fs_manager_setup(self, tmp_path):
+    def fs_manager_setup(self, tmp_path, manager_lock):
         """Real FileSystemTierManager inside TieringOffloadingManager on a tmp disk."""
         # Small block size so tests are fast and don't require O_DIRECT
         # alignment; the FS tier gracefully falls back to buffered I/O when
@@ -2331,10 +2354,11 @@ class TestTieringOffloadingManagerWithFsTier:
         primary_tier = CPUPrimaryTierOffloadingManager(
             num_chunks=n_chunks, mmap_region=mmap
         )
-        fs_tier = self._make_fs_tier(mmap, str(tmp_path))
+        fs_tier = self._make_fs_tier(mmap, str(tmp_path), manager_lock)
         manager = TieringOffloadingManager(
             primary_tier=primary_tier,
             secondary_tiers=[fs_tier],
+            lock=manager_lock,
         )
         yield manager, primary_tier, fs_tier
         manager.reset_cache()
@@ -2407,7 +2431,7 @@ class TestTieringOffloadingManagerWithFsTier:
                 f"key {k!r} expected HIT after promotion, got {r!r}"
             )
 
-    def test_two_fs_tier_promotions_different_keys(self, tmp_path):
+    def test_two_fs_tier_promotions_different_keys(self, tmp_path, manager_lock):
         """Two FS tiers each hold different keys; promotions go to correct tier."""
         mmap = _mock_mmap_region(8, 64)
         primary_tier = CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=mmap)
@@ -2415,11 +2439,12 @@ class TestTieringOffloadingManagerWithFsTier:
         path0.mkdir()
         path1.mkdir()
 
-        fs_tier0 = self._make_fs_tier(mmap, str(path0))
-        fs_tier1 = self._make_fs_tier(mmap, str(path1))
+        fs_tier0 = self._make_fs_tier(mmap, str(path0), manager_lock)
+        fs_tier1 = self._make_fs_tier(mmap, str(path1), manager_lock)
         manager = TieringOffloadingManager(
             primary_tier=primary_tier,
             secondary_tiers=[fs_tier0, fs_tier1],
+            lock=manager_lock,
         )
 
         keys0 = to_keys(range(2))

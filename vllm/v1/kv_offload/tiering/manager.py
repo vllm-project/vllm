@@ -378,6 +378,7 @@ class TieringOffloadingManager(OffloadingManager):
 
     def __init__(
         self,
+        lock: threading.Lock,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
         tier_poll_interval_s: float = DEFAULT_TIER_POLL_INTERVAL_S,
@@ -385,6 +386,8 @@ class TieringOffloadingManager(OffloadingManager):
         """Initialize the TieringOffloadingManager.
 
         Args:
+            lock: Manager lock, to be held when calling into this Manager's
+                functions (for example by the secondary tiers).
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
@@ -397,14 +400,9 @@ class TieringOffloadingManager(OffloadingManager):
         # Guards this manager and every tier it composes, the primary tier
         # included. A real lock because the tier-poll thread enters the
         # manager too; the primary tier has none of its own.
-        self._lock = threading.Lock()
+        self._lock = lock
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
-
-        # set manager_lock for use by the tiers when they want to call
-        # manager level functions from tier-level threads.
-        for tier in self.secondary_tiers:
-            tier.set_manager_lock(self._lock)
 
         self._job_id_counter: int = 0
         # Job tracking: maps job_id to metadata for all in-flight transfers.

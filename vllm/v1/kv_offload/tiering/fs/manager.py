@@ -44,6 +44,7 @@ from vllm.v1.kv_offload.tiering.backpressure import BackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobResult,
+    ParentContext,
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
@@ -109,7 +110,7 @@ class FileSystemTierManager(SecondaryTierManager):
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
-        primary_kv_view: memoryview,
+        parent_ctx: "ParentContext",
         tier_type: str,
         root_dir: str,
         n_read_threads: int = 16,
@@ -121,7 +122,7 @@ class FileSystemTierManager(SecondaryTierManager):
         """Args:
         offloading_spec: Contains normalized offloading configuration and
             blocks_per_chunk.
-        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        parent_ctx: Handles into the composing tiering manager.
         tier_type: Tier type identifier, set by SecondaryTierFactory.
         root_dir: Root directory for block files.
         n_read_threads: Number of read-priority I/O threads.
@@ -134,9 +135,7 @@ class FileSystemTierManager(SecondaryTierManager):
         backpressure_detector: Optional backpressure detector.
 
         """
-        super().__init__(
-            offloading_spec, primary_kv_view, tier_type, backpressure_detector
-        )
+        super().__init__(offloading_spec, parent_ctx, tier_type, backpressure_detector)
         self.locality = Locality(locality) if locality is not None else None
 
         self.events: list[OffloadingEvent] | None = None
@@ -167,11 +166,7 @@ class FileSystemTierManager(SecondaryTierManager):
         # write, so no extra lock is needed (get_finished is itself lock-free).
         self._load_progress: dict[JobId, int] = {}
 
-        # Extract block size from primary view
-        assert primary_kv_view.strides is not None, (
-            "primary_kv_view.strides cannot be None"
-        )
-        self._block_size: int = primary_kv_view.strides[0]
+        self._block_size: int = self.block_size_bytes
 
         # Opt in; FileMapper enables it only for a parallelism-invariant block.
         self.file_mapper = FileMapper.from_offloading_spec(

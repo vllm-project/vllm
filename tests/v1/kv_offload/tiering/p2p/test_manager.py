@@ -33,6 +33,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    ParentContext,
     TieringOffloadingMetrics,
     TransferJob,
 )
@@ -68,6 +69,10 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import StoreDrainResult
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _parent_ctx(view):
+    return ParentContext(threading.Lock(), view)
 
 
 def _remote_prefiller_kv_params(
@@ -134,11 +139,11 @@ def _job_metadata(
     )
 
 
-def _make_manager() -> P2PSecondaryTierManager:
+def _make_manager(lock: threading.Lock | None = None) -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
     mgr.tier_type = "p2p"
-    mgr.manager_lock = None
+    mgr.manager_lock = lock or threading.Lock()
     mgr._bp_detector = None
     mgr._local_id = "127.0.0.1:7777"
     mgr._hash_seed = "0"
@@ -213,7 +218,7 @@ class TestInitHashSeed:
         )
         return P2PSecondaryTierManager(
             offloading_spec=_init_offloading_spec(),
-            primary_kv_view=memoryview(bytearray(16)),
+            parent_ctx=_parent_ctx(memoryview(bytearray(16))),
         )
 
     def test_missing_pythonhashseed_uses_default(self, monkeypatch):
@@ -267,7 +272,7 @@ class TestBackpressureRejected:
         with pytest.raises(ValueError, match="not supported for the P2P"):
             P2PSecondaryTierManager(
                 offloading_spec=_init_offloading_spec(),
-                primary_kv_view=memoryview(bytearray(16)),
+                parent_ctx=_parent_ctx(memoryview(bytearray(16))),
                 backpressure_detector=object(),
             )
 
@@ -275,7 +280,7 @@ class TestBackpressureRejected:
         self._patch_transports(monkeypatch)
         mgr = P2PSecondaryTierManager(
             offloading_spec=_init_offloading_spec(),
-            primary_kv_view=memoryview(bytearray(16)),
+            parent_ctx=_parent_ctx(memoryview(bytearray(16))),
         )
         assert mgr.bp_detector is None
 
@@ -595,10 +600,12 @@ class TestSubmitLoad:
 
 
 class TestPromotionLatency:
-    def test_p2p_load_without_transfer_time_records_promotion_latency(self):
+    def test_p2p_load_without_transfer_time_records_promotion_latency(
+        self, manager_lock
+    ):
         """P2P load results omit transfer_time; the manager records promotion
         latency from job creation to completion."""
-        p2p_tier = _make_manager()
+        p2p_tier = _make_manager(manager_lock)
         primary_kv_view = memoryview(np.zeros((5, 16), dtype=np.uint8))
 
         primary_tier = SimpleNamespace(
@@ -608,6 +615,7 @@ class TestPromotionLatency:
             get_stats=lambda: None,
         )
         tiering_manager = TieringOffloadingManager(
+            lock=manager_lock,
             primary_tier=primary_tier,
             secondary_tiers=[p2p_tier],
             tier_poll_interval_s=0.0,
@@ -653,7 +661,7 @@ class TestPromotionLatency:
         assert len(observations[("1:p2p", "success")]) == 1
 
 
-def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
+def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch, manager_lock):
     """A timed-out P2P load fails at once but keeps its primary chunk out of
     the free pool: the peer may still be writing it. The AbortAck frees it."""
     from tests.v1.kv_offload.tiering.p2p.test_sessions import (
@@ -670,11 +678,12 @@ def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
     now = [1000.0]
     monkeypatch.setattr(client_module.time, "monotonic", lambda: now[0])
     peer = "10.0.0.1:8000"
-    p2p_tier = _make_manager()
+    p2p_tier = _make_manager(manager_lock)
     p2p_tier._control = SimpleNamespace(poll=lambda: [])  # type: ignore[assignment]
     region = _mock_mmap_region(4)
     primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region)
     tiering = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=primary,
         secondary_tiers=[p2p_tier],
         tier_poll_interval_s=0.0,
@@ -1159,7 +1168,7 @@ class TestHasPendingWork:
         assert mgr.has_pending_work() is True
 
     @pytest.mark.cpu_test
-    def test_B2_idle_manager_does_not_keep_engine_busy(self):
+    def test_B2_idle_manager_does_not_keep_engine_busy(self, manager_lock):
         """A quiescent P2P tier must let pause and shutdown observe idle.
 
         The shipped configuration runs the tier-poll thread, which services
@@ -1182,14 +1191,15 @@ class TestHasPendingWork:
             TieringOffloadingManager,
         )
 
-        p2p = _make_manager()
+        p2p = _make_manager(manager_lock)
         _attach_fake_transports(p2p)
         mmap_region = MagicMock()
         view = memoryview(np.zeros((1, 16), dtype=np.int8))
         mmap_region.create_kv_memoryview.return_value = view
         manager = TieringOffloadingManager(
-            CPUPrimaryTierOffloadingManager(1, mmap_region),
-            [p2p],
+            lock=manager_lock,
+            primary_tier=CPUPrimaryTierOffloadingManager(1, mmap_region),
+            secondary_tiers=[p2p],
         )
         try:
             connector_scheduler = object.__new__(OffloadingConnectorScheduler)
@@ -1218,7 +1228,7 @@ class TestHasPendingWork:
             manager.shutdown()
 
     @pytest.mark.cpu_test
-    def test_B2_no_poll_thread_keeps_engine_busy(self):
+    def test_B2_no_poll_thread_keeps_engine_busy(self, manager_lock):
         """With the tier-poll thread disabled the engine tick is the only
         driver, so the tiering manager must keep the engine stepping."""
         from unittest.mock import MagicMock
@@ -1237,14 +1247,15 @@ class TestHasPendingWork:
             TieringOffloadingManager,
         )
 
-        p2p = _make_manager()
+        p2p = _make_manager(manager_lock)
         _attach_fake_transports(p2p)
         mmap_region = MagicMock()
         view = memoryview(np.zeros((1, 16), dtype=np.int8))
         mmap_region.create_kv_memoryview.return_value = view
         manager = TieringOffloadingManager(
-            CPUPrimaryTierOffloadingManager(1, mmap_region),
-            [p2p],
+            lock=manager_lock,
+            primary_tier=CPUPrimaryTierOffloadingManager(1, mmap_region),
+            secondary_tiers=[p2p],
             tier_poll_interval_s=0,
         )
         try:
@@ -1557,15 +1568,18 @@ class _FakeData:
         pass
 
 
-def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierManager]:
+def _build_paired_managers(
+    lock: threading.Lock | None = None,
+) -> tuple[P2PSecondaryTierManager, P2PSecondaryTierManager]:
     """Two managers each acting as both client and server toward the other.
 
     Wires _LoopbackControl pair + per-side _FakeData so transfers complete
     on the next poll. The test drives polling by calling get_finished_jobs(),
     which invokes _poll_once synchronously on the calling thread.
     """
-    mgr_a = _make_manager()
-    mgr_b = _make_manager()
+    lock = lock or threading.Lock()
+    mgr_a = _make_manager(lock)
+    mgr_b = _make_manager(lock)
     mgr_a._local_id = "A:1"
     mgr_b._local_id = "B:2"
 
@@ -2464,7 +2478,7 @@ class TestBindHostPortDefaults:
                 parallel=SimpleNamespace(data_parallel_index=dp_index)
             ),
         )
-        return P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
+        return P2PSecondaryTierManager(spec, _parent_ctx(memoryview(b"")), **kwargs)
 
     def test_defaults_from_env_unset(self, monkeypatch):
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
@@ -3082,15 +3096,15 @@ class TestReconnectBackoff:
 # ---------------------------------------------------------------------------
 
 
-def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch):
+def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch, manager_lock):
     """A P2P server looks a peer's keys up through its ParentManager, not the
     scheduler, so the hold must stop the promotion such a lookup would start
     and tell the peer the key is absent."""
-    consumer, server = _build_paired_managers()
+    consumer, server = _build_paired_managers(manager_lock)
     region = _mock_mmap_region(4)
     example = ExampleSecondaryTierManager(
         offloading_spec=SimpleNamespace(),
-        primary_kv_view=region.create_kv_memoryview(),
+        parent_ctx=ParentContext(manager_lock, region.create_kv_memoryview()),
         tier_type="example",
     )
     key = OffloadKey(b"secondary-only")
@@ -3105,6 +3119,7 @@ def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch):
     monkeypatch.setattr(example, "submit_load", record_submit_load)
     # Drive the server's polls on this thread, once per step.
     tiering = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region),
         secondary_tiers=[example, server],
         tier_poll_interval_s=0,
@@ -3146,14 +3161,18 @@ def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch):
 
 
 def _producer_with_cpu_hit(
-    key: OffloadKey, tier_poll_interval_s: float | None = None
+    key: OffloadKey,
+    tier_poll_interval_s: float | None = None,
+    *,
+    manager_lock: threading.Lock,
 ) -> tuple[P2PSecondaryTierManager, TieringOffloadingManager]:
     """A consumer paired with a lone-P2P producer whose CPU tier holds key."""
-    consumer, server = _build_paired_managers()
+    consumer, server = _build_paired_managers(manager_lock)
     kwargs = {}
     if tier_poll_interval_s is not None:
         kwargs["tier_poll_interval_s"] = tier_poll_interval_s
     tiering = TieringOffloadingManager(
+        lock=manager_lock,
         primary_tier=CPUPrimaryTierOffloadingManager(
             num_chunks=4, mmap_region=_mock_mmap_region(4)
         ),
@@ -3202,12 +3221,12 @@ def _peer_hit(
 
 class TestIdleWhileServingPeers:
     @pytest.mark.cpu_test
-    def test_pinned_peer_hit_does_not_block_idleness(self):
+    def test_pinned_peer_hit_does_not_block_idleness(self, manager_lock):
         """A lone-P2P producer with a live tier-poll thread serves a whole peer
         request without an engine step, so its pin must not count as pending
         work, and the fetch must still complete and release the pin."""
         key = OffloadKey(b"cpu-resident")
-        consumer, tiering = _producer_with_cpu_hit(key)
+        consumer, tiering = _producer_with_cpu_hit(key, manager_lock=manager_lock)
         try:
             assert tiering._tier_poll_thread is not None
             ctx = _peer_hit(consumer, tiering, key, step_producer=False)
@@ -3242,11 +3261,13 @@ class TestIdleWhileServingPeers:
             tiering.shutdown()
 
     @pytest.mark.cpu_test
-    def test_pinned_peer_hit_without_poll_thread_is_pending(self):
+    def test_pinned_peer_hit_without_poll_thread_is_pending(self, manager_lock):
         """With the tier-poll thread disabled only a step completes the
         fetch, so the engine must keep stepping."""
         key = OffloadKey(b"cpu-resident")
-        consumer, tiering = _producer_with_cpu_hit(key, tier_poll_interval_s=0)
+        consumer, tiering = _producer_with_cpu_hit(
+            key, tier_poll_interval_s=0, manager_lock=manager_lock
+        )
         try:
             assert tiering._tier_poll_thread is None
             _peer_hit(consumer, tiering, key, step_producer=True)

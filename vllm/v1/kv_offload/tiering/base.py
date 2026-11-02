@@ -132,6 +132,17 @@ class JobResult:
     deferred_release: threading.Event | None = None
 
 
+@dataclass(frozen=True)
+class ParentContext:
+    """Handles into the composing manager, shared by all its secondary tiers."""
+
+    # Held while calling back into the parent, e.g. when a tier worker thread
+    # materializes a promotion's deferred CPU allocation.
+    lock: threading.Lock
+    # The primary tier's KV buffer.
+    kv_view: memoryview
+
+
 class ParentManager(ABC):
     """Interface for secondary tiers to call back into the tiering manager.
 
@@ -214,39 +225,30 @@ class SecondaryTierManager(ABC):
     def __init__(
         self,
         offloading_spec: "OffloadingSpec",
-        primary_kv_view: memoryview,
+        parent_ctx: "ParentContext",
         tier_type: str,
         backpressure_detector: BackpressureDetector | None = None,
     ) -> None:
         """Args:
         offloading_spec: Offloading configuration.
-        primary_kv_view: Memoryview of the primary tier's CPU KV cache.
+        parent_ctx: Handles into the composing TieringOffloadingManager.
         tier_type: Tier type identifier, set by SecondaryTierFactory
             from the registered tier type.
         backpressure_detector: Optional `BackpressureDetector`.
 
         """
         self._offloading_spec = offloading_spec
-        self._primary_kv_view: memoryview = primary_kv_view
-        assert primary_kv_view.strides is not None, (
+        self._primary_kv_view: memoryview = parent_ctx.kv_view
+        assert self._primary_kv_view.strides is not None, (
             "primary_kv_view.strides cannot be None"
         )
-        self._block_size_bytes: int = primary_kv_view.strides[0]
+        self._block_size_bytes: int = self._primary_kv_view.strides[0]
         self.tier_type = tier_type
         self.locality: Locality | None = None
         self._bp_detector = backpressure_detector
-        # manager_lock when the tiers need to call the Manager level
-        # functions. For example, deferred CPU block allocation by the
-        # FS tier.
-        # manager_lock should materialize when the manager materializes.
-        self.manager_lock: threading.Lock | None = None
-
-    def set_manager_lock(self, lock: threading.Lock) -> None:
-        """Called by the TieringOffloadingManager::__init__()."""
-        assert self.manager_lock is None, (
-            f"tier {self.tier_type} already has a manager lock"
-        )
-        self.manager_lock = lock
+        # Held while calling back into the manager, e.g. when a tier worker
+        # thread materializes a promotion's deferred CPU allocation.
+        self.manager_lock: threading.Lock = parent_ctx.lock
 
     @property
     def block_size_bytes(self) -> int:

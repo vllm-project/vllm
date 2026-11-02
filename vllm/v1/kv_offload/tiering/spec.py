@@ -52,6 +52,7 @@ Example out-of-tree tier configuration:
 }
 """
 
+import threading
 from typing import Any
 
 from typing_extensions import override
@@ -71,6 +72,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     TIER_LABEL,
+    ParentContext,
     SecondaryTierManager,
     TieringOffloadingMetrics,
 )
@@ -427,11 +429,15 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                     info=self.cpu_info,
                 )
 
-                # Create secondary tiers
-                primary_kv_view = primary_tier.get_kv_memoryview()
+                # Create secondary tiers. The lock is shared by the tiers and
+                # the tiering manager composed below.
+                parent_ctx = ParentContext(
+                    lock=threading.Lock(),
+                    kv_view=primary_tier.get_kv_memoryview(),
+                )
                 for i, tier_config in enumerate(self.secondary_tier_configs):
                     tier = SecondaryTierFactory.create_secondary_tier(
-                        tier_config, primary_kv_view, self
+                        tier_config, parent_ctx, self
                     )
                     secondary_tiers.append(tier)
                     logger.info(
@@ -444,6 +450,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 # get_worker(). Secondary tier transfers are handled by the
                 # secondary tier managers and need no additional workers here.
                 tiering_manager = TieringOffloadingManager(
+                    lock=parent_ctx.lock,
                     primary_tier=primary_tier,
                     secondary_tiers=secondary_tiers,
                     tier_poll_interval_s=self.tier_poll_interval_s,

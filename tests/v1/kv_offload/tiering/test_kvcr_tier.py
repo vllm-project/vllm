@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import mmap
+import threading
 from collections.abc import Collection, Iterable, Mapping
 from types import SimpleNamespace
 from typing import Any
@@ -39,7 +40,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
-from vllm.v1.kv_offload.tiering.base import JobResult, TransferJob
+from vllm.v1.kv_offload.tiering.base import JobResult, ParentContext, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.kvcr import manager as kvcr_manager
 from vllm.v1.kv_offload.tiering.kvcr.manager import KVCRSecondaryTierManager
@@ -47,6 +48,10 @@ from vllm.v1.kv_offload.tiering.manager import (
     CascadeTransferJob,
     PromotionTransferJob,
 )
+
+
+def _parent_ctx(view):
+    return ParentContext(threading.Lock(), view)
 
 
 def _op_entries(
@@ -259,7 +264,7 @@ def _make_tier(
                 self_describing_kv_events=self_describing_kv_events,
             ),
         ),
-        primary_kv_view=(
+        parent_ctx=_parent_ctx(
             primary_kv_view
             if primary_kv_view is not None
             else memoryview(np.zeros((4, 16), dtype=np.int8))

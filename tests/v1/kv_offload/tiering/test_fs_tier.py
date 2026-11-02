@@ -35,7 +35,7 @@ from vllm.v1.kv_offload.config import (
     OffloadingModelConfig,
     OffloadingParallelConfig,
 )
-from vllm.v1.kv_offload.tiering.base import TransferJob
+from vllm.v1.kv_offload.tiering.base import ParentContext, TransferJob
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import (
     FileSystemTierManager,
@@ -54,6 +54,10 @@ _NUM_BLOCKS = 8
 _BLOCK_ELEMENTS = 128 * mmap.PAGESIZE  # 2MB per block for pagesize 4096.
 _DTYPE: torch.dtype = torch.float32
 _CTX = ReqContext(req_id="test")
+
+
+def _parent_ctx(view, lock=None):
+    return ParentContext(lock or threading.Lock(), view)
 
 
 def _make_offloading_spec(
@@ -194,15 +198,12 @@ def fs_tier(tmp_path):
     mock_view = memoryview(tensor.numpy())
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=mock_view,
+        parent_ctx=_parent_ctx(mock_view),
         tier_type="fs",
         root_dir=str(tmp_path),
         n_read_threads=4,
         n_write_threads=4,
     )
-    # Standalone tier: no manager owns it, but pool workers materialize
-    # promotion jobs under the manager lock.
-    tier.set_manager_lock(threading.Lock())
     yield tier, tensor
     tier.shutdown()
 
@@ -213,7 +214,7 @@ def fs_tier_with_events(tmp_path):
     mock_view = memoryview(tensor.numpy())
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
-        primary_kv_view=mock_view,
+        parent_ctx=_parent_ctx(mock_view),
         tier_type="fs",
         root_dir=str(tmp_path),
         n_read_threads=4,
@@ -221,7 +222,6 @@ def fs_tier_with_events(tmp_path):
         enable_kv_events=True,
         locality="LOCAL",
     )
-    tier.set_manager_lock(threading.Lock())
     yield tier
     tier.shutdown()
 
@@ -343,7 +343,7 @@ def test_invalid_path_raises_at_construction():
     with pytest.raises(OSError):
         FileSystemTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=mock_view,
+            parent_ctx=_parent_ctx(mock_view),
             tier_type="fs",
             root_dir="/dev/null/invalid_path",
         )
@@ -356,7 +356,7 @@ def test_invalid_locality_raises_at_construction(tmp_path, locality):
     with pytest.raises(ValueError, match="Locality"):
         FileSystemTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
-            primary_kv_view=memoryview(tensor.numpy()),
+            parent_ctx=_parent_ctx(memoryview(tensor.numpy())),
             tier_type="fs",
             root_dir=str(tmp_path),
             locality=locality,
@@ -373,7 +373,7 @@ def test_factory_forwards_locality_to_fs_tier(tmp_path):
             "n_write_threads": 1,
             "locality": "LOCAL",
         },
-        memoryview(tensor.numpy()),
+        _parent_ctx(memoryview(tensor.numpy())),
         _MOCK_OFFLOADING_SPEC,
     )
     try:
@@ -497,13 +497,12 @@ def test_store_load_roundtrip_without_o_direct(tmp_path, monkeypatch):
     tensor = _page_aligned_rand_tensor(4, _BLOCK_ELEMENTS)
     tier = FileSystemTierManager(
         offloading_spec=_MOCK_OFFLOADING_SPEC,
-        primary_kv_view=memoryview(tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(tensor.numpy())),
         tier_type="fs",
         root_dir=str(tmp_path),
         n_read_threads=4,
         n_write_threads=4,
     )
-    tier.set_manager_lock(threading.Lock())
     try:
         assert tier._use_o_direct is False
 
@@ -869,7 +868,7 @@ def test_store_event_uses_configured_locality(tmp_path, locality, expected):
     locality_config = {} if locality is None else {"locality": locality}
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
-        primary_kv_view=memoryview(tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(tensor.numpy())),
         tier_type="fs",
         root_dir=str(tmp_path),
         enable_kv_events=True,
@@ -971,7 +970,7 @@ def test_events_require_global_kv_events_flag(tmp_path):
     tensor = _page_aligned_zero_tensor(4, _BLOCK_ELEMENTS)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=False),
-        primary_kv_view=memoryview(tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(tensor.numpy())),
         tier_type="fs",
         root_dir=str(tmp_path),
         enable_kv_events=True,
@@ -988,7 +987,7 @@ def test_events_require_global_kv_events_flag(tmp_path):
         tier.shutdown()
 
 
-def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
+def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path, manager_lock):
     """A GPU->CPU->fs cascade surfaces the tier-owned FS stored event via the
     TieringOffloadingManager's aggregated take_events()."""
     from vllm.v1.kv_offload.tiering.manager import (
@@ -1003,12 +1002,14 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
     primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=mock_region)
     tier = FileSystemTierManager(
         offloading_spec=_make_offloading_spec(enable_kv_cache_events=True),
-        primary_kv_view=primary.get_kv_memoryview(),
+        parent_ctx=_parent_ctx(primary.get_kv_memoryview(), manager_lock),
         tier_type="fs",
         root_dir=str(tmp_path),
         enable_kv_events=True,
     )
-    manager = TieringOffloadingManager(primary_tier=primary, secondary_tiers=[tier])
+    manager = TieringOffloadingManager(
+        primary_tier=primary, secondary_tiers=[tier], lock=manager_lock
+    )
     try:
         keys = [key(1), key(2)]
         manager.on_new_request(_CTX)
@@ -1041,7 +1042,7 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         offloading_spec=_make_offloading_spec(
             tp_size=2, world_size=2, rank=0, replicated_layout=True
         ),
-        primary_kv_view=memoryview(writer_tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(writer_tensor.numpy())),
         tier_type="fs",
         root_dir=root,
         n_read_threads=2,
@@ -1060,13 +1061,12 @@ def test_fs_tier_cross_tp_round_trip(tmp_path):
         offloading_spec=_make_offloading_spec(
             tp_size=4, world_size=4, rank=3, replicated_layout=True
         ),
-        primary_kv_view=memoryview(reader_tensor.numpy()),
+        parent_ctx=_parent_ctx(memoryview(reader_tensor.numpy())),
         tier_type="fs",
         root_dir=root,
         n_read_threads=2,
         n_write_threads=2,
     )
-    reader.set_manager_lock(threading.Lock())
     try:
         assert reader.file_mapper.base_path == writer_base
         assert reader.file_mapper.get_file_name(key(7)) == writer_path
