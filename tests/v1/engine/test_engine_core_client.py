@@ -457,7 +457,11 @@ def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
     client = object.__new__(MPClient)
     client._effective_attention_block_sizes = set()
     client.vllm_config = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=0),
+        cache_config=SimpleNamespace(
+            block_size=16,
+            num_gpu_blocks=0,
+            kv_cache_capacity_bytes={},
+        ),
         model_config=SimpleNamespace(max_model_len=8192),
         parallel_config=SimpleNamespace(_coord_store_port=0),
     )
@@ -487,6 +491,7 @@ def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
             coord_store_port=1234,
             coordinator_input_address="tcp://127.0.0.1:1235",
             coordinator_output_address="tcp://127.0.0.1:1236",
+            kv_cache_capacity_bytes=123456,
         )
     )
     fields = msgspec.msgpack.decode(payload)
@@ -498,6 +503,7 @@ def test_apply_ready_response_syncs_engine_metadata(effective_size, other_size):
     assert client.vllm_config.cache_config.block_size == 1056
     cache_config = client.vllm_config.cache_config
     assert cache_config.effective_attention_block_size == effective_size
+    assert cache_config.kv_cache_capacity_bytes == {0: 123456}
 
     fields["effective_attention_block_size"] = other_size
     client._apply_ready_response(msgspec.msgpack.encode(fields))
