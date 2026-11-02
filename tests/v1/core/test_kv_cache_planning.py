@@ -2264,3 +2264,49 @@ def test_extensible_kv_cache_granule_alignment_under_connector():
         )
         == blocks_per_granule + 5
     )
+
+
+def test_extensible_kv_cache_sizing_leaves_host_resident_tensors():
+    """Host-resident tensors (HiSparse's host pool) are sized by their own
+    block count, not the device pool's: granule alignment ignores their
+    stride, and capacity alignment and the measured shrink leave them as is,
+    even when their layer stride matches the device capacity."""
+    from vllm.v1.worker.worker_base import CompilationTimes
+
+    spec = new_kv_cache_spec()
+    granule = 2 << 20
+    blocks_per_granule = granule // spec.page_size_bytes
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    capacity = 3 * blocks_per_granule + 7
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * capacity
+    )
+    host_block_stride = 3 * 1000
+    host_tensor = KVCacheTensor(
+        size=capacity * host_block_stride,
+        layers=["host.0"],
+        layer_stride=capacity * host_block_stride,
+        block_stride=host_block_stride,
+        host_resident=True,
+    )
+    config.kv_cache_tensors.insert(0, host_tensor)
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+
+    kv_cache_planning.align_extensible_kv_cache_capacity(
+        vllm_config, [config], scheduler_config, granule
+    )
+    assert config.num_blocks == 3 * blocks_per_granule
+    assert config.kv_cache_tensors[0] == host_tensor
+
+    measured = [CompilationTimes(0.0, 0.0, num_kv_blocks=2 * blocks_per_granule + 5)]
+    assert (
+        kv_cache_planning.finalize_extensible_kv_cache(
+            vllm_config, [config], scheduler_config, measured, commit_granule=granule
+        )
+        == 2 * blocks_per_granule
+    )
+    assert config.kv_cache_tensors[0] == host_tensor

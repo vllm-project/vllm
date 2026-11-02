@@ -21,6 +21,7 @@ from vllm.v1.core.sched.output import (
 from vllm.v1.kv_cache_interface import (
     CircularBufferSpec,
     CrossAttentionSpec,
+    HiSparseHotSpec,
     KVCacheSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
@@ -59,6 +60,9 @@ def _reserved_block_count(
     if isinstance(kvcache_spec, CrossAttentionSpec):
         # Cross-attention blocks cover the encoder sequence only.
         return cdiv(max_encoder_len, kvcache_spec.block_size)
+    if isinstance(kvcache_spec, HiSparseHotSpec):
+        # A request's hot buffer has a fixed size, whatever its length.
+        return kvcache_spec.blocks_per_request
     num_speculative_blocks = 0
     if isinstance(kvcache_spec, MambaSpec):
         # MambaManager appends speculative running-state blocks in every cache

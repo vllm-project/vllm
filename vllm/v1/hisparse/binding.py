@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side wiring of HiSparse caches to attention layers."""
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from copy import copy
 from typing import TYPE_CHECKING, Any
 
@@ -86,6 +86,7 @@ def allocate_hisparse_kv_caches(
     layout: KVCacheLayout,
     kernel_block_sizes: list[int],
     host_pool: HiSparseHostPool,
+    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Allocate the host pool separately from the shared device backing."""
     device_config = copy(kv_cache_config)
@@ -94,7 +95,9 @@ def allocate_hisparse_kv_caches(
         for tensor in kv_cache_config.kv_cache_tensors
         if not tensor.host_resident
     ]
-    kv_caches = allocate_kv_cache(device_config, device, layout, kernel_block_sizes)
+    kv_caches = allocate_kv_cache(
+        device_config, device, layout, kernel_block_sizes, allocate=allocate
+    )
     host_tensors = [
         tensor for tensor in kv_cache_config.kv_cache_tensors if tensor.host_resident
     ]
@@ -127,6 +130,7 @@ def init_hisparse_kv_cache(
     vllm_config: VllmConfig,
     forward_context: dict[str, Any],
     block_tables: "BlockTables",
+    allocate: Callable[[int], torch.Tensor] | None = None,
 ) -> dict[str, Any]:
     """Allocate and bind HiSparse caches within the caller's allocation context."""
     backend = get_hisparse_backend()
@@ -139,6 +143,7 @@ def init_hisparse_kv_cache(
             vllm_config.cache_config.get_resolved_kv_cache_layout(),
             kernel_block_sizes,
             host_pool,
+            allocate=allocate,
         )
         backend.prepare_kv_cache_views(kv_cache_config, kv_caches, forward_context)
         cache_handles = bind_hisparse_kv_caches(

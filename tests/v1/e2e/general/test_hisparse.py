@@ -269,6 +269,74 @@ def test_hisparse_spill_and_prefix_restore(
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
 )
+@pytest.mark.parametrize(
+    "attention_backend",
+    [
+        pytest.param(None, id="default"),
+        pytest.param("FLASH_ATTN_MLA_SPARSE_FA4", id="fa4"),
+    ],
+)
+@fork_new_process_for_each_test
+def test_hisparse_extensible_kv_cache(
+    monkeypatch: pytest.MonkeyPatch,
+    vllm_runner: type[VllmRunner],
+    attention_backend: str | None,
+):
+    """HiSparse serves from an extensible KV cache with its host pool kept out.
+
+    Warmup used to fail on it: the FlashInfer decode autotune read hot blocks
+    the cache had not committed yet, and the context-prefill warmup gave the
+    hot group blocks for the whole context, more than its fixed-size rows hold.
+    """
+    capability = current_platform.get_device_capability()
+    if capability is None or capability.major < 9:
+        pytest.skip("Sparse MLA requires Hopper or newer")
+    if attention_backend and not current_platform.is_device_capability_family(100):
+        pytest.skip("FA4 sparse MLA requires SM 10.x")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
+
+    prompt = [1000 + i % 64 for i in range(700)]
+    with vllm_runner(
+        MODEL,
+        load_format="dummy",
+        hf_overrides=_shrink_config,
+        attention_config=AttentionConfig(
+            hisparse_config=HiSparseConfig(device_buffer_size=512)
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="HiSparseConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={"host_pool_gib": 1},
+        ),
+        attention_backend=attention_backend,
+        block_size=64,
+        max_model_len=1024,
+        max_num_batched_tokens=1024,
+        max_num_seqs=4,
+        enable_extensible_kv_cache=True,
+        compilation_config={
+            "cudagraph_mode": "FULL_AND_PIECEWISE",
+            "cudagraph_capture_sizes": [1, 4],
+        },
+    ) as runner:
+        engine_core = runner.llm.llm_engine.engine_core.engine_core
+        model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+        kv_cache = model_runner.extensible_kv_cache
+        assert kv_cache is not None
+        assert kv_cache.num_committed_blocks == model_runner.kv_cache_config.num_blocks
+        worker = _get_hisparse_worker(runner)
+        assert worker.host_caches
+        assert not any(cache.is_cuda for cache in worker.host_caches)
+
+        outputs = runner.generate_greedy([prompt] * 2, max_tokens=16)
+
+        assert outputs[0] == outputs[1]
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
+)
 @fork_new_process_for_each_test
 def test_hisparse_host_exhaustion_defers_requests(
     monkeypatch: pytest.MonkeyPatch,

@@ -1748,7 +1748,11 @@ def shrink_kv_cache_configs(
     for kv_cache_config in kv_cache_configs:
         assert num_blocks <= kv_cache_config.num_blocks
         kv_cache_config.kv_cache_tensors = [
-            replace(tensor, size=num_blocks * tensor.size // kv_cache_config.num_blocks)
+            tensor
+            if tensor.host_resident
+            else replace(
+                tensor, size=num_blocks * tensor.size // kv_cache_config.num_blocks
+            )
             for tensor in kv_cache_config.kv_cache_tensors
         ]
         groups = kv_cache_config.kv_cache_groups
@@ -1781,6 +1785,7 @@ def granule_aligned_kv_cache_blocks(
         tensor.block_stride
         for kv_cache_config in kv_cache_configs
         for tensor in kv_cache_config.kv_cache_tensors
+        if not tensor.host_resident
     }
     return granule_aligned_blocks(num_blocks, strides, commit_granule)
 
@@ -1810,7 +1815,8 @@ def align_extensible_kv_cache_capacity(
                 layer_stride=num_blocks * tensor.block_stride,
                 offset=tensor.offset // old_num_blocks * num_blocks,
             )
-            if tensor.layer_stride == old_num_blocks * tensor.block_stride
+            if not tensor.host_resident
+            and tensor.layer_stride == old_num_blocks * tensor.block_stride
             else tensor
             for tensor in kv_cache_config.kv_cache_tensors
         ]

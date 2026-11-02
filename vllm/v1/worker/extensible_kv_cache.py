@@ -77,11 +77,15 @@ class ExtensibleKVCache:
     reservation and captured CUDA graphs stay valid as more are committed. The
     allocation splits into segments holding num_blocks blocks each: one per
     layer for layer-outermost layouts (sized by that layer's block stride), one
-    overall for block-outermost.
+    overall for block-outermost. Host-resident tensors live outside it.
     """
 
     def __init__(self, kv_cache_config: KVCacheConfig, device: torch.device):
-        tensors = kv_cache_config.kv_cache_tensors
+        tensors = [
+            tensor
+            for tensor in kv_cache_config.kv_cache_tensors
+            if not tensor.host_resident
+        ]
         assert tensors, "Extensible KV cache requires at least one KV cache tensor."
         sizes = {tensor.size for tensor in tensors}
         assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
@@ -204,6 +208,8 @@ class ExtensibleKVCache:
         assert kv_cache_config.num_blocks == self.num_committed_blocks
         kv_caches: dict[str, torch.Tensor] = {}
         for tensor in kv_cache_config.kv_cache_tensors:
+            if tensor.host_resident:
+                continue
             group_id, spec = layer_spec_for_tensor(kv_cache_config, tensor)
             if not spec.has_layer_views:
                 # Laid out by the layer itself over the raw buffer; as at
@@ -290,20 +296,25 @@ class ExtensibleKVCache:
     ) -> list[KVCacheTensor]:
         """Tensor placements matching committed_views for num_blocks.
 
-        size is the committed total, as every tensor describes the one
-        allocation. Under block-outermost layouts the committed blocks are one
-        prefix of it, so the capacity placements still hold. Under layer-outermost
-        layouts each layer's view has its own storage over its committed prefix:
-        describe it as a one-layer tensor placed at the start of that storage.
+        size is the committed total, as every device tensor describes the one
+        allocation; host-resident tensors are unchanged. Under block-outermost
+        layouts the committed blocks are one prefix of it, so the capacity
+        placements still hold. Under layer-outermost layouts each layer's view
+        has its own storage over its committed prefix: describe it as a
+        one-layer tensor placed at the start of that storage.
         """
         size = num_blocks * self.bytes_per_block
         tensors = [
-            replace(tensor, size=size) for tensor in kv_cache_config.kv_cache_tensors
+            tensor if tensor.host_resident else replace(tensor, size=size)
+            for tensor in kv_cache_config.kv_cache_tensors
         ]
         if layout.is_block_outermost:
             return tensors
         committed: list[KVCacheTensor] = []
         for tensor in tensors:
+            if tensor.host_resident:
+                committed.append(tensor)
+                continue
             _, spec = layer_spec_for_tensor(kv_cache_config, tensor)
             for layer_idx, layer_name in enumerate(tensor.layers):
                 start = tensor.offset + layer_idx * tensor.layer_stride
