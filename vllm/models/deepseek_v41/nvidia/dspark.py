@@ -320,13 +320,16 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         # The speculator's sample_sequential hook, when its loop would sample
         # from the full draft-logits cache with plain Gumbel noise.
+        # additional_config={"dspark_fused_markov": false} keeps the loop.
         spec_config = vllm_config.speculative_config
+        extra = vllm_config.additional_config
         if (
             spec_config.draft_sample_method == "probabilistic"
             and not spec_config.enable_adaptive_verification
             and not vllm_config.model_config.use_fp64_gumbel
             and getattr(vllm_config, "watermark_config", None) is None
             and not vllm_config.parallel_config.enable_batch_sharded_sampling
+            and (not isinstance(extra, dict) or extra.get("dspark_fused_markov", True))
         ):
             self.sample_sequential = FusedMarkovSampler(
                 vllm_config.scheduler_config.max_num_seqs,

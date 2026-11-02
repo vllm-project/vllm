@@ -155,9 +155,8 @@ class FusedMarkovSampler:
 
     def __call__(self, spec, num_reqs: int, head_hidden: torch.Tensor) -> bool:
         model, n_spec = spec.model, spec.num_speculative_steps
-        num_sample = num_reqs * n_spec
         base_logits = model.compute_draft_logits(
-            head_hidden[spec.sample_indices[:num_sample]]
+            head_hidden[spec.sample_indices[: num_reqs * n_spec]]
         )
         markov_embed = model.markov_embed(
             spec.input_buffers.input_ids[spec._anchor_idx[:num_reqs]]

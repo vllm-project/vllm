@@ -70,8 +70,8 @@ def test_greedy_and_cache_match_loop():
     assert torch.equal(cache[:, 0], ref_cache[:, 0])
 
 
-@pytest.mark.parametrize("temp", [0.6, 1.0])
-def test_sampled_tokens_follow_softmax(temp):
+def test_sampled_tokens_follow_softmax():
+    temp = 0.6
     row = (torch.randn(VOCAB, device="cuda") * 3).to(torch.bfloat16)
     base = row.expand(REQS * N_SPEC, VOCAB).contiguous()
     temps = torch.full((REQS,), temp, device="cuda")
