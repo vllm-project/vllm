@@ -3270,7 +3270,7 @@ def test_sharded_candidate_merge_deduplicates_and_forces(
         spin_limit=1 << 20,
         prefill=prefill,
     )
-    nonempty = counts > 0
+    nonempty = (counts > 0).cpu()
     _assert_sharded_topk(
         actual[nonempty],
         scores.max(dim=0).values[nonempty].unsqueeze(1),
