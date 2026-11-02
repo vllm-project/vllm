@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 import regex as re
 import torch
 
+from vllm.distributed.parallel_state import get_world_group
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.artifact_store import (
     STORE_BACKENDS,
@@ -21,6 +22,12 @@ from vllm.model_executor.model_loader.weight_cache.seed import Seedable
 from vllm.model_executor.model_loader.weight_cache.utils import (
     build_warmup_runner,
     is_draft_model_cacheable,
+)
+from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+    flashinfer_autotune_cache_hash,
+    flashinfer_autotune_filename,
+    flashinfer_autotune_root,
+    use_flashinfer_autotune_v2,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
@@ -53,10 +60,6 @@ class FlashInferWarmupCache(WarmupCache):
     kind = "flashinfer_autotune"
 
     def __init__(self, store_names: Iterable[str] = ()) -> None:
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            flashinfer_autotune_root,
-        )
-
         # Disk is first: installs and publishes must land on it for the engine.
         self.store_sources: list[ArtifactStore] = [
             DiskArtifactStore(self.kind, flashinfer_autotune_root())
@@ -105,11 +108,6 @@ class FlashInferWarmupCache(WarmupCache):
             torch.accelerator.empty_cache()
 
     def request_params(self, runner: "GPUModelRunner") -> dict[str, Any]:
-        from vllm.distributed.parallel_state import get_world_group
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            flashinfer_autotune_cache_hash,
-        )
-
         return {
             "config_hash": flashinfer_autotune_cache_hash(runner),
             "dp_rank": runner.vllm_config.parallel_config.data_parallel_rank,
@@ -118,20 +116,12 @@ class FlashInferWarmupCache(WarmupCache):
 
     def _runner_key(self, runner: "GPUModelRunner") -> tuple[str, str]:
         """The (key, filename) naming this rank's table in every store."""
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            flashinfer_autotune_filename,
-        )
-
         params = self.request_params(runner)
         filename = flashinfer_autotune_filename(params["dp_rank"], params["rank"])
         key = artifact_key(self.kind, params["config_hash"], filename)
         return key, filename
 
     def resolve(self, request: dict[str, Any]) -> dict[str, Any] | None:
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            flashinfer_autotune_filename,
-        )
-
         config_hash = request.get("config_hash")
         if not isinstance(config_hash, str) or not _CONFIG_HASH_RE.fullmatch(
             config_hash
@@ -148,10 +138,6 @@ class FlashInferWarmupCache(WarmupCache):
 
     def _adopt_from_stores(self, runner: "GPUModelRunner") -> bool:
         """Pull this rank's table from the shared stores; True skips D2D."""
-        from vllm.model_executor.warmup.flashinfer_autotune_cache import (
-            use_flashinfer_autotune_v2,
-        )
-
         shared = self.store_sources[1:]
         if not shared or use_flashinfer_autotune_v2(runner):
             return False

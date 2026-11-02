@@ -9,7 +9,19 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Protocol
 
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
+from vllm.distributed.mooncake_store import MooncakeStoreConfig, setup_mooncake_store
 from vllm.logger import init_logger
+from vllm.utils.import_utils import PlaceholderModule
+from vllm.utils.network_utils import get_ip
+
+try:
+    from mooncake.store import MooncakeDistributedStore
+except ImportError:
+    mooncake_store = PlaceholderModule("mooncake.store")  # type: ignore[assignment]
+    MooncakeDistributedStore = mooncake_store.placeholder_attr(
+        "MooncakeDistributedStore"
+    )
 
 logger = init_logger(__name__)
 
@@ -77,15 +89,6 @@ class MooncakeArtifactStore(ArtifactStore):
     name = "mooncake"
 
     def __init__(self) -> None:
-        from mooncake.store import MooncakeDistributedStore  # type: ignore
-
-        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
-        from vllm.distributed.mooncake_store import (
-            MooncakeStoreConfig,
-            setup_mooncake_store,
-        )
-        from vllm.utils.network_utils import get_ip
-
         self._store = MooncakeDistributedStore()
         config = MooncakeStoreConfig.load_from_config()
         local_hostname = rdma_utils.get_requester_local_hostname(get_ip())

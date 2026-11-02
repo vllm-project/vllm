@@ -1497,14 +1497,13 @@ class _FakeNativeMooncakeStore:
 def test_mooncake_artifact_store_put_get_is_best_effort(tmp_path, monkeypatch):
     """Put is idempotent (first write wins) and native errors are swallowed."""
     import json
-    import sys
-    import types
 
     native = _FakeNativeMooncakeStore()
-    mooncake_store_mod = types.SimpleNamespace(MooncakeDistributedStore=lambda: native)
-    mooncake_mod = types.SimpleNamespace(store=mooncake_store_mod)
-    monkeypatch.setitem(sys.modules, "mooncake", mooncake_mod)
-    monkeypatch.setitem(sys.modules, "mooncake.store", mooncake_store_mod)
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_cache.artifact_store"
+        ".MooncakeDistributedStore",
+        lambda: native,
+    )
     config_file = tmp_path / "mooncake.json"
     config_file.write_text(
         json.dumps(
@@ -1603,10 +1602,13 @@ def test_warmup_cache_adopt_from_stores(tmp_path, monkeypatch):
     from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
         FlashInferWarmupCache,
     )
-    from vllm.model_executor.warmup import flashinfer_autotune_cache as fi_cache
 
     monkeypatch.setenv("VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(tmp_path))
-    monkeypatch.setattr(fi_cache, "use_flashinfer_autotune_v2", lambda _: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_cache.warmup_cache"
+        ".use_flashinfer_autotune_v2",
+        lambda _: False,
+    )
     config_hash = "f" * 64
     filename = "autotune_configs_dp0_rank0.json"
     target = tmp_path / config_hash / filename
@@ -1637,12 +1639,20 @@ def test_warmup_cache_adopt_from_stores(tmp_path, monkeypatch):
 
     # The managed v2 store path is never touched by the v1 file seeding.
     store.data[key] = json.dumps(table).encode()
-    monkeypatch.setattr(fi_cache, "use_flashinfer_autotune_v2", lambda _: True)
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_cache.warmup_cache"
+        ".use_flashinfer_autotune_v2",
+        lambda _: True,
+    )
     assert kind._adopt_from_stores(None) is False
     assert not target.exists()
 
     # A store miss leaves the daemon to D2D seeding and local tuning.
-    monkeypatch.setattr(fi_cache, "use_flashinfer_autotune_v2", lambda _: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.model_loader.weight_cache.warmup_cache"
+        ".use_flashinfer_autotune_v2",
+        lambda _: False,
+    )
     store.data.clear()
     assert kind._adopt_from_stores(None) is False
     assert not target.exists()
