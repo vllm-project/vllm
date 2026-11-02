@@ -37,9 +37,6 @@
     "INSTALL_KV_CONNECTORS": {
       "default": "false"
     },
-    "BUILD_NIXL": {
-      "default": "false"
-    },
     "SCCACHE_BUCKET_NAME": {
       "default": "vllm-build-sccache"
     },
@@ -83,7 +80,7 @@
       "default": ">=1.0.17"
     },
     "RUNAI_MODEL_STREAMER_VERSION": {
-      "default": ">=0.15.7"
+      "default": ">=0.17.1"
     },
     "GGUF_VERSION": {
       "default": ">=0.19.0"

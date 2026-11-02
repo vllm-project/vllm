@@ -31,6 +31,7 @@ class PEFTHelper:
 
     bias: Literal["none"] = field(default="none")
     modules_to_save: list[str] | None = field(default=None)
+    task_type: str | None = field(default=None)
     # True to use Rank-Stabilized LoRA (rsLoRA, see: https://arxiv.org/abs/2312.03732)
     use_rslora: bool = field(default=False)
     # True to use Weight-Decomposed Low-Rank Adaptation (DoRA, see: https://arxiv.org/abs/2402.09353)
@@ -110,6 +111,12 @@ class PEFTHelper:
                     f"LoRA rank for `{key}` in `rank_pattern` must be a positive "
                     f"integer, got {rank}."
                 )
+        # PEFT adds the classification head to modules_to_save whenever it
+        # loads a SEQ_CLS or TOKEN_CLS adapter, even if the config omits it.
+        if self.task_type in ("SEQ_CLS", "TOKEN_CLS"):
+            self.modules_to_save = list(
+                dict.fromkeys([*(self.modules_to_save or []), "classifier", "score"])
+            )
         if self.use_rslora:
             logger.info_once("Loading LoRA weights trained with rsLoRA.")
         self.vllm_lora_scaling_factor = self._scaling(self.r, self.lora_alpha)
