@@ -305,9 +305,9 @@ def get_layer_transfer_geometry(
         # Single-head views may be split into kernel blocks (N < num_states):
         # the allocator only splits dense pages, so a manager block is the same
         # token rows whatever the kernel block size, and P and D may differ.
-        num_heads, content_dim = shape[1], shape[3]
+        num_kernel_blocks, num_heads, kernel_states, content_dim = shape
         blocks = group_kernel_blocks(
-            kv_cache, shape[0] // (spec.num_states // shape[2])
+            kv_cache, num_kernel_blocks // (spec.num_states // kernel_states)
         )
         slot_size_bytes = num_heads * content_dim * element_size
         block_len = 1 + sum(
