@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Exercise C4/C128 shard boundaries through real two-GPU generation."""
+"""Exercise C4/C128 shard boundaries through real multi-GPU generation."""
 
 import json
 import math
@@ -72,7 +72,7 @@ def _small_config():
     }
 
 
-def _generate(model_path, output_path, pcp):
+def _generate(model_path, output_path, pcp, tp=1, ep=False):
     from vllm import LLM, SamplingParams
 
     llm = LLM(
@@ -80,7 +80,8 @@ def _generate(model_path, output_path, pcp):
         load_format="dummy",
         skip_tokenizer_init=True,
         prefill_context_parallel_size=pcp,
-        tensor_parallel_size=1,
+        tensor_parallel_size=tp,
+        enable_expert_parallel=ep,
         seed=1234,
         enforce_eager=True,
         enable_prefix_caching=False,
@@ -114,7 +115,12 @@ def _generate(model_path, output_path, pcp):
 
 
 @pytest.mark.distributed
-def test_pcp_matches_single_rank_across_compression_boundaries(tmp_path):
+@pytest.mark.parametrize(
+    "topologies",
+    [((1, 1, False), (2, 1, False)), ((1, 4, True), (2, 2, True))],
+    ids=["pcp", "tp_ep"],
+)
+def test_pcp_matches_single_rank_across_compression_boundaries(tmp_path, topologies):
     """Keep attention dimensions with three layers and eight experts."""
     model = tmp_path / "model"
     model.mkdir()
@@ -126,12 +132,20 @@ def test_pcp_matches_single_rank_across_compression_boundaries(tmp_path):
         VLLM_DEEP_GEMM_WARMUP="skip",
     )
     outputs = []
-    for pcp in (1, 2):
+    for pcp, tp, ep in topologies:
         output = tmp_path / f"pcp{pcp}.json"
         log = tmp_path / f"pcp{pcp}.log"
         with log.open("w") as stream:
             result = subprocess.run(
-                [sys.executable, __file__, str(model), str(output), str(pcp)],
+                [
+                    sys.executable,
+                    __file__,
+                    str(model),
+                    str(output),
+                    str(pcp),
+                    str(tp),
+                    str(int(ep)),
+                ],
                 env=env,
                 stdout=stream,
                 stderr=subprocess.STDOUT,
@@ -140,13 +154,25 @@ def test_pcp_matches_single_rank_across_compression_boundaries(tmp_path):
         assert result.returncode == 0, log.read_text()
         outputs.append(json.loads(output.read_text()))
     assert len(outputs[0]) == len(outputs[1]) == 11
+    # Dummy initialization depends on TP/EP weight partitioning. Only compare
+    # logprobs when the topology preserves the initialized weights.
+    compare_values = topologies[0][1:] == topologies[1][1:]
     for reference, actual in zip(*outputs):
-        assert len(actual["tokens"]) == 4
-        assert actual["tokens"] == reference["tokens"]
+        assert len(actual["tokens"]) == len(reference["tokens"]) == 4
+        if compare_values:
+            assert actual["tokens"] == reference["tokens"]
         for expected, observed in zip(reference["logprobs"], actual["logprobs"]):
+            assert all(math.isfinite(value) for value in expected.values())
             assert all(math.isfinite(value) for value in observed.values())
-            assert observed == pytest.approx(expected, abs=1e-5, rel=1e-5)
+            if compare_values:
+                assert observed == pytest.approx(expected, abs=1e-5, rel=1e-5)
 
 
 if __name__ == "__main__":
-    _generate(sys.argv[1], sys.argv[2], int(sys.argv[3]))
+    _generate(
+        sys.argv[1],
+        sys.argv[2],
+        int(sys.argv[3]),
+        int(sys.argv[4]) if len(sys.argv) > 4 else 1,
+        bool(int(sys.argv[5])) if len(sys.argv) > 5 else False,
+    )
