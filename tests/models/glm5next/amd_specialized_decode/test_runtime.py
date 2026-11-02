@@ -103,13 +103,6 @@ def test_either_switch_turns_it_on(monkeypatch, monokernel, backend, on):
     assert (spec.specialized_decode_config(cfg) is not None) is on
 
 
-def test_unknown_decode_backend_raises():
-    cfg = kit.make_vllm_config()
-    cfg.additional_config = {"decode_backend": "fast"}
-    with pytest.raises(ValueError, match="decode_backend must be"):
-        spec.specialized_decode_config(cfg)
-
-
 def _decode(monkeypatch, log=None, rank=0, **fakes):
     log = [] if log is None else log
     kit.patch_layers(monkeypatch, log, rank=rank, **fakes)

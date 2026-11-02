@@ -101,6 +101,7 @@ from .multimodal import (
     Glm5NextProcessingInfo,
     Glm5NextVisionTransformer,
 )
+from .specialized_decode import requested
 
 logger = init_logger(__name__)
 
@@ -115,12 +116,17 @@ def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
 
 
 def _specialized_decode_config(vllm_config: VllmConfig):
-    """The AMD specialized decode's config (None unless requested); its runtime is
-    imported only when the switch is on."""
-    from vllm.models.glm5next.amd.specialized_decode import requested
-
+    """The specialized decode's config, None unless it is requested. Only ROCm has
+    one today, so only ROCm imports a vendor runtime; elsewhere a request is refused
+    at startup and a stock deployment never reaches vendor code."""
     if not requested(vllm_config):
         return None
+    if not current_platform.is_rocm():
+        raise ValueError(
+            "GLM-5.3-Flash has a specialized decode only on ROCm (MI355X); drop "
+            "--monokernel / decode_backend=latency_specialized on "
+            f"{current_platform.device_name}"
+        )
     from vllm.models.glm5next.amd.specialized_decode.runtime import (
         specialized_decode_config,
     )

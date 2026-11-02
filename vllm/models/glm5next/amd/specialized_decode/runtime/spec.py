@@ -15,8 +15,8 @@ import enum
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from vllm.models.glm5next.amd.specialized_decode import requested
 from vllm.models.glm5next.amd.specialized_decode.mono.ffn.layout import POLL_STAGES
+from vllm.models.glm5next.common.specialized_decode import requested
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
