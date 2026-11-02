@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import typing
 from collections.abc import Callable, Iterable
+from functools import partial
 from itertools import islice
 
 import regex as re
@@ -15,8 +16,13 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
-from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.forward_context import (
+    get_forward_context,
+    in_piecewise_cudagraph,
+    is_forward_context_available,
+)
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.mhc.triton import MHC_POST_COLLAPSE_RMS_NORM_KERNEL
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -59,6 +65,12 @@ from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
+from vllm.models.deepseek_v41.amd.mhc import (
+    MHC_OVERLAP_MAX_TOKENS,
+    MHCOverlapStream,
+    mhc_pre_delayed_overlap,
+    supports_mhc_overlap,
+)
 from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -188,10 +200,12 @@ class DeepseekV4DecoderLayer(nn.Module):
         aux_stream_list: list[torch.cuda.Stream] | None = None,
         candidate_block_buffer: torch.Tensor | None = None,
         engram_layout: EngramLayout | None = None,
+        mhc_overlap: MHCOverlapStream | None = None,
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
         self.hidden_size = config.hidden_size
+        self.mhc_overlap = mhc_overlap
         self.use_sequence_parallel = _use_sequence_parallel(vllm_config)
 
         self.engram: Engram | None = None
@@ -276,6 +290,10 @@ class DeepseekV4DecoderLayer(nn.Module):
         )
         self.mhc_pre_delayed = MHCPreDelayedOp()
         self.mhc_post = MHCPostOp()
+        if mhc_overlap is not None:
+            MHC_POST_COLLAPSE_RMS_NORM_KERNEL.register_warmup(
+                hidden_size=self.hidden_size, weight_dtype=self.ffn_norm.weight.dtype
+            )
         # Where aiter's fused seam kernel runs (gfx950), it folds the following
         # attn_norm / ffn_norm into its collapse, so the separate norms are
         # skipped for the seams it takes.
@@ -323,6 +341,20 @@ class DeepseekV4DecoderLayer(nn.Module):
         # The fused kernel only takes the latter, so that seam keeps the
         # separate attn_norm.
         fuse_attn_norm = self.fuse_seam_norm and not (residual is None and x.dim() == 2)
+        mhc_overlap = self.mhc_overlap
+        if mhc_overlap is not None and (
+            in_piecewise_cudagraph()
+            or not 0 < positions.shape[0] <= MHC_OVERLAP_MAX_TOKENS
+            or not torch.cuda.is_current_stream_capturing()
+        ):
+            # Fork only inside FULL graph capture, where the joins become graph
+            # edges; HIP event waits at runtime are unreliable here.
+            mhc_overlap = None
+        mhc_pre = (
+            partial(mhc_pre_delayed_overlap, self.mhc_pre_delayed, overlap=mhc_overlap)
+            if mhc_overlap is not None
+            else self.mhc_pre_delayed
+        )
         # The reference collapses each sublayer's input with the *previous*
         # sublayer's pre-mix: attention uses the pre-mix carried in (identity
         # for the first layer), the FFN uses this layer's attention pre-mix.
@@ -342,7 +374,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 # form. The folded form has no AITER kernel on gfx942 and runs
                 # the eager reference instead, about 120 small kernels a step.
                 unfolded = self.mono is not None and self.mono.unfolded_entry
-                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn if unfolded else self.hc_attn_fn_broadcast,
                     self.hc_attn_scale,
@@ -356,7 +388,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 )
             else:
                 residual = x
-                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     self.hc_attn_fn,
                     self.hc_attn_scale,
@@ -393,7 +425,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     engram_hashes[:, self.engram.layer_hash_index],
                     engram_mask,
                 )
-                residual, post_mix, res_mix, x, attn_pre = self.mhc_pre_delayed(
+                residual, post_mix, res_mix, x, attn_pre = mhc_pre(
                     residual,
                     *pre_args,
                     pre_mix=pre_mix,
@@ -407,7 +439,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                     res_mix,
                     x,
                     attn_pre,
-                ) = self.mhc_pre_delayed(
+                ) = mhc_pre(
                     residual,
                     *pre_args,
                     pre_mix=pre_mix,
@@ -424,6 +456,8 @@ class DeepseekV4DecoderLayer(nn.Module):
             x = sp_all_gather(x)[: positions.shape[0]]
 
         x = self.attn(positions, x, None)
+        if mhc_overlap is not None:
+            mhc_overlap.join()
         if self.use_sequence_parallel:
             x = sp_reduce_scatter(x)
         elif self.mono is not None and self.mono.ffn_only:
@@ -432,7 +466,7 @@ class DeepseekV4DecoderLayer(nn.Module):
                 return out
             x = tensor_model_parallel_all_reduce(x)
 
-        residual, post_mix, res_mix, x, ffn_pre = self.mhc_pre_delayed(
+        residual, post_mix, res_mix, x, ffn_pre = mhc_pre(
             residual,
             self.hc_ffn_fn,
             self.hc_ffn_scale,
@@ -452,6 +486,8 @@ class DeepseekV4DecoderLayer(nn.Module):
         if not self.fuse_seam_norm:
             x = self.ffn_norm(x)
         x = self.ffn(x, input_ids)
+        if mhc_overlap is not None:
+            mhc_overlap.join()
         return x, residual, post_mix, res_mix, ffn_pre
 
     def write_kv(
@@ -519,6 +555,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (compressor kv_score, indexer.weights_proj). fused_wqa_wkv stays on
         # the default stream.
         aux_stream_list = [torch.cuda.Stream() for _ in range(3)]
+        mhc_overlap = MHCOverlapStream() if supports_mhc_overlap(vllm_config) else None
 
         # Reserved topk indices buffer for all Indexer layers to reuse.
         self.topk_indices_buffer = torch.empty(
@@ -571,6 +608,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 aux_stream_list=aux_stream_list,
                 candidate_block_buffer=self.candidate_block_buffer,
                 engram_layout=self.engram_layout,
+                mhc_overlap=mhc_overlap,
             ),
             prefix=f"{prefix}.layers",
         )
