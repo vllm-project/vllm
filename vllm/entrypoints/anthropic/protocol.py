@@ -9,6 +9,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 import vllm.envs as envs
+from vllm.entrypoints.anthropic.client_tools import expand_client_tool
 from vllm.entrypoints.generate.base.protocol import (
     MMPayload,
     resolve_return_mm_kwargs_alias,
@@ -133,7 +134,9 @@ class AnthropicMessage(BaseModel):
 class AnthropicTool(BaseModel):
     """Tool definition."""
 
-    type: Literal["custom"] | None = None
+    # "custom", or a registered Anthropic-defined client tool type such as
+    # "bash_20250124"; see client_tools.CLIENT_TOOL_SPECS.
+    type: str | None = None
     name: str
     description: str | None = None
     input_schema: dict[str, Any]
@@ -142,18 +145,24 @@ class AnthropicTool(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def reject_anthropic_defined_tools(cls, data: Any) -> Any:
-        # Anthropic-defined tools (web_search_*, code_execution_*, bash_*,
-        # text_editor_*, ...) carry a versioned ``type`` and no input_schema.
-        # Reject them by name here, before field validation would report a
-        # missing input_schema and point the client at the wrong problem.
+    def resolve_anthropic_defined_tools(cls, data: Any) -> Any:
+        # Anthropic-defined tools carry a versioned ``type`` and no
+        # input_schema. Client tools (bash_*, text_editor_*, memory_*) get
+        # their built-in schema filled in here; any other type (server tools
+        # such as web_search_*, or computer_*) is rejected by name before
+        # field validation would report a missing input_schema.
         if isinstance(data, dict):
             tool_type = data.get("type")
-            if tool_type not in (None, "custom"):
+            if tool_type in (None, "custom"):
+                return data
+            expanded = expand_client_tool(data)
+            if expanded is None:
                 raise ValueError(
                     f"tool type {tool_type!r} is not supported; only custom "
-                    "tools with an input_schema are supported"
+                    "tools with an input_schema and the Anthropic-defined "
+                    "bash, text_editor and memory client tools are supported"
                 )
+            return expanded
         return data
 
     @field_validator("input_schema")
