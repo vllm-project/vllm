@@ -376,6 +376,20 @@ class FlashAttentionBackend(AttentionBackend):
             return max(default_block_size, block_size)
         if current_platform.is_xpu():
             return max(default_block_size, 64)
+        if (
+            current_platform.is_device_capability_family(100)
+            and (vllm_config := get_current_vllm_config_or_none()) is not None
+            and vllm_config.model_config is not None
+            and get_flash_attn_version(
+                head_size=vllm_config.model_config.get_head_size(),
+                head_size_v=cls.head_size_v,
+                supports_fa4_hd256=True,
+            )
+            == 4
+        ):
+            # FA4's SM100 kernels load paged KV via TMA only when the page
+            # size equals the 128-token KV tile; other sizes take a gather path.
+            return max(default_block_size, 128)
         return super().get_preferred_block_size(default_block_size)
 
     @staticmethod

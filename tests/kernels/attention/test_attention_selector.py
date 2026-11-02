@@ -621,8 +621,10 @@ def _blackwell(vllm_config=None):
     platform.is_xpu.return_value = False
     platform.is_rocm.return_value = False
     platform.get_device_capability.return_value = DeviceCapability(10, 0)
+    platform.is_device_capability_family.side_effect = lambda cap, *_: cap // 10 == 10
     with (
         patch("vllm.v1.attention.backends.fa_utils.current_platform", platform),
+        patch("vllm.v1.attention.backends.flash_attn.current_platform", platform),
         patch(
             "vllm.vllm_flash_attn.flash_attn_interface.is_fa_version_supported",
             return_value=True,
@@ -694,17 +696,17 @@ def test_fa4_hd256_fallback_matrix(kwargs, config_kwargs, expected):
 
 @blackwell_only
 @pytest.mark.parametrize(
-    "backend_name,config_kwargs,expected",
+    "backend_name,config_kwargs,expected,required",
     [
-        ("FLASH_ATTN", {}, 128),
-        ("FLASH_ATTN", {"softcap": 50.0}, 16),
-        ("FLASH_ATTN", {"head_size": 128}, 16),
-        ("FLASH_ATTN", {"cache_dtype": "fp8"}, 16),
-        ("FLASH_ATTN_DIFFKV", {}, 16),
+        ("FLASH_ATTN", {}, 128, True),
+        ("FLASH_ATTN", {"softcap": 50.0}, 16, False),
+        ("FLASH_ATTN", {"head_size": 128}, 128, False),
+        ("FLASH_ATTN", {"cache_dtype": "fp8"}, 16, False),
+        ("FLASH_ATTN_DIFFKV", {}, 16, False),
     ],
 )
 def test_fa4_hd256_block_size_advertisement(
-    backend_name: str, config_kwargs: dict, expected: int
+    backend_name: str, config_kwargs: dict, expected: int, required: bool
 ):
     from vllm.v1.attention.backend import MultipleOf
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
@@ -721,10 +723,10 @@ def test_fa4_hd256_block_size_advertisement(
         (size,) = backend.get_supported_kernel_block_sizes()
         preferred = backend.get_preferred_block_size(16)
     assert preferred == expected
-    if expected == 128:
+    if required:
         assert size == 128
     else:
-        assert isinstance(size, MultipleOf) and size.base == expected
+        assert isinstance(size, MultipleOf) and size.base == 16
 
 
 @blackwell_only
