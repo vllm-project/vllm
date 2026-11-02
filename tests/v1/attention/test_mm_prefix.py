@@ -15,12 +15,16 @@ auto-clearing those when ``mask_mod`` is set; leaving ``causal=True`` would
 short out the mask_mod on SM90 and clip bidirectional ranges on SM100.
 """
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
 
+from vllm.multimodal.inputs import PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.utils import (
+    compute_mm_prefix_ranges,
     fill_mm_prefix_query_ranges,
 )
 from vllm.v1.kv_cache_interface import KVCacheLayout
@@ -95,6 +99,26 @@ def _query_ranges(mm_ranges, query_lens, seq_lens):
     if num_tokens == 0:
         return None
     return torch.from_numpy(out[:num_tokens])
+
+
+def test_prompt_lens_make_the_whole_prompt_one_range():
+    """PaliGemma-style PrefixLM: every prompt token, not just the image, is
+    one bidirectional block, unless the prompt exceeds the sliding window."""
+    image = SimpleNamespace(
+        modality="image", mm_position=PlaceholderRange(offset=0, length=256)
+    )
+    features = [[image], []]
+
+    assert compute_mm_prefix_ranges(features) == {0: [(0, 255)], 1: []}
+    assert compute_mm_prefix_ranges(features, prompt_lens=[260, 5]) == {
+        0: [(0, 259)],
+        1: [(0, 4)],
+    }
+    assert compute_mm_prefix_ranges(
+        features, sliding_window=258, prompt_lens=[260, 5]
+    ) == {0: [(0, 255)], 1: [(0, 4)]}
+    # Dummy requests (profiling, CUDA graph capture) have no prompt length.
+    assert compute_mm_prefix_ranges([[]], prompt_lens=[None]) == {0: []}
 
 
 def test_matches_range_scan_semantics_with_context_offset():

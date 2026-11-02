@@ -62,7 +62,14 @@ class DefaultModelState(ModelState):
             self.model_config, model, self.rope_state, encoder_cache
         )
 
+        # Prompt lengths for models whose PrefixLM block is the whole prompt.
+        self.mm_prefix_prompt_lens: dict[str, int] | None = (
+            {} if self.model_config.mm_prefix_whole_prompt else None
+        )
+
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
+        if self.mm_prefix_prompt_lens is not None:
+            self.mm_prefix_prompt_lens[new_req_data.req_id] = new_req_data.prompt_len
         if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
             # `prompt_embeds` is a passthrough modality with no grid info, but
@@ -80,6 +87,8 @@ class DefaultModelState(ModelState):
             self.prompt_embeds_state.add_request(req_index, new_req_data)
 
     def remove_request(self, req_id: str) -> None:
+        if self.mm_prefix_prompt_lens is not None:
+            self.mm_prefix_prompt_lens.pop(req_id, None)
         if self.prompt_embeds_state is not None:
             self.prompt_embeds_state.remove_request(req_id)
 
@@ -213,6 +222,12 @@ class DefaultModelState(ModelState):
                 )
                 or getattr(hf_text_config, "mm_prefix_clamp_sliding_window", False),
                 span_pad=getattr(self.model, "mm_prefix_span_leading_pad_modulus", 0),
+                prompt_lens=[
+                    self.mm_prefix_prompt_lens.get(req_id)
+                    for req_id in input_batch.req_ids
+                ]
+                if self.mm_prefix_prompt_lens is not None
+                else None,
             )
         dcp_local_seq_lens_cpu_upper_bound = None
         if input_batch.pcp is not None:
