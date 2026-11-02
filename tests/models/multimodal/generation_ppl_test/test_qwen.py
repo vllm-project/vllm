@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
 
 import pytest
 
@@ -8,7 +7,7 @@ from tests.models.utils import GenerateModelInfo
 
 from .ppl_utils import vqa_ppl_test
 
-MODELS: list[tuple[GenerateModelInfo, int, dict[str, Any]]] = [
+MODELS = [
     (
         GenerateModelInfo("Qwen/Qwen2-VL-2B-Instruct", hf_ppl=9.810060501098633),
         28,
@@ -24,11 +23,11 @@ MODELS: list[tuple[GenerateModelInfo, int, dict[str, Any]]] = [
         32,
         {},
     ),
-    # (
-    #    GenerateModelInfo("Qwen/Qwen3.5-4B", hf_ppl=6.478141784667969),
-    #    32,
-    #    {"enable_prefix_caching": False},
-    # ),
+    (
+        GenerateModelInfo("Qwen/Qwen3.5-4B", hf_ppl=6.478141784667969),
+        32,
+        {"enable_prefix_caching": False},
+    ),
 ]
 
 
