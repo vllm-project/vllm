@@ -76,6 +76,8 @@ There are several notable differences when using Ray:
 
 Currently, the internal DP load balancing is done within the API server process(es) and is based on the running and waiting queues in each of the engines. This could be made more sophisticated in future by incorporating KV cache aware logic.
 
+With `--data-parallel-lb-policy context_tokens`, the API servers instead route each request to the engine with the fewest context tokens, i.e. the total prompt and output tokens of its running and waiting requests, as reported by the engines through the DP coordinator. This suits workloads whose prompt lengths vary widely, where request counts poorly reflect engine load.
+
 When deploying large DP sizes using this method, the API server process can become a bottleneck. In this case, the orthogonal `--api-server-count` command line option can be used to scale this out (for example `--api-server-count=4`). This is transparent to users - a single HTTP endpoint / port is still exposed. Note that this API server scale-out is "internal" and still confined to the "head" node.
 
 <figure markdown="1">

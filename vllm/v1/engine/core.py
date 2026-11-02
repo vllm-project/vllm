@@ -119,6 +119,9 @@ logger = init_logger(__name__)
 
 
 HANDSHAKE_TIMEOUT_MINS = 5
+# How often an engine republishes its context tokens to the DP coordinator while
+# its request counts are unchanged; matches the coordinator's stats interval.
+CONTEXT_TOKENS_REFRESH_S = 0.1
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -1280,7 +1283,12 @@ class EngineCoreProc(EngineCore):
             # Only publish request queue stats to coordinator for "internal"
             # and "hybrid" LB modes.
             self.publish_dp_lb_stats = internal_dp_balancing
+            self.publish_context_tokens = (
+                vllm_config.parallel_config.data_parallel_lb_policy == "context_tokens"
+            )
             self.last_counts = (0, 0)
+            self.last_context_tokens = 0
+            self.last_context_tokens_time = 0.0
 
             self.addresses = addresses
             self.process_input_queue_block = True
@@ -1699,13 +1707,39 @@ class EngineCoreProc(EngineCore):
             return
 
         # Publish our request counts (if they've changed).
-        counts = self.scheduler.get_request_counts()
-        if counts != self.last_counts:
-            self.last_counts = counts
+        if (update := self._request_counts_update()) is not None:
+            counts, context_tokens = update
             stats = SchedulerStats(
-                *counts, kv_cache_usage=self.scheduler.get_kv_cache_usage()
+                *counts,
+                kv_cache_usage=self.scheduler.get_kv_cache_usage(),
+                num_context_tokens=context_tokens,
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
+
+    def _request_counts_update(self) -> tuple[tuple[int, int], int] | None:
+        """The (request counts, context tokens) to publish, or None if the
+        coordinator already has them. Context tokens grow every step without the
+        counts changing, so they are also republished every
+        CONTEXT_TOKENS_REFRESH_S while they change."""
+        counts = self.scheduler.get_request_counts()
+        if not self.publish_context_tokens:
+            if counts == self.last_counts:
+                return None
+            self.last_counts = counts
+            return counts, 0
+        now = time.monotonic()
+        if (
+            counts == self.last_counts
+            and now - self.last_context_tokens_time < CONTEXT_TOKENS_REFRESH_S
+        ):
+            return None
+        context_tokens = self.scheduler.get_num_context_tokens()
+        self.last_context_tokens_time = now
+        if counts == self.last_counts and context_tokens == self.last_context_tokens:
+            return None
+        self.last_counts = counts
+        self.last_context_tokens = context_tokens
+        return counts, context_tokens
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -2563,12 +2597,12 @@ class DPEngineCoreProc(EngineCoreProc):
 
         # Publish our request counts (if they've changed), stamped with the
         # lockstep-synchronized step counter and wave number.
-        counts = self.scheduler.get_request_counts()
-        if counts != self.last_counts:
-            self.last_counts = counts
+        if (update := self._request_counts_update()) is not None:
+            counts, context_tokens = update
             stats = SchedulerStats(
                 *counts,
                 kv_cache_usage=self.scheduler.get_kv_cache_usage(),
+                num_context_tokens=context_tokens,
                 step_counter=self.step_counter,
                 current_wave=self.current_wave,
             )

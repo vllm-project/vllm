@@ -253,6 +253,10 @@ class SchedulerInterface(ABC):
         """Returns the fraction of the KV cache currently in use (0.0-1.0)."""
         return 0.0
 
+    def get_num_context_tokens(self) -> int:
+        """Returns the total tokens of the running and waiting requests."""
+        return 0
+
     @abstractmethod
     def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.
