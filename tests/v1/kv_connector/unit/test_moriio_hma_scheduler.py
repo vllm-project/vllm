@@ -1115,6 +1115,28 @@ def test_update_state_preserves_each_mamba_group():
     ]
 
 
+@pytest.mark.parametrize("routable", [True, False])
+def test_read_abort_before_scheduling_releases_only_routable_requests(routable):
+    """The serving layer submits a pre-aborted request under its own id after
+    rejecting one; without a prefill address it must not reach
+    build_connector_meta, which would raise and kill the engine."""
+    sched = _make_read_scheduler()
+    sched._has_mamba = False
+    sched.blocks_per_sw = [0]
+    request = _make_read_request([[10, 11]])
+    request.request_id = "9ed3b2574f8750be"
+    request.status = moriio_connector.RequestStatus.FINISHED_ABORTED
+    if not routable:
+        for key in ("remote_host", "remote_handshake_port", "remote_notify_port"):
+            del request.kv_transfer_params[key]
+
+    assert sched.request_finished(request, [[]]) == (False, None)
+
+    assert ("9ed3b2574f8750be" in sched._reqs_need_recv) is routable
+    meta = sched.build_connector_meta(SchedulerOutput.make_empty())
+    assert ("9ed3b2574f8750be" in meta.reqs_to_recv) is routable
+
+
 def test_align_read_blocks_allows_configured_lookahead_tail():
     assert moriio_connector.MoRIIOConnectorScheduler._align_read_blocks(
         [100, 101, 102], [10], max_decode_tail_blocks=2
