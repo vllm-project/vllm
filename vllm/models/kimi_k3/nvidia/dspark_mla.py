@@ -28,6 +28,7 @@ from vllm.model_executor.models.utils import (
 from vllm.models.common.ops.fused_allreduce_rms_norm import fused_allreduce_rms_norm
 from vllm.models.kimi_k3.nvidia.mla import MultiHeadLatentAttention
 from vllm.models.kimi_k3.nvidia.model import KimiMLP
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 from vllm.v1.worker.gpu.spec_decode.dspark.config import DSparkSpeculatorConfig
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -400,7 +401,7 @@ class K3DSparkModel(nn.Module):
         # build the pointer array once and return it on every call.
         if not hasattr(self, "_context_cache_ptrs"):
             ref_cache = cache_layers[0].kv_cache
-            cache_ptrs = torch.tensor(
+            cache_ptrs = async_tensor_h2d(
                 [cl.kv_cache.data_ptr() for cl in cache_layers],
                 dtype=torch.int64,
                 device=ref_cache.device,
