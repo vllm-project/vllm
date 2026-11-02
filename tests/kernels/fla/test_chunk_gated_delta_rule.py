@@ -16,6 +16,7 @@ from vllm.third_party.flash_linear_attention.ops import chunk_gated_delta_rule
 from vllm.third_party.flash_linear_attention.ops.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_kernel_h_blockdim64,
 )
+from vllm.triton_utils import triton
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE = current_platform.device_type
@@ -193,3 +194,44 @@ def test_checkpoints_are_states_at_their_offsets(
             output_final_state=True,
         )
         _assert_equal(snapshots[i], expected[0].to(state_dtype))
+
+
+def test_offset_checkpoint_metadata_reuses_warmed_kernel(monkeypatch):
+    """Slicing prefill metadata must reuse the kernel warmed on dense buffers."""
+    torch.set_default_device(DEVICE)
+    set_random_seed(0)
+    inputs = _make_inputs([257])
+    pages = _make_pages(torch.float32)
+    original = pages.clone()
+    cache = _state_rows(pages)
+    metadata = dict(
+        cu_seqlens=_cu_seqlens([257]),
+        state_indices=torch.tensor([1], dtype=torch.int32),
+        has_initial_state=torch.tensor([True]),
+        checkpoint_offsets=torch.tensor([128], dtype=torch.int32),
+        checkpoint_state_indices=torch.tensor([2], dtype=torch.int32),
+    )
+
+    def run(metadata):
+        return chunk_gated_delta_rule(
+            *inputs, state_cache=cache, checkpoint_state=cache, **metadata
+        )[0]
+
+    expected = run(metadata)
+    expected_pages = pages.clone()
+    pages.copy_(original)
+    for name, tensor in metadata.items():
+        view = tensor.new_empty(tensor.numel() + 1)[1:]
+        view.copy_(tensor)
+        metadata[name] = view
+
+    compiled = []
+
+    def record_compile(**kwargs):
+        compiled.append(getattr(kwargs.get("fn"), "name", None))
+
+    monkeypatch.setattr(triton.knobs.runtime, "jit_post_compile_hook", record_compile)
+    actual = run(metadata)
+    _assert_equal(actual, expected)
+    _assert_equal(pages, expected_pages)
+    assert "chunk_gated_delta_rule_fwd_kernel_h_blockdim64" not in compiled

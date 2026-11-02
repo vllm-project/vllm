@@ -77,7 +77,18 @@ def paged_state_tuning_bucket(num_seqs: int) -> int:
     post_hook=_restore_state_rows,
     use_cuda_graph=use_cuda_graph,
 )
-@triton.jit(do_not_specialize=["T", "TUNING_BUCKET"])
+@triton.jit(
+    do_not_specialize=["T", "TUNING_BUCKET"],
+    # Metadata uses scalar loads; offset views must reuse warmed kernels.
+    do_not_specialize_on_alignment=[
+        "cu_seqlens",
+        "chunk_offsets",
+        "state_indices",
+        "has_initial_state",
+        "checkpoint_offsets",
+        "checkpoint_state_indices",
+    ],
+)
 def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     k,
     v,
