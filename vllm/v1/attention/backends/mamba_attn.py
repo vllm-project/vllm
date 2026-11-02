@@ -98,6 +98,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        if torch.device(device).type == "cuda" and vllm_config.use_v2_model_runner:
+            self.mamba_aligned_state_indices: torch.Tensor | None = None
 
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
@@ -189,6 +191,26 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self._init_reorder_batch_threshold(1, self.use_spec_decode)
         if self.use_spec_decode:
             self.supports_update_block_table = False
+
+    def bind_mrv2_graph_inputs(
+        self,
+        state_indices: torch.Tensor,
+        num_accepted_tokens: torch.Tensor | None,
+    ) -> None:
+        """Bind MRV2's persistent metadata buffers as full-graph inputs."""
+        assert state_indices.shape == self.state_indices_tensor_d.shape
+        assert state_indices.dtype == self.state_indices_tensor_d.dtype
+        assert state_indices.device == self.state_indices_tensor_d.device
+        self.state_indices_tensor_d = state_indices
+
+        if self.use_spec_decode:
+            assert num_accepted_tokens is not None
+            assert num_accepted_tokens.shape == self.decode_num_accepted_tokens.shape
+            assert num_accepted_tokens.dtype == self.decode_num_accepted_tokens.dtype
+            assert num_accepted_tokens.device == self.decode_num_accepted_tokens.device
+            self.decode_num_accepted_tokens = num_accepted_tokens
+        else:
+            assert num_accepted_tokens is None
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -466,12 +488,14 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         is_flush_d = None
         replayssm_scratch = None
 
-        state_indices_tensor = mamba_get_block_table_tensor(
-            common_attn_metadata.block_table_tensor,
-            common_attn_metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.mamba_cache_mode,
-        )
+        state_indices_tensor = getattr(self, "mamba_aligned_state_indices", None)
+        if state_indices_tensor is None:
+            state_indices_tensor = mamba_get_block_table_tensor(
+                common_attn_metadata.block_table_tensor,
+                common_attn_metadata.seq_lens,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.mamba_cache_mode,
+            )
 
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
@@ -649,18 +673,27 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             padded_bs = metadata.num_reqs
-            self.state_indices_tensor_d[: metadata.num_decodes].copy_(
-                state_indices_tensor_d, non_blocking=True
-            )
+            assert state_indices_tensor_d is not None
+            if (
+                self.state_indices_tensor_d.data_ptr()
+                != state_indices_tensor_d.data_ptr()
+            ):
+                self.state_indices_tensor_d[: metadata.num_decodes].copy_(
+                    state_indices_tensor_d, non_blocking=True
+                )
             state_indices_tensor_d = self.state_indices_tensor_d[:padded_bs]
             state_indices_tensor_d[metadata.num_decodes :] = NULL_BLOCK_ID
 
             if self.use_spec_decode and num_accepted_tokens is not None:
                 assert query_start_loc_d is not None
                 query_start_loc_d = query_start_loc_d[: padded_bs + 1]
-                self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
-                    num_accepted_tokens, non_blocking=True
-                )
+                if (
+                    self.decode_num_accepted_tokens.data_ptr()
+                    != num_accepted_tokens.data_ptr()
+                ):
+                    self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
+                        num_accepted_tokens, non_blocking=True
+                    )
                 num_accepted_tokens = self.decode_num_accepted_tokens[:padded_bs]
                 num_accepted_tokens[metadata.num_decodes :] = (
                     1  # pad with 1st slot index

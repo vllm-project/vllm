@@ -86,11 +86,16 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu = torch.ones(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
+        self._align_mode = self.cache_config.mamba_cache_mode == "align"
+        self._mamba_num_accepted_tokens_batch = (
+            torch.ones(self.max_num_reqs, dtype=torch.int32, device=self.device)
+            if self._align_mode and vllm_config.num_speculative_tokens > 0
+            else None
+        )
         # Pre-copy "align" prefix-cache state (V2). The migration of each
         # request's mamba state across block boundaries runs as a fused GPU
         # kernel reusing the postprocess copy machinery, so the per-step src
         # columns and the running state_idx are kept GPU-resident.
-        self._align_mode = self.cache_config.mamba_cache_mode == "align"
         self.recoverssm = (
             RecoverSSMState() if self.cache_config.use_kda_recoverssm else None
         )
@@ -273,7 +278,12 @@ class MambaHybridModelState(DefaultModelState):
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
         if not for_capture and self.vllm_config.num_speculative_tokens > 0:
-            num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
+            accepted_batch = getattr(self, "_mamba_num_accepted_tokens_batch", None)
+            if accepted_batch is None:
+                num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
+            else:
+                num_accepted_tokens = accepted_batch[:num_reqs]
+                num_accepted_tokens[input_batch.num_reqs :].fill_(1)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
                 input_batch.idx_mapping
             ]
@@ -314,8 +324,19 @@ class MambaHybridModelState(DefaultModelState):
                 all_group_indices = self._mamba_ctx.compute_aligned_state_indices(
                     input_batch.seq_lens, num_reqs
                 )
+                assert self._mamba_ctx.aligned_state_indices is not None
                 for group_idx, builder in aligned_index_builders:
-                    builder.mamba_aligned_state_indices = all_group_indices[group_idx]
+                    aligned = all_group_indices[group_idx]
+                    builder.mamba_aligned_state_indices = aligned
+                    if isinstance(builder, Mamba2AttentionMetadataBuilder):
+                        graph_size = builder.decode_cudagraph_max_bs
+                        accepted = self._mamba_num_accepted_tokens_batch
+                        builder.bind_mrv2_graph_inputs(
+                            self._mamba_ctx.aligned_state_indices[
+                                group_idx, :graph_size
+                            ],
+                            None if accepted is None else accepted[:graph_size],
+                        )
 
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
