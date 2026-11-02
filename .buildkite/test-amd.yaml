@@ -477,7 +477,8 @@ steps:
     pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)' &&
     pytest models/language -v -s -m 'distributed(num_gpus=2)' &&
     VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'distributed(num_gpus=2)' &&
-    pytest -v -s models/test_mimo_v2_attention_backend.py ;;
+    pytest -v -s models/test_mimo_v2_attention_backend.py &&
+    pytest -v -s models/multimodal/test_mimo_v2_omni.py ;;
     2)
     pytest models/multimodal -v -s -m 'distributed(num_gpus=2)'
     --ignore models/multimodal/generation/test_whisper.py &&
@@ -1298,9 +1299,13 @@ steps:
   source_file_dependencies:
   - csrc/attention/
   - csrc/core/vec_dtypes/
+  - csrc/fused_minimax_m3_qknorm_rope_kv_insert_kernel.cu
   - vllm/v1/attention
   - vllm/model_executor/layers/attention
   - tests/kernels/attention
+  - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
+  - vllm/models/minimax_m3/common/indexer.py
+  - vllm/models/minimax_m3/amd/ops/sparse_pa.py
   - vllm/_aiter_ops.py
   - vllm/envs.py
   - vllm/platforms/rocm.py
@@ -1314,6 +1319,7 @@ steps:
     --ignore=kernels/attention/test_rocm_aiter_mla_decode_metadata.py
     --ignore=kernels/attention/test_rocm_aiter_mla_fp8_support.py
     --ignore=kernels/attention/test_rocm_aiter_mla_op_registration.py
+    kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
     --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 - label: ":amd: (MI300) MiniMax Reduce RMS Kernels" # TBD
@@ -4372,6 +4378,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s
+      kernels/attention/test_minimax_m3_nvfp4_index.py
       kernels/test_apply_repetition_penalties.py
       kernels/test_awq_int4_to_int8.py
       kernels/test_bf16_skinny_gemm.py
