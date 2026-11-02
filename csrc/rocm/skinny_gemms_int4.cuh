@@ -902,8 +902,10 @@ torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
   auto M_in = in_a.size(0);
   auto K_in = in_b.size(1);
   auto N_in = in_b.size(0);
-  TORCH_CHECK(N_in == N, "wvSplitK_int4_g: N_in ", N_in, " reached the ", N,
-              " instantiation");
+  // Internal guard: the API unit dispatches on N_in, so this only fires if a
+  // future caller reaches the wrong instantiation.
+  TORCH_CHECK(N_in == N, "wvSplitK_int4_g_impl<", N,
+              "> called with N_in=", N_in);
   auto Bx_in =
       (in_bias.has_value() && in_bias->numel() > 0)
           ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
