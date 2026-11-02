@@ -3,7 +3,9 @@
 
 import pytest
 import torch
+from transformers import GPT2Config
 
+from vllm import LLM
 from vllm.exceptions import VLLMValidationError
 
 
@@ -56,10 +58,6 @@ def test_require_mm_embeds(vllm_runner):
 
 @pytest.mark.parametrize("seed", [-1, 2**32])
 def test_model_seed_out_of_numpy_range_fails_during_initialization(tmp_path, seed):
-    from transformers import GPT2Config
-
-    from vllm import LLM
-
     GPT2Config(
         n_layer=1,
         n_head=1,
