@@ -103,14 +103,14 @@ class TestQueueBackendSelection(unittest.TestCase):
             self.assertEqual(helper.resolve_shm_wait_backend("stock"), ("stock", None))
 
     def test_missing_optional_extension_is_the_only_import_fallback(self):
-        missing = ModuleNotFoundError(name="vllm._asa_shmwait")
+        missing = ModuleNotFoundError(name="vllm._shm_wait")
         with (
             self.supported_runtime(),
             patch.object(helper.importlib, "import_module", side_effect=missing),
         ):
             backend, reason = helper.resolve_shm_wait_backend("auto")
             self.assertEqual(backend, "stock")
-            self.assertIn("vllm._asa_shmwait", reason)
+            self.assertIn("vllm._shm_wait", reason)
             with self.assertRaises(ModuleNotFoundError):
                 helper.resolve_shm_wait_backend("futex")
 

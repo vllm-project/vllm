@@ -40,7 +40,7 @@ from vllm.utils.system_utils import update_environment_variables
 def stock_wait_backend(monkeypatch):
     """Keep tests of stock notification internals on the explicit opt-out."""
     envs.disable_envs_cache()
-    monkeypatch.setenv("VLLM_ASA_SHM_WAIT", "stock")
+    monkeypatch.setenv("VLLM_SHM_WAIT_BACKEND", "stock")
 
 
 def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
@@ -196,9 +196,9 @@ def test_shm_broadcast():
 def test_futex_shm_broadcast(monkeypatch, start_method):
     """Exercise the same real process-group payload test with futex controls."""
     envs.disable_envs_cache()
-    monkeypatch.setenv("VLLM_ASA_SHM_WAIT", "futex")
-    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "128")
-    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "0")
+    monkeypatch.setenv("VLLM_SHM_WAIT_BACKEND", "futex")
+    monkeypatch.setenv("VLLM_SHM_READER_STRIDE", "128")
+    monkeypatch.setenv("VLLM_SHM_SPIN_NS", "0")
     distributed_run(worker_fn, 4, mp_context=mp.get_context(start_method))
 
 
@@ -831,9 +831,9 @@ def test_readable_does_not_wait_on_remote_socket():
 def futex_queue_pair(monkeypatch, request):
     readers, spin_ns, stride = request.param
     envs.disable_envs_cache()
-    monkeypatch.setenv("VLLM_ASA_SHM_WAIT", "futex")
-    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", str(spin_ns))
-    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", str(stride))
+    monkeypatch.setenv("VLLM_SHM_WAIT_BACKEND", "futex")
+    monkeypatch.setenv("VLLM_SHM_SPIN_NS", str(spin_ns))
+    monkeypatch.setenv("VLLM_SHM_READER_STRIDE", str(stride))
     writer = MessageQueue(
         n_reader=readers,
         n_local_reader=readers,
@@ -981,11 +981,11 @@ def test_writer_handle_preserves_policy_for_attaching_reader(monkeypatch, select
     """An attaching reader follows its writer, not its own environment."""
     envs.disable_envs_cache()
     if selection is None:
-        monkeypatch.delenv("VLLM_ASA_SHM_WAIT", raising=False)
+        monkeypatch.delenv("VLLM_SHM_WAIT_BACKEND", raising=False)
     else:
-        monkeypatch.setenv("VLLM_ASA_SHM_WAIT", selection)
-    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "16")
-    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "1000000")
+        monkeypatch.setenv("VLLM_SHM_WAIT_BACKEND", selection)
+    monkeypatch.setenv("VLLM_SHM_READER_STRIDE", "16")
+    monkeypatch.setenv("VLLM_SHM_SPIN_NS", "1000000")
     writer = MessageQueue(1, 1, max_chunk_bytes=1024, max_chunks=1)
     handle = writer.export_handle()
     if selection == "stock":
@@ -993,10 +993,10 @@ def test_writer_handle_preserves_policy_for_attaching_reader(monkeypatch, select
     else:
         assert handle.event_handle[3:] == (16, 1_000_000, 1)
     monkeypatch.setenv(
-        "VLLM_ASA_SHM_WAIT", "futex" if selection == "stock" else "stock"
+        "VLLM_SHM_WAIT_BACKEND", "futex" if selection == "stock" else "stock"
     )
-    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "128")
-    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "0")
+    monkeypatch.setenv("VLLM_SHM_READER_STRIDE", "128")
+    monkeypatch.setenv("VLLM_SHM_SPIN_NS", "0")
     reader = MessageQueue.create_from_handle(handle, rank=0)
     assert (reader._event_queue is not None) is (selection != "stock")
     try:
@@ -1023,9 +1023,9 @@ def test_writer_handle_preserves_policy_for_attaching_reader(monkeypatch, select
 def test_futex_payload_survives_ring_reuse(monkeypatch, nbytes, arena, readonly):
     """Real payloads retain their values without intercepting serialization."""
     envs.disable_envs_cache()
-    monkeypatch.setenv("VLLM_ASA_SHM_WAIT", "futex")
-    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "128")
-    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "0")
+    monkeypatch.setenv("VLLM_SHM_WAIT_BACKEND", "futex")
+    monkeypatch.setenv("VLLM_SHM_READER_STRIDE", "128")
+    monkeypatch.setenv("VLLM_SHM_SPIN_NS", "0")
     writer = MessageQueue(
         1,
         1,
@@ -1070,11 +1070,11 @@ def test_futex_preserves_remote_payload_transport(
     """Futex controls local slots only; remote readers still receive bytes."""
     envs.disable_envs_cache()
     if selection is None:
-        monkeypatch.delenv("VLLM_ASA_SHM_WAIT", raising=False)
+        monkeypatch.delenv("VLLM_SHM_WAIT_BACKEND", raising=False)
     else:
-        monkeypatch.setenv("VLLM_ASA_SHM_WAIT", selection)
-    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "128")
-    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "0")
+        monkeypatch.setenv("VLLM_SHM_WAIT_BACKEND", selection)
+    monkeypatch.setenv("VLLM_SHM_READER_STRIDE", "128")
+    monkeypatch.setenv("VLLM_SHM_SPIN_NS", "0")
     n_reader = n_local_reader + 1
     writer = MessageQueue(
         n_reader,

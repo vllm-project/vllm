@@ -36,17 +36,17 @@ class EventQueue:
     @classmethod
     def create(cls, readers: int, capacity: int):
         resolve_shm_wait_backend("futex")
-        from vllm._asa_shmwait import Endpoint
+        from vllm._shm_wait import Endpoint
         from vllm.distributed.device_communicators.shm_broadcast import (
             check_shm_free_space,
         )
 
-        stride = envs.VLLM_ASA_SHM_READER_STRIDE
+        stride = envs.VLLM_SHM_READER_STRIDE
         if stride not in (16, 128):
-            raise ValueError("VLLM_ASA_SHM_READER_STRIDE must be 16 or 128")
-        spin_ns = envs.VLLM_ASA_SHM_SPIN_NS
+            raise ValueError("VLLM_SHM_READER_STRIDE must be 16 or 128")
+        spin_ns = envs.VLLM_SHM_SPIN_NS
         if not 0 <= spin_ns <= 1_000_000:
-            raise ValueError("VLLM_ASA_SHM_SPIN_NS must be 0..1000000")
+            raise ValueError("VLLM_SHM_SPIN_NS must be 0..1000000")
         control_bytes = 128 + readers * stride
         check_shm_free_space(control_bytes)
         shm = shared_memory.SharedMemory(create=True, size=control_bytes)
@@ -66,7 +66,7 @@ class EventQueue:
     def attach(cls, handle, rank: int):
         # Follow the writer's resolved backend, never the reader's environment.
         resolve_shm_wait_backend("futex")
-        from vllm._asa_shmwait import Endpoint
+        from vllm._shm_wait import Endpoint
 
         name, readers, capacity, stride, spin_ns, abi = handle
         if abi != cls.ABI:
@@ -141,7 +141,7 @@ class EventQueue:
 
 
 def requested():
-    mode, reason = resolve_shm_wait_backend(envs.VLLM_ASA_SHM_WAIT)
+    mode, reason = resolve_shm_wait_backend(envs.VLLM_SHM_WAIT_BACKEND)
     if reason is not None:
         logger.info("Using stock MessageQueue wait backend: %s", reason)
     return mode == "futex"

@@ -236,7 +236,7 @@ class TestQueueExtensionExtraction(unittest.TestCase):
             if namespace["is_freethreaded"]()
             else ".abi3.so"
         )
-        return "vllm/_asa_shmwait" + suffix
+        return "vllm/_shm_wait" + suffix
 
     def test_packaged_queue_extension_uses_actual_interpreter_ABI(self):
         member = self.member()
@@ -247,8 +247,8 @@ class TestQueueExtensionExtraction(unittest.TestCase):
     def test_queue_extension_rejects_foreign_namespace_and_ABI(self):
         self.assertEqual(self.extract([self.member()])[1], [self.member()])
         for member in (
-            "_asa_shmwait.abi3.so",
-            "vllm/_asa_shmwait.cpython-310-aarch64-linux-gnu.so",
+            "_shm_wait.abi3.so",
+            "vllm/_shm_wait.cpython-310-aarch64-linux-gnu.so",
         ):
             with self.subTest(member=member):
                 self.assertEqual(self.extract([member]), ({}, []))

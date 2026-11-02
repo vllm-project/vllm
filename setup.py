@@ -1130,7 +1130,7 @@ class precompiled_wheel_utils:
                             "vllm/cumem_allocator.abi3.so",
                             "vllm/spinloop.abi3.so",
                             "vllm/fs_io_C.abi3.so",
-                            "vllm/_asa_shmwait"
+                            "vllm/_shm_wait"
                             + (
                                 sysconfig.get_config_var("EXT_SUFFIX")
                                 if is_freethreaded()
@@ -1561,7 +1561,7 @@ if sys.platform.startswith("linux") and platform.machine().lower() in (
     "aarch64",
     "arm64",
 ):
-    ext_modules.append(CMakeExtension(name="vllm._asa_shmwait"))
+    ext_modules.append(CMakeExtension(name="vllm._shm_wait"))
 
 if _is_cuda() or _is_hip():
     ext_modules.append(CMakeExtension(name="vllm.cumem_allocator"))

@@ -2,7 +2,7 @@
 
 The local shared-memory `MessageQueue` defaults to `auto`: it selects futex on
 64-bit Linux x86_64/aarch64 CPython with the GIL enabled and the native extension
-installed. Set `VLLM_ASA_SHM_WAIT=stock` to opt out; stock needs no native
+installed. Set `VLLM_SHM_WAIT_BACKEND=stock` to opt out; stock needs no native
 extension. The futex backend changes how local participants wait for publication
 and capacity, not the payload ring, serialization, tensor arena, overflow, or
 remote ZMQ transport.
@@ -10,14 +10,14 @@ remote ZMQ transport.
 ## Build and select the backend
 
 This backend requires Linux on x86_64 or aarch64, lock-free process-shared atomics,
-and the packaged `vllm._asa_shmwait` extension. Follow the
+and the packaged `vllm._shm_wait` extension. Follow the
 [incremental compilation workflow](../contributing/incremental_build.md) with
 the same Python and build configuration as the editable vLLM installation:
 
 ```sh
 cmake --preset release
-cmake --build --preset release --target _asa_shmwait
-cmake --install cmake-build-release --component _asa_shmwait
+cmake --build --preset release --target _shm_wait
+cmake --install cmake-build-release --component _shm_wait
 ```
 
 The extension uses Python's stable API from 3.11 on GIL-enabled builds. It
@@ -31,7 +31,7 @@ wheel without it needs the targeted component build before selecting futex mode.
 For example, with an already installed compatible model and environment:
 
 ```sh
-VLLM_ASA_SHM_WAIT=futex .venv/bin/python \
+VLLM_SHM_WAIT_BACKEND=futex .venv/bin/python \
   examples/basic/offline_inference/generate.py \
   --model /path/to/local/model --distributed-executor-backend mp \
   --enforce-eager --max-tokens 16
@@ -43,7 +43,7 @@ For implicit `auto`, unsupported runtimes or an absent optional extension use
 stock and emit an initialization message explaining the choice. Import failures
 inside the extension, ABI/loader failures, invalid control configuration and
 queue initialization errors are not hidden by this fallback. An explicit
-`VLLM_ASA_SHM_WAIT=futex` request for local control fails on unsupported runtimes
+`VLLM_SHM_WAIT_BACKEND=futex` request for local control fails on unsupported runtimes
 or when the extension is absent. GIL-disabled execution is unsupported; the
 runtime check uses CPython's
 [`sys._is_gil_enabled()`](https://docs.python.org/3.13/library/sys.html#sys._is_gil_enabled)
@@ -65,15 +65,15 @@ enables the environment cache; changing a worker's environment afterward does
 not reconfigure an existing queue or override its writer's handle.
 
 `VLLM_USE_SPINLOOP_EXT` continues to control the stock path. In `futex` mode,
-the explicit `VLLM_ASA_SHM_SPIN_NS` interval is the alternative wait policy;
+the explicit `VLLM_SHM_SPIN_NS` interval is the alternative wait policy;
 the stock spinloop extension and notification socket are not used for local
 waits. Remote-only and mixed queues keep their existing ZMQ payload transport.
 
 | Variable | Default | Accepted values |
 | --- | --- | --- |
-| `VLLM_ASA_SHM_WAIT` | `auto` | `auto`, `stock`, `futex` |
-| `VLLM_ASA_SHM_READER_STRIDE` | `128` | `16`, `128` bytes |
-| `VLLM_ASA_SHM_SPIN_NS` | `0` | Integer nanoseconds from `0` to `1000000` |
+| `VLLM_SHM_WAIT_BACKEND` | `auto` | `auto`, `stock`, `futex` |
+| `VLLM_SHM_READER_STRIDE` | `128` | `16`, `128` bytes |
+| `VLLM_SHM_SPIN_NS` | `0` | Integer nanoseconds from `0` to `1000000` |
 
 The stride separates per-reader control records. A larger stride can avoid false
 sharing but uses more control memory. The optional spin interval trades CPU use
@@ -115,6 +115,6 @@ The packaged native controls and actual queue integration tests are separate:
 
 ```sh
 .venv/bin/python -m pytest \
-  tests/distributed/test_asa_futex_source_contract.py
+  tests/distributed/test_futex_control.py
 .venv/bin/python -m pytest tests/distributed/test_shm_broadcast.py
 ```
