@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import tempfile
+import weakref
 from unittest.mock import Mock
 
 import huggingface_hub.constants
@@ -16,6 +17,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     initialize_single_dummy_weight,
     load_attention_sink,
     maybe_remap_kv_scale_name,
+    multi_thread_pt_weights_iterator,
 )
 from vllm.platforms import current_platform
 
@@ -108,6 +110,83 @@ def test_make_attention_sink_registers_loader_and_padding(num_heads, dtype):
     assert sink.requires_grad is False
     assert torch.isinf(sink).all() and (sink < 0).all()
     assert sink.weight_loader is load_attention_sink
+
+
+@pytest.mark.parametrize("max_workers", [1, 2, 8])
+@pytest.mark.parametrize("map_location", ["cpu", {"cpu": "cpu"}])
+def test_multi_thread_pt_weights_iterator(tmp_path, max_workers, map_location):
+    expected = {f"weight_{i}": torch.full((2, 3), i) for i in range(5)}
+    files = []
+    for name, tensor in expected.items():
+        path = tmp_path / f"{name}.bin"
+        torch.save({name: tensor}, path)
+        files.append(str(path))
+
+    weights = list(
+        multi_thread_pt_weights_iterator(files, False, map_location, max_workers)
+    )
+    assert len(weights) == len(expected)
+    actual = dict(weights)
+    assert actual.keys() == expected.keys()
+    for name in expected:
+        torch.testing.assert_close(actual[name], expected[name])
+
+
+def test_multi_thread_pt_weights_iterator_releases_consumed_shards(
+    tmp_path, monkeypatch
+):
+    """Advancing to another shard must release tensors the consumer dropped."""
+    references = {}
+    original_load = torch.load
+
+    def load(*args, **kwargs):
+        state = original_load(*args, **kwargs)
+        for name, tensor in state.items():
+            references[name] = weakref.ref(tensor)
+        return state
+
+    monkeypatch.setattr(torch, "load", load)
+    files = []
+    for i in range(3):
+        path = tmp_path / f"{i}.bin"
+        torch.save({str(i): torch.ones(2)}, path)
+        files.append(str(path))
+
+    weights = multi_thread_pt_weights_iterator(files, False, max_workers=2)
+    try:
+        name, tensor = next(weights)
+        del tensor
+        next(weights)
+        assert references[name]() is None
+    finally:
+        weights.close()
+
+
+def test_multi_thread_pt_weights_iterator_close_stops_loading(tmp_path, monkeypatch):
+    """Closing after one weight must not load every remaining checkpoint."""
+    loaded_files = []
+    original_load = torch.load
+
+    def load(path, **kwargs):
+        loaded_files.append(path)
+        return original_load(path, **kwargs)
+
+    monkeypatch.setattr(torch, "load", load)
+    files = []
+    for i in range(5):
+        path = tmp_path / f"{i}.bin"
+        torch.save({str(i): torch.ones(2)}, path)
+        files.append(str(path))
+
+    weights = multi_thread_pt_weights_iterator(files, False, max_workers=2)
+    next(weights)
+    weights.close()
+    assert 1 <= len(loaded_files) <= 2
+
+
+def test_multi_thread_pt_weights_iterator_propagates_load_error(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        list(multi_thread_pt_weights_iterator([str(tmp_path / "missing.bin")], False))
 
 
 def test_download_weights_from_hf():
