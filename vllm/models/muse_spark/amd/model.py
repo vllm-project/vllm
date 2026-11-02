@@ -18,6 +18,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
 )
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
@@ -174,8 +175,10 @@ class MuseSpark1xMoE(nn.Module):
         self.ep_size = get_ep_group().device_group.size()
         self.n_routed_experts = config.num_local_experts
         self.n_logical_experts = config.num_local_experts
-        self.n_redundant_experts = 0
-        self.n_physical_experts = self.n_logical_experts
+        parallel_config = vllm_config.parallel_config
+        self.enable_eplb = parallel_config.enable_eplb
+        self.n_redundant_experts = parallel_config.eplb_config.num_redundant_experts
+        self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         self.n_shared_experts = config.num_shared_experts
 
@@ -208,6 +211,8 @@ class MuseSpark1xMoE(nn.Module):
             router_output_multiplier=self.router_output_multiplier,
             router_score_normalization="sigmoid",
             router_score_division_eps=1e-15,
+            # FusedMoEFactory only attaches EPLB state to routers it creates.
+            eplb_state=EplbLayerState() if self.enable_eplb else None,
         )
 
         hidden_size = config.moe_hidden_size
@@ -268,6 +273,8 @@ class MuseSpark1xMoE(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             is_sequence_parallel=self.is_sequence_parallel,
+            enable_eplb=self.enable_eplb,
+            num_redundant_experts=self.n_redundant_experts,
             router_logits_dtype=self.router_dtype,
             scoring_func="sigmoid",
             e_score_correction_bias=self.expert_bias,
