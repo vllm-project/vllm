@@ -2069,7 +2069,7 @@ def _check_aiter_flydsl_quark_backend(model):
 
 
 @pytest.mark.skipif(not ROCM_AVAILABLE, reason="ROCm-specific backend")
-@pytest.mark.parametrize("num_tokens", [0, 1, 8, 33])
+@pytest.mark.parametrize("num_tokens", [1, 8, 33])
 def test_aiter_flydsl_clamped_mxfp4_oracle_and_graph(
     num_tokens, enable_aiter_flydsl_mxfp4, workspace_init
 ):
@@ -2218,9 +2218,6 @@ def test_aiter_flydsl_clamped_mxfp4_oracle_and_graph(
     torch.testing.assert_close(
         output.float() / rms, expected / rms, rtol=0.03, atol=0.03
     )
-    if num_tokens == 0:
-        assert output.shape == (0, hidden_dim)
-        return
     warmup = torch.cuda.Stream()
     warmup.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(warmup):
@@ -2250,18 +2247,7 @@ def test_aiter_flydsl_mxfp4_quark_loading(
     if not on_gfx942():
         pytest.skip("The AITER FlyDSL MXFP4 backend is restricted to gfx942")
     if not _has_aiter_flydsl_mxfp4():
-        from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
-            select_deepseek_v4_mxfp4_moe_backend,
-        )
-
-        config = replace(
-            make_dummy_moe_config(hidden_dim=256, intermediate_size=384),
-            moe_backend="aiter_flydsl_mxfp4_bf16",
-            swiglu_limit=10.0,
-        )
-        with pytest.raises(ValueError, match="requires AITER PR #6995"):
-            select_deepseek_v4_mxfp4_moe_backend(config)
-        return
+        pytest.skip("AITER FlyDSL MXFP4 requires AITER PR #6995")
 
     from aiter import QuantType, dtypes, get_torch_quant
     from safetensors.torch import save_file

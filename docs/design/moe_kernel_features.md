@@ -91,7 +91,7 @@ To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE k
 | marlin | standard,</br>batched | <sup>3</sup> / N/A | <sup>3</sup> / N/A | silu,</br>swigluoai | Y | Y | [`fused_marlin_moe`][vllm.model_executor.layers.fused_moe.experts.marlin_moe.fused_marlin_moe],</br>[`MarlinExperts`][vllm.model_executor.layers.fused_moe.experts.marlin_moe.MarlinExperts],</br>[`BatchedMarlinExperts`][vllm.model_executor.layers.fused_moe.experts.marlin_moe.BatchedMarlinExperts] |
 | trtllm | standard | mxfp4,</br>nvfp4 | G(16),G(32) | <sup>5</sup> | N | Y | [`TrtLlmMxfp4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsMonolithic],</br>[`TrtLlmMxfp4ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe.TrtLlmMxfp4ExpertsModular],</br>[`TrtLlmNvFp4ExpertsMonolithic`][vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe.TrtLlmNvFp4ExpertsMonolithic],</br>[`TrtLlmNvfp4ExpertsModular`][vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe.TrtLlmNvFp4ExpertsModular] |
 | hpc | standard | fp8 | G(128),T | silu | Y | Y | [`HPCExperts`][vllm.model_executor.layers.fused_moe.hpc_moe.HPCExperts] |
-| rocm aiter moe | standard | none,</br>mxfp4,</br>fp8 | G(32),G(128),A,T | silu, gelu,</br>swigluoai,</br>situ | Y | Y | [`rocm_aiter_fused_experts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.rocm_aiter_fused_experts],</br>[`AiterUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterUnquantizedExperts],</br>[`AiterFp8BlockExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFp8BlockExperts],</br>[`AiterFp8TensorExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFp8TensorExperts],</br>[`AiterFp8ChannelExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFp8ChannelExperts],</br>[`AiterMxfp4Experts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterMxfp4Experts] |
+| rocm aiter moe | standard | none,</br>mxfp4,</br>fp8 | G(32),G(128),A,T | silu, gelu,</br>swigluoai,</br>situ | Y | Y | [`rocm_aiter_fused_experts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.rocm_aiter_fused_experts],</br>[`AiterUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterUnquantizedExperts],</br>[`AiterFp8BlockExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFp8BlockExperts],</br>[`AiterFp8TensorExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFp8TensorExperts],</br>[`AiterFp8ChannelExperts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFp8ChannelExperts],</br>[`AiterMxfp4Experts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterMxfp4Experts],</br>[`AiterFlydslMxfp4Experts`][vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe.AiterFlydslMxfp4Experts] |
 | cpu_moe | standard | N/A | N/A | silu, gelu,</br>gelu_tanh,</br>swigluoai | Y | N | [`X86CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.X86CPUUnquantizedExperts],</br>[`ArmCPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.ArmCPUUnquantizedExperts],</br>[`CPUUnquantizedExperts`][vllm.model_executor.layers.fused_moe.experts.cpu_moe.CPUUnquantizedExperts] |
 | naive batched<sup>4</sup> | batched | int8,</br>fp8 | G,A,T | silu, gelu | <sup>6</sup> | Y | [`NaiveBatchedExperts`][vllm.model_executor.layers.fused_moe.experts.fused_batched_moe.NaiveBatchedExperts] |
 
@@ -105,34 +105,9 @@ To be used with a particular `FusedMoEPrepareAndFinalizeModular` subclass, MoE k
 
 ### AITER FlyDSL Native MXFP4
 
-`--moe-backend aiter_flydsl_mxfp4_bf16` explicitly selects AITER's native
-MXFP4-weight, BF16-activation clamped-SiLU experts on gfx942 (MI300/MI325).
-It does not change `auto` or the existing `aiter`, `flydsl`, and
-`aiter_triton_mxfp4_bf16` choices. Enable `VLLM_ROCM_USE_AITER=1` and
-`VLLM_ROCM_USE_AITER_MOE=1` and install an AITER build exposing
-`flydsl_a16w4_moe` from [AITER PR #6995](https://github.com/ROCm/aiter/pull/6995).
-Older AITER builds reject this explicit choice.
-The default ROCm image's AITER v0.1.26 does not provide this optional API.
-The dedicated gfx942 CI job uses AITER commit
-`f52deefccdb66c410b337a2947050b228a55e547` and FlyDSL 0.4.0 in an isolated
-environment, after checking the base image's dependency behavior.
-
-The supported configuration is BF16 input/output, native MXFP4 weights with
-E8M0 scales, SiLU with a positive model-provided clamp bound, and TP without
-expert parallelism. Bias, LoRA, expert load balancing, GPT-OSS SwiGLU, quantized
-activations and routing weights applied to the input are not supported.
-Both native MXFP4 and Quark MXFP4 checkpoints use the same weight conversion
-when they satisfy these requirements.
-The activation rounds GEMM1 results to BF16 before computing
-`silu(min(gate, limit)) * clamp(up, -limit, limit)`; it does not add an up-branch
-offset. BF16 atomic accumulation is not bitwise deterministic.
-
-AITER owns sorting, paired tile selection, output zeroing and the same-math
-fallback. Weights remain MXFP4 and are preshuffled once at load time; they are
-not requantized to INT4. The hidden dimension aligns to 256 and the per-rank
-intermediate dimension to 128, including separate gate/up zero padding.
-Kernel and CUDA-graph tests do not establish full-model quality or serving
-throughput; those require a checkpoint-specific end-to-end evaluation.
+`--moe-backend aiter_flydsl_mxfp4_bf16` opts in to `AiterFlydslMxfp4Experts`; it is never selected automatically.
+It runs on gfx942 only, with BF16 activations, MXFP4 weights and SiLU with a positive clamp limit (TP without EP, no bias).
+It requires `VLLM_ROCM_USE_AITER=1`, `VLLM_ROCM_USE_AITER_MOE=1` and an AITER build that provides `flydsl_a16w4_moe` ([ROCm/aiter#6995](https://github.com/ROCm/aiter/pull/6995)).
 
 ## Modular Kernel "families"
 

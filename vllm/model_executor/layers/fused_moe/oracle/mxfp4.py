@@ -1621,24 +1621,22 @@ def convert_weight_to_mxfp4_moe_kernel_format(
     backends.
     """
     if mxfp4_backend == Mxfp4MoeBackend.AITER_FLYDSL_MXFP4_BF16:
-        if (
-            activation != MoEActivation.SILU
-            or w13_bias is not None
-            or w2_bias is not None
-        ):
-            raise ValueError("AITER FlyDSL MXFP4 requires SiLU experts without bias")
-        from aiter.ops.shuffle import shuffle_scale_a16w4, shuffle_weight_a16w4
+        from vllm._aiter_ops import rocm_aiter_ops
 
         num_experts = w13_weight.shape[0]
         return (
-            shuffle_weight_a16w4(w13_weight.data.view(torch.uint8), 16, False),
-            shuffle_weight_a16w4(w2_weight.data.view(torch.uint8), 16, False),
-            shuffle_scale_a16w4(
+            rocm_aiter_ops.shuffle_weight_a16w4(
+                w13_weight.data.view(torch.uint8), 16, False
+            ),
+            rocm_aiter_ops.shuffle_weight_a16w4(
+                w2_weight.data.view(torch.uint8), 16, False
+            ),
+            rocm_aiter_ops.shuffle_scale_a16w4(
                 w13_weight_scale.data.view(torch.uint8).flatten(0, 1),
                 num_experts,
                 False,
             ),
-            shuffle_scale_a16w4(
+            rocm_aiter_ops.shuffle_scale_a16w4(
                 w2_weight_scale.data.view(torch.uint8).flatten(0, 1),
                 num_experts,
                 False,

@@ -703,13 +703,7 @@ class AiterFlydslMxfp4Experts(AiterExperts):
         super().__init__(moe_config, quant_config)
         from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_moe
 
-        if quant_config.w1_bias is not None or quant_config.w2_bias is not None:
-            raise ValueError("AITER FlyDSL MXFP4 does not support expert bias")
-        self.clamp_limit = quant_config.gemm1_clamp_limit
-        if self.clamp_limit is None:
-            self.clamp_limit = moe_config.swiglu_limit
-        if self.clamp_limit is None or not self.clamp_limit > 0:
-            raise ValueError("AITER FlyDSL MXFP4 requires a positive clamp limit")
+        self.clamp_limit = moe_config.swiglu_limit
         self._moe = flydsl_a16w4_moe
 
     @staticmethod
@@ -753,8 +747,6 @@ class AiterFlydslMxfp4Experts(AiterExperts):
             return supported, reason
         if moe_config.in_dtype != torch.bfloat16 or moe_config.has_bias:
             return False, "AITER FlyDSL MXFP4 requires BF16 inputs and no bias"
-        if moe_config.num_local_experts != moe_config.num_experts:
-            return False, "AITER FlyDSL MXFP4 requires all experts on each TP rank"
         if moe_config.swiglu_limit is None or not moe_config.swiglu_limit > 0:
             return False, "AITER FlyDSL MXFP4 requires a positive clamp limit"
         if moe_config.swiglu_alpha not in (None, 1.0) or moe_config.swiglu_beta not in (
@@ -788,17 +780,10 @@ class AiterFlydslMxfp4Experts(AiterExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
-        if (
-            activation != MoEActivation.SILU
-            or apply_router_weight_on_input
-            or expert_map is not None
-            or expert_tokens_meta is not None
-            or a1q_scale is not None
-            or a2_scale is not None
-        ):
-            raise ValueError("Unsupported AITER FlyDSL MXFP4 routing or activation")
-        if hidden_states.shape[0] == 0:
-            return
+        if apply_router_weight_on_input:
+            raise ValueError(
+                "AITER FlyDSL MXFP4 does not support applying router weights on input"
+            )
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
         self._moe(
