@@ -227,7 +227,6 @@ def test_nvfp4_selects_msa_nvfp4_backend_and_requires_sm100(
     backend_cls, impl_cls = select_main_backend_and_impl_cls(
         topk_blocks=TOPK,
         kv_cache_dtype="nvfp4",
-        num_kv_heads=1,
     )
     assert backend_cls is MiniMaxM3SparseMSANvfp4Backend
     assert impl_cls is MiniMaxM3SparseMSANvfp4Impl
@@ -235,7 +234,6 @@ def test_nvfp4_selects_msa_nvfp4_backend_and_requires_sm100(
         select_main_backend_and_impl_cls(
             topk_blocks=TOPK,
             kv_cache_dtype="nvfp4_4over6",
-            num_kv_heads=1,
         )
 
     monkeypatch.setattr(
@@ -247,7 +245,6 @@ def test_nvfp4_selects_msa_nvfp4_backend_and_requires_sm100(
         select_main_backend_and_impl_cls(
             topk_blocks=TOPK,
             kv_cache_dtype="nvfp4",
-            num_kv_heads=1,
         )
 
 
@@ -274,7 +271,6 @@ def test_msa_backend_owns_msa_metadata_builder(
     backend_cls, impl_cls = select_main_backend_and_impl_cls(
         topk_blocks=TOPK,
         kv_cache_dtype="fp8_e4m3",
-        num_kv_heads=1,
     )
     assert backend_cls is MiniMaxM3SparseMSABackend
     assert impl_cls is MiniMaxM3SparseMSAImpl
@@ -287,7 +283,6 @@ def test_msa_backend_owns_msa_metadata_builder(
     backend_cls, impl_cls = select_main_backend_and_impl_cls(
         topk_blocks=TOPK,
         kv_cache_dtype="fp8_e4m3",
-        num_kv_heads=1,
     )
     assert backend_cls is MiniMaxM3SparseBackend
     assert impl_cls is MiniMaxM3SparseTritonImpl

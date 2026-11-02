@@ -119,28 +119,6 @@ def minimax_m3_query_token_positions(
     return query_req_id, query_abs_pos
 
 
-def minimax_m3_use_aiter_sparse_pa(
-    num_kv_heads: int, *, emits_sparse_block_table: bool = False
-) -> bool:
-    """Whether to use the ROCm AITER page-16 sparse PA prototype.
-
-    More than one KV head per rank is only served when the layer's indexer
-    emits the attend's page table itself, since the Triton builders this path
-    otherwise falls back to address one head's cache. Whether an indexer does
-    that is a ROCm-side fact, so its caller passes it in.
-    """
-    requested = _minimax_m3_aiter_sparse_pa_requested()
-    if requested and num_kv_heads != 1 and not emits_sparse_block_table:
-        raise ValueError(
-            "MiniMax M3 AITER sparse paged attention requires "
-            f"num_kv_heads == 1 per tensor-parallel rank, got {num_kv_heads}, "
-            "unless the AITER indexer emits the attend's page table. It is not "
-            "in use here; the 'MiniMax M3 indexer: AITER unavailable' log line "
-            "says why."
-        )
-    return requested
-
-
 class MiniMaxM3SparseBackend(AttentionBackend):
     """Block-sparse GQA backend for MiniMax M3 sparse attention layers."""
 
@@ -535,8 +513,6 @@ def select_main_backend_and_impl_cls(
     *,
     topk_blocks: int,
     kv_cache_dtype: str,
-    num_kv_heads: int,
-    emits_sparse_block_table: bool = False,
 ) -> tuple[type[MiniMaxM3SparseBackend], type[MiniMaxM3SparseImpl]]:
     """Pick the main attention backend and implementation.
 
@@ -546,9 +522,7 @@ def select_main_backend_and_impl_cls(
     back to Triton. NVFP4 is MSA-only. The MSA modules are imported lazily to
     avoid import errors on unsupported platforms.
     """
-    use_aiter_sparse_pa = minimax_m3_use_aiter_sparse_pa(
-        num_kv_heads, emits_sparse_block_table=emits_sparse_block_table
-    )
+    use_aiter_sparse_pa = _minimax_m3_aiter_sparse_pa_requested()
     use_msa = (
         current_platform.is_cuda()
         and current_platform.is_device_capability_family(100)
@@ -612,13 +586,9 @@ def select_main_impl_cls(
     *,
     topk_blocks: int,
     kv_cache_dtype: str,
-    num_kv_heads: int,
-    emits_sparse_block_table: bool = False,
 ) -> type[MiniMaxM3SparseImpl]:
     """Backward-compatible implementation-only selector."""
     return select_main_backend_and_impl_cls(
         topk_blocks=topk_blocks,
         kv_cache_dtype=kv_cache_dtype,
-        num_kv_heads=num_kv_heads,
-        emits_sparse_block_table=emits_sparse_block_table,
     )[1]
