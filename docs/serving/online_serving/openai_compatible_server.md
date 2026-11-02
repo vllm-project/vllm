@@ -229,3 +229,14 @@ The following extra parameters in the response object are supported:
     ```python
     --8<-- "vllm/entrypoints/openai/responses/protocol.py:responses-response-extra-params"
     ```
+
+
+## Streaming Cancellation and Resource Reclamation
+
+When serving online inference with streaming generation via Server-Sent Events (SSE), client connections may be terminated unexpectedly (such as user navigation or network drops).
+
+vLLM `AsyncLLMEngine` listens for client disconnect events and triggers request cancellation:
+
+* The active sequence is removed from the running scheduling queues.
+* Allocated KV cache blocks are promptly released back to `BlockManager` to avoid GPU memory leaks.
+* In-flight generation for the cancelled request is aborted to conserve compute resources.
