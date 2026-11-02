@@ -65,13 +65,20 @@ class CudaCommunicator(DeviceCommunicatorBase):
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
-            use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
+            # --disable-custom-all-reduce falls back to NCCL, so it also turns
+            # off the FlashInfer and symmetric-memory all-reduce.
+            use_torch_symm_mem = (
+                use_custom_allreduce and envs.VLLM_ALLREDUCE_USE_SYMM_MEM
+            )
             # FlashInfer all-reduce does not provide a fixed reduction order.
             use_flashinfer_allreduce = (
-                envs.VLLM_ALLREDUCE_USE_FLASHINFER and not envs.VLLM_BATCH_INVARIANT
+                use_custom_allreduce
+                and envs.VLLM_ALLREDUCE_USE_FLASHINFER
+                and not envs.VLLM_BATCH_INVARIANT
             )
             use_flashinfer_pcie_ipc_allreduce = (
-                envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC
+                use_custom_allreduce
+                and envs.VLLM_ALLREDUCE_USE_FLASHINFER_PCIE_IPC
                 and not envs.VLLM_BATCH_INVARIANT
             )
             # Neither AITER nor QuickReduce all-reduce has a fixed reduction order.
