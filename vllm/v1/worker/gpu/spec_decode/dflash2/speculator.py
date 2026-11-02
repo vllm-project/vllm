@@ -35,19 +35,22 @@ def _selector_walk_kernel(
     row = tl.program_id(0)
     offsets = tl.arange(0, BLOCK_K)
     mask = offsets < top_k
+    predecessors = offsets[:, None]
     req_state = tl.load(req_state_ptr + row * num_steps)
     valid = req_state >= 0
     temperature = tl.load(temperature_ptr + req_state, mask=valid, other=0.0)
     seed = tl.load(seeds_ptr + req_state, mask=valid, other=0)
     previous = 0
-    for step in range(num_steps):
+    # Unrolled, with loads that do not depend on the previous step's choice, so
+    # only the row selection and argmax are serial.
+    for step in tl.static_range(num_steps):
         flat = row * num_steps + step
-        score_base = (flat * top_k + previous) * top_k
-        scores = tl.load(
-            scores_ptr + score_base + offsets,
-            mask=mask & valid,
+        edges = tl.load(
+            scores_ptr + (flat * top_k + predecessors) * top_k + offsets[None, :],
+            mask=mask[:, None] & mask[None, :] & valid,
             other=float("-inf"),
         ).to(tl.float64 if USE_FP64 else tl.float32)
+        scores = tl.max(tl.where(predecessors == previous, edges, float("-inf")), 0)
         candidate_base = flat * top_k
         candidates = tl.load(
             candidate_ptr + candidate_base + offsets,
@@ -74,7 +77,7 @@ def _selector_walk_kernel(
             scores,
             mask=mask & valid,
         )
-        token = tl.load(candidate_ptr + candidate_base + index, mask=valid, other=0)
+        token = tl.sum(tl.where(offsets == index, candidates, 0))
         tl.store(tokens_ptr + flat, token, mask=valid)
         previous = index
 

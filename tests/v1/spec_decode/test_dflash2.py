@@ -9,7 +9,11 @@ import torch
 
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-from vllm.model_executor.models.qwen3_dflash2 import _grouped_conv, _score_edges
+from vllm.model_executor.models.qwen3_dflash2 import (
+    _grouped_conv,
+    _score_edges,
+    _score_edges_reference,
+)
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
@@ -306,8 +310,34 @@ def test_beam_fused_candidate_edges(
     # Production anchors are a strided view of the query token buffer.
     anchors = torch.randint(vocab, (batch * 8,), device="cuda", dtype=anchor_dtype)[::8]
     args = (predecessors, successors, candidates, unary, hidden, anchors, top_k)
-    expected = _score_edges(*args)
+    expected = _score_edges_reference(*args)
     actual = candidate_edges(*args)
+    torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015625)
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
+@pytest.mark.parametrize(
+    "batch,steps,top_k,rank",
+    [(1, 1, 3, 5), (1, 15, 8, 128), (32, 15, 16, 256), (3, 5, 17, 65)],
+)
+@pytest.mark.parametrize("unary_dtype", [torch.bfloat16, torch.float32])
+def test_fused_score_edges_match_reference(batch, steps, top_k, rank, unary_dtype):
+    """The CUDA edge kernel keeps the reference's anchors, predecessor mapping,
+    BF16 intermediate rounding and output dtype."""
+    torch.manual_seed(1)
+    vocab = 257
+    predecessors = torch.randn(vocab, rank, device="cuda", dtype=torch.bfloat16)
+    successors = torch.randn_like(predecessors)
+    candidates = torch.randint(vocab, (batch, steps, top_k), device="cuda")
+    unary = torch.randn(batch, steps, top_k, device="cuda", dtype=unary_dtype)
+    hidden = torch.randn(batch, steps, rank, device="cuda", dtype=torch.bfloat16)
+    # Production anchors are a strided view of the query token buffer, and can
+    # lie past the draft vocabulary.
+    anchors = torch.randint(2 * vocab, (batch * 8,), device="cuda")[::8]
+    args = (predecessors, successors, candidates, unary, hidden, anchors, top_k)
+    expected = _score_edges_reference(*args)
+    actual = _score_edges(*args)
+    assert actual.dtype == expected.dtype
     torch.testing.assert_close(actual, expected, rtol=0.01, atol=0.015625)
 
 
