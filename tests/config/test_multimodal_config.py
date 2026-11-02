@@ -40,9 +40,10 @@ def test_supports_multimodal_inputs(model_id, limit_mm_per_prompt, expected):
     assert ctx.model_config.supports_multimodal_inputs is expected
 
 
-def test_mm_encoder_attn_backend_str_conversion():
-    config = MultiModalConfig(mm_encoder_attn_backend="FLASH_ATTN")
-    assert config.mm_encoder_attn_backend == AttentionBackendEnum.FLASH_ATTN
+@pytest.mark.parametrize("backend", ["FLASH_ATTN", "TORCH_SDPA"])
+def test_mm_encoder_attn_backend_str_conversion(backend):
+    config = MultiModalConfig(mm_encoder_attn_backend=backend)
+    assert config.mm_encoder_attn_backend == AttentionBackendEnum[backend]
 
 
 def test_mm_encoder_attn_backend_invalid():
