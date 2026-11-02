@@ -376,6 +376,60 @@ def _drive_to_faulted(
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("busy", [False, True], ids=["idle", "busy"])
+def test_pause_retry_recovers_healthy_engines(busy):
+    """Pause closes admission and enables recovery without a detected fault."""
+    with _ft_manager() as servers:
+        engines = list(_servers_by_rank(servers, 2).values())
+        _assert_serving_and_healthy(engines)
+        stream = None
+        try:
+            if busy:
+                client = engines[0].get_client()
+                stream = client.completions.create(
+                    model=MODEL_NAME,
+                    prompt="Count from one to a thousand:",
+                    max_tokens=1024,
+                    temperature=0,
+                    stream=True,
+                    extra_body={"ignore_eos": True},
+                )
+                next(stream)
+            for server in engines:
+                _apply_ft(server, "pause")
+            unavailable = _wait_for_engines(
+                engines, match_key="status", match_values={"diagnosing", "unhealthy"}
+            )
+            assert all(unavailable), unavailable
+            for server in engines:
+                response = requests.post(
+                    server.url_for("v1/completions"),
+                    json={"model": MODEL_NAME, "prompt": "Hello", "max_tokens": 1},
+                    timeout=10,
+                )
+                assert response.status_code == 503, response.text
+            paused = _wait_for_engines(
+                engines, match_key="status", match_values={"unhealthy"}
+            )
+            assert all(paused), paused
+            pause_id = str(uuid.uuid4())
+            for server in engines:
+                _apply_ft(server, "pause", request_id=pause_id)
+            duplicates = _wait_for_engines(
+                engines, match_key="last_ft_request_id", match_values={pause_id}
+            )
+            assert all(s and s.get("ft_state") != "recovering" for s in duplicates)
+            round_id = str(uuid.uuid4())
+            for server in engines:
+                _apply_ft(server, "retry", request_id=round_id)
+            _assert_serving_and_healthy(engines)
+        finally:
+            if stream is not None:
+                stream.close()
+
+
+@pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
+@multi_gpu_test(num_gpus=2)
 def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
     """An exception injected into the inference path drives full retry recovery.
 
@@ -433,8 +487,12 @@ def test_injected_fault_retry_recovers_all_ranks(monkeypatch, tmp_path):
 
 @pytest.mark.skipif(not has_nixl_ep(), reason="Requires nixl_ep all2all backend")
 @multi_gpu_test(num_gpus=4)
-@pytest.mark.parametrize("quantization", [None, "fp8_per_block"])
-def test_scale_down_removes_dead_rank_and_recovers(quantization):
+@pytest.mark.parametrize(
+    ("quantization", "proactive"),
+    [(None, False), ("fp8_per_block", False), (None, True)],
+    ids=["detected", "detected-fp8", "idle-pause"],
+)
+def test_scale_down_removes_dead_rank_and_recovers(quantization, proactive):
     """Preserve physical expert IDs and reload recovered placement after scale-down.
 
     Survivors keep serving with a smaller DP group, including processed FP8
@@ -473,12 +531,42 @@ def test_scale_down_removes_dead_rank_and_recovers(quantization):
         # 2. Baseline accuracy while the full DP group is healthy.
         initial_accuracy = _run_gsm8k_eval(servers_by_rank[0], "Initial")
 
-        # 3. Kill the victim's worker; drive all engines into the fault.
+        # 3. An external controller can prepare idle survivors without traffic.
+        if proactive:
+            for action in ("pause?mode=wait&clear_cache=false", "resume"):
+                responses = _in_parallel(
+                    lambda s, action=action: requests.post(
+                        s.url_for(action), timeout=30
+                    ),
+                    list(servers_by_rank.values()),
+                )
+                for response in responses:
+                    response.raise_for_status()
         _kill_worker_process(victim)
-        faulted = _drive_to_faulted(servers_by_rank, match_values={"dead", "unhealthy"})
+        if proactive:
+            dead = _wait_for_engines(
+                [victim], match_key="status", match_values={"dead"}
+            )
+            assert all(dead), dead
+            assert all(
+                _get_ft_status(s)["engines"][0]["status"] == "healthy"
+                for s in survivors
+            )
+            for server in survivors:
+                _apply_ft(server, "pause")
+            paused = _wait_for_engines(
+                survivors, match_key="status", match_values={"unhealthy"}
+            )
+            assert all(
+                s and s.get("fault_info") == "FaultTolerancePause" for s in paused
+            ), paused
+        else:
+            faulted = _drive_to_faulted(
+                servers_by_rank, match_values={"dead", "unhealthy"}
+            )
+            assert faulted[victim_rank]["status"] == "dead", faulted[victim_rank]
 
         # 4. DEAD engine rejects retry: recovery requires UNHEALTHY.
-        assert faulted[victim_rank]["status"] == "dead", faulted[victim_rank]
         _apply_ft(victim, "retry")
         ft_error = _wait_for_ft_failure(victim, FAULT_DETECTION_DEADLINE_S)
         assert ft_error is not None, (
