@@ -1,5 +1,10 @@
 # Features
 
+## LoRA Adapters
+
+- [LoRA serving](lora.md)
+- [Fixed-weight adapter composition for offline generation](lora.md#fixed-weight-adapter-composition)
+
 ## KV Cache Offloading
 
 - [UMBPStoreConnector](umbp_store_connector_usage.md)
