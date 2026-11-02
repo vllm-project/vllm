@@ -13,11 +13,20 @@ expected to deduplicate (reference-count) repeated store/remove announcements
 of the same hash. Opt-in via
 ``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
 KV cache events are enabled. See the PR description for the full design.
+
+Recurrent (Mamba / linear-attention) state groups announce state checkpoints,
+not token ranges: an offloaded chunk holds the recurrent state at the chunk's
+last hash only. Their ``BlockStored`` therefore carries that single hash, its
+parent, an empty ``token_ids`` and ``kv_cache_spec_kind`` ``"mamba"``. A
+consumer aligns it by hash with the attention group's blocks, and a hybrid
+prefix is reusable only up to a boundary where every group has a residency.
+Windowed attention groups keep the legacy placeholder payload.
 """
 
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
+
+import msgspec
 
 from vllm.distributed.kv_events import (
     MEDIUM_CPU,
@@ -35,6 +44,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
+    MambaSpec,
     get_kv_cache_spec_kind,
     get_kv_cache_spec_sliding_window,
 )
@@ -60,8 +70,8 @@ _MEDIUM_TO_EVENT_STR: dict[Medium, str] = {
     Medium.STORAGE: MEDIUM_STORAGE,
 }
 
-# The tracker is CPU-primary by construction: the primary tier's residency key.
-_PRIMARY_RESIDENCY: tuple[Medium, str | None] = (Medium.CPU, None)
+# The tracker is CPU-primary by construction: the primary tier's residency bit.
+_PRIMARY_RESIDENCY_BIT = 1
 
 
 class OffloadingEventGroupSpec(NamedTuple):
@@ -79,11 +89,16 @@ def get_offloading_event_group_spec(
     )
 
 
-@dataclass(slots=True)
-class _OffloadEventMetadata:
+class _OffloadEventMetadata(
+    msgspec.Struct,
+    gc=False,  # type: ignore[call-arg]
+):
     """BlockStored payload snapshot for one OffloadKey, captured while the
     Request is available and kept until the final matching removal event.
-    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent."""
+    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent.
+
+    One is kept per offloaded chunk, so it is untracked by the cyclic GC: keep
+    fields free of tracked containers (``active_residencies`` is a bitmask)."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -96,7 +111,40 @@ class _OffloadEventMetadata:
     extra_keys: tuple[tuple[Any, ...] | None, ...] | None
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
-    active_residencies: set[tuple[Medium, str | None]]
+    active_residencies: int
+
+
+def describes_group(group_config: "GroupOffloadConfig") -> bool:
+    """Whether the tracker builds self-describing payloads for this group.
+
+    Full-attention groups and recurrent state groups (``MambaSpec``) do;
+    windowed attention groups (sliding window, chunked local) keep the legacy
+    placeholder because a window's hashes do not identify a reusable prefix.
+    """
+    if group_config.sliding_window_size_in_chunks is None:
+        return True
+    return _is_recurrent_group(group_config)
+
+
+def _is_recurrent_group(group_config: "GroupOffloadConfig") -> bool:
+    return isinstance(group_config.kv_cache_spec, MambaSpec)
+
+
+def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
+    """Reduce a chunk payload to the recurrent state checkpoint it holds.
+
+    A recurrent group's offloaded chunk is one state, valid at the chunk's
+    last hash. Announcing the whole hash range would let a consumer treat
+    every hash in it as a resumable position, so the payload keeps only the
+    last hash (the OffloadKey), chained to the hash before it, and no tokens:
+    the consumer aligns it with the attention group's blocks by hash.
+    """
+    assert meta.block_hashes
+    if len(meta.block_hashes) > 1:
+        meta.parent_block_hash = meta.block_hashes[-2]
+    meta.block_hashes = meta.block_hashes[-1:]
+    meta.token_ids = ()
+    return meta
 
 
 class OffloadingEventsTracker:
@@ -122,6 +170,10 @@ class OffloadingEventsTracker:
 
         # OffloadKey -> payload snapshot, kept until final removal or reset.
         self._pending_event_metadata: dict[OffloadKey, _OffloadEventMetadata] = {}
+        # (medium, ownership) -> its bit in active_residencies.
+        self._residency_bits: dict[tuple[Medium, str | None], int] = {
+            (Medium.CPU, None): _PRIMARY_RESIDENCY_BIT
+        }
 
     def record_store(
         self,
@@ -132,16 +184,16 @@ class OffloadingEventsTracker:
     ) -> None:
         """Snapshot the KV cache event payload for one offloaded chunk.
 
-        No-op when self-describing event capture is disabled or for
-        sliding-window / SSM groups, which keep the legacy placeholder payload.
+        No-op when self-describing event capture is disabled or for windowed
+        attention groups, which keep the legacy placeholder payload.
         """
         if not self.self_describing_enabled:
             return
-        if group_config.sliding_window_size_in_chunks is not None:
+        if not describes_group(group_config):
             return
         meta = self._build_event_metadata(req, group_config, chunk_idx)
         if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
+            meta.active_residencies |= existing.active_residencies
         self._pending_event_metadata[offload_key] = meta
 
     def record_lookup(
@@ -154,19 +206,17 @@ class OffloadingEventsTracker:
         """Snapshot metadata for a ready or write-pending primary-tier hit."""
         if not self.self_describing_enabled:
             return
-        if group_config.sliding_window_size_in_chunks is not None:
+        if not describes_group(group_config):
             return
-        if offload_key not in self._pending_event_metadata:
-            self._pending_event_metadata[offload_key] = self._build_event_metadata(
-                req, group_config, chunk_idx
-            )
+        meta = self._pending_event_metadata.get(offload_key)
+        if meta is None:
+            meta = self._build_event_metadata(req, group_config, chunk_idx)
+            self._pending_event_metadata[offload_key] = meta
         # Primary residency is registered here rather than by the manager's
         # prepare_write(): the payload needs the Request, which only the
         # scheduler holds at lookup time, and the manager reaches this tracker
         # only through OffloadingEvents.
-        self._pending_event_metadata[offload_key].active_residencies.add(
-            _PRIMARY_RESIDENCY
-        )
+        meta.active_residencies |= _PRIMARY_RESIDENCY_BIT
 
     def record_partial_store(
         self,
@@ -176,7 +226,7 @@ class OffloadingEventsTracker:
         offload_key: OffloadKey,
     ) -> None:
         """Snapshot metadata for a newly stored partial recurrent tail."""
-        if group_config.sliding_window_size_in_chunks is not None:
+        if not describes_group(group_config):
             return
         self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
 
@@ -188,7 +238,7 @@ class OffloadingEventsTracker:
         offload_key: OffloadKey,
     ) -> None:
         """Backfill metadata for a partial recurrent tail lookup hit."""
-        if group_config.sliding_window_size_in_chunks is not None:
+        if not describes_group(group_config):
             return
         if offload_key not in self._pending_event_metadata:
             self._record_partial_tail(req, group_config, boundary_tokens, offload_key)
@@ -245,18 +295,20 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={_PRIMARY_RESIDENCY},
+            active_residencies=_PRIMARY_RESIDENCY_BIT,
         )
+        if _is_recurrent_group(group_config):
+            meta = _as_state_checkpoint(meta)
         if existing := self._pending_event_metadata.get(offload_key):
-            meta.active_residencies.update(existing.active_residencies)
+            meta.active_residencies |= existing.active_residencies
         self._pending_event_metadata[offload_key] = meta
 
     def take_events(self, events: Iterable[OffloadingEvent]) -> Iterable[KVCacheEvent]:
         """Translate raw OffloadingEvents into self-describing KV events.
 
-        Complete metadata is available only for full-attention groups when
-        the tracker is enabled. Other shapes retain the legacy placeholder
-        payload so consumers can ignore them.
+        Complete metadata is available for full-attention and recurrent
+        state groups when the tracker is enabled. Windowed attention groups
+        retain the legacy placeholder payload so consumers can ignore them.
 
         Yields:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
@@ -292,7 +344,8 @@ class OffloadingEventsTracker:
     ) -> _OffloadEventMetadata:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
-        per-block ``block_size``."""
+        per-block ``block_size``. A recurrent group's chunk is reduced to
+        its state checkpoint (see :func:`_as_state_checkpoint`)."""
         hashes_per_chunk = group_config.hashes_per_chunk
         assert hashes_per_chunk > 0
         assert chunk_idx >= 0
@@ -314,9 +367,12 @@ class OffloadingEventsTracker:
             group_config.tokens_per_chunk // group_config.tokens_per_block
         )
 
-        if group_config.sliding_window_size_in_chunks is not None:
+        if not describes_group(group_config):
             # The recording methods filter these out before calling this helper.
-            raise AssertionError("self-describing events only support full attention")
+            raise AssertionError(
+                "self-describing events only support full-attention and "
+                "recurrent state groups"
+            )
 
         parent_block_hash: BlockHash | None
         if first_hash_idx == 0:
@@ -328,7 +384,12 @@ class OffloadingEventsTracker:
         tok_start = chunk_idx * group_config.tokens_per_chunk
         tok_end = tok_start + group_config.tokens_per_chunk
         assert tok_end <= len(req.all_token_ids)
-        token_ids = tuple(req.all_token_ids[tok_start:tok_end])
+        # A recurrent chunk's payload carries no tokens; skip the copy.
+        token_ids: tuple[int, ...] = (
+            ()
+            if _is_recurrent_group(group_config)
+            else tuple(req.all_token_ids[tok_start:tok_end])
+        )
 
         lora_id: int | None = None
         lora_name: str | None = None
@@ -336,7 +397,7 @@ class OffloadingEventsTracker:
             lora_id = req.lora_request.adapter_id
             lora_name = req.lora_request.name
 
-        return _OffloadEventMetadata(
+        meta = _OffloadEventMetadata(
             block_hashes=tuple(chunk_hashes),
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
@@ -346,8 +407,11 @@ class OffloadingEventsTracker:
             extra_keys=None,
             group_idx=group_config.group_idx,
             kv_cache_spec=group_config.kv_event_group_spec,
-            active_residencies={_PRIMARY_RESIDENCY},
+            active_residencies=_PRIMARY_RESIDENCY_BIT,
         )
+        if _is_recurrent_group(group_config):
+            meta = _as_state_checkpoint(meta)
+        return meta
 
     def _placeholder_stored(
         self,
@@ -386,6 +450,11 @@ class OffloadingEventsTracker:
         # eviction event so BlockRemoved can fan out to the same hashes.
         # Events are self-contained (own parent), so key order is free.
         locality = event.locality.value if event.locality is not None else None
+        residency_bit = 0
+        if event.removal_expected:
+            residency_bit = self._residency_bits.setdefault(
+                (event.medium, event.ownership), 1 << len(self._residency_bits)
+            )
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
             if meta is None:
@@ -394,7 +463,7 @@ class OffloadingEventsTracker:
                     logger.warning_once(
                         "OffloadingEventsTracker: no event metadata for "
                         "offload key during BlockStored emission; emitting a "
-                        "placeholder payload. Expected for non-full-attention "
+                        "placeholder payload. Expected for windowed attention "
                         "groups and promotions not observed as a primary-tier "
                         "hit before translation."
                     )
@@ -403,8 +472,7 @@ class OffloadingEventsTracker:
                 )
                 continue
 
-            if event.removal_expected:
-                meta.active_residencies.add((event.medium, event.ownership))
+            meta.active_residencies |= residency_bit
             yield BlockStored(
                 block_hashes=list(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
@@ -433,18 +501,19 @@ class OffloadingEventsTracker:
         # Keep group_idx unambiguous if a manager batch spans groups.
         locality = event.locality.value if event.locality is not None else None
         by_group: dict[int, list] = {}
+        residency_mask = ~self._residency_bits.get((event.medium, event.ownership), 0)
         for key in event.keys:
             meta = self._pending_event_metadata.get(key)
             if event.metadata_only:
                 if meta is not None:
-                    meta.active_residencies.discard((event.medium, event.ownership))
+                    meta.active_residencies &= residency_mask
                 continue
             if meta is not None:
                 group_idx = meta.group_idx
                 by_group.setdefault(group_idx, []).extend(
                     maybe_convert_block_hash(h) for h in meta.block_hashes
                 )
-                meta.active_residencies.discard((event.medium, event.ownership))
+                meta.active_residencies &= residency_mask
             else:
                 if self.self_describing_enabled:
                     logger.warning_once(

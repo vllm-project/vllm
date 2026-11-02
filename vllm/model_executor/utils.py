@@ -75,24 +75,55 @@ def _extent(t: torch.Tensor) -> int:
     return 1 + sum((n - 1) * s for n, s in zip(t.shape, t.stride()))
 
 
-def _in_own_storage(old: torch.Tensor, new: torch.Tensor) -> torch.Tensor:
+def storage_view(
+    storage: torch.UntypedStorage,
+    offset: int,
+    shape: tuple[int, ...],
+    stride: tuple[int, ...],
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """A ``dtype`` tensor on ``storage`` at element ``offset``. ``set_`` does
+    not bounds-check: callers check that the view fits."""
+    view = torch.empty(0, dtype=dtype, device=storage.device)
+    return view.set_(storage, offset, shape, stride)
+
+
+def _in_own_storage(
+    old: torch.Tensor, new: torch.Tensor, whole_storage: bool = False
+) -> torch.Tensor:
     """``new`` copied into the bytes ``old`` spans if it fits, so the loaded
     storage is kept (with its ``data_ptr``); else ``new`` itself. An equal-size
     result fits too: a repack to the same byte count (e.g. FP8 → Marlin int32)
-    then keeps the address captured CUDA graphs read."""
+    then keeps the address captured CUDA graphs read.
+
+    With ``whole_storage`` (direct reload), ``new`` may use the rest of
+    ``old``'s storage, so a weight that post-load processing grew keeps its
+    address on a reload too, as do a padded view with gaps (ROCm FP8 padding)
+    and an emptied weight (the checkpoint bytes stay for the next reload)."""
     storage = old.untyped_storage()
     offset, size = old.storage_offset() * old.element_size(), new.element_size()
+    span = _extent(new)
+    if whole_storage:
+        fits = (
+            span >= new.numel()  # not overlapping
+            and offset + span * size <= storage.nbytes()
+        )
+    else:
+        fits = (
+            new.numel() > 0
+            and span == new.numel()  # neither overlapping nor with gaps
+            # its gaps may hold another tensor's data
+            and _extent(old) == old.numel()
+            and new.numel() * size <= old.numel() * old.element_size()
+        )
     if (
-        new.numel() == 0
+        not fits
         or old.device != new.device
         or new.untyped_storage().data_ptr() == storage.data_ptr()
-        or _extent(new) != new.numel()  # overlapping or with gaps
-        or _extent(old) != old.numel()  # its gaps may hold another tensor's data
         or offset % size
-        or new.numel() * size > _extent(old) * old.element_size()
     ):
         return new
-    view = new.new_empty(0).set_(storage, offset // size, new.shape, new.stride())
+    view = storage_view(storage, offset // size, new.shape, new.stride(), new.dtype)
     return view.copy_(new)
 
 
@@ -115,6 +146,10 @@ def replace_parameter(
     Custom attributes set on ``new_tensor`` (e.g. kernel dispatch flags such as
     ``is_shuffled``) are carried over to the parameter, except ``weight_loader``,
     which is always taken from the existing parameter.
+
+    Under direct reload, a ``new_tensor`` larger than the parameter at cold start
+    may be written into the parameter's existing storage on a reload, so do not
+    read a local alias of the old data (``w = layer.weight.data``) after this call.
 
     This function should not be called on weights which are tied/shared
 
@@ -142,6 +177,9 @@ def replace_parameter(
     # a loader riding along under that name has to be dropped as well.
     new_tensor_attrs.pop("weight_loader", None)
     new_tensor_attrs.pop("_weight_loader", None)
+    # A checkpoint record belongs to the parameter it was recorded on (direct
+    # reload); one on new_tensor (another checkpoint parameter) must not overwrite it.
+    new_tensor_attrs.pop("_ckpt", None)
 
     if isinstance(new_tensor, torch.nn.Parameter):
         new_tensor = new_tensor.data
@@ -163,7 +201,13 @@ def replace_parameter(
         elif getattr(getattr(layer, "quant_method", None), "uses_meta_device", False):
             old_param.data = new_tensor  # online quantization frees the source
         else:
-            old_param.data = _in_own_storage(old_param, new_tensor)
+            from vllm.model_executor.model_loader.reload.direct import (
+                direct_reload_enabled,
+            )
+
+            old_param.data = _in_own_storage(
+                old_param, new_tensor, whole_storage=direct_reload_enabled()
+            )
         for attr_name, attr in new_tensor_attrs.items():
             setattr(old_param, attr_name, attr)
         return

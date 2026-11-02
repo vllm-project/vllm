@@ -13,6 +13,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi.responses import JSONResponse
+from pydantic import TypeAdapter
 
 import vllm.envs as envs
 from vllm.assets.audio import AudioAsset
@@ -1287,6 +1289,43 @@ def test_validate_batch_rejects_malformed_request(tmp_path):
         pytest.raises(ValueError, match=f"line {bad_line}:"),
     ):
         validate_batch(f)
+
+
+@pytest.mark.asyncio
+async def test_requests_and_responses_reuse_type_adapters(monkeypatch):
+    """Building a TypeAdapter rebuilds its schema, too slow to do per request."""
+    type_adapter = MagicMock(wraps=TypeAdapter)
+    monkeypatch.setattr(run_batch_module, "TypeAdapter", type_adapter)
+
+    fallback_line = json.dumps(
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/unknown",
+            "body": {"model": EMBEDDING_MODEL_NAME, "input": "Hello world!"},
+        }
+    )
+    lines = [
+        *INPUT_EMBEDDING_BATCH.split("\n"),
+        *INPUT_SCORE_BATCH.split("\n"),
+        fallback_line,
+    ]
+    requests = [BatchRequestInput.model_validate_json(line) for line in lines]
+
+    async def handler(_body):
+        error = {"message": "bad", "type": "BadRequestError", "code": 400}
+        return JSONResponse(content={"error": error}, status_code=400)
+
+    output = await run_request(handler, requests[0])
+
+    assert [type(r.body).__name__ for r in requests] == [
+        *["EmbeddingCompletionRequest"] * 4,
+        *["ScoreQueriesDocumentsRequest"] * 2,
+        "EmbeddingCompletionRequest",
+    ]
+    assert isinstance(output.error, ErrorResponse)
+    assert output.response.status_code == 400
+    type_adapter.assert_not_called()
 
 
 @pytest.mark.asyncio

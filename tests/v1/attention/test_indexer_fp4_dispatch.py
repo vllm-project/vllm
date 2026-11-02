@@ -496,13 +496,14 @@ def _config(dtype=None, *, dcp=1, pcp=1, model_type="deepseek_v4"):
     attention = (
         AttentionConfig() if dtype is None else AttentionConfig(indexer_kv_dtype=dtype)
     )
+    hf_config = SimpleNamespace(model_type=model_type)
     return SimpleNamespace(
         attention_config=attention,
         parallel_config=SimpleNamespace(
             decode_context_parallel_size=dcp,
             prefill_context_parallel_size=pcp,
         ),
-        model_config=SimpleNamespace(hf_config=SimpleNamespace(model_type=model_type)),
+        model_config=SimpleNamespace(hf_config=hf_config, hf_text_config=hf_config),
     )
 
 
