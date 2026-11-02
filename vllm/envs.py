@@ -161,6 +161,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_PADDING: bool = True
     VLLM_ROCM_MOE_PADDING: bool = True
     VLLM_ROCM_SHUFFLE_KV_CACHE_LAYOUT: bool = False
+    VLLM_ROCM_MINIMAX_M3_PARALLEL_TOPK: bool = False
     VLLM_ENABLE_V1_MULTIPROCESSING: bool = True
     VLLM_LOG_BATCHSIZE_INTERVAL: float = -1
     VLLM_DISABLE_COMPILE_CACHE: bool = False
@@ -1465,6 +1466,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # QuickReduce. This does not affect QuickReduce eligibility.
     "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB": lambda: maybe_convert_int(
         os.environ.get("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION_MIN_SIZE_KB", None)
+    ),
+    # Enable the experimental parallel decode top-16 index selector for
+    # MiniMax-M3 on ROCm gfx950. Set to 1 to enable; disabled by default.
+    # Uses runtime shape metadata to avoid mixed-batch JIT specializations.
+    "VLLM_ROCM_MINIMAX_M3_PARALLEL_TOPK": lambda: (
+        os.getenv("VLLM_ROCM_MINIMAX_M3_PARALLEL_TOPK", "0") == "1"
     ),
     # If set, enable multiprocessing in LLM for the V1 code path.
     "VLLM_ENABLE_V1_MULTIPROCESSING": lambda: bool(

@@ -7,6 +7,7 @@ import functools
 
 import torch
 
+import vllm.envs as envs
 from vllm.models.minimax_m3.amd.ops.flydsl_utils import (
     run_compiled,
 )
@@ -95,6 +96,11 @@ def minimax_m3_index_topk_decode_indices(
     assert seq_lens.dtype == torch.int32 and seq_lens.is_contiguous()
     assert seq_lens.numel() >= rows // query_len
     if rows == 0:
+        return
+    if envs.VLLM_ROCM_MINIMAX_M3_PARALLEL_TOPK:
+        from .parallel_kernel import parallel_decode_topk
+
+        parallel_decode_topk(score, topk_idx, seq_lens, query_len, cols)
         return
     run_compiled(
         _get_decode_kernel(),
