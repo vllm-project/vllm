@@ -7,6 +7,14 @@ from typing import ClassVar
 import torch
 
 import vllm.envs as envs
+from vllm.model_executor.kernels.linear.cute_dsl.skinny_fp8_gemm import (
+    can_use_skinny_fp8_gemm,
+    shape_dynamic_skinny_fp8_gemm,
+)
+from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+    SKINNY_FP8_MAX_TOKENS,
+    get_skinny_fp8_gemm_plan,
+)
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
@@ -151,8 +159,12 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
 ):
     """Conditional FlashInfer / DeepGEMM FP8 block-scaled GEMM.
 
-    Dispatches between two kernels based on input batch size:
-    - Small batches (M < 32): FlashInfer's swapAB trick for better utilisation.
+    Dispatches between three kernels based on input batch size:
+    - A few tokens with a measured plan for the weight shape
+      (``SKINNY_FP8_GEMM_PLANS_BY_CAPABILITY``): the W8A16 skinny GEMM on the
+      BF16 input, no activation quantization.
+    - Other small batches (M < 32): FlashInfer's swapAB trick for better
+      utilisation.
     - Large batches (M >= 32): DeepGEMM for peak throughput.
 
     apply_input_quant is False because FlashInfer accepts BF16 input and
@@ -179,6 +191,19 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
         # DeepGEMM need post-processing; both kernels share the same
         # parameter tensor layout so processing once is sufficient.
         self.fallback.process_weights_after_loading(layer)
+        self._request_skinny_fp8_warmup(layer)
+
+    def _request_skinny_fp8_warmup(self, layer: torch.nn.Module) -> None:
+        # Compile the measured skinny GEMM configs for this weight shape
+        # before CUDA graph capture (see _skinny_fp8_config).
+        if envs.VLLM_BATCH_INVARIANT or self.weight_group_shape.col != 128:
+            return
+        weight = self.fallback._get_layer_params(layer).weight
+        if weight.dim() != 2:
+            return
+        plan = get_skinny_fp8_gemm_plan(*weight.shape)
+        if plan:
+            shape_dynamic_skinny_fp8_gemm.request_warmup_configs(plan.values())
 
     def apply_block_scaled_mm(
         self,
@@ -226,6 +251,33 @@ direct_register_custom_op(
 )
 
 
+def _skinny_fp8_config(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    group_size: int,
+):
+    """The measured skinny GEMM config for this call, or None.
+
+    Cheap rejection first: this runs on every call of the op, including
+    prefills, where the token count alone rules the kernel out.
+    """
+    if (
+        input.dim() != 2
+        or input.shape[0] > SKINNY_FP8_MAX_TOKENS
+        or group_size != 128
+        or weight.dim() != 2
+    ):
+        return None
+    plan = get_skinny_fp8_gemm_plan(*weight.shape)
+    config = None if plan is None else plan.get(input.shape[0])
+    if config is None or not can_use_skinny_fp8_gemm(
+        input, weight, weight_scale, config
+    ):
+        return None
+    return config
+
+
 def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
     input: torch.Tensor,
     weight: torch.Tensor,
@@ -235,8 +287,10 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
 ) -> torch.Tensor:
     """Conditional FlashInfer FP8 blockscale GEMM with batch-size-dependent selection.
 
-    This function switches between two optimized kernels based on the input batch size:
-    - For small batches (M < 32): Uses FlashInfer's DeepGEMM swapAB optimization.
+    This function switches between optimized kernels based on the input batch size:
+    - For a few tokens with a measured plan for the weight shape: the W8A16
+      skinny GEMM (BF16 input, FP8 weight, no activation quantization).
+    - For other small batches (M < 32): Uses FlashInfer's DeepGEMM swapAB optimization.
     - For larger batches (M >= 32): Uses the official DeepGEMM kernel.
 
     The conditional logic must use torch.cond() instead of a simple if-else statement
@@ -297,6 +351,16 @@ def _dynamic_flashinfer_deepgemm_blockscale_gemm_impl(
 
     if envs.VLLM_BATCH_INVARIANT:
         return run_deepgemm(input, weight, weight_scale)
+
+    # A few tokens: W8A16 skinny GEMM on the BF16 input where a measured plan
+    # exists for this weight shape and token count. The op runs eagerly, so
+    # the token count is the runtime value. This path skips the activation
+    # quantization, so its output differs from the W8A8 kernels at the
+    # rounding level (closer to the dequantized weights); VLLM_BATCH_INVARIANT
+    # disables it above.
+    skinny_config = _skinny_fp8_config(input, weight, weight_scale, group_size)
+    if skinny_config is not None:
+        return shape_dynamic_skinny_fp8_gemm(input, weight, weight_scale, skinny_config)
 
     condition = input.shape[0] < 32
 

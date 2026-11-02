@@ -6,6 +6,9 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm import (
+    SkinnyGemmConfig,
+)
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
     apply_moe_activation_supported,
@@ -101,6 +104,170 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # higher-precision + activation QDQ.
         self.quantization_emulation = False
         super().__init__(moe_config, quant_config)
+        self._skinny_fp8_moe_plans = self._init_skinny_fp8_moe_plans()
+
+    def _init_skinny_fp8_moe_plans(
+        self,
+    ) -> dict[int, tuple[SkinnyGemmConfig, SkinnyGemmConfig]] | None:
+        """Token count -> (gate_up, down) configs of the grouped W8A16 skinny
+        kernel, or None when this layer cannot take it: not 128x128 block-FP8,
+        activations dispatched across ranks, kernel unavailable, or no plan
+        for the expert shapes on this GPU."""
+        if not (self.quant_config.use_fp8_w8a8 and self.block_shape == [128, 128]):
+            return None
+        parallel_config = self.moe_config.moe_parallel_config
+        if parallel_config.use_all2all_kernels or parallel_config.dp_size > 1:
+            return None
+        w1_scale, w2_scale = self.w1_scale, self.w2_scale
+        if (
+            w1_scale is None
+            or w2_scale is None
+            or w1_scale.dim() != 3
+            or w2_scale.dim() != 3
+            or self.w1_bias is not None
+            or self.w2_bias is not None
+        ):
+            return None
+        from vllm.model_executor.kernels.linear.cute_dsl.skinny_fp8_moe_gemm import (
+            QUANT_BLOCK,
+            shape_dynamic_skinny_fp8_moe_gemm,
+        )
+        from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
+            get_skinny_fp8_moe_gemm_plan,
+        )
+
+        plan1 = get_skinny_fp8_moe_gemm_plan(
+            w1_scale.shape[1] * QUANT_BLOCK, w1_scale.shape[2] * QUANT_BLOCK
+        )
+        plan2 = get_skinny_fp8_moe_gemm_plan(
+            w2_scale.shape[1] * QUANT_BLOCK, w2_scale.shape[2] * QUANT_BLOCK
+        )
+        if plan1 is None or plan2 is None:
+            return None
+        plans = {m: (plan1[m], plan2[m]) for m in sorted(set(plan1) & set(plan2))}
+        if not plans:
+            return None
+        shape_dynamic_skinny_fp8_moe_gemm.request_warmup_configs(
+            [(c1, True, False) for c1, _ in plans.values()]
+            + [(c2, False, mul) for _, c2 in plans.values() for mul in (True, False)]
+        )
+        return plans
+
+    def _skinny_fp8_moe_configs(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+    ) -> tuple[SkinnyGemmConfig, SkinnyGemmConfig] | None:
+        """The grouped skinny kernel configs for this call, or None (then the
+        Triton path runs). Both GEMMs' inputs are checked here so that the
+        kernel wrapper never has to raise."""
+        plans = self._skinny_fp8_moe_plans
+        if (
+            plans is None
+            or expert_map is not None
+            or self._lora_context is not None
+            or apply_router_weight_on_input
+        ):
+            return None
+        configs = plans.get(topk_ids.shape[0])
+        if configs is None:
+            return None
+        from vllm.model_executor.kernels.linear.cute_dsl.skinny_fp8_moe_gemm import (
+            can_use_skinny_fp8_moe_gemm,
+            weight_fits_skinny_fp8_moe_gemm,
+        )
+
+        assert self.w1_scale is not None and self.w2_scale is not None
+        if not can_use_skinny_fp8_moe_gemm(
+            hidden_states,
+            w1,
+            self.w1_scale,
+            topk_ids,
+            configs[0],
+            a_per_token=True,
+            topk_weights=topk_weights,
+        ):
+            return None
+        if not (
+            weight_fits_skinny_fp8_moe_gemm(w2, self.w2_scale, configs[1])
+            and w2.shape[2]
+            == self.adjust_N_for_activation(w1.shape[1], MoEActivation.SILU)
+            and w2.shape[0] == w1.shape[0]
+        ):
+            return None
+        return configs
+
+    def _apply_skinny_fp8_moe(
+        self,
+        output: torch.Tensor,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        expert_map: torch.Tensor | None,
+        workspace13: torch.Tensor,
+        workspace2: torch.Tensor,
+        configs: tuple[SkinnyGemmConfig, SkinnyGemmConfig],
+    ) -> None:
+        """Routed experts at a small token count: W8A16 grouped skinny GEMMs on
+        the unquantized BF16 activations (no activation quantization kernels),
+        the activation function, and the usual top-k reduction."""
+        from vllm.model_executor.kernels.linear.cute_dsl.skinny_fp8_moe_gemm import (
+            shape_dynamic_skinny_fp8_moe_gemm,
+        )
+
+        num_tokens, top_k_num = topk_ids.shape
+        N = w1.shape[1]
+        K = w2.shape[1]
+        num_pairs = num_tokens * top_k_num
+        intermediate_cache1 = _resize_cache(workspace2, (num_pairs, N))
+        intermediate_cache2 = _resize_cache(
+            workspace13, (num_pairs, self.adjust_N_for_activation(N, activation))
+        )
+        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
+        hooked = self._uses_post_gemm2_hook(num_tokens)
+
+        assert self.w1_scale is not None and self.w2_scale is not None
+        shape_dynamic_skinny_fp8_moe_gemm(
+            hidden_states,
+            w1,
+            self.w1_scale,
+            topk_ids,
+            None,
+            configs[0],
+            a_per_token=True,
+            out=intermediate_cache1,
+        )
+        self.activation(activation, intermediate_cache2, intermediate_cache1)
+        # cache1 is dead now; cache3 reuses its workspace.
+        shape_dynamic_skinny_fp8_moe_gemm(
+            intermediate_cache2,
+            w2,
+            self.w2_scale,
+            topk_ids,
+            None if hooked else topk_weights,
+            configs[1],
+            a_per_token=False,
+            out=intermediate_cache3.view(num_pairs, K),
+        )
+        if hooked:
+            self._run_post_gemm2_hook(
+                route_major_moe_output(
+                    intermediate_cache3, topk_weights, topk_ids, expert_map
+                ),
+                output,
+            )
+        else:
+            self._finalize_expert_output(
+                intermediate_cache3, output, topk_ids, expert_map
+            )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -108,9 +275,12 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        # Defer activation quantization to apply() only when LoRA is active AND
-        # tokens are dispatched across ranks (DP+EP all2all).
-        return (
+        # Defer activation quantization to apply() when LoRA is active AND
+        # tokens are dispatched across ranks (DP+EP all2all), or when the
+        # layer may take the grouped W8A16 skinny kernel, which consumes the
+        # BF16 activations directly (apply() quantizes them for the other
+        # token counts).
+        return self._skinny_fp8_moe_plans is not None or (
             self._lora_context is not None
             and self.quant_dtype is not None
             and self.moe_config.moe_parallel_config.use_all2all_kernels
@@ -302,6 +472,30 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         lora_unquantized_hidden_states: torch.Tensor | None = None
         if self.expects_unquantized_inputs:
             assert a1q_scale is None
+            skinny_configs = self._skinny_fp8_moe_configs(
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                expert_map,
+                apply_router_weight_on_input,
+            )
+            if skinny_configs is not None:
+                self._apply_skinny_fp8_moe(
+                    output,
+                    hidden_states,
+                    w1,
+                    w2,
+                    topk_weights,
+                    topk_ids,
+                    activation,
+                    expert_map,
+                    workspace13,
+                    workspace2,
+                    skinny_configs,
+                )
+                return
             lora_unquantized_hidden_states = hidden_states
             hidden_states, a1q_scale = moe_kernel_quantize_input(
                 hidden_states,
