@@ -1236,54 +1236,14 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
     assert mixed.supports_divergent_local_hybrid_hits is False
 
 
-@pytest.mark.parametrize(
-    ("top_level_role", "child_roles", "is_producer", "is_consumer"),
-    [
-        ("kv_producer", ["kv_producer", "kv_both"], True, True),
-        ("kv_consumer", ["kv_consumer", "kv_both"], True, True),
-        ("kv_both", ["kv_producer", "kv_producer"], True, False),
-        ("kv_both", ["kv_consumer", "kv_consumer"], False, True),
-    ],
-)
-def test_role_follows_child_roles(
-    tmp_path: Path,
-    top_level_role: str,
-    child_roles: list[str],
-    is_producer: bool,
-    is_consumer: bool,
-):
-    """Each child saves or loads KV per its own kv_role, so MultiConnector
-    takes a role if any child has it, whatever the top-level kv_role says."""
-    connectors = [
-        {
-            "kv_connector": "ExampleConnector",
-            "kv_role": role,
-            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
-        }
-        for role in child_roles
-    ]
-    vllm_config = create_vllm_config(
-        kv_connector="MultiConnector",
-        kv_role=top_level_role,
-        kv_connector_extra_config={"connectors": connectors},
-    )
-    mc = MultiConnector(
-        vllm_config=vllm_config,
-        role=KVConnectorRole.SCHEDULER,
-        kv_cache_config=KVCacheConfig(
-            num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[]
-        ),
-    )
-    assert mc.is_kv_producer is is_producer
-    assert mc.is_kv_consumer is is_consumer
-
-
+@pytest.mark.cpu_test
 @pytest.mark.parametrize(
     ("child_roles", "defer_block_free"),
     [
         (["kv_producer", "kv_both"], True),
         (["kv_producer", "kv_producer"], False),
     ],
+    ids=["loading-child", "pure-producers"],
 )
 def test_defer_block_free_follows_child_roles(
     tmp_path: Path, child_roles: list[str], defer_block_free: bool

@@ -195,11 +195,6 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
-    def is_kv_producer(self) -> bool:
-        """Whether this connector saves KV computed by this instance."""
-        return self._kv_transfer_config.is_kv_producer
-
-    @property
     def is_kv_consumer(self) -> bool:
         """Whether this connector loads external KV into local blocks."""
         return self._kv_transfer_config.is_kv_consumer
