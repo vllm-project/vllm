@@ -876,10 +876,13 @@ async def test_streaming_errors_preserve_envelope(
 
 def test_build_per_request_timing_metrics_valid_timestamps():
     metrics = build_per_request_timing_metrics(
-        _PER_REQUEST_STATS, num_generation_tokens=10
+        _PER_REQUEST_STATS,
+        num_generation_tokens=10,
+        first_content_token_ts=2.5,
     )
 
     assert metrics.time_to_first_token_ms == pytest.approx(500.0)
+    assert metrics.time_to_first_content_token_ms == pytest.approx(1000.0)
     assert metrics.generation_time_ms == pytest.approx(1000.0)
     assert metrics.queue_time_ms == pytest.approx(500.0)
     assert metrics.mean_itl_ms == pytest.approx(1000.0 / 9, rel=1e-4)

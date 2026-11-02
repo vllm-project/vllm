@@ -82,6 +82,13 @@ class Segment(NamedTuple):
     delta: str
     completed_message: Message | None = None
 
+    @property
+    def is_content(self) -> bool:
+        return (
+            _SegmentType.from_channel_and_recipient(self.channel, self.recipient)
+            == _SegmentType.CONTENT
+        )
+
 
 @dataclass
 class ChunkResult:
