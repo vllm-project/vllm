@@ -211,6 +211,33 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         if self.use_spec_decode:
             self.supports_update_block_table = False
 
+    def bind_mrv2_graph_inputs(
+        self,
+        state_indices: torch.Tensor,
+        num_accepted_tokens: torch.Tensor | None,
+    ) -> None:
+        """Bind compatible MRV2 persistent buffers as full-graph inputs."""
+        assert state_indices.shape == (
+            self.decode_cudagraph_max_bs,
+            1 + self.num_speculative_blocks,
+        )
+        assert state_indices.dtype == self.state_indices_tensor_d.dtype
+        assert state_indices.device == self.state_indices_tensor_d.device
+        # ReplaySSM reserves no per-draft state blocks, so its aligned-index
+        # view is narrower than the legacy full-graph staging buffer. Keep the
+        # existing copy fallback for that case.
+        if state_indices.shape == self.state_indices_tensor_d.shape:
+            self.state_indices_tensor_d = state_indices
+
+        if self.use_spec_decode:
+            assert num_accepted_tokens is not None
+            assert num_accepted_tokens.shape == self.decode_num_accepted_tokens.shape
+            assert num_accepted_tokens.dtype == self.decode_num_accepted_tokens.dtype
+            assert num_accepted_tokens.device == self.decode_num_accepted_tokens.device
+            self.decode_num_accepted_tokens = num_accepted_tokens
+        else:
+            assert num_accepted_tokens is None
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ) -> M:
@@ -487,13 +514,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         is_flush_d = None
         replayssm_scratch = None
 
-        state_indices_tensor = mamba_get_block_table_tensor(
-            common_attn_metadata.block_table_tensor,
-            common_attn_metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.enable_prefix_caching,
-            self.num_speculative_blocks,
-        )
+        state_indices_tensor = getattr(self, "mamba_aligned_state_indices", None)
+        if state_indices_tensor is None:
+            state_indices_tensor = mamba_get_block_table_tensor(
+                common_attn_metadata.block_table_tensor,
+                common_attn_metadata.seq_lens,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.enable_prefix_caching,
+                self.num_speculative_blocks,
+            )
 
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
@@ -617,18 +646,27 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             and self.compilation_config.cudagraph_mode.has_full_cudagraphs()
         ):
             padded_bs = metadata.num_reqs
-            self.state_indices_tensor_d[: metadata.num_decodes].copy_(
-                state_indices_tensor_d, non_blocking=True
-            )
+            assert state_indices_tensor_d is not None
+            if (
+                self.state_indices_tensor_d.data_ptr()
+                != state_indices_tensor_d.data_ptr()
+            ):
+                self.state_indices_tensor_d[: metadata.num_decodes].copy_(
+                    state_indices_tensor_d, non_blocking=True
+                )
             state_indices_tensor_d = self.state_indices_tensor_d[:padded_bs]
             state_indices_tensor_d[metadata.num_decodes :] = NULL_BLOCK_ID
 
             if self.use_spec_decode and num_accepted_tokens is not None:
                 assert query_start_loc_d is not None
                 query_start_loc_d = query_start_loc_d[: padded_bs + 1]
-                self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
-                    num_accepted_tokens, non_blocking=True
-                )
+                if (
+                    self.decode_num_accepted_tokens.data_ptr()
+                    != num_accepted_tokens.data_ptr()
+                ):
+                    self.decode_num_accepted_tokens[: metadata.num_decodes].copy_(
+                        num_accepted_tokens, non_blocking=True
+                    )
                 num_accepted_tokens = self.decode_num_accepted_tokens[:padded_bs]
                 num_accepted_tokens[metadata.num_decodes :] = (
                     1  # pad with 1st slot index
@@ -683,13 +721,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         blk_table: torch.Tensor,
         slot_mapping: torch.Tensor,
     ) -> M:
-        state_indices_tensor = mamba_get_block_table_tensor(
-            blk_table,
-            metadata.seq_lens,
-            self.kv_cache_spec,
-            self.vllm_config.cache_config.enable_prefix_caching,
-            self.num_speculative_blocks,
-        )
+        state_indices_tensor = getattr(self, "mamba_aligned_state_indices", None)
+        if state_indices_tensor is None:
+            state_indices_tensor = mamba_get_block_table_tensor(
+                blk_table,
+                metadata.seq_lens,
+                self.kv_cache_spec,
+                self.vllm_config.cache_config.enable_prefix_caching,
+                self.num_speculative_blocks,
+            )
         if state_indices_tensor.dim() == 1:
             state_indices_tensor = state_indices_tensor.unsqueeze(-1)
 
