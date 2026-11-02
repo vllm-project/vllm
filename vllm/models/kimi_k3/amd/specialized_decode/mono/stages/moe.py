@@ -1327,9 +1327,9 @@ def stage_down_i4(c, rgd, nu, ops0):
     """gfx942 ``stage_down``: INTER (``inter16``) staged into LDS a K slice at a
     time (the next slice loaded under this one's MFMAs); in a slice, wave w the
     slots w, w + 8, ... (a batch of w2 in flight, the next issued under this
-    one's MFMAs; past |U| the next slice's first); a slot's partial added into
-    its picks' fp32 rows (``contrib``), the last slice writing bf16(w acc) there
-    -> ``fold_down``."""
+    one's MFMAs; past |U| the next slice's first); a batch's partials, after
+    all its MFMAs, added into their picks' fp32 rows (``contrib``), the last
+    slice writing bf16(w acc) there -> ``fold_down``."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rt = c["rt"]
     t = fx.min(lane % 16, s - 1)
@@ -1365,6 +1365,7 @@ def stage_down_i4(c, rgd, nu, ops0):
                 )
             else:
                 ops_n = down_loads_i4(c, rgd, nu, fx.min(nb, nu - 1), q)
+            parts = []
             for j in range_constexpr(db):
                 slot = fx.min(b0 + WAVES * j, nu - 1)
                 live = (b0 + WAVES * j) < nu
@@ -1376,25 +1377,25 @@ def stage_down_i4(c, rgd, nu, ops0):
                     sw = i4.lane_scale(ops[db * nbq + j * nbq + i], lane)
                     a0, a1 = i4.dequant(ops[j * nbq + i], sw)
                     at = (pick * irow + i * i4.BLOCK_K + 16 * kb) // 2
+                    # no mask: an unpicked token's column (its pick 0's INTER)
+                    # only feeds its own outputs, which are not stored
                     bs = []
                     for d in range_constexpr(2):
                         ld = fx.ptr_load(c["interb"] + (at + 4 * d), result_type=v4)
-                        bw = fx.Vector(ld)
-                        bw = fx.Vector.from_elements(
-                            [picked.select(bw[x], fx.Int32(0)) for x in range(4)],
-                            fx.Int32,
-                        )
-                        bs.append(bw.bitcast(fx.BFloat16))
+                        bs.append(fx.Vector(ld).bitcast(fx.BFloat16))
                     acc = mfma_bf16(a0, bs[0], acc)
                     acc = mfma_bf16(a1, bs[1], acc)
-                # lane: rows 4 (lane / 16) + i of token lane % 16
-                if live & picked:
-                    wt = fx.ptr_load(rt["route"] + (t * 2 * TOPK + TOPK + k)).bitcast(
+                parts.append((live & picked, k, acc))
+            # lane: rows 4 (lane / 16) + i of token lane % 16
+            for j in range_constexpr(db):
+                store, kj, acc_j = parts[j]
+                if store:
+                    wt = fx.ptr_load(rt["route"] + (t * 2 * TOPK + TOPK + kj)).bitcast(
                         fx.Float32
                     )
                     for i in range_constexpr(4):
-                        at = c["contrib"] + ((t * TOPK + k) * ROWS + 4 * kb + i)
-                        v = acc[i]
+                        at = c["contrib"] + ((t * TOPK + kj) * ROWS + 4 * kb + i)
+                        v = acc_j[i]
                         if const_expr(q > 0):
                             v = fx.ptr_load(at) + v
                         if const_expr(q + 1 < nq):

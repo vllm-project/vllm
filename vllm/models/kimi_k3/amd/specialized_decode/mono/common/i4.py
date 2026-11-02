@@ -17,6 +17,7 @@ block is two ``mfma_bf16`` (four 16x16x16) of ``dequant``'s two v8bf16.
 
 import flydsl.expr as fx
 from aiter.ops.flydsl.kernels import buffer_ops as bo
+from flydsl._mlir.dialects import llvm
 from flydsl.expr import rocdl
 from flydsl.expr.typing import T
 
@@ -63,25 +64,20 @@ def lane_scale(word, lane):
     return hi.select(word & fx.Int32(-65536), word << 16).bitcast(fx.Float32)
 
 
-def _nibbles_bf16x8(raw, eff):
-    """Eight int4 of ``raw`` (K j low, K j + 4 high) times ``eff`` / 16 ->
-    v8bf16 K 0 .. 7, by high-16 truncation: aiter's gfx942
-    ``_int4_nibble_to_bf16x8(old_pack=True)`` bit for bit."""
+def _nibbles_bf16x8(raw, eff2):
+    """Eight int4 of ``raw`` (K j low, K j + 4 high) times ``eff2`` / 16 (a pair
+    a v_pk_mul_f32) -> v8bf16 K 0 .. 7, by high-16 truncation (a v_perm_b32 a
+    pair): aiter's gfx942 ``_int4_nibble_to_bf16x8(old_pack=True)`` bit for
+    bit."""
     odd = fx.Int32(raw).shrui(fx.Int32(4))
-    lo = [
-        fx.Float32(rocdl.cvt_off_f32_i4(fx.Int32(raw).ir_value(), byte_sel=j)) * eff
-        for j in range(4)
-    ]
-    hi = [
-        fx.Float32(rocdl.cvt_off_f32_i4(odd.ir_value(), byte_sel=j)) * eff
-        for j in range(4)
-    ]
-    f = lo + hi
+    f = [rocdl.cvt_off_f32_i4(fx.Int32(raw).ir_value(), byte_sel=j) for j in range(4)]
+    f += [rocdl.cvt_off_f32_i4(odd.ir_value(), byte_sel=j) for j in range(4)]
+    hi16 = fx.Int32(0x07060302)  # perm_b32(hi_w, lo_w): their high halves
     words = []
     for i in range(4):
-        b0 = f[2 * i].bitcast(fx.Int32)
-        b1 = f[2 * i + 1].bitcast(fx.Int32)
-        words.append(b0.shrui(fx.Int32(16)) | (b1 & fx.Int32(-65536)))
+        p = fx.Vector.from_elements(f[2 * i : 2 * i + 2], fx.Float32) * eff2
+        lo_w, hi_w = p[0].bitcast(fx.Int32), p[1].bitcast(fx.Int32)
+        words.append(fx.Int32(rocdl.perm_b32(hi_w, lo_w, hi16)))
     return fx.Vector.from_elements(words, fx.Int32).bitcast(fx.BFloat16)
 
 
@@ -89,4 +85,10 @@ def dequant(raw2, scale):
     """A lane's block dwordx2 with its f32 group scale -> (v8bf16 K 0 .. 7,
     v8bf16 K 8 .. 15) of its 16."""
     eff = scale * fx.Float32(16.0)
-    return _nibbles_bf16x8(raw2[0], eff), _nibbles_bf16x8(raw2[1], eff)
+    # both halves defined: a splat pair's undefined high half makes the waitcnt
+    # pass wait on the load last written to that register (a prefetch)
+    hi = fx.Float32(
+        llvm.call_intrinsic(T.f32, "llvm.arithmetic.fence", [eff.ir_value()], [], [])
+    )
+    eff2 = fx.Vector.from_elements([eff, hi], fx.Float32)
+    return _nibbles_bf16x8(raw2[0], eff2), _nibbles_bf16x8(raw2[1], eff2)
