@@ -352,7 +352,7 @@ def test_aiter_decode_route_follows_replayed_step(dist_init, monkeypatch, dim_fi
     # load_state_dict skips the weight loaders and the non-persistent decode
     # conv weight; vLLM's loaders end with this hook.
     for layer in layers.values():
-        layer.process_weights_after_loading(vllm_config.model_config.dtype)
+        layer.process_weights_after_loading()
     # The AITER layer runs f_b and g_b as one batched GEMM over the weights loading
     # filled; the stock layer, the reference below, runs them one at a time.
     fused_gate_b = layers["fused"]._gate_b_weight

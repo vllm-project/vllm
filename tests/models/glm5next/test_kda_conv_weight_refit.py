@@ -82,6 +82,8 @@ def _decode_layer(conv1d: nn.Module) -> kda.Glm5NextLinearAttention:
     layer.A_log = layer.dt_bias = None
     layer._conv_state_dim_first = True
     layer.kv_cache = (torch.zeros(1, 3 * CHANNELS, KERNEL - 1), None)
+    layer._use_aiter_conv1d = False
+    layer._register_aiter_conv1d_weight()
     return layer
 
 

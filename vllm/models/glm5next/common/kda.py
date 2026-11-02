@@ -588,7 +588,7 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if self._aiter_conv1d_exact:
             logger.info_once("GLM-5.3-Flash KDA prefill conv: AITER HIP.")
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         # The weight cache IPC loader maps the buffer the daemon already filled.
         pre_processed = is_weights_pre_processed()
         if not pre_processed:
