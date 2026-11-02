@@ -26,7 +26,10 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.types import SparseKVResidencyUpdate
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    _REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 
 logger = init_logger(__name__)
 
@@ -406,6 +409,7 @@ def allocate_hisparse_host_pools(
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
+        num_segments=_REGION_SEGMENTS,
     )
     pinned: list[torch.Tensor] = []
     try:
