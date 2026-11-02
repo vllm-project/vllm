@@ -403,7 +403,6 @@ impl RoundtripCase {
     }
 
     /// Kimi K2.5 tool-call format with `<think>` reasoning tags.
-    #[allow(dead_code)]
     fn kimi_k25() -> Self {
         Self {
             model_id: "moonshotai/Kimi-K2.5",
@@ -627,7 +626,7 @@ roundtrip_tests! {
     step5 => [reasoning_and_content, tool_call_mix],
     nemotron_v3 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
-    gemma4_hf => [tool_call_mix],
+    gemma4_hf => #[file_serial(hf_gemma4)] [tool_call_mix],
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
     // K3 drops plain-assistant reasoning in history; tool-call turns keep it.
     kimi_k3 => [tool_call_mix],
