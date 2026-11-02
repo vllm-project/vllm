@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The Model Runner V2 sampler processes the logits in place only where no
-returned logprobs read the raw logits."""
+returned logprobs read the raw logits, and wants FP32 logits from the gather
+only there."""
 
 from typing import get_args
 
@@ -18,6 +19,7 @@ if not current_platform.is_cuda():
     pytest.skip("Model Runner V2 sampler tests need CUDA", allow_module_level=True)
 
 from vllm.v1.worker.gpu.sample.sampler import Sampler
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
 from vllm.v1.worker.gpu.states import RequestState
 
 DEVICE = torch.device("cuda")
@@ -60,6 +62,14 @@ def test_logits_processed_in_place_only_when_raw_logits_unread(
     assert writable == (
         num_logprobs is None or logprobs_mode in PROCESSED_LOGPROBS_MODES
     )
+    # FP32 logits are wanted exactly where the sampler would copy them to FP32
+    # and may then overwrite them; verification asks the same sampler.
+    rejection_sampler = object.__new__(RejectionSampler)
+    rejection_sampler.sampler = sampler
+    for idx in (np.array([0]), idx_mapping_np):
+        wants = sampler.can_process_logits_in_place(idx)
+        assert sampler.wants_fp32_logits(idx) == wants
+        assert rejection_sampler.wants_fp32_logits(idx) == wants
 
     idx_mapping = torch.tensor([1], dtype=torch.int32, device=DEVICE)
     for dtype in (torch.float32, torch.bfloat16):
