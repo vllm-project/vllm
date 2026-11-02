@@ -43,6 +43,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     UMBPRuntimeFactory,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.standalone import (
+    _ABANDONED_STORAGES,
+    _DaemonTransferPool,
     _SharedPoolWorkerHandle,
     normalize_endpoint,
 )
@@ -363,6 +365,62 @@ def test_worker_close_finishes_while_a_store_is_stuck(
     assert mori_calls == []
 
 
+def test_close_releases_the_client_after_cancelling_queued_transfers(
+    monkeypatch, tmp_path
+):
+    """A transfer cancelled before it started must not count as blocked."""
+    started = threading.Event()
+    release = threading.Event()
+    mori_calls: list[str] = []
+
+    def put(keys, *args):
+        started.set()
+        assert release.wait(5)
+        return [True] * len(keys)
+
+    worker = _SharedPoolWorkerHandle(
+        SimpleNamespace(
+            batch_put_ranges_from_ptr=put,
+            flush=lambda: True,
+            deregister_memory=lambda ptr: mori_calls.append("deregister_memory"),
+            close=lambda: mori_calls.append("close"),
+        ),
+        "shared-close",
+        RankTopology(),
+        str(tmp_path),
+        1,
+        5,
+    )
+    storage = torch.zeros(16, dtype=torch.uint8).untyped_storage()
+    worker._registered_storages.add(storage.data_ptr())
+    worker._storages[storage.data_ptr()] = storage
+    running = worker.store([BlockTransferPlan("running", 0)])
+    assert started.wait(5)
+    queued = worker.store([BlockTransferPlan("queued", 1)])
+    queued_future = worker._futures[id(queued)]
+    shutdown = worker._executor.shutdown
+
+    def shutdown_then_finish(*args, **kwargs):
+        shutdown(*args, **kwargs)
+        release.set()
+
+    monkeypatch.setattr(worker._executor, "shutdown", shutdown_then_finish)
+    abandoned = len(_ABANDONED_STORAGES)
+
+    worker.close()
+
+    assert queued_future.cancelled()
+    assert running.status is TransferJobStatus.COMPLETED
+    assert mori_calls == ["deregister_memory", "close"]
+    assert len(_ABANDONED_STORAGES) == abandoned
+
+
+@pytest.mark.parametrize("max_workers", [0, -1])
+def test_transfer_pool_rejects_non_positive_worker_counts(max_workers):
+    with pytest.raises(ValueError, match="max_workers"):
+        _DaemonTransferPool(max_workers, "umbp-test")
+
+
 _NEVER_RETURNS = """
 import sys
 import tempfile
@@ -486,6 +544,8 @@ def test_config_rejects_options_the_server_owns(option):
         ({"lookup_timeout_ms": 0}, "lookup_timeout_ms"),
         ({"lookup_timeout_ms": -1}, "lookup_timeout_ms"),
         ({"lookup_timeout_ms": True}, "lookup_timeout_ms"),
+        ({"num_workers": 0}, "num_workers"),
+        ({"num_workers": -1}, "num_workers"),
         ({"master_address": "x"}, "distributed-only"),
         ({"endpoint": "tcp://127.0.0.1:5555"}, "endpoint"),
     ],
