@@ -289,6 +289,13 @@ three times, limited in turn to web search, GitHub, and a local checkout (before
 merge: the docs preview and the PR branch). If it cannot find and quote the
 docs, fix the docs.
 
+Some capability tables are generated from source at docs build time, e.g.
+attention backends (`docs/mkdocs/gen_files/generate_attention_backends.py`) and
+quantization schemes (`docs/mkdocs/gen_files/generate_quantization_matrix.py`).
+When you add or remove a quantization scheme, update its note in the generator;
+otherwise the docs build fails and names the entry. Prose around a generated
+table lives in the tracked page next to the `--8<-- "gen:..."` marker.
+
 ### Adding or Changing Kernels
 
 When actively developing or modifying kernels, using the [Incremental Compilation Workflow](./incremental_build.md) is highly recommended for faster build times.
