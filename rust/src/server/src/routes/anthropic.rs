@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::State;
+use axum::extract::rejection::JsonRejection;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
@@ -16,7 +17,6 @@ use crate::routes::openai::utils::types::{
     Normalizable, StringOrArray, validate_stop, validate_top_p_value,
 };
 use crate::routes::openai::utils::validate_max_output_tokens;
-use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::output_log::LoggedOutput;
 use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context};
@@ -46,7 +46,14 @@ pub struct MessagesRequest {
     stream: Option<bool>,
 }
 
-impl Normalizable for MessagesRequest {}
+impl Normalizable for MessagesRequest {
+    fn normalize(&mut self) {
+        if let Some(TextContent::Blocks(blocks)) = &mut self.system {
+            blocks
+                .retain(|TextBlock::Text { text }| !text.starts_with("x-anthropic-billing-header"));
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(tag = "role", rename_all = "lowercase", deny_unknown_fields)]
@@ -109,10 +116,12 @@ impl TextContent {
 
 impl MessagesRequest {
     fn into_chat_request(
-        self,
+        mut self,
         model: &LoraModelResolution,
         ctx: ResolvedRequestContext,
     ) -> Result<ChatRequest, ApiError> {
+        self.normalize();
+        self.validate().map_err(|error| invalid_request!("{error}"))?;
         if self.model.is_empty() || self.messages.is_empty() {
             return Err(invalid_request!("model and messages must be non-empty"));
         }
@@ -132,11 +141,9 @@ impl MessagesRequest {
         if let Some(system) = self.system {
             let text = match system {
                 TextContent::Text(text) => text,
-                TextContent::Blocks(blocks) => blocks
-                    .into_iter()
-                    .map(|TextBlock::Text { text }| text)
-                    .filter(|text| !text.starts_with("x-anthropic-billing-header"))
-                    .collect(),
+                TextContent::Blocks(blocks) => {
+                    blocks.into_iter().map(|TextBlock::Text { text }| text).collect()
+                }
             };
             if !text.is_empty() {
                 messages.push(ChatMessage::system(text));
@@ -226,11 +233,11 @@ fn error_response(error: ApiError) -> Response {
 pub async fn count_tokens(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Result<ValidatedJson<MessagesRequest>, ApiError>,
+    body: Result<Json<MessagesRequest>, JsonRejection>,
 ) -> Response {
     let body = match body {
         Ok(body) => body.0,
-        Err(error) => return error_response(error),
+        Err(error) => return error_response(error.into()),
     };
     match MessagesLlm::new(&state)
         .count_tokens(body, resolve_request_context(&headers, None))
@@ -254,11 +261,11 @@ struct ContextManagement {
 pub async fn messages(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    body: Result<ValidatedJson<MessagesRequest>, ApiError>,
+    body: Result<Json<MessagesRequest>, JsonRejection>,
 ) -> Response {
     let body = match body {
         Ok(body) => body.0,
-        Err(error) => return error_response(error),
+        Err(error) => return error_response(error.into()),
     };
     match MessagesLlm::new(&state)
         .create(body, resolve_request_context(&headers, None))

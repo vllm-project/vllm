@@ -10774,13 +10774,42 @@ async fn anthropic_rejects_invalid_model_and_sampling_before_generation() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn anthropic_facade_validates_requests_without_http_extraction() {
+    let (chat, _engine_task) = test_chat_with_engine_outputs(
+        b"engine-anthropic-validation",
+        default_stream_output_specs(),
+    )
+    .await;
+    let state = AppState::new(vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()], chat);
+    let messages = super::anthropic::MessagesLlm::new(&state);
+    for count_only in [true, false] {
+        let request = serde_json::from_value(json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat", "max_tokens": 10,
+            "temperature": 1.5, "messages": [{"role": "user", "content": "Hi"}]
+        }))
+        .unwrap();
+        let result = if count_only {
+            messages.count_tokens(request, Default::default()).await.map(|_| ())
+        } else {
+            messages.create(request, Default::default()).await.map(|_| ())
+        };
+        assert!(
+            matches!(result, Err(crate::error::ApiError::InvalidRequest { .. })),
+            "{result:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
     let (mut app, engine_task) = test_app_with_stream_output_specs(vec![(
         bytes_to_token_ids(b"continuation"),
         Some(EngineCoreFinishReason::Length),
     )])
     .await;
-    let input = json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [
+    let input = json!({"model": "Qwen/Qwen1.5-0.5B-Chat",
+    "system": [{"type": "text", "text": "x-anthropic-billing-header: ignored"}], "messages": [
         {"role": "user", "content": "Complete"},
         {"role": "assistant", "content": [
             {"type": "text", "text": "pre"}, {"type": "text", "text": "fix"}
