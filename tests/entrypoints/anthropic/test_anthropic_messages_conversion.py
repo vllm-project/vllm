@@ -74,6 +74,42 @@ def _make_request(
     )
 
 
+@pytest.mark.parametrize(
+    "extra_body,expected_min_tokens,expected_ignore_eos",
+    [
+        ({}, 0, False),
+        ({"min_tokens": 1}, 1, False),
+        ({"ignore_eos": True}, 0, True),
+        ({"min_tokens": 1, "ignore_eos": True}, 1, True),
+    ],
+)
+def test_messages_stop_controls_reach_sampling_params(
+    extra_body, expected_min_tokens, expected_ignore_eos
+):
+    """One-token prefill controls must survive Messages-to-chat conversion."""
+    request = AnthropicMessagesRequest.model_validate(
+        {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "max_tokens": 1,
+            **extra_body,
+        }
+    )
+    params = _convert(request).to_sampling_params(1, {})
+    assert params.max_tokens == 1
+    assert params.min_tokens == expected_min_tokens
+    assert params.ignore_eos is expected_ignore_eos
+
+
+@pytest.mark.parametrize("min_tokens", [-1, 2])
+def test_messages_invalid_min_tokens_reaches_sampling_validation(min_tokens):
+    request = _make_request(
+        [{"role": "user", "content": "Hello"}], min_tokens=min_tokens
+    )
+    with pytest.raises(VLLMValidationError, match="min_tokens"):
+        _convert(request).to_sampling_params(1, {})
+
+
 # ======================================================================
 # _convert_image_source_to_url
 # ======================================================================
