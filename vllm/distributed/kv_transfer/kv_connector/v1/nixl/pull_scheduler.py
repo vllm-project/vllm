@@ -241,6 +241,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             self._reqs_not_processed.add(request.request_id)
             # Clear _reqs_need_save if a request is aborted as partial prefill.
             self._reqs_need_save.pop(request.request_id, None)
+            self._reqs_save_state.pop(request.request_id, None)
             return False, None
 
         # TODO: check whether block_ids actually ever be 0. If not we could

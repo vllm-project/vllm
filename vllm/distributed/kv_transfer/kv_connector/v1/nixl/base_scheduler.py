@@ -34,6 +34,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import make_zmq_path
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     MambaSpec,
     SlidingWindowSpec,
@@ -124,6 +125,9 @@ class NixlBaseConnectorScheduler:
             ReqId, tuple[Request, BlockIds, tuple[int, ...], bool]
         ] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
+        # Host-buffer save progress of a partially prefilled request: its block
+        # table per KV cache group and how many tokens have been saved.
+        self._reqs_save_state: dict[ReqId, tuple[list[list[int]], int]] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self._reqs_in_batch: set[ReqId] = set()
@@ -160,6 +164,30 @@ class NixlBaseConnectorScheduler:
             if isinstance(g.kv_cache_spec, MambaSpec)
             else None
             for g in kv_cache_config.transfer_groups
+        ]
+        # Tokens per block for groups whose blocks map to token positions (one
+        # entry per KV cache group, before transfer-group selection). None for
+        # other groups (SSM state, circular buffers), which keep the per-step
+        # copy of new blocks. The scheduler's config has no
+        # UniformTypeKVCacheSpecs: generate_scheduler_kv_cache_config replaces
+        # each with one of its layer specs.
+        dcp_size = parallel_config.decode_context_parallel_size
+        self._save_block_size: list[int | None] = [
+            spec.block_size * (dcp_size if spec.dcp_sharded else 1)
+            if isinstance(
+                spec, (FullAttentionSpec, SlidingWindowSpec, ChunkedLocalAttentionSpec)
+            )
+            else None
+            for spec in (g.kv_cache_spec for g in kv_cache_config.kv_cache_groups)
+        ]
+        # Speculative scratch slots of each SSM group, None for other groups.
+        # "align" SSM groups null and relocate state blocks, so their state slot
+        # can't be found by position: they keep the per-step copy.
+        self._save_ssm_spec_blocks: list[int | None] = [
+            spec.num_speculative_blocks
+            if isinstance(spec, MambaSpec) and spec.mamba_cache_mode != "align"
+            else None
+            for spec in (g.kv_cache_spec for g in kv_cache_config.kv_cache_groups)
         ]
 
         # Threshold to decide whether to compute kv cache locally
@@ -265,8 +293,8 @@ class NixlBaseConnectorScheduler:
         (null placeholders and the previous step's superseded state) go.
 
         Use this at every block-id exchange point. Pass ``clip_ssm=False``
-        for per-step partial lists (host-buffer save), where the SSM strip
-        does not apply.
+        when the caller has already picked the SSM blocks to send (host-buffer
+        save does, per chunk).
         """
         if len(block_ids) == 0:
             # No blocks to clip, e.g. a full prefix cache hit.
@@ -447,35 +475,67 @@ class NixlBaseConnectorScheduler:
     ) -> None:
         # only called when use_host_buffer is True to build the save metadata
 
-        # NOTE: For the prefill side, there might be a chance that an early added
-        # request is a chunked prefill, so we need to check if new blocks are added
-        for req_id, new_block_id_groups, _ in yield_req_data(scheduler_output):
-            req_to_save = self._reqs_need_save.get(req_id)
-            if req_to_save is None or new_block_id_groups is None:
+        # A chunked prefill is saved chunk by chunk, so blocks are selected by
+        # token position: a chunk boundary that is not block aligned leaves a
+        # block partly written for the next chunk to finish, and blocks
+        # allocated ahead (e.g. spec-decode lookahead) are not written yet.
+        assert scheduler_output.num_scheduled_tokens is not None
+        for req_id, new_block_id_groups, is_full_table in yield_req_data(
+            scheduler_output
+        ):
+            req = self._reqs_need_save.get(req_id)
+            if req is None:
                 continue
-            req = req_to_save
+            # A new or resumed (e.g. preempted) request sends its whole block
+            # table, so its save starts over.
+            state = None if is_full_table else self._reqs_save_state.get(req_id)
+            if state is None:
+                if new_block_id_groups is None:
+                    continue
+                table = [list(blocks) for blocks in new_block_id_groups]
+                saved = 0
+            else:
+                table, saved = state
+                if new_block_id_groups is not None:
+                    for blocks, new_blocks in zip(table, new_block_id_groups):
+                        blocks.extend(new_blocks)
+            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
+            end = req.num_computed_tokens + num_scheduled_tokens
+            last_chunk = end >= req.num_prompt_tokens
+            to_save: list[list[int]] = []
+            for group_id, blocks in enumerate(table):
+                block_size = self._save_block_size[group_id]
+                num_spec_blocks = self._save_ssm_spec_blocks[group_id]
+                if block_size is not None:
+                    to_save.append(blocks[saved // block_size : cdiv(end, block_size)])
+                elif num_spec_blocks is not None:
+                    # Each chunk rewrites the SSM state in place; copy its slot
+                    # once the last chunk has written it.
+                    to_save.append(
+                        clip_ssm_state_blocks(blocks, num_spec_blocks)
+                        if last_chunk
+                        else []
+                    )
+                elif new_block_id_groups is not None:
+                    to_save.append(list(new_block_id_groups[group_id]))
+                else:
+                    to_save.append([])
 
             assert req.kv_transfer_params is not None
-            clipped_block_id_groups = self.get_exchange_clipped_blocks(
-                new_block_id_groups, clip_ssm=False
-            )
             meta.add_new_req_to_save(
                 request_id=req_id,
-                local_block_ids=clipped_block_id_groups,
+                local_block_ids=self.get_exchange_clipped_blocks(
+                    tuple(to_save), clip_ssm=False
+                ),
                 kv_transfer_params=req.kv_transfer_params,
             )
-            assert scheduler_output.num_scheduled_tokens is not None
-            num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
-            is_partial = (
-                req.num_computed_tokens + num_scheduled_tokens
-            ) < req.num_prompt_tokens
-            if not is_partial:
-                # For non-partial prefills, once new req_meta is scheduled, it
-                # can be removed from _reqs_need_save.
-                # For partial prefill case, we will retain the request in
-                # _reqs_need_save until all blocks are scheduled with req_meta.
-                # Therefore, only pop if `not is_partial`.
+            if not last_chunk:
+                # Partial prefill: keep the request in _reqs_need_save until
+                # its last chunk is scheduled.
+                self._reqs_save_state[req_id] = (table, end)
+            else:
                 self._reqs_need_save.pop(req_id)
+                self._reqs_save_state.pop(req_id, None)
 
     def build_connector_meta(
         self,
