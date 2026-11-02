@@ -72,7 +72,7 @@ def test_quantize_format_and_fit() -> None:
 def test_quantize_preserves_zeros() -> None:
     weight = torch.linspace(-1, 1, 512).reshape(8, 64)
     weight[:, -1] = 0
-    reconstructed = dequantize_lut_b(*quantize_lut_b(weight), torch.float32)
+    reconstructed = dequantize_lut_b(*quantize_lut_b(weight), out_dtype=torch.float32)
     assert torch.all(reconstructed[weight == 0] == 0)
 
 
@@ -164,8 +164,8 @@ def test_emulation_matches_reference(workspace_init, num_tokens: int) -> None:
     x, w13, w2, topk_weights, topk_ids = _make_problem(
         num_tokens, num_experts, top_k, hidden, inter
     )
-    w13 = dequantize_lut_b(*quantize_lut_b(w13), torch.bfloat16)
-    w2 = dequantize_lut_b(*quantize_lut_b(w2), torch.bfloat16)
+    w13 = dequantize_lut_b(*quantize_lut_b(w13), out_dtype=torch.bfloat16)
+    w2 = dequantize_lut_b(*quantize_lut_b(w2), out_dtype=torch.bfloat16)
 
     actual = _run(
         LutBEmulationTritonExperts, w13, w2, x, topk_weights, topk_ids, num_experts
@@ -206,8 +206,8 @@ def test_sm107_matches_emulation(
     )
     emulated = _run(
         LutBEmulationTritonExperts,
-        dequantize_lut_b(*q13, torch.bfloat16),
-        dequantize_lut_b(*q2, torch.bfloat16),
+        dequantize_lut_b(*q13, out_dtype=torch.bfloat16),
+        dequantize_lut_b(*q2, out_dtype=torch.bfloat16),
         x,
         topk_weights,
         topk_ids,
@@ -253,7 +253,7 @@ def test_sm107_gemm_exact(workspace_init) -> None:
     )
 
     a_ref = dequant_mxfp8_to_bf16(a_q, a_s.view(num_tokens, -1)).float()
-    w_ref = dequantize_lut_b(*q, torch.float32)
+    w_ref = dequantize_lut_b(*q, out_dtype=torch.float32)
     ref = (
         torch.einsum("tk,tjnk->tjn", a_ref.double(), w_ref.double()[topk_ids])
         * topk_weights[..., None].double()
