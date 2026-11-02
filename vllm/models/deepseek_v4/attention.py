@@ -971,6 +971,11 @@ class DeepseekV4Indexer(nn.Module):
         self.vllm_config = vllm_config
         self.config = config
         self.quant_config = quant_config
+        self.force_scoring = (
+            vllm_config.aux_output_config.enable_return_indexer_topk
+            and extract_layer_index(prefix)
+            < vllm_config.model_config.get_total_num_hidden_layers()
+        )
         # self.indexer_cfg = config.attn_module_list_cfg[0]["attn_index"]
         self.topk_tokens = config.index_topk
         self.n_head = config.index_n_heads  # 64
@@ -1132,7 +1137,9 @@ class DeepseekV4Indexer(nn.Module):
         if isinstance(attn_metadata, dict):
             indexer_metadata = cast(Any, attn_metadata[self.k_cache.prefix])
             if (
-                indexer_metadata.max_seq_len // self.compress_ratio <= self.topk_tokens
+                not self.force_scoring
+                and indexer_metadata.max_seq_len // self.compress_ratio
+                <= self.topk_tokens
                 and not torch.cuda.is_current_stream_capturing()
             ):
                 # candidates num smaller than topk, every candidate is selected

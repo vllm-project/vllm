@@ -132,14 +132,6 @@ class IndexerCapturer:
             default=str,
         )
         self.namespace = hashlib.sha256(identity.encode()).hexdigest()
-        self.device_buffer = torch.empty(
-            (
-                config.scheduler_config.max_num_batched_tokens,
-                *self.shape_per_token,
-            ),
-            dtype=torch.int32,
-            device=config.device_config.device,
-        )
         self._output_rank = output_rank
         self.device_buffer = torch.empty(
             (

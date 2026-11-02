@@ -135,7 +135,7 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     assert events == expected_events
     connector = runner.aux_output_connector
     if enabled:
-        assert connector is not None and connector._capturer is capturer
+        assert connector is not None and connector._routed_experts_capturer is capturer
     else:
         assert connector is None
 

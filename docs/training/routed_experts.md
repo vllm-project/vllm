@@ -49,7 +49,9 @@ Per-request, default `0`: drops the first N prompt-token rows (e.g. routing alre
 
 ## Limitations
 
-- The Rust HTTP frontend never returns `routed_experts` and always sends `routed_experts_prompt_start = 0`. Use the Python API server.
+- The Rust HTTP frontend returns `routed_experts` through `/inference/v1/generate`,
+  including streaming responses, and accepts `sampling_params.routed_experts_prompt_start`.
+  Rust OpenAI Chat/Completions artifact delivery is not implemented; use the Python API server for those endpoints.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).
 

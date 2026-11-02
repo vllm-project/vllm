@@ -202,6 +202,50 @@ def test_connector_binds_indexer_at_construction_before_storage(
     connector.close()
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_profile_reserves_all_in_flight_indexer_snapshots(
+    capture_config, dist_init, enabled, async_scheduling
+):
+    capture_config.aux_output_config.enable_return_indexer_topk = enabled
+    capture_config.scheduler_config.async_scheduling = async_scheduling
+    source = CaptureSource(2)
+    model = torch.nn.ModuleList([source, CaptureSource(5)])
+    connector = AuxOutputWorkerConnector(vllm_config=capture_config, model=model)
+    try:
+        snapshots = connector.allocate_profile_snapshots()
+        if not enabled:
+            assert snapshots == []
+            return
+        assert source.indexer_capture is not None
+        capture_rows = source.indexer_capture.rows
+        expected_batches = capture_config.max_concurrent_batches + int(async_scheduling)
+        assert len(snapshots) == expected_batches
+        assert sum(t.numel() * t.element_size() for t in snapshots) == (
+            expected_batches
+            * len(model)
+            * capture_rows.numel()
+            * capture_rows.element_size()
+        )
+        assert len({t.data_ptr() for t in snapshots}) == expected_batches
+        for snapshot in snapshots:
+            assert snapshot.shape == (len(capture_rows), len(model), source.topk)
+            assert snapshot.dtype == capture_rows.dtype
+            assert snapshot.device == capture_rows.device
+            assert snapshot.data_ptr() != capture_rows.data_ptr()
+    finally:
+        connector.close()
+
+
+def test_rocm_monokernel_rejects_indexer_replay_before_loading_layers(capture_config):
+    from vllm.models.deepseek_v4.amd.mono_decode import MonoDecodeLayer
+
+    capture_config.aux_output_config.enable_return_indexer_topk = True
+    capture_config.kernel_config.monokernel = True
+    with pytest.raises(ValueError, match="disable --monokernel to use replay"):
+        MonoDecodeLayer.create(None, capture_config)
+
+
 def test_capture_helper_skips_unbound_sink_without_a_buffer():
     capture_indexer_topk(None, None, 2)
 

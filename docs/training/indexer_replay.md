@@ -69,6 +69,14 @@ Initialization paths that skip profiling retain main's Connector fallback.
 Capture buffers stay outside the weights pool. Explicit KV memory budgets remain
 manual. Shutdown releases captured graphs before unbinding Indexer capture.
 
+On the output TP rank, profiling also reserves one full-size Indexer snapshot
+per maximum concurrent batch alongside the forward/sampler peak, plus one while
+constructing the next asynchronous step before completed outputs are drained.
+These temporary allocations are released after profiling; runtime snapshots remain
+cloned per step. DeepSeek V4 replay forces backbone scoring even for short contexts
+so the common capture entry always sees freshly scored TopK. ROCm DeepSeek V4 `--monokernel` bypasses
+that entry and is rejected with `--enable-return-indexer-topk`.
+
 Indexer storage is `4 * num_indexer_sources * index_topk` bytes/token. The
 record adds the byte widths of all enabled artifacts, including routed experts.
 With the default `max_bytes`, `N` KV blocks and `B` tokens/block allocate
