@@ -290,9 +290,9 @@ repos:
     entry: python tools/pre_commit/check_boolean_context_manager.py
     language: python
     types: [python]
-  - id: check-docstring-crossrefs
-    name: Check for accidental cross-references in docstrings
-    entry: python tools/pre_commit/check_docstring_crossrefs.py
+  - id: check-docstring-style
+    name: Check docstring Markdown style
+    entry: python tools/pre_commit/check_docstring_style.py
     language: python
     types: [python]
     files: ^vllm/
