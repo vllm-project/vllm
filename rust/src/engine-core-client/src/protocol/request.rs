@@ -7,6 +7,7 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use serde_default::DefaultFromSerde;
 use serde_tuple::{Deserialize_tuple, Serialize_tuple};
+use serde_with::serde_as;
 
 use crate::protocol::kv_hints::KvHintsEnvelope;
 use crate::protocol::multimodal::MmFeatures;
@@ -131,7 +132,19 @@ pub struct EngineCoreRequest {
     pub session_id: Option<String>,
     #[serde(default)]
     pub kv_hints: Option<KvHintsEnvelope>,
+    /// Hashes of the prompt's full blocks, computed with the engine's
+    /// [`PrefixHashConfig`](crate::protocol::handshake::PrefixHashConfig) so
+    /// the engine doesn't hash the prompt itself. They must include any extra
+    /// keys the engine would add (LoRA, multimodal, cache salt).
+    #[serde(default)]
+    pub block_hashes: Option<Vec<BlockHash>>,
 }
+
+/// A prefix-cache block hash, carried as msgpack bin like Python `bytes`.
+#[serde_as]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct BlockHash(#[serde_as(as = "serde_with::Bytes")] pub Vec<u8>);
 
 impl EngineCoreRequest {
     /// Validate fields intentionally not supported in the first-stage client.
@@ -211,7 +224,7 @@ mod tests {
             other => panic!("expected array, got {other:?}"),
         };
 
-        assert_eq!(array.len(), 22);
+        assert_eq!(array.len(), 23);
         assert_eq!(array[0], Value::from("req-1"));
         assert_eq!(array[2], Value::Nil);
         assert_eq!(array[4], Value::Nil);
@@ -219,6 +232,8 @@ mod tests {
         assert_eq!(array[11], Value::from(7));
         assert_eq!(array[20], Value::from("session-1"));
         assert!(matches!(&array[21], Value::Map(_)));
+        // `block_hashes`, filled in by the client.
+        assert_eq!(array[22], Value::Nil);
     }
 
     #[test]
