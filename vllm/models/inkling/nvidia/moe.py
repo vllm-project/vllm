@@ -573,7 +573,13 @@ class InklingMoE(nn.Module):
             return [f"experts.routed_experts.{projection}_input_scale"]
 
         param = getattr(experts, key)
-        slots = self._local_expert_slots()
+        # EP-alignment padding experts have no checkpoint tensor; they are
+        # zeroed in finalize_load.
+        slots = {
+            g: s
+            for g, s in self._local_expert_slots().items()
+            if g < self.n_routed_experts
+        }
         gids = sorted(slots)
         lids = [slots[g] for g in gids]
         tp_rank = experts.moe_config.moe_parallel_config.tp_rank
