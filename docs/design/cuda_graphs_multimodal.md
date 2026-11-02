@@ -139,7 +139,7 @@ When `mm_encoder_tp_mode="data"`, the manager distributes images across TP ranks
 Following <https://github.com/vllm-project/vllm/pull/35963> (ViT full CUDA graph support for image inference), <https://github.com/vllm-project/vllm/pull/38061> extends the encoder CUDA graph framework to support video inference for Qwen3-VL. Previously, the CUDA graph capture/replay path only handled image inputs (`pixel_values` + `image_grid_thw`). Video inputs use different keys (`pixel_values_videos` + `video_grid_thw`) and require larger `cu_seqlens` buffers because each video item contributes multiple frames (`T` attention sequences). This PR generalizes the protocol and manager to handle both modalities through a single shared graph manager.
 
 !!! note
-    Video CUDA graphs are automatically disabled when video token pruning (EVS or VidCom2) is enabled, since pruning makes the token count data-dependent and incompatible with CUDA graph capture.
+    With video token pruning (EVS or VidCom2), Qwen3-VL and models inheriting its encoder implementation, including Qwen3.5 and the MoE variants, keep video encoding eager. Image encoding can use CUDA graphs when `cudagraph_mm_encoder=True`, `mm_encoder_tp_mode="weights"` (the default), and the image limit in `limit_mm_per_prompt` is greater than zero. Image mRoPE metadata is appended outside the captured graph, preserving all DeepStack features. When pruning is enabled with `mm_encoder_tp_mode="data"`, both modalities remain eager.
 
     Mixed inputs (image+video) per prompt are also supported now.
 
