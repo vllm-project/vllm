@@ -94,7 +94,16 @@ class ImageMediaIO(MediaIO[Image.Image]):
             image = normalize_image(image)
             image.load()
             converted = self._convert_image_mode(image)
-        except (OSError, Image.UnidentifiedImageError) as e:
+        # Pillow raises SyntaxError (not OSError) for broken PNG chunks and
+        # RuntimeError for undecodable data, e.g. from the AVIF decoder.
+        # RuntimeError also covers NotImplementedError (e.g. BLPFormatError)
+        # and RecursionError, which here are caused by the input image too.
+        except (
+            OSError,
+            Image.UnidentifiedImageError,
+            SyntaxError,
+            RuntimeError,
+        ) as e:
             raise ValueError(f"Failed to load image: {e}") from e
 
         io_config = None

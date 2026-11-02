@@ -264,6 +264,8 @@ class ModelArchConfigConvertorBase:
                         quant_cfg["quant_method"] = "modelopt"
                     elif quant_algo_upper == "NVFP4":
                         quant_cfg["quant_method"] = "modelopt_fp4"
+                    elif quant_algo_upper == "MIXED_PRECISION":
+                        quant_cfg["quant_method"] = "modelopt_mixed"
                     else:
                         raise ValueError(f"Unknown ModelOpt quant algo: {quant_algo}")
 
@@ -649,6 +651,19 @@ class Qwen3_5ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         super().__init__(hf_config, hf_text_config, revision)
 
 
+class Qwen3ASRModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def __init__(
+        self,
+        hf_config: PreTrainedConfig,
+        hf_text_config: PreTrainedConfig,
+        revision: str | None = None,
+    ):
+        thinker_config = getattr(hf_config, "thinker_config", None)
+        if getattr(thinker_config, "model_type", None) == "qwen3_forced_aligner":
+            hf_config.architectures = ["Qwen3ASRForcedAlignerForTokenClassification"]
+        super().__init__(hf_config, hf_text_config, revision)
+
+
 class Qwen3OmniMoeModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def __init__(
         self,
@@ -736,6 +751,16 @@ class Qwen3_5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
 class Step3p5MTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
+
+    def get_per_layer_hf_configs(
+        self,
+    ) -> list[tuple[PreTrainedConfig, PreTrainedConfig]] | None:
+        if (per_layer := super().get_per_layer_hf_configs()) is None:
+            return None
+        # Each MTP layer matches the first main layer of the same type
+        layer_types = self.hf_text_config.layer_types
+        mtp_layer_types = self.hf_text_config.mtp_layer_types or []
+        return [per_layer[layer_types.index(t)] for t in mtp_layer_types]
 
 
 class PanguUltraMoeMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -853,6 +878,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,
     "qwen3_5": Qwen3_5ModelArchConfigConvertor,
     "qwen3_5_mtp": Qwen3_5MTPModelArchConfigConvertor,
+    "qwen3_asr": Qwen3ASRModelArchConfigConvertor,
     "qwen3_omni_moe": Qwen3OmniMoeModelArchConfigConvertor,
     "qwen3_next_mtp": Qwen3NextMTPModelArchConfigConvertor,
     "qwen4_exp_mtp": Qwen4ExpMTPModelArchConfigConvertor,

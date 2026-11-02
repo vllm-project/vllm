@@ -46,8 +46,11 @@ pub(super) struct ResponseOptions {
     pub include_prompt_logprobs: bool,
     /// Whether to include token IDs alongside generated text.
     pub return_token_ids: bool,
-    /// Whether to format logprob tokens as `token_id:{id}`.
-    pub return_tokens_as_token_ids: bool,
+    /// The request's `return_tokens_as_token_ids`; `None` falls back to the
+    /// server's `--return-tokens-as-token-ids`.
+    pub return_tokens_as_token_ids: Option<bool>,
+    /// Whether to return the weight-version spans on each finished choice.
+    pub return_weight_versions: bool,
 }
 
 /// Validate and lower one OpenAI completions request into the internal
@@ -70,20 +73,11 @@ pub(super) fn prepare_completion_request(
     .map_err(|error| text_submit_error("invalid prompt truncation", error))?;
 
     let request_id = format!("cmpl-{}", ctx.request_id);
-    let response_model = lora_resolution
-        .lora_request
-        .as_ref()
-        .map(|request| request.lora_name.clone())
-        .unwrap_or_else(|| lora_resolution.model_names.first().cloned().unwrap_or_default());
+    let response_model = lora_resolution.response_model();
 
     let logprobs = request.logprobs;
     let prompt_only = request.echo && request.max_tokens == Some(0);
-    let prompt_logprobs =
-        request.prompt_logprobs.or(if request.echo && (!request.stream || prompt_only) {
-            logprobs
-        } else {
-            None
-        });
+    let prompt_logprobs = request.prompt_logprobs.or(if request.echo { logprobs } else { None });
     let include_usage = (request.stream_options.as_ref())
         .and_then(|options| options.include_usage)
         .unwrap_or(false);
@@ -141,11 +135,12 @@ pub(super) fn prepare_completion_request(
             ignore_eos: request.ignore_eos,
             logit_bias: convert_logit_bias(request.logit_bias)?,
             allowed_token_ids: request.allowed_token_ids,
-            bad_words: None,
+            bad_words: request.bad_words,
             bad_words_token_ids: None,
             logprob_token_ids,
             structured_outputs,
             skip_reading_prefix_cache: None,
+            routed_experts_prompt_start: None,
             vllm_xargs: merge_kv_transfer_params(
                 merge_ec_transfer_params(request.vllm_xargs, request.ec_transfer_params.as_ref()),
                 request.kv_transfer_params.as_ref(),
@@ -157,6 +152,7 @@ pub(super) fn prepare_completion_request(
             include_stop_str_in_output: request.include_stop_str_in_output,
             stop_strings: request.stop.map(|stop| stop.into_vec()),
             min_tokens: request.min_tokens.unwrap_or(0),
+            detokenize: true,
         },
         intermediate: request.stream,
         prompt_truncation,
@@ -183,7 +179,8 @@ pub(super) fn prepare_completion_request(
             requested_logprobs: request.logprobs,
             include_prompt_logprobs,
             return_token_ids: request.return_token_ids.unwrap_or(false),
-            return_tokens_as_token_ids: request.return_tokens_as_token_ids.unwrap_or(false),
+            return_tokens_as_token_ids: request.return_tokens_as_token_ids,
+            return_weight_versions: request.return_weight_versions.unwrap_or(false),
         },
         text_request,
     })
@@ -228,6 +225,7 @@ mod tests {
 
     use super::prepare_completion_request;
     use crate::lora::LoraModelResolution;
+    use crate::model_names::ServedModelNames;
     use crate::routes::openai::completions::types::CompletionRequest;
     use crate::routes::openai::utils::types::Normalizable;
     use crate::utils::{ResolvedRequestContext, resolve_request_context};
@@ -238,7 +236,7 @@ mod tests {
 
     fn served(names: &[&str]) -> LoraModelResolution {
         LoraModelResolution {
-            model_names: names.iter().map(|s| s.to_string()).collect(),
+            model_names: ServedModelNames::new(names.iter().map(|s| s.to_string()).collect()),
             lora_request: None,
         }
     }
@@ -408,6 +406,7 @@ mod tests {
             "frequency_penalty": 0.2,
             "presence_penalty": 0.3,
             "repetition_penalty": 1.1,
+            "bad_words": ["hello"],
             "ignore_eos": true,
             "skip_special_tokens": false,
             "stream_interval": 4
@@ -443,6 +442,10 @@ mod tests {
         assert_eq!(
             prepared.text_request.sampling_params.repetition_penalty,
             Some(1.1)
+        );
+        assert_eq!(
+            prepared.text_request.sampling_params.bad_words,
+            Some(vec!["hello".to_string()])
         );
         assert!(prepared.text_request.sampling_params.ignore_eos);
         assert!(!prepared.text_request.decode_options.skip_special_tokens);
@@ -505,7 +508,7 @@ mod tests {
 
         assert!(prepared.options.include_usage);
         assert!(prepared.options.include_continuous_usage);
-        assert!(prepared.options.return_tokens_as_token_ids);
+        assert_eq!(prepared.options.return_tokens_as_token_ids, Some(true));
     }
 
     #[test]

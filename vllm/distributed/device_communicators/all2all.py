@@ -4,8 +4,8 @@ import os
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, replace
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
@@ -13,6 +13,7 @@ import torch.distributed as dist
 import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import get_dp_group, get_ep_group, get_pcp_group
+from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
@@ -20,7 +21,6 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
-from vllm.utils.func_utils import supports_kw
 from vllm.utils.import_utils import (
     check_moonep_system_support,
     deep_ep_v2_unavailable_reason,
@@ -28,23 +28,13 @@ from vllm.utils.import_utils import (
     has_deep_ep_v2,
     has_mori,
 )
+from vllm.utils.math_utils import round_up
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
-if has_flashinfer_nvlink_two_sided():
-    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
-    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
-    from flashinfer.comm.trtllm_alltoall import (
-        MnnvlMoe,  # type: ignore[import-not-found]
-    )
-
-if has_flashinfer_nvlink_one_sided():
-    from flashinfer.comm import Mapping  # type: ignore[import-not-found]
-    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
-    from flashinfer.comm.trtllm_moe_alltoall import (
-        MoeAlltoAll,  # type: ignore[import-not-found]
-        moe_a2a_get_workspace_size_per_rank,
-    )
+if TYPE_CHECKING:
+    from flashinfer.fused_moe import QuantFormat
+    from flashinfer.moe_ep import NVLinkOneSidedAlltoAll
 
 
 logger = init_logger(__name__)
@@ -424,6 +414,17 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         torch.accelerator.synchronize()
         DeepEPLLAll2AllManager._last_mask = None
 
+    def update_mask(self, rank: int, masked: bool = True) -> None:
+        buf = DeepEPLLAll2AllManager._buffer
+        assert buf is not None
+        buf.low_latency_update_mask_buffer(rank, masked)
+        torch.accelerator.synchronize()
+        if DeepEPLLAll2AllManager._last_mask is None:
+            DeepEPLLAll2AllManager._last_mask = torch.zeros(
+                self.world_size, device="cuda", dtype=torch.int32
+            )
+        DeepEPLLAll2AllManager._last_mask[rank] = int(masked)
+
 
 @dataclass
 class _NixlEPBufferState:
@@ -658,6 +659,19 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         torch.accelerator.synchronize()
         NixlEPAll2AllManager._last_mask = None
 
+    def update_mask(self, rank: int, masked: bool = True) -> None:
+        state = NixlEPAll2AllManager._buffer
+        assert state is not None
+        state.buffer.update_mask_buffer(rank, mask=masked)
+        torch.accelerator.synchronize()
+        last = NixlEPAll2AllManager._last_mask
+        if last is None or last.shape[0] != state.active_ep_size:
+            NixlEPAll2AllManager._last_mask = torch.zeros(
+                state.active_ep_size, device="cuda", dtype=torch.int32
+            )
+            last = NixlEPAll2AllManager._last_mask
+        last[rank] = int(masked)
+
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
     """All2All communication based on flashinfer all2allv/two-sided NVLink kernels."""
@@ -687,6 +701,10 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         gpus_per_node: int,
     ):
         """Initialize workspace."""
+        from flashinfer.comm import Mapping
+        from flashinfer.comm.mnnvl import MnnvlConfig
+        from flashinfer.comm.trtllm_alltoall import MnnvlMoe
+
         if self.initialized:
             return
 
@@ -765,55 +783,18 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
 
 
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
-    """All2All communication based on FlashInfer's MoeAlltoAll/One-sided NVLink kernel.
-    This is a newer kernel from trtllm that should perform better than the kernel
-    used by flashinfer_nvlink_two_sided.
-    """
-
-    rank: int
-    world_size: int
-    low_precision_combine: bool = False
+    """MoE EP communication using FlashInfer's NVLink one-sided wrapper."""
 
     def __init__(self, cpu_group):
         assert has_flashinfer_nvlink_one_sided(), (
-            "flashinfer trtllm_moe_alltoall module not found. "
-            "Please install/check flashinfer"
+            "FlashInfer MoEEpCommunication NVLink one-sided API not found. "
+            "Please install FlashInfer 0.7.2 or later."
         )
         super().__init__(cpu_group)
-        logger.debug(
-            "Initialize FlashInfer One-sided NVLink rank=%d, world size=%d",
-            self.rank,
-            self.world_size,
-        )
         self.initialized = False
-        self.moe_alltoall: MoeAlltoAll | None = None
-        self.mapping = None
-        self.workspace_size = 0
-        self.max_num_tokens = 0
+        self.communication: NVLinkOneSidedAlltoAll | None = None
         self.top_k = 0
         self.num_experts = 0
-        self._combine_supports_output = False
-        self.low_precision_combine = self._resolve_low_precision_combine()
-
-    def _resolve_low_precision_combine(self) -> bool:
-        """Whether to use the low-precision combine: requested via the env var
-        and supported by the installed FlashInfer.
-        """
-        if not envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE:
-            return False
-        try:
-            supported = supports_kw(
-                MoeAlltoAll.combine, "use_low_precision", allow_var_kwargs=False
-            )
-        except (TypeError, ValueError):
-            supported = False
-        if not supported:
-            logger.warning_once(
-                "VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE is set, but the "
-                "installed FlashInfer MoeAlltoAll.combine() does not accept "
-                "`use_low_precision`. Falling back to a BF16 combine."
-            )
-        return supported
 
     def initialize(
         self,
@@ -821,175 +802,147 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         top_k: int,
         num_experts: int,
         hidden_size: int,
-        x_bytes_per_token: int,
-        x_sf_bytes_per_token: int,
-    ):
-        """Initialize (or grow) the MoeAlltoAll workspace."""
-        total_dispatch_payload_size_per_token = (
-            x_bytes_per_token
-            + x_sf_bytes_per_token
-            + top_k * 4  # int32 topks ids
-            + top_k * 4  # float32 topk weights
+        dispatch_format: "QuantFormat | None" = None,
+        extra_payload_bytes_per_token: int = 0,
+    ) -> None:
+        """Share the largest token, dispatch-row and combine-row capacities."""
+        from flashinfer.moe_ep import (
+            BootstrapConfig,
+            MoEEpCommParams,
+            NVLinkOneSidedAlltoAll,
+            NVLinkOneSidedConfig,
+            create_communication,
         )
-        # Sized from the bf16 payload passed to combine(), which is what the
-        # kernel checks this region against. Low-precision transport quantizes
-        # on write, so it does not shrink the requirement.
-        combine_payload_size_per_token = hidden_size * 2
-        needed_workspace_size = moe_a2a_get_workspace_size_per_rank(
-            ep_size=self.world_size,
-            max_num_tokens=max_num_tokens,
-            total_dispatch_payload_size_per_token=total_dispatch_payload_size_per_token,
-            combine_payload_size_per_token=combine_payload_size_per_token,
-        )
-        # workspace_size and max_num_tokens are kernel-side max-bounds, so
-        # heterogeneous MoE layers (e.g. NVFP4 base + bf16 MTP head) only
-        # need the shared workspace grown to the union. top_k and num_experts
-        # must match across layers: top_k is a strict-equality assert at
-        # dispatch (FlashInfer csrc/trtllm_moe_alltoall.cu), and num_experts
-        # feeds the expert-to-rank routing math, so any mismatch would crash
-        # or silently corrupt routing. All ranks see the same MoE layers in
-        # the same order with identical shapes, so the skip / rebuild
-        # branches are taken consistently across ranks.
+
         if self.initialized:
             assert top_k == self.top_k, (
-                "FlashInfer one-sided MoeAlltoAll does not support "
-                f"heterogeneous top_k across MoE layers (got {top_k}, "
-                f"was built with {self.top_k})"
+                "FlashInfer one-sided communication does not support "
+                f"heterogeneous top_k (got {top_k}, was built with {self.top_k})"
             )
             assert num_experts == self.num_experts, (
-                "FlashInfer one-sided MoeAlltoAll does not support "
-                f"heterogeneous num_experts across MoE layers (got "
-                f"{num_experts}, was built with {self.num_experts})"
+                "FlashInfer one-sided communication does not support "
+                f"heterogeneous num_experts (got {num_experts}, "
+                f"was built with {self.num_experts})"
+            )
+
+        if extra_payload_bytes_per_token < 0:
+            raise ValueError("extra_payload_bytes_per_token must be non-negative")
+        params = MoEEpCommParams(
+            num_experts=num_experts,
+            top_k=top_k,
+            max_tokens_per_rank=max_num_tokens,
+            hidden_size=hidden_size,
+            dtype=torch.bfloat16,
+            dispatch_format=dispatch_format,
+        )
+        communication = self.communication
+        if communication is not None:
+            previous_max = communication.params.max_tokens_per_rank
+            previous_extra = communication.config.extra_payload_bytes_per_token
+            previous_bytes = (
+                communication.params.dispatch_bytes_per_token + previous_extra
+            )
+            dispatch_bytes = (
+                params.dispatch_bytes_per_token + extra_payload_bytes_per_token
             )
             if (
-                needed_workspace_size <= self.workspace_size
-                and max_num_tokens <= self.max_num_tokens
+                max_num_tokens <= previous_max
+                and hidden_size <= communication.params.hidden_size
+                and dispatch_bytes <= previous_bytes
             ):
                 return
-
-        self.workspace_size = max(self.workspace_size, needed_workspace_size)
-        self.max_num_tokens = max(self.max_num_tokens, max_num_tokens)
-        self.top_k = top_k
-        self.num_experts = num_experts
-
-        self.cleanup()
-        from vllm.platforms.interface import get_assigned_physical_gpu_ids
-
-        assigned_physical_gpu_ids = get_assigned_physical_gpu_ids()
-        gpus_per_node = (
-            len(assigned_physical_gpu_ids)
-            if assigned_physical_gpu_ids is not None
-            else torch.accelerator.device_count()
-        )
-        logger.debug(
-            "Making One-sided NVLink mapping: rank=%d, world size=%d",
-            self.rank,
-            self.world_size,
-        )
-        self.mapping = Mapping(
-            self.world_size,
-            self.rank,
-            gpus_per_node,
-            tp_size=self.world_size,
-            moe_ep_size=self.world_size,
-        )
+            # Use the larger hidden size for combine capacity. Its dispatch
+            # format may need fewer bytes than another layer's actual payload.
+            if hidden_size < communication.params.hidden_size or (
+                hidden_size == communication.params.hidden_size
+                and dispatch_bytes < previous_bytes
+            ):
+                params = communication.params
+            params = replace(
+                params, max_tokens_per_rank=max(max_num_tokens, previous_max)
+            )
+            extra_payload_bytes_per_token = (
+                max(dispatch_bytes, previous_bytes) - params.dispatch_bytes_per_token
+            )
 
         from vllm.distributed.device_communicators.mnnvl_compat import (
             CustomCommunicator,
         )
 
-        # MNNVL workspace is allocated per rank in the comm_backend's group; the
-        # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
-        # must span the EP group (= DP*PCP*TP), not the DP group.
-        ep_config = MnnvlConfig(
+        # MNNVL handle exchange must cover EP (= DP*PCP*TP), including with PP.
+        bootstrap = BootstrapConfig(
+            world_size=self.world_size,
+            rank=self.rank,
+            device=torch.accelerator.current_device_index(),
+            process_group=self.cpu_group,
+        )
+        config = NVLinkOneSidedConfig(
+            extra_payload_bytes_per_token=extra_payload_bytes_per_token,
+            use_low_precision_combine=envs.VLLM_FLASHINFER_MOE_A2A_LOW_PRECISION_COMBINE,
             comm_backend=CustomCommunicator(self.cpu_group),
         )
-
-        # Release cached allocator blocks before FlashInfer reserves the
-        # symmetric MNNVL fabric workspace.
+        if communication is not None:
+            # Growth happens during model initialization, before graph capture.
+            # Destroy the old wrapper on every rank before replacing it;
+            # FlashInfer owns the underlying workspace cache.
+            torch.accelerator.synchronize()
+            dist.barrier(group=self.cpu_group)
+            self.cleanup()
+            dist.barrier(group=self.cpu_group)
         torch.accelerator.empty_cache()
-
-        self.moe_alltoall = MoeAlltoAll(
-            mapping=self.mapping,
-            max_num_tokens=self.max_num_tokens,
-            top_k=self.top_k,
-            num_experts=self.num_experts,
-            workspace_size_per_rank=self.workspace_size,
-            mnnvl_config=ep_config,
-        )
-        try:
-            self._combine_supports_output = supports_kw(
-                self.moe_alltoall.combine, "output", allow_var_kwargs=False
-            )
-        except (TypeError, ValueError):
-            self._combine_supports_output = False
-
-        self.gpus_per_node = gpus_per_node
+        # Bootstrap metadata must stay on the CPU even when model layers are
+        # constructed under a CUDA default-device context.
+        with torch.device("cpu"):
+            replacement = create_communication(bootstrap, params, backend=config)
+        assert isinstance(replacement, NVLinkOneSidedAlltoAll)
+        self.communication = replacement
+        self.top_k = top_k
+        self.num_experts = num_experts
         self.initialized = True
-
         logger.info(
-            "FlashInfer One-sided NVLink initialized for rank %s, size %s",
+            "FlashInfer One-sided NVLink initialized for rank %s, size %s, hidden %s",
             self.rank,
             self.world_size,
+            params.hidden_size,
         )
-        # Scope barrier to the EP group: with PP, different EP groups can
-        # rebuild a different number of times if their MoE layers have
-        # different shape sequences, so a world-level barrier would deadlock.
         dist.barrier(group=self.cpu_group)
 
-    def combine_into(
-        self,
-        payload: torch.Tensor,
-        runtime_max_tokens_per_rank: int,
-        output: torch.Tensor,
-    ) -> None:
-        """Combine into ``output``, with a fallback for older FlashInfer."""
-        assert self.moe_alltoall is not None
-        if self._combine_supports_output:
-            self.moe_alltoall.combine(
-                payload=payload,
-                runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
-                output=output,
-                use_low_precision=self.low_precision_combine,
-            )
-        else:
-            # FlashInfer < 0.6.16 has neither `output` nor `use_low_precision`.
-            combined_output = self.moe_alltoall.combine(
-                payload=payload,
-                runtime_max_tokens_per_rank=runtime_max_tokens_per_rank,
-            )
-            output.copy_(combined_output)
+    def get_communication(self) -> "NVLinkOneSidedAlltoAll":
+        # Resolve at use time: another layer can grow the shared capacity during
+        # model construction, replacing the wrapper created for an earlier layer.
+        assert self.communication is not None, "One-sided communication not initialized"
+        return self.communication
 
     def get_handle(self, kwargs):
         return self
 
     def cleanup(self):
-        """Clean up resources."""
-        if self.initialized and self.moe_alltoall is not None:
-            try:
-                del self.moe_alltoall
-            except Exception as e:
-                logger.warning(
-                    "Failed to cleanup FlashInfer One-sided NVLink workspace: %s", e
-                )
-            finally:
-                self.moe_alltoall = None
-                self.mapping = None
-                self.initialized = False
+        if self.communication is not None:
+            self.communication.destroy()
+            self.communication = None
+        self.initialized = False
 
     def checkpoint_prepare(self) -> None:
-        if self.initialized:
-            assert self.moe_alltoall is not None
-            self.moe_alltoall.checkpoint_prepare()
+        if self.communication is not None:
+            communication = self.communication
+            if hasattr(communication, "checkpoint_prepare"):
+                communication.checkpoint_prepare()
+            else:
+                # FlashInfer 0.7.2 exposes checkpoints on the wrapped backend.
+                communication.alltoall.checkpoint_prepare()
 
     def checkpoint_restore(self) -> None:
         if self.initialized:
-            assert self.moe_alltoall is not None
             from vllm.distributed.device_communicators.mnnvl_compat import (
                 CustomCommunicator,
             )
 
-            self.moe_alltoall.checkpoint_restore(CustomCommunicator(self.cpu_group))
+            communicator = CustomCommunicator(self.cpu_group)
+            communication = self.get_communication()
+            if hasattr(communication, "checkpoint_restore"):
+                communication.checkpoint_restore(communicator)
+            else:
+                communication.alltoall.checkpoint_restore(communicator)
 
 
 class MoriAll2AllManager(All2AllManagerBase):
@@ -1001,6 +954,7 @@ class MoriAll2AllManager(All2AllManagerBase):
         assert all2all_backend in (
             "mori_high_throughput",
             "mori_low_latency",
+            "mori",
         ), f"unsupported MoRI all2all backend: {all2all_backend!r}"
         import mori
 
@@ -1009,13 +963,20 @@ class MoriAll2AllManager(All2AllManagerBase):
         self.handle_cache = Cache()
 
         torch._C._distributed_c10d._register_process_group("mori", cpu_group)
-        if get_current_vllm_config().kernel_config.moe_backend == "aiter_mega_moe":
+        vllm_config = get_current_vllm_config()
+        if vllm_config.kernel_config.moe_backend == "aiter_mega_moe":
             # MegaMoEV2 places its dispatch/combine workspaces on the MoRI
             # symmetric heap, which defaults to 2 GB. MegaMoEV2 requires > 4GB
-            # (> 8GB with a fused shared expert).
+            # (> 8GB with a fused shared expert, which needs an mxfp4 target).
+            online_targets = getattr(
+                vllm_config.model_config.quantization_config, "targets", None
+            )
+            may_fuse_shared_expert = (
+                envs.VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS
+                and "mxfp4" in (online_targets or {}).values()
+            )
             heap_size = os.environ.setdefault(
-                "MORI_SHMEM_HEAP_SIZE",
-                "16G" if envs.VLLM_ROCM_AITER_MEGA_MOE_FUSE_SHARED_EXPERTS else "8G",
+                "MORI_SHMEM_HEAP_SIZE", "16G" if may_fuse_shared_expert else "8G"
             )
             logger.info_once("AITER MegaMoE: MORI_SHMEM_HEAP_SIZE=%s", heap_size)
         mori.shmem.shmem_torch_process_group_init("mori")
@@ -1048,9 +1009,16 @@ class MoriAll2AllManager(All2AllManagerBase):
             warp_num_per_block = 16
             block_num = 80
         else:
-            # Multi-node: kernel follows --all2all-backend (mirrors deepep_* split).
-            # mori_low_latency → InterNodeV1LL; mori_high_throughput → V1.
-            if self._all2all_backend == "mori_low_latency":
+            # Multi-node: mori_low_latency → InterNodeV1LL; mori_high_throughput
+            # → V1; mori → V1LL for small per-rank token budgets, else V1.
+            if self._all2all_backend == "mori":
+                use_ll = (
+                    max_num_tokens_per_dp_rank
+                    <= envs.VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD
+                )
+            else:
+                use_ll = self._all2all_backend == "mori_low_latency"
+            if use_ll:
                 kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1LL
             else:
                 kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
@@ -1101,6 +1069,134 @@ class MoriAll2AllManager(All2AllManagerBase):
             mori_kwargs, self._make_handle
         )
         return handle
+
+
+def _mori_epv2_arena_bytes(cfg) -> int:
+    """Upper bound of a MORI EPv2 gather-mode op's symmetric arena.
+
+    Mirrors the intranode regions of MORI's hip_backend: per received row
+    disp_out, out_tok, out_scales, out_idx + out_wts (topk * 4 each) and
+    recv_to_src_token (4); per rank recv_num (8 since MORI 1.2.4) and
+    cross_device_barrier (8); and tok_off (4). MORI allocates the arena inside
+    the window itself, so an underestimate fails there rather than overlapping.
+    """
+    # The hip backend pads scale rows to 128 B; FlyDSL uses the unpadded row.
+    scale_row = -(-cfg.scale_dim * cfg.scale_type_size // 128) * 128
+    topk = cfg.num_experts_per_token
+    per_recv_row = cfg.token_nbytes + cfg.combine_token_nbytes + scale_row
+    per_recv_row += topk * 8 + 4
+    per_rank = cfg.world_size * 16
+    # The arena aligns each of its (at most 12) regions to 256 B.
+    return cfg.effective_max_recv * per_recv_row + per_rank + 4 + 12 * 256
+
+
+# cco reserves each rank's window in 4 GiB steps.
+_MORI_EPV2_WINDOW_ALIGN = 4 << 30
+
+
+@dataclass
+class _MoriEPv2Window:
+    comm: Any
+    free_bytes: int
+
+
+class MoriEPv2All2AllManager(All2AllManagerBase):
+    def __init__(self, cpu_group):
+        super().__init__(cpu_group)
+        from mori.cco import GDA_CONNECTION_NONE, CCODevCommRequirements
+
+        self._windows: list[_MoriEPv2Window] = []
+        # The cache holds ops weakly; keep them alive with the windows their
+        # arenas were charged to, so a dropped op is never charged twice.
+        self._ops: list[Any] = []
+        self.handle_cache = Cache()
+        # Open the first window now so a wrong topology fails before the
+        # weights load; ops that need more get their own window later.
+        comm = self._open_window(_MORI_EPV2_WINDOW_ALIGN).comm
+        requirements = CCODevCommRequirements()
+        requirements.gda_connection_type = GDA_CONNECTION_NONE
+        try:
+            device_comm = comm.create_dev_comm(requirements)
+            lsa_size = device_comm.lsa_size
+            device_comm.close()
+            if lsa_size != self.world_size:
+                raise ValueError(
+                    "MORI EPv2 requires all expert-parallel ranks in one LSA team, "
+                    f"got LSA size {lsa_size} for {self.world_size} ranks"
+                )
+        except Exception as e:
+            e.add_note("MORI EPv2: probing the CCO-LSA team of the EP group failed")
+            self.destroy()
+            raise
+        logger.debug("MORI EPv2 all2all over a %d-rank CCO-LSA team", self.world_size)
+
+    def _open_window(self, nbytes: int) -> _MoriEPv2Window:
+        from mori.cco import Communicator
+
+        uid = Communicator.get_unique_id() if self.rank == 0 else None
+        values = [uid]
+        dist.broadcast_object_list(values, group_src=0, group=self.cpu_group)
+        comm = Communicator.init(
+            self.world_size, self.rank, values[0], per_rank_vmm=nbytes
+        )
+        # cco probes fabric handles with hipMemCreate and, where they are
+        # unsupported, leaves hipErrorNotSupported as the HIP last error; the
+        # next torch call that checks it (an allocation) would raise it. MoRI
+        # clears it itself since ROCm/mori#761, which no release has yet.
+        CudaRTLibrary().cudaGetLastError()
+        window = _MoriEPv2Window(comm, nbytes)
+        self._windows.append(window)
+        return window
+
+    def _make_handle(self, **kwargs):
+        from mori.ops.dispatch_combine_v2 import (
+            EpDispatchCombineConfig,
+            EpDispatchCombineOp,
+        )
+
+        config = EpDispatchCombineConfig(
+            rank=self.rank,
+            world_size=self.world_size,
+            data_type=torch.bfloat16,
+            combine_mode="gather",
+            **kwargs,
+        )
+        # Each op carves its arena out of a cco window, which only reserves
+        # address space, so open a big enough one instead of failing. Whole
+        # GiB per op keeps MORI's allocation granularity inside the window.
+        arena = round_up(_mori_epv2_arena_bytes(config), 1 << 30)
+        window = next((w for w in self._windows if w.free_bytes >= arena), None)
+        if window is None:
+            window = self._open_window(round_up(arena, _MORI_EPV2_WINDOW_ALIGN))
+        window.free_bytes -= arena
+        handle = EpDispatchCombineOp(config, window.comm)
+        self._ops.append(handle)
+        window.comm.barrier()
+        logger.debug(
+            "MORI EPv2 op initialized: dispatch=%s combine=%s recv_cap=%d "
+            "schedule=%s arena_gb=%d cco_windows=%d",
+            config.dispatch_dtype,
+            config.combine_dtype,
+            config.effective_max_recv,
+            config.schedule,
+            arena >> 30,
+            len(self._windows),
+        )
+        return handle
+
+    def get_handle(self, kwargs):
+        return self.handle_cache.get_or_create(kwargs, self._make_handle)
+
+    def destroy(self):
+        # Each op's arena lives in a cco window, so free the ops first.
+        with self.handle_cache._lock:
+            self.handle_cache._cache.clear()
+        for handle in self._ops:
+            handle.close()
+        self._ops.clear()
+        for window in self._windows:
+            window.comm.destroy()
+        self._windows.clear()
 
 
 class DeepEPV2All2AllManager(All2AllManagerBase):
