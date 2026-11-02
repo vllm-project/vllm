@@ -4656,7 +4656,7 @@ steps:
   - VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_MOE=1 VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 pytest -v -s kernels/moe/test_mori_moe.py
 
 - label: ":amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics"
-  timeout_in_minutes: 40
+  timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   dind: false
   agent_pool: mi355_4
@@ -4668,9 +4668,11 @@ steps:
   - vllm/models/deepseek_v41/amd/
   - tests/models/test_dsv41_mono_numerics.py
   - tests/models/test_dsv41_mono_layers.py
+  - tests/models/test_deepseek_v41_amd_pp_replay.py
   commands:
   - pytest -v -s tests/models/test_dsv41_mono_numerics.py
   - pytest -v -s tests/models/test_dsv41_mono_layers.py
+  - pytest -v -s tests/models/test_deepseek_v41_amd_pp_replay.py
 
 - label: ":amd: (MI355) Quantization Kernels Shard %N"
   timeout_in_minutes: 120
