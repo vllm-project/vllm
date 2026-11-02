@@ -18,7 +18,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 
 
-class DeepseekV41ROCMAiterMLAMegAttnBackend(DeepseekV41ROCMAiterMLASparseBackend):
+class DeepseekV41ROCMAiterMLAMegaAttnBackend(DeepseekV41ROCMAiterMLASparseBackend):
     @staticmethod
     def get_name() -> str:
         return "ROCM_FLASHMLA_MEGA_ATTN_DSV4"
@@ -33,7 +33,7 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
     ordinary ROCm sparse attention path.
     """
 
-    backend_cls = DeepseekV41ROCMAiterMLAMegAttnBackend
+    backend_cls = DeepseekV41ROCMAiterMLAMegaAttnBackend
 
     @classmethod
     def is_available_for(cls, vllm_config: VllmConfig) -> bool:
