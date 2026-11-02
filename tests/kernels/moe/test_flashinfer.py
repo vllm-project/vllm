@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
+    MoEPrepareAndFinalizeNoDPEPModular,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -785,6 +788,7 @@ def test_trtllm_fp8_swiglu_clamp_support(
 
     assert supported == expected, reason
     if not expected:
+        assert reason is not None
         assert "SwiGLU" in reason
 
 
@@ -920,9 +924,12 @@ def test_trtllm_fp8_block_moe_deferred_finalize(
             ).is_scale_transposed
             # no_dp_ep emits column-major [M, G] scales (physical [G, M]), so
             # the experts' a1q_scale.t().contiguous() is a no-op.
-            _, a1q_scale, _, _, _ = kernel.prepare_finalize.prepare(
+            prepare_finalize = kernel.prepare_finalize
+            assert isinstance(prepare_finalize, MoEPrepareAndFinalizeNoDPEPModular)
+            _, a1q_scale, _, _, _ = prepare_finalize.prepare(
                 a, topk_weights, topk_ids, e, None, False, quant_config
             )
+            assert a1q_scale is not None
             assert a1q_scale.t().is_contiguous()
             # Bitwise-equal to running with row-major scales.
             row_major = replace(quant_config, is_scale_transposed=False)
@@ -1136,7 +1143,9 @@ def test_trtllm_mxfp8_moe_pads_intermediate(
             apply_router_weight_on_input=False,
             routed_scaling_factor=1.0,
             routing_sink=None,
-        )[:, :k]
+        )
+        assert isinstance(output, torch.Tensor)
+        output = output[:, :k]
         topk_weights, topk_ids, _ = fused_topk(a, logits, topk, renormalize=True)
         reference = fused_experts(
             a,
