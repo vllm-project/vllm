@@ -757,12 +757,9 @@ void launch(const torch::stable::Tensor& w2_res,
                   "base is too large for 32-bit offsets");
   const int smem = (kRes + kRing) * kTileBytes + kRowsCta * 4;
   auto kernel = markov_walk_kernel<kTiles>;
-  static bool attr_set = false;
-  if (!attr_set) {
-    STD_CUDA_CHECK(cudaFuncSetAttribute(
-        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
-    attr_set = true;
-  }
+  // per device, so not cached across launches
+  STD_CUDA_CHECK(cudaFuncSetAttribute(
+      kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
   cudaLaunchConfig_t cfg = {};
   cfg.gridDim = dim3(grid);
   cfg.blockDim = dim3(kThreads);
