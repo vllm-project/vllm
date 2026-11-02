@@ -501,7 +501,6 @@ def _create_async_pp_scheduler(
         async_scheduling=True,
         num_speculative_tokens=num_spec or None,
         speculative_method="ngram_gpu" if num_spec else None,
-        use_v2_model_runner=True,
         num_blocks=num_blocks,
         block_size=16,
         max_num_batched_tokens=512,
@@ -772,10 +771,7 @@ def test_resumable_request_handoff():
     """New streaming input resumes with the correct context and stale results
     are ignored.
     """
-    scheduler = create_scheduler(
-        async_scheduling=True,
-        use_v2_model_runner=True,
-    )
+    scheduler = create_scheduler(async_scheduling=True)
     engine = PipelinedEngine(scheduler, queue_size=3)
     engine._next_token = EOS_TOKEN_ID
 

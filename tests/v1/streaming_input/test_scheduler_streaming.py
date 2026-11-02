@@ -40,7 +40,7 @@ STOP_TOKEN = 128001
 
 
 class CachedState(TypedDict):
-    """The subset of `CachedRequestState` the model runner is simulated to cache."""
+    """The subset of request state the model runner is simulated to cache."""
 
     req_id: str
     prompt_token_ids: list[int]
@@ -509,9 +509,7 @@ class TestStreamingScheduler(unittest.TestCase):
         )
 
         # Step 3: Simulate model runner caching the prompt_token_ids
-        # This simulates gpu_model_runner.py:706-720 CachedRequestState creation
-        # The model runner makes a copy of prompt_token_ids when creating
-        # CachedRequestState
+        # The model runner makes a copy of prompt_token_ids when adding the request
         cached_state_cycle1: CachedState = {
             "req_id": session.request_id,
             "prompt_token_ids": list(
@@ -667,8 +665,7 @@ class TestStreamingScheduler(unittest.TestCase):
         assert session._output_token_ids == []  # Output tokens are cleared
 
         # Step 14: Model runner caches NEW prompt_token_ids reference
-        # The model runner makes a copy of prompt_token_ids when creating
-        # CachedRequestState
+        # The model runner makes a copy of prompt_token_ids when adding the request
         new_req_data_cycle3 = scheduler_output_cycle3.scheduled_new_reqs[0]
         cached_state_cycle3: CachedState = {
             "req_id": session.request_id,

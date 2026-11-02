@@ -551,10 +551,9 @@ class SpeculativeConfig:
     to `prompt_lookup_max` if set, otherwise 5."""
 
     # Alternative drafting strategies
-    parallel_drafting: bool = False
-    """Enable parallel drafting, where all speculative tokens are generated
-    in parallel rather than sequentially. Set automatically for the DFlash and
-    DSpark methods, the only ones that support it."""
+    parallel_drafting: bool | None = None
+    """Deprecated and has no effect. DFlash and DSpark always draft in
+    parallel, and no other method supports it."""
 
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -1659,10 +1658,16 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.parallel_drafting and self.method not in ("dflash", "dspark"):
-            raise ValueError(
-                "parallel_drafting is only supported by the dflash and dspark "
-                f"methods, not {self.method!r}."
+        if self.parallel_drafting is not None:
+            if self.parallel_drafting and self.method not in ("dflash", "dspark"):
+                raise ValueError(
+                    "parallel_drafting is only supported by the dflash and dspark "
+                    f"methods, not {self.method!r}."
+                )
+            logger.warning_once(
+                "parallel_drafting is deprecated and has no effect: dflash and "
+                "dspark always draft in parallel, and no other method supports "
+                "it. It will be removed in a future release."
             )
 
         if self.rejection_sample_method == "fly":

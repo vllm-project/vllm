@@ -1347,13 +1347,6 @@ class VllmConfig:
                     "Speculative decoding with watermarking requires "
                     "rejection_sample_method='standard'."
                 )
-            if (
-                speculative_config.parallel_drafting
-                and speculative_config.method not in ("dflash", "dspark")
-            ):
-                raise ValueError(
-                    "Parallel speculative drafting is not supported with watermarking."
-                )
             if not speculative_config.speculator_config.supports_watermarking:
                 raise ValueError(
                     "Watermarking supports only dflash, dspark, eagle, eagle3 and "

@@ -151,7 +151,6 @@ def m3_config():
         rms_norm_eps=1e-5,
     )
     return SimpleNamespace(
-        use_v2_model_runner=True,
         load_config=SimpleNamespace(load_format="auto"),
         model_config=SimpleNamespace(hf_text_config=hf_config),
         speculative_config=fake_speculative_config(
@@ -234,13 +233,9 @@ def test_m3_direct_loader_embedding_ownership(make_m3_draft, m3_config, load_for
         assert draft.model.embed_tokens is equal_target.embed_tokens
 
 
-@pytest.mark.parametrize("use_v2,pp_size", [(True, 1), (False, 1), (False, 2)])
-def test_m3_preserves_legacy_embedding_sharing(
-    monkeypatch, m3_modules, m3_config, make_m3_draft, use_v2, pp_size
-):
+def test_m3_preserves_legacy_embedding_sharing(monkeypatch, m3_modules, make_m3_draft):
     mtp, _ = m3_modules
-    m3_config.use_v2_model_runner = use_v2
-    monkeypatch.setattr(mtp, "get_pp_group", _fake_pp(pp_size))
+    monkeypatch.setattr(mtp, "get_pp_group", _fake_pp(1))
     draft = make_m3_draft()
     draft.load_weights(
         [

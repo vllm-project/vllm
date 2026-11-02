@@ -29,7 +29,6 @@ from vllm.profiler.wrapper import (
 )
 from vllm.v1.core.sched.output import CachedRequestData
 from vllm.v1.executor.abstract import Executor
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.xpu_worker import XPUWorker
 
@@ -730,24 +729,6 @@ class TestAnnotateProfile:
         assert isinstance(context, nullcontext)
 
 
-def test_profiler_entered_during_capture():
-    """Profiler is used as a context manager in _warmup_and_capture,
-    confirming it is active during the actual graph capture run."""
-    runner = MagicMock()
-    runner.compilation_config.cudagraph_num_of_warmups = 0
-    mock_profiler = MagicMock()
-
-    GPUModelRunner._warmup_and_capture(
-        runner,
-        desc=MagicMock(num_tokens=4, uniform=True),
-        cudagraph_runtime_mode=CUDAGraphMode.FULL,
-        profiler=mock_profiler,
-    )
-
-    mock_profiler.__enter__.assert_called_once()
-    mock_profiler.__exit__.assert_called_once()
-
-
 def make_proton(session_id: int | None = 7):
     data = SimpleNamespace(
         advance_phase=Mock(side_effect=range(1, 100)),
@@ -975,27 +956,6 @@ class TestProtonConfig:
                     else CUDAGraphMode.FULL,
                     cudagraph_mm_encoder=encoder_only,
                 ),
-            )
-
-    def test_ordinary_proton_keeps_mrv1_graph_restriction(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-        with pytest.raises(ValueError, match="requires proton_graph_attribution=True"):
-            VllmConfig(
-                profiler_config=ProfilerConfig(
-                    profiler="proton", proton_profiler_dir=str(tmp_path)
-                ),
-                compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.FULL),
-            )
-
-    def test_graph_attribution_rejects_mrv1(self, tmp_path, monkeypatch):
-        monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
-        with pytest.raises(ValueError, match="requires the V2 model runner"):
-            VllmConfig(
-                profiler_config=ProfilerConfig(
-                    profiler="proton",
-                    proton_profiler_dir=str(tmp_path),
-                    proton_graph_attribution=True,
-                )
             )
 
 
@@ -1321,13 +1281,12 @@ def test_gpu_worker_reuses_cuda_graph_proton_session():
 
 
 @_requires_cuda_for_proton
-@pytest.mark.parametrize("runner", ["attribution_off", "v1", "no_capture"])
+@pytest.mark.parametrize("runner", ["attribution_off", "no_capture"])
 def test_proton_not_initialized_without_capture(runner):
     worker = MagicMock()
     worker.profiler = None
     worker.profiler_config.profiler = "proton"
     worker.profiler_config.proton_graph_attribution = runner != "attribution_off"
-    worker.use_v2_model_runner = runner != "v1"
     worker.model_runner.needs_cudagraph_capture.return_value = runner != "no_capture"
 
     context = Worker._get_cudagraph_capture_context(worker)
@@ -1353,7 +1312,6 @@ def test_proton_initializes_before_cuda_graph_capture():
     worker.profiler = None
     worker.profiler_config.profiler = "proton"
     worker.profiler_config.proton_graph_attribution = True
-    worker.use_v2_model_runner = True
     worker.model_runner.needs_cudagraph_capture.return_value = True
 
     with (
@@ -1399,10 +1357,7 @@ def test_proton_cuda_graph_replay_attribution_on_gpu(tmp_path, context, output_f
         ),
         worker_name="gpu",
     )
-    worker = SimpleNamespace(
-        profiler=wrapper,
-        use_v2_model_runner=True,
-    )
+    worker = SimpleNamespace(profiler=wrapper)
     x = torch.ones(1024, device="cuda")
     graph = torch.cuda.CUDAGraph()
 
