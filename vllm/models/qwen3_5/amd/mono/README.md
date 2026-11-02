@@ -1,4 +1,4 @@
-# Qwen3.8-27B dense mono decode (MI355X)
+# Qwen3.8-27B dense mono decode (MI355X, MI350P)
 
 Opt-in FlyDSL decode for `amd/Qwen3.8-27B-Quark-AWQ-MXFP4` (`qwen3_5_text`,
 TP1 or TP2, gfx950). Set `VLLM_ROCM_MONO_DECODE=1`. The K1 and K2 kernels are adapted from
@@ -141,6 +141,33 @@ is RULER `niah_single_2`. MMMU is `mmmu_val`, 900 questions, seed 4321.
 TP2 GPQA mean answer length is 43,452 characters versus 41,440 for
 non-mono (165/198 versus 163/198). An earlier TP2 build that wrapped the
 stock modules scored 0.1818 on the same eval.
+
+### MI350P (128 CUs)
+
+TP1, one MI350P, vLLM v0.32.0 with AITER main and this decode, MTP off
+in both arms, same image; the arms differ only in
+`VLLM_ROCM_MONO_DECODE=1`. Row caps 8 unless stated, 8k input / 1k
+output, as above.
+
+| Concurrency | Output tok/s, non-mono → mono | Median TPOT (ms) |
+| --- | --- | --- |
+| 1 | 104.4 → 117.5 (+12.5%) | 9.23 → 8.15 (+11.7%) |
+| 2 | 196.3 → 212.5 (+8.3%) | 9.82 → 9.06 (+7.7%) |
+| 4 | 343.2 → 366.5 (+6.8%) | 11.03 → 10.31 (+6.5%) |
+| 8 | 574.7 → 567.1 (−1.3%) | 13.15 → 13.35 (−1.5%) |
+| 4, default caps | 343.2 → 365.8 (+6.6%) | 11.03 → 10.32 (+6.4%) |
+| 8, default caps | 574.7 → 578.0 (+0.6%) | 13.15 → 13.10 (+0.4%) |
+
+At 8 rows K1 and K2 take about as long as the MI350P stock MXFP4 GEMMs
+they replace, so keep the default TP1 caps (4) on MI350P.
+
+Accuracy on MI350P at 8 concurrent requests, so that decode steps stay
+inside the caps (8) and K1 and K2 produce nearly every token:
+
+| Eval | non-mono → mono |
+| --- | --- |
+| GSM8K 5-shot, chat, 250 questions, flexible / strict | 0.920 / 0.916 → 0.932 / 0.916 |
+| GPQA Diamond, thinking on, 198 questions | 0.773 → 0.768 |
 
 ## Tests
 
