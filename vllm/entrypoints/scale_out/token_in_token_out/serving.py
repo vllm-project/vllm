@@ -83,10 +83,10 @@ logger = init_logger(__name__)
 
 
 def _clamp_logprob(logprob: float) -> float:
-    """The OpenAI shapes' floor for a logprob: `-inf` and NaN become `-9999.0`.
+    """The OpenAI shapes' floor for a logprob: ``-inf`` and NaN become ``-9999.0``.
 
-    `max(nan, -9999.0)` is NaN in Python, so NaN needs its own check; NaN
-    would otherwise fail `JSONResponse` or reach the client as `null`.
+    ``max(nan, -9999.0)`` is NaN in Python, so NaN needs its own check; NaN
+    would otherwise fail ``JSONResponse`` or reach the client as ``null``.
     """
     return -9999.0 if math.isnan(logprob) else max(logprob, -9999.0)
 
@@ -96,7 +96,7 @@ def _logprob_token(
 ) -> tuple[str, list[int] | None]:
     """Token string and UTF-8 bytes for one logprob entry.
 
-    Without a tokenizer the token is a `token_id:N` placeholder with no bytes.
+    Without a tokenizer the token is a ``token_id:N`` placeholder with no bytes.
     """
     if tokenizer is None:
         return format_token_id_placeholder(token_id), None
@@ -822,8 +822,8 @@ class ServingTokens(GenerateBaseServing):
     def _logprobs_tokenizer(self, text_mode: bool) -> TokenizerLike | None:
         """Tokenizer that resolves logprob tokens, or None for placeholders.
 
-        `--return-tokens-as-token-ids` keeps placeholders at every level, as
-        it does on `/v1/completions`.
+        ``--return-tokens-as-token-ids`` keeps placeholders at every level, as
+        it does on ``/v1/completions``.
         """
         if not text_mode or self.return_tokens_as_token_ids:
             return None
@@ -880,7 +880,7 @@ class ServingTokens(GenerateBaseServing):
     ) -> GenerateLogProbs:
         """Create generate-shaped logprobs (integer token ids, no tokenizer).
 
-        `top_logprobs` carries every candidate the engine returned for the
+        ``top_logprobs`` carries every candidate the engine returned for the
         position: the sampled token first, then the top k, so k entries when the
         sampled token is in the top k and k + 1 when it is not. It is not cut to
         the requested count: `/v1/chat/completions` and
@@ -888,7 +888,7 @@ class ServingTokens(GenerateBaseServing):
         cut the way the coupled server does.
 
         The engine reports rank 0 for a sampled token whose logprob is NaN; that
-        is not a rank, so it is sent as `None` (the logprob is clamped).
+        is not a rank, so it is sent as ``None`` (the logprob is clamped).
         """
         logprobs_content: list[GenerateLogProbsContent] = []
 

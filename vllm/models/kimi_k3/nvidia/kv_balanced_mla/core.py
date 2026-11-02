@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FP8 MLA decode over the paged FP8 cache with a device-planned split-KV work list.
 
-The kernel is TokenSpeed's FP8 MLA decode (vendored in `kernel.py`): query rows
+The kernel is TokenSpeed's FP8 MLA decode (vendored in ``kernel.py``): query rows
 packed into 128-row tiles (heads x q tokens), one 2-CTA cluster per (query tile,
 request, KV split), FP16 partials merged by its reduction kernel. A planner kernel
 picks each request's split count from its KV length and lists exactly the planned
@@ -56,12 +56,12 @@ def max_planned_requests(heads: int, q: int) -> int:
 
 
 def workspace_bytes(heads: int, q: int, requests: int) -> int:
-    """Split-KV scratch of `requests`: FP16 partials and FP32 partial LSEs."""
+    """Split-KV scratch of ``requests``: FP16 partials and FP32 partial LSEs."""
     return requests * query_tiles(heads, q) * ROWS * CAPACITY * (LATENT * 2 + 4)
 
 
 def work_list_len(heads: int, q: int, requests: int, clusters: int) -> int:
-    """Entries of the work list: the planned clusters of up to `MAX_WAVES` waves
+    """Entries of the work list: the planned clusters of up to ``MAX_WAVES`` waves
     (more if one split per request and query tile needs them, so no planned entry
     is ever dropped), then one wave of empty entries that ends every walk."""
     waves = max(MAX_WAVES, -(-requests * query_tiles(heads, q) // clusters))
@@ -95,12 +95,12 @@ def _plan_work_list_kernel(
 ):
     """Per-request split counts, then the work list.
 
-    For each W = 1 .. `max_waves` waves of `clusters` (rows of a [W, B] search):
-    the counts ceil(T_b / c) (T_b: KV tiles, at most `capacity`) for the smallest
-    chunk c >= `min_tiles` whose clusters fit W * clusters, as the kernel's
+    For each W = 1 .. ``max_waves`` waves of ``clusters`` (rows of a [W, B] search):
+    the counts ceil(T_b / c) (T_b: KV tiles, at most ``capacity``) for the smallest
+    chunk c >= ``min_tiles`` whose clusters fit W * clusters, as the kernel's
     nonempty splits; the estimated time is waves used x (longest chunk +
-    `overhead_tiles`). The fastest W wins (ties: fewer waves). The list holds each
-    request's entries `(q_tile * B + b) << 8 | split` split-major (its query tiles
+    ``overhead_tiles``). The fastest W wins (ties: fewer waves). The list holds each
+    request's entries ``(q_tile * B + b) << 8 | split`` split-major (its query tiles
     adjacent, sharing the split's KV through L2), requests in order, then -1."""
     offs = tl.arange(0, BLOCK_B)
     mask = offs < num_reqs
@@ -159,8 +159,8 @@ def _compile(
     cp: tuple[int, int, int],
 ):
     """The KV-balanced FP8 MLA decode for one shape: packed query rows, causal among a
-    request's q rows unless `causal` is off, FP16 partials, BF16 latent output,
-    and each row's log2 LSE with `lse`. `cp` is (DCP world, rank, interleave):
+    request's q rows unless ``causal`` is off, FP16 partials, BF16 latent output,
+    and each row's log2 LSE with ``lse``. ``cp`` is (DCP world, rank, interleave):
     with a world above 1 the cache holds this rank's shard and the causal mask maps
     each row's global bound onto it."""
     qk_tiler, pv_tiler = select_mla_decode_tilers(
@@ -260,10 +260,10 @@ def supports(heads: int, q: int, device: torch.device) -> bool:
 
 class KvBalancedMla:
     """The KV-balanced MLA decode of one (heads, q, causal) shape for up to
-    `max_requests` requests: `plan` once per forward, then `decode` per layer.
+    ``max_requests`` requests: ``plan`` once per forward, then ``decode`` per layer.
 
-    The caller owns the plan buffers (`counts` [max_requests], `work`
-    [list_len]) and the split-KV `workspace` [workspace_bytes]."""
+    The caller owns the plan buffers (``counts`` [max_requests], ``work``
+    [list_len]) and the split-KV ``workspace`` [workspace_bytes]."""
 
     def __init__(
         self,
@@ -288,8 +288,8 @@ class KvBalancedMla:
     def plan(
         self, seq_lens: torch.Tensor, counts: torch.Tensor, work: torch.Tensor
     ) -> None:
-        """Plan the split counts and the work list for `seq_lens` (this rank's KV
-        lengths) into `counts` and `work`."""
+        """Plan the split counts and the work list for ``seq_lens`` (this rank's KV
+        lengths) into ``counts`` and ``work``."""
         requests = seq_lens.numel()
         assert requests <= self.max_requests
         assert counts.numel() >= self.max_requests and work.numel() >= self.list_len
@@ -328,11 +328,11 @@ class KvBalancedMla:
         causal_lens: torch.Tensor | None = None,
         cp: tuple[int, int, int] = (1, 0, 1),
     ) -> torch.Tensor:
-        """BF16 latent [T, H, 512] of the FP8 `query` [T, H, 576] (`q` rows per
-        request) over the FP8 `cache` [blocks, page, 576] with the plan in
-        `counts` and `work`. With `lse` [requests, q, H] FP32 it also writes
-        each row's log2 LSE. Under DCP (`cp` = world, rank, interleave),
-        `seq_lens` are this rank's shard lengths and `causal_lens` the global
+        """BF16 latent [T, H, 512] of the FP8 ``query`` [T, H, 576] (``q`` rows per
+        request) over the FP8 ``cache`` [blocks, page, 576] with the plan in
+        ``counts`` and ``work``. With ``lse`` [requests, q, H] FP32 it also writes
+        each row's log2 LSE. Under DCP (``cp`` = world, rank, interleave),
+        ``seq_lens`` are this rank's shard lengths and ``causal_lens`` the global
         ones. An empty request gets a zero output and an LSE of -inf."""
         requests = seq_lens.numel()
         assert cache.shape[-1] == LATENT + ROPE, cache.shape

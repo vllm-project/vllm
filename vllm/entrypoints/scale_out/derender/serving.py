@@ -146,10 +146,11 @@ class ServingDerender(BaseServing):
         """Postprocess a GenerateResponse into a ChatCompletionResponse.
 
         Non-streaming only: expects the complete GenerateResponse with all
-        token IDs present.  Uses `parser.parse()` for one-shot extraction.
+        token IDs present.  Uses ``parser.parse()`` for one-shot extraction.
 
-        When `request.chat_request` is provided, the parser splits the output into
-        (reasoning, content, tool_calls). Otherwise falls back to plain detokenization.
+        When ``request.chat_request`` is provided, the parser splits the
+        output into (reasoning, content, tool_calls).  Otherwise falls
+        back to plain detokenization.
         """
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
@@ -294,9 +295,9 @@ class ServingDerender(BaseServing):
         self,
         request: DerenderChatStreamRequest,
     ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState] | ErrorResponse:
-        """Streaming counterpart to `derender_chat_response`.
+        """Streaming counterpart to ``derender_chat_response``.
 
-        Processes one `GenerateStreamResponse` chunk and returns the
+        Processes one ``GenerateStreamResponse`` chunk and returns the
         derendered chunk together with the updated client carried state.
         """
         error_check_ret = await self._check_model(request)
@@ -403,9 +404,9 @@ class ServingDerender(BaseServing):
         self,
         request: DerenderCompletionStreamRequest,
     ) -> tuple[CompletionStreamResponse, DerenderStreamState] | ErrorResponse:
-        """Streaming counterpart to `derender_completion_response`.
+        """Streaming counterpart to ``derender_completion_response``.
 
-        Processes one `GenerateStreamResponse` chunk (one output sequence's
+        Processes one ``GenerateStreamResponse`` chunk (one output sequence's
         delta) and returns the derendered chunk and updated state.
         """
         error_check_ret = await self._check_model(request)

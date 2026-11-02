@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The mono decode layer's two launches (README): K1 = the attention seam
-(`stages.seam`: slice, gate, the norm into vLLM's MXFP8) + the attention front
-(`attention.front`); K2 = the attention back (`attention.back`, wo_b pushed
-to every rank) + the FFN seam (the TP sum folded in) + the MoE (`stages.moe`,
+(``stages.seam``: slice, gate, the norm into vLLM's MXFP8) + the attention front
+(``attention.front``); K2 = the attention back (``attention.back``, wo_b pushed
+to every rank) + the FFN seam (the TP sum folded in) + the MoE (``stages.moe``,
 its all-reduce in-kernel too). A layer whose attention vLLM runs takes the FFN
 launch instead: K2 with the attention back replaced by a push of vLLM's
-unreduced wo_b output (`seam.stage_push`).
+unreduced wo_b output (``seam.stage_push``).
 
 Tags: K1's hand-offs carry 2 e + 1, K2's 2 e + 2 (e: the launch pair's epoch,
 moved on by K2's CTA 0 at its end), so K2's seam may reuse K1's seam regions.
@@ -140,7 +140,7 @@ def scratch_layout(
 ) -> dict:
     """Every region of step width s's launches -> (byte offset, bytes), disjoint:
     K1's front and seam, K2's back, the MoE's regions, the normed rows and their
-    flags. Each width has a scratch of its own (`DSV41MonoLayer.scratch`):
+    flags. Each width has a scratch of its own (``DSV41MonoLayer.scratch``):
     under another width's layout a mailbox pair's tag word could be plain data,
     which a poll may take for a current tag. The MoE's counters, whose slots
     outlive a step width, are in the epoch buffer. The MoE regions follow the
@@ -198,8 +198,8 @@ def _epoch(epoch):
 
 @traced
 def store_x8(c, t, col, ys, live):
-    """The attention seam's norm output (`seam.stage_norm`'s 8 columns at
-    `col`) -> vLLM's MXFP8 of each 32 (the attention's input quant) -> the
+    """The attention seam's norm output (``seam.stage_norm``'s 8 columns at
+    ``col``) -> vLLM's MXFP8 of each 32 (the attention's input quant) -> the
     front's X8 / X8S, plain at device scope."""
     amax = abs(ys[0])
     for y in ys[1:]:
@@ -527,9 +527,9 @@ def run_ffn(
     key: MonoBuild, lds, a: dict, amb, bases, own, rank, ep, part=None, tl=None
 ):
     """K2's FFN half on this CTA: the FFN seam (the attention's TP partials --
-    `part` pushed to every rank's ATTN region first -- summed and folded into
-    the residual), the MoE and its all-reduce into `a["out"]`, then the
-    launch pair's epoch moved on. `tl`: K2's timeline record base (a
+    ``part`` pushed to every rank's ATTN region first -- summed and folded into
+    the residual), the MoE and its all-reduce into ``a["out"]``, then the
+    launch pair's epoch moved on. ``tl``: K2's timeline record base (a
     timeline build), stamped from point K2_SEAM_POINT on."""
     s, tp = key.tokens, key.tp
     # The scratch is laid out for the routing and the FP4 groups of the
@@ -989,7 +989,7 @@ def build_mono_k2(key: MonoBuild):
 
 
 def build_mono_ffn(key: MonoBuild):
-    """The FFN launch of a layer whose attention vLLM ran (`part`: this rank's
+    """The FFN launch of a layer whose attention vLLM ran (``part``: this rank's
     unreduced wo_b output, bf16 [S, HIDDEN]): K2's FFN half, the partial pushed
     to every rank first. It takes a launch pair's epoch, as K2 does."""
     s, tp = key.tokens, key.tp

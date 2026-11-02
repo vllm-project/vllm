@@ -561,16 +561,16 @@ class EplbState:
         num_unpadded_tokens: int,
         ubatch_slices: list | None = None,
     ) -> None:
-        """Fill the per-[u]batch `num_unpadded_tokens` tensors before a
+        """Fill the per-[u]batch ``num_unpadded_tokens`` tensors before a
         forward pass.
 
         Args:
-            model_config: Identifies which `EplbModelState` to update.
+            model_config: Identifies which ``EplbModelState`` to update.
             num_unpadded_tokens: Total number of real (non-padding) tokens
                 in the batch.
             ubatch_slices: When DBO is active, a list of
-                `UBatchSlice` objects describing each micro-batch's
-                token range.  When `None`, only `tensors[0]` is filled.
+                ``UBatchSlice`` objects describing each micro-batch's
+                token range.  When ``None``, only ``tensors[0]`` is filled.
 
         """
         model_state = self.model_states.get(compute_hash_cached(model_config))
@@ -769,7 +769,7 @@ class EplbState:
         return should_record_for_rearrange or should_record_for_log
 
     def _update_layer_should_record(self, log_stats: bool = False) -> None:
-        """Update the shared `should_record_tensor` for all layers."""
+        """Update the shared ``should_record_tensor`` for all layers."""
         if self.should_record_tensor is None:
             return
         should_record = self._should_record_current_step(log_stats=log_stats)
@@ -785,12 +785,13 @@ class EplbState:
     ) -> None:
         """Propagate shared tensors to every :class:`EplbLayerState`.
 
-        Allocates `should_record_tensor` on the first call and then assigns both it and
-        `num_unpadded_tokens_tensors` to every MoE layer's :class:`EplbLayerState`. All
-        layers reference the **same** objects so a single update is visible everywhere.
+        Allocates ``should_record_tensor`` on the first call and then
+        assigns both it and ``num_unpadded_tokens_tensors`` to every
+        MoE layer's :class:`EplbLayerState`.  All layers reference the
+        **same** objects so a single update is visible everywhere.
 
         Must be called after :meth:`model.set_eplb_state` so that each
-        layer's `eplb_state` is already populated.
+        layer's ``eplb_state`` is already populated.
         """
         layer_states = [
             layer.eplb_state

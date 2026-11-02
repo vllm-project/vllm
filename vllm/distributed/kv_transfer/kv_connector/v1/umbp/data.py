@@ -134,7 +134,7 @@ class UMBPNamespace:
 
     @classmethod
     def configured(cls, vllm_config: Any) -> UMBPNamespace | None:
-        """Return the explicit `key_namespace`, or None when it is derived."""
+        """Return the explicit ``key_namespace``, or None when it is derived."""
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         configured = extra.get("key_namespace", "auto")
         if configured == "auto":

@@ -54,10 +54,10 @@ PAIR_SENT = 0x80000000  # BF16 pair (+0, -0); sent pairs have no negative zero
 
 
 class DcpBox:
-    """Model-owned DCP state over `group`, Lamport mailboxes (sentinel-filled,
+    """Model-owned DCP state over ``group``, Lamport mailboxes (sentinel-filled,
     re-armed by their reader): q [2, CAP, DCP*H, 576] FP8 bytes (multicast stores),
     partials [2, DCP, CAP, H, 512] BF16 and LSE [2, DCP, CAP, H] FP32 (peer stores),
-    and the local tokenspeed rows / LSE. Parity alternates by layer. `interleave`:
+    and the local tokenspeed rows / LSE. Parity alternates by layer. ``interleave``:
     the KV cache's DCP interleave (global masking of spec verify rows)."""
 
     def __init__(self, group, device, size, rank, heads, cap=64, interleave=1):
@@ -86,19 +86,20 @@ class DcpBox:
         torch.distributed.barrier(group=group)
 
     def mc(self, parity):
-        """The q mailbox multicast address of `parity`."""
+        """The q mailbox multicast address of ``parity``."""
         return Int64(self.q_mc + parity * self.q[0].numel())
 
 
 class DcpValue:
     """The DCP tail of one MLA layer, one 512-thread CTA per (head, 16 requests).
     Every rank re-arms this parity's q mailbox (tokenspeed has read it) and pushes all
-    its local tokenspeed rows (+ LSE) to their head owner's Lamport mailbox (empty local
-    shards: zeros, LSE -inf). Warp r then LSE-weights request t0 + r of this head over
-    the DCP sources (exp2(lse - max) / sum in FP32), the CTA merges the polled rows in
-    FP32 (one BF16 rounding, re-arming what it read) into shared memory, and W_UV (BF16
+    its local tokenspeed rows (+ LSE) to their head owner's Lamport mailbox (empty
+    local shards: zeros, LSE -inf). Warp r then LSE-weights request t0 + r of this
+    head over the DCP sources (exp2(lse - max) / sum in FP32), the CTA merges the
+    polled rows in FP32
+    (one BF16 rounding, re-arming what it read) into shared memory, and W_UV (BF16
     MMA, FP32 accumulation) and the sigmoid gate follow as in MlaValue: warp w owns
-    outputs 32 (w // 4) + 8 (w % 4) .. + 7. Rows are tokens, `q` per request."""
+    outputs 32 (w // 4) + 8 (w % 4) .. + 7. Rows are tokens, ``q`` per request."""
 
     def __init__(self, heads, size, batch, sms=148, q=1):
         self.heads, self.size, self.batch = heads, size, batch
@@ -255,8 +256,8 @@ class DcpValue:
 
 @cache
 def compile_value(heads, size, batch, cap, uv, pitch, device, sms=148, q=1):
-    """DcpValue of one batch (`q` rows per request); `uv`: the (shape, stride,
-    dtype) of W_UV, `pitch`: the projected rows' (the gate follows the 2112 query /
+    """DcpValue of one batch (``q`` rows per request); ``uv``: the (shape, stride,
+    dtype) of W_UV, ``pitch``: the projected rows' (the gate follows the 2112 query /
     KV columns)."""
     f32, i32 = torch.float32, torch.int32
     w_uv, gate = fake(*uv), fake((batch, heads * 128), (pitch, 1))
@@ -292,11 +293,11 @@ def stock_decode(
     totals=None,
     pack=False,
 ):
-    """tokenspeed_mla_decode's FP8 path with caller-owned `out` and `lse` (log2)
+    """tokenspeed_mla_decode's FP8 path with caller-owned ``out`` and ``lse`` (log2)
     buffers and no per-call allocation: the split count follows from (B, max_seq,
-    min_split); `lengths` bound the work, empty splits are skipped by its reducer.
-    The q rows of a request mask causally; under DCP in global positions (`cp`:
-    world, rank, interleave; `totals`: the global lengths). `pack`: M128 tiles hold
+    min_split); ``lengths`` bound the work, empty splits are skipped by its reducer.
+    The q rows of a request mask causally; under DCP in global positions (``cp``:
+    world, rank, interleave; ``totals``: the global lengths). ``pack``: M128 tiles hold
     consecutive (query row, head) rows across the q rows."""
     import tvm_ffi
     from tokenspeed_mla import mla_decode as md
@@ -373,5 +374,5 @@ def fill_splits(batch, device):
 
 
 def local_max(max_context, size):
-    """Longest local shard of a `max_context` sequence (block-interleaved)."""
+    """Longest local shard of a ``max_context`` sequence (block-interleaved)."""
     return math.ceil(max_context / (size * 64)) * 64

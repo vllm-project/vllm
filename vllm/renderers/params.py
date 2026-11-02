@@ -225,10 +225,10 @@ class TokenizeParams:
     def max_input_tokens(self) -> int | None:
         """Maximum allowed number of input tokens.
 
-        `max_output_tokens` is *not* subtracted here: the value represents the
+        ``max_output_tokens`` is *not* subtracted here: the value represents the
         actual model context length, not a reservation of output space.
-        Downstream clamping of the sampling `max_tokens` is handled by
-        `get_max_tokens()` in the entrypoint layer.
+        Downstream clamping of the sampling ``max_tokens`` is handled by
+        ``get_max_tokens()`` in the entrypoint layer.
         """
         if self.max_total_tokens is None:
             return None
@@ -424,7 +424,7 @@ class TokenizeParams:
     ) -> int:
         """Return the number of source characters removed from the left.
 
-        `_text_len_check` pre-truncates long text before tokenization when
+        ``_text_len_check`` pre-truncates long text before tokenization when
         an explicit truncation side is requested. Fast-tokenizer offsets are
         then relative to that shortened string, so callers need this prefix
         length to map them back to the original prompt.

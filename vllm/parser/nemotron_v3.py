@@ -3,10 +3,10 @@
 """Nemotron V3 parser.
 
 The Nemotron 3 Super model uses the same tool call and reasoning
-format as Qwen3 (`<think>`/`</think>` + `<tool_call>` XML).
+format as Qwen3 (``<think>``/``</think>`` + ``<tool_call>`` XML).
 This config reuses :func:`qwen3_config` with a distinct name.
 
-When `enable_thinking=False` or `force_nonempty_content=True` and
+When ``enable_thinking=False`` or ``force_nonempty_content=True`` and
 content is empty, reasoning and content are swapped.
 """
 
@@ -41,8 +41,9 @@ def nemotron_v3_config(thinking: bool = True) -> ParserEngineConfig:
 
 class NemotronV3Parser(Qwen3Parser):
     """Nemotron V3 parser: same format as Qwen3, with Nemotron-specific
-    behavior: when `enable_thinking=False` or `force_nonempty_content=True` and content
-    is empty, swaps reasoning and content.
+    behavior: when ``enable_thinking=False`` or
+    ``force_nonempty_content=True`` and content is empty, swaps
+    reasoning and content.
     """
 
     def __init__(

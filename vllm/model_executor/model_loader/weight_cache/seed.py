@@ -13,7 +13,7 @@ target validates and installs it:
 
 Payloads are JSON values. Large binary state (weights) must not be inlined:
 the payload then describes the transfer (e.g. a storage manifest) and the
-kind's `install` drives the data plane itself.
+kind's ``install`` drives the data plane itself.
 
 The connection is unencrypted beyond the shared token; keep the listener on a
 trusted network.
@@ -56,10 +56,10 @@ class Seedable(Protocol):
         ...
 
     def resolve(self, request: dict[str, Any]) -> Any | None:
-        """Source side: produce the payload named by `request`.
+        """Source side: produce the payload named by ``request``.
 
         Validate the wire key first — raise an error on any malformed field
-        (`ValueError` for bad values, `KeyError` for missing ones), before
+        (``ValueError`` for bad values, ``KeyError`` for missing ones), before
         touching local state. The transport turns it into an error response.
         Return None on a miss.
         """
@@ -100,7 +100,7 @@ class SeedTransport:
         self._server: socket.socket | None = None
 
     def adopt(self, seedable: Seedable, ctx: Any) -> None:
-        """Best-effort: fetch and install `seedable` from the source daemon.
+        """Best-effort: fetch and install ``seedable`` from the source daemon.
 
         Any failure degrades to the local path with a log line.
         """

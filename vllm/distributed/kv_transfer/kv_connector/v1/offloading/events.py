@@ -4,21 +4,23 @@
 
 The OffloadingManager identifies an offloaded chunk only by its OffloadKey,
 so its raw events carry no token ids, parent hash, or block size.
-:class:`OffloadingEventsTracker` snapshots each chunk's full `BlockStored`
-payload while the `Request` is alive and publishes stores as block-granular
-payloads: a chunk event may carry multiple constituent per-block hashes, and evictions
-fan out to the same hashes. Chunks overlapping a non-chunk-aligned shared prefix
-re-announce the shared hashes once per chunk; consumers are expected to deduplicate
-(reference-count) repeated store/remove announcements of the same hash. Opt-in via
-`kv_connector_extra_config["self_describing_kv_events"]`; inert unless KV cache events
-are enabled. See the PR description for the full design.
+:class:`OffloadingEventsTracker` snapshots each chunk's full ``BlockStored``
+payload while the ``Request`` is alive and publishes stores as block-granular
+payloads: a chunk event may carry multiple constituent per-block hashes, and
+evictions fan out to the same hashes. Chunks overlapping a non-chunk-aligned
+shared prefix re-announce the shared hashes once per chunk; consumers are
+expected to deduplicate (reference-count) repeated store/remove announcements
+of the same hash. Opt-in via
+``kv_connector_extra_config["self_describing_kv_events"]``; inert unless
+KV cache events are enabled. See the PR description for the full design.
 
-Recurrent (Mamba / linear-attention) state groups announce state checkpoints, not token
-ranges: an offloaded chunk holds the recurrent state at the chunk's last hash only.
-Their `BlockStored` therefore carries that single hash, its parent, an empty `token_ids`
-and `kv_cache_spec_kind` `"mamba"`. A consumer aligns it by hash with the attention
-group's blocks, and a hybrid prefix is reusable only up to a boundary where every group
-has a residency. Windowed attention groups keep the legacy placeholder payload.
+Recurrent (Mamba / linear-attention) state groups announce state checkpoints,
+not token ranges: an offloaded chunk holds the recurrent state at the chunk's
+last hash only. Their ``BlockStored`` therefore carries that single hash, its
+parent, an empty ``token_ids`` and ``kv_cache_spec_kind`` ``"mamba"``. A
+consumer aligns it by hash with the attention group's blocks, and a hybrid
+prefix is reusable only up to a boundary where every group has a residency.
+Windowed attention groups keep the legacy placeholder payload.
 """
 
 from collections.abc import Iterable
@@ -93,10 +95,10 @@ class _OffloadEventMetadata(
 ):
     """BlockStored payload snapshot for one OffloadKey, captured while the
     Request is available and kept until the final matching removal event.
-    `medium` and `ownership` are forwarded from the OffloadingEvent.
+    ``medium`` and ``ownership`` are forwarded from the OffloadingEvent.
 
     One is kept per offloaded chunk, so it is untracked by the cyclic GC: keep
-    fields free of tracked containers (`active_residencies` is a bitmask)."""
+    fields free of tracked containers (``active_residencies`` is a bitmask)."""
 
     # The chunk's constituent block hashes; the last one is the OffloadKey.
     block_hashes: tuple[BlockHash, ...]
@@ -115,7 +117,7 @@ class _OffloadEventMetadata(
 def describes_group(group_config: "GroupOffloadConfig") -> bool:
     """Whether the tracker builds self-describing payloads for this group.
 
-    Full-attention groups and recurrent state groups (`MambaSpec`) do;
+    Full-attention groups and recurrent state groups (``MambaSpec``) do;
     windowed attention groups (sliding window, chunked local) keep the legacy
     placeholder because a window's hashes do not identify a reusable prefix.
     """
@@ -148,8 +150,8 @@ def _as_state_checkpoint(meta: _OffloadEventMetadata) -> _OffloadEventMetadata:
 class OffloadingEventsTracker:
     """Tracks offloaded chunks' KV event payloads from store to eviction.
 
-    The scheduler calls :meth:`record_store` from `_build_store_jobs` and
-    :meth:`record_lookup` for allocated primary-tier hits while the `Request` is
+    The scheduler calls :meth:`record_store` from ``_build_store_jobs`` and
+    :meth:`record_lookup` for allocated primary-tier hits while the ``Request`` is
     available. Unallocated and missing lookups add no state. Entries remain until
     the final observed residency removal or :meth:`reset`.
     """
@@ -309,7 +311,7 @@ class OffloadingEventsTracker:
         retain the legacy placeholder payload so consumers can ignore them.
 
         Yields:
-            `BlockStored` or `BlockRemoved` events corresponding to
+            ``BlockStored`` or ``BlockRemoved`` events corresponding to
             the underlying :class:`OffloadingEvent` stream.
 
         """
@@ -342,7 +344,7 @@ class OffloadingEventsTracker:
     ) -> _OffloadEventMetadata:
         """Build the payload snapshot for one offloaded chunk: its
         constituent per-block hashes, the whole chunk's tokens, and the
-        per-block `block_size`. A recurrent group's chunk is reduced to
+        per-block ``block_size``. A recurrent group's chunk is reduced to
         its state checkpoint (see :func:`_as_state_checkpoint`)."""
         hashes_per_chunk = group_config.hashes_per_chunk
         assert hashes_per_chunk > 0

@@ -466,7 +466,7 @@ class GenerateLogProb(BaseModel):
 class GenerateLogProbsContent(GenerateLogProb):
     """The sampled token at one position, plus its top-k candidates.
 
-    `top_logprobs` is a list, not a dict: JSON turns dict keys into strings
+    ``top_logprobs`` is a list, not a dict: JSON turns dict keys into strings
     and the order would be implicit. It is in the engine's order: the sampled
     token first, then the remaining candidates in rank order.
     """
@@ -477,7 +477,7 @@ class GenerateLogProbsContent(GenerateLogProb):
 class GenerateLogProbs(BaseModel):
     """Output logprobs for one choice.
 
-    `content` holds one entry per generated token.
+    ``content`` holds one entry per generated token.
     """
 
     content: list[GenerateLogProbsContent] | None = None

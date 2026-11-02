@@ -64,7 +64,7 @@ class ReasoningParser:
         detokenizer holds back text.  This method returns the engine's
         *processed* state, not a raw token-ID check.
 
-        Only called for parsers with `engine_based_streaming = True`.
+        Only called for parsers with ``engine_based_streaming = True``.
         """
         return False
 
@@ -134,9 +134,9 @@ class ReasoningParser:
         """Count the number of reasoning tokens in a sequence.
 
         Text-based reasoning models typically wrap their chain-of-thought
-        between special start/end tokens (e.g., `<think> ... </think>`).
+        between special start/end tokens (e.g., ``<think> ... </think>``).
         Implementations that support reasoning token counting should override
-        this method. The default implementation returns `0` so existing
+        this method. The default implementation returns ``0`` so existing
         parsers remain unchanged unless they explicitly opt in.
 
         Args:

@@ -63,7 +63,7 @@ def _verify_num_sequences(value: int, parameter_name: str) -> None:
 
 
 def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
-    """Validate `thinking_token_budget`; return `None` if unset."""
+    """Validate ``thinking_token_budget``; return ``None`` if unset."""
     if value is None:
         return None
     if isinstance(value, (bool, float)) or not isinstance(value, int):

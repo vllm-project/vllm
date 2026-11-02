@@ -6,13 +6,14 @@ Implements the HyperConnection residual scheme proposed in
 "HyperConnections" (https://arxiv.org/abs/2409.19606).
 
 The two concrete variants are:
-  - `HyperConnectionBase`  - simple average pooling across hc_count parallel
+  - ``HyperConnectionBase``  - simple average pooling across hc_count parallel
     streams (equivalent to hyperconnection_average).
-  - `GatedResidual` - learnable low-rank gated mixing and injection (gated_residual).
+  - ``GatedResidual``  - learnable low-rank gated mixing and injection
+    (gated_residual).
 
-Hidden states between layers have shape `[..., HC*HS]` with HS inner
+Hidden states between layers have shape ``[..., HC*HS]`` with HS inner
 (HC outer, HS inner — checkpoint-native layout). The local torch
-implementation consumes the hyper input viewed as `[..., HC, HS]`.
+implementation consumes the hyper input viewed as ``[..., HC, HS]``.
 
 Typical usage inside a transformer decoder layer::
 
@@ -100,10 +101,10 @@ class GroupedGemmaRMSNorm(nn.Module):
 # Average-pooling variant
 # ---------------------------------------------------------------------------
 class HyperConnectionBase(nn.Module):
-    """Average-pooling HyperConnection (`hyperconnection_average`).
+    """Average-pooling HyperConnection (``hyperconnection_average``).
 
-    Splits the incoming `[..., HC*HS]` tensor (HC outer, HS inner) into
-    `HC` parallel streams, averages them for the block input, and
+    Splits the incoming ``[..., HC*HS]`` tensor (HC outer, HS inner) into
+    ``HC`` parallel streams, averages them for the block input, and
     broadcasts the block output back to every stream.
     """
 
@@ -149,9 +150,10 @@ class HyperConnectionBase(nn.Module):
 class GatedResidual(HyperConnectionBase):
     """Gated HyperConnection with learnable low-rank mixing and injection.
 
-    `mix()` applies GemmaRMSNorm per HC stream and projects through a low-rank sigmoid
-    gate to produce a single block input. `combine()` injects the block output back into
-    each stream through a learned per-stream injection weight.
+    ``mix()`` applies GemmaRMSNorm per HC stream and projects through a
+    low-rank sigmoid gate to produce a single block input. ``combine()``
+    injects the block output back into each stream through a learned
+    per-stream injection weight.
 
     This implementation uses only PyTorch operators. Tensor-parallel
     collectives are supplied by its caller.

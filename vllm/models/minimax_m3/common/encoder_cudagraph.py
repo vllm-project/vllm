@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Encoder CUDA graph support for the MiniMax M3 vision tower.
 
-Mixin implementing the SupportsEncoderCudaGraph protocol for any host class that holds
-the vision tower as `self.vision_tower` (a `MiniMaxVLVisionModel`). The manager routes
-image items through this mixin; video items use the eager encoder path.
+Mixin implementing the SupportsEncoderCudaGraph protocol for any host class
+that holds the vision tower as ``self.vision_tower`` (a
+``MiniMaxVLVisionModel``). The manager routes image items through this mixin;
+video items use the eager encoder path.
 """
 
 from collections.abc import Hashable
@@ -27,7 +28,7 @@ if TYPE_CHECKING:
 
 
 class MiniMaxM3EncoderCudaGraphMixin(SupportsEncoderCudaGraph):
-    """SupportsEncoderCudaGraph for hosts with `self.vision_tower`."""
+    """SupportsEncoderCudaGraph for hosts with ``self.vision_tower``."""
 
     vision_tower: "MiniMaxVLVisionModel"
     multimodal_config: "MultiModalConfig | None"

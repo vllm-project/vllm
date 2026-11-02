@@ -108,7 +108,7 @@ def load_audio_pyav(
             expands into gigabytes of PCM.
 
     Returns:
-        `(waveform, sample_rate)` where *waveform* is a 1-D float32
+        ``(waveform, sample_rate)`` where *waveform* is a 1-D float32
         NumPy array and *sample_rate* is the native sample rate in Hz.
 
     """
@@ -266,13 +266,13 @@ def load_audio_torchcodec(
 
     Unlike :func:`load_audio_pyav`, which drives FFmpeg through a per-frame
     Python generator, torchcodec decodes inside a single call that releases
-    the GIL. Resampling also happens in C++ (`sample_rate=sr`), so this
+    the GIL. Resampling also happens in C++ (``sample_rate=sr``), so this
     backend never falls back to PyAV or libsndfile.
 
     Args:
         path: A :class:`~io.BytesIO` buffer, a filesystem
             :class:`~pathlib.Path`, or a string path.
-        sr: Output sample rate; `None` keeps the native rate. Must be an
+        sr: Output sample rate; ``None`` keeps the native rate. Must be an
             integer when set.
         mono: Average channels down to a single channel.
         max_duration_s: Reject audio longer than this many seconds.
@@ -282,8 +282,9 @@ def load_audio_torchcodec(
             bytes.
 
     Returns:
-        `(waveform, sample_rate)` where *waveform* is a float32 NumPy array (1-D when
-        `mono=True`) and *sample_rate* is the output sample rate in Hz.
+        ``(waveform, sample_rate)`` where *waveform* is a float32 NumPy
+        array (1-D when ``mono=True``) and *sample_rate* is the output
+        sample rate in Hz.
 
     """
     if AudioDecoder is None:
@@ -439,9 +440,10 @@ def load_audio(
         max_duration_s: Reject audio longer than this many seconds.
         max_decode_bytes: Reject audio that would decode to more than this
             many bytes.
-        backend: One of `AUDIO_BACKENDS`. `None` (default) selects `"auto"`, which tries
-            torchcodec, then falls back to the soundfile → PyAV chain; the other values
-            select a single backend with no fallback.
+        backend: One of ``AUDIO_BACKENDS``. ``None`` (default) selects
+            ``"auto"``, which tries torchcodec, then falls back to the
+            soundfile → PyAV chain; the other values select a single
+            backend with no fallback.
 
     """
     backend = backend or "auto"

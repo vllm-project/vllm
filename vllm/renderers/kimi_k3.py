@@ -69,9 +69,10 @@ def _normalize_k3_tool_messages(
 ) -> list[dict[str, Any]]:
     """Reorder tool-result messages to match assistant tool_call order.
 
-    Supports matching by `tool_call_id` or by the synthetic
-    `"{tool}:{zero_based_index}"` alias. When any tool message in a block cannot be
-    resolved, the whole block is left in its original order (graceful fallback).
+    Supports matching by ``tool_call_id`` or by the synthetic
+    ``"{tool}:{zero_based_index}"`` alias. When any tool message in a
+    block cannot be resolved, the whole block is left in its original
+    order (graceful fallback).
 
     Returns a new list; caller-owned message dicts are not mutated.
     """
@@ -143,7 +144,7 @@ class KimiK3Renderer(BaseRenderer[HfTokenizer]):
     """Render chat prompts with Kimi K3's Python XTML encoding.
 
     K3 ships no Jinja chat template; its tokenizer renders messages through
-    `encoding_k3` instead. We tokenize eagerly so the structural markers keep
+    ``encoding_k3`` instead. We tokenize eagerly so the structural markers keep
     their special-token ids while user- and tool-supplied text stays ordinary.
     """
 

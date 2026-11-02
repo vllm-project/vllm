@@ -98,7 +98,7 @@ class PreparedKda:
         return self
 
     def run(self, projected, out, *, caches, slots, accepted=None):
-        """`accepted` [>= B] (verify steps): `slots` is [>= B, q] contiguous."""
+        """``accepted`` [>= B] (verify steps): ``slots`` is [>= B, q] contiguous."""
         batch = projected.shape[0]
         key, rows = batch, batch
         if accepted is not None:

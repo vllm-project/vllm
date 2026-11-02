@@ -2,9 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Entropy-gated deferred verification for FLy speculative decoding.
 
-FLy defers a high-entropy rejection when the next `W` draft tokens would be accepted
-natively. ModelRunnerV1 encodes these decisions in a pre-pass by replacing target
-argmaxes or uniform samples. ModelRunnerV2 applies them inside its rejection kernel.
+FLy defers a high-entropy rejection when the next ``W`` draft tokens would be
+accepted natively. ModelRunnerV1 encodes these decisions in a pre-pass by
+replacing target argmaxes or uniform samples. ModelRunnerV2 applies them
+inside its rejection kernel.
 """
 
 import torch

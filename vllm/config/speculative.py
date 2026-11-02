@@ -1284,18 +1284,20 @@ class SpeculativeConfig:
         target_hf_overrides: HfOverrides | None,
         transformers_mtp_overrides: dict[str, Any] | None = None,
     ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
-        """Build the `hf_overrides` for the draft `ModelConfig`.
+        """Build the ``hf_overrides`` for the draft ``ModelConfig``.
 
-        Callable overrides on the target are config-to-config transforms (e.g. test
-        harnesses shrinking `num_hidden_layers`) and must also reach the draft config —
-        otherwise a draft belonging to a large target is instantiated at full size even
-        when the target is shrunk. Dict overrides are target-specific key patches and
-        are not applied to the draft.
+        Callable overrides on the target are config-to-config transforms
+        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
+        reach the draft config — otherwise a draft belonging to a large
+        target is instantiated at full size even when the target is shrunk.
+        Dict overrides are target-specific key patches and are not applied
+        to the draft.
 
-        The composed override must stay picklable: the draft `ModelConfig` is sent to
-        spawned engine-core processes, so a local closure would fail with
-        `Can't get local object` during pickling. Bind the target via
-        `functools.partial` over a module-referenceable static method instead.
+        The composed override must stay picklable: the draft ``ModelConfig``
+        is sent to spawned engine-core processes, so a local closure would
+        fail with ``Can't get local object`` during pickling. Bind the
+        target via ``functools.partial`` over a module-referenceable static
+        method instead.
         """
         if not callable(target_hf_overrides):
             return functools.partial(
@@ -1311,7 +1313,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def _is_custom_proposer_path(model: str | None) -> bool:
-        """True if `model` is a dotted import path (e.g. `pkg.MyProposer`)."""
+        """True if ``model`` is a dotted import path (e.g. ``pkg.MyProposer``)."""
         if model is None:
             return False
         if model.startswith(("http://", "https://", "file://")):
@@ -1756,7 +1758,7 @@ class SpeculativeConfig:
         """Return the maximum additional drafting slots per request.
 
         The scheduler budget already includes one query slot per decoding request.
-        Let K be `num_speculative_tokens`. Standard configurations require:
+        Let K be ``num_speculative_tokens``. Standard configurations require:
 
         ==================== ============= ======== ================
         Algorithm            Method        Parallel Additional slots

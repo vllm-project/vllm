@@ -47,7 +47,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
             cd FlexKV && bash build.sh
 
     Configuration:
-        Pass `kv_connector="FlexKVConnectorV1"` via `--kv-transfer-config`::
+        Pass ``kv_connector="FlexKVConnectorV1"`` via ``--kv-transfer-config``::
 
             --kv-transfer-config \
             '{"kv_connector":"FlexKVConnectorV1","kv_role":"kv_both"}'
@@ -83,13 +83,14 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         """No-op for FlexKV (currently).
 
         FlexKV manages all KV transfers on the **scheduler side** via
-        `build_connector_meta` (which calls `launch_tasks`) and
-        `update_connector_output` (which polls `query_finished_task`). KV blocks are
-        transferred directly between the FlexKV server and vLLM's GPU memory without
-        worker-side intervention during the forward pass — similar to how NIXL operates.
+        ``build_connector_meta`` (which calls ``launch_tasks``) and
+        ``update_connector_output`` (which polls ``query_finished_task``).
+        KV blocks are transferred directly between the FlexKV server and
+        vLLM's GPU memory without worker-side intervention during the
+        forward pass — similar to how NIXL operates.
 
         These worker-side hooks are kept (rather than omitted) to satisfy
-        the `KVConnectorBase_V1` interface contract and to serve as
+        the ``KVConnectorBase_V1`` interface contract and to serve as
         extension points for a future worker-side layer-pipelining path.
 
         Args:
@@ -103,7 +104,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         """No-op for FlexKV (currently).
 
         FlexKV manages all KV transfers on the scheduler side.
-        This hook is retained for `KVConnectorBase_V1` API compatibility.
+        This hook is retained for ``KVConnectorBase_V1`` API compatibility.
 
         Args:
             layer_name: the name of the layer (unused).
@@ -121,10 +122,10 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         """No-op for FlexKV (currently).
 
         FlexKV offloads KV cache asynchronously from the scheduler side
-        after a request finishes (see `request_finished`).  It does not
+        after a request finishes (see ``request_finished``).  It does not
         intercept individual layer tensors during the forward pass.
 
-        This hook is retained to satisfy `KVConnectorBase_V1` and as an
+        This hook is retained to satisfy ``KVConnectorBase_V1`` and as an
         extension point for future per-layer async offload support.
 
         Args:
@@ -141,11 +142,12 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
     def wait_for_save(self):
         """No-op for FlexKV (currently).
 
-        KV offload tasks are tracked asynchronously by the scheduler connector via
-        `request_finished` / `query_finished_task`. There is no pending worker-side save
-        to wait for at forward-context exit.
+        KV offload tasks are tracked asynchronously by the scheduler
+        connector via ``request_finished`` / ``query_finished_task``.
+        There is no pending worker-side save to wait for at
+        forward-context exit.
 
-        Retained to satisfy `KVConnectorBase_V1` and as an extension
+        Retained to satisfy ``KVConnectorBase_V1`` and as an extension
         point for future worker-side save-completion signalling.
         """
         self._flexkv_connector.wait_for_save()
@@ -184,7 +186,7 @@ class FlexKVConnectorV1(KVConnectorBase_V1):
         num_computed_tokens: int,
     ) -> tuple[int, bool]:
         """Get the number of new tokens that can be loaded from the
-        external KV cache beyond `num_computed_tokens`.
+        external KV cache beyond ``num_computed_tokens``.
 
         Args:
             request (Request): the request object.

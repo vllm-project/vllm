@@ -51,7 +51,7 @@ def _popc(m):
 
 
 def _below(mask, base):
-    """The set bits of `mask` below this lane, plus `base` (v_mbcnt)."""
+    """The set bits of ``mask`` below this lane, plus ``base`` (v_mbcnt)."""
     lo = mask.to(fx.Int32)
     hi = (mask >> 32).to(fx.Int32)
     r = fx.rocdl.mbcnt_lo(T.i32, lo.ir_value(), fx.Int32(base).ir_value())
@@ -189,7 +189,7 @@ def compile_topk_prefill(strips: int, *, decode: bool = False):
             return t
 
         def compact(keys, wbase, base, pred):
-            """Append the keys `pred` keeps at `base` if they fit below CAP."""
+            """Append the keys ``pred`` keeps at ``base`` if they fit below CAP."""
             oks = [
                 _one(pred(keys[j], wbase + (j * 64) + lane))
                 for j in range_constexpr(STRIPS)

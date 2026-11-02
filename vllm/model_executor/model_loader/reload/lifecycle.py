@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Begin and complete a checkpoint-format weight update in the reload mode
-`VLLM_RELOAD_MODE` selects (fixed for the process)."""
+``VLLM_RELOAD_MODE`` selects (fixed for the process)."""
 
 import torch
 

@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Logits of the specialized decode: the low-batch LM head GEMM (`lm_head`)
+"""Logits of the specialized decode: the low-batch LM head GEMM (``lm_head``)
 and vocab-parallel logits gathered with the TP group's custom all-gather.
 
 For decode batches the one-shot custom all-gather is several times faster than

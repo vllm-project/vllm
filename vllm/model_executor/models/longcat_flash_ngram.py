@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only LongCat-Flash-Lite (n-gram embedding) model.
 
-`LongcatFlashNgramForCausalLM` is LongCat-Flash (MLA dual-attention + zero-expert MoE +
-YaRN) plus an n-gram embedding input layer: each position's embedding fuses the token
-embedding with hashed embeddings of the preceding `n` tokens. That per-request token
-history is isolated in a Model-Runner-V2 :class:`LongcatNgramModelState` (mirroring
-`DiffusionGemmaModelState`), so `get_model_state_cls` makes the model MRV2-only.
+``LongcatFlashNgramForCausalLM`` is LongCat-Flash (MLA dual-attention +
+zero-expert MoE + YaRN) plus an n-gram embedding input layer: each position's
+embedding fuses the token embedding with hashed embeddings of the preceding
+``n`` tokens. That per-request token history is isolated in a Model-Runner-V2
+:class:`LongcatNgramModelState` (mirroring ``DiffusionGemmaModelState``), so
+``get_model_state_cls`` makes the model MRV2-only.
 """
 
 from collections.abc import Iterable
@@ -48,10 +49,10 @@ def _config_dtype(config: LongcatFlashConfig) -> torch.dtype:
 class NgramEmbedding(nn.Module):
     """Token embedding fused with hashed n-gram embeddings.
 
-    TP-sharded: the `k*(n-1)` per-embedder tables are concatenated into one
-    :class:`VocabParallelEmbedding` (`oe_embedder`) with per-embedder offsets,
-    and the projections are stacked into one `oe_projection` applied with a
-    single `bmm`. Hashing math is ported from the HF reference.
+    TP-sharded: the ``k*(n-1)`` per-embedder tables are concatenated into one
+    :class:`VocabParallelEmbedding` (``oe_embedder``) with per-embedder offsets,
+    and the projections are stacked into one ``oe_projection`` applied with a
+    single ``bmm``. Hashing math is ported from the HF reference.
     """
 
     def __init__(self, config: LongcatFlashConfig, base_embeddings: nn.Module) -> None:
@@ -152,10 +153,10 @@ class NgramEmbedding(nn.Module):
         """Fused n-gram embedding for a flat batch given precomputed ids.
 
         Args:
-            input_ids: `[num_tokens]` current token per position.
-            oe_ids: `[num_tokens, num_embedders]` global (offset) n-gram ids,
-                as produced by the `ngram_compute_n_gram_ids` kernel.
-        Returns: `[num_tokens, hidden]`.
+            input_ids: ``[num_tokens]`` current token per position.
+            oe_ids: ``[num_tokens, num_embedders]`` global (offset) n-gram ids,
+                as produced by the ``ngram_compute_n_gram_ids`` kernel.
+        Returns: ``[num_tokens, hidden]``.
 
         """
         word = self.word_embeddings(input_ids)  # [N, H]
@@ -342,10 +343,10 @@ class LongcatNgramModelState(DefaultModelState):
         return model_inputs
 
     def _compute_oe_ids(self, input_batch: InputBatch) -> torch.Tensor:
-        """Batched global n-gram ids `[num_tokens, num_embedders]`.
+        """Batched global n-gram ids ``[num_tokens, num_embedders]``.
 
         Assembles an ephemeral per-request token table (``[n-1] context ++
-        current tokens`, EOS-negated) and runs the `ngram_compute_n_gram_ids``
+        current tokens``, EOS-negated) and runs the ``ngram_compute_n_gram_ids``
         CUDA kernel for the whole batch, then rolls each slot's context forward.
         """
         device = self.token_context.device

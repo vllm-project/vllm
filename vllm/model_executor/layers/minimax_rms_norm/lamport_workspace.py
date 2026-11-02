@@ -176,12 +176,14 @@ class LamportWorkspace:
         Local rank (0-based).
     world_size : int
         Total number of ranks in the TP group.
-    comm_size : int Size in bytes of *one* Lamport buffer slot. The total IPC allocation
-        per rank is `3 * comm_size` (triple-buffering). Must be large enough to hold the
-        per-slot data written by the kernel. Use `compute_comm_size_for_minimax()` for a
-        safe default.
-    process_group : optional `torch.distributed` process group for IPC handle exchange.
-        `None` uses the default group.
+    comm_size : int
+        Size in bytes of *one* Lamport buffer slot. The total IPC allocation
+        per rank is ``3 * comm_size`` (triple-buffering). Must be large enough
+        to hold the per-slot data written by the kernel.  Use
+        ``compute_comm_size_for_minimax()`` for a safe default.
+    process_group : optional
+        ``torch.distributed`` process group for IPC handle exchange.
+        ``None`` uses the default group.
 
     """
 
@@ -225,7 +227,7 @@ class LamportWorkspace:
     @property
     def workspace(self) -> torch.Tensor:
         """Device tensor (int64) that can be passed to the kernel
-        as `void** workspace`."""
+        as ``void** workspace``."""
         return self._workspace
 
     # ------------------------------------------------------------------
@@ -238,11 +240,11 @@ class LamportWorkspace:
         world_size: int,
         fused_qk: bool = True,
     ) -> int:
-        """Return a safe `comm_size` (in bytes) for MiniMaxReduceRMSKernel.
+        """Return a safe ``comm_size`` (in bytes) for MiniMaxReduceRMSKernel.
 
         The kernel stores per-token variance scalars in the Lamport buffer:
-          - single-matrix path: `world_size × max_tokens × 4` bytes per slot
-          - fused Q+K path: `world_size × 2 × ceil(max_tokens/4) × 16` bytes per slot
+          - single-matrix path: ``world_size × max_tokens × 4`` bytes per slot
+          - fused Q+K path: ``world_size × 2 × ceil(max_tokens/4) × 16`` bytes per slot
 
         The returned value is rounded up to 2 MiB alignment.
         """
@@ -292,10 +294,13 @@ def get_allreduce_workspace(
     ----------
     rank, world_size : int
         TP rank and TP size.
-    comm_size : int, optional Explicit slot size in bytes. If `None`, computed
-        automatically from `max_tokens` and `world_size` (fused Q+K path).
-    max_tokens : int Maximum number of tokens per batch (used when `comm_size is None`).
-    process_group : optional `torch.distributed` process group.
+    comm_size : int, optional
+        Explicit slot size in bytes.  If ``None``, computed automatically
+        from ``max_tokens`` and ``world_size`` (fused Q+K path).
+    max_tokens : int
+        Maximum number of tokens per batch (used when ``comm_size is None``).
+    process_group : optional
+        ``torch.distributed`` process group.
 
     """
     if comm_size is None:

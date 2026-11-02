@@ -132,7 +132,7 @@ logger = init_logger(__name__)
 
 
 def _norm_quant_key(linear: nn.Module) -> QuantKey | None:
-    """The input quant key of `linear` that the fused norms can produce.
+    """The input quant key of ``linear`` that the fused norms can produce.
 
     Checked per call: keys are exposed after weight loading, and LoRA hides
     them (requires_unquantized_input).
@@ -177,8 +177,8 @@ def _fused_gdn_gated_rms_norm_quant(
 class Qwen3_5RMSNorm(nn.Module):
     """Gemma-style RMS normalization backed by flashinfer kernels.
 
-    When `residual` is given, the fused add + norm runs in place and the
-    updated `(x, residual)` pair is returned.
+    When ``residual`` is given, the fused add + norm runs in place and the
+    updated ``(x, residual)`` pair is returned.
     """
 
     def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
@@ -209,11 +209,11 @@ class Qwen3_5RMSNorm(nn.Module):
         key: QuantKey,
         write_y: bool = False,
     ) -> tuple[QuantizedActivation, torch.Tensor | None, torch.Tensor]:
-        """`forward` fused with `linear`'s input quantization `key`.
+        """``forward`` fused with ``linear``'s input quantization ``key``.
 
         x is not modified. Returns the quantized normed activation, the
-        normed activation in x's dtype when `write_y` (else None), and the
-        residual (x itself when `residual` is None).
+        normed activation in x's dtype when ``write_y`` (else None), and the
+        residual (x itself when ``residual`` is None).
         """
         nvfp4 = key == kNvfp4Dynamic
         scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
@@ -874,7 +874,7 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     ) -> torch.Tensor | IntermediateTensors:
         """Run forward pass for Qwen3.5.
 
-        With mrope enabled (default for Qwen3VL-class models), `positions`
+        With mrope enabled (default for Qwen3VL-class models), ``positions``
         has shape `(3, seq_len)`, otherwise `(seq_len,)`.
         """
         if intermediate_tensors is not None:

@@ -107,7 +107,7 @@ class RouteSitu:
 
     @cute.jit
     def select(self, key, threshold, buffers):
-        """B>8 candidates (keys at or above `threshold`) append to `dense` at a
+        """B>8 candidates (keys at or above ``threshold``) append to ``dense`` at a
         per-warp offset from the shared count, then rank themselves: 8 threads per
         candidate (4 past 32 candidates) each count their share of the candidates above
         it (key, then lower expert). Ranks below 16 store the expert and its sigmoid."""
@@ -388,8 +388,8 @@ def front_ks(batch, n):
 
 
 def front_geometry(batch, n, ks, kb=None, tg=None, rt=None, ch=None):
-    """(rt, kq, staged, tg, ch) of the front GEMM over `n` rows. Unset arguments come
-    from the table when `ks` is its K-split, else from the single pass; token groups
+    """(rt, kq, staged, tg, ch) of the front GEMM over ``n`` rows. Unset arguments come
+    from the table when ``ks`` is its K-split, else from the single pass; token groups
     whose x slice does not fit in SMEM fall back to the single pass."""
     entry = front_table(n).get(batch, ())
     table = entry[1:] if entry[:1] == (ks,) else (14, 0, 1, 0)
@@ -434,8 +434,8 @@ class SharedFront:
         self, moe, packed, box, storage, batches, beta, linear_beta, plan=None,
         counters=None, q=1,
     ):  # fmt: skip
-        """`plan`: the experts' plan buffer, written by the routing kernel at B>8;
-        `counters`: the fused shared expert's model-owned barrier counters; `q`: the
+        """``plan``: the experts' plan buffer, written by the routing kernel at B>8;
+        ``counters``: the fused shared expert's model-owned barrier counters; ``q``: the
         deployment's verify length (its SPLITS entries)."""
         experts = moe.shared_experts
         gate_up, down = experts.gate_up_proj.weight, experts.down_proj.weight
@@ -495,7 +495,7 @@ class SharedFront:
     def route(self, x):
         """Router logits + published down shard, then top16 and the latent copy (and
         at B>8 the experts' MXFP8 plan). Merged batches publish them from the gate/up
-        kernel, which also leaves h for `shared_expert`'s down rows."""
+        kernel, which also leaves h for ``shared_expert``'s down rows."""
         views, front, route, _, args, extra, code = self.plans[x.shape[0]]
         s = stream(self.device)
         if x.shape[0] in self.merged:
@@ -515,7 +515,7 @@ class SharedFront:
         return bool(self.plans[batch][5])
 
     def shared_expert(self, x, tail):
-        """The shared expert's rows into the tail's RS mailboxes (`tail.push`); the
+        """The shared expert's rows into the tail's RS mailboxes (``tail.push``); the
         fused kernel peer-stores them itself and leaves the returned rows unwritten.
         Returns (rows, the split's down launch to run beside the experts, or None)."""
         views, _, _, situ, args, _, code = self.plans[x.shape[0]]

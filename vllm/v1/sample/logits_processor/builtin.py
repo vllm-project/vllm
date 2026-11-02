@@ -297,8 +297,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         Stop tokens stay masked unless masking them would leave every logit
         in a row at -inf.
 
-        Example: `num_draft_tokens = [2, 3, 1]`
-          -> `logits` shape `[6, V]`, `cumsum = [0, 2, 5, 6]`
+        Example: ``num_draft_tokens = [2, 3, 1]``
+          -> ``logits`` shape ``[6, V]``, ``cumsum = [0, 2, 5, 6]``
           -> request 0 owns rows 0-1, request 1 rows 2-4, request 2 row 5.
         """
         if not self.min_toks:

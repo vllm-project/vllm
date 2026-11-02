@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Gemma RMSNorm (optionally fused with the residual add) in one Triton pass.
 
-With an `sf` scale buffer the output is E4M3 data plus UE8M0 scales in the 128x4
-swizzled layout, replacing the BF16 norm followed by a separate MXFP8 quantize (which
-re-reads the full normed activation). Without it, the output is the plain BF16 norm. The
-residual is bitwise the BF16 norm's; the quantized data and scales match the reference
-quantize within one E4M3 step (the rstd reduction order differs).
+With an ``sf`` scale buffer the output is E4M3 data plus UE8M0 scales in the
+128x4 swizzled layout, replacing the BF16 norm followed by a separate MXFP8
+quantize (which re-reads the full normed activation). Without it, the output
+is the plain BF16 norm. The residual is bitwise the BF16 norm's; the
+quantized data and scales match the reference quantize within one E4M3 step
+(the rstd reduction order differs).
 """
 
 import torch
@@ -107,7 +108,7 @@ def gemma_rmsnorm_mxfp8(
     residual: torch.Tensor | None = None,
     mxfp8: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    """GemmaRMSNorm of `x` (plus `residual` in place when given).
+    """GemmaRMSNorm of ``x`` (plus ``residual`` in place when given).
 
     Args:
         x: (num_tokens, hidden) BF16 activation, contiguous along the row
@@ -120,9 +121,10 @@ def gemma_rmsnorm_mxfp8(
             normed activation.
 
     Returns:
-        `(data, scale)`: with `mxfp8=True`, E4M3 data (num_tokens, hidden) and UE8M0
-        scales in the 128x4 swizzled layout with zeroed padding rows; with
-        `mxfp8=False`, the BF16 normed activation and None.
+        ``(data, scale)``: with ``mxfp8=True``, E4M3 data (num_tokens,
+        hidden) and UE8M0 scales in the 128x4 swizzled layout with zeroed
+        padding rows; with ``mxfp8=False``, the BF16 normed activation and
+        None.
 
     """
     assert x.dim() == 2 and x.stride(1) == 1, x.shape

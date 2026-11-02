@@ -5,7 +5,7 @@
 This module is deliberately import-light: the frontend process uses it to
 validate per-request params, so importing it must not pull in model-runner
 side modules (torch, triton, worker state). Imports needed to instantiate
-processors are deferred to `build_custom_logits_processors`.
+processors are deferred to ``build_custom_logits_processors``.
 """
 
 import importlib
@@ -37,8 +37,9 @@ LOGITSPROCS_GROUP = "vllm.logits_processors"
 def _load_v2_logitsprocs_plugins() -> list[type[LogitsProcessor]]:
     """Load installed logits processor plugins.
 
-    Plugins registered under `LOGITSPROCS_GROUP` ship V1-interface processors today;
-    those crash under the V2 sampler, so reject them at load time.
+    Plugins registered under ``LOGITSPROCS_GROUP`` ship V1-interface
+    processors today; those crash under the V2 sampler, so reject them at
+    load time.
     """
     from vllm.utils.torch_utils import guard_cuda_initialization
 
@@ -188,7 +189,7 @@ def build_custom_logits_processors_params_validator(
     """Load custom processor classes once and return a params validator.
 
     Called from the frontend at startup. The returned callable runs each
-    processor's `validate_params` at request admission.
+    processor's ``validate_params`` at request admission.
 
     Raises:
         ValueError: if a loaded class does not implement the V2 interface.

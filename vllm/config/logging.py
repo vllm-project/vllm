@@ -14,13 +14,13 @@ LogFormatter = Literal["text", "json"]
 
 @config
 class LoggingConfig:
-    """vLLM logging. Default `dictConfig` adds a formatted stream handler.
+    """vLLM logging. Default ``dictConfig`` adds a formatted stream handler.
 
-    Supply a JSON object with `--logging-config` or individual fields with
-    dotted arguments such as `--logging-config.log_level DEBUG` and
-    `--logging-config.formatter json`. `--log-level` and legacy
-    `--log-config-file` override their matching fields. Set
-    `configure_logging` to false to skip applying a `dictConfig`.
+    Supply a JSON object with ``--logging-config`` or individual fields with
+    dotted arguments such as ``--logging-config.log_level DEBUG`` and
+    ``--logging-config.formatter json``. ``--log-level`` and legacy
+    ``--log-config-file`` override their matching fields. Set
+    ``configure_logging`` to false to skip applying a ``dictConfig``.
     """
 
     log_level: LogLevel = Field(

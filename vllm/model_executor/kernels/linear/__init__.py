@@ -1030,7 +1030,7 @@ def _user_linear_activation_override() -> QuantKey | None:
 def _resolve_linear_activation_key(
     model_activation_key: QuantKey | None,
 ) -> QuantKey | None:
-    """Apply `--quantization-config.linear.activation` to the checkpoint's
+    """Apply ``--quantization-config.linear.activation`` to the checkpoint's
     activation key. The override wins: it may replace a checkpoint's MXFP4
     activations with a format a kernel computes directly (e.g. int8)."""
     user_override = _user_linear_activation_override()

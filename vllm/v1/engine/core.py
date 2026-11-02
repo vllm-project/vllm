@@ -1024,12 +1024,12 @@ class EngineCore:
         All pause modes queue new adds -- "abort" and "keep" skip step();
         "wait" allows step() so in-flight requests can drain.
 
-        - `abort`: Set PAUSED_NEW, abort all requests, wait for abort
+        - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - `wait`: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
-        - `keep`: Set PAUSED_ALL; return a Future that completes when the
+        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
         if mode not in get_args(PauseMode):
@@ -2231,9 +2231,9 @@ class EngineCoreProc(EngineCore):
     ) -> None:
         """Return a retryable response for a P0/P1 cache-drift miss.
 
-        Surfaces every drifted hash via `EngineCoreOutput.mm_cache_miss_hashes` so
+        Surfaces every drifted hash via ``EngineCoreOutput.mm_cache_miss_hashes`` so
         the frontend drops them from its sender cache and the client resends with
-        data (see `MultiModalCacheMissError`). Logged at warning, not exception,
+        data (see ``MultiModalCacheMissError``). Logged at warning, not exception,
         because it is expected and self-healing.
         """
         logger.warning(
@@ -2305,12 +2305,12 @@ class EngineCoreProc(EngineCore):
         All pause modes queue new adds -- "abort" and "keep" skip step();
         "wait" allows step() so in-flight requests can drain.
 
-        - `abort`: Set PAUSED_NEW, abort all requests, wait for abort
+        - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), optionally
           clear caches, then complete the returned Future.
-        - `wait`: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
           optionally clear caches, then complete the returned Future.
-        - `keep`: Set PAUSED_ALL; return a Future that completes when the
+        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
         if mode not in get_args(PauseMode):
@@ -2344,7 +2344,7 @@ class EngineCoreProc(EngineCore):
     def pause_generation(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future | None:
-        """`pause_scheduler` for a user pause: "abort" and "wait" also reject
+        """``pause_scheduler`` for a user pause: "abort" and "wait" also reject
         new requests with a retryable error until resume, rather than queue
         them. Other pauses (e.g. sleep) leave this policy unchanged."""
         future = self.pause_scheduler(mode, clear_cache)
@@ -2402,7 +2402,7 @@ class EngineCoreProc(EngineCore):
 
     def _pause_complete(self) -> bool:
         """Returns True if the pause has fully completed and the caller can
-        return `None` synchronously; False if the pause is still pending
+        return ``None`` synchronously; False if the pause is still pending
         and the caller should register an idle-state callback to finish it.
         """
         return not self.has_work()
@@ -2518,15 +2518,15 @@ class DPEngineCoreProc(EngineCoreProc):
     def _pause_complete(self) -> bool:
         """Two-phase DP-aware pause.
 
-        Phase 1: Set local pause state and `pending_pause` flag. If the
-        engines are idle, kick-start them by setting `engines_running` to
+        Phase 1: Set local pause state and ``pending_pause`` flag. If the
+        engines are idle, kick-start them by setting ``engines_running`` to
         True so ranks enter the stepping loop and reach the all-reduce
-        consensus checkpoint in `_has_global_unfinished_reqs`.
+        consensus checkpoint in ``_has_global_unfinished_reqs``.
 
-        Phase 2 (in `_has_global_unfinished_reqs`): Once the all-reduce
-        confirms that **all** ranks have `pending_pause` set, collectively
-        stop stepping and set `ignore_start_dp_wave` so that stale
-        `START_DP_WAVE` messages cannot re-wake any engine.
+        Phase 2 (in ``_has_global_unfinished_reqs``): Once the all-reduce
+        confirms that **all** ranks have ``pending_pause`` set, collectively
+        stop stepping and set ``ignore_start_dp_wave`` so that stale
+        ``START_DP_WAVE`` messages cannot re-wake any engine.
         """
         self.pending_pause = True
         self.engines_running = True
