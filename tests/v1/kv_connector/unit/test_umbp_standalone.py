@@ -268,11 +268,7 @@ def test_shared_pool_poll_preserves_running_transfer_ownership(
         future.add_done_callback(lambda _: finished.set())
         assert started.wait(5)
         clock.now += 2
-        if operation == "load":
-            with pytest.raises(TimeoutError, match="buffers still in use"):
-                worker.poll(job)
-        else:
-            assert worker.poll(job) is None
+        assert worker.poll(job) is None
         assert job.status is TransferJobStatus.RUNNING
         assert worker._futures[id(job)] is future
         assert not future.done()
@@ -340,6 +336,56 @@ def test_transfer_queued_behind_a_blocked_store_fails(
     assert queued.status is TransferJobStatus.FAILED
     assert queued.error.startswith(TRANSFER_NOT_ATTEMPTED)
     assert worker.poll(stalled) is None
+
+
+def test_async_load_past_its_deadline_stays_pending(monkeypatch, tmp_path):
+    """A stalled server must not fail the step; the request keeps its blocks."""
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: clock.now)
+
+    def get(keys, *args):
+        started.set()
+        assert release.wait(5)
+        return [True] * len(keys)
+
+    handle = _SharedPoolWorkerHandle(
+        SimpleNamespace(
+            batch_get_ranges_into_ptr=get,
+            flush=lambda: True,
+            close=lambda: None,
+        ),
+        "shared-load",
+        RankTopology(),
+        str(tmp_path),
+        1,
+        1,
+    )
+    worker = UMBPStoreConnectorWorker(handle)
+    plan = BlockTransferPlan("restore", 1, request_id="req")
+    try:
+        worker.start_load_kv(
+            None, UMBPConnectorMetadata(async_load=True, load_requests={"req": [plan]})
+        )
+        (job,) = worker._load_jobs["req"].values()
+        handle._futures[id(job)].add_done_callback(lambda _: finished.set())
+        assert started.wait(5)
+        clock.now += 2
+
+        assert worker.get_finished(set()) == (None, None)
+        refused = handle.store([BlockTransferPlan("next", 2)])
+        assert refused.status is TransferJobStatus.FAILED
+        assert refused.error.startswith(TRANSFER_NOT_ATTEMPTED)
+
+        release.set()
+        assert finished.wait(5)
+        assert worker.get_finished(set()) == (None, {"req"})
+        assert worker.get_block_ids_with_load_errors() == set()
+    finally:
+        release.set()
+        handle.close()
 
 
 def test_worker_close_finishes_while_a_store_is_stuck(
@@ -476,10 +522,40 @@ def test_process_exits_while_the_service_never_returns(stuck):
     assert "WORKER_CLOSE_RETURNED" in result.stdout
 
 
+_LOOKUP_NEVER_RETURNS = """
+import threading
+from types import SimpleNamespace
+
+from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime.standalone import (
+    _StandaloneSchedulerHandle,
+)
+
+never = threading.Event()
+client = SimpleNamespace(batch_exists=lambda keys: never.wait(), close=lambda: None)
+handle = _StandaloneSchedulerHandle(client, "unix:///never", 0.1, 0.1)
+assert handle.lookup(["key"]) == [False]
+handle.close()
+print("SCHEDULER_CLOSE_RETURNED", flush=True)
+"""
+
+
+def test_process_exits_while_a_lookup_never_returns():
+    result = subprocess.run(
+        [sys.executable, "-c", _LOOKUP_NEVER_RETURNS],
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stderr[-2000:]
+    assert "SCHEDULER_CLOSE_RETURNED" in result.stdout
+
+
 def test_blocked_store_snapshot_is_safe_during_job_updates():
     worker = object.__new__(_SharedPoolWorkerHandle)
     worker._job_lock = threading.Lock()
     worker._store_deadlines = {}
+    worker._load_deadlines = {}
     worker._futures = {}
     finished = threading.Event()
 
@@ -496,10 +572,10 @@ def test_blocked_store_snapshot_is_safe_during_job_updates():
     updater = threading.Thread(target=update_jobs)
     updater.start()
     while not finished.is_set():
-        worker._blocked_stores()
+        worker._blocked_transfers()
     updater.join()
 
-    assert worker._blocked_stores() == 1
+    assert worker._blocked_transfers() == 1
 
 
 @pytest.mark.parametrize(
@@ -544,6 +620,7 @@ def test_config_rejects_options_the_server_owns(option):
         ({"lookup_timeout_ms": 0}, "lookup_timeout_ms"),
         ({"lookup_timeout_ms": -1}, "lookup_timeout_ms"),
         ({"lookup_timeout_ms": True}, "lookup_timeout_ms"),
+        ({"timeout_ms": 0}, "timeout_ms"),
         ({"num_workers": 0}, "num_workers"),
         ({"num_workers": -1}, "num_workers"),
         ({"master_address": "x"}, "distributed-only"),
@@ -715,6 +792,76 @@ def test_lookup_degrades_to_a_miss_when_the_server_is_gone(server):
 
     assert handle.lookup(["k", "j"]) == [False, False]
     assert handle.clear() is False
+
+
+def _stall_scheduler_call(server, monkeypatch, method, release) -> list:
+    client = server.clients[0]
+    original = getattr(client, method)
+    calls = []
+
+    def stalled(*args):
+        calls.append(args)
+        assert release.wait(10)
+        return original(*args)
+
+    monkeypatch.setattr(client, method, stalled)
+    return calls
+
+
+def test_lookup_without_a_reply_misses_until_the_server_answers(server, monkeypatch):
+    handle = _runtime(lookup_timeout_ms=50).create_scheduler_handle(
+        "ns", RankTopology(), None
+    )
+    server.objects["k"] = b"x"
+    release = threading.Event()
+    calls = _stall_scheduler_call(server, monkeypatch, "batch_exists", release)
+    try:
+        started = time.monotonic()
+        assert handle.lookup(["k"]) == [False]
+        assert handle.lookup(["k"]) == [False]
+        assert time.monotonic() - started < 2
+        # The second lookup fails at once rather than queueing behind the first.
+        assert len(calls) == 1
+
+        release.set()
+        deadline = time.monotonic() + 5
+        while handle.lookup(["k"]) != [True]:
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+    finally:
+        release.set()
+        handle.close()
+
+
+def test_clear_without_a_reply_reports_false(server, monkeypatch):
+    handle = _runtime(lookup_timeout_ms=50).create_scheduler_handle(
+        "ns", RankTopology(), None
+    )
+    release = threading.Event()
+    _stall_scheduler_call(server, monkeypatch, "clear", release)
+    try:
+        assert handle.clear() is False
+    finally:
+        release.set()
+        handle.close()
+
+
+@pytest.mark.parametrize("stuck", ["batch_exists", "close"])
+def test_scheduler_close_does_not_wait_on_a_stalled_server(server, monkeypatch, stuck):
+    handle = _runtime(lookup_timeout_ms=50, timeout_ms=50).create_scheduler_handle(
+        "ns", RankTopology(), None
+    )
+    release = threading.Event()
+    _stall_scheduler_call(server, monkeypatch, stuck, release)
+    try:
+        if stuck == "batch_exists":
+            assert handle.lookup(["k"]) == [False]
+        started = time.monotonic()
+        handle.close()
+        assert time.monotonic() - started < 2
+        assert not server.clients[0].closed
+    finally:
+        release.set()
 
 
 def test_lookup_rejects_a_short_result(server, monkeypatch):

@@ -214,6 +214,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
     KVRange,
     RankTopology,
+    TransferJobStatus,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
     StandaloneRuntime,
@@ -222,25 +223,41 @@ from vllm.distributed.kv_transfer.kv_connector.v1.umbp.runtime import (
 
 address, server_pid, scenario = sys.argv[1], int(sys.argv[2]), sys.argv[3]
 torch.accelerator.set_device_index(0)
-options = {"endpoint": address, "startup_timeout_ms": 20000, "timeout_ms": 200}
-worker = StandaloneRuntime(
-    UMBPRuntimeConfig("standalone", options)
-).create_worker_handle("ns", RankTopology(), None)
+options = {
+    "endpoint": address,
+    "startup_timeout_ms": 20000,
+    "timeout_ms": 200,
+    "lookup_timeout_ms": 200,
+}
+runtime = StandaloneRuntime(UMBPRuntimeConfig("standalone", options))
+worker = runtime.create_worker_handle("ns", RankTopology(), None)
+scheduler = runtime.create_scheduler_handle("ns", RankTopology(), None)
 source = torch.arange(1 << 20, dtype=torch.uint8, device="cuda:0")
 worker.register_buffers({"kv": source})
+size = source.numel()
+kv_range = KVRange("kv", 0, 0, source.data_ptr(), size, size, 0)
+plan = BlockTransferPlan("stuck", 0, ranges=(kv_range,))
+if scenario == "load":
+    stored = worker.wait(worker.store([plan]))
+    assert stored.status is TransferJobStatus.COMPLETED, stored.error
+    worker.publish(stored)
 os.kill(server_pid, signal.SIGSTOP)
-if scenario == "store":
-    size = source.numel()
-    kv_range = KVRange("kv", 0, 0, source.data_ptr(), size, size, 0)
-    job = worker.store([BlockTransferPlan("stuck", 0, ranges=(kv_range,))])
+if scenario in ("store", "load"):
+    job = getattr(worker, scenario)([plan])
     time.sleep(0.5)
     assert worker.poll(job) is None
+if scenario == "lookup":
+    started = time.monotonic()
+    assert list(scheduler.lookup(["stuck"])) == [False]
+    assert list(scheduler.lookup(["stuck"])) == [False]
+    assert time.monotonic() - started < 5
+scheduler.close()
 worker.close()
 print("WORKER_CLOSE_RETURNED", flush=True)
 """
 
 
-@pytest.mark.parametrize("scenario", ["store", "idle"])
+@pytest.mark.parametrize("scenario", ["store", "load", "lookup", "idle"])
 def test_process_exits_while_the_server_stays_stopped(server, scenario):
     """A server that never resumes must not hold up close() or process exit."""
     try:
