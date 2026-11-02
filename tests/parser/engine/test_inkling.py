@@ -168,6 +168,7 @@ def _delegating(mock_tokenizer, tools=None):
         reasoning_parser_name="inkling",
         enable_auto_tools=True,
     )
+    assert parser_cls is not None
     return parser_cls(mock_tokenizer, tools or [])
 
 
@@ -407,6 +408,7 @@ class TestStreaming:
             reasoning_parser_name="inkling",
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         parser = parser_cls(mock_tokenizer, [])
 
         first = parser.parse_delta(
@@ -443,8 +445,10 @@ class TestStreaming:
         )
         assert third is not None
         assert third.tool_calls
-        assert third.tool_calls[0].function.name == "get_weather"
-        assert third.tool_calls[0].function.arguments == '{"city":"Seattle"}'
+        function = third.tool_calls[0].function
+        assert function is not None
+        assert function.name == "get_weather"
+        assert function.arguments == '{"city":"Seattle"}'
         assert TOOL_JSON not in ((third.content or "") + (third.reasoning or ""))
 
     def test_streamed_args_are_object_only(self, parser, mock_request):
@@ -548,6 +552,7 @@ class TestToolCallFiltering:
         first.skip_tool_parsing = True
         reasoning, content = first.extract_reasoning(text, mock_request)
         assert reasoning == "plan"
+        assert content is not None
         assert content.count(TOOL_JSON) == 2
 
         second = InklingParser(mock_tokenizer)
@@ -592,6 +597,8 @@ class TestRegisteredAdapters:
 
         reasoning_cls = ReasoningParserManager.get_reasoning_parser("inkling")
         tool_cls = ToolParserManager.get_tool_parser("inkling")
+        assert issubclass(reasoning_cls, InklingParserReasoningAdapter)
+        assert issubclass(tool_cls, InklingParserToolAdapter)
         assert reasoning_cls._parser_engine_cls is InklingParser
         assert tool_cls._parser_engine_cls is InklingParser
         assert tool_cls.supports_required_and_named is False
@@ -939,6 +946,7 @@ class TestToolParserWithoutReasoningParser:
             tool_parser_name="inkling",
             enable_auto_tools=True,
         )
+        assert parser_cls is not None
         return parser_cls(mock_tokenizer, tools or [])
 
     def test_plain_text_non_streaming(self, mock_tokenizer, mock_request):

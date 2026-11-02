@@ -2,12 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import tempfile
 from collections import defaultdict
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from itertools import chain, count
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from unittest.mock import Mock
 
+import numpy as np
 import torch
 
 from vllm import SamplingParams
@@ -48,6 +49,11 @@ from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
+
+if TYPE_CHECKING:
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RegionPairs,
+    )
 
 EOS_TOKEN_ID = 50256
 
@@ -288,6 +294,7 @@ def create_model_runner_output(
     use_eos: bool = False,
     token_id: int = 0,
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
+    failed_recving: set[str] | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
     # Make request data.
@@ -305,12 +312,14 @@ def create_model_runner_output(
             and finished_recving is None
             and invalid_block_ids is None
             and kv_connector_worker_meta is None
+            and failed_recving is None
         )
         else KVConnectorOutput(
             finished_sending=finished_sending,
             finished_recving=finished_recving,
             invalid_block_ids=invalid_block_ids or set(),
             kv_connector_worker_meta=kv_connector_worker_meta,
+            failed_recving=failed_recving or set(),
         )
     )
 
@@ -327,6 +336,8 @@ def create_model_runner_output(
 
 
 class TestExampleConnector(ExampleConnector):
+    __test__ = False
+
     def __init__(
         self,
         config: VllmConfig,
@@ -682,3 +693,39 @@ def make_moriio_writer(fake_worker: Any) -> Any:
     writer._defer_timeout = 60.0
     writer.ensure_worker_started = lambda: None
     return writer
+
+
+def expand_strided_descs(strided_descs: np.ndarray) -> np.ndarray:
+    """Expand Nx5 (addr, len, dev, stride, count) rows to one row per block.
+
+    Mirrors how NIXL indexes a strided descriptor list, so desc ids computed
+    by the connector can be resolved to (addr, len, dev) byte ranges.
+    """
+    strided_descs = np.asarray(strided_descs, dtype=np.uint64).reshape(-1, 5)
+    counts = strided_descs[:, 4].astype(np.intp)
+    starts = np.cumsum(strided_descs[:, 4]) - strided_descs[:, 4]
+    out = np.repeat(strided_descs[:, :3], counts, axis=0)
+    offsets = np.arange(len(out), dtype=np.uint64) - np.repeat(starts, counts)
+    out[:, 0] += offsets * np.repeat(strided_descs[:, 3], counts)
+    return out
+
+
+def region_pairs_by_index(
+    num_regions: int,
+    groups: Sequence[int] | None = None,
+    groups_match: bool = True,
+) -> "_RegionPairs":
+    """NIXL region pairs where peer region ``i`` pairs with local region ``i``."""
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker import (
+        _RegionPairs,
+    )
+
+    regions = list(range(num_regions))
+    return _RegionPairs(
+        remote=regions,
+        local=regions,
+        group=list(groups) if groups is not None else [0] * num_regions,
+        remote_regions=regions,
+        partner=regions,
+        groups_match=groups_match,
+    )

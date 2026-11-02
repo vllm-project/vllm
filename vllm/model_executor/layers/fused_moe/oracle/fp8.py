@@ -9,6 +9,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -38,8 +39,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
 )
-from vllm.model_executor.utils import replace_parameter
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_kernel_parameter,
+)
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
 from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
@@ -211,10 +217,12 @@ def backend_to_kernel_cls(
 
     elif backend == Fp8MoeBackend.AITER:
         from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-            AiterExperts,
+            AiterFp8BlockExperts,
+            AiterFp8ChannelExperts,
+            AiterFp8TensorExperts,
         )
 
-        return [AiterExperts]
+        return [AiterFp8BlockExperts, AiterFp8TensorExperts, AiterFp8ChannelExperts]
 
     elif backend == Fp8MoeBackend.VLLM_CUTLASS:
         from vllm.model_executor.layers.fused_moe.experts.triton_cutlass_moe import (
@@ -490,6 +498,13 @@ def select_fp8_moe_backend(
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
+    elif (model_config := get_current_vllm_config().model_config) is not None and (
+        should_auto_disable_deep_gemm(
+            getattr(model_config.hf_text_config, "model_type", None)
+        )
+    ):
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.DEEPGEMM)
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_DEEPGEMM)
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
@@ -628,6 +643,14 @@ def convert_to_fp8_moe_kernel_format(
         convert_to_humming_moe_kernel_format(
             layer, quant_config=_humming_fp8_weight_schema(layer, w13, w13_scale)
         )
+        if scale_name == "weight_scale_inv":
+            # One param under both names: the loaded `_inv` holds the runtime scale.
+            for prefix in ("w13", "w2"):
+                scale = layer._parameters.pop(f"{prefix}_weight_scale").data
+                move_parameter(
+                    layer, f"{prefix}_{scale_name}", f"{prefix}_weight_scale"
+                )
+                set_kernel_parameter(layer, f"{prefix}_weight_scale", scale)
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
@@ -830,6 +853,11 @@ def make_fp8_moe_quant_config(
         block_shape=block_shape,
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
+        # TRTLLM fp8-block consumes activation scales as [K/128, M]; emit them
+        # transposed from the quant kernel instead of copying afterwards.
+        is_scale_transposed=(
+            fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM and block_shape == [128, 128]
+        ),
         gemm1_alpha=gemm1_alpha,
         gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=swiglu_limit,
@@ -850,6 +878,14 @@ def make_fp8_moe_kernel(
         routing_tables=routing_tables,
         allow_new_interface=True,
         use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+        # CUTLASS block-FP8 experts quantize inside the kernel, so all-to-all
+        # carries BF16/FP16 activations rather than FP8 values and scales.
+        input_dtype=(
+            moe_config.in_dtype
+            if fp8_backend == Fp8MoeBackend.FLASHINFER_CUTLASS
+            and moe_quant_config.is_block_quantized
+            else None
+        ),
     )
     assert prepare_finalize is not None
 

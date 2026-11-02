@@ -282,6 +282,12 @@ class VideoBackend(VideoLoader):
                 - ``hw_decoders`` (PyNvVideoCodec): maximum number of
                   concurrent decoder slots. Defaults to 2 and must be a
                   positive integer.
+                - ``max_width`` / ``max_height`` (PyNvVideoCodec): optional
+                  maximum input dimensions configured for each decoder. Both
+                  must be positive integers and set together. Values are
+                  clamped to each codec's hardware limits. By default, decoder
+                  dimensions also cover the input's opposite orientation when
+                  that fits the reserved memory and hardware limits.
                 - ``pool_size`` / ``timeout_sec`` (DeepStream): decoder pool
                   size and pool acquisition timeout in seconds.
 

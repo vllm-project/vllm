@@ -322,16 +322,15 @@ def generate_sparse_seqlen_kernel(
 
 
 def generate_sparse_seqlen_triton(
-    query_lens: torch.Tensor,
     seq_lens: torch.Tensor,
     cu_query_lens: torch.Tensor,
     topk_token: int,
     num_tokens: int,
     max_query_len: int,
 ):
-    num_seqs = query_lens.size(0)
+    num_seqs = cu_query_lens.size(0) - 1
     # zero initialize the tensor to make sure invalid positions will be zero
-    out = torch.zeros([num_tokens], dtype=torch.int32, device=query_lens.device)
+    out = torch.zeros([num_tokens], dtype=torch.int32, device=cu_query_lens.device)
     block_size = 64
     num_block_per_row = triton.cdiv(max_query_len, block_size)
     grid = (
@@ -401,6 +400,18 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         return on_mi3xx()
 
 
+# Indexer writes per shared top-k buffer, in layer construction order.
+_INDEX_EPOCHS: dict[int, int] = {}
+
+
+def _index_epoch(buf: object, owns_indexer: bool) -> int:
+    """Number of indexer writes up to and including this layer."""
+    # id(): tensors are unhashable, and the buffer outlives every reader.
+    epoch = _INDEX_EPOCHS.get(id(buf), 0) + (1 if owns_indexer else 0)
+    _INDEX_EPOCHS[id(buf)] = epoch
+    return epoch
+
+
 @dataclass(kw_only=True)
 class ROCMAiterMLASparseMetadata(SparseMLACommonMetadata):
     qo_indptr: torch.Tensor | None = None
@@ -408,6 +419,10 @@ class ROCMAiterMLASparseMetadata(SparseMLACommonMetadata):
     paged_kv_indices: torch.Tensor | None = None
     paged_kv_indptr: torch.Tensor | None = None
     attn_out_dtype: torch.dtype | None = None
+
+    # Source buffer and index_epoch of paged_kv_indices; -1 before any remap.
+    remapped_buf: object = None
+    remapped_epoch: int = -1
 
     # Persistent MLA metadata (only populated when persistent mode is enabled,
     # i.e. when the aiter sparse decode kernel supports work-stealing splits).
@@ -611,10 +626,8 @@ class ROCMAiterMLASparseMetadataBuilder(
             np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
         query_start_loc = common_attn_metadata.query_start_loc[: num_reqs + 1]
-        query_lens = query_start_loc[1:] - query_start_loc[:-1]
         seq_lens = common_attn_metadata.seq_lens[:num_reqs]
         sparse_seqlen = generate_sparse_seqlen_triton(
-            query_lens,
             seq_lens,
             query_start_loc,
             self.topk_tokens,
@@ -623,7 +636,9 @@ class ROCMAiterMLASparseMetadataBuilder(
         )
 
         torch.cumsum(sparse_seqlen, dim=0, out=self.paged_kv_indptr[1 : num_tokens + 1])
-        self.paged_kv_indptr[num_tokens + 1 :].fill_(self.paged_kv_indptr[num_tokens])
+        # fill_() with a value that aliases the destination clones it first.
+        indptr_tail = self.paged_kv_indptr[num_tokens + 1 :]
+        indptr_tail.copy_(self.paged_kv_indptr[num_tokens].expand_as(indptr_tail))
 
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
         qo_indptr = self.qo_indptr[: num_tokens + 1]
@@ -818,6 +833,10 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
         self.masked_mha_available = False
 
         vllm_config = get_current_vllm_config()
+        self.owns_indexer: bool = indexer is not None
+        self.index_epoch: int = _index_epoch(
+            self.topk_indices_buffer, self.owns_indexer
+        )
         max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         q_concat_shape = (max_tokens, num_heads, head_size)
         (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
@@ -1162,25 +1181,35 @@ class ROCMAiterMLASparseImpl(SparseMLACommonImpl[ROCMAiterMLASparseMetadata]):
 
         num_actual_toks = q.shape[0]
 
-        # Get topk indices
-        assert self.topk_indices_buffer is not None
-        topk_indices = fit_kpool_indices_to_aiter(
-            self.topk_indices_buffer[:num_actual_toks], attn_metadata.topk_tokens
-        )
-
         kv_c_and_k_pe_cache, block_stride_rows = flat_kv_row_view(
             kv_c_and_k_pe_cache, attn_metadata.block_size
         )
-        triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_actual_toks],
-            attn_metadata.block_table,
-            topk_indices,
-            attn_metadata.paged_kv_indptr,
-            attn_metadata.paged_kv_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            BLOCK_STRIDE_ROWS=block_stride_rows,
-            NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
-        )
+
+        # Indexer layers may rewrite their buffer, so always remap. Non-indexer
+        # layers have their own KV cache group: remap once per indexer write.
+        if (
+            self.owns_indexer
+            or attn_metadata.remapped_epoch != self.index_epoch
+            or attn_metadata.remapped_buf is not self.topk_indices_buffer
+        ):
+            # Get topk indices
+            assert self.topk_indices_buffer is not None
+            topk_indices = fit_kpool_indices_to_aiter(
+                self.topk_indices_buffer[:num_actual_toks], attn_metadata.topk_tokens
+            )
+
+            triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                attn_metadata.paged_kv_indptr,
+                attn_metadata.paged_kv_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=attn_metadata.topk_tokens,
+            )
+            attn_metadata.remapped_buf = self.topk_indices_buffer
+            attn_metadata.remapped_epoch = self.index_epoch
 
         # write the latent and rope to kv cache
         if fp8_attention:
