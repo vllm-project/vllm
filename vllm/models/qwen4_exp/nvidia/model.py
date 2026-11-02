@@ -11,6 +11,7 @@ from transformers import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import get_pp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
@@ -84,6 +85,7 @@ from vllm.v1.kv_cache_interface import MambaSpec
 from ..common.hyperconnection import is_hc_sequence_parallel_enabled
 from .hyperconnection import GatedResidual, HyperConnectionConfig
 from .low_latency_gemm import enable_qwen4_exp_low_latency_gemm
+from .mega_moe import Qwen4ExpMegaMoeBlock, flush_mega_moe_requantize
 from .ops.cute_dsl.hc_down_silu import request_hc_down_silu_warmup
 from .ple_layer import Qwen4ExpPLELayer
 from .qsa import Qwen4ExpQSAAttention
@@ -254,11 +256,15 @@ class Qwen4ExpDecoderLayer(nn.Module):
         else:
             raise ValueError(f"Invalid layer_type {layer_type}")
 
-        self.mlp = Qwen4ExpSparseMoeBlock(
-            vllm_config=vllm_config,
-            prefix=f"{prefix}.mlp",
-            reduce_results=not self.use_hc_sequence_parallel,
-        )
+        self.mlp: Qwen4ExpSparseMoeBlock | Qwen4ExpMegaMoeBlock
+        if vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS:
+            self.mlp = Qwen4ExpMegaMoeBlock(vllm_config, prefix=f"{prefix}.mlp")
+        else:
+            self.mlp = Qwen4ExpSparseMoeBlock(
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mlp",
+                reduce_results=not self.use_hc_sequence_parallel,
+            )
 
         hc_config = HyperConnectionConfig(
             hc_count=config.hc_count,
@@ -362,7 +368,7 @@ class Qwen4ExpMixtureOfExperts(MixtureOfExperts):
         example_moe = None
         for layer in layers:
             if isinstance(layer, Qwen4ExpDecoderLayer) and isinstance(
-                layer.mlp, Qwen4ExpSparseMoeBlock
+                layer.mlp, (Qwen4ExpSparseMoeBlock, Qwen4ExpMegaMoeBlock)
             ):
                 example_moe = layer.mlp
                 self.moe_mlp_layers.append(layer.mlp)
@@ -685,6 +691,7 @@ class Qwen4ExpModel(nn.Module):
             weights,
             mapper=mapper,
         )
+        flush_mega_moe_requantize(self)
         return loaded
 
 
