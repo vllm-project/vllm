@@ -34,6 +34,10 @@ from vllm.model_executor.layers.fused_qk_norm_rope_gate_fp8_quant import (
     fused_qk_norm_rope_gate_fp8_quant,
     supports_prequantized_scheduler,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    get_input_quant_key,
+)
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
 )
@@ -55,6 +59,9 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_quark_ocp_mx_group_size,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8StaticTensorSym,
 )
 from vllm.model_executor.layers.rotary_embedding import MRotaryEmbedding, get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
@@ -547,7 +554,7 @@ class Qwen3NextAttention(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         if self.use_prequantized_qkv:
@@ -559,10 +566,20 @@ class Qwen3NextAttention(nn.Module):
             q, k, v, gate = self._project_qkv_gate(qkv, positions)
             attn_output = self.attn(q, k, v)
         if gate is not None:
-            if self.use_fused_output_gate:
-                attn_output = fused_sigmoid_gate_mul(attn_output, gate)
-            else:
+            if not self.use_fused_output_gate:
                 attn_output = attn_output * torch.sigmoid(gate)
+            elif get_input_quant_key(self.o_proj) == kFp8StaticTensorSym:
+                # Sigmoid gate, fused with o_proj's static FP8 input quant.
+                scale = self.o_proj.input_scale
+                attn_output = QuantizedActivation(
+                    data=fused_sigmoid_gate_mul(attn_output, gate, scale),
+                    scale=scale,
+                    orig_dtype=attn_output.dtype,
+                    orig_shape=attn_output.shape,
+                    quant_key=kFp8StaticTensorSym,
+                )
+            else:
+                attn_output = fused_sigmoid_gate_mul(attn_output, gate)
         output, _ = self.o_proj(attn_output)
         return output
 

@@ -73,6 +73,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import (
     publish,
     sreg,
 )
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
 HIDDEN = 7168
 NA = 56  # attn CTAs
@@ -987,7 +988,8 @@ def kda_pre(
     layer (tags are a layer's); ``epoch`` a device int32 bumped once a step and
     ``layer`` this launch's slot below ``TAG_SLOTS``."""
     f = build(key)
-    f(
+    _run_compiled(
+        f,
         prefix.data_ptr(),
         ptr(delta),
         blocks.data_ptr(),
@@ -1017,5 +1019,5 @@ def kda_pre(
         epoch.data_ptr(),
         health.data_ptr(),
         alarm,
-        stream=torch.cuda.current_stream(),
+        torch.cuda.current_stream(),
     )
