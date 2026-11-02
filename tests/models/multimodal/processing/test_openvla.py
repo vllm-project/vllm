@@ -5,6 +5,7 @@
 import numpy as np
 import pytest
 import torch
+from jinja2.sandbox import ImmutableSandboxedEnvironment
 from PIL import Image
 from transformers import LlamaConfig
 
@@ -14,6 +15,7 @@ from vllm.model_executor.models.openvla import (
     OpenVLAProcessingInfo,
 )
 from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
+from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.transformers_utils.configs.openvla import OpenVLAConfig
 from vllm.transformers_utils.processors.openvla import (
     IMAGENET_MEAN,
@@ -164,8 +166,10 @@ def test_openvla_image_processor_outputs_pixel_values() -> None:
 
     output = processor(images=image)
 
-    assert output["pixel_values"].shape == (1, 6, 224, 224)
-    assert output["pixel_values"].dtype == torch.float32
+    pixel_values = output["pixel_values"]
+    assert isinstance(pixel_values, torch.Tensor)
+    assert pixel_values.shape == (1, 6, 224, 224)
+    assert pixel_values.dtype == torch.float32
 
 
 def test_openvla_processing_info_token_counts() -> None:
@@ -196,6 +200,7 @@ def test_openvla_prompt_update_inserts_image_tokens_after_bos() -> None:
     ] == [(1, 1)]
     assert content.full == [32000] * 256
 
+    assert callable(content.is_embed)
     is_embed = content.is_embed(content.full)
     assert is_embed.dtype == torch.bool
     assert is_embed.tolist() == [True] * 256
@@ -203,3 +208,41 @@ def test_openvla_prompt_update_inserts_image_tokens_after_bos() -> None:
 
 def test_openvla_placeholder_string() -> None:
     assert OpenVLAForActionPrediction.get_placeholder_str("image", 0) is None
+
+
+# OpenVLA's training prompt; predict_action() appends trailing space when the
+# prompt does not already end with it.
+_OPENVLA_PROMPT = (
+    "<s>In: What action should the robot take to pick up the red block?\nOut: "
+)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "pick up the red block",
+        " Pick up the red block. ",
+        "In: What action should the robot take to pick up the red block?\nOut:",
+        "In: What action should the robot take to pick up the red block?\nOut: ",
+    ],
+)
+@pytest.mark.parametrize("with_image", [False, True])
+def test_openvla_chat_template(text: str, with_image: bool) -> None:
+    path = get_chat_template_fallback_path("openvla", "openvla/openvla-7b")
+    assert path is not None
+    env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
+    template = env.from_string(path.read_text())
+
+    content: str | list[dict] = text
+    if with_image:
+        content = [
+            {"type": "image", "image": None},
+            {"type": "text", "text": text},
+        ]
+    messages = [
+        {"role": "system", "content": "ignored"},
+        {"role": "user", "content": content},
+    ]
+
+    # No image placeholder: the processor inserts image tokens after BOS.
+    assert template.render(messages=messages, bos_token="<s>") == _OPENVLA_PROMPT

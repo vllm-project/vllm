@@ -8,7 +8,14 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from tests.v1.attention.utils import (
+    BatchSpec,
+    create_common_attn_metadata,
+    create_vllm_config,
+)
+from vllm.config import set_current_vllm_config
 from vllm.model_executor.kernels.linear.zentorch_utils import has_zentorch_op
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.utils.torch_utils import set_default_torch_num_threads, set_random_seed
@@ -19,6 +26,7 @@ from vllm.v1.attention.backends.zentorch_sdpa import (
     zentorch_sdpa_attn,
 )
 from vllm.v1.attention.selector import AttentionSelectorConfig
+from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec
 
 if not current_platform.is_cpu():
     pytest.skip("skipping CPU-only tests", allow_module_level=True)
@@ -803,6 +811,72 @@ def test_varlen_encoder_attention_amx(
         block_size=block_size,
         isa=isa,
     )
+
+
+@pytest.mark.parametrize("sliding_window", SLIDING_WINDOWS)
+@torch.inference_mode()
+def test_encoder_only_attention_ignores_default_causal(
+    sliding_window: int | None,
+) -> None:
+    """ENCODER_ONLY layers attend bidirectionally even though the encoder-only
+    runner leaves CommonAttentionMetadata.causal at its default (True)."""
+    set_random_seed(0)
+    seq_lens = [1, 37, 300]
+    num_heads, num_kv_heads, head_size = 4, 2, 128
+    block_size = 128
+    dtype = torch.float32
+    device = torch.device("cpu")
+    layer_name = "model.layers.0.self_attn.attn"
+    vllm_config = create_vllm_config(dtype=dtype, block_size=block_size)
+
+    with set_current_vllm_config(vllm_config):
+        layer = Attention(
+            num_heads,
+            head_size,
+            head_size**-0.5,
+            num_kv_heads=num_kv_heads,
+            per_layer_sliding_window=sliding_window,
+            attn_type=AttentionType.ENCODER_ONLY,
+            prefix=layer_name,
+        )
+        spec = EncoderOnlyAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+            dtype=dtype,
+        )
+        builder = layer.get_attn_backend().get_builder_cls()(
+            spec, [layer_name], vllm_config, device
+        )
+        common_attn_metadata = create_common_attn_metadata(
+            BatchSpec(seq_lens=seq_lens, query_lens=seq_lens),
+            block_size,
+            device,
+            arange_block_indices=True,
+        )
+        common_attn_metadata.positions = torch.cat(
+            [torch.arange(seq_len) for seq_len in seq_lens]
+        )
+        attn_metadata = builder.build(0, common_attn_metadata)
+
+        num_tokens = sum(seq_lens)
+        query = torch.randn(num_tokens, num_heads, head_size, dtype=dtype)
+        key = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype)
+        value = torch.randn(num_tokens, num_kv_heads, head_size, dtype=dtype)
+        output = torch.empty_like(query)
+        layer.impl.forward(
+            layer, query, key, value, torch.empty(0), attn_metadata, output
+        )
+
+    ref_output = ref_varlen_encoder_attn(
+        query=query,
+        key=key,
+        value=value,
+        seq_lens=seq_lens,
+        scale=head_size**-0.5,
+        sliding_window=sliding_window,
+    )
+    torch.testing.assert_close(output, ref_output, atol=1e-4, rtol=1e-4)
 
 
 @torch.inference_mode()
