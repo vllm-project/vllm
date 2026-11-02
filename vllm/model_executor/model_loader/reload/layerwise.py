@@ -311,7 +311,7 @@ def _finalize_attention_layer(
         _reload_attention_scales(layer, info)
     else:
         _place_kernel_tensors(layer, info)
-    layer.process_weights_after_loading(model_config.dtype)
+    layer.process_weights_after_loading()
 
 
 def _reload_attention_scales(layer: torch.nn.Module, info: LayerReloadingInfo) -> None:
