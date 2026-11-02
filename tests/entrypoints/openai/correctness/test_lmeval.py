@@ -25,13 +25,12 @@ MORE_ARGS_LIST = [
     [],  # Default
     ["--enable-chunked-prefill"],  # Chunked
 ]
-MAX_WAIT_SECONDS = None
+MAX_WAIT_SECONDS = 600
 
 if current_platform.is_tpu():
     MORE_ARGS_LIST = [
         [],  # Default
     ]
-    MAX_WAIT_SECONDS = 600
 
 
 def run_test(more_args):
