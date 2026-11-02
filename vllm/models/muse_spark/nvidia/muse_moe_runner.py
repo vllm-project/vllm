@@ -412,17 +412,30 @@ class MusePostExpertFinalize:
     ) -> torch.Tensor:
         """Norm weight in the activation dtype; the gain centre is added in fp32."""
         if self._fused_weight is None:
-            norm = self._norm
-            if norm.has_weight:
-                weight = norm.weight.detach()
-                assert weight.shape == (norm.hidden_size,), (
-                    f"post-expert norm weight is {tuple(weight.shape)}, expected "
-                    f"({norm.hidden_size},)"
-                )
-            else:
-                weight = torch.ones(norm.hidden_size)
-            self._fused_weight = weight.to(dtype=dtype, device=device).contiguous()
+            self._fused_weight = self._norm_weight(dtype, device)
         return self._fused_weight
+
+    def _norm_weight(self, dtype: torch.dtype, device: torch.device) -> torch.Tensor:
+        norm = self._norm
+        if norm.has_weight:
+            weight = norm.weight.detach()
+            assert weight.shape == (norm.hidden_size,), (
+                f"post-expert norm weight is {tuple(weight.shape)}, expected "
+                f"({norm.hidden_size},)"
+            )
+        else:
+            weight = torch.ones(norm.hidden_size)
+        return weight.to(dtype=dtype, device=device).contiguous()
+
+    def process_weights_after_loading(self) -> None:
+        """Refill the activation-dtype norm weight (built on the first forward,
+        once the dtype is known) in place after a reload."""
+        if self._fused_weight is not None:
+            refill_derived(
+                self,
+                "_fused_weight",
+                self._norm_weight(self._fused_weight.dtype, self._fused_weight.device),
+            )
 
     def _finalize_chunk(
         self,
@@ -820,6 +833,10 @@ class MuseMoERunner(MoERunner):
             routed_experts.quant_method,
         )
         quant_method.muse_post_expert_finalize = self.post_expert_finalize
+
+    def process_weights_after_loading(self) -> None:
+        super().process_weights_after_loading()
+        self.post_expert_finalize.process_weights_after_loading()
 
     @property
     def _prepared_nvfp4_experts(self) -> MuseSparkTrtLlmNvFp4Experts | None:
