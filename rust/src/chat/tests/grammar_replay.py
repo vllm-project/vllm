@@ -38,14 +38,18 @@ from functools import cache
 from pathlib import Path
 
 import xgrammar as xgr
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, TokenizersBackend
 
 CASES_DIR = Path(__file__).parent / "grammar_replay"
 
 
 @cache
 def load_tokenizer(model_id: str, vocab_size: int):
-    tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
+    # Match vLLM's override for Step5's incorrect Llama tokenizer class on the Hub.
+    tokenizer_cls = (
+        TokenizersBackend if model_id == "stepfun-ai/Step-5-Preview" else AutoTokenizer
+    )
+    tokenizer = tokenizer_cls.from_pretrained(model_id, trust_remote_code=True)
     tokenizer_info = xgr.TokenizerInfo.from_huggingface(
         tokenizer, vocab_size=vocab_size
     )

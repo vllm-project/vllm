@@ -16,7 +16,7 @@ use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use thiserror_ext::AsReport as _;
 
-use crate::error::{ApiError, server_error};
+use crate::error::{ApiError, chat_submit_error, server_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::tokenize::types::{
     DetokenizeRequest, DetokenizeResponse, TokenizeChatRequest, TokenizeCompletionRequest,
@@ -32,16 +32,6 @@ fn tokenize_request_id(headers: &HeaderMap) -> String {
         None,
     );
     format!("tokenize-{base}")
-}
-
-/// Reject an unknown model name, matching the other handlers.
-fn check_model(state: &AppState, model: Option<&str>) -> Result<(), ApiError> {
-    if let Some(model) = model
-        && !state.served_model_names().iter().any(|n| n == model)
-    {
-        return Err(ApiError::model_not_found(model.to_string()));
-    }
-    Ok(())
 }
 
 /// Build the `token_strs` vector when requested, via the tokenizer vocab.
@@ -84,7 +74,7 @@ fn tokenize_completion(
     request_id: &str,
     req: TokenizeCompletionRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
-    check_model(state, req.model.as_deref())?;
+    state.base_model_names().check(req.model.as_deref())?;
     let return_token_strs = req.return_token_strs;
     let tokens = state
         .chat
@@ -104,7 +94,7 @@ async fn tokenize_chat(
     request_id: &str,
     req: TokenizeChatRequest,
 ) -> Result<(Vec<u32>, bool), ApiError> {
-    check_model(state, req.model.as_deref())?;
+    state.base_model_names().check(req.model.as_deref())?;
     let return_token_strs = req.return_token_strs;
     // `continue_final_message` / `add_generation_prompt` mutual exclusion is
     // enforced in `normalize_generation_prompt_mode` inside `into_chat_request`.
@@ -113,7 +103,7 @@ async fn tokenize_chat(
         .request_processor()
         .prepare_for_tokenization(req.into_chat_request(request_id.to_string())?)
         .await
-        .map_err(|e| server_error!("tokenize failed: {}", e.to_report_string()))?;
+        .map_err(|error| chat_submit_error("tokenize failed", error))?;
     let tokens = state
         .chat
         .text()
@@ -127,7 +117,7 @@ pub async fn detokenize(
     State(state): State<Arc<AppState>>,
     ValidatedJson(body): ValidatedJson<DetokenizeRequest>,
 ) -> Response {
-    if let Err(error) = check_model(&state, body.model.as_deref()) {
+    if let Err(error) = state.base_model_names().check(body.model.as_deref()) {
         return error.into_response();
     }
     let tokenizer = state.chat.text().tokenizer();

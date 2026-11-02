@@ -1,0 +1,305 @@
+meta:
+  title: "Hy4-preview"
+  slug: "hy4-preview"
+  provider: "Hunyuan (Tencent)"
+  description: "Tencent Hunyuan Hy4-preview — scaled-up MoE language model (770B total / 49B active) with a 10B MTP layer for speculative decoding, 1M context, and hy_v4 tool/reasoning parsers"
+  date_added: 2026-08-28
+  date_updated: 2026-09-28
+  tasks:
+    - text
+  performance_headline: "Hunyuan Hy4-preview MoE — 770B/49B on 16xB200, 8xB300, 8xMI355X with MTP"
+  related_recipes:
+    - "tencent/Hy3"
+    - "tencent/Hy3-preview"
+  default_hardware: b300
+  hardware:
+    b200: verified
+    b300: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "tencent/Hy4-preview"
+  min_vllm_version: "0.29.0"
+  default_frontend: rust
+  docker_image:
+    nvidia: "vllm/vllm-openai:hy4-preview"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  nightly_required: true
+  install:
+    docker:
+      note: "NVIDIA: dedicated hy4-preview image until changes land in vllm:latest. AMD: vllm/vllm-openai-rocm:nightly from 2026-09-22 or later."
+    pip:
+      note: "Hy4-preview's latest optimizations aren't in a stable release yet — use nightly wheels or build from source."
+  architecture: moe
+  parameter_count: "770B"
+  active_parameters: "49B"
+  context_length: 1048576
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Hunyuan v4 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "hy_v4"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "Hunyuan v4 reasoning parser for thinking-mode chain-of-thought extraction"
+    args:
+      - "--reasoning-parser"
+      - "hy_v4"
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding using the model's built-in MTP layer"
+    args:
+      - "--speculative-config"
+      - '{"method":"mtp","num_speculative_tokens":3}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 1848
+    description: "Full precision BF16 — 16xB200 or 8xB300 minimum for weights + KV cache"
+    hardware_overrides:
+      amd:
+        extra_args:
+          - "--gpu-memory-utilization"
+          - "0.92"
+  fp8:
+    model_id: "tencent/Hy4-preview-FP8"
+    precision: mxfp8
+    vram_minimum_gb: 924
+    description: "MXFP8-quantized instruct checkpoint (tencent/Hy4-preview-FP8) — fits a single 8xB200 / 8xB300 node with wide headroom. Verified AMD path on 8xMI355X and 8xMI325X."
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tep
+  - multi_node_dep
+
+hardware_overrides:
+  # Suggest enable hpc-ops for better performance on Blackwell
+  blackwell:
+    extra_env:
+      VLLM_ENABLE_HPC_OPS: "1"
+    extra_args:
+      - "--attention-backend"
+      - "FLASHMLA_SPARSE"
+  amd:
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+    extra_args:
+      - "--max-model-len"
+      - "262144"
+      - "--gpu-memory-utilization"
+      - "0.85"
+      - "--max-num-batched-tokens"
+      - "8192"
+
+strategy_overrides:
+  single_node_tp:
+    hardware_overrides:
+      # gfx942 stores the MXFP8 checkpoint as BF16. The shared AMD window
+      # (262144, util 0.85, 8192 batched tokens) stays the MI355X path.
+      # These flags replace that window on MI325X only.
+      mi325x:
+        extra_args:
+          - "--trust-remote-code"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--max-model-len"
+          - "139264"
+          - "--max-num-batched-tokens"
+          - "16384"
+          - "--gpu-memory-utilization"
+          - "0.96"
+        extra_env:
+          VLLM_ROCM_USE_AITER_MOE: "1"
+          VLLM_ROCM_USE_AITER_MHA: "1"
+          VLLM_ROCM_USE_AITER_RMSNORM: "1"
+          VLLM_ROCM_USE_AITER_LINEAR: "1"
+          VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+
+guide: |
+  # Hy4-preview Usage Guide
+
+  Hy4-preview is Tencent Hunyuan's new-generation open-source Mixture-of-Experts language
+  model. Its backbone has 770B total parameters with 49B activated per token across
+  78 layers. The first layer uses a dense FFN; the other 77 layers use 256 routed
+  experts (top-8) and 1 shared expert. A native MTP layer adds 10B total parameters
+  (0.7B activated) for speculative decoding.
+
+  On the architecture side, inspired by DeepSeek and GLM, the attention module employs Gated DeepSeek Sparse Attention (Gated DSA) with IndexCache for cross-layer sparse index reuse. The residual pathway uses iHC (identity Hyper-Connections) to expand inter-layer information flow.
+
+  ## vLLM Setup
+
+  Choose one of the following setup methods.
+
+  ### Using Docker
+
+  ```bash
+  docker run --gpus all \
+    -p 8000:8000 \
+    --ipc=host \
+    -e VLLM_ENABLE_HPC_OPS=1 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:hy4-preview tencent/Hy4-preview-FP8 \
+      --tensor-parallel-size 8 \
+      --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+      --attention-backend FLASHMLA_SPARSE \
+      --tool-call-parser hy_v4 \
+      --reasoning-parser hy_v4 \
+      --enable-auto-tool-choice \
+      --port 8000 \
+      --served-model-name hy4-preview
+  ```
+
+  Build vLLM from source:
+
+  ```bash
+  uv venv --python 3.12 --seed --managed-python
+  source .venv/bin/activate
+  git clone https://github.com/vllm-project/vllm.git
+  cd vllm
+  uv pip install --editable . --torch-backend=auto
+  ```
+
+  ## vLLM Deployment
+
+  Start the FP8 model with MTP enabled:
+
+  ```bash
+  export VLLM_ENABLE_HPC_OPS=1
+
+  vllm serve tencent/Hy4-preview-FP8 \
+    --tensor-parallel-size 8 \
+    --speculative-config '{"num_speculative_tokens":3,"method":"mtp"}' \
+    --attention-backend FLASHMLA_SPARSE \
+    --tool-call-parser hy_v4 \
+    --reasoning-parser hy_v4 \
+    --enable-auto-tool-choice \
+    --port 8000 \
+    --served-model-name hy4-preview
+  ```
+
+  ### Serving on 8×AMD MI355X (gfx950)
+
+  Spec decoding (native MTP, `k=3`) is opt-in. 
+
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+
+  vllm serve tencent/Hy4-preview-FP8 \
+    --tensor-parallel-size 8 \
+    --max-model-len 262144 \
+    --gpu-memory-utilization 0.85 \
+    --max-num-batched-tokens 8192 \
+    --tool-call-parser hy_v4 \
+    --reasoning-parser hy_v4 \
+    --enable-auto-tool-choice \
+    --port 8000 \
+    --served-model-name hy4-preview
+  ```
+
+  **Context window.** 262,144 is the default verified window. MXFP8
+  (`tencent/Hy4-preview-FP8`) also comes up at the full 1,048,576 ceiling
+  at util `0.92` (1.21× concurrency for a 1M request). 
+
+  ### Serving on 8×AMD MI325X (gfx942)
+
+  Select the FP8 variant. Since gfx942 dequantizes MXFP8 weights to BF16,
+  the context window is not the same as on the MI355X. The verified serve
+  is context 139264, FP8 KV, and the AITER MoE, MHA, RMSNorm, and linear toggles.
+  At GPU memory utilization 0.96 the KV cache holds 530,912 tokens,
+  about 3.81× one 139,264-token request.
+  
+  ```bash
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_MOE=1
+  export VLLM_ROCM_USE_AITER_MHA=1
+  export VLLM_ROCM_USE_AITER_RMSNORM=1
+  export VLLM_ROCM_USE_AITER_LINEAR=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+  export VLLM_USE_RUST_FRONTEND=1
+
+  vllm serve tencent/Hy4-preview-FP8 \
+    --tensor-parallel-size 8 \
+    --trust-remote-code \
+    --kv-cache-dtype fp8 \
+    --max-model-len 139264 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.96 \
+    --tool-call-parser hy_v4 \
+    --enable-auto-tool-choice \
+    --reasoning-parser hy_v4
+  ```
+
+  ## OpenAI Client Example
+
+  Tencent recommends `temperature=0.9` and `top_p=1.0`. Reasoning defaults to
+  `high`, which is suitable for math, coding, and other complex tasks.
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(base_url="http://127.0.0.1:8000/v1", api_key="EMPTY")
+
+  response = client.chat.completions.create(
+      model="hy4-preview",
+      messages=[
+          {"role": "user", "content": "Hello! Can you briefly introduce yourself?"},
+      ],
+      temperature=0.9,
+      top_p=1.0,
+  )
+  output_msg = response.choices[0].message
+  print(output_msg.reasoning)           # chain-of-thought
+  print(output_msg.content)             # final answer
+  ```
+
+  For a direct response without deep reasoning, pass `reasoning_effort="no_think"`:
+
+  ```python
+  response = client.chat.completions.create(
+      model="hy4-preview",
+      messages=[
+          {"role": "user", "content": "Hello! Can you briefly introduce yourself?"},
+      ],
+      temperature=0.9,
+      top_p=1.0,
+      extra_body={"chat_template_kwargs": {"reasoning_effort": "no_think"}},
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ### cURL Usage
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "hy4-preview",
+      "messages": [
+        {"role": "system", "content": "You are a helpful assistant."},
+        {"role": "user", "content": "Hello! Can you briefly introduce yourself?"}
+      ],
+      "temperature": 0.9,
+      "top_p": 1.0
+    }'
+  ```
+
+  ## References
+
+  - [Hugging Face: Hy4-preview](https://huggingface.co/tencent/Hy4-preview)
+  - [Hugging Face: Hy4-preview-FP8](https://huggingface.co/tencent/Hy4-preview-FP8)
+  - [ModelScope: Hy4-preview](https://modelscope.cn/models/Tencent-Hunyuan/Hy4-preview)
+  - [GitHub: Tencent-Hunyuan/Hy4-preview](https://github.com/Tencent-Hunyuan/Hy4-preview)
+  - [GitCode: Hy4-preview](https://ai.gitcode.com/tencent_hunyuan/Hy4-preview)
+  - [CNB: Hy4-preview](https://cnb.cool/ai-models/tencent/Hy4-preview)
+  - [AngelSlim quantization toolkit](https://github.com/tencent/AngelSlim)

@@ -212,31 +212,31 @@ def _merge_mm_processor_kwargs(
 class BaseDummyOptions:
     """Base options for generating dummy data during profiling."""
 
-    count: int = Field(999, ge=0)
+    count: int = Field(default=999, ge=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class VideoDummyOptions(BaseDummyOptions):
     """Options for generating dummy video data during profiling."""
 
-    num_frames: int | None = Field(None, gt=0)
-    width: int | None = Field(None, gt=0)
-    height: int | None = Field(None, gt=0)
+    num_frames: int | None = Field(default=None, gt=0)
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class ImageDummyOptions(BaseDummyOptions):
     """Options for generating dummy image data during profiling."""
 
-    width: int | None = Field(None, gt=0)
-    height: int | None = Field(None, gt=0)
+    width: int | None = Field(default=None, gt=0)
+    height: int | None = Field(default=None, gt=0)
 
 
 @dataclass(config=ConfigDict(extra="forbid"))
 class AudioDummyOptions(BaseDummyOptions):
     """Options for generating dummy audio data during profiling."""
 
-    length: int | None = Field(None, gt=0)
+    length: int | None = Field(default=None, gt=0)
 
 
 @final
@@ -452,7 +452,8 @@ class MultiModalConfig:
     placeholder range.
 
     Derived, not user-settable: `VllmConfig.__post_init__` sets this to True
-    on EC and KV consumers. Everywhere else it stays False so that a request
+    on EC consumers, and on KV consumers unless `language_model_only` is set
+    without `enable_mm_embeds`. Everywhere else it stays False so that a request
     which forgets its embeddings still fails fast in the frontend, with a clear
     error, rather than deep inside the model."""
 

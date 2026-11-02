@@ -55,7 +55,6 @@ BASE_MODELS_TO_TEST = [
 
 # (target_model, draft_model, trust_remote_code)
 SPECULATIVE_MODELS = [
-    ("JackFram/llama-68m", "abhigoyal/vllm-medusa-llama-68m-random", False),
     ("luccafong/deepseek_mtp_main_random", "luccafong/deepseek_mtp_draft_random", True),
     ("eagle618/deepseek-v3-random", "eagle618/eagle-deepseek-v3-random", True),
     ("meta-llama/Meta-Llama-3-8B-Instruct", "yuhuili/EAGLE-LLaMA3-Instruct-8B", True),
@@ -136,9 +135,7 @@ def test_qwen35_decision_config_selects_d3(tmp_path, has_decision_config, archit
         assert not hasattr(config, "decision_config")
 
 
-def _assert_model_arch_config(
-    model_config, expected: dict, check_head_size: bool = True
-):
+def _assert_model_arch_config(model_config, expected: dict):
     """Assert model_arch_config matches expected values."""
     model_arch_config = model_config.model_arch_config
     assert model_arch_config.architectures == expected["architectures"]
@@ -164,14 +161,10 @@ def _assert_model_arch_config(
         config_format="hf",
     )
     assert str(torch_dtype) == expected["dtype"]
-
-    if check_head_size:
-        assert model_arch_config.head_size == expected["head_size"]
+    assert model_arch_config.head_size == expected["head_size"]
 
 
-def _assert_model_config_methods(
-    model_config, expected: dict, check_head_size: bool = True
-):
+def _assert_model_config_methods(model_config, expected: dict):
     """Assert model_config methods return expected values."""
     assert model_config.architectures == expected["architectures"]
     assert model_config.get_vocab_size() == expected["vocab_size"]
@@ -182,9 +175,7 @@ def _assert_model_config_methods(
         model_config.get_total_num_hidden_layers()
         == expected["total_num_hidden_layers"]
     )
-
-    if check_head_size:
-        assert model_config.get_head_size() == expected["head_size"]
+    assert model_config.get_head_size() == expected["head_size"]
 
 
 def test_head_size_falls_back_when_head_dim_is_zero():
@@ -276,6 +267,30 @@ def test_legacy_modelopt_config_without_producer_is_normalized():
     convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
 
     assert convertor.get_quantization_config()["quant_method"] == "modelopt_fp4"
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("quant_algo", ["MIXED_PRECISION", "mixed_precision"])
+def test_modelopt_mixed_precision_config_is_normalized(legacy, quant_algo):
+    quantized_layers = {"model.layers.0.mlp.down_proj": {"quant_algo": "FP8"}}
+    quantization = {
+        "quant_algo": quant_algo,
+        "quantized_layers": quantized_layers,
+    }
+    quantization_config = {"quantization": quantization}
+    if legacy:
+        quantization["modelopt_quant_config"] = {"quant_cfg": {}}
+    else:
+        quantization_config["producer"] = {"name": "modelopt"}
+    hf_config = PreTrainedConfig(quantization_config=quantization_config)
+    convertor = ModelArchConfigConvertorBase(hf_config, hf_config)
+
+    normalized = convertor.get_quantization_config()
+
+    assert normalized["quant_method"] == "modelopt_mixed"
+    assert normalized["quantization"]["quantized_layers"] == {
+        "model.layers.0.mlp.down_proj": {"quant_algo": "FP8"}
+    }
 
 
 def _layer(**overrides) -> ModelArchitectureConfig:
@@ -519,14 +534,8 @@ def test_draft_model_arch_config(
     )
     model_config = speculative_config.draft_model_config
 
-    # For medusa models, head_size may cause division by zero before
-    # model_arch_config was introduced, so we conditionally check it
-    check_head_size = isinstance(expected["head_size"], int)
-
-    _assert_model_arch_config(model_config, expected, check_head_size=check_head_size)
-    _assert_model_config_methods(
-        model_config, expected, check_head_size=check_head_size
-    )
+    _assert_model_arch_config(model_config, expected)
+    _assert_model_config_methods(model_config, expected)
 
 
 def test_deepseek_v4_convertor_splits_vision_architecture():
@@ -534,7 +543,8 @@ def test_deepseek_v4_convertor_splits_vision_architecture():
     text-only DeepSeek-V4; the convertor routes it to the VL wrapper class
     by rewriting hf_config.architectures (model-class resolution reads the
     raw attribute)."""
-    from vllm.transformers_utils.configs.deepseek_v4 import DeepseekV4Config
+    from transformers import DeepseekV4Config
+
     from vllm.transformers_utils.model_arch_config_convertor import (
         DeepseekV4ModelArchConfigConvertor,
     )
