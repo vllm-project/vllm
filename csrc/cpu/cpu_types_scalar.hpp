@@ -502,7 +502,7 @@ inline FP16Vec16::FP16Vec16(const FP32Vec16& v) {
       [&v, this](int i) { reg.val[i] = float_to_fp16(v.reg.val[i]); });
 }
 
-inline FP16Vec8 ::FP16Vec8(const FP32Vec8& v) {
+inline FP16Vec8::FP16Vec8(const FP32Vec8& v) {
   unroll_loop<int, FP16Vec8::VEC_ELEM_NUM>(
       [&v, this](int i) { reg.val[i] = float_to_fp16(v.reg.val[i]); });
 }

@@ -7,6 +7,7 @@ The tier manager writes KV cache blocks to disk and reads them back, verifying
 data integrity throughout the process.
 """
 
+import errno
 import mmap
 import os
 import threading
@@ -228,6 +229,52 @@ def test_store_creates_file_and_lookup_succeeds(fs_tier):
     assert lookup_and_wait(tier, [key(1)]) == [LookupResult.HIT]
     dest = tier.file_mapper.get_file_name(key(1))
     assert os.path.exists(dest), f"Expected file at {dest}"
+
+
+def test_store_accepts_block_published_by_another_writer(fs_tier, monkeypatch):
+    """Losing the race to publish a block must not fail the store job.
+
+    Another engine instance sharing the same root_dir can publish the block
+    between the existence check and the rename, and some shared filesystems
+    report that as EEXIST instead of replacing. Block file names are content
+    hashes, so the file already in place holds the same data and the job has
+    nothing left to do.
+    """
+    import vllm.v1.kv_offload.tiering.fs.io as io_mod
+
+    # Python path only: EEXIST cannot be injected into the C extension.
+    monkeypatch.setattr(io_mod, "_HAS_FSIO_C", False)
+    tier, tensor = fs_tier
+    dest = tier.file_mapper.get_file_name(key(1))
+
+    tier.submit_store(make_job(1, [key(1)], [0]))
+    assert all(r.success for r in drain(tier))
+    with open(dest, "rb") as f:
+        published = f.read()
+
+    real_exists = os.path.exists
+    real_replace = os.replace
+
+    def racing_replace(src: str, dst: str) -> None:
+        if dst == dest:
+            raise FileExistsError(errno.EEXIST, "File exists", dst)
+        real_replace(src, dst)
+
+    # Hide the published block from the check, then lose the rename to it.
+    monkeypatch.setattr(
+        io_mod.os.path, "exists", lambda p: False if p == dest else real_exists(p)
+    )
+    monkeypatch.setattr(io_mod.os, "replace", racing_replace)
+
+    # Distinct bytes, so the comparison below fails if the loser overwrites.
+    tensor[1] = 1.0
+    tier.submit_store(make_job(2, [key(1)], [1]))
+    results = drain(tier)
+    assert len(results) == 1
+    assert results[0].success
+    assert os.listdir(os.path.dirname(dest)) == [os.path.basename(dest)]
+    with open(dest, "rb") as f:
+        assert f.read() == published
 
 
 def test_store_then_load_roundtrip(fs_tier):
@@ -777,6 +824,7 @@ def test_successful_store_emits_stored_event(fs_tier_with_events):
     assert events[0].medium == Medium.STORAGE
     assert events[0].locality is Locality.LOCAL
     assert not events[0].removed
+    assert events[0].req_context is _CTX
     # take_events drains the buffer.
     assert list(tier.take_events()) == []
 
@@ -873,7 +921,7 @@ def test_partially_failed_store_emits_no_event(fs_tier_with_events, monkeypatch)
     assert len(results) == 1
     assert not results[0].success
     assert list(tier.take_events()) == []
-    assert tier._store_job_keys == {}
+    assert tier._store_jobs == {}
 
 
 def test_events_disabled_by_default(fs_tier):
@@ -883,7 +931,7 @@ def test_events_disabled_by_default(fs_tier):
     assert len(results) == 1
     assert results[0].success
     assert tier.events is None
-    assert tier._store_job_keys == {}
+    assert tier._store_jobs == {}
     assert list(tier.take_events()) == []
 
 
@@ -904,7 +952,7 @@ def test_events_require_global_kv_events_flag(tmp_path):
         assert len(results) == 1
         assert results[0].success
         assert list(tier.take_events()) == []
-        assert tier._store_job_keys == {}
+        assert tier._store_jobs == {}
     finally:
         tier.shutdown()
 
@@ -948,6 +996,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         assert len(fs_events) == 1
         assert set(fs_events[0].keys) == set(keys)
         assert not fs_events[0].removed
+        assert fs_events[0].req_context is _CTX
     finally:
         tier.shutdown()
 

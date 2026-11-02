@@ -428,3 +428,103 @@ def test_rocm_compiled_caller_keeps_the_kv_insert(monkeypatch):
         forward(qkv, positions)
 
     assert inserted == [False, True]
+
+
+@pytest.mark.parametrize(
+    "prefill_tokens,decode_tokens,prefill_dtype,decode_dtype,expected_fp8",
+    [
+        (0, 2, torch.bfloat16, torch.float8_e4m3fn, True),
+        (2, 0, torch.float8_e4m3fn, torch.bfloat16, True),
+        (1, 1, torch.float8_e4m3fn, torch.float8_e4m3fn, True),
+        (1, 1, torch.float8_e4m3fn, torch.bfloat16, False),
+        (0, 2, torch.float8_e4m3fn, torch.bfloat16, False),
+    ],
+)
+def test_query_fusion_respects_attention_metadata(
+    monkeypatch,
+    prefill_tokens,
+    decode_tokens,
+    prefill_dtype,
+    decode_dtype,
+    expected_fp8,
+):
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadata
+
+    metadata = FlashInferMetadata(
+        kv_cache_layout=None,
+        num_actual_tokens=2,
+        slot_mapping=None,
+        q_data_type_prefill=prefill_dtype,
+        q_data_type_decode=decode_dtype,
+        num_decodes=decode_tokens,
+        num_decode_tokens=decode_tokens,
+        num_prefills=int(prefill_tokens > 0),
+        num_prefill_tokens=prefill_tokens,
+        causal=True,
+        prefill=None,
+        decode=None,
+    )
+    layer = SimpleNamespace(
+        attn_backend=SimpleNamespace(get_name=lambda: "FLASHINFER"),
+        kv_cache_dtype="fp8",
+        _q_scale=torch.tensor(0.37, device="cuda"),
+    )
+    monkeypatch.setattr(
+        fused_ops,
+        "get_attention_context",
+        lambda _: (metadata, layer, torch.empty(0, device="cuda"), None),
+    )
+    qkv = torch.randn(2, 20 * HEAD_DIM, device="cuda", dtype=torch.bfloat16)
+    ref = qkv.clone()
+    positions = torch.arange(2, device="cuda", dtype=torch.int64)
+    ops.fused_muse_spark_qknorm_rope_kv_insert(ref, positions, 16, 2, HEAD_DIM, 1e-5)
+    q_fp8 = fused_ops.fused_qk_norm_rope_kv_insert(
+        qkv,
+        positions,
+        None,
+        "layer",
+        16,
+        2,
+        HEAD_DIM,
+        0,
+        1e-5,
+    )
+    assert (q_fp8 is not None) == expected_fp8
+    if expected_fp8:
+        assert q_fp8 is not None
+        expected_q, _ = ops.scaled_fp8_quant(ref[:, : 16 * HEAD_DIM], layer._q_scale)
+        torch.testing.assert_close(q_fp8.float(), expected_q.float(), rtol=0, atol=0)
+    else:
+        torch.testing.assert_close(qkv, ref, rtol=0, atol=0)
+
+
+def test_attention_accepts_fused_fp8_query_without_requantizing(monkeypatch):
+    """The model's FP8 Q must reach attention unchanged with BF16 output."""
+    from vllm.model_executor.layers.attention import attention as attention_module
+
+    layer = attention_module.Attention.__new__(attention_module.Attention)
+    torch.nn.Module.__init__(layer)
+    layer.kv_cache_dtype = "fp8"
+    layer.impl = SimpleNamespace(supports_quant_query_input=True)
+    layer.num_heads = 16
+    layer.head_size = layer.head_size_v = HEAD_DIM
+    layer.layer_name = "layer"
+    layer.use_direct_call = True
+    layer.attn_backend = SimpleNamespace(forward_includes_kv_cache_update=False)
+    layer.kv_sharing_target_layer_name = None
+
+    def unexpected_quant(*args):
+        pytest.fail("an already quantized query must not be quantized again")
+
+    layer.query_quant = unexpected_quant
+    query = torch.randn(2, 16 * HEAD_DIM, device="cuda").to(torch.float8_e4m3fn)
+
+    def attend(q, k, v, output, *args, **kwargs):
+        assert q.data_ptr() == query.data_ptr()
+        assert q.dtype == torch.float8_e4m3fn
+        assert output.dtype == torch.bfloat16
+        output.copy_(q)
+
+    monkeypatch.setattr(attention_module, "unified_attention_with_output", attend)
+    result = layer(query, None, None, output_dtype=torch.bfloat16)
+    torch.testing.assert_close(result, query.bfloat16(), rtol=0, atol=0)
