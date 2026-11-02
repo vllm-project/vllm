@@ -115,17 +115,11 @@ class Sampler:
         if self.trace_replay_state is not None:
             self.trace_replay_state.apply_staged_writes()
 
-    def get_logprobs_dims(
-        self, idx_mapping_np: np.ndarray, include_token_ids: bool = True
-    ) -> tuple[int, int] | None:
+    def get_logprobs_dims(self, idx_mapping_np: np.ndarray) -> tuple[int, int] | None:
         """(num_logprobs, max_per_req_token_ids) for the given requests, or
         None when none of them want logprobs."""
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)
-        max_token_ids = (
-            self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np)
-            if include_token_ids
-            else 0
-        )
+        max_token_ids = self.logprob_token_ids_state.max_num_token_ids(idx_mapping_np)
         if max_num_logprobs == NO_LOGPROBS and max_token_ids == 0:
             return None
         num_logprobs = max_num_logprobs if max_num_logprobs != NO_LOGPROBS else 0
