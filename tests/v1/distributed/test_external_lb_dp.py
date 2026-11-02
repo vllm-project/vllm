@@ -31,6 +31,10 @@ ELASTIC_EP_MODEL_NAME = "deepseek-ai/DeepSeek-V2-Lite-Chat"
 DP_SIZE = int(os.getenv("DP_SIZE", "2"))
 # Default tensor parallel size to use
 TP_SIZE = int(os.getenv("TP_SIZE", "1"))
+_skip_device_mask = os.getenv("SKIP_DEVICE_MASK_IN_EP", "False").lower()
+if _skip_device_mask not in {"true", "false"}:
+    raise ValueError("SKIP_DEVICE_MASK_IN_EP must be 'True' or 'False'")
+SKIP_DEVICE_MASK_IN_EP = _skip_device_mask == "true"
 
 
 class DictStore:
@@ -184,13 +188,13 @@ class ExternalLBServerManager:
             ]
         )
 
-        env_dict = {
-            "VLLM_SERVER_DEV_MODE": "1",
-            current_platform.device_control_env_var: ",".join(
+        env_dict = {"VLLM_SERVER_DEV_MODE": "1"}
+        enable_ep = "--enable-expert-parallel" in server_args
+        if not (enable_ep and SKIP_DEVICE_MASK_IN_EP):
+            env_dict[current_platform.device_control_env_var] = ",".join(
                 str(current_platform.device_id_to_physical_device_id(i))
                 for i in range(rank * self.tp_size, (rank + 1) * self.tp_size)
-            ),
-        }
+            )
         if elastic_ep_scale_up_launch:
             env_dict["VLLM_ELASTIC_EP_SCALE_UP_LAUNCH"] = "1"
 
