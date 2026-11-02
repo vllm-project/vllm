@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import threading
 from contextlib import nullcontext
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -68,10 +69,11 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
 
         return forward_fn
 
+    capture_stream = object()
     with (
         patch(
             "vllm.v1.worker.gpu.cudagraph_utils.graph_capture",
-            return_value=nullcontext(),
+            return_value=nullcontext(SimpleNamespace(stream=capture_stream)),
         ),
         patch(
             "vllm.v1.worker.gpu.cudagraph_utils.is_global_first_rank",
@@ -80,6 +82,7 @@ def test_piecewise_capture_builds_fresh_metadata_for_both_passes():
     ):
         manager.capture(create_forward_fn)
 
+    assert manager.capture_stream is capture_stream
     assert [warmup for warmup, _ in create_calls] == [True, False]
     assert [mode for _, mode, _ in forward_calls] == [
         CUDAGraphMode.NONE,

@@ -82,6 +82,7 @@ import gc
 import itertools
 import multiprocessing
 import os
+import select
 import socket
 from collections.abc import Callable
 
@@ -266,6 +267,8 @@ class WeightCacheDaemon:
         self.is_draft = is_draft
         self.role = format_daemon_role(is_draft)
         self.model: torch.nn.Module | None = None
+        # Engine watch connections, held open for the daemon's lifetime.
+        self._watchers: list[socket.socket] = []
         key_dp_size, key_dp_rank = get_engine_dp_placement(vllm_config, dp_rank)
         # Fingerprint before loading: process_weights_after_loading may
         # mutate hf_config.quantization_config.
@@ -281,6 +284,7 @@ class WeightCacheDaemon:
             is_draft=is_draft,
             enable_expert_parallel=parallel_config.enable_expert_parallel,
             expert_placement_strategy=parallel_config.expert_placement_strategy,
+            kernel_config=vllm_config.kernel_config,
         )
 
     def warmup(self) -> None:
@@ -430,6 +434,8 @@ class WeightCacheDaemon:
                             send_msg(conn, {"status": "error", "message": str(e)})
         finally:
             server.close()
+            for watcher in self._watchers:
+                watcher.close()
             self.d2d.close()
             if os.path.exists(socket_path):
                 os.unlink(socket_path)
@@ -476,6 +482,8 @@ class WeightCacheDaemon:
             )
         elif cmd == "release":
             self._handle_release(conn)
+        elif cmd == "watch":
+            self._handle_watch(conn)
         else:
             send_msg(conn, {"status": "error", "message": f"Unknown command {cmd!r}"})
 
@@ -517,6 +525,30 @@ class WeightCacheDaemon:
             len(entries),
             len(aliases),
         )
+
+    def _handle_watch(self, conn: socket.socket) -> None:
+        """Hold the connection open until this daemon exits.
+
+        Zero-copy engines keep serving from the mapped weights after the
+        daemon exits; the closed connection tells them their daemon is gone.
+        """
+        self._prune_watchers()
+        # serve_forever closes conn after the request; keep a duplicate.
+        self._watchers.append(conn.dup())
+        send_msg(conn, {"status": "ok"})
+
+    def _prune_watchers(self) -> None:
+        """Close the watch connections of engines that have exited."""
+        alive = []
+        for watcher in self._watchers:
+            # Engines never write after the request, so a readable watcher
+            # has been closed by its engine.
+            readable, _, _ = select.select([watcher], [], [], 0)
+            if readable:
+                watcher.close()
+            else:
+                alive.append(watcher)
+        self._watchers = alive
 
     def _handle_release(self, conn: socket.socket) -> None:
         self.model = None
