@@ -124,6 +124,7 @@ def test_mxfp4_decode_work_map_is_graph_stable(monkeypatch):
     at capture, so every step must refill one buffer and use one block bound."""
     import sys
     import types
+    from typing import Any
 
     from vllm.models.minimax_m3.amd import indexer_mxfp4 as mod
     from vllm.models.minimax_m3.amd.indexer_msa import (
@@ -138,7 +139,7 @@ def test_mxfp4_decode_work_map_is_graph_stable(monkeypatch):
         calls.append((out, max_block))
         return out
 
-    fake = types.ModuleType("aiter.ops.flydsl")
+    fake: Any = types.ModuleType("aiter.ops.flydsl")
     fake.minimax_m3_index_score_work_map = work_map
     fake.minimax_m3_index_score_work_map_capacity = lambda *a: 64
     for name in ("aiter", "aiter.ops"):
@@ -182,4 +183,5 @@ def test_mxfp4_decode_work_map_is_graph_stable(monkeypatch):
     assert len(calls) == 2
     assert calls[0][0] is calls[1][0] is builder._work_map_buf
     assert calls[0][1] == calls[1][1] == 4096 // 128
+    assert first.decode is not None and second.decode is not None
     assert first.decode.max_seq_len == second.decode.max_seq_len == 4096
