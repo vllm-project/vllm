@@ -1080,6 +1080,9 @@ class Qwen3Omni_VisionTransformer(nn.Module):
     }
 )
 class Qwen3MoeLLMModel(Qwen3MoeModel):
+    # Overrides forward without the PP aux-state relay.
+    supports_aux_hidden_states_over_pp = False
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
