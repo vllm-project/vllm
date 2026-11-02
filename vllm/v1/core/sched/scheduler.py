@@ -188,9 +188,7 @@ class Scheduler(SchedulerInterface):
             # With overlapping batches (async scheduling or PP), a step may
             # still be writing a freed request's KV blocks. A consumer KV
             # Connector can reallocate and fill those blocks via a load that
-            # isn't ordered against that write, so defer freeing them. Use the
-            # connector's role, since a MultiConnector child may load KV even
-            # when the top-level kv_role is kv_producer.
+            # isn't ordered against that write, so defer freeing them.
             multiple_inflight_batches = self.vllm_config.max_concurrent_batches > 1
             if multiple_inflight_batches and self.connector.is_kv_consumer:
                 self.defer_block_free = True
