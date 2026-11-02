@@ -288,6 +288,7 @@ steps:
 
 - label: ":nvidia: (H200 MIG 18GB) OpenAI API Correctness"
   key: openai-api-correctness
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_18gb
   source_file_dependencies:
@@ -297,6 +298,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) OpenAI API Correctness"
       dind: false
       device: mi355_dpx

@@ -14,6 +14,7 @@ use std::time::Duration;
 use futures::StreamExt;
 use rmpv::Value;
 use thiserror_ext::AsReport as _;
+use tokio::runtime::Builder;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout;
 use tracing_subscriber::EnvFilter;
@@ -436,6 +437,67 @@ fn client_config_validates_bootstrapped_dp_range() {
         "invalid engine-core client configuration: connected engine range [1, 3) exceeds data parallel size (2)"
     ]]
     .assert_eq(&error.to_string());
+}
+
+#[test]
+fn client_transport_outlives_connecting_runtime() {
+    init_tracing();
+    let caller = Builder::new_current_thread().enable_all().build().unwrap();
+    let independent = Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let ipc = IpcNamespace::new().unwrap();
+    let handshake_address = ipc.handshake_endpoint();
+    let (shutdown_tx, engine_task) = independent.block_on(async {
+        spawn_mock_engine_task(
+            handshake_address.clone(),
+            vec![0x00, 0x00],
+            |dealer, push| {
+                Box::pin(async move {
+                    let _request = recv_engine_message(dealer).await;
+                    send_outputs(
+                        push,
+                        RequestBatchOutputs {
+                            outputs: vec![request_output(
+                                "req-1",
+                                vec![42],
+                                Some(EngineCoreFinishReason::Length),
+                            )],
+                            ..Default::default()
+                        }
+                        .into(),
+                    )
+                    .await;
+                })
+            },
+        )
+    });
+    let client = caller.block_on(connect_client_with_ipc(
+        handshake_test_config(
+            handshake_address,
+            1,
+            "test-model",
+            Duration::from_secs(2),
+            0,
+            None,
+        ),
+        &ipc,
+    ));
+
+    caller.shutdown_timeout(Duration::from_secs(1));
+
+    let mut stream = independent
+        .block_on(client.call(sample_request()))
+        .expect("the client owns its transport runtime")
+        .into_outputs();
+    let output = independent
+        .block_on(async { timeout(Duration::from_secs(2), stream.next()).await })
+        .expect("engine output timed out")
+        .expect("engine output stream ended")
+        .expect("engine output failed");
+    assert_eq!(output.new_token_ids, [42]);
+
+    let _ = shutdown_tx.send(());
+    independent.block_on(engine_task).unwrap();
+    independent.block_on(client.shutdown()).unwrap();
 }
 
 async fn recv_xpub_message(xpub: &mut XPubSocket) -> Vec<bytes::Bytes> {
@@ -2034,18 +2096,38 @@ async fn call_utility_waits_for_all_engines_before_returning_error() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancelled_utility_call_unregisters_waiter() {
+async fn cancelled_utility_call_still_collects_the_reply() {
     init_tracing();
     let ipc = IpcNamespace::new().unwrap();
     let handshake_address = ipc.handshake_endpoint();
     let (received_tx, received_rx) = oneshot::channel();
+    let (cancelled_tx, cancelled_rx) = oneshot::channel::<()>();
     let (_shutdown, engine_task) = spawn_mock_engine_task(
         handshake_address.clone(),
         vec![0x00, 0x00],
-        |dealer, _push| {
+        |dealer, push| {
             Box::pin(async move {
-                let _utility = recv_engine_message(dealer).await;
+                let utility = recv_engine_message(dealer).await;
+                let payload = decode_value(&utility[1]);
+                let call_id = payload.as_array().expect("utility payload array")[1]
+                    .as_u64()
+                    .expect("call_id");
                 let _ = received_tx.send(());
+                cancelled_rx.await.unwrap();
+                send_outputs(
+                    push,
+                    UtilityCallOutput {
+                        engine_index: 0,
+                        timestamp: 0.0,
+                        output: UtilityOutput {
+                            call_id: call_id.into(),
+                            failure_message: None,
+                            result: Some(utility_result_value(true)),
+                        },
+                    }
+                    .into(),
+                )
+                .await;
                 std::future::pending::<()>().await;
             })
         },
@@ -2069,10 +2151,18 @@ async fn cancelled_utility_call_unregisters_waiter() {
         tokio::spawn(async move { call_client.call_utility::<bool, _>("add_lora", ()).await });
 
     received_rx.await.unwrap();
-    assert_eq!(client.pending_utility_call_count(), 1);
     call.abort();
     assert!(call.await.unwrap_err().is_cancelled());
-    assert_eq!(client.pending_utility_call_count(), 0);
+    // The call keeps waiting for the engine after its caller is gone.
+    assert_eq!(client.pending_utility_call_count(), 1);
+    cancelled_tx.send(()).unwrap();
+    timeout(Duration::from_secs(2), async {
+        while client.pending_utility_call_count() > 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the reply resolves the waiter");
 
     engine_task.abort();
     let client = std::sync::Arc::try_unwrap(client)
