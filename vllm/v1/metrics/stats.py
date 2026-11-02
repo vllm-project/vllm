@@ -231,6 +231,13 @@ class SchedulerStats:
 
     num_kv_fetch_reqs_by_stage: dict[str, int] = field(default_factory=dict)
 
+    # Number of KV cache block copies (copy-on-write) issued in the most
+    # recent scheduler step. A single copy corresponds to one source block
+    # duplicated into a fresh destination block (e.g. for a partial prefix
+    # cache hit in a forked sequence). This is a per-step delta; the
+    # Prometheus logger accumulates it into a monotonic counter.
+    num_cow_blocks: int = 0
+
     # These are used for internal DP load-balancing.
     step_counter: int = 0
     current_wave: int = 0
