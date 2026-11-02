@@ -2917,6 +2917,8 @@ def _sparse_attn_decode_partial_kernel(
     k_offsets = tl.arange(0, BLOCK_K)
 
     zero_nope = tl.zeros((BLOCK_K, NOPE_BLOCK), dtype=tl.bfloat16)
+    scale_offsets = tl.arange(0, NOPE_BLOCK // 64)
+    scale_mask = scale_offsets < (NOPE_DIM + 63) // 64
     zero_rope = tl.zeros((BLOCK_K, ROPE_DIM), dtype=tl.bfloat16)
 
     # Each split processes a contiguous slice of this query's main (SWA) and
@@ -2951,12 +2953,19 @@ def _sparse_attn_decode_partial_kernel(
             x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
         else:
             x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+        # One e8m0 byte per 64 nope columns: load [BLOCK_K, NOPE_BLOCK // 64]
+        # and broadcast in registers (bit-identical to a [BLOCK_K, NOPE_BLOCK]
+        # byte gather, which loads each scale byte 64 times).
         encoded_scales = tl.load(
-            token_scale_ptr[:, None] + nope_offsets[None, :] // 64,
-            mask=valid[:, None] & nope_mask[None, :],
+            token_scale_ptr[:, None] + scale_offsets[None, :],
+            mask=valid[:, None] & scale_mask[None, :],
             other=127,
         )
         scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
+        scales = tl.reshape(
+            tl.broadcast_to(scales[:, :, None], (BLOCK_K, NOPE_BLOCK // 64, 64)),
+            (BLOCK_K, NOPE_BLOCK),
+        )
         k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
         k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
         k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
@@ -3022,12 +3031,19 @@ def _sparse_attn_decode_partial_kernel(
                 x_fp8 = x_uint8.to(tl.float8e4b8, bitcast=True)
             else:
                 x_fp8 = x_uint8.to(tl.float8e4nv, bitcast=True)
+            # One e8m0 byte per 64 nope columns: load [BLOCK_K, NOPE_BLOCK // 64]
+            # and broadcast in registers (bit-identical to a [BLOCK_K, NOPE_BLOCK]
+            # byte gather, which loads each scale byte 64 times).
             encoded_scales = tl.load(
-                token_scale_ptr[:, None] + nope_offsets[None, :] // 64,
-                mask=valid[:, None] & nope_mask[None, :],
+                token_scale_ptr[:, None] + scale_offsets[None, :],
+                mask=valid[:, None] & scale_mask[None, :],
                 other=127,
             )
             scales = tl.exp2(encoded_scales.to(tl.float32) - 127.0)
+            scales = tl.reshape(
+                tl.broadcast_to(scales[:, :, None], (BLOCK_K, NOPE_BLOCK // 64, 64)),
+                (BLOCK_K, NOPE_BLOCK),
+            )
             k_nope = x_fp8.to(tl.bfloat16) * scales.to(tl.bfloat16)
             k_nope = tl.where(valid[:, None] & nope_mask[None, :], k_nope, zero_nope)
             k_nope = tl.where(k_nope == k_nope, k_nope, zero_nope)
@@ -4319,7 +4335,9 @@ def _rocm_sparse_attn_decode_ragged_triton(
         )
         return out
 
-    block_k = 32  # KV tokens walked per split-K iteration. Tuned on gfx950.
+    # KV tokens walked per split-K iteration. 32 is tuned on gfx950; on gfx942
+    # 16 is faster at every batch size (fewer VGPRs, half the LDS).
+    block_k = 32 if _ON_GFX950 else 16
     if _ON_GFX950:
         inv_q = 1.0 / max(1, num_queries)
         avg_main_len = main_indices.numel() * inv_q
