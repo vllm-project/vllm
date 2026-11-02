@@ -795,7 +795,11 @@ class ExternalElasticEPScaleCoordinator:
             prepared.dp_rank < bootstrap.new_data_parallel_size
         )
         try:
-            await self._wait_for_commit_ready(prepared)
+            try:
+                await self._wait_for_commit_ready(prepared)
+            except BaseException:
+                await self.client.abort_elastic_ep()
+                raise
             for store in (prepared.control_store, prepared.reconfig_store):
                 self._set_phase(
                     store, prepared.epoch, ExternalElasticEPScalePhase.COMMITTING
