@@ -24,7 +24,6 @@ from vllm.model_executor.kernels.linear.nvfp4.base import (
     NvFp4LinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.nvfp4.cutlass import CutlassNvFp4LinearKernel
-from vllm.model_executor.kernels.linear.nvfp4.fbgemm import FbgemmNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferB12xNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
@@ -78,7 +77,6 @@ SUPPORTING = {
     FlashInferCutlassMxfp8LinearKernel,
     RocmDotScaledMxfp8LinearKernel,
     CutlassNvFp4LinearKernel,
-    FbgemmNvFp4LinearKernel,
     TorchNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
     FlashInferB12xNvFp4LinearKernel,

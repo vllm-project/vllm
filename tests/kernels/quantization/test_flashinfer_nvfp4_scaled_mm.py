@@ -15,7 +15,6 @@ from nvfp4_utils import (
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
 from vllm.model_executor.kernels.linear.nvfp4.cutlass import CutlassNvFp4LinearKernel
-from vllm.model_executor.kernels.linear.nvfp4.fbgemm import FbgemmNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferB12xNvFp4LinearKernel,
     FlashInferCudnnNvFp4LinearKernel,
@@ -71,7 +70,6 @@ CUDA_DEVICES = ["cuda:0"]
             FlashInferCuteDslNvFp4LinearKernel,
             CutlassNvFp4LinearKernel,
             TorchNvFp4LinearKernel,
-            FbgemmNvFp4LinearKernel,
             FlashInferCudnnNvFp4LinearKernel,
             FlashInferB12xNvFp4LinearKernel,
         )

@@ -3,16 +3,10 @@
 
 import torch
 
-from vllm.model_executor.layers.fusion.quant_activation import (
-    QuantizedActivation,
-)
+from vllm._custom_ops import scaled_fp4_quant
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
     swizzle_blockscale,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kNvfp4Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.import_utils import has_fbgemm_gpu
@@ -22,11 +16,6 @@ from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FBGEMM."""
-
-    input_quant_backend_name = "fbgemm"
-
-    def input_quant_key(self) -> QuantKey:
-        return kNvfp4Dynamic
 
     @classmethod
     def is_supported(
@@ -47,25 +36,33 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor | QuantizedActivation,
+        x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         import fbgemm_gpu  # noqa: F401 - registers torch.ops.fbgemm.*
 
         output_size = layer.output_size_per_partition
-        qa = self.prepare_input(layer, x)
+        output_dtype = x.dtype
+        output_shape = [*x.shape[:-1], output_size]
+
+        x_fp4, x_blockscale = scaled_fp4_quant(
+            x,
+            layer.input_global_scale_inv,
+            is_sf_swizzled_layout=True,
+            backend="fbgemm",
+        )
 
         out = torch.ops.fbgemm.f4f4bf16(
-            qa.data,
+            x_fp4,
             layer.weight,
-            qa.scale.view(-1).view(torch.uint8),
+            x_blockscale.view(-1).view(torch.uint8),
             layer.weight_scale,
             layer.alpha,
             use_mx=False,
-        ).to(qa.orig_dtype)
+        ).to(output_dtype)
 
         out = slice_nvfp4_output(out, output_size)
 
         if bias is not None:
             out = out + bias
-        return out.view(*qa.orig_shape[:-1], output_size)
+        return out.view(*output_shape)
