@@ -1595,6 +1595,7 @@ def _derender_serving(engine, parser_cls=_StubParser):
     serving = _build_serving_tokens(engine)
     derenderer = serving.online_derenderer
     derenderer.parser = parser_cls
+    derenderer.enable_auto_tools = False
     derenderer.renderer = MagicMock()
     derenderer.model_config = engine.model_config
     derenderer.make_stream_processor = functools.partial(
