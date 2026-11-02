@@ -12,11 +12,16 @@ from nvfp4_utils import (
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
+from vllm.model_executor.kernels.linear.nvfp4.cutlass import CutlassNvFp4LinearKernel
+from vllm.model_executor.kernels.linear.nvfp4.fbgemm import FbgemmNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferB12xNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
     FlashInferCuteDslNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.nvfp4.pytorch import TorchNvFp4LinearKernel
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     dequantize_to_dtype,
@@ -53,14 +58,35 @@ CUDA_DEVICES = ["cuda:0"]
 
 @pytest.mark.parametrize("token_shape", [(17,), (1, 17), (2, 17)])
 @pytest.mark.parametrize(
-    "kernel_cls",
-    [FlashInferCutlassNvFp4LinearKernel, FlashInferCuteDslNvFp4LinearKernel],
+    "kernel_cls,hidden_size,output_size",
+    [
+        (cls, 128, 128)
+        for cls in (
+            FlashInferCutlassNvFp4LinearKernel,
+            FlashInferCuteDslNvFp4LinearKernel,
+            CutlassNvFp4LinearKernel,
+            TorchNvFp4LinearKernel,
+            FbgemmNvFp4LinearKernel,
+            FlashInferCudnnNvFp4LinearKernel,
+            FlashInferB12xNvFp4LinearKernel,
+        )
+    ]
+    + [
+        (cls, 144, 150)
+        for cls in (
+            CutlassNvFp4LinearKernel,
+            TorchNvFp4LinearKernel,
+            FlashInferCutlassNvFp4LinearKernel,
+            FlashInferCudnnNvFp4LinearKernel,
+        )
+    ],
 )
 @torch.inference_mode()
 def test_flashinfer_nvfp4_preserves_quantized_input_shape(
     token_shape: tuple[int, ...],
-    kernel_cls: type[FlashInferCutlassNvFp4LinearKernel]
-    | type[FlashInferCuteDslNvFp4LinearKernel],
+    kernel_cls,
+    hidden_size: int,
+    output_size: int,
 ) -> None:
     """Pre-quantized inputs must match the tensor path and retain token dimensions."""
     supported, reason = kernel_cls.is_supported()
@@ -68,13 +94,14 @@ def test_flashinfer_nvfp4_preserves_quantized_input_shape(
         pytest.skip(reason)
 
     set_random_seed(42)
-    hidden_size, output_size = 128, 128
     x = torch.randn(*token_shape, hidden_size, dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(output_size, hidden_size, dtype=x.dtype, device=x.device)
     input_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / x.abs().max()).float()
     weight_scale = (FLOAT8_E4M3_MAX * FLOAT4_E2M1_MAX / weight.abs().max()).float()
     x_fp4, x_blockscale = ops.scaled_fp4_quant(x.reshape(-1, hidden_size), input_scale)
-    weight_fp4, weight_blockscale = ops.scaled_fp4_quant(weight, weight_scale)
+    weight_fp4, weight_blockscale = ops.scaled_fp4_quant(
+        weight, weight_scale, is_sf_swizzled_layout=False
+    )
     quantized_input = QuantizedActivation(
         data=x_fp4.reshape(*token_shape, hidden_size // 2),
         scale=x_blockscale,
@@ -85,18 +112,20 @@ def test_flashinfer_nvfp4_preserves_quantized_input_shape(
     layer = torch.nn.Module()
     layer.input_size_per_partition = hidden_size
     layer.output_size_per_partition = output_size
-    layer.weight = weight_fp4
-    layer.weight_scale = weight_blockscale
+    layer.weight = torch.nn.Parameter(weight_fp4, requires_grad=False)
+    layer.weight_scale = torch.nn.Parameter(weight_blockscale, requires_grad=False)
     layer.input_global_scale_inv = input_scale
     layer.alpha = (input_scale * weight_scale).reciprocal()
     kernel = kernel_cls(NvFp4LinearLayerConfig())
+    kernel.process_weights_after_loading(layer)
+    bias = torch.randn(output_size, dtype=x.dtype, device=x.device)
 
-    expected = kernel.apply_weights(layer, x.reshape(-1, hidden_size))
-    actual = kernel.apply_weights(layer, quantized_input)
+    expected = kernel.apply_weights(layer, x.reshape(-1, hidden_size), bias)
+    actual = kernel.apply_weights(layer, quantized_input, bias)
 
     assert actual.shape == (*token_shape, output_size)
     assert actual.dtype == x.dtype
-    torch.testing.assert_close(actual.reshape(expected.shape), expected)
+    torch.testing.assert_close(actual.reshape(expected.shape), expected, rtol=0, atol=0)
 
 
 def get_ref_results(

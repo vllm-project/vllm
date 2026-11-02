@@ -4,10 +4,19 @@
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    pad_nvfp4_activation_for_cutlass,
     pad_nvfp4_weight_for_cutlass,
     slice_nvfp4_output,
     swizzle_blockscale,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
@@ -22,6 +31,9 @@ class TorchNvFp4LinearKernel(NvFp4LinearKernel):
     ``torch.compile``, TorchInductor may select any enabled scaled-GEMM backend,
     including NVGEMM on supported Blackwell systems.
     """
+
+    def input_quant_key(self) -> QuantKey:
+        return kNvfp4Dynamic
 
     @classmethod
     def is_supported(
@@ -52,21 +64,30 @@ class TorchNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
         weights_padding_bytes = getattr(layer, "weights_padding_cols", 0)
 
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="cutlass",
-            padded_n=x.shape[-1] + weights_padding_bytes * 2,
-        )
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            x_fp4 = qa.data.reshape(-1, qa.data.shape[-1])
+            x_fp4 = pad_nvfp4_activation_for_cutlass(x_fp4, weights_padding_bytes)
+            x_blockscale = qa.scale
+            output_dtype = qa.orig_dtype
+            output_shape = [*qa.orig_shape[:-1], output_size]
+        else:
+            assert isinstance(x, torch.Tensor)
+            output_dtype = x.dtype
+            output_shape = [*x.shape[:-1], output_size]
+            x_fp4, x_blockscale = scaled_fp4_quant(
+                x,
+                layer.input_global_scale_inv,
+                is_sf_swizzled_layout=True,
+                backend="cutlass",
+                padded_n=x.shape[-1] + weights_padding_bytes * 2,
+            )
 
         # scaled_fp4_quant returns packed bytes, while torch._scaled_mm uses
         # the corresponding shell dtype to describe the two FP4 values stored

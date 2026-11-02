@@ -4,9 +4,17 @@
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    as_quantized_activation,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
     swizzle_blockscale,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.utils.import_utils import has_fbgemm_gpu
@@ -16,6 +24,9 @@ from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
 class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FBGEMM."""
+
+    def input_quant_key(self) -> QuantKey:
+        return kNvfp4Dynamic
 
     @classmethod
     def is_supported(
@@ -36,21 +47,28 @@ class FbgemmNvFp4LinearKernel(NvFp4LinearKernel):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         import fbgemm_gpu  # noqa: F401 - registers torch.ops.fbgemm.*
 
         output_size = layer.output_size_per_partition
-        output_dtype = x.dtype
-        output_shape = [*x.shape[:-1], output_size]
-
-        x_fp4, x_blockscale = scaled_fp4_quant(
-            x,
-            layer.input_global_scale_inv,
-            is_sf_swizzled_layout=True,
-            backend="fbgemm",
-        )
+        qa = as_quantized_activation(x, self.input_quant_key())
+        if qa is not None:
+            x_fp4 = qa.data.reshape(-1, qa.data.shape[-1])
+            x_blockscale = qa.scale
+            output_dtype = qa.orig_dtype
+            output_shape = [*qa.orig_shape[:-1], output_size]
+        else:
+            assert isinstance(x, torch.Tensor)
+            output_dtype = x.dtype
+            output_shape = [*x.shape[:-1], output_size]
+            x_fp4, x_blockscale = scaled_fp4_quant(
+                x,
+                layer.input_global_scale_inv,
+                is_sf_swizzled_layout=True,
+                backend="fbgemm",
+            )
 
         out = torch.ops.fbgemm.f4f4bf16(
             x_fp4,
