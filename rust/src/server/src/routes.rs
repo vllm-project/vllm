@@ -148,6 +148,13 @@ fn build_router_with_options(
         .route("/load", get(load::load))
         .route("/version", get(version::version))
         .route("/kv_event_sources", get(kv_event_sources::kv_event_sources))
+        // SageMaker
+        .route("/ping", get(health::health).post(health::health))
+        // TODO: SageMaker sends every inference request to `/invocations`. Python
+        // dispatches the body to the first endpoint whose request type it parses
+        // as (chat completions, then completions, then pooling) and returns 400
+        // if none match. Port that routing; until then this returns 501.
+        .route("/invocations", post(not_supported))
         // OpenAI-compatible endpoints
         .route("/v1/models", get(openai::list_models))
         .route("/v1/completions", post(openai::completions))

@@ -884,6 +884,7 @@ async fn unimplemented_python_routes_return_not_implemented() {
         ("POST", "/v1/systemone"),
         ("POST", "/scale_elastic_ep"),
         ("POST", "/is_scaling_elastic_ep"),
+        ("POST", "/invocations"),
     ] {
         assert_route_not_supported(&app, method, uri, uri).await;
     }
@@ -1490,13 +1491,16 @@ async fn server_load(app: &axum::Router) -> u64 {
     value["server_load"].as_u64().expect("server_load")
 }
 
-async fn health_status(app: &axum::Router) -> (StatusCode, Bytes) {
+/// `/health` and SageMaker's `/ping`, which Python serves with the same handler.
+const HEALTH_ROUTES: [(&str, &str); 3] = [("GET", "/health"), ("GET", "/ping"), ("POST", "/ping")];
+
+async fn health_status(app: &axum::Router, method: &str, uri: &str) -> (StatusCode, Bytes) {
     let response = app
         .clone()
         .call(
             Request::builder()
-                .method("GET")
-                .uri("/health")
+                .method(method)
+                .uri(uri)
                 .body(Body::empty())
                 .expect("build request"),
         )
@@ -4618,9 +4622,11 @@ async fn health_endpoint_returns_ok_with_empty_body_when_client_is_healthy() {
     let (app, _state, engine_task) =
         test_health_app_with_engine_script(|_push| boxed_test_future(async move {})).await;
 
-    let (status, body) = health_status(&app).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(body.is_empty(), "expected empty body, got {:?}", body);
+    for (method, uri) in HEALTH_ROUTES {
+        let (status, body) = health_status(&app, method, uri).await;
+        assert_eq!(status, StatusCode::OK, "{method} {uri}");
+        assert!(body.is_empty(), "{method} {uri}: {body:?}");
+    }
 
     engine_task.await.expect("mock engine task");
 }
@@ -4645,9 +4651,11 @@ async fn health_endpoint_returns_503_after_engine_core_dead_sentinel() {
     .await
     .expect("wait for unhealthy client");
 
-    let (status, body) = health_status(&app).await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(body.is_empty(), "expected empty body, got {:?}", body);
+    for (method, uri) in HEALTH_ROUTES {
+        let (status, body) = health_status(&app, method, uri).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{method} {uri}");
+        assert!(body.is_empty(), "{method} {uri}: {body:?}");
+    }
     assert!(matches!(
         state.chat.engine_core_client().health_error().as_deref(),
         Some(vllm_engine_core_client::Error::EngineCoreDead)
