@@ -1071,3 +1071,39 @@ class TestResponseInputToHarmonyReasoningItem:
 
         assert msg is not None
         assert msg.content[0].text == ""
+
+
+class TestResponsePreviousInputDegenerateContent:
+    """previous_input_messages dicts are not schema-validated by Pydantic, so
+    the Harmony parser must not crash with raw exceptions on degenerate
+    (but valid) content fields."""
+
+    def test_chat_format_plain_string_content_parts(self):
+        """content: list[str] is valid chat format and must not crash."""
+        msgs = response_previous_input_to_harmony(
+            {"role": "user", "content": ["hello", "world"]}
+        )
+        assert len(msgs) == 1
+        assert [c.text for c in msgs[0].content] == ["hello", "world"]
+
+    def test_chat_format_none_content(self):
+        """content=None (valid for assistant messages) must not crash."""
+        msgs = response_previous_input_to_harmony(
+            {"role": "assistant", "content": None}
+        )
+        assert len(msgs) == 1
+        assert msgs[0].content[0].text == ""
+
+    def test_harmony_format_plain_string_content_parts(self):
+        """Harmony-format content list with plain strings must not crash."""
+        msgs = response_previous_input_to_harmony(
+            {"author": {"role": "user"}, "content": ["hello", "world"]}
+        )
+        assert len(msgs) == 1
+        assert [c.text for c in msgs[0].content] == ["hello", "world"]
+
+    def test_unsupported_content_part_type_raises_validation_error(self):
+        """Nonsensical content parts must yield a 400-mappable error, not a
+        raw exception."""
+        with pytest.raises(VLLMValidationError, match="Invalid content part"):
+            response_previous_input_to_harmony({"role": "user", "content": [123]})
