@@ -315,6 +315,8 @@ def test_request_tracker_keeps_event_tokens_from_hybrid_checkpoint():
     first = ReqMeta.from_request_tracker(
         tracker,
         block_size=8,
+        hash_block_size=8,
+        block_hashes=[b"h0", b"h1"],
     )
     assert first is None
     assert tracker.num_saved_tokens == 8
@@ -323,6 +325,8 @@ def test_request_tracker_keeps_event_tokens_from_hybrid_checkpoint():
     second = ReqMeta.from_request_tracker(
         tracker,
         block_size=8,
+        hash_block_size=8,
+        block_hashes=[b"h0", b"h1"],
     )
     assert second is not None
     assert second.token_ids_start == 8
@@ -405,6 +409,7 @@ def _make_vllm_config(
         ),
         kv_events_config=SimpleNamespace(enable_kv_cache_events=False),
         speculative_config=None,
+        num_hash_lookahead_tokens=0,
     )
 
 
@@ -1071,6 +1076,7 @@ def _make_partial_tail_send_thread(
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        num_hash_lookahead_tokens=0,
         use_eagle=False,
         eagle_proof_margin_by_group={},
     )
@@ -1597,6 +1603,7 @@ def test_partial_tail_with_smaller_mamba_blocks_writes_one_mamba_key(tp_rank):
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        num_hash_lookahead_tokens=0,
         use_eagle=False,
         eagle_proof_margin_by_group={},
     )
@@ -1655,6 +1662,7 @@ def test_shared_prefix_junction_handoff_writes_only_its_mamba_key():
         hash_block_size=4,
         lcm_block_size=16,
         mamba_group_ids={1},
+        num_hash_lookahead_tokens=0,
         use_eagle=True,
         eagle_proof_margin_by_group={0: 4},
     )
@@ -4218,23 +4226,37 @@ def test_store_sending_thread_kv_events_retry_without_covered_tokens():
     assert suffix_event.token_ids == list(range(16, 32))
 
 
-def test_store_sending_thread_kv_events_recover_suffix_after_put_failure():
+@pytest.mark.parametrize("lookahead", [0, 5])
+@pytest.mark.cpu_test
+def test_store_sending_thread_kv_events_recover_suffix_after_put_failure(lookahead):
     store = MagicMock()
     store.batch_is_exist.side_effect = ([0], [0, 0])
     store.batch_put_from_multi_buffers.side_effect = ([-1], [256, 256])
     thread = _make_store_sending_thread(store)
     thread.enable_kv_event = True
 
-    _run_store_req(thread, _make_event_store_req(16))
+    first = _make_event_store_req(16)
+    first.num_hash_lookahead_tokens = lookahead
+    first.token_ids = list(range(16 + lookahead))
+    _run_store_req(thread, first)
 
     assert thread.get_kv_events() == []
-    assert thread._retry_token_ids["r0"] == (0, list(range(16)))
+    assert thread._retry_token_ids["r0"] == (0, list(range(16 + lookahead)))
 
-    _run_store_req(thread, _make_event_store_req(32, 16))
+    second = _make_event_store_req(32, 16)
+    second.num_hash_lookahead_tokens = lookahead
+    second.token_ids = list(range(16, 32 + lookahead))
+    _run_store_req(thread, second)
 
     retry_event, suffix_event = thread.get_kv_events()
     assert retry_event.token_ids == list(range(16))
     assert suffix_event.token_ids == list(range(16, 32))
+    assert retry_event.lookahead_token_ids == (
+        [list(range(16, 16 + lookahead))] if lookahead else None
+    )
+    assert suffix_event.lookahead_token_ids == (
+        [list(range(32, 32 + lookahead))] if lookahead else None
+    )
     assert thread._retry_token_ids == {}
     assert thread._saved_offset["r0"] == 32
 
@@ -4398,6 +4420,7 @@ def test_mooncake_lookup_reuses_resolved_hash_checkpoint(
         ),
     ]
     config = SimpleNamespace(
+        num_hash_lookahead_tokens=0,
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}
@@ -4471,6 +4494,7 @@ def test_scheduler_follows_core_hit_alignment(alignment, expected):
         ),
     ]
     config = SimpleNamespace(
+        num_hash_lookahead_tokens=0,
         speculative_config=None,
         kv_transfer_config=SimpleNamespace(
             kv_role="kv_both", kv_connector_extra_config={}

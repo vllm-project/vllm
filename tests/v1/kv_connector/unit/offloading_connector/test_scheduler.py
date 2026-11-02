@@ -23,11 +23,13 @@ from tests.v1.kv_connector.unit.utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    set_mtp_config,
 )
 from tests.v1.spec_decode.utils import attach_speculator_config
 from vllm import SamplingParams
-from vllm.config import KVEventsConfig, KVTransferConfig
+from vllm.config import KVEventsConfig, KVTransferConfig, SpeculativeConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
     scheduler as scheduler_module,
 )
@@ -197,6 +199,7 @@ def test_swa_offload_window_covers_unaligned_hit(
         get_manager=lambda: manager,
     )
     config = SimpleNamespace(
+        num_hash_lookahead_tokens=0,
         speculative_config=None,
         cache_config=SimpleNamespace(
             enable_prefix_caching=True, prefix_cache_retention_interval=None
@@ -4858,6 +4861,71 @@ class TestEagle:
         # 3 hits, pop to 2 → 2 * block_size = 8 tokens loadable
         assert sched._lookup(req_status) == 8
 
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize(
+        "num_lookahead, num_tokens, blocks_per_chunk, expected",
+        [
+            (1, 1, 1, 0),
+            (1, 16, 1, 12),
+            (1, 17, 1, 16),
+            (2, 20, 2, 16),
+            (5, 20, 1, 12),
+            (5, 20, 2, 8),
+        ],
+    )
+    def test_lookahead_lookup_waits_for_full_window(
+        self, num_lookahead, num_tokens, blocks_per_chunk, expected
+    ):
+        """Only chunks whose entire lookahead window is known can hit."""
+        init_none_hash(sha256)
+        block_size = 4
+        config = create_vllm_config(
+            block_size=block_size,
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "spec_name": "MockOffloadingSpec",
+                "spec_module_path": MockOffloadingSpec.__module__,
+                "block_size": block_size * blocks_per_chunk,
+            },
+        )
+        set_mtp_config(config, num_lookahead)
+        caches = KVCacheConfig(
+            num_blocks=100,
+            kv_cache_tensors=[],
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    ["mtp"],
+                    FullAttentionSpec(
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        dtype=torch.float32,
+                    ),
+                    is_eagle_group=True,
+                )
+            ],
+        )
+        connector = OffloadingConnector(config, KVConnectorRole.SCHEDULER, caches)
+        assert (
+            connector.scheduler._events_tracker.num_hash_lookahead_tokens
+            == num_lookahead
+        )
+        request = Request(
+            request_id="lookahead",
+            prompt_token_ids=list(range(num_tokens)),
+            sampling_params=SamplingParams(max_tokens=1),
+            pooling_params=None,
+            block_hasher=get_request_block_hasher(block_size, sha256, num_lookahead),
+        )
+        connector.on_new_request(request)
+        _as_mock(connector.scheduler.manager).lookup.return_value = LookupResult.HIT
+
+        assert connector.get_num_new_matched_tokens(request, 0) == (
+            expected,
+            bool(expected),
+        )
+
     def test_full_attn_lookup_single_block_returns_zero(self, request_runner):
         """Full-attn eagle group with 1 block hit → pop to 0 → returns 0."""
         block_size = 4
@@ -5346,6 +5414,47 @@ class TestEagle:
             generate_store_output(keys)
         )
         runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=((0, 0),))
+
+    @pytest.mark.cpu_test
+    @pytest.mark.parametrize("async_scheduling", [True, False])
+    @pytest.mark.parametrize("num_lookahead, expected_blocks", [(1, 4), (5, 2)])
+    def test_lookahead_store_includes_block_hashed_by_sampled_token(
+        self,
+        request_runner,
+        async_scheduling: bool,
+        num_lookahead: int,
+        expected_blocks,
+    ):
+        """Final stores include newly proven chunks and exclude unproven tails."""
+        block_size = 8
+        blocks_per_chunk = 2
+        spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
+        spec.method = "mtp"
+        spec.draft_model_config = create_vllm_config(
+            hf_overrides={"num_nextn_predict_layers": num_lookahead}
+        ).model_config
+        runner = request_runner(
+            block_size=block_size,
+            num_gpu_blocks=100,
+            async_scheduling=async_scheduling,
+            blocks_per_chunk=blocks_per_chunk,
+            speculative_config=spec,
+        )
+        connector = runner.scheduler_connector
+        assert connector.supports_lookahead_block_hashes(
+            runner.scheduler.vllm_config.kv_transfer_config
+        )
+        assert runner.scheduler.num_hash_lookahead_tokens == num_lookahead
+
+        runner.new_request(token_ids=[0] * block_size * 4)
+        runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+            generate_store_output(keys)
+        )
+
+        runner.run(
+            decoded_tokens=[EOS_TOKEN_ID],
+            expected_stored=tuple((0, i) for i in range(expected_blocks)),
+        )
 
     @pytest.mark.parametrize("async_scheduling", [True, False])
     def test_multichunk_store_no_interior_holes(
@@ -6204,6 +6313,7 @@ def _shared_kv_mtp_config():
     spec = MagicMock(name="shared_kv_mtp_spec")
     spec.use_eagle.return_value = True
     spec.use_eagle_block_drop.return_value = True
+    spec.disable_lookahead_block_hashes = False
     spec.use_multi_module_mtp.return_value = False
     spec.num_speculative_tokens_per_batch_size = None
     spec.max_num_new_slots_for_drafting = 0
@@ -6257,11 +6367,14 @@ class TestSharedGroupMTPOffload:
             generate_store_output(keys)
         )
         runner.run(decoded_tokens=[0])
+        # Lookahead hashing is enabled for this connector, so each
+        # block is published once the token after it is materialized: the
+        # last decode block is stored on the finishing step.
         runner.run(
             decoded_tokens=[0] * (block_size * 3 + 2),
-            expected_stored=(0, 1, 2, 3, 4, 5),
+            expected_stored=(0, 1, 2, 3, 4),
         )
-        runner.run(decoded_tokens=[EOS_TOKEN_ID])
+        runner.run(decoded_tokens=[EOS_TOKEN_ID], expected_stored=(5,))
 
         runner.scheduler.reset_prefix_cache()
 
@@ -6425,3 +6538,103 @@ class TestMambaHybridOffloadServing:
             False,
         ]
         assert self._roundtrip_served_tokens(scheduler) == 16
+
+
+def _make_lookahead_hybrid_engine(lookahead=1, eagle=True):
+    from dataclasses import replace
+
+    from tests.v1.kv_connector.unit.utils import make_kv_cache_config
+
+    config = create_vllm_config(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        num_speculative_tokens=lookahead,
+        kv_connector_extra_config={
+            "spec_name": "MockOffloadingSpec",
+            "spec_module_path": "tests.v1.kv_connector.unit.offloading_connector.utils",
+        },
+    )
+    config.scheduler_config.async_scheduling = False
+    config.cache_config.prefix_match_unit = 4
+    config.cache_config.prefix_cache_retention_interval = 16
+    config.cache_config.mamba_cache_mode = "align"
+    set_mtp_config(config, lookahead)
+    caches = make_kv_cache_config(
+        block_size=16,
+        mamba_enabled=True,
+        mamba_cache_mode="align",
+        num_blocks=32,
+    )
+    caches.cache_hit_alignment_tokens = 4
+    caches.prefix_cache_retention_interval = 16
+    caches.kv_cache_groups[0].is_eagle_group = eagle
+    group = caches.kv_cache_groups[1]
+    group.kv_cache_spec = replace(
+        group.kv_cache_spec, num_speculative_blocks=1, num_prefill_checkpoint_blocks=1
+    )
+    init_none_hash(sha256)
+    return create_scheduler(config, kv_cache_config=caches, hash_block_size=4)
+
+
+@pytest.mark.parametrize("lookahead", [1, 5])
+@pytest.mark.parametrize("eagle", [False, True])
+@pytest.mark.cpu_test
+def test_lookahead_partial_lookup_uses_available_hashes(lookahead, eagle):
+    engine = _make_lookahead_hybrid_engine(lookahead, eagle)
+    connector = engine.connector
+    assert isinstance(connector, OffloadingConnector)
+    request = Request(
+        "probe",
+        list(range(44)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, lookahead),
+    )
+    engine.add_request(request)
+    connector.scheduler.manager.lookup.return_value = LookupResult.HIT
+    assert connector.get_num_new_matched_tokens(request, 0) == (
+        min(40, len(request.block_hashes) * 4),
+        True,
+    )
+
+
+@pytest.mark.parametrize("lookahead", [1, 5])
+@pytest.mark.cpu_test
+def test_lookahead_partial_store_uses_checkpoint_hash(lookahead):
+    engine = _make_lookahead_hybrid_engine(lookahead)
+    connector = engine.connector
+    assert isinstance(connector, OffloadingConnector)
+    scheduler = connector.scheduler
+    request = Request(
+        "partial-store",
+        list(range(43)),
+        SamplingParams(max_tokens=1),
+        None,
+        block_hasher=get_request_block_hasher(4, sha256, lookahead),
+    )
+    engine.add_request(request)
+    scheduler.manager.prepare_store.side_effect = (
+        lambda keys, ctx: generate_store_output(keys)
+    )
+    offered = set()
+    for _ in range(5):
+        step = engine.schedule()
+        for job in step.kv_connector_metadata.store_jobs.values():
+            offered.update(job.dst_spec.offload_keys)
+        if request.is_finished():
+            break
+        final = request.num_computed_tokens == request.num_tokens
+        engine.update_from_output(
+            step,
+            ModelRunnerOutput(
+                req_ids=[request.request_id],
+                req_id_to_index={request.request_id: 0},
+                sampled_token_ids=[[99] if final else []],
+            ),
+        )
+    boundary = 40 if lookahead == 1 else 36
+    assert request.is_finished()
+    assert all(
+        make_offload_key(request.block_hashes[boundary // 4 - 1], g) in offered
+        for g in [0, 1]
+    )

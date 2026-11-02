@@ -238,6 +238,9 @@ class RequestRunner:
             kv_role="kv_both",
             kv_connector_extra_config=extra_config,
         )
+        vllm_config.num_hash_lookahead_tokens = (
+            vllm_config._resolve_num_hash_lookahead_tokens()
+        )
         vllm_config.kv_events_config = KVEventsConfig(
             # Enable so the offloading events tracker is active, but use the
             # null publisher: these tests drain take_events directly and a
@@ -363,7 +366,10 @@ class RequestRunner:
         self.gpu_blocks: dict[int, GPUBlock] = {}
 
         init_none_hash(sha256)
-        self._block_hasher = get_request_block_hasher(block_size, sha256)
+        # Mirror EngineCore's choice of hash protocol.
+        self._block_hasher = get_request_block_hasher(
+            block_size, sha256, self.scheduler.num_hash_lookahead_tokens
+        )
 
         self._dummy_ctx: ForwardContext = ForwardContext(
             no_compile_layers={},

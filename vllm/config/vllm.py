@@ -398,6 +398,8 @@ class VllmConfig:
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
     """Speculative decoding configuration."""
+    num_hash_lookahead_tokens: int = Field(default=0, init=False)
+    """Tokens after each block covered by its hash; zero keeps legacy hashes."""
     watermark_config: WatermarkConfig | None = None
     """Text watermarking configuration."""
     diffusion_config: DiffusionConfig | None = None
@@ -670,19 +672,25 @@ class VllmConfig:
             return 0
         return speculative_config.speculator_config.num_prefill_lookahead_tokens
 
-    @property
-    def num_hash_lookahead_tokens(self) -> int:
-        """Tokens after each block that its hash covers; 0 keeps the legacy hashes."""
+    def _resolve_num_hash_lookahead_tokens(self) -> int:
+        """Resolve the hash lookahead after the relevant configs are finalized."""
         speculative_config = self.speculative_config
         if (
             speculative_config is None
             or not speculative_config.use_eagle_block_drop()
             or speculative_config.disable_lookahead_block_hashes
-            or not self.cache_config.enable_prefix_caching
         ):
             return 0
-        # KV connectors, including HiSparse's, keep the legacy hashes.
-        if self.kv_transfer_config is not None:
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is not None:
+            from vllm.distributed.kv_transfer.kv_connector.factory import (
+                KVConnectorFactory,
+            )
+
+            connector_cls = KVConnectorFactory.get_connector_class(kv_transfer_config)
+            if not connector_cls.supports_lookahead_block_hashes(kv_transfer_config):
+                return 0
+        elif not self.cache_config.enable_prefix_caching:
             return 0
         # The drafter's KV at a block's last position reads this far ahead.
         return self.num_prefill_lookahead_tokens
@@ -1540,6 +1548,7 @@ class VllmConfig:
             # with_hf_config() view: the parent config was already validated,
             # and this view's empty architecture list makes the model-dependent checks
             # below unsafe (e.g. use_mla resolves the architecture registry).
+            self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()
             return
 
         self._resolve_mm_encoder_only()
@@ -2384,6 +2393,7 @@ class VllmConfig:
                 )
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()
+        self.num_hash_lookahead_tokens = self._resolve_num_hash_lookahead_tokens()
 
     def _set_max_num_scheduled_tokens(self):
         """In most cases, the scheduler may schedule a batch with as many tokens as the
