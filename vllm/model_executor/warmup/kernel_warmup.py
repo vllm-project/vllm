@@ -459,8 +459,8 @@ def _load_shared_autotune_cache(cache_path: Path, tuner, tune_group) -> bool:
     """Load the per-rank autotune cache into the tuner, group-wide.
 
     Returns True only when every rank of the tune group had a matching file
-    and loaded it: the dummy-run sweep contains collectives, so skipping it
-    is safe only if the decision is unanimous.
+    and loaded it. Otherwise every rank drops its configs and retunes: a rank
+    with a cache hit skips the per-tactic reduces the other ranks block in.
     """
     if not _all_ranks_have_matching_cache(cache_path, tune_group):
         return False
@@ -526,7 +526,6 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
         autotune_kwargs["skip_ops"] = skip_ops
 
     use_autotune_v2 = use_flashinfer_autotune_v2(runner)
-    cache_hit = False
     if use_autotune_v2:
         from flashinfer import autotune_v2, autotune_v2_reload
 
@@ -549,7 +548,7 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 cache_path,
             )
 
-        cache_hit = _load_shared_autotune_cache(cache_path, tuner, tune_group)
+        _load_shared_autotune_cache(cache_path, tuner, tune_group)
         autotune_context = fi_utils.autotune(tune_mode=True, **autotune_kwargs)
 
     group = tune_group.cpu_group if tune_group.world_size > 1 else None
@@ -564,8 +563,9 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 # HiSparse hot-buffer attention is bounded by decode batch
                 # size, not the prefill-sized batch used for the full model.
                 autotune_hisparse_flashinfer_attention(runner)
-            if not cache_hit:
-                _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
+            # Run on a cache hit too: the dummy runs JIT-compile the kernels of
+            # the cached tactics, which would otherwise compile on live requests.
+            _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
     finally:

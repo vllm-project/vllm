@@ -176,8 +176,8 @@ def test_flashinfer_autotune_lifecycle(
     model = runner.get_model()
     cache_path = tmp_path / "autotune.json"
     rank_cache_path = cache_path.with_name(f"autotune_dp0_rank{rank}.json")
-    # A matching cache lets every rank skip the tuning sweep, so the dummy
-    # failure case must run on a cache miss to reach the sweep at all.
+    # The dummy runs also warm up the kernels of cached tactics, so they run
+    # on a cache hit too; the dummy failure case covers the cache miss.
     cache_hit = failure != "dummy"
     if cache_hit:
         rank_cache_path.write_text(json.dumps({"_metadata": {}, "op": 1}))
@@ -270,11 +270,10 @@ def test_flashinfer_autotune_lifecycle(
     if hisparse:
         expected.append(call.hisparse(runner))
     warmup_calls: list[tuple[str, object, dict]] = [
+        ("dummy", runner, {"skip_attn": hisparse}),
         ("replayssm", runner, {}),
         ("kimi", model, {}),
     ]
-    if use_v2 or not cache_hit:
-        warmup_calls.insert(0, ("dummy", runner, {"skip_attn": hisparse}))
     for name, arg, kwargs in warmup_calls:
         expected.append(getattr(call, name)(arg, **kwargs))
         if failure == name:
