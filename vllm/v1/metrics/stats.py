@@ -427,7 +427,7 @@ class RequestSpecDecodeMetrics:
             "num_accepted_draft_tokens": num_accepted,
             "num_draft_tokens": self.num_draft_tokens,
             "num_spec_tokens": self.num_spec_tokens,
-            "num_verified_tokens": self.num_verified_tokens,
+            "num_verified_draft_tokens": self.num_verified_tokens,
         }
         if self.per_step_accepted:
             result["per_step_accepted"] = self.per_step_accepted

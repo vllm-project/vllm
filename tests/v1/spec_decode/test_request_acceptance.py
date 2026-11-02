@@ -62,7 +62,7 @@ def test_to_dict_summary_omits_per_step_arrays():
         "num_accepted_draft_tokens": 9,
         "num_draft_tokens": 15,
         "num_spec_tokens": 3,
-        "num_verified_tokens": 15,
+        "num_verified_draft_tokens": 15,
     }
 
 

@@ -52,7 +52,7 @@ A `summary` response's `metrics` looks like:
       "num_accepted_draft_tokens": 10,
       "num_draft_tokens": 129,
       "num_spec_tokens": 3,
-      "num_verified_tokens": 97
+      "num_verified_draft_tokens": 97
     }
   }
 }
@@ -67,9 +67,9 @@ A `summary` response's `metrics` looks like:
 | `num_accepted_draft_tokens` | Total accepted draft tokens, excluding bonus tokens. |
 | `num_draft_tokens` | Total draft tokens proposed by the draft model. Includes tokens rejected by structured-output grammars or skipped by adaptive verification. |
 | `num_spec_tokens` | Configured `num_speculative_tokens` (`k`), i.e. the maximum draft length per step. |
-| `num_verified_tokens` | Total draft tokens the target model ran a forward pass on, excluding bonus tokens. Smaller than `num_draft_tokens` when adaptive verification skips draft tokens, or when synchronous scheduling drops grammar-invalid draft tokens before the forward pass. |
+| `num_verified_draft_tokens` | Total draft tokens the target model ran a forward pass on, excluding bonus tokens. Smaller than `num_draft_tokens` when adaptive verification skips draft tokens, or when synchronous scheduling drops grammar-invalid draft tokens before the forward pass. |
 
-The counts always satisfy `num_draft_tokens >= num_verified_tokens >= num_accepted_draft_tokens`, both in total and at each step.
+The counts always satisfy `num_draft_tokens >= num_verified_draft_tokens >= num_accepted_draft_tokens`, both in total and at each step.
 
 With `detailed`, ordered arrays are added, one entry per verification step:
 
@@ -103,4 +103,4 @@ all-`n == 1` workloads):
 | `num_spec_steps` | `vllm:spec_decode_num_drafts_total` |
 | `num_draft_tokens` | `vllm:spec_decode_num_draft_tokens_total` |
 | `num_accepted_draft_tokens` | `vllm:spec_decode_num_accepted_tokens_total` |
-| `num_verified_tokens` | `vllm:spec_decode_num_verified_tokens_total` |
+| `num_verified_draft_tokens` | `vllm:spec_decode_num_verified_tokens_total` |

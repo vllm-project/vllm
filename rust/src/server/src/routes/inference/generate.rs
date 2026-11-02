@@ -919,7 +919,7 @@ mod tests {
                 let stats = &json["metrics"]["speculative_decoding"];
                 assert_eq!(stats.as_object().expect("metrics object").len(), 8);
                 assert_eq!(stats["num_draft_tokens"], 6);
-                assert_eq!(stats["num_verified_tokens"], 5);
+                assert_eq!(stats["num_verified_draft_tokens"], 5);
                 assert_eq!(stats["num_accepted_draft_tokens"], 3);
                 assert_eq!(stats["mean_acceptance_length"], 2.5);
                 assert_eq!(
@@ -953,7 +953,7 @@ mod tests {
         });
         assert_eq!(detailed.per_step_accepted, Some(vec![1, 2]));
         assert_eq!(detailed.per_step_drafted, Some(vec![2, 2]));
-        assert_eq!(detailed.num_verified_tokens, 3);
+        assert_eq!(detailed.num_verified_draft_tokens, 3);
         assert_eq!(detailed.per_step_verified, Some(vec![2, 1]));
     }
 
