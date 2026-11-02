@@ -18,8 +18,7 @@ where::
 """
 
 import math
-from enum import Enum
-from typing import NamedTuple
+from typing import Literal, NamedTuple, get_args
 
 import torch
 from torch import nn
@@ -180,16 +179,24 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
     )
 
 
-class InputLayout(str, Enum):
-    """Layout of the tensors (a.k.a. ``pixel_values``) passed to
-    ``FusedMMInputNorm``.
+# Layout of the tensors (a.k.a. ``pixel_values``) passed to ``FusedMMInputNorm``.
+#
+# * ``"pcl"``  — ``(patches, C * L)``: flattened per-patch pixels.
+# * ``"bchw"`` — ``(B, C, H, W)``: NCHW image tensors.
+InputLayout = Literal["pcl", "bchw"]
+_INPUT_LAYOUTS: tuple[str, ...] = get_args(InputLayout)
 
-    * ``PCL``  — ``(patches, C * L)``: flattened per-patch pixels。
-    * ``BCHW`` — ``(B, C, H, W)``: NCHW image tensors.
+
+def _validate_layout(layout: str) -> InputLayout:
+    """Runtime validation for layouts supplied via config/plumbing.
+
+    A ``Literal`` is only checked statically; validating here preserves the
+    fail-fast behaviour of the previous ``InputLayout(layout)`` call so that
+    typos do not silently fall through to the ``PCL`` branch.
     """
-
-    PCL = "pcl"
-    BCHW = "bchw"
+    if layout not in _INPUT_LAYOUTS:
+        raise ValueError(f"invalid layout {layout!r}; expected one of {_INPUT_LAYOUTS}")
+    return layout  # type: ignore[return-value]
 
 
 class IdentityInputNorm(nn.Module):
@@ -248,7 +255,7 @@ class FusedMMInputNorm(CustomOp):
         image_std: list[float],
         rescale_factor: float,
         channel: int = 3,
-        layout: InputLayout | str = InputLayout.PCL,
+        layout: InputLayout = "pcl",
     ):
         super().__init__()
 
@@ -259,7 +266,7 @@ class FusedMMInputNorm(CustomOp):
         assert rescale_factor != 0.0, "rescale_factor must be non-zero"
 
         self.channel = channel
-        self.layout = InputLayout(layout)
+        self.layout = _validate_layout(layout)
 
         # Model construction can set the accelerator as PyTorch's default
         # device; build the buffers on CPU first, then move them over.
@@ -311,7 +318,7 @@ class FusedMMInputNorm(CustomOp):
         forward_* methods call ``.contiguous()`` inside
         ``fused_mm_input_norm_triton`` when needed.
         """
-        if self.layout is InputLayout.BCHW:
+        if self.layout == "bchw":
             assert pixel_values.ndim == 4, (
                 f"pixel_values must be 4D (B, C, H, W) for layout='bchw', "
                 f"got {pixel_values.dim()}D with shape "
@@ -367,7 +374,7 @@ class FusedMMInputNorm(CustomOp):
         """XPU fused custom kernel path for uint8 and Triton kernel path
         for others.
         """
-        if pixel_values.dtype != torch.uint8 or self.layout is InputLayout.BCHW:
+        if pixel_values.dtype != torch.uint8 or self.layout == "bchw":
             return self.forward_cuda(pixel_values, visual_dtype)
 
         # For uint8 input, falls to xpu_fused_input_norm from xpu kernels
@@ -386,7 +393,7 @@ class FusedMMInputNorm(CustomOp):
 
 def build_mm_input_norm(
     model_config: ModelConfig,
-    layout: InputLayout | str = InputLayout.PCL,
+    layout: InputLayout = "pcl",
 ) -> nn.Module:
     """Build the input normalisation module for a model.
 

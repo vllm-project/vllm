@@ -4,6 +4,7 @@
 """Tests for FusedMMInputNorm and the fused affine transform kernel."""
 
 from types import SimpleNamespace
+from typing import get_args
 from unittest.mock import Mock
 
 import pytest
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.fusion.mm_input_norm import (
     IdentityInputNorm,
     InputLayout,
     NormParams,
+    _validate_layout,
     fused_mm_input_norm_triton,
 )
 from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
@@ -99,7 +101,7 @@ def _check_against_reference(
     image_mean: list[float] | None = None,
     image_std: list[float] | None = None,
     rescale_factor: float = _RGB_RESCALE,
-    layout: InputLayout | str = InputLayout.PCL,
+    layout: InputLayout = "pcl",
     **close_kwargs,
 ):
     """Run ``FusedMMInputNorm`` on ``pixel_values`` and compare against the
@@ -108,7 +110,7 @@ def _check_against_reference(
         image_mean = list(_RGB_MEAN)
     if image_std is None:
         image_std = list(_RGB_STD)
-    layout = InputLayout(layout)
+    layout = _validate_layout(layout)
 
     norm = FusedMMInputNorm(
         image_mean=image_mean,
@@ -118,7 +120,7 @@ def _check_against_reference(
         layout=layout,
     ).to(_DEVICE)
 
-    if layout is InputLayout.BCHW:
+    if layout == "bchw":
         expected = _reference_input_norm_nchw(
             pixel_values, image_mean, image_std, rescale_factor, channel, out_dtype
         )
@@ -407,22 +409,21 @@ class TestFusedMMInputNormBCHWValidation:
 class TestFusedMMInputInputLayoutConfig:
     def test_default_is_pcl(self):
         norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE)
-        assert norm.layout is InputLayout.PCL
+        assert norm.layout == "pcl"
 
-    @pytest.mark.parametrize("layout", ["bchw", InputLayout.BCHW])
-    def test_accepts_string_and_enum(self, layout):
+    @pytest.mark.parametrize("layout", ["pcl", "bchw"])
+    def test_accepts_valid_string(self, layout):
         norm = FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout=layout)
-        assert norm.layout is InputLayout.BCHW
+        assert norm.layout == layout
 
     def test_invalid_layout_raises(self):
         with pytest.raises(ValueError):
             FusedMMInputNorm(_RGB_MEAN, _RGB_STD, _RGB_RESCALE, layout="nchw")
 
-    def test_enum_is_str_compatible(self):
-        # InputLayout(str, Enum) must compare equal to its string form so
-        # callers can keep layout="bchw" in configs.
-        assert InputLayout.BCHW == "bchw"
-        assert InputLayout.PCL == "pcl"
+    def test_layout_literal_members(self):
+        # The Literal alias must remain exactly the two supported layouts so
+        # config plumbing that passes strings keeps working.
+        assert set(get_args(InputLayout)) == {"pcl", "bchw"}
 
     def test_input_dtype_and_enabled(self):
         # Sanity check for the CustomOp contract used by the processor.
@@ -647,13 +648,13 @@ class TestBuildMMInputNorm:
         mod = self._patch_processor(monkeypatch, self._NON_IDENTITY_CFG)
         norm = mod.build_mm_input_norm(self._model_config(), layout=layout)
         assert isinstance(norm, FusedMMInputNorm)
-        assert norm.layout is InputLayout(layout)
+        assert norm.layout == layout
 
     def test_default_layout_is_pcl(self, monkeypatch):
         mod = self._patch_processor(monkeypatch, self._NON_IDENTITY_CFG)
         norm = mod.build_mm_input_norm(self._model_config())
         assert isinstance(norm, FusedMMInputNorm)
-        assert norm.layout is InputLayout.PCL
+        assert norm.layout == "pcl"
 
     def test_identity_params_return_identity_norm(self, monkeypatch):
         mod = self._patch_processor(monkeypatch, self._IDENTITY_CFG)
