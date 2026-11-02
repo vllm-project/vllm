@@ -370,7 +370,7 @@ class HopperLowBatchMoE:
         ``SHARED_MAX_ROWS`` rows. Both are views of the workspace."""
         from cutlass import Int32, Int64
 
-        from ...ops.cute_dsl.primitives import current_cu_stream
+        from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
         rows = x.shape[0]
         assert self.serves(rows) and x.is_contiguous() and x.dtype == torch.bfloat16

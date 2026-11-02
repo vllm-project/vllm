@@ -257,7 +257,8 @@ def _compiled(nt: int, c: Cute, xr: int, pub: bool):
     import cutlass
     import cutlass.cute as cute
 
-    from ...ops.cute_dsl.primitives import current_cu_stream
+    from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
+
     from .dense_gemm_cute import DenseFp8Gemm
 
     def fake(dtype):
@@ -402,7 +403,7 @@ class DenseFp8Linear:
         )
 
     def _cute(self, x: torch.Tensor, out: torch.Tensor, c: Cute, all_reduce) -> None:
-        from ...ops.cute_dsl.primitives import current_cu_stream
+        from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
         rows = x.shape[0]
         assert x.stride(-1) == 1 and out.stride(-1) == 1

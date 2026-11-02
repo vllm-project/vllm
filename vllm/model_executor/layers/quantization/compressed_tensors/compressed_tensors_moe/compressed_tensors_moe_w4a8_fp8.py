@@ -25,7 +25,11 @@ from vllm.model_executor.layers.fused_moe.oracle.w4a8 import (
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe import (  # noqa E501
     CompressedTensorsMoEMethod,
 )
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import (
+    move_parameter,
+    replace_parameter,
+    set_weight_attrs,
+)
 
 
 class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
@@ -149,8 +153,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         for name in ("w13", "w2"):
-            setattr(layer, f"{name}_weight", getattr(layer, f"{name}_weight_packed"))
-            delattr(layer, f"{name}_weight_packed")
+            move_parameter(layer, f"{name}_weight_packed", f"{name}_weight")
 
         (
             w13_weight,

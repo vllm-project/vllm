@@ -84,7 +84,8 @@ def finalize(routed: UnfinalizedMoEOutput) -> torch.Tensor:
     import cutlass
     from cutlass import Int32
 
-    from ...ops.cute_dsl.primitives import current_cu_stream
+    from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
+
     from ..moe.routed_expert_gemm import _finalize_kernel, _pointer
 
     rows, top_k = routed.expert_weights.shape

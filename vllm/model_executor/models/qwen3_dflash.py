@@ -27,17 +27,22 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
 from vllm.model_executor.model_loader.weight_utils import make_attention_sink
+from vllm.model_executor.utils import (
+    weights_already_processed,
+)
 from vllm.multimodal.inputs import NestedTensors
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import set_default_rope_theta
 from vllm.transformers_utils.repo_utils import get_hf_file_bytes
 from vllm.v1.attention.backend import AttentionType
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
@@ -59,6 +64,25 @@ logger = init_logger(__name__)
 _SLIDING_ATTENTION = "sliding_attention"
 
 
+def _is_mxfp8_linear(layer: nn.Module) -> bool:
+    return isinstance(
+        getattr(layer, "quant_config", None), ModelOptMxFp8Config
+    ) and not isinstance(layer.quant_method, UnquantizedLinearMethod)
+
+
+_QKV_PARAM = re.compile(
+    r"^layers\.(\d+)\.self_attn\.qkv_proj\.(weight|weight_scale|bias)$"
+)
+
+
+def _load_context_kv_rows(
+    param: torch.Tensor, loaded_weight: torch.Tensor, row_offset: int
+) -> None:
+    """Weight loader of the MXFP8 context K/V projection: one layer's K or V
+    rows, at their offset in the stacked projection."""
+    param.data.narrow(0, row_offset, loaded_weight.shape[0]).copy_(loaded_weight)
+
+
 def _dflash_layer_causal(config: Qwen3Config, layer_idx: int) -> bool:
     """Resolve explicit causality before falling back to legacy layer defaults."""
     is_causal = getattr(config, "is_causal", None)
@@ -78,6 +102,13 @@ def dflash_has_any_non_causal(config: Qwen3Config) -> bool:
     (config mirror of the model's ``get_draft_attn_causal``, usable pre-build)."""
     return not all(
         _dflash_layer_causal(config, i) for i in range(config.num_hidden_layers)
+    )
+
+
+def _reads_raw_weights(projs: list[nn.Module]) -> bool:
+    """Whether post-load `.weight` is plain (not quantized, not CPU-repacked)."""
+    return not current_platform.is_cpu() and all(
+        isinstance(p.quant_method, UnquantizedLinearMethod) for p in projs
     )
 
 
@@ -182,6 +213,7 @@ class DFlashQwen3Attention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        query_pre_quantized: bool = False,
     ) -> None:
         super().__init__()
         self.layer_name = prefix
@@ -242,6 +274,7 @@ class DFlashQwen3Attention(nn.Module):
             prefix=f"{prefix}.attn",
             attn_type=attn_type,
             sinks=self.attention_sink_bias,
+            query_pre_quantized=query_pre_quantized,
         )
         self.causal = causal
         if current_platform.is_rocm():
@@ -408,6 +441,9 @@ class DFlashQwen3Model(nn.Module):
             ".up_proj": (".gate_up_proj", 1),
         },
     )
+    # Maps module paths in the draft checkpoint's quantization exclusions to
+    # this model's module paths.
+    quant_config_mapper: WeightsMapper | None = None
 
     def __init__(
         self,
@@ -422,6 +458,8 @@ class DFlashQwen3Model(nn.Module):
         self.config = speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
         self.quant_config = get_draft_quant_config(vllm_config)
+        if self.quant_config is not None and self.quant_config_mapper is not None:
+            self.quant_config.apply_vllm_mapper(self.quant_config_mapper)
         map_draft_quant_config(
             self.quant_config,
             self.hf_to_vllm_mapper,
@@ -493,6 +531,10 @@ class DFlashQwen3Model(nn.Module):
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
+        layers_attn = [getattr(layer, "self_attn", None) for layer in self.layers]
+        self._context_kv_proj: ReplicatedLinear | None = None
+        if all(_is_mxfp8_linear(getattr(a, "qkv_proj", None)) for a in layers_attn):
+            self._context_kv_proj = self._make_mxfp8_context_kv_proj(layers_attn)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embeds = self.embed_tokens(input_ids)
@@ -511,10 +553,7 @@ class DFlashQwen3Model(nn.Module):
         self._context_qkv_projs = [a.qkv_proj for a in layers_attn]
         self._context_q_sizes = [a.q_size for a in layers_attn]
 
-        if all(
-            isinstance(proj.quant_method, UnquantizedLinearMethod)
-            for proj in self._context_qkv_projs
-        ):
+        if _reads_raw_weights(self._context_qkv_projs):
             # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
             kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
             self._fused_kv_weight: torch.Tensor | None = torch.cat(kv_weights, dim=0)
@@ -525,7 +564,8 @@ class DFlashQwen3Model(nn.Module):
                 self._fused_kv_bias = None
         else:
             # Quantized linear weights may use packed storage that cannot be
-            # consumed by F.linear. Run each projection through its quant method.
+            # consumed by F.linear. Run each projection through its quant method
+            # (or the MXFP8 context projection, when there is one).
             self._fused_kv_weight = None
             self._fused_kv_bias = None
 
@@ -534,6 +574,51 @@ class DFlashQwen3Model(nn.Module):
         self._k_norm_weights = torch.stack(
             [a.k_norm.weight.data for a in layers_attn], dim=0
         ).contiguous()
+
+    def _make_mxfp8_context_kv_proj(
+        self, layers_attn: list[nn.Module]
+    ) -> ReplicatedLinear:
+        """One MXFP8 GEMM over the K/V rows of every layer's QKV projection.
+
+        MXFP8 block scales are per output row, so it holds the K/V rows of the
+        checkpoint's weights and scales as-is. They are loaded from the
+        checkpoint's K/V tensors (`load_weights`), so the projection goes
+        through post-load processing and weight reloads like any other layer.
+        """
+        first = layers_attn[0].qkv_proj
+        proj = ReplicatedLinear(
+            first.input_size,
+            sum(2 * a.kv_size for a in layers_attn),
+            bias=first.bias is not None,
+            params_dtype=first.params_dtype,
+            quant_config=first.quant_config,
+            prefix=first.prefix,
+            return_bias=False,
+            disable_tp=True,  # holds this rank's K/V rows
+        )
+        for param in proj.parameters():
+            param.weight_loader = _load_context_kv_rows
+        offsets = [0]
+        for a in layers_attn:
+            offsets.append(offsets[-1] + 2 * a.kv_size)
+        self._context_kv_offsets = offsets
+        return proj
+
+    def _load_context_kv(
+        self, layer_idx: int, shard_id: str, param_name: str, weight: torch.Tensor
+    ) -> None:
+        """Load this rank's rows of a layer's K or V checkpoint tensor into the
+        MXFP8 context projection, sharded as the layer's QKV projection does."""
+        assert self._context_kv_proj is not None
+        attn = self.layers[layer_idx].self_attn
+        qkv = attn.qkv_proj
+        rank = qkv.tp_rank // qkv.num_kv_head_replicas
+        rows = weight.narrow(0, rank * attn.kv_size, attn.kv_size)
+        offset = self._context_kv_offsets[layer_idx]
+        if shard_id == "v":
+            offset += attn.kv_size
+        param = getattr(self._context_kv_proj, param_name)
+        param.weight_loader(param, rows, offset)
 
     def _build_fused_kv_buffers(self) -> None:
         """Build fused weight buffers for precompute_and_store_context_kv.
@@ -578,15 +663,7 @@ class DFlashQwen3Model(nn.Module):
         # References to inner Attention layers for direct cache writes
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
 
-    def _project_context_kv(
-        self,
-        context_states: torch.Tensor,
-        num_ctx: int,
-        num_layers: int,
-        num_kv_heads: int,
-        head_dim: int,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # --- Fused KV projection (one GEMM for all layers) ---
+    def _normalize_context_states(self, context_states: torch.Tensor) -> torch.Tensor:
         normed_context_states = torch.empty_like(context_states)
         ops.rms_norm(
             normed_context_states,
@@ -594,11 +671,28 @@ class DFlashQwen3Model(nn.Module):
             self._hidden_norm_weight,
             self._rms_norm_eps,
         )
+        return normed_context_states
+
+    def _project_context_kv_token_major(
+        self,
+        context_states: torch.Tensor,
+        num_ctx: int,
+        num_layers: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> torch.Tensor:
+        """Context K/V of every layer, ``[num_ctx, L, 2, nkv, hd]``."""
+        # --- Fused KV projection (one GEMM for all layers) ---
+        normed_context_states = self._normalize_context_states(context_states)
         if self._fused_kv_weight is not None:
             all_kv_flat = F.linear(
                 normed_context_states, self._fused_kv_weight, self._fused_kv_bias
             )
             all_kv = all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+        elif self._context_kv_proj is not None:
+            all_kv = self._context_kv_proj(normed_context_states).view(
+                num_ctx, num_layers, 2, num_kv_heads, head_dim
+            )
         else:
             layer_kv = []
             for proj, q_size in zip(
@@ -609,7 +703,19 @@ class DFlashQwen3Model(nn.Module):
                     qkv[:, q_size:].view(num_ctx, 2, num_kv_heads, head_dim)
                 )
             all_kv = torch.stack(layer_kv, dim=1)
+        return all_kv
 
+    def _project_context_kv(
+        self,
+        context_states: torch.Tensor,
+        num_ctx: int,
+        num_layers: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        all_kv = self._project_context_kv_token_major(
+            context_states, num_ctx, num_layers, num_kv_heads, head_dim
+        )
         # Single contiguous copy that separates K/V and transposes to
         # layer-major layout. Result: [2, L, num_ctx, nkv, hd] contiguous.
         # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
@@ -653,7 +759,8 @@ class DFlashQwen3Model(nn.Module):
                 "DFlash buffer initialization was skipped. If dummy weights are not "
                 "in use, this may indicate an error in weight loading."
             )
-            self._build_fused_kv_buffers()
+            with weights_already_processed():
+                self._build_fused_kv_buffers()
 
         num_ctx = context_states.shape[0]
         L = self._num_attn_layers
@@ -729,11 +836,35 @@ class DFlashQwen3Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        proj = self._context_kv_proj
+        if proj is not None:
+            weights = self._tee_context_kv(weights)
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if proj is not None:
+            loaded |= {
+                f"_context_kv_proj.{name}" for name, _ in proj.named_parameters()
+            }
+        return loaded
+
+    def _tee_context_kv(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        for name, weight in weights:
+            mapped = self.hf_to_vllm_mapper._map_name_with_shard(name)
+            if mapped is not None and mapped[1] in ("k", "v"):
+                match = _QKV_PARAM.match(mapped[0])
+                if match is not None:
+                    self._load_context_kv(
+                        int(match[1]), str(mapped[1]), match[2], weight
+                    )
+            yield name, weight
 
 
 class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DFlashSpeculatorConfig
+
     model_cls = DFlashQwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -843,7 +974,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
                 "means the draft model's target_layer_ids reference layers that "
                 "do not exist in the target model (incompatible draft/target pair)."
             )
-        result = self.model.fc(hidden_states)
+        # The target may keep its residual stream in FP32 (e.g. Muse Spark).
+        result = self.model.fc(hidden_states.to(self.model.fc.params_dtype))
         if needs_squeeze:
             result = result.squeeze(0)
         return result
@@ -889,6 +1021,8 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         mapper = WeightsMapper(orig_to_new_substr=orig_to_new_substr)
         loader = AutoWeightsLoader(self)
         loader.load_weights(model_weights.items(), mapper=mapper)
+
+    def process_weights_after_loading(self) -> None:
         self.model._build_fused_kv_buffers()
 
     def _read_mask_embedding(self) -> torch.Tensor | None:

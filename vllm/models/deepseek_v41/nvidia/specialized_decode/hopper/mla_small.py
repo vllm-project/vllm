@@ -75,7 +75,7 @@ def _launch(kind: str, compressed: bool, *args: Any) -> None:
     floats and ``("i64", n)`` pass as 64-bit, other ints as Int32."""
     from cutlass import Float32, Int32, Int64
 
-    from ...ops.cute_dsl.primitives import current_cu_stream
+    from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
     values: list = []
     for arg in args:
