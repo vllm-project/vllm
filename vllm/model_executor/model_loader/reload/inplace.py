@@ -10,6 +10,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.weight_utils import refresh_derived_weights
 
 from .lifecycle import finish_reload, start_reload
 
@@ -107,6 +108,7 @@ def reload_weights(
             param = get_parameter_for_reload(model, name)  # TODO: buffers?
             param.copy_(loaded_weight)
             loaded_weights.add(name)
+        refresh_derived_weights(model)
 
     # logging and validation
     counter_after_reloading = time.perf_counter()
