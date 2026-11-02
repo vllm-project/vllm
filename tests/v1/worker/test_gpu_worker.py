@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,8 +20,9 @@ from vllm.v1.worker.startup_plan import (
 )
 
 
-def test_v2_worker_requires_triton(monkeypatch):
+def test_v2_gpu_worker_requires_triton(monkeypatch):
     monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cpu", lambda: False)
     config = SimpleNamespace(use_v2_model_runner=True)
     with pytest.raises(ValueError, match="Model Runner V2 requires Triton"):
         gpu_worker.Worker(
@@ -29,46 +31,6 @@ def test_v2_worker_requires_triton(monkeypatch):
             rank=0,
             distributed_init_method="env://",
         )
-
-
-@pytest.mark.skipif(
-    not current_platform.is_cpu(), reason="CPU worker test; needs the CPU platform"
-)
-def test_cpu_worker_without_triton(monkeypatch):
-    import vllm.config.vllm as config_module
-    from vllm.config import VllmConfig
-    from vllm.utils.cpu_resource_utils import MemoryNodeInfo
-    from vllm.v1.worker import cpu_worker
-
-    monkeypatch.delenv("VLLM_USE_V2_MODEL_RUNNER", raising=False)
-    monkeypatch.setattr(config_module, "HAS_TRITON", False)
-    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
-    monkeypatch.setattr(
-        cpu_worker, "get_visible_memory_node", lambda _assigned_node_ids: [0]
-    )
-    monkeypatch.setattr(
-        cpu_worker, "get_allowed_cpu_list", lambda: [SimpleNamespace(numa_node=0)]
-    )
-    monkeypatch.setattr(
-        cpu_worker,
-        "get_memory_node_info",
-        lambda node: MemoryNodeInfo(
-            total_memory=8 * GiB_bytes, available_memory=8 * GiB_bytes
-        ),
-    )
-    monkeypatch.setattr(
-        cpu_worker.torch.ops._C,
-        "init_cpu_memory_env",
-        lambda nodes: None,
-        raising=False,
-    )
-
-    config = VllmConfig()
-    worker = cpu_worker.CPUWorker(
-        config, local_rank=0, rank=0, distributed_init_method="env://"
-    )
-    assert not config.use_v2_model_runner
-    assert not worker.use_v2_model_runner
 
 
 def test_sleep_preservation_restores_private_draft_not_shared_target():
@@ -352,6 +314,23 @@ def test_startup_plan_apply_gate(plan_env):
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
 
 
+def test_startup_plan_rejects_budget_recorded_before_aux_capture(plan_env):
+    """Ignore an old-schema budget even when the fingerprint matches."""
+    worker = _plan_worker()
+    maybe_save_startup_plan(worker, 1024)
+    fingerprint = startup_plan.compute_plan_fingerprint(worker.vllm_config, 0, 1)
+    path = startup_plan._plan_path(fingerprint)
+    with open(path) as f:
+        plan = json.load(f)
+    plan["schema"] = 1
+    with open(path, "w") as f:
+        json.dump(plan, f)
+
+    maybe_apply_startup_plan(worker)
+
+    assert worker.cache_config.kv_cache_memory_bytes is None
+
+
 # Memory accounting of the profiling run (Worker.determine_available_memory).
 
 # The fallback reads only the sign of the measured drop and this process's torch
@@ -518,3 +497,298 @@ def test_jit_monitor_activation_follows_enable_jit_warmup(
     calls.clear()
     gpu_worker.Worker._maybe_activate_jit_monitor(worker(False))
     assert calls == []
+
+
+def test_extensible_init_defers_the_connector(monkeypatch: pytest.MonkeyPatch):
+    """Under the extensible cache the connector is created at the final extend,
+    not at init, and the config is kept for it."""
+    from vllm.v1.worker import gpu_worker
+    from vllm.v1.worker.gpu_worker import Worker
+
+    def fail(*args, **kwargs):
+        raise AssertionError("connector created at init")
+
+    monkeypatch.setattr(gpu_worker, "ensure_kv_transfer_initialized", fail)
+    log: list[str] = []
+    runner = SimpleNamespace(
+        initialize_kv_cache=lambda *args, **kwargs: log.append("initialize_kv_cache"),
+        extensible_kv_cache=SimpleNamespace(
+            reserved_headroom_bytes=0, committable_blocks=lambda: 42
+        ),
+    )
+    kv_cache_config = SimpleNamespace(
+        num_blocks=8,
+        kv_cache_layout=None,
+        needs_kv_cache_zeroing=False,
+        hash_block_size=16,
+        cache_hit_alignment_tokens=16,
+    )
+    worker = SimpleNamespace(
+        cache_config=SimpleNamespace(enable_extensible_kv_cache=True),
+        model_config=SimpleNamespace(enable_return_routed_experts=False),
+        model_runner=runner,
+        _maybe_get_memory_pool_context=lambda tag: nullcontext(),
+        _v2_model_runner=lambda: runner,
+    )
+    # Warmup commits what every rank can: another can commit two fewer.
+    monkeypatch.setattr(gpu_worker, "_min_across_ranks", lambda value: value - 2)
+    Worker.initialize_from_config(worker, kv_cache_config)
+    assert runner.extensible_kv_cache.warmup_committable_blocks == 40
+    assert log == ["initialize_kv_cache"]
+    assert worker._kv_cache_config is kv_cache_config
+
+
+@pytest.mark.parametrize(
+    ("local_reason", "any_rank_unsupported", "expected"),
+    [
+        (None, False, None),
+        (None, True, "another rank cannot use it"),
+        ("no VMM support", True, "no VMM support"),
+    ],
+)
+def test_ranks_agree_on_extensible_kv_cache(
+    monkeypatch: pytest.MonkeyPatch, local_reason, any_rank_unsupported, expected
+):
+    """Every rank in the world group (this engine's, and with MoE data
+    parallelism or the external launcher, its peers') must decide alike: one
+    that keeps the cache would wait in its block-count all-reduces for one
+    that dropped it."""
+    import torch.distributed as dist
+
+    from vllm.v1.worker.gpu_worker import Worker
+
+    reduced: list[tuple[int, object]] = []
+
+    def all_reduce_int(group, value: int, op) -> int:
+        reduced.append((value, op))
+        return int(any_rank_unsupported)
+
+    monkeypatch.setattr(gpu_worker, "vmm_unavailable_reason", lambda: local_reason)
+    monkeypatch.setattr(gpu_worker, "all_reduce_int", all_reduce_int)
+    monkeypatch.setattr(
+        gpu_worker, "get_world_group", lambda: SimpleNamespace(cpu_group=None)
+    )
+    assert Worker.extensible_kv_cache_unsupported_reason(SimpleNamespace()) == expected
+    assert reduced == [(int(local_reason is not None), dist.ReduceOp.MAX)]
+
+
+@pytest.mark.parametrize("connector_pool", [None, object()])
+def test_extensible_extend_asks_connector_for_its_memory_pool(
+    monkeypatch: pytest.MonkeyPatch, connector_pool
+):
+    """Under the extensible cache the connector is created at the final extend.
+    It is asked for a custom memory pool before the cache is committed, as on
+    the standard path, and one it provides cannot back a driver-mapped cache."""
+    from vllm.v1.worker import extensible_kv_cache
+
+    log: list[str] = []
+
+    class Committed(Exception):
+        pass
+
+    def get_mem_pool_context():
+        log.append("get_mem_pool_context")
+        return connector_pool
+
+    def commit(num_blocks, **kwargs):
+        log.append(f"commit:{num_blocks}")
+        raise Committed
+
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "ensure_kv_transfer_initialized",
+        lambda config, kv_cache_config: log.append(
+            f"ensure_kv_transfer:{kv_cache_config.num_blocks}"
+        ),
+    )
+    monkeypatch.setattr(extensible_kv_cache, "has_kv_transfer_group", lambda: True)
+    monkeypatch.setattr(
+        extensible_kv_cache,
+        "get_kv_transfer_group",
+        lambda: SimpleNamespace(get_mem_pool_context=get_mem_pool_context),
+    )
+    runner = SimpleNamespace(
+        extensible_kv_cache=SimpleNamespace(
+            committed_kv_cache_tensors=lambda config, layout, num_blocks: [],
+            num_committed_blocks=4,
+            commit=commit,
+        ),
+        cache_config=SimpleNamespace(get_resolved_kv_cache_layout=lambda: None),
+        vllm_config=SimpleNamespace(kv_transfer_config=object()),
+    )
+    kv_cache_config = SimpleNamespace(num_blocks=16, kv_cache_tensors=[])
+
+    if connector_pool is None:
+        with pytest.raises(Committed):
+            extensible_kv_cache.extend_kv_cache(runner, kv_cache_config, 8)
+        assert log == ["ensure_kv_transfer:8", "get_mem_pool_context", "commit:8"]
+    else:
+        with pytest.raises(ValueError, match="own memory pool"):
+            extensible_kv_cache.extend_kv_cache(runner, kv_cache_config, 8)
+        assert log == ["ensure_kv_transfer:8", "get_mem_pool_context"]
+    # The engine's config is left as planned.
+    assert kv_cache_config.num_blocks == 16
+
+
+GiB = GiB_bytes
+
+
+def _weight_update_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    free_bytes: int,
+    layer_bytes: int,
+    reclaimable: bool,
+    log: list[str],
+):
+    """A Worker over an extensible KV cache with free_bytes of free memory
+    and a model whose largest layer reloads layer_bytes."""
+    from vllm.v1.worker import extensible_kv_cache
+    from vllm.v1.worker.gpu_worker import Worker
+
+    monkeypatch.setattr(
+        extensible_kv_cache, "max_layer_reload_bytes", lambda model: layer_bytes
+    )
+    monkeypatch.setattr(extensible_kv_cache, "has_kv_transfer_group", lambda: False)
+    monkeypatch.setattr(
+        torch.accelerator, "get_memory_info", lambda *args: (free_bytes, 100 * GiB)
+    )
+    monkeypatch.setattr(torch.accelerator, "memory_reserved", lambda *args: 0)
+    monkeypatch.setattr(torch.accelerator, "memory_allocated", lambda *args: 0)
+    monkeypatch.setattr(torch.accelerator, "empty_cache", lambda: None)
+
+    kv_cache = SimpleNamespace(
+        buffer=SimpleNamespace(physical_bytes=50 * GiB),
+        release_physical=lambda: log.append("release"),
+        recommit=lambda: log.append("recommit"),
+        torch_memory_limit=None,
+    )
+
+    def set_torch_memory_limit(num_bytes):
+        kv_cache.torch_memory_limit = num_bytes
+        log.append(f"torch limit {num_bytes}")
+
+    kv_cache.set_torch_memory_limit = set_torch_memory_limit
+    runner = SimpleNamespace(
+        extensible_kv_cache=kv_cache,
+        get_model=lambda: None,
+        reload_weights=lambda *args: log.append("reload"),
+    )
+    worker = object.__new__(Worker)
+    worker.vllm_config = None
+    worker.model_runner = runner
+    worker._kv_cache_reclaimable = reclaimable
+    return worker
+
+
+@pytest.mark.parametrize(
+    ("free_gib", "reclaimable", "expected"),
+    [
+        pytest.param(4, False, ["reload"], id="room"),
+        pytest.param(1, True, ["release", "reload", "recommit"], id="borrows"),
+        pytest.param(2, False, ["reload"], id="short-warns"),
+    ],
+)
+def test_weight_reload_makes_room_from_an_emptied_kv_cache(
+    monkeypatch: pytest.MonkeyPatch, free_gib, reclaimable, expected
+):
+    """A reload that may not fit borrows the extensible KV cache's memory when
+    a pause emptied it, and backs the cache again afterwards."""
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch,
+        free_bytes=free_gib * GiB,
+        layer_bytes=GiB,
+        reclaimable=reclaimable,
+        log=log,
+    )
+    with patch.object(gpu_worker, "set_current_vllm_config", nullcontext):
+        worker.reload_weights()
+    assert log == expected
+
+
+def test_weight_reload_lifts_the_torch_memory_cap(monkeypatch: pytest.MonkeyPatch):
+    """Weight processing allocates through torch, beyond the cap sized for
+    serving; the cap returns afterwards, failed reload or not."""
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch, free_bytes=4 * GiB, layer_bytes=GiB, reclaimable=False, log=log
+    )
+    worker.model_runner.extensible_kv_cache.torch_memory_limit = 7
+
+    def fail(*args):
+        log.append("reload")
+        raise ValueError("bad checkpoint")
+
+    worker.model_runner.reload_weights = fail
+    with (
+        patch.object(gpu_worker, "set_current_vllm_config", nullcontext),
+        pytest.raises(ValueError),
+    ):
+        worker.reload_weights()
+    assert log == ["torch limit None", "reload", "torch limit 7"]
+
+
+def test_weight_reload_fails_before_loading_when_a_layer_cannot_fit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Failing midway would leave a mix of old and new weights."""
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch, free_bytes=GiB // 2, layer_bytes=GiB, reclaimable=False, log=log
+    )
+    with pytest.raises(RuntimeError, match="largest layer"):
+        worker.reload_weights()
+    assert log == []
+
+
+def test_weight_reload_recommits_the_kv_cache_after_a_failed_reload(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch, free_bytes=GiB, layer_bytes=GiB, reclaimable=True, log=log
+    )
+
+    def fail(*args):
+        raise ValueError("bad checkpoint")
+
+    worker.model_runner.reload_weights = fail
+    with (
+        patch.object(gpu_worker, "set_current_vllm_config", nullcontext),
+        pytest.raises(ValueError),
+    ):
+        worker.reload_weights()
+    assert log == ["release", "recommit"]
+
+
+def test_weight_reload_leaves_a_released_kv_cache_released(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Whoever released the cache (sleep, release_kv_cache_memory) restores it."""
+    log: list[str] = []
+    worker = _weight_update_worker(
+        monkeypatch, free_bytes=0, layer_bytes=GiB, reclaimable=True, log=log
+    )
+    worker.model_runner.extensible_kv_cache.buffer.physical_bytes = 0
+    with patch.object(gpu_worker, "set_current_vllm_config", nullcontext):
+        worker.reload_weights()
+    assert log == ["reload"]
+
+
+def test_discarding_the_kv_cache_releases_an_extensible_one(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from vllm.v1.worker.gpu_worker import Worker
+
+    log: list[str] = []
+    monkeypatch.setattr(gpu_worker, "has_kv_transfer_group", lambda: False)
+    kv_cache = SimpleNamespace(release_physical=lambda: log.append("release"))
+    worker = SimpleNamespace(
+        model_runner=SimpleNamespace(extensible_kv_cache=kv_cache),
+        sleep_mode_backend=SimpleNamespace(discard=lambda tags: log.append("pool")),
+    )
+    Worker.discard(worker, ("kv_cache",))
+    assert log == ["release", "pool"]
+    Worker.discard(worker, ("weights",))
+    assert log == ["release", "pool", "pool"]

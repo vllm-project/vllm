@@ -118,6 +118,7 @@ from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
     HiSparseRuntime,
+    HiSparseSlotInvalidator,
     ResolvedHiSparseConfig,
     _has_hisparse_ops,
     build_hisparse_prefill_staging_plan,
@@ -285,6 +286,94 @@ def test_nope_flashinfer_sparse_mla_uses_model_scale(monkeypatch):
 
     assert recorded_scale == model_scale
     assert recorded_scale != kv_lora_rank**-0.5
+
+
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="trtllm-gen sparse MLA requires SM10x",
+)
+@pytest.mark.parametrize(
+    ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
+    [(128, 64, 128), (256, 0, 256)],
+)
+def test_flashinfer_sparse_mla_attends_tokens_past_grid_limit(
+    default_vllm_config, dist_init, qk_nope_head_dim, qk_rope_head_dim, v_head_dim
+):
+    """trtllm-gen maps each token to gridDim.z (limit 65535); a larger step,
+    e.g. a 64K-token prefill, must still attend every token."""
+    device = torch.device("cuda")
+    num_tokens, num_heads, kv_lora_rank, topk, block_size = (
+        65536 + 4099,
+        16,
+        512,
+        128,
+        64,
+    )
+    head_size = kv_lora_rank + qk_rope_head_dim
+    impl = FlashInferMLASparseImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        logits_soft_cap=None,
+        attn_type="decoder",
+        kv_sharing_target_layer_name=None,
+        q_lora_rank=None,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        qk_head_dim=qk_nope_head_dim + qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        kv_b_proj=ColumnParallelLinear(
+            kv_lora_rank, num_heads * (qk_nope_head_dim + v_head_dim), bias=False
+        ),
+    )
+    gen = torch.Generator(device=device).manual_seed(0)
+    kv_cache = (
+        torch.rand(64, block_size, head_size, generator=gen, device=device) - 0.5
+    ).to(torch.bfloat16)
+    q = (
+        torch.rand(num_tokens, num_heads, head_size, generator=gen, device=device) - 0.5
+    ).to(torch.bfloat16)
+    # Mixed active lengths, valid indices first and -1 padding after, as the
+    # index converters produce.
+    valid_counts = torch.randint(
+        1, topk + 1, (num_tokens,), generator=gen, device=device, dtype=torch.int32
+    )
+    valid_counts[::3] = topk
+    topk_indices = torch.randint(
+        0,
+        kv_cache.shape[0] * block_size,
+        (num_tokens, topk),
+        generator=gen,
+        device=device,
+        dtype=torch.int32,
+    )
+    slots = torch.arange(topk, device=device)
+    topk_indices.masked_fill_(slots[None, :] >= valid_counts[:, None], -1)
+
+    out, lse = impl._forward_mqa_kernel(
+        q,
+        kv_cache,
+        topk_indices,
+        valid_counts,
+        layer=SimpleNamespace(),
+        block_size=block_size,
+        is_decode=False,
+    )
+
+    assert lse is None
+    kv_rows = kv_cache.view(-1, head_size).float()
+    # Both sides of the 65535 boundary, the ends, and a sweep in between.
+    rows = sorted({0, 65534, 65535, 65536, num_tokens - 1, *range(0, num_tokens, 997)})
+    for t in rows:
+        kv = kv_rows[topk_indices[t, : valid_counts[t]].long()]
+        scores = q[t].float() @ kv.T * impl.scale
+        ref = torch.softmax(scores, dim=-1) @ kv[:, :kv_lora_rank]
+        torch.testing.assert_close(out[t].float(), ref, atol=2e-2, rtol=2e-2)
 
 
 def test_hisparse_routes_prefill_to_sparse_mqa():
@@ -2168,8 +2257,6 @@ def test_sparse_mla_index_groups_own_distinct_physical_buffers():
 def test_hisparse_index_group_preserves_row_width(
     monkeypatch, kv_cache_dtype, row_width, kv_dtype
 ):
-    monkeypatch.setattr(index_group_module, "_create_side_stream", MagicMock())
-    monkeypatch.setattr(index_group_module, "_create_event", MagicMock())
     create_handle = MagicMock(side_effect=lambda *args, **kwargs: SimpleNamespace())
     monkeypatch.setattr(
         index_group_module, "create_hisparse_cache_handle", create_handle
@@ -3233,8 +3320,10 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     stale_row = flat_hot[stale_hot_slot].clone()
 
     flat_pool[8] += 1000
-    cache_handle.runtime.invalidate_written_slots(
-        torch.tensor([8], dtype=torch.int64, device=device), req_ids
+    HiSparseSlotInvalidator(request_state_indices)(
+        [cache_handle.runtime],
+        torch.tensor([8], dtype=torch.int64, device=device),
+        req_ids,
     )
     cache_handle.runtime.begin_forward()
     hot_indices = cache_handle.swap_in(
@@ -3249,6 +3338,40 @@ def test_hisparse_newest_write_and_recycled_slot_invalidation():
     idx = hot_indices.cpu().tolist()[0][0]
     assert not torch.equal(flat_hot[idx], stale_row)
     torch.testing.assert_close(flat_hot[idx].cpu(), flat_pool[8])
+
+
+@requires_hisparse_ops
+def test_hisparse_invalidation_covers_every_index_group():
+    """One launch drops a rewritten slot from each listed group's request row."""
+    device = torch.device(DEVICE_TYPE)
+    tables = [
+        torch.tensor(
+            [[5, 7, 9, 7, 1, 2, 3, 4], [7, 1, 2, 3, 7, 7, 7, 7]],
+            dtype=torch.int32,
+            device=device,
+        )
+        + offset
+        for offset in (0, 0, 100)
+    ]
+    expected = [table.clone() for table in tables]
+    leaders = [
+        SimpleNamespace(
+            index_group=SimpleNamespace(device_global_indices=table),
+            cache_ops=torch.ops._C_cache_ops,
+        )
+        for table in tables[:2]
+    ]
+    for table in expected[:2]:
+        table[1][table[1] == 7] = -1
+
+    HiSparseSlotInvalidator(torch.tensor([1, 0], dtype=torch.int32, device=device))(
+        leaders,
+        torch.tensor([7, 7], dtype=torch.int64, device=device),
+        torch.tensor([0, -1], dtype=torch.int32, device=device),
+    )
+
+    for table, want in zip(tables, expected):
+        torch.testing.assert_close(table, want)
 
 
 @requires_hisparse_ops
@@ -3677,7 +3800,9 @@ def test_hisparse_gather_prefill_cache_prefers_resident_rows(row_width, kv_dtype
         device=device,
     )
 
-    runtime = _make_hisparse_runtime(row_width=row_width, block_size=block_size)
+    runtime = _make_hisparse_runtime(
+        row_width=row_width, block_size=block_size, kv_dtype=kv_dtype
+    )
     runtime.bind_source_cache(host_cache)
     staged = runtime.gather_prefill_cache(
         host_cache, plan, resident_cache=resident_cache
@@ -3719,7 +3844,9 @@ def test_hisparse_staged_prefill_cache_backs_min_attention_rows():
     )
     host_cache = torch.zeros(4, block_size, row_width).pin_memory()
 
-    staged = HiSparseRuntime.gather_prefill_cache(None, host_cache, plan)
+    runtime = _make_hisparse_runtime(row_width=row_width, block_size=block_size)
+    runtime.bind_source_cache(host_cache)
+    staged = runtime.gather_prefill_cache(host_cache, plan)
 
     assert staged.shape[0] * block_size < 256
     backing_rows = staged.untyped_storage().nbytes() // (
@@ -4322,10 +4449,11 @@ def _record_fa4_kernels(monkeypatch, num_heads, *, device):
     def fake_trtllm(**kwargs):
         trtllm_calls.append(kwargs)
         rows = kwargs["query"].shape[0]
-        out = torch.full(
-            (rows, 1, num_heads, 512), 2.0, dtype=torch.bfloat16, device=device
-        )
-        return (out, lse(rows)) if kwargs.get("return_lse") else out
+        # Like FlashInfer, write into the caller-owned ``out`` / ``lse``.
+        out = kwargs["out"].fill_(2.0)
+        if not kwargs.get("return_lse"):
+            return out
+        return out, kwargs["lse"].copy_(lse(rows))
 
     monkeypatch.setattr(flashattn_sparse_module, "flash_attn_varlen_func", fake_fa4)
     monkeypatch.setattr(

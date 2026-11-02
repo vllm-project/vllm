@@ -31,7 +31,7 @@ from vllm.inputs import EncoderDecoderInput, EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import SupportsTranscription
-from vllm.multimodal.audio import get_audio_duration, split_audio
+from vllm.multimodal.audio import AudioResampler, get_audio_duration, split_audio
 from vllm.multimodal.media.audio import load_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
@@ -173,14 +173,20 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         # NOTE resample to model SR here for efficiency. This is also a
         # pre-requisite for chunking, as it assumes Whisper SR.
         try:
+            resample_method = self.asr_config.audio_resample_method
             with io.BytesIO(audio_data) as buf:
                 y, sr = load_audio(
                     buf,
-                    sr=self.asr_config.sample_rate,
+                    sr=None if resample_method else self.asr_config.sample_rate,
                     mono=True,
                     max_duration_s=self.max_audio_decode_duration_s,
                     max_decode_bytes=self.max_audio_decode_bytes,
                 )
+            if resample_method:
+                y = AudioResampler(
+                    target_sr=self.asr_config.sample_rate, method=resample_method
+                ).resample(y, orig_sr=sr)
+                sr = self.asr_config.sample_rate
         except ValueError:
             raise
         except Exception as exc:
