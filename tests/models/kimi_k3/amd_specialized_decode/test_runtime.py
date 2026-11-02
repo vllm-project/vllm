@@ -109,6 +109,8 @@ def _vllm_config(**over) -> SimpleNamespace:
 
 @pytest.fixture(autouse=True)
 def fp4_bmm(monkeypatch):
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "1")
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_MLA", "1")
 
@@ -280,7 +282,8 @@ _NO_AITER_MLA = [
 @pytest.mark.parametrize(
     "over, env, why",
     [
-        ({"cache_config.cache_dtype": "auto"}, {}, "an fp8 KV cache"),
+        ({"cache_config.cache_dtype": "auto"}, {}, "an fp8 (E4M3) KV cache"),
+        ({"cache_config.cache_dtype": "fp8_e5m2"}, {}, "an fp8 (E4M3) KV cache"),
         (
             {},
             {"VLLM_ROCM_USE_AITER_FP4BMM": "0"},
@@ -334,6 +337,17 @@ def test_refusals(on_mi355x, over, reason):
     assert len(reasons) == 1 and reason in reasons[0], reasons
 
 
+@pytest.mark.parametrize("env", ["VLLM_ROCM_USE_AITER", "VLLM_ROCM_USE_AITER_MOE"])
+@pytest.mark.parametrize("dcp", [1, 8])
+def test_aiter_off_is_refused(on_mi355x, monkeypatch, env, dcp):
+    """K2's MoE needs AITER's: refused at config time, before the weight load."""
+    monkeypatch.setenv(env, "0")
+    reasons = runtime.unsupported(
+        _vllm_config(**{"parallel_config.decode_context_parallel_size": dcp})
+    )
+    assert reasons and "VLLM_ROCM_USE_AITER=1" in reasons[0], reasons
+
+
 def _step(dcp: int, seqs: int, k: int) -> SimpleNamespace:
     return _vllm_config(
         **{
@@ -367,7 +381,7 @@ def test_served_steps_are_accepted(on_mi355x, dcp, seqs, k):
         (1, 2, 15, "max_num_seqs 2 at 15"),
         # 3 requests at qlen 4 (12 rows): M1c's 80 splits do not share out
         (1, 4, 3, "DCP1 runs M1c only"),
-        # no M1c at qlen 2 / 16: AITER's asm decode
+        # no M1c at qlen 2 / 16 (AITER's asm decode is not served at DCP1)
         (1, 1, 1, "DCP1 runs M1c only"),
         (1, 8, 1, "DCP1 runs M1c only"),
         (1, 1, 15, "DCP1 runs M1c only"),
@@ -406,7 +420,9 @@ def test_dcp1_without_m1_is_refused(on_mi355x):
         }
     )
     reasons = runtime.unsupported(cfg)
-    assert len(reasons) == 1 and "DCP1 without M1 (an fp8 KV cache)" in reasons[0]
+    assert (
+        len(reasons) == 1 and "DCP1 without M1 (an fp8 (E4M3) KV cache)" in reasons[0]
+    )
 
 
 def test_every_refusal_is_reported_at_once(monkeypatch):
@@ -647,9 +663,10 @@ def test_qkv_gate_weights_split_the_merged_gate():
     assert mla.qkv_gate_weights(wrapper) == (w, gw)
 
 
-def test_m1c_falls_back_where_its_splits_dont_share_out():
-    """M1c's KV splits share out evenly over a width's requests or the width
-    runs the asm decode: qlen 4's 80 splits over 12 rows (3 requests) don't."""
+def test_m1c_runs_where_its_splits_share_out():
+    """M1c's KV splits share out evenly over a width's requests: qlen 4's 80
+    splits over 12 rows (3 requests) don't (DCP1 refuses that step,
+    ``test_unserved_steps_are_refused``)."""
     from vllm.models.kimi_k3.amd.specialized_decode.runtime.layers import (
         m1c_at,
         m1c_splits,

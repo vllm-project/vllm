@@ -30,6 +30,8 @@ MAX_ROWS = 16
 MAX_SEQS = (1, 2, 4, 8)
 # M1c's qlens: DCP1 runs only them (AITER's asm decode at DCP1 is not served)
 M1C_QLENS = (4, 8)
+# the KV cache dtypes M1 serves: M1a writes E4M3, M1c / AITER's decode read it
+FP8_KV = ("fp8", "fp8_e4m3")
 WHOLE, FFN = "whole", "ffn"
 # Kimi-K3's text shapes the kernels are written for (hidden size, routed experts,
 # KDA heads, KDA head dim, KDA short-conv width)
@@ -115,15 +117,15 @@ def m1_reasons(vllm_config) -> list[str]:
         # asm_decode_num_heads); the loaded layers' backend is checked too
         # (``guards.mla_weight_reasons``)
         (
-            not envs.VLLM_ROCM_USE_AITER_MLA
+            not (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MLA)
             or backend not in (None, AttentionBackendEnum.ROCM_AITER_MLA),
             "the ROCM_AITER_MLA attention backend",
         ),
-        # M1a writes the MLA layers' fp8 KV and hands AITER an fp8 query
-        (not cc.cache_dtype.startswith("fp8"), "an fp8 KV cache"),
+        # M1a writes the MLA layers' fp8 (E4M3) KV and hands AITER an fp8 query
+        (cc.cache_dtype not in FP8_KV, "an fp8 (E4M3) KV cache"),
         # M1 runs W_UK / W_UV as AITER's MXFP4 bmms
         (
-            not envs.VLLM_ROCM_USE_AITER_FP4BMM,
+            not (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_FP4BMM),
             "AITER's MXFP4 bmms (VLLM_ROCM_USE_AITER_FP4BMM=1)",
         ),
     )
@@ -135,6 +137,7 @@ def unsupported(vllm_config) -> list[str]:
     can). Config only: the loaded weights are checked when the executor is built.
     Default-deny: every feature below is refused, the kernels serve none of them.
     What only M1 needs is not refused at DCP8 (``m1_reasons``)."""
+    import vllm.envs as envs
     from vllm.config import CompilationMode
     from vllm.model_executor.layers.mamba.mamba_utils import (
         MambaStateDtypeCalculator,
@@ -161,6 +164,12 @@ def unsupported(vllm_config) -> list[str]:
         # the kernels read one batch's attention metadata per step
         (pc.use_ubatching, "DBO (dual-batch overlap)"),
         (vllm_config.lora_config is not None, "LoRA"),
+        # K2 runs the MoE vLLM loads for AITER's SiTU MXFP4 MoE
+        # (``guards.weight_reasons``), M1 AITER's MLA metadata and bmms
+        (
+            not (envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MOE),
+            "AITER off (set VLLM_ROCM_USE_AITER=1, VLLM_ROCM_USE_AITER_MOE=1)",
+        ),
         # MoRIIO consumers finish loads before execution, without per-layer hooks.
         (
             kv is not None

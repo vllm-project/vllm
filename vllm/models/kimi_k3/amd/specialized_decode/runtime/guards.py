@@ -13,6 +13,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     DCP,
     DCP_SIZES,
     FFN,
+    FP8_KV,
     layer_kinds,
 )
 
@@ -149,8 +150,8 @@ def _mla_reasons(p: str, w, need) -> list[str]:
         reasons.append(f"{p}: needs DCP1 or DCP{DCP}, no PCP / HiSparse")
     elif dcp > 1 and (a.dcp_manager is None or a.dcp_manager.query_gather is None):
         reasons.append(f"{p}: no DCP query gather")
-    if not a.kv_cache_dtype.startswith("fp8"):
-        reasons.append(f"{p}: KV cache {a.kv_cache_dtype}, needs fp8")
+    if a.kv_cache_dtype not in FP8_KV:
+        reasons.append(f"{p}: KV cache {a.kv_cache_dtype}, needs fp8 (E4M3)")
     if not a.is_aiter_triton_fp4_bmm_enabled:
         reasons.append(
             f"{p}: W_UK / W_UV must be AITER MXFP4 bmms (VLLM_ROCM_USE_AITER_FP4BMM=1)"
