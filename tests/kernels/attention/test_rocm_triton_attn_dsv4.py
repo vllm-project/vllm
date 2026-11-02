@@ -1050,6 +1050,60 @@ def test_sparse_attn_decode_ragged_kernel() -> None:
     torch.testing.assert_close(actual, expected, atol=2e-2, rtol=2e-2)
 
 
+@torch.inference_mode()
+def test_sparse_attn_decode_reports_only_rows_it_rotated() -> None:
+    """Callers inverse-RoPE only the rows past the returned count, so on every
+    arch (split-K reduce or the un-tuned fallback) fusing must end up where
+    decoding unfused and rotating every row afterwards does."""
+    from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+        rocm_inverse_rope_rows_,
+        rocm_sparse_attn_decode,
+    )
+
+    device = torch.device("cuda")
+    torch.manual_seed(2)
+    q = torch.randn(2, 16, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    kv = torch.randn(6, HEAD_DIM, dtype=torch.bfloat16, device=device) * 0.125
+    swa_cache = _pack_fp8_ds_mla_cache(
+        kv, block_size=4, use_fnuz=current_platform.is_fp8_fnuz()
+    )
+    swa_indices = torch.tensor([[0, 2, 4], [1, 3, 5]], dtype=torch.int32, device=device)
+    swa_lens = torch.tensor([3, 3], dtype=torch.int32, device=device)
+    positions = torch.tensor([7, 11], dtype=torch.int64, device=device)
+    cos_sin_cache = _random_cos_sin_cache(16, device)
+
+    def decode(fuse: bool) -> torch.Tensor:
+        out = torch.empty_like(q)
+        rotated = rocm_sparse_attn_decode(
+            q=q,
+            kv_cache=None,
+            swa_k_cache=swa_cache,
+            swa_only=True,
+            topk_indices=None,
+            topk_lens=None,
+            swa_indices=swa_indices,
+            swa_lens=swa_lens,
+            swa_ragged_indices=None,
+            swa_ragged_indptr=None,
+            topk_ragged_indices=None,
+            topk_ragged_indptr=None,
+            attn_sink=None,
+            scale=HEAD_DIM**-0.5,
+            head_dim=HEAD_DIM,
+            nope_head_dim=NOPE_HEAD_DIM,
+            rope_head_dim=ROPE_HEAD_DIM,
+            output=out,
+            inv_rope_positions=positions if fuse else None,
+            inv_rope_cos_sin_cache=cos_sin_cache if fuse else None,
+        )
+        rocm_inverse_rope_rows_(
+            out[rotated:], positions[rotated:], cos_sin_cache, ROPE_HEAD_DIM
+        )
+        return out
+
+    torch.testing.assert_close(decode(True), decode(False), atol=2e-2, rtol=2e-2)
+
+
 @requires_gfx950
 @torch.inference_mode()
 def test_sparse_attn_decode_scrubs_untrusted_cache_by_default() -> None:
