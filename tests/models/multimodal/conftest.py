@@ -10,4 +10,4 @@ import torch.nn.functional as F
 # longer re-exports the typing aliases, so executing that module raises NameError.
 # TODO: Remove once the checkpoint fixes its imports.
 if not hasattr(F, "List"):
-    F.List = list
+    F.List = list  # type: ignore[attr-defined]
