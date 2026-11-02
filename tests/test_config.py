@@ -4,6 +4,7 @@
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import textwrap
@@ -51,13 +52,20 @@ from vllm.config.mamba import MambaBackendEnum
 from vllm.config.speculative import _validate_qwen3_omni_dspark
 from vllm.config.utils import get_field
 from vllm.config.vllm import OPTIMIZATION_LEVEL_TO_CONFIG, OptimizationLevel
+from vllm.model_executor.layers.pooler.activations import (
+    PoolerClassify,
+    PoolerIdentity,
+    get_act_fn,
+)
 from vllm.platforms import CpuArchEnum, Platform, PlatformEnum, current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.config import (
     _patch_hf_transformers_nested_rope_validation,
     get_pooling_config,
+    get_sentence_transformers_activation_fn,
     try_get_dense_modules,
 )
+from vllm.transformers_utils.repo_utils import get_non_weight_snapshot_path
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.lilicorr.config import LiLiCorrSpeculatorConfig
@@ -2609,6 +2617,79 @@ def test_get_dense_modules_supports_sentence_transformers_schemas(
     assert try_get_dense_modules(str(tmp_path)) == [
         {**dense_config, "folder": "2_Dense"}
     ]
+
+
+_IDENTITY = "torch.nn.modules.linear.Identity"
+_CROSS_ENCODER = {"model_type": "CrossEncoder", "activation_fn": _IDENTITY}
+_TRANSFORMER = {"type": "sentence_transformers.base.modules.transformer.Transformer"}
+_LOGIT_SCORE = {
+    "type": "sentence_transformers.cross_encoder.modules.logit_score.LogitScore"
+}
+
+
+@pytest.mark.parametrize(
+    ("st_config", "modules", "expected"),
+    [
+        (_CROSS_ENCODER, None, _IDENTITY),
+        (_CROSS_ENCODER, [_TRANSFORMER], _IDENTITY),
+        # e.g. Qwen3 rerankers and jina-reranker-m0: vLLM scores these itself.
+        (_CROSS_ENCODER, [_TRANSFORMER, _LOGIT_SCORE], None),
+        (
+            _CROSS_ENCODER,
+            [{"type": "custom_transformer.JinaRerankerTransformer"}],
+            None,
+        ),
+        ({"model_type": "SentenceTransformer", "activation_fn": _IDENTITY}, None, None),
+        ({"model_type": "CrossEncoder"}, None, None),
+    ],
+)
+def test_get_sentence_transformers_activation_fn(
+    tmp_path, st_config, modules, expected
+):
+    _write_json(tmp_path / "config_sentence_transformers.json", st_config)
+    if modules is not None:
+        _write_json(tmp_path / "modules.json", modules)
+
+    assert get_sentence_transformers_activation_fn(str(tmp_path)) == expected
+
+
+_SIGMOID = "torch.nn.modules.activation.Sigmoid"
+
+
+def _sigmoid_override(hf_config):
+    hf_config.sentence_transformers = {"activation_fn": _SIGMOID}
+    return hf_config
+
+
+@pytest.mark.parametrize("saved_act_fn", [None, _SIGMOID])
+@pytest.mark.parametrize(
+    ("hf_overrides", "expected"),
+    [
+        ({}, PoolerIdentity),
+        ({"sentence_transformers": {"activation_fn": _SIGMOID}}, PoolerClassify),
+        ({"sbert_ce_default_activation_function": _SIGMOID}, PoolerClassify),
+        (_sigmoid_override, PoolerClassify),
+    ],
+)
+def test_sentence_transformers_cross_encoder_activation_fn(
+    tmp_path, saved_act_fn, hf_overrides, expected
+):
+    """Sentence Transformers v6 saves the CrossEncoder activation (here
+    Identity) in config_sentence_transformers.json, which wins over an older
+    copy in config.json. An explicit hf_overrides activation, as a dict or a
+    callable, wins over both, even when it matches config.json."""
+    model = "tomaarsen/ettin-encoder-150m-reranker-msmarco524k-1e-4-20261014"
+    if saved_act_fn is not None:
+        shutil.copytree(
+            get_non_weight_snapshot_path(model), tmp_path, dirs_exist_ok=True
+        )
+        config = json.loads((tmp_path / "config.json").read_text())
+        config["sentence_transformers"] = {"activation_fn": saved_act_fn}
+        _write_json(tmp_path / "config.json", config)
+        model = str(tmp_path)
+    model_config = ModelConfig(model, hf_overrides=hf_overrides)
+
+    assert isinstance(get_act_fn(model_config.hf_config), expected)
 
 
 @pytest.mark.skipif(
