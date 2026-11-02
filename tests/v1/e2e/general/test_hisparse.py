@@ -309,6 +309,9 @@ def test_hisparse_extensible_kv_cache(
             max_model_len=4096,
             max_num_batched_tokens=4096,
             max_num_seqs=4,
+            # Leaves room for the second engine while the first one's memory
+            # is still being released.
+            gpu_memory_utilization=0.4,
             compilation_config={
                 "cudagraph_mode": "FULL_AND_PIECEWISE",
                 "cudagraph_capture_sizes": [1, 4],
