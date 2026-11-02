@@ -643,15 +643,16 @@ def test_prefill_checkpoint_resumes_suffix(monkeypatch, dim_first, num_spec, off
     torch.testing.assert_close(recurrent[3], expected_state, atol=0.003, rtol=0.03)
 
 
-@pytest.mark.parametrize("aiter_conv1d", [False, True])
+@pytest.mark.parametrize("conv", ["vllm", "aiter", "fp32 weights"])
 @pytest.mark.parametrize("num_decodes", [0, 3])
 @torch.inference_mode()
-def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, aiter_conv1d):
+def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, conv):
     """With ``flashkda`` on ROCm the layer's prefill runs AITER FlashKDA on
     the paged state and output in place, and matches the Triton chunk path
     to bf16 precision (chunk size 32 vs 64). Decodes in the same step take
     the recurrent kernel, so FlashKDA sees the prefills only. Both paths run
-    with either prefill conv."""
+    with either prefill conv; AITER's takes only conv weights with bf16
+    values."""
     from types import SimpleNamespace
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -661,7 +662,7 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, aiter_c
 
     if not rocm_aiter_ops.is_kda_flashkda_prefill_available():
         pytest.skip("requires AITER FlashKDA (VLLM_ROCM_USE_AITER=1, gfx950)")
-    if aiter_conv1d and not rocm_aiter_ops.is_causal_conv1d_prefill_available():
+    if conv != "vllm" and not rocm_aiter_ops.is_causal_conv1d_prefill_available():
         pytest.skip("requires AITER's HIP prefill conv")
 
     torch.manual_seed(7)
@@ -680,11 +681,18 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, aiter_c
     layer.kda_safe_gate = True
     layer.kda_lower_bound = LOWER_BOUND
     layer._conv_state_dim_first = False
-    layer._use_aiter_conv1d = aiter_conv1d
-    layer._merged_conv_weight = 0.5 * torch.randn(
-        width, 4, device=device, dtype=torch.bfloat16
+    layer.conv_size = 4
+    layer._use_aiter_conv1d = conv != "vllm"
+    layer._aiter_conv_weight = None
+    # Built by _forward from the q, k and v convs, whose fp32 parameters hold
+    # bf16 values when they come from a bf16 checkpoint.
+    layer._merged_conv_weight = None
+    conv_weights = 0.5 * torch.randn(3, heads * D, 1, 4, device=device)
+    if conv != "fp32 weights":
+        conv_weights = conv_weights.bfloat16().float()
+    layer.q_conv1d, layer.k_conv1d, layer.v_conv1d = (
+        SimpleNamespace(weight=w, bias=None) for w in conv_weights
     )
-    layer.q_conv1d = SimpleNamespace(bias=None)
     layer.A_log = 0.5 * torch.randn(1, 1, heads, 1, device=device)
     layer.dt_bias = 0.1 * torch.randn(heads * D, device=device)
 
@@ -740,6 +748,18 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, aiter_c
         return kda_flashkda_prefill(**kwargs)
 
     monkeypatch.setattr(rocm_aiter_ops, "kda_flashkda_prefill", staticmethod(spy))
+    conv_weight_dtypes = []
+    conv_prefill = rocm_aiter_ops.causal_conv1d_prefill_split_qkv
+
+    def conv_spy(*args, **kwargs):
+        conv_weight_dtypes.append(args[1].dtype)
+        return conv_prefill(*args, **kwargs)
+
+    monkeypatch.setattr(
+        rocm_aiter_ops, "causal_conv1d_prefill_split_qkv", staticmethod(conv_spy)
+    )
+    # The step here is far below the size from which the layer takes AITER's conv.
+    monkeypatch.setattr(kda, "_AITER_CONV1D_MIN_TOKENS", 0)
 
     def run(backend: str):
         conv_pool, recurrent_pool = conv_storage.clone(), recurrent_storage.clone()
@@ -759,6 +779,9 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, aiter_c
     assert len(prefill_calls) == 1
     assert prefill_calls[0]["q"].shape[1] == sum(prefill_lengths)
     assert prefill_calls[0]["cu_seqlens"].tolist() == [0, 37, 137]
+    # Both runs' convs, or none: fp32 weight values keep vLLM's kernel.
+    expected_convs = [torch.bfloat16] * 2 if conv == "aiter" else []
+    assert conv_weight_dtypes == expected_convs
 
     torch.testing.assert_close(out, triton_out, rtol=2e-2, atol=2e-2)
     torch.testing.assert_close(recurrent, triton_recurrent, rtol=2e-2, atol=2e-2)
@@ -777,9 +800,9 @@ def test_aiter_flashkda_prefill_matches_triton(monkeypatch, num_decodes, aiter_c
 @torch.inference_mode()
 def test_aiter_conv1d_prefill_matches_vllm(dim_first, prefill_len):
     """AITER's HIP prefill conv, called as the layer calls it, matches
-    ``causal_conv1d_fn``: q|k|v to bf16 rounding and the conv state exactly.
-    The step takes 16-token tiles below 4096 tokens and 32-token tiles from
-    there, each scheduled from vLLM's 8-token schedule."""
+    ``causal_conv1d_fn`` on the layer's fp32 weights holding bf16 values:
+    q|k|v to bf16 rounding and the conv state exactly. Its 32-token tiles are
+    scheduled from vLLM's 8-token schedule."""
     from types import SimpleNamespace
 
     from vllm._aiter_ops import rocm_aiter_ops
@@ -802,7 +825,7 @@ def test_aiter_conv1d_prefill_matches_vllm(dim_first, prefill_len):
         num_tokens, width + 272, device=device, dtype=torch.bfloat16
     )
     x = projected[:, :width].transpose(0, 1)
-    weight = 0.5 * torch.randn(width, 4, device=device, dtype=torch.bfloat16)
+    weight = (0.5 * torch.randn(width, 4, device=device)).bfloat16()
     shape = (num_lines, width, 3) if dim_first else (num_lines, 3, width)
     pool = torch.randn(shape, device=device, dtype=torch.bfloat16)
     state = pool if dim_first else pool.transpose(-1, -2)
@@ -819,7 +842,7 @@ def test_aiter_conv1d_prefill_matches_vllm(dim_first, prefill_len):
     initial = pool.clone()
     expected = causal_conv1d_fn(
         x,
-        weight,
+        weight.float(),
         None,
         activation="silu",
         conv_states=state,
@@ -849,12 +872,11 @@ def test_aiter_conv1d_prefill_matches_vllm(dim_first, prefill_len):
     )
     assert torch.equal(pool, expected_pool)
 
-    block_m = 32 if num_tokens >= 4096 else 16
-    schedule = step.nums_dict[block_m]
+    schedule = step.nums_dict[32]
     chunks = [
         (seq, chunk)
         for seq, length in enumerate(lengths)
-        for chunk in range(-(-length // block_m))
+        for chunk in range(-(-length // 32))
     ]
     assert schedule["tot"] == len(chunks)
     assert chunks == list(

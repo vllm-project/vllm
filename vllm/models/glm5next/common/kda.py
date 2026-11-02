@@ -48,6 +48,7 @@ from vllm.model_executor.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.third_party.flash_linear_attention.ops.kda import FusedRMSNormGated
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -64,6 +65,9 @@ else:
     )
 
 logger = init_logger(__name__)
+
+# Below this many tokens vLLM's prefill conv is as fast as AITER's HIP conv.
+_AITER_CONV1D_MIN_TOKENS = 4096
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -367,13 +371,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         if self._use_aiter_decode:
             logger.info_once("GLM-5.3-Flash KDA decode: AITER single-launch kernel.")
-        # AITER's HIP prefill conv takes a width-4 conv with bf16 inputs, weights
-        # and states; _forward checks the dtypes per step.
+        # AITER's HIP prefill conv: width 4, no bias. _forward decides on the
+        # weights and the state dtype when it builds the merged weight.
         self._use_aiter_conv1d = self.conv_size == 4 and bool(
             rocm_aiter_ops.is_causal_conv1d_prefill_available()
         )
-        if self._use_aiter_conv1d:
-            logger.info_once("GLM-5.3-Flash KDA prefill conv: AITER HIP kernel.")
+        self._aiter_conv_weight: torch.Tensor | None = None
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -670,6 +673,20 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 [_w(self.q_conv1d), _w(self.k_conv1d), _w(self.v_conv1d)],
                 dim=0,
             ).contiguous()
+            if (
+                self._use_aiter_conv1d
+                and self.q_conv1d.bias is None
+                and conv_state.dtype == torch.bfloat16
+            ):
+                # AITER's HIP conv reads bf16 weights. The conv parameters are
+                # fp32, so it takes them only if they hold bf16 values, as they
+                # do when the checkpoint stores bf16.
+                weight = self._merged_conv_weight.to(torch.bfloat16)
+                with gpu_sync_allowed():
+                    exact = torch.equal(weight.float(), self._merged_conv_weight)
+                if exact:
+                    self._aiter_conv_weight = weight
+                    logger.info_once("GLM-5.3-Flash KDA prefill conv: AITER HIP.")
             if out_gate is not None:
                 # Derived from the merged weight, so it is rebuilt with it.
                 self._decode_conv_weight = (
@@ -768,16 +785,14 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         if attn_metadata_narrowed.num_prefills > 0:
             assert qkv_ns is not None
             if (
-                self._use_aiter_conv1d
-                and qkv_ns.dtype
-                == conv_state.dtype
-                == conv_weights.dtype
-                == torch.bfloat16
+                self._aiter_conv_weight is not None
+                and qkv_ns.shape[0] >= _AITER_CONV1D_MIN_TOKENS
+                and qkv_ns.dtype == torch.bfloat16
             ):
                 q_ns, k_ns, v_ns = rocm_aiter_ops.causal_conv1d_prefill_split_qkv(
                     qkv_ns.transpose(0, 1),
-                    conv_weights,
-                    conv_bias,
+                    self._aiter_conv_weight,
+                    None,
                     conv_state,
                     non_spec_query_start_loc,
                     self.local_projection_size,

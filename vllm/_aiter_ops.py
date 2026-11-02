@@ -5366,23 +5366,23 @@ class rocm_aiter_ops:
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Run AITER's HIP prefill causal conv1d (width 4, SiLU) on q|k|v.
 
-        Takes what ``causal_conv1d_fn`` takes: ``x`` is bf16 ``[dim, tokens]``
-        with the channels contiguous and ordered q|k|v, and ``conv_states`` the
-        bf16 ``[lines, dim, 3]`` cache, updated in place. ``metadata`` is the
-        step's GDN attention metadata. Returns contiguous ``q``, ``k`` and ``v``,
+        Takes what ``causal_conv1d_fn`` takes, with bf16 weights: ``x`` is bf16
+        ``[dim, tokens]`` with the channels contiguous and ordered q|k|v,
+        ``weight`` bf16 ``[dim, 4]``, and ``conv_states`` the bf16
+        ``[lines, dim, 3]`` cache, updated in place. ``metadata`` is the step's
+        GDN attention metadata. Returns contiguous ``q``, ``k`` and ``v``,
         ``[tokens, k_dim]``, ``[tokens, k_dim]`` and ``[tokens, v_dim]``.
         """
         from aiter.ops.causal_conv1d_fwd_split_qkv import (
             causal_conv1d_split_qkv_hip_fn,
         )
 
-        # Tiles of 32 tokens for long steps and 16 for short ones.
-        block_m = 32 if x.shape[1] >= 4096 else 16
+        block_m = 32
         nums_dict = metadata.nums_dict
         if block_m not in nums_dict:
             # The metadata builder makes the 8-token chunk schedule on the host.
-            # The coarser one follows from its chunk counts, as
-            # ceil(ceil(n / 8) / r) = ceil(n / (8 * r)), so AITER need not copy
+            # The 32-token one follows from its chunk counts, as
+            # ceil(ceil(n / 8) / 4) = ceil(n / 32), so AITER need not copy
             # query_start_loc back. Built once per step, for all its layers.
             nums = (-(-nums_dict[8]["nums"] // (block_m // 8))).numpy()
             tot = int(nums.sum())
@@ -5396,6 +5396,10 @@ class rocm_aiter_ops:
                     chunk_ids, x.device, torch.int32
                 ),
             }
+        # AITER reads the flags as uint8. A bool tensor's bytes already are, so a
+        # view saves its cast, one kernel per layer.
+        if has_initial_state.dtype == torch.bool:
+            has_initial_state = has_initial_state.view(torch.uint8)
         return causal_conv1d_split_qkv_hip_fn(
             x,
             weight,
