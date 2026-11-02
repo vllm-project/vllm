@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config.speech_to_text import SpeechToTextConfig
 from vllm.multimodal.audio import (
     MONO_AUDIO_SPEC,
     PASSTHROUGH_AUDIO_SPEC,
@@ -781,6 +782,62 @@ class TestAudioChunking:
         for chunk in chunks[:-1]:
             assert chunk.shape[0] >= max_samples - overlap_samples
             assert chunk.shape[0] <= max_samples
+
+    def test_split_audio_default_config_splits_in_pause_before_limit(self):
+        """With the default chunking settings, a pause well before
+        max_audio_clip_s is used as the split point."""
+        config = SpeechToTextConfig()
+        sr = int(config.sample_rate)
+        audio = np.random.default_rng(0).uniform(-0.5, 0.5, 40 * sr).astype(np.float32)
+        pause_start, pause_end = 22 * sr, int(22.4 * sr)
+        audio[pause_start:pause_end] = 0.0
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=sr,
+            max_clip_duration_s=config.max_audio_clip_s,
+            overlap_duration_s=config.overlap_chunk_second,
+            min_energy_window_size=config.min_energy_split_window_size,
+        )
+
+        assert pause_start <= chunks[0].shape[0] < pause_end
+
+    def test_split_audio_default_config_short_clip_limit(self):
+        """The default search region stays in the second half of each chunk
+        when max_audio_clip_s is not much longer than the region."""
+        max_audio_clip_s = 10
+        config = SpeechToTextConfig(max_audio_clip_s=max_audio_clip_s)
+        sr = int(config.sample_rate)
+        audio = np.random.default_rng(0).uniform(-0.5, 0.5, 60 * sr).astype(np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=sr,
+            max_clip_duration_s=max_audio_clip_s,
+            overlap_duration_s=config.overlap_chunk_second,
+            min_energy_window_size=config.min_energy_split_window_size,
+        )
+
+        max_samples = max_audio_clip_s * sr
+        for chunk in chunks[:-1]:
+            assert max_samples // 2 <= chunk.shape[0] < max_samples
+
+    def test_split_audio_explicit_region_longer_than_half_clip(self):
+        """An explicit search region is used as given."""
+        sr = 16000
+        audio = np.random.default_rng(0).uniform(-0.5, 0.5, 60 * sr).astype(np.float32)
+        pause_start, pause_end = 12 * sr, int(12.4 * sr)
+        audio[pause_start:pause_end] = 0.0
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=sr,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=20.0,
+            min_energy_window_size=1600,
+        )
+
+        assert pause_start <= chunks[0].shape[0] < pause_end
 
     def test_find_split_point_finds_quiet_region(self):
         """find_split_point should identify low-energy regions."""
