@@ -251,23 +251,6 @@ def get_pp_port_stride(tp_size: int, dp_size: int) -> int:
     return tp_size * dp_size
 
 
-def get_peer_notify_ports(
-    base_port: int, dp_rank: int, tp_size: int, pp_size: int, dp_size: int
-) -> list[int]:
-    """Notify ports of every (pp, tp) worker of one peer DP rank.
-
-    ``dp_rank`` and ``dp_size`` are the peer's pod-local values, which its own
-    ports are derived from.
-    """
-    pp_stride = get_pp_port_stride(tp_size, dp_size)
-    return [
-        base_port
-        + get_port_offset(dp_rank, tp_rank, pp_rank=pp_rank, pp_stride=pp_stride)
-        for pp_rank in range(pp_size)
-        for tp_rank in range(tp_size)
-    ]
-
-
 def fold_local_rank(global_dp_rank: int, dp_size_local: int) -> int:
     """Fold a global DP rank into its pod-local rank [0, dp_size_local).
 
@@ -338,12 +321,24 @@ class MoRIIOConfig:
     recv_abort_timeout: float
     pp_rank: int = 0
     pp_size: int = 1
+    # Port distance between the same worker of consecutive pipeline stages.
+    pp_port_stride: int = 0
     port_offset: int = 0
     read_mode: bool = False
     qp_per_transfer: int = 1
     post_batch_size: int = -1
     num_workers: int = 1
     backend: str = "rdma"
+
+    def later_stage_notify_ports(self) -> list[int]:
+        """Notify ports of this worker's counterparts in the later pipeline
+        stages, to which the first stage forwards the decode's messages."""
+        if self.pp_rank != 0:
+            return []
+        return [
+            self.notify_port + stage * self.pp_port_stride
+            for stage in range(1, self.pp_size)
+        ]
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -390,13 +385,11 @@ class MoRIIOConfig:
         tp_size = get_tensor_model_parallel_world_size()
         pp_size = pc.pipeline_parallel_size
         pp_rank = get_pipeline_model_parallel_rank() if pp_size > 1 else 0
+        pp_port_stride = get_pp_port_stride(
+            tp_size, pc.data_parallel_size_local or pc.data_parallel_size
+        )
         port_offset = get_port_offset(
-            dp_rank,
-            tp_rank,
-            pp_rank=pp_rank,
-            pp_stride=get_pp_port_stride(
-                tp_size, pc.data_parallel_size_local or pc.data_parallel_size
-            ),
+            dp_rank, tp_rank, pp_rank=pp_rank, pp_stride=pp_port_stride
         )
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
@@ -448,6 +441,7 @@ class MoRIIOConfig:
             tp_size=tp_size,
             pp_rank=pp_rank,
             pp_size=pp_size,
+            pp_port_stride=pp_port_stride,
             port_offset=port_offset,
             read_mode=get_moriio_mode(kv_transfer_config) == MoRIIOMode.READ,
             qp_per_transfer=int(extra_config.get("qp_per_transfer", 1)),

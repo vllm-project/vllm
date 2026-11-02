@@ -3,7 +3,9 @@
 """MoRIIO WRITE from a pipeline-parallel producer (e.g. P TP1 x PP4 -> D TP4)."""
 
 import itertools
+import socket
 import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -21,7 +23,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOError,
     MoRIIOMode,
     RemoteAllocInfo,
-    get_peer_notify_ports,
     get_port_offset,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
@@ -87,15 +88,20 @@ def test_every_stage_worker_binds_its_own_ports(pp_size, tp_size, dp_size):
             # Stage 0 keeps the ports of a pipeline-free instance.
             assert config.port_offset == get_port_offset(config.dp_rank, config.tp_rank)
 
-    for dp_rank in range(dp_size):
-        assert sorted(
-            get_peer_notify_ports(NOTIFY_PORT, dp_rank, tp_size, pp_size, dp_size)
-        ) == sorted(
-            config.notify_port for config in configs if config.dp_rank == dp_rank
+        # The first stage forwards to the same worker of every later stage.
+        later = [
+            other.notify_port
+            for other in configs
+            if other.pp_rank > 0
+            and (other.dp_rank, other.tp_rank) == (config.dp_rank, config.tp_rank)
+        ]
+        assert config.later_stage_notify_ports() == (
+            later if config.pp_rank == 0 else []
         )
 
 
-def _decode_scheduler() -> MoRIIOConnectorScheduler:
+def _decode_scheduler(*, send: bool = False) -> MoRIIOConnectorScheduler:
+    """A decode scheduler that records its notifications, or sends them."""
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.mode = MoRIIOMode.WRITE
     scheduler.is_producer = False
@@ -106,51 +112,20 @@ def _decode_scheduler() -> MoRIIOConnectorScheduler:
     scheduler._global_dp_rank = 0
     scheduler.transfer_id_to_request_id = {}
     scheduler.request_id_to_transfer_id = {}
+    scheduler.paths = {}
     scheduler.notified = []
     scheduler.released = []
-    scheduler.send_notify_block = (  # type: ignore[method-assign]
-        lambda **kwargs: scheduler.notified.append(kwargs)
-    )
-    scheduler._send_transfer_release = (  # type: ignore[method-assign]
-        lambda transfer_id, host, port: scheduler.released.append(port)
-    )
+    if not send:
+        scheduler.send_notify_block = (  # type: ignore[method-assign]
+            lambda **kwargs: scheduler.notified.append(kwargs)
+        )
+        scheduler._send_transfer_release = (  # type: ignore[method-assign]
+            lambda transfer_id, host, port: scheduler.released.append(port)
+        )
     return scheduler
 
 
-def _prefill_stage_ports(pp_size: int, tp_size: int) -> list[int]:
-    return [
-        _moriio_config(pp, pp_size, tp, tp_size).notify_port
-        for pp, tp in itertools.product(range(pp_size), range(tp_size))
-    ]
-
-
-@pytest.mark.parametrize(("pp_size", "tp_size"), [(4, 1), (2, 2)])
-def test_decode_sends_its_allocation_to_every_prefill_stage(pp_size, tp_size):
-    scheduler = _decode_scheduler()
-    request = SimpleNamespace(
-        request_id="req",
-        kv_transfer_params={
-            "do_remote_prefill": True,
-            "transfer_id": "tA",
-            "remote_host": "10.0.0.1",
-            "remote_notify_port": NOTIFY_PORT,
-            "remote_tp_size": tp_size,
-            "remote_pp_size": pp_size,
-            "remote_dp_size": 1,
-        },
-    )
-    blocks = SimpleNamespace(get_block_ids=lambda: ([5, 6, 7],))
-
-    scheduler.update_state_after_alloc(request, blocks, num_external_tokens=40)
-
-    assert sorted(n["port"] for n in scheduler.notified) == sorted(
-        _prefill_stage_ports(pp_size, tp_size)
-    )
-    assert all(n["block_notify_list"] == [5, 6, 7] for n in scheduler.notified)
-    assert all(n["transfer_id"] == "tA" for n in scheduler.notified)
-
-
-def _prefill_scheduler(pp_size: int, tp_size: int) -> SimpleNamespace:
+def _prefill_scheduler(pp_size: int, tp_size: int, host: str, notify_port: int):
     """The prefill-side state request_finished reads."""
     scheduler = SimpleNamespace(
         is_producer=True,
@@ -159,9 +134,9 @@ def _prefill_scheduler(pp_size: int, tp_size: int) -> SimpleNamespace:
         blocks_per_sw=[0],
         _global_dp_rank=0,
         engine_id="prefill",
-        host_ip="10.0.0.1",
+        host_ip=host,
         handshake_port=HANDSHAKE_PORT,
-        side_notify_port=NOTIFY_PORT,
+        side_notify_port=notify_port,
         vllm_config=SimpleNamespace(
             parallel_config=SimpleNamespace(
                 data_parallel_size=1,
@@ -177,59 +152,124 @@ def _prefill_scheduler(pp_size: int, tp_size: int) -> SimpleNamespace:
     return scheduler
 
 
-@pytest.mark.parametrize(("pp_size", "tp_size"), [(4, 1), (2, 2)])
-def test_decode_reaches_every_stage_with_the_params_the_prefill_returns(
-    pp_size, tp_size
-):
-    """A router may forward the prefill's returned kv_transfer_params as is."""
-    prefill = _prefill_scheduler(pp_size, tp_size)
-    finished = SimpleNamespace(
-        request_id="req",
-        kv_transfer_params={"do_remote_decode": True, "transfer_id": "tA"},
-        status=RequestStatus.FINISHED_LENGTH_CAPPED,
-    )
-    _, params = MoRIIOConnectorScheduler.request_finished(
-        prefill,  # type: ignore[arg-type]
-        finished,  # type: ignore[arg-type]
-        block_ids=[],
-    )
-    assert params is not None
-    assert params["pp_size"] == pp_size
+# The shapes of the decode request's kv_transfer_params a router can send. None
+# carries a pipeline size.
+PARAMS_SHAPES = ["peer sizes", "returned by prefill", "tp_size only"]
 
+
+def _decode_params(shape, pp_size, tp_size, host="10.0.0.1", notify_port=NOTIFY_PORT):
+    """The decode request's kv_transfer_params in one of PARAMS_SHAPES."""
+    if shape == "returned by prefill":
+        # What the prefill's request_finished returns, forwarded as is.
+        _, params = MoRIIOConnectorScheduler.request_finished(
+            _prefill_scheduler(pp_size, tp_size, host, notify_port),  # type: ignore[arg-type]
+            SimpleNamespace(  # type: ignore[arg-type]
+                request_id="req",
+                kv_transfer_params={"do_remote_decode": True, "transfer_id": "tA"},
+                status=RequestStatus.FINISHED_LENGTH_CAPPED,
+            ),
+            block_ids=[],
+        )
+        assert params is not None
+        return params
+    params = {
+        "do_remote_prefill": True,
+        "transfer_id": "tA",
+        "remote_host": host,
+        "remote_notify_port": notify_port,
+        "remote_dp_size": 1,
+    }
+    if shape == "tp_size only":
+        # One TP size and a pinned DP rank, set by the router itself.
+        return {**params, "tp_size": tp_size, "remote_dp_rank": 0}
+    # The prefill's TP and DP sizes, as a router learns them from registration.
+    return {**params, "remote_tp_size": tp_size}
+
+
+@pytest.mark.parametrize("shape", PARAMS_SHAPES)
+@pytest.mark.parametrize(("pp_size", "tp_size"), [(4, 1), (2, 2)])
+def test_decode_addresses_only_the_first_stage(shape, pp_size, tp_size):
+    """The decode notifies a pipeline-parallel prefill as a pipeline-free one,
+    whatever params it gets; the first stage forwards to the others."""
+    params = _decode_params(shape, pp_size, tp_size)
+    first_stage = sorted(
+        _moriio_config(0, pp_size, tp, tp_size).notify_port for tp in range(tp_size)
+    )
     scheduler = _decode_scheduler()
+
     scheduler.update_state_after_alloc(
         SimpleNamespace(request_id="req", kv_transfer_params=params),
         SimpleNamespace(get_block_ids=lambda: ([5, 6, 7],)),
         num_external_tokens=40,
     )
+    scheduler._release_write_prefill_blocks("req", {**params, "remote_dp_rank": 0})
 
-    assert sorted(n["port"] for n in scheduler.notified) == sorted(
-        _prefill_stage_ports(pp_size, tp_size)
+    assert sorted(n["port"] for n in scheduler.notified) == first_stage
+    assert all(n["block_notify_list"] == [5, 6, 7] for n in scheduler.notified)
+    assert sorted(scheduler.released) == first_stage
+
+
+def _free_consecutive_ports(n: int) -> list[int]:
+    """N consecutive free ports, laid out like one TP1 worker per stage."""
+    for base in range(20000, 30000, 97):
+        socks = []
+        try:
+            for port in range(base, base + n):
+                sock = socket.socket()
+                socks.append(sock)
+                sock.bind(("127.0.0.1", port))
+        except OSError:
+            continue
+        finally:
+            for sock in socks:
+                sock.close()
+        return list(range(base, base + n))
+    raise RuntimeError("no free port range")
+
+
+def _wait_for(condition, timeout: float = 10.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return condition()
+
+
+@pytest.mark.parametrize("shape", PARAMS_SHAPES)
+def test_every_stage_gets_the_allocation_and_release(shape, monkeypatch):
+    """Decode scheduler -> first stage's notify listener -> later stages, over
+    real sockets, with each params shape (P TP1 x PP4)."""
+    monkeypatch.setattr(moriio_engine, "get_role", lambda: ROLE.PRODUCER)
+    ports = _free_consecutive_ports(4)
+    stages = []
+    for port in ports:
+        wrapper = MoRIIOWrapper()
+        wrapper.notify_port = port
+        stages.append(wrapper)
+    stages[0].stage_notify_ports = ports[1:]
+    for wrapper in stages:
+        wrapper.async_wait_reqid()
+    params = _decode_params(shape, 4, 1, host="127.0.0.1", notify_port=ports[0])
+    scheduler = _decode_scheduler(send=True)
+
+    scheduler.update_state_after_alloc(
+        SimpleNamespace(request_id="req", kv_transfer_params=params),
+        SimpleNamespace(get_block_ids=lambda: ([5, 6, 7],)),
+        num_external_tokens=40,
+    )
+    assert _wait_for(
+        lambda: all("tA" in w.done_remote_allocate_req_dict for w in stages)
+    )
+    assert all(
+        w.done_remote_allocate_req_dict["tA"].block_ids == [[5, 6, 7]] for w in stages
     )
 
-
-@pytest.mark.parametrize(
-    ("params", "pp_size", "tp_size"),
-    [
-        ({"remote_tp_size": 1, "remote_pp_size": 4}, 4, 1),
-        ({"remote_tp_size": 2}, 1, 2),
-    ],
-)
-def test_decode_releases_every_prefill_stage(params, pp_size, tp_size):
-    scheduler = _decode_scheduler()
-
-    scheduler._release_write_prefill_blocks(
-        "req",
-        {
-            "transfer_id": "tA",
-            "remote_dp_rank": 0,
-            "remote_host": "10.0.0.1",
-            "remote_notify_port": NOTIFY_PORT,
-            **params,
-        },
-    )
-
-    assert sorted(scheduler.released) == sorted(_prefill_stage_ports(pp_size, tp_size))
+    scheduler._release_write_prefill_blocks("req", {**params, "remote_dp_rank": 0})
+    assert _wait_for(lambda: all(len(w.done_req_ids) == 1 for w in stages))
+    assert all(w.done_req_ids[0].transfer_id == "tA" for w in stages)
+    for sock in scheduler.paths.values():
+        sock.close(linger=0)
 
 
 MR_BASE = 0x7F0000000000

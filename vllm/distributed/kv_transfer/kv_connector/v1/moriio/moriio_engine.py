@@ -751,6 +751,10 @@ class MoRIIOWrapper:
         self.transfer_status: list[Any] = []
         self.remote_engine_ip: str | None = None
         self.notify_port: int | None = None
+        # Notify ports of the same worker in the later pipeline stages; set on
+        # the first stage of a pipeline-parallel producer only.
+        self.stage_notify_ports: list[int] = []
+        self._stage_socks: dict[int, zmq.Socket] = {}
         self.lock = threading.Lock()
         self.done_req_ids: list[MoRIIOTransferAck] = []
         self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
@@ -998,6 +1002,7 @@ class MoRIIOWrapper:
                 while True:
                     try:
                         identity, msg = sock.recv_multipart()
+                        self._forward_to_stages(msg)
                         self._handle_message(msg)
                     except Exception as e:
                         logger.error("Error processing message: %s", e)
@@ -1007,6 +1012,25 @@ class MoRIIOWrapper:
             target=_async_wait, daemon=True, name="moriio-notify-listener"
         )
         self.notify_thread.start()
+
+    def _forward_to_stages(self, msg: bytes) -> None:
+        """Hand a message from the decode to the later pipeline stages.
+
+        Every stage holds its own blocks of the transfer, so each needs the
+        allocation and the release. Runs on the notify listener thread, which
+        owns these sockets.
+        """
+        for port in self.stage_notify_ports:
+            sock = self._stage_socks.get(port)
+            if sock is None:
+                sock = make_zmq_socket(
+                    ctx=zmq.Context.instance(),
+                    path=make_zmq_path("tcp", "127.0.0.1", port),
+                    socket_type=zmq.DEALER,
+                    bind=False,
+                )
+                self._stage_socks[port] = sock
+            sock.send(msg)
 
     def _handle_message(self, msg: bytes):
         """Handles incoming messages from remote nodes."""
@@ -1237,3 +1261,6 @@ class MoRIIOWrapper:
             except Exception as e:
                 logger.warning("Error closing ZMQ socket for path %s: %s", path, e)
         self.paths.clear()
+        for sock in self._stage_socks.values():
+            sock.close(linger=0)
+        self._stage_socks.clear()

@@ -49,7 +49,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     WriteTask,
     fold_local_rank,
     get_moriio_mode,
-    get_peer_notify_ports,
     get_peer_zmq_from_request_id,
     get_port_offset,
     get_role,
@@ -229,16 +228,6 @@ def get_moriio_peer_tp_size(params: dict[str, Any] | None, local_tp_size: int) -
     return int(params.get("remote_tp_size") or params.get("tp_size") or local_tp_size)
 
 
-def get_moriio_peer_pp_size(params: dict[str, Any] | None) -> int:
-    params = params or {}
-    return int(params.get("remote_pp_size") or params.get("pp_size") or 1)
-
-
-def get_moriio_peer_local_dp_size(params: dict[str, Any] | None) -> int:
-    params = params or {}
-    return int(params.get("remote_dp_size_local") or params.get("remote_dp_size") or 1)
-
-
 def get_moriio_expected_ack_count(producer_tp_size: int, consumer_tp_size: int) -> int:
     if producer_tp_size <= 0 or consumer_tp_size <= 0:
         raise ValueError("TP sizes must be positive")
@@ -327,8 +316,8 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             parallel_config.pipeline_parallel_size > 1
             and parallel_config.nnodes_within_dp > 1
         ):
-            # The decode sends every stage's allocation and release to the one
-            # host this instance advertises.
+            # The first stage forwards the decode's allocations and releases
+            # to the other stages on its own host.
             raise NotImplementedError(
                 "MoRIIOConnector with pipeline_parallel_size > 1 requires all "
                 "pipeline stages on one node, got "
@@ -1011,13 +1000,9 @@ class MoRIIOConnectorScheduler:
                 )
                 return
 
-        for target_port in get_peer_notify_ports(
-            int(remote_notify_port),
-            remote_dp_rank,
-            get_moriio_peer_tp_size(params, self.tp_size),
-            get_moriio_peer_pp_size(params),
-            get_moriio_peer_local_dp_size(params),
-        ):
+        remote_notify_port = int(remote_notify_port)
+        for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
+            target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -1300,15 +1285,13 @@ class MoRIIOConnectorScheduler:
                         _pod_idx = pod_index(remote_dp_rank, _dp_local)
                         if 0 <= _pod_idx < len(_remote_hosts):
                             _notify_host = _remote_hosts[_pod_idx]
-                    # Every prefill (pp, tp) worker needs the allocation; ports
-                    # past the prefill sizes are not bound.
-                    for target_port in get_peer_notify_ports(
-                        remote_notify_port,
-                        _remote_dp_rank_for_port,
-                        get_moriio_peer_tp_size(_kvp, self.tp_size),
-                        get_moriio_peer_pp_size(_kvp),
-                        get_moriio_peer_local_dp_size(_kvp),
-                    ):
+                    # Every prefill TP rank needs the allocation; ports past
+                    # the prefill TP size are not bound.
+                    for tp_index in range(get_moriio_peer_tp_size(_kvp, self.tp_size)):
+                        target_port = remote_notify_port + get_port_offset(
+                            _remote_dp_rank_for_port, tp_index
+                        )
+
                         self.send_notify_block(
                             req_id=request.request_id,
                             transfer_id=request.kv_transfer_params["transfer_id"],
@@ -1682,7 +1665,6 @@ class MoRIIOConnectorScheduler:
                 self.vllm_config.parallel_config.data_parallel_size_local
             ),
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
-            pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             transfer_id=params["transfer_id"],
         )
 
@@ -1917,6 +1899,11 @@ class MoRIIOConnectorWorker:
             num_workers=self.moriio_config.num_workers,
         )
         self.moriio_wrapper.notify_port = self.moriio_config.notify_port
+        # The decode notifies the first stage only, as it would a pipeline-free
+        # producer, and the first stage hands each message to the later ones.
+        self.moriio_wrapper.stage_notify_ports = (
+            self.moriio_config.later_stage_notify_ports()
+        )
         self.local_kv_cache_metadata: list[bytes] = []
         self.local_kv_cache_size: list[int] = []
         self.layer_name_to_local_kv_cache_metadata: dict[str, list[bytes]] = {}
@@ -2155,7 +2142,6 @@ class MoRIIOConnectorWorker:
             ),
             "dp_size": self.moriio_config.dp_size,
             "tp_size": self.moriio_config.tp_size,
-            "pp_size": self.moriio_config.pp_size,
             "transfer_mode": self.mode.name,
         }
         return MoRIIOHeartbeat(
