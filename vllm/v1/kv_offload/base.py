@@ -500,6 +500,16 @@ class OffloadingManager(ABC):
         reset_cache(); blocks it freed are no longer written by them."""
         return
 
+    def get_load_capacity(self) -> int | None:
+        """Return how many more blocks lookup() may bring this step into the
+        tier that loads read from: its free and evictable space.
+
+        Blocks that lookup() found there stay until the step ends and no
+        longer count. None means lookup() never takes space there, so a hit
+        of any size can be loaded.
+        """
+        return None
+
     def get_stats(self) -> "OffloadingConnectorStats | None":
         """Return collected metrics since last call, or None if disabled."""
         return None

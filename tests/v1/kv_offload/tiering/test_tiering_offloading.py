@@ -1062,6 +1062,41 @@ class TestTieringOffloadingManager:
         self.manager.on_reset_flushed()
         assert self.manager.lookup(chunk, _CTX) is not LookupResult.MISS
 
+    def test_lookup_pins_primary_hits_until_step_end(self, manager_setup):
+        """A promotion never evicts a chunk this step's lookups found."""
+        stored = to_keys(range(4))
+        promoted = to_keys(range(10, 12))
+        self._start_request()
+        output = self.manager.prepare_store(stored, _CTX)
+        assert output is not None
+        self.manager.complete_store(stored, _CTX, success=True)
+        # Let their cascades to the secondary tiers finish.
+        for _ in range(3):
+            self._simulate_on_schedule_end()
+        for key in promoted:
+            self.secondary_tier1.chunks[key] = True
+        # One free chunk and four idle ones.
+        assert self.manager.get_load_capacity() == 5
+
+        assert self.manager.lookup(stored[0], _CTX) is LookupResult.HIT
+        assert self.manager.get_load_capacity() == 4
+        # The first promotion takes the free chunk, the second evicts an idle
+        # one, never the pinned hit, although it is the least recently used.
+        for key in promoted:
+            assert self.manager.lookup(key, _CTX) is LookupResult.HIT_PENDING
+        assert self.manager.get_load_capacity() == 2
+        assert self.manager.lookup(stored[0], _CTX) is LookupResult.HIT
+
+        self._simulate_on_schedule_end()
+        # The step end unpins the hit, and the promotions have landed.
+        assert self.manager.get_load_capacity() == 5
+
+    def test_get_load_capacity_without_secondary_tiers(self, manager_setup):
+        manager = TieringOffloadingManager(
+            primary_tier=self.primary_tier, secondary_tiers=[]
+        )
+        assert manager.get_load_capacity() is None
+
     def test_lookup_batches_submit_load_per_request(self, manager_setup, monkeypatch):
         """lookup() defers submit_load until on_schedule_end(), one per request.
 
