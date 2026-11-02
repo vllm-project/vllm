@@ -1511,14 +1511,45 @@ def multi_thread_pt_weights_iterator(
 
 
 def finalize_model_weights(model: torch.nn.Module) -> None:
-    """Run once after a full load or reload: the model-level post-load hook."""
-    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+    """Run every module's own post-load hook after a full load or reload,
+    each module after all of its submodules.
 
+    Quantization methods, the submodules of quantized layers (their quant
+    method processes them) and attention layers are skipped: the loader runs
+    them in its earlier per-layer passes, which later passes may read.
+    """
+    from vllm.model_executor.layers.attention import is_deferred_attention_layer
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizeMethodBase,
+    )
+
+    # inside FusedMoE layers, which the module pass below does not enter
     for module in model.modules():
         if isinstance(module, MoERunner):
             module.fuse_gate_weights()
-    if hasattr(model, "process_weights_after_loading"):
-        model.process_weights_after_loading()
+
+    seen: set[torch.nn.Module] = set()
+
+    def children_first(module: torch.nn.Module) -> Iterable[torch.nn.Module]:
+        quantized = isinstance(
+            getattr(module, "quant_method", None), QuantizeMethodBase
+        )
+        # a module shared by several parents runs once, before all of them
+        for child in [] if quantized else module.children():
+            if child not in seen:
+                seen.add(child)
+                yield from children_first(child)
+        yield module
+
+    for module in children_first(model):
+        if isinstance(module, QuantizeMethodBase) or is_deferred_attention_layer(
+            module
+        ):
+            continue
+        hook = getattr(module, "process_weights_after_loading", None)
+        if callable(hook):
+            hook()
 
 
 def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
