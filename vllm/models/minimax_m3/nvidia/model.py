@@ -707,7 +707,20 @@ class MiniMaxM3MoE(nn.Module):
         read only ``hidden_states``, yet the experts quantize after routing. So
         quantize on the aux stream while the router GEMM runs and hand the
         result to the experts for the block.
+
+        Only while the call is being captured into a CUDA graph, where the
+        fork and join are recorded once and replayed for free. An eager
+        forward (a step above the largest captured size, or a run without
+        CUDA graphs) is host-bound, and the per-layer stream switch, event
+        record/wait and handoff cost more host time than the overlap saves on
+        the GPU, so there the experts quantize on the current stream as
+        before. The model is not torch.compiled (breakable CUDA graphs run
+        this Python at capture time and replay only the graphs), so the check
+        is evaluated on every call.
         """
+        if not torch.cuda.is_current_stream_capturing():
+            yield self.gate(hidden_states)[0]
+            return
         handoff = self._routed_input_handoff(hidden_states)
         if handoff is None:
             yield self.gate(hidden_states)[0]
