@@ -14,6 +14,7 @@ import torch
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from tests.v1.core.utils import (
+    get_kv_cache_configs,
     new_kv_cache_spec,
     new_mamba_spec,
     new_mla_spec,
@@ -1044,6 +1045,64 @@ def test_request_block_hasher(hash_fn):
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
+def test_request_continues_from_frontend_block_hashes(hash_fn):
+    """Frontend-computed prompt block hashes are used as is, and blocks that
+    outputs complete chain onto them."""
+    frontend_hashes = [BlockHash(bytes([i]) * 32) for i in range(1, 4)]
+    sampling_params = SamplingParams(max_tokens=17)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+    request = Request(
+        request_id="0",
+        prompt_token_ids=list(range(10)),
+        sampling_params=sampling_params,
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(3, hash_fn),
+        block_hashes=list(frontend_hashes),
+    )
+    assert request.block_hashes == frontend_hashes
+
+    request.append_output_token_ids([10, 11])
+    assert request.block_hashes == [
+        *frontend_hashes,
+        hash_fn((frontend_hashes[-1], (9, 10, 11), None)),
+    ]
+
+
+def test_frontend_block_hashes_count_check():
+    from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
+
+    def frontend_hashes(config, num_hashes):
+        request = EngineCoreRequest(
+            request_id="0",
+            prompt_token_ids=list(range(10)),
+            mm_features=None,
+            sampling_params=SamplingParams(),
+            pooling_params=None,
+            arrival_time=0.0,
+            lora_request=None,
+            cache_salt=None,
+            data_parallel_rank=None,
+            block_hashes=[bytes([i]) * 32 for i in range(num_hashes)],
+        )
+        return kv_cache_utils.frontend_block_hashes(request, config)
+
+    config = PrefixHashConfig(
+        hash_algo="sha256", hash_block_size=3, none_hash=kv_cache_utils.NONE_HASH
+    )
+    # 10 prompt tokens make 3 full blocks of 3.
+    assert frontend_hashes(config, 3) == [bytes([i]) * 32 for i in range(3)]
+    assert frontend_hashes(config, 2) is None
+    assert frontend_hashes(config, 4) is None
+    # The engine doesn't hash blocks.
+    assert frontend_hashes(None, 3) is None
+    # With 2 lookahead tokens, the last full block isn't hashed until the 2
+    # tokens after it exist: (10 - 2) // 3 = 2.
+    config.num_lookahead_tokens = 2
+    assert frontend_hashes(config, 2) == [bytes([i]) * 32 for i in range(2)]
+    assert frontend_hashes(config, 3) is None
+
+
+@pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
 @pytest.mark.parametrize("lookahead", [False, True])
 def test_request_block_hasher_incremental_append_with_multiple_mm_features(
     hash_fn, lookahead
@@ -1436,6 +1495,21 @@ def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
 
 
 @pytest.mark.parametrize(
+    "spec",
+    [
+        new_kv_cache_spec(),
+        SinkFullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32, sink_len=4
+        ),
+    ],
+)
+def test_attention_merge_preserves_kv_head_major_slots(spec):
+    # NIXL re-shards NVFP4 pages by KV head only if the group spec keeps the flag.
+    spec = replace(spec, num_head_slots=2 * spec.num_kv_heads, kv_head_major_slots=True)
+    assert type(spec).merge([spec, spec]).kv_head_major_slots
+
+
+@pytest.mark.parametrize(
     "layer_type,dcp_size,expected_width",
     [
         ("mla", 1, 64),
@@ -1813,6 +1887,40 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
+@pytest.mark.parametrize(
+    "first_dtype,second_dtype,needs_zeroing",
+    [
+        (torch.float32, torch.float32, False),
+        (torch.float16, torch.float32, True),
+        (torch.float32, torch.float16, True),
+    ],
+)
+def test_generate_scheduler_kv_cache_config_keeps_zeroing(
+    first_dtype, second_dtype, needs_zeroing
+):
+    """Scheduler projection and PP workers must agree on the zeroing contract."""
+    config = VllmConfig(model_config=ModelConfig(max_model_len=128))
+    config.cache_config.kv_cache_layout = "LBNHC"
+    configs = get_kv_cache_configs(
+        config,
+        [
+            {
+                "layer_0": new_kv_cache_spec(),
+                "layer_1": new_kv_cache_spec(dtype=first_dtype),
+            },
+            {
+                "layer_2": new_kv_cache_spec(),
+                "layer_3": new_kv_cache_spec(dtype=second_dtype),
+            },
+        ],
+        [2**20, 2**20],
+    )
+    scheduler_config = generate_scheduler_kv_cache_config(configs)
+    assert configs[0].needs_kv_cache_zeroing is needs_zeroing
+    assert configs[1].needs_kv_cache_zeroing is needs_zeroing
+    assert scheduler_config.needs_kv_cache_zeroing is needs_zeroing
+
+
 def test_resolve_dcp_kv_block_size_unwraps_uniform_type_specs():
     attention = FullAttentionSpec(
         block_size=16,
@@ -2026,6 +2134,26 @@ def test_merge_mla_spec():
     ]
     with pytest.raises(AssertionError):
         kv_cache_specs[0].merge(kv_cache_specs)
+
+
+@pytest.mark.skip_global_cleanup
+def test_merge_sliding_window_mla_spec_preserves_quantization_mode():
+    specs = [
+        SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8_ds_mla",
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            sliding_window=128,
+        )
+        for _ in range(2)
+    ]
+
+    merged = SlidingWindowMLASpec.merge(specs)
+
+    assert merged.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])
