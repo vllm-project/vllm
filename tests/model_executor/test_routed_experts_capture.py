@@ -761,6 +761,7 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
             use_mla=False,
             logits_processors=None,
             enable_prompt_embeds=False,
+            is_multimodal_raw_input_only_model=False,
         ),
         aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
         speculative_config=None,

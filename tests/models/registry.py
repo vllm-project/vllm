@@ -664,6 +664,11 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "nvidia/llama-nemotron-embed-vl-1b-v2", trust_remote_code=True
     ),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
+    "Nemotron3DiarizationForAudioFrameClassification": _HfExamplesInfo(
+        "nvidia/Nemotron-3-Diarization",
+        min_transformers_version="5.18.0",
+        require_embed_inputs=True,
+    ),
     "Phi3VForCausalLM": _HfExamplesInfo(
         "TIGER-Lab/VLM2Vec-Full", trust_remote_code=True
     ),

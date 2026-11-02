@@ -3130,6 +3130,12 @@ class VllmConfig:
         if self.parallel_config.use_ubatching:
             unsupported.extend(self._get_dbo_unsupported_features())
 
+        if (
+            self.model_config is not None
+            and self.model_config.is_multimodal_raw_input_only_model
+        ):
+            unsupported.append("raw-input-only multimodal models")
+
         return unsupported
 
     def _get_standalone_cpu_model_runner_unsupported_features(self) -> list[str]:

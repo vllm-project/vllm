@@ -484,3 +484,46 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 `embed&token_classify` task is an internal execution contract for this plugin,
 not a generic Pooling API response format. Without the plugin, select one of
 the three concrete tasks above.
+
+## NVIDIA Nemotron-3-Diarization
+
+`nvidia/Nemotron-3-Diarization` is a streaming Sortformer speaker diarization
+model. For every 10 ms frame of a recording it predicts the activity of up to 8
+speakers, numbered in order of first arrival.
+
+| Architecture | Inputs | Example HF Models |
+| - | - | - |
+| `Nemotron3DiarizationForAudioFrameClassification` | A | `nvidia/Nemotron-3-Diarization` |
+
+vLLM runs it offline, one whole recording per request, through the `plugin`
+pooling task. The model takes no text, so start the engine with
+`skip_tokenizer_init=True`. vLLM runs it in eager mode on the V1 model runner,
+and its feature extractor needs the `librosa` package. Use `dtype="float32"`,
+the checkpoint's dtype, for logits that match Transformers; half precision moves
+a few segment boundaries. Each output is the `[num_frames, 8]` logits; turn
+them into speech segments with the Transformers processor:
+
+```python
+from transformers import AutoProcessor
+from vllm import LLM
+
+model = "nvidia/Nemotron-3-Diarization"
+llm = LLM(model=model, runner="pooling", skip_tokenizer_init=True, dtype="float32")
+processor = AutoProcessor.from_pretrained(model)
+
+(output,) = llm.encode(
+    [{"prompt_token_ids": [0], "multi_modal_data": {"audio": (audio, sample_rate)}}],
+    pooling_task="plugin",
+)
+segments = processor.extract_speaker_dict(output.outputs.data[None])[0]
+# [{'Start': <seconds>, 'End': <seconds>, 'Speaker': <index>}, ...]
+```
+
+A step runs up to `max_num_seqs` recordings, and the features of all of them sit
+on the GPU together: about 200 MB per hour of audio in fp32. For long recordings,
+lower `max_num_seqs` to bound this memory.
+
+Streaming sessions, which carry the speaker cache from one request to the next,
+and the online Pooling API are not supported yet. See
+[examples/pooling/plugin/nemotron3_diarization_offline.py](../../../examples/pooling/plugin/nemotron3_diarization_offline.py)
+for a complete example.
