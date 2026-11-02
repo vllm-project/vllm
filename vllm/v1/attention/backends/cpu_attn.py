@@ -337,7 +337,6 @@ class CPUAttentionBackendImpl(AttentionImpl):
         self.kv_cache_dtype = kv_cache_dtype
         self.num_queries_per_kv = self.num_heads // self.num_kv_heads
 
-        self.is_fp8_kv_cache = is_quantized_kv_cache(kv_cache_dtype)
         self.attn_type = attn_type
 
         self.sinks = sinks
