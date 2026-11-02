@@ -1054,9 +1054,9 @@ def tokenize_prompt(
     want_offsets: bool = False,
 ) -> HfTokensPrompt:
     """Tokenize text, preserving an optional mask for truncated echoes."""
+    # The mask identifies truncated text inputs even when no tokens were added.
     want_special_tokens_mask = (
         params.needs_detokenization
-        and params.add_special_tokens
         and params.truncate_prompt_tokens is not None
         and params.truncation_side is not None
     )

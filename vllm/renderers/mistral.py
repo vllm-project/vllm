@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from mistral_common.tokens.tokenizers.base import SpecialTokenPolicy
+
 from vllm.config import VllmConfig
 from vllm.inputs import TextPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -16,6 +18,7 @@ from vllm.utils.async_utils import make_async
 from .base import BaseRenderer
 from .hf import (
     HfTokensPrompt,
+    _get_detokenization_tokens,
     detokenize_prompt,
     detokenize_prompt_async,
     tokenize_prompt,
@@ -77,9 +80,23 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         )
 
     def _detokenize_prompt(self, prompt: TokensPrompt) -> TokensPrompt:
-        return detokenize_prompt(self.get_tokenizer(), prompt)
+        tokenizer = self.get_tokenizer()
+        if not tokenizer.is_tekken and "prompt_special_tokens_mask" in prompt:
+            # SentencePiece KEEP returns pieces; decode text prompts natively.
+            prompt["prompt"] = tokenizer.tokenizer.decode(
+                _get_detokenization_tokens(prompt), SpecialTokenPolicy.IGNORE
+            )
+            return prompt
+        return detokenize_prompt(tokenizer, prompt)
 
     async def _detokenize_prompt_async(self, prompt: TokensPrompt) -> TokensPrompt:
+        tokenizer = self.get_tokenizer()
+        if not tokenizer.is_tekken and "prompt_special_tokens_mask" in prompt:
+            decode = make_async(tokenizer.tokenizer.decode, executor=self._executor)
+            prompt["prompt"] = await decode(
+                _get_detokenization_tokens(prompt), SpecialTokenPolicy.IGNORE
+            )
+            return prompt
         return await detokenize_prompt_async(self._async_tokenizer_decode, prompt)
 
     def render_messages(
