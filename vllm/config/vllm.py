@@ -3627,20 +3627,53 @@ class VllmConfig:
                 "validated under DCP. Use decode_context_parallel_size=1 or a "
                 "different --kv-cache-dtype."
             )
-        if self.model_config is None:
+        if self.model_config is None or not self.model_config.use_mla:
             return self
-        # The ds_mla layouts are MLA-only by construction; the plain nvfp4
-        # layout (head_size//2 + head_size//16) does not apply to MLA.
+        cache_dtype = self.cache_config.cache_dtype
+        # The ds_mla layouts are MLA-only by construction and plain nvfp4 is
+        # the dense (FlashInfer MLA) layout; the other nvfp4 layouts
+        # (head_size//2 + head_size//16) do not apply to MLA.
+        sparse_mla = (
+            getattr(self.model_config.hf_text_config, "index_topk", None) is not None
+        )
         if (
-            self.cache_config.cache_dtype.startswith("nvfp4")
-            and not self.cache_config.cache_dtype.endswith("_ds_mla")
-            and self.model_config.use_mla
+            cache_dtype.startswith("nvfp4")
+            and not cache_dtype.endswith("_ds_mla")
+            and (cache_dtype != "nvfp4" or sparse_mla)
         ):
             raise ValueError(
-                "nvfp4 KV cache is not supported with MLA (Multi-head Latent "
-                "Attention) backends. Please use a different --kv-cache-dtype "
-                "(e.g., 'fp8', 'auto', or 'nvfp4_ds_mla' with a sparse MLA "
-                "backend) for MLA models such as DeepSeek."
+                f"{cache_dtype} KV cache is not supported with this MLA "
+                "(Multi-head Latent Attention) model. Please use a different "
+                "--kv-cache-dtype (e.g., 'nvfp4' for dense MLA, 'fp8', 'auto', "
+                "or 'nvfp4_ds_mla' with a sparse MLA backend)."
+            )
+        spec_config = self.speculative_config
+        draft_dtype = spec_config.kv_cache_dtype if spec_config else None
+        if (
+            "nvfp4" in (cache_dtype, draft_dtype)
+            and self.model_config.is_hybrid
+            and self.cache_config.kv_cache_dtype_skip_layers
+        ):
+            raise ValueError(
+                "nvfp4 KV cache does not support --kv-cache-dtype-skip-layers on "
+                "hybrid MLA models: their page sizes cannot be unified."
+            )
+        # MLA draft layers gather context into a workspace typed by the target's
+        # KV dtype: BF16 for nvfp4, FP8 for fp8 under FP8 prefill.
+        draft_model_config = spec_config.draft_model_config if spec_config else None
+        if (
+            self.attention_config.use_prefill_query_quantization
+            and draft_model_config is not None
+            and draft_model_config.use_mla
+            and draft_dtype is not None
+            and "nvfp4" in (cache_dtype, draft_dtype)
+            and any(d.startswith("fp8") for d in (cache_dtype, draft_dtype))
+        ):
+            raise ValueError(
+                "FP8 prefill (use_prefill_query_quantization) does not support a "
+                f"{cache_dtype} KV cache with a {draft_dtype} draft KV cache; leave "
+                "speculative_config.kv_cache_dtype unset or set it to "
+                f"{cache_dtype!r}."
             )
         return self
 

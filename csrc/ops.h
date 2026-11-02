@@ -832,7 +832,8 @@ void cp_gather_and_upconvert_fp8_kv_cache(
     std::optional<torch::stable::Tensor> host_row_ids = std::nullopt,
     std::optional<torch::stable::Tensor> device_row_ids = std::nullopt);
 
-// Gather and upconvert an nvfp4_ds_mla KV cache to a BF16 workspace
+// Gather and upconvert an nvfp4_ds_mla or dense-MLA nvfp4 KV cache to a BF16
+// workspace
 void cp_gather_and_upconvert_nvfp4_kv_cache(
     torch::stable::Tensor const& src_cache,         // [NUM_BLOCKS, BLOCK_SIZE,
                                                     // 352]
@@ -840,7 +841,9 @@ void cp_gather_and_upconvert_nvfp4_kv_cache(
     torch::stable::Tensor const& block_table,       // [BATCH, BLOCK_INDICES]
     torch::stable::Tensor const& workspace_starts,  // [BATCH]
     int64_t batch_size,
-    std::optional<torch::stable::Tensor> seq_starts = std::nullopt);
+    std::optional<torch::stable::Tensor> seq_starts = std::nullopt,
+    const std::string& kv_cache_dtype = "nvfp4_ds_mla",
+    std::optional<torch::stable::Tensor> scale = std::nullopt);
 
 // Indexer K quantization and cache function
 void indexer_k_quant_and_cache(

@@ -556,6 +556,52 @@ def nvfp4_kv_cache_full_dim(head_size: int) -> int:
     return head_size // 2 + head_size // 16
 
 
+def nvfp4_mla_kv_cache_full_dim(head_size: int, rope_dim: int = 64) -> int:
+    """Packed last dim for NVFP4 MLA KV cache: fp4 NoPE + fp8 RoPE + fp8 scales."""
+    nope_dim = head_size - rope_dim
+    return nope_dim // 2 + rope_dim + nope_dim // 16
+
+
+def nvfp4_mla_kv_cache_split_views(
+    kv_cache: torch.Tensor, rope_dim: int = 64
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split an NVFP4 MLA KV cache into zero-copy NoPE, RoPE and scale views.
+
+    Each token entry has the nvfp4_ds_mla byte layout:
+    ``(head_size - rope_dim) // 2`` packed-fp4 NoPE bytes (even element in the
+    low nibble), ``rope_dim`` fp8-e4m3 RoPE bytes, then
+    ``(head_size - rope_dim) // 16`` fp8-e4m3 NoPE scales, here in plain order.
+    These are the ``ckv_cache`` / ``kpe_cache`` / ``ckv_sf_cache`` operands of
+    FlashInfer's Cake NVFP4 MLA decode.
+
+    Args:
+        kv_cache: uint8 tensor of shape ``(num_pages, block_size, full_dim)``,
+            where ``full_dim = nvfp4_mla_kv_cache_full_dim(head_size,
+            rope_dim)``.
+        rope_dim: number of RoPE dims stored as fp8 (default 64).
+
+    Returns:
+        ``(nope, rope, scale)``: a uint8 ``(num_pages, block_size, nope_dim //
+        2)`` view and float8_e4m3fn ``(num_pages, block_size, rope_dim)`` and
+        ``(num_pages, block_size, nope_dim // 16)`` views.
+
+    """
+    assert kv_cache.dim() == 3, f"MLA NVFP4 KV cache must be 3D, got {kv_cache.dim()}D"
+    assert kv_cache.dtype == torch.uint8
+
+    # full_dim = nope_dim // 2 + rope_dim + nope_dim // 16
+    #          = 9 * nope_dim / 16 + rope_dim
+    full_dim = kv_cache.shape[-1]
+    nope_dim = (full_dim - rope_dim) * 16 // 9
+    data_dim = nope_dim // 2 + rope_dim
+    assert data_dim + nope_dim // 16 == full_dim
+
+    nope = kv_cache[..., : nope_dim // 2]
+    rope = kv_cache[..., nope_dim // 2 : data_dim].view(torch.float8_e4m3fn)
+    scale = kv_cache[..., data_dim:].view(torch.float8_e4m3fn)
+    return nope, rope, scale
+
+
 def nvfp4_split_data_scale(
     kv_side: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor]:
