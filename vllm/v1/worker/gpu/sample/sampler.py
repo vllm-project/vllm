@@ -235,6 +235,19 @@ class Sampler:
         restriction_np = self.sampling_states.needs_restriction[idx_mapping_np]
         return not np.any((temp_np != 0.0) & restriction_np)
 
+    def needs_only_temperature_and_top_p(self, idx_mapping_np: np.ndarray) -> bool:
+        """Like needs_only_temperature_scaling, but top_p may be active too: the
+        verify kernels can then mask each row at its top-p cutoff as they load.
+        """
+        if np.any(self.needs_other_processing[idx_mapping_np]):
+            return False
+        states = self.sampling_states
+        sampled = states.temperature.np[idx_mapping_np] != 0.0
+        restricted = (states.min_p.np[idx_mapping_np] != 0.0) | (
+            states.top_k.np[idx_mapping_np] != states.vocab_size
+        )
+        return not np.any(sampled & restricted)
+
     def apply_sampling_params(
         self,
         logits: torch.Tensor,

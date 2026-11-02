@@ -146,34 +146,55 @@ def test_logits_processing_cache_only_checks_active_requests():
 
 
 @pytest.mark.parametrize(
-    ("sampling_params", "expected"),
+    ("sampling_params", "expected", "expected_with_top_p"),
     [
-        pytest.param(SamplingParams(), True, id="defaults"),
-        pytest.param(SamplingParams(temperature=0.0), True, id="greedy"),
-        pytest.param(SamplingParams(temperature=0.7), True, id="temperature-only"),
+        pytest.param(SamplingParams(), True, True, id="defaults"),
+        pytest.param(SamplingParams(temperature=0.0), True, True, id="greedy"),
         pytest.param(
-            SamplingParams(temperature=0.7, top_p=0.9), False, id="temp-and-top-p"
+            SamplingParams(temperature=0.7), True, True, id="temperature-only"
         ),
-        pytest.param(SamplingParams(temperature=0.7, top_k=10), False, id="top-k"),
-        pytest.param(SamplingParams(temperature=0.7, min_p=0.1), False, id="min-p"),
         pytest.param(
-            SamplingParams(thinking_token_budget=3), False, id="thinking-budget"
+            SamplingParams(temperature=0.7, top_p=0.9),
+            False,
+            True,
+            id="temp-and-top-p",
         ),
-        pytest.param(SamplingParams(logit_bias={1: 1.0}), False, id="logit-bias"),
+        pytest.param(
+            SamplingParams(temperature=0.7, top_k=10), False, False, id="top-k"
+        ),
+        pytest.param(
+            SamplingParams(temperature=0.7, top_p=0.9, top_k=10),
+            False,
+            False,
+            id="top-p-and-top-k",
+        ),
+        pytest.param(
+            SamplingParams(temperature=0.7, min_p=0.1), False, False, id="min-p"
+        ),
+        pytest.param(
+            SamplingParams(thinking_token_budget=3),
+            False,
+            False,
+            id="thinking-budget",
+        ),
+        pytest.param(
+            SamplingParams(logit_bias={1: 1.0}), False, False, id="logit-bias"
+        ),
     ],
 )
 def test_needs_only_temperature_scaling_matches_request_features(
-    sampling_params: SamplingParams, expected: bool
+    sampling_params: SamplingParams, expected: bool, expected_with_top_p: bool
 ):
-    """rejection_sampler.py's caller-side fast path (skip
-    apply_sampling_params, let rejection_sample() scale on load) is only
-    safe when this returns True."""
+    """rejection_sampler.py's caller-side fast paths (skip
+    apply_sampling_params, let rejection_sample() scale, and with top_p mask,
+    on load) are only safe when these return True."""
     sampler = _make_sampler()
     sampler.add_request(3, sampling_params=sampling_params)
     sampler.sampling_states.apply_staged_writes()
 
     idx_np = np.array([3], dtype=np.int32)
     assert sampler.needs_only_temperature_scaling(idx_np) == expected
+    assert sampler.needs_only_temperature_and_top_p(idx_np) == expected_with_top_p
 
 
 def test_needs_only_temperature_scaling_ignores_restriction_on_greedy_rows():

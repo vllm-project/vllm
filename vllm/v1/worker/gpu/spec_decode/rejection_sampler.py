@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 from collections.abc import Iterable, Iterator
 from typing import Any
 
 import numpy as np
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.config import SpeculativeConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.spec_decode.utils import unconditional_to_conditional_rates
@@ -144,6 +147,15 @@ def gather_draft_sampled(
     return draft_sampled, pos
 
 
+@functools.cache
+def _supports_topp_cutoffs() -> bool:
+    # topp_cutoffs_lse is built for SM90 and datacenter Blackwell.
+    return ops.has_topp_cutoffs_lse() and (
+        current_platform.is_device_capability(90)
+        or current_platform.is_device_capability_family(100)
+    )
+
+
 class RejectionSampler:
     def __init__(
         self,
@@ -275,6 +287,22 @@ class RejectionSampler:
             not needs_processed_logits
             and self.sampler.needs_only_temperature_scaling(idx_mapping_np)
         )
+        target_topp_thresh = None
+        if (
+            not skip_scaling
+            and not needs_processed_logits
+            and logits.dtype == torch.bfloat16
+            and _supports_topp_cutoffs()
+            and self.sampler.needs_only_temperature_and_top_p(idx_mapping_np)
+        ):
+            # Top-p cutoffs on the raw logits, with every tie at the cutoff
+            # kept; the verify kernels mask and scale as they load, so no fp32
+            # copy of the logits is made.
+            states = self.sampler.sampling_states
+            target_topp_thresh, _ = ops.topp_cutoffs_lse(
+                logits, expanded_idx_mapping, states.temperature.gpu, states.top_p.gpu
+            )
+            skip_scaling = True
         if skip_scaling:
             processed_logits = logits
         else:
@@ -307,6 +335,7 @@ class RejectionSampler:
             fly_entropy_threshold=self.fly_entropy_threshold,
             fly_entropy_top_k=self.fly_entropy_top_k,
             target_logits_pre_scaled=not skip_scaling,
+            target_topp_thresh=target_topp_thresh,
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),

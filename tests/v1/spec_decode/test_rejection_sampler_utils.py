@@ -1142,6 +1142,10 @@ def test_verify_rejects_unproposed_drafts():
         ),
         use_fp64_gumbel=False,
         trace_replay_state=None,
+        logprobs_mode="raw_logprobs",
+        return_sampling_mask=False,
+        needs_only_temperature_scaling=lambda _: False,
+        needs_only_temperature_and_top_p=lambda _: False,
     )
     rejection_sampler.num_speculative_steps = K
     rejection_sampler.synthetic_conditional_rates = None
@@ -1855,3 +1859,63 @@ def test_raw_target_logits_matches_pre_scaled_target_logits(
         torch.testing.assert_close(
             actual_sampled[req, :n], expected_sampled[req, :n], rtol=0, atol=0
         )
+
+
+@pytest.mark.parametrize(
+    "num_speculative_steps,temperature", [(1, 0.0), (3, 0.73), (1, 1.0)]
+)
+@pytest.mark.parametrize("has_draft_logits", [True, False])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_topp_thresh_on_load_matches_pre_masked_target_logits(
+    num_speculative_steps: int,
+    temperature: float,
+    has_draft_logits: bool,
+    use_block_verification: bool,
+):
+    """Raw bf16 target logits with per-row top-p cutoffs, masked and divided by
+    the temperature as the kernels load them, must sample exactly what the
+    caller-side path samples from logits masked at the same cutoffs and divided
+    by the temperature (IEEE x / T) up front."""
+    torch.manual_seed(11)
+    device = "cuda"
+    vocab_size = 3 * 8192 + 17
+    num_trials = 64
+    K = num_speculative_steps
+
+    raw_1d = (torch.randn(vocab_size, device=device) * 3).to(torch.bfloat16)
+    draft_logits_1d = torch.randn(vocab_size, device=device)
+    inputs = _build_rejection_sample_inputs(
+        raw_1d.float(),
+        draft_logits_1d,
+        K,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+    raw = raw_1d.unsqueeze(0).expand(num_trials * (K + 1), -1).contiguous()
+    # Per-row cutoffs from the top 0.1% up to the top 50% of the row; greedy
+    # rows are never masked.
+    q = torch.linspace(0.5, 0.999, raw.shape[0], device=device)
+    thresh = torch.quantile(raw_1d.float(), q).to(raw.dtype).float()
+    if temperature == 0.0:
+        thresh.fill_(float("-inf"))
+
+    masked = torch.where(raw.float() >= thresh[:, None], raw.float(), float("-inf"))
+    pre_scaled = masked / temperature if temperature > 0 else masked
+    expected_sampled, expected_num_sampled = _rejection_sample(
+        **dict(inputs, target_logits=pre_scaled),
+        num_speculative_steps=K,
+        use_block_verification=use_block_verification,
+    )
+    sampled, num_sampled = _rejection_sample(
+        **dict(inputs, target_logits=raw),
+        num_speculative_steps=K,
+        use_block_verification=use_block_verification,
+        target_logits_pre_scaled=False,
+        target_topp_thresh=thresh,
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
+    torch.testing.assert_close(sampled[valid], expected_sampled[valid], rtol=0, atol=0)
