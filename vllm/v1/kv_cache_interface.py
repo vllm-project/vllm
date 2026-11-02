@@ -497,6 +497,9 @@ class HiSparseHotSpec(KVCacheSpec):
     def page_size_bytes(self) -> int:
         return self.page_size
 
+    def get_block_stride_alignment(self) -> int:
+        return self.page_size
+
     @property
     def block_table_token_alignment(self) -> int | None:
         return None

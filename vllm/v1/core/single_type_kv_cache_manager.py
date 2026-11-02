@@ -394,7 +394,8 @@ class SingleTypeKVCacheManager(ABC):
             block_idx, source_block = self._partial_hit_reqs.pop(request_id)
             cow_block = self.block_pool.get_new_blocks(1)[0]
             self._apply_cow(request_id, block_idx, source_block, cow_block)
-            self.new_block_ids.append(cow_block.block_id)
+            if self._record_new_block_ids:
+                self.new_block_ids.append(cow_block.block_id)
             cow_blocks.append(cow_block)
 
         req_blocks = self.req_to_blocks[request_id]
@@ -2231,14 +2232,6 @@ class HiSparseSourceManager(FullAttentionManager):
     # The host tier keeps prefixes the device groups have already lost.
     retains_longer_hit = True
 
-    @property
-    def records_new_block_ids(self) -> bool:
-        return False
-
-    def take_new_block_ids(self) -> list[int]:
-        self.new_block_ids = []
-        return []
-
     def bind_host_pool(self, num_blocks: int) -> None:
         """Replace the device pool this group was built with by a host one."""
         device_pool = self.block_pool
@@ -2256,6 +2249,7 @@ class HiSparseSourceManager(FullAttentionManager):
             event_owner=device_pool,
         )
         self._null_block = self.block_pool.null_block
+        self._record_new_block_ids = False
 
     def take_pending_cow_copies(self) -> list[tuple[KVCacheBlock, KVCacheBlock]]:
         """Host copies never reach the worker's generic block-copy path."""
