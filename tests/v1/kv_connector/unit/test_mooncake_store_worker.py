@@ -765,6 +765,54 @@ def test_default_local_buffer_size_matches_pr40900():
     assert mooncake_store.DEFAULT_LOCAL_BUFFER_SIZE == 4 * 1024**3
 
 
+@pytest.mark.parametrize(
+    ("store_config", "physical_gpu", "expected"),
+    [
+        ({"device_name": "mlx5_0,mlx5_1"}, None, "mlx5_0,mlx5_1"),
+        ({"device_name_per_gpu": ["rdma0", "rdma1,rdma2"]}, 1, "rdma1,rdma2"),
+        ({"device_name_per_gpu": ["rdma0", "rdma1"]}, 2, ValueError),
+    ],
+)
+def test_setup_passes_the_current_gpus_device_names(
+    monkeypatch, tmp_path, store_config, physical_gpu, expected
+):
+    import vllm.platforms
+
+    path = tmp_path / "mooncake_config.json"
+    path.write_text(json.dumps(store_config))
+    config = mooncake_store.MooncakeStoreConfig.from_file(str(path))
+    platform = MagicMock()
+    platform.visible_device_id_to_physical_device_id.return_value = physical_gpu
+    monkeypatch.setattr(vllm.platforms, "current_platform", platform)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 0)
+    store = MagicMock()
+    store.setup.return_value = 0
+    if expected is ValueError:
+        with pytest.raises(ValueError, match="no entry for physical GPU 2"):
+            mooncake_store.setup_mooncake_store(store, config, "host")
+        return
+    mooncake_store.setup_mooncake_store(store, config, "host")
+    assert store.setup.call_args.args[5] == expected
+    if physical_gpu is None:
+        platform.visible_device_id_to_physical_device_id.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "store_config",
+    [
+        {"device_name": "rdma0", "device_name_per_gpu": ["rdma0"]},
+        {"device_name_per_gpu": []},
+        {"device_name_per_gpu": ["rdma0", " "]},
+        {"device_name_per_gpu": "rdma0"},
+    ],
+)
+def test_device_name_per_gpu_rejects_invalid_config(tmp_path, store_config):
+    path = tmp_path / "mooncake_config.json"
+    path.write_text(json.dumps(store_config))
+    with pytest.raises(ValueError, match="device_name"):
+        mooncake_store.MooncakeStoreConfig.from_file(str(path))
+
+
 def test_get_requester_local_hostname_prefers_override(monkeypatch):
     monkeypatch.setenv("MOONCAKE_REQUESTER_LOCAL_HOSTNAME", "worker-a:50053")
 

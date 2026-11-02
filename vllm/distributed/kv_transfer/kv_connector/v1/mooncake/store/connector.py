@@ -134,14 +134,14 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         config = MooncakeStoreConfig.load_from_config()
         if (
             config.protocol != "rdma"
-            or not config.device_name
+            or not (config.device_name or config.device_name_per_gpu)
             or os.getenv("MC_MS_AUTO_DISC", "0") != "0"
             or any(v in os.environ for v in ("MC_USE_TENT", "MC_USE_TEV1"))
         ):
             raise ValueError(
                 "MooncakeStoreConnector sleep requires protocol='rdma', "
-                "device_name set, MC_MS_AUTO_DISC=0 or unset, and "
-                "MC_USE_TENT/MC_USE_TEV1 unset. "
+                "device_name or device_name_per_gpu set, MC_MS_AUTO_DISC=0 "
+                "or unset, and MC_USE_TENT/MC_USE_TEV1 unset. "
                 "Sleep with NVLink Fabric is not supported yet."
             )
         return True
