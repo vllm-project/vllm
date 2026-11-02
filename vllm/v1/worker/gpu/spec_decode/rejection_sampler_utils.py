@@ -1257,6 +1257,7 @@ def rejection_sample(
     fly_entropy = None
     if fly_window_size > 0:
         assert synthetic_conditional_rates is None and not use_block_verification
+        assert target_logits_pre_scaled, "FLy's entropy needs processed logits"
         fly_entropy = compute_fly_entropy(
             target_logits[:, :vocab_size], fly_entropy_top_k, from_logits=True
         )

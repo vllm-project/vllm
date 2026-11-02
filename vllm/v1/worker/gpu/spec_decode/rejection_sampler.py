@@ -265,11 +265,13 @@ class RejectionSampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        # processed_logits doubles as the logprobs/sampling-mask source below,
-        # so the skip is only safe when nothing downstream needs it scaled.
+        # processed_logits doubles as the logprobs/sampling-mask source below and
+        # FLy computes its entropy from it, so the skip is only safe when nothing
+        # needs it processed.
         needs_processed_logits = (
             self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
             or self.sampler.return_sampling_mask
+            or self.fly_window_size > 0
         )
         skip_scaling = (
             not needs_processed_logits
