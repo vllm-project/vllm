@@ -381,7 +381,8 @@ class DeepseekV4MoE(nn.Module):
         )
 
         experts_cls = DeepGemmMegaMoEExperts
-        if envs.VLLM_DSV4_MEGAMOE_LOCALIZE_WEIGHTS:
+        extra = vllm_config.additional_config
+        if isinstance(extra, dict) and extra.get("dsv4_megamoe_localize_weights"):
             # Locality-domain memory is outside the CuMem and offload pools.
             offload = vllm_config.offload_config
             if (
@@ -390,8 +391,8 @@ class DeepseekV4MoE(nn.Module):
                 or offload.prefetch.offload_group_size > 0
             ):
                 raise ValueError(
-                    "VLLM_DSV4_MEGAMOE_LOCALIZE_WEIGHTS does not support sleep "
-                    "mode or CPU weight offloading."
+                    "dsv4_megamoe_localize_weights does not support sleep mode "
+                    "or CPU weight offloading."
                 )
             experts_cls = DeepseekV4LocalizedMegaMoEExperts
         self.experts = experts_cls(
