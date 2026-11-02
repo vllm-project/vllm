@@ -409,6 +409,7 @@ steps:
 
 - label: ":nvidia: (B200) Qwen4 Exp HC Kernels"
   key: qwen4-exp-hc-kernels-b200
+  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
@@ -613,6 +614,7 @@ steps:
 
 - label: ":nvidia: (4xB200) DeepSeek-V4.1 NVIDIA Kernels"
   key: dsv41-nvidia-kernels-4xb200
+  automatic_shard: true
   # Nightly only: 4-GPU B200 pods wait hours behind smaller jobs on per-PR runs.
   optional: true
   timeout_in_minutes: 50
