@@ -4,12 +4,13 @@ import functools
 import time
 from collections import deque
 from collections.abc import Iterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import NamedTuple
 
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 from vllm.logger import init_logger
@@ -87,6 +88,24 @@ class Transfer:
     batch_dst: torch.Tensor
     batch_sizes: torch.Tensor
     failed: bool = False
+    # start_event/end_event time the last (or only) submitted slice; these are
+    # the (start, end) events of the slices submitted before it
+    prior_events: list[tuple[torch.Event, torch.Event]] = field(default_factory=list)
+
+
+@dataclass
+class _PendingTransfer:
+    """A job whose copy descriptors are not all submitted yet."""
+
+    job_id: int
+    stream: torch.cuda.Stream
+    num_bytes: int
+    num_ops: int
+    batch_src: torch.Tensor
+    batch_dst: torch.Tensor
+    batch_sizes: torch.Tensor
+    next_op: int = 0
+    prior_events: list[tuple[torch.Event, torch.Event]] = field(default_factory=list)
 
 
 def compute_sub_block_ptrs(
@@ -298,6 +317,13 @@ class SingleDirectionOffloadingHandler:
     Transfers are guaranteed to be executed in order of their submission.
     Each transfer uses a unique CUDA stream, and its stream will start
     executing only after the streams of previous transfers have finished.
+
+    With max_descriptors_per_submit > 0, at most that many copy descriptors are
+    handed to the driver per call; the rest of a job is submitted by later
+    transfer_async / get_finished calls (one per engine step). A single
+    cuMemcpyBatchAsync call with more descriptors than the GPU command queue
+    holds blocks the calling thread until the copy engine drains it, which
+    stalls the worker's next model step for about the whole copy.
     """
 
     def __init__(
@@ -308,6 +334,7 @@ class SingleDirectionOffloadingHandler:
         gpu_to_cpu: bool,
         canonical_layout: bool = False,
         host_memory_is_pinned: bool = True,
+        max_descriptors_per_submit: int = 0,
     ):
         """Initialize a SingleDirectionOffloadingHandler.
 
@@ -321,6 +348,8 @@ class SingleDirectionOffloadingHandler:
                 described by the refs' mappings.
             host_memory_is_pinned: whether the CPU tensors are pinned, so GPU
                 kernels may dereference them directly.
+            max_descriptors_per_submit: cap on the copy descriptors submitted
+                per call; 0 submits every job in a single call.
 
         """
         assert len(cpu_tensors) > 0
@@ -359,6 +388,9 @@ class SingleDirectionOffloadingHandler:
         self._transfer_events: dict[int, torch.Event] = {}
         # queue of transfers (job_id, stream, event)
         self._transfers: deque[Transfer] = deque()
+        # jobs with descriptors left to submit, in submission order
+        self.max_descriptors_per_submit = max_descriptors_per_submit
+        self._pending: deque[_PendingTransfer] = deque()
         # list of CUDA streams available for re-use
         self._stream_pool: list[torch.cuda.Stream] = []
         # list of CUDA events available for re-use
@@ -594,24 +626,10 @@ class SingleDirectionOffloadingHandler:
         # Writer rotation may skip non-writer blocks, leaving op_idx below
         # the sized upper bound
         assert op_idx <= num_copy_ops
-        src = src[:op_idx]
-        dst = dst[:op_idx]
-        sizes = sizes[:op_idx]
 
         stream = (
             self._stream_pool.pop() if self._stream_pool else current_platform.Stream()
         )
-        start_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.Event(enable_timing=True)
-        )
-        end_event = (
-            self._event_pool.pop()
-            if self._event_pool
-            else torch.Event(enable_timing=True)
-        )
-
         # Stores must wait for the model to finish writing the KV they read.
         # Loads must wait for pending writes (including zeroing) to their
         # destination blocks: the scheduler leaves a block unzeroed only in
@@ -619,83 +637,119 @@ class SingleDirectionOffloadingHandler:
         # shipped in an earlier step for a since-reallocated block; with async
         # scheduling nothing else orders that zeroing against this copy.
         stream.wait_stream(current_platform.current_stream())
-        if self._transfers:
-            last_transfer: Transfer = self._transfers[-1]
-            last_event = last_transfer.end_event
-            # assure job will start only after the previous one completes
-            stream.wait_event(last_event)
-        # CPU->GPU reads from host memory, which is never written
-        # by a concurrent GPU stream, so CU_MEMCPY_SRC_ACCESS_ORDER_ANY is
-        # safe and lets the driver pipeline source reads. GPU->CPU reads
-        # from the live GPU KV cache, which the compute stream keeps
-        # writing; we must keep STREAM ordering so source reads are gated
-        # by the transfer stream's wait_stream(compute) barrier.
-        is_src_access_order_any = not self.gpu_to_cpu
-        try:
-            with current_platform.stream(stream):
-                start_event.record(stream)
-                if op_idx > 0:
-                    self._swap_blocks_batch(
-                        src,
-                        dst,
-                        sizes,
-                        is_src_access_order_any=is_src_access_order_any,
-                    )
-                end_event.record(stream)
-        except RuntimeError:
-            _clear_pending_device_error()
-            logger.exception(
-                "KV offload %s transfer failed for job %d",
-                "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
-                job_id,
-            )
-            end_event.record(stream)
-            self._transfer_events[job_id] = end_event
-            self._transfers.append(
-                Transfer(
-                    job_id=job_id,
-                    stream=stream,
-                    start_event=start_event,
-                    end_event=end_event,
-                    num_bytes=0,
-                    batch_src=batch_src,
-                    batch_dst=batch_dst,
-                    batch_sizes=batch_sizes,
-                    failed=True,
-                )
-            )
-            return True
-
-        self._transfer_events[job_id] = end_event
-        self._transfers.append(
-            Transfer(
+        self._pending.append(
+            _PendingTransfer(
                 job_id=job_id,
                 stream=stream,
-                start_event=start_event,
-                end_event=end_event,
                 num_bytes=num_transfer_bytes,
+                num_ops=op_idx,
                 batch_src=batch_src,
                 batch_dst=batch_dst,
                 batch_sizes=batch_sizes,
             )
         )
+        self._submit_pending(self.max_descriptors_per_submit)
 
         # success
         return True
 
+    def _submit_pending(self, budget: int) -> None:
+        """Submit pending jobs in order, at most `budget` descriptors in total.
+
+        Args:
+            budget: descriptor cap for this call; 0 submits everything pending.
+
+        """
+        unbounded = budget <= 0
+        while self._pending and (unbounded or budget > 0):
+            job = self._pending[0]
+            if job.next_op == 0 and self._transfers:
+                last_transfer: Transfer = self._transfers[-1]
+                last_event = last_transfer.end_event
+                # assure job will start only after the previous one completes
+                job.stream.wait_event(last_event)
+
+            begin = job.next_op
+            end = job.num_ops if unbounded else min(job.num_ops, begin + budget)
+            budget -= end - begin
+            start_event = (
+                self._event_pool.pop()
+                if self._event_pool
+                else torch.Event(enable_timing=True)
+            )
+            end_event = (
+                self._event_pool.pop()
+                if self._event_pool
+                else torch.Event(enable_timing=True)
+            )
+            # CPU->GPU reads from host memory, which is never written
+            # by a concurrent GPU stream, so CU_MEMCPY_SRC_ACCESS_ORDER_ANY is
+            # safe and lets the driver pipeline source reads. GPU->CPU reads
+            # from the live GPU KV cache, which the compute stream keeps
+            # writing; we must keep STREAM ordering so source reads are gated
+            # by the transfer stream's wait_stream(compute) barrier.
+            is_src_access_order_any = not self.gpu_to_cpu
+            failed = False
+            try:
+                with current_platform.stream(job.stream):
+                    start_event.record(job.stream)
+                    if end > begin:
+                        self._swap_blocks_batch(
+                            job.batch_src[begin:end],
+                            job.batch_dst[begin:end],
+                            job.batch_sizes[begin:end],
+                            is_src_access_order_any=is_src_access_order_any,
+                        )
+                    end_event.record(job.stream)
+            except RuntimeError:
+                _clear_pending_device_error()
+                logger.exception(
+                    "KV offload %s transfer failed for job %d",
+                    "GPU->CPU" if self.gpu_to_cpu else "CPU->GPU",
+                    job.job_id,
+                )
+                end_event.record(job.stream)
+                failed = True
+
+            if not failed and end < job.num_ops:
+                # the rest of the job is submitted by a later call
+                job.next_op = end
+                job.prior_events.append((start_event, end_event))
+                return
+
+            self._pending.popleft()
+            self._transfer_events[job.job_id] = end_event
+            self._transfers.append(
+                Transfer(
+                    job_id=job.job_id,
+                    stream=job.stream,
+                    start_event=start_event,
+                    end_event=end_event,
+                    num_bytes=0 if failed else job.num_bytes,
+                    batch_src=job.batch_src,
+                    batch_dst=job.batch_dst,
+                    batch_sizes=job.batch_sizes,
+                    failed=failed,
+                    prior_events=job.prior_events,
+                )
+            )
+
     def get_finished(self) -> list[TransferResult]:
+        if self._pending:
+            self._submit_pending(self.max_descriptors_per_submit)
         results: list[TransferResult] = []
         while self._transfers:
             transfer = self._transfers[0]
             try:
                 if not transfer.end_event.query():
                     break
-                transfer_time = (
-                    None
-                    if transfer.failed
+                transfer_time = None
+                if not transfer.failed:
                     # elapsed_time is in milliseconds
-                    else transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
-                )
+                    elapsed_ms = transfer.start_event.elapsed_time(transfer.end_event)
+                    for start, end in transfer.prior_events:
+                        elapsed_ms += start.elapsed_time(end)
+                    transfer_time = elapsed_ms * 1e-3
             except RuntimeError:
                 logger.exception(
                     "KV offload %s transfer failed for job %d while polling "
@@ -725,12 +779,16 @@ class SingleDirectionOffloadingHandler:
             self._stream_pool.append(transfer.stream)
             self._event_pool.append(transfer.end_event)
             self._event_pool.append(transfer.start_event)
+            for start, end in transfer.prior_events:
+                self._event_pool.extend((end, start))
             self._buffer_pool.append(
                 (transfer.batch_src, transfer.batch_dst, transfer.batch_sizes)
             )
         return results
 
     def wait(self, job_ids: set[int]):
+        if any(job.job_id in job_ids for job in self._pending):
+            self._submit_pending(0)
         for job_id in job_ids:
             event = self._transfer_events.get(job_id)
             if event is not None:
@@ -745,6 +803,9 @@ class SingleDirectionOffloadingHandler:
 
     def shutdown(self) -> None:
         """Drain this direction and release its transfer-side resources."""
+        # A partly submitted job may have copies in flight; submit the rest so
+        # every job is drained below, as wait() does for the flush fence
+        self._submit_pending(0)
         sync_error: Exception | None = None
         while self._transfers:
             transfer = self._transfers[0]
@@ -844,7 +905,12 @@ class CPUOffloadingWorker(OffloadingWorker):
             host_memory_is_pinned=host_memory_is_pinned,
         )
         self._store_handler = make_handler(gpu_to_cpu=True)
-        self._load_handler = make_handler(gpu_to_cpu=False)
+        # Async loads may finish over several steps, so cap the descriptors
+        # each step submits instead of blocking the worker on one large batch.
+        self._load_handler = make_handler(
+            gpu_to_cpu=False,
+            max_descriptors_per_submit=envs.VLLM_KV_OFFLOAD_MAX_LOAD_SUBMIT_DESCRIPTORS,
+        )
         # Own stream, so expedited loads do not queue behind regular loads.
         self._expedited_load_handler = make_handler(gpu_to_cpu=False)
 
