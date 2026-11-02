@@ -3228,6 +3228,32 @@ def test_handshake_listener_bind_failure_raises():
             scheduler.set_xfer_handshake_metadata({(0, 0): payload})
 
 
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+@pytest.mark.timeout(1200, method="thread")
+def test_llm_startup_fails_when_side_channel_port_is_taken(monkeypatch):
+    """`LLM` reports a taken side-channel port instead of hanging in startup."""
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with socket.socket() as occupier:
+        occupier.bind(("127.0.0.1", 0))
+        occupier.listen()
+        port = occupier.getsockname()[1]
+        monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_HOST", "127.0.0.1")
+        monkeypatch.setenv("VLLM_NIXL_SIDE_CHANNEL_PORT", str(port))
+        with pytest.raises(RuntimeError, match=f"127.0.0.1:{port}"):
+            LLM(
+                model="Qwen/Qwen3-0.6B",
+                enforce_eager=True,
+                gpu_memory_utilization=0.5,
+                kv_transfer_config=KVTransferConfig(
+                    kv_connector="NixlConnector",
+                    kv_role="kv_both",
+                ),
+            )
+
+
 # ── TTL-based remote engine eviction tests ──────────────────────────
 
 
