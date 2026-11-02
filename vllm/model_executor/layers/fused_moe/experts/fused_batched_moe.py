@@ -477,6 +477,7 @@ def batched_triton_kernel_swapped(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
     USE_TD: tl.constexpr = False,
+    per_out_ch_quant: tl.constexpr = False,
 ):
     # axis 0 is M_blocks * N_blocks
     pid_mn = tl.program_id(axis=0)
@@ -558,6 +559,7 @@ def batched_triton_kernel_swapped(
         BLOCK_N,
         BLOCK_K,
         USE_TD,
+        per_out_ch_quant,
     )
 
 
