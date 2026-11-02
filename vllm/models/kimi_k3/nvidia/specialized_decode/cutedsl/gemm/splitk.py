@@ -3,12 +3,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from FlashInfer v0.7.0.post1 (Apache-2.0):
 # flashinfer/gemm/kernels/dense_bf16_gemm_sm100_splitk.py
-"""FlashInfer 0.7.0.post1 ``SplitKDenseGemmKernel`` (``dense_bf16_gemm_sm100_splitk``)
+"""FlashInfer 0.7.0.post1 `SplitKDenseGemmKernel` (`dense_bf16_gemm_sm100_splitk`)
 reduced to our use (PDL, no bias) with the weight (kernel-A) TMA issued through a
 device tensor map with an L2 evict_first policy, and its synchronization fixed: the
-owner waits for the peers' ``st.async`` partials at ``.acquire.cluster``; the MMA warp
+owner waits for the peers' `st.async` partials at `.acquire.cluster`; the MMA warp
 waits for TMEM-pointer phase 0 before its release arrival (else its phase-1 wait can
-pass before the epilogue has read TMEM); ``tcgen05.fence::*_thread_sync`` around
+pass before the epilogue has read TMEM); `tcgen05.fence::*_thread_sync` around
 every mbarrier hand-off of tcgen05 work.
 
 Each cluster rank accumulates an exact K slice in FP32; peers publish partials to
@@ -62,7 +62,7 @@ def _tma_load_evict_first(smem, mbar, tensor_map, k0, row0, *, loc=None, ip=None
 
 @dsl_user_op
 def _wait_cluster(mbar, phase, *, loc=None, ip=None):
-    """``cute.arch.mbarrier_wait`` at ``.acquire.cluster`` (remote ``st.async``)."""
+    """`cute.arch.mbarrier_wait` at `.acquire.cluster` (remote `st.async`)."""
     code = "{ .reg .pred P1; LAB_WAIT: "
     code += "mbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 P1, [$0], $1, "
     code += "10000000; @P1 bra.uni DONE; bra.uni LAB_WAIT; DONE: }"
@@ -81,7 +81,7 @@ def _smem(dtype, size, alignment, layout=None):
 
 
 class SplitKGemm:
-    """BF16 GEMM with a cluster-local split-K reduction; ``a_map`` is the device
+    """BF16 GEMM with a cluster-local split-K reduction; `a_map` is the device
     address of A's tensor map (box {64, mma_m}, 128-byte swizzle)."""
 
     def __init__(self, *, tactic: SplitKTactic):

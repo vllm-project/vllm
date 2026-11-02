@@ -6,8 +6,8 @@ The MTP draft model reuses the Qwen4Exp backbone (PLE/HC/MoE) but:
   - drops all multi-modal handling (text-only),
   - forces PLE off while keeping the main model's HC stream count,
   - fuses the backbone hidden and the new-token embedding via
-    ``residual_linear_shared`` (fc_embedding + shared fc_hidden) instead of
-    the ``Linear(2H, H)`` + repeat used by other MTP variants,
+    `residual_linear_shared` (fc_embedding + shared fc_hidden) instead of
+    the `Linear(2H, H)` + repeat used by other MTP variants,
   - emits TWO hidden streams per step (scheme A): a single stream [T, H]
     (final-mixer collapsed, fed to the LM head) and a pre-final-mixer
     multi stream [T, hc_count*H] (fed to the next draft step).

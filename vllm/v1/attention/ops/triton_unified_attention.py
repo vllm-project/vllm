@@ -43,10 +43,10 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
 
     Modes handled inside the core kernel:
 
-    - ``KV_QUANT_MODE == 0`` (NONE) and ``2`` (INT8 per-token-head) and
-      ``3`` (FP8 per-token-head): plain cast.  Per-token-head modes apply
+    - `KV_QUANT_MODE == 0` (NONE) and `2` (INT8 per-token-head) and
+      `3` (FP8 per-token-head): plain cast.  Per-token-head modes apply
       their scales separately on S/P inside the loop.
-    - ``KV_QUANT_MODE == 1`` (FP8 per-tensor): dequantize using the
+    - `KV_QUANT_MODE == 1` (FP8 per-tensor): dequantize using the
       tensor-wide scale, unless Q is also FP8 and the caller folds the scales
       into the attention score and output accumulator.
     """
@@ -83,16 +83,16 @@ def _load_q_td(
 ):
     """Load Q via a 2D tensor descriptor.
 
-    Caller guarantees (via the wrapper's ``use_td_qo`` gate):
-      * ``HEAD_SIZE == HEAD_SIZE_PADDED`` (head_size is a power of 2),
-      * ``num_queries_per_kv`` is a power of 2,
-      * the ``num_queries_per_kv`` heads of the current KV group are
-        contiguous in memory (``query_stride_1 == HEAD_SIZE``, which is
+    Caller guarantees (via the wrapper's `use_td_qo` gate):
+      * `HEAD_SIZE == HEAD_SIZE_PADDED` (head_size is a power of 2),
+      * `num_queries_per_kv` is a power of 2,
+      * the `num_queries_per_kv` heads of the current KV group are
+        contiguous in memory (`query_stride_1 == HEAD_SIZE`, which is
         the default vLLM query layout).
 
     Under those preconditions the inner two axes are flattened into one
-    row of size ``num_queries_per_kv * HEAD_SIZE`` with stride 1, which
-    avoids the non-power-of-2 ``block_shape`` error from the Triton
+    row of size `num_queries_per_kv * HEAD_SIZE` with stride 1, which
+    avoids the non-power-of-2 `block_shape` error from the Triton
     tensor-descriptor validator.  Returns (BLOCK_M, HEAD_SIZE_PADDED).
     """
     q_base = (
@@ -128,7 +128,7 @@ def _load_kv_tile_td(
 
     Returns shape (TILE_SIZE, HEAD_SIZE_PADDED). Caller transposes for K.
     Tensor descriptors zero-pad reads beyond the shape boundary, so
-    ``HEAD_SIZE_PADDED > HEAD_SIZE`` is handled correctly.
+    `HEAD_SIZE_PADDED > HEAD_SIZE` is handled correctly.
     """
     base = (
         cache_ptr
@@ -158,10 +158,10 @@ def _store_output_td(
 ):
     """Store an output tile via a tensor descriptor.
 
-    The 2D and 3D epilogues differ only in ``base_ptr`` and the
-    ``(stride_token, stride_head)`` pair: 2D writes directly to the
+    The 2D and 3D epilogues differ only in `base_ptr` and the
+    `(stride_token, stride_head)` pair: 2D writes directly to the
     flat output buffer, 3D writes to a single per-segment slice of
-    ``segm_output_ptr``.  Descriptor shape / block_shape / reshape
+    `segm_output_ptr`.  Descriptor shape / block_shape / reshape
     are the same in both modes, so share one helper.
     """
     acc = acc.to(base_ptr.dtype.element_ty)

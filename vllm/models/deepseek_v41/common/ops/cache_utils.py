@@ -86,8 +86,8 @@ def quantize_and_insert_k_kernel(
 
     One program per token.
 
-    ``use_fnuz=True`` selects FNUZ (``tl.float8e4b8``); default OCP
-    (``tl.float8e4nv``) matches every production caller.
+    `use_fnuz=True` selects FNUZ (`tl.float8e4b8`); default OCP
+    (`tl.float8e4nv`) matches every production caller.
     """
     pid = tl.program_id(0)
 
@@ -251,11 +251,11 @@ def quantize_and_insert_k_cache(
 ):
     """Quantize K tensor and insert into paged K cache.
 
-    ``bytes_per_token`` picks the record (see the module header): the V4 one,
+    `bytes_per_token` picks the record (see the module header): the V4 one,
     or V4.1's all-dims MXFP8 one.
 
-    ``use_fnuz=True`` selects FNUZ E4M3 cache encoding and is only valid on
-    platforms whose FP8 format is FNUZ. ``use_fnuz=False`` selects OCP E4M3,
+    `use_fnuz=True` selects FNUZ E4M3 cache encoding and is only valid on
+    platforms whose FP8 format is FNUZ. `use_fnuz=False` selects OCP E4M3,
     which is used by OCP-encoded caches even on gfx942.
     """
     assert k.dim() == 2 and k.shape[1] == 512, (
@@ -460,7 +460,7 @@ def _dequantize_and_gather_k_one_pass_kernel(
     n_quant_blocks: tl.constexpr,  # 7 real blocks; the per-block form only
     use_fnuz: tl.constexpr = False,
 ):
-    """``_dequantize_and_gather_k_kernel`` with the token read in one tile.
+    """`_dequantize_and_gather_k_kernel` with the token read in one tile.
 
     The seven quantization blocks tile the fp8 region exactly, so the per-block
     form's bounds never bite and its twenty-two memory operations per token
@@ -678,7 +678,7 @@ _NVFP4_GATHER_TILE = 8
 
 
 def gather_num_workers(max_gather_len: int | None) -> int:
-    """Grid width for a gather of at most ``max_gather_len`` tokens."""
+    """Grid width for a gather of at most `max_gather_len` tokens."""
     if max_gather_len is None:
         return _GATHER_MIN_WORKERS
     workers = cdiv(max_gather_len, _GATHER_STEPS_PER_WORKER)
@@ -805,13 +805,13 @@ def dequantize_and_gather_k_cache(
 ) -> None:
     """Dequantize and gather a paged DSv4 K cache.
 
-    The record is read off ``k_cache.shape[-1]``; see the module header. Only
+    The record is read off `k_cache.shape[-1]`; see the module header. Only
     the fp8 records have a CuteDSL gather, so NVFP4 always takes the Triton
     path.
 
-    ``use_fnuz`` MUST match the encoder of the specific cache being read:
-    ``False`` for ``compressed_k_cache`` (Triton encoder is OCP everywhere),
-    ``current_platform.is_fp8_fnuz()`` for ``swa_k_cache`` (C++ encoder
+    `use_fnuz` MUST match the encoder of the specific cache being read:
+    `False` for `compressed_k_cache` (Triton encoder is OCP everywhere),
+    `current_platform.is_fp8_fnuz()` for `swa_k_cache` (C++ encoder
     writes FNUZ on gfx942 and OCP on gfx950).
     """
     if has_cutedsl() and k_cache.shape[-1] != V41_NVFP4_BYTES_PER_TOKEN:
@@ -1025,9 +1025,9 @@ def _hf_config_int(vllm_config: Any, name: str, default: int) -> int:
 def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     """One warmup row per v4.1 layer type (compress ratio) in the model.
 
-    Every layer slices the shared ``index_topk``-wide indices buffer, so the
+    Every layer slices the shared `index_topk`-wide indices buffer, so the
     padded width is the same for all rows; SWA-only layers (ratio 0) pass
-    ``TOP_K=0``.
+    `TOP_K=0`.
     """
     model_config = getattr(vllm_config, "model_config", None)
     hf_config = getattr(model_config, "hf_config", None)
@@ -1274,14 +1274,14 @@ def build_flashinfer_mixed_sparse_indices(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
-    Produces ``sparse_indices`` of shape ``[num_tokens, swa_total_width +
-    padded_topk]`` (the first ``swa_total_width`` columns are SWA slot ids, the
-    rest are compressed/top-k slot ids) and ``sparse_topk_lens`` (active length
+    Produces `sparse_indices` of shape ``[num_tokens, swa_total_width +
+    padded_topk]` (the first `swa_total_width`` columns are SWA slot ids, the
+    rest are compressed/top-k slot ids) and `sparse_topk_lens` (active length
     per token). Decode tokens read precomputed SWA/compressed indices; prefill
     tokens derive their SWA window from the position and translate local
     compressed indices to global slots via the block tables.
 
-    ``replay_start`` ([num_reqs], SWA bounded replay) lower-bounds every
+    `replay_start` ([num_reqs], SWA bounded replay) lower-bounds every
     prefill token's window: positions below it hold no window KV.
     """
     assert decode_swa_indices.dtype == torch.int32

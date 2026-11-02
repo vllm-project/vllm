@@ -522,7 +522,7 @@ def qsa_select_paged_decode(
             head_dim]``.
         k_cache: Compressed key cache shaped ``[blocks, page_size, 1,
             head_dim]``.
-        page_table: Request block table shaped ``[num_requests, max_pages]``.
+        page_table: Request block table shaped `[num_requests, max_pages]`.
         visible_blocks: Number of visible compressed blocks per query.
         token_topk: Number of logical tokens selected per query.
         compress_ratio: Number of logical tokens represented by a cache row.
@@ -591,10 +591,10 @@ def qsa_select_paged_prefill(
     """Score and select compressed prefill blocks in bounded chunks.
 
     Args:
-        q: Packed prefill query tensor shaped ``[num_tokens, heads, head_dim]``.
+        q: Packed prefill query tensor shaped `[num_tokens, heads, head_dim]`.
         k_cache: Compressed key cache shaped ``[blocks, page_size, 1,
             head_dim]``.
-        page_table: Block table shaped ``[num_requests, max_pages]``.
+        page_table: Block table shaped `[num_requests, max_pages]`.
         query_start_loc: Packed prefill query offsets with a terminal offset.
             Offsets may share the base of a larger backing tensor.
         visible_blocks: Number of visible compressed blocks per query.

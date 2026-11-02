@@ -55,7 +55,7 @@ class VllmModel(Protocol):
         """Return True for checkpoint weights this model does not load.
 
         Defining this method is optional for satisfying this interface.
-        Override with the same rule used in ``load_weights``. Models without
+        Override with the same rule used in `load_weights`. Models without
         a selection rule keep every checkpoint weight by default.
         """
         return False

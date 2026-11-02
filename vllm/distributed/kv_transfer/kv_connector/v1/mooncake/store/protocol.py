@@ -2,8 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Wire-format constants for the LookupKey ZMQ admin channel.
 
-This is the single source of truth shared by ``LookupKeyClient`` and
-``LookupKeyServer`` on the scheduler<->worker rank-0 admin channel.
+This is the single source of truth shared by `LookupKeyClient` and
+`LookupKeyServer` on the scheduler<->worker rank-0 admin channel.
 
 Wire format (REQ/REP over IPC):
 
@@ -30,7 +30,7 @@ self-describing and extensible: adding new admin commands requires
 only a new tag and a new dispatch branch.
 
 Mirrors the named-tag convention used by the NIXL connector (see
-``vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py``).
+`vllm/distributed/kv_transfer/kv_connector/v1/nixl/metadata.py`).
 """
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (

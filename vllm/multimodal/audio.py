@@ -191,8 +191,8 @@ def resample_audio_pyav(
 
     Args:
         audio: Input audio. Can be:
-            - 1D array ``(samples,)``: mono audio
-            - 2D array ``(channels, samples)``: stereo audio
+            - 1D array `(samples,)`: mono audio
+            - 2D array `(channels, samples)`: stereo audio
         orig_sr: Original sample rate in Hz.
         target_sr: Target sample rate in Hz.
 
@@ -309,8 +309,8 @@ def resample_audio_torchaudio(
 
     Args:
         audio: Input audio. Can be:
-            - 1D array ``(samples,)``: mono audio
-            - 2D array ``(channels, samples)``: stereo audio
+            - 1D array `(samples,)`: mono audio
+            - 2D array `(channels, samples)`: stereo audio
         orig_sr: Original sample rate in Hz.
         target_sr: Target sample rate in Hz.
 
@@ -423,7 +423,7 @@ def split_audio(
         List of 1D audio chunks.
 
     Raises:
-        AssertionError: If ``audio_data`` is not 1D.
+        AssertionError: If `audio_data` is not 1D.
 
     Example:
         >>> audio = np.random.randn(1040000)  # 65 seconds at 16kHz

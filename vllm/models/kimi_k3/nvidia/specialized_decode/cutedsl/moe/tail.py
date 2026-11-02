@@ -60,7 +60,7 @@ shuffle = cute.arch.shuffle_sync
 
 
 def scatter_sums(values, lane, width):
-    """``warp_sum(values[g], width)`` of every g (4 or 8 values) as a reduce-scatter:
+    """`warp_sum(values[g], width)` of every g (4 or 8 values) as a reduce-scatter:
     each butterfly level keeps half of the values and receives the partner's other
     half, so every partial sum (and the total) is the butterfly's. Returns the lane's
     total; value g's sits in lanes g << (log2(width) - log2(len(values)))."""
@@ -82,7 +82,7 @@ def scatter_sums(values, lane, width):
 
 
 def gather_sums(total, count, width, padded):
-    """Every lane's copy of ``scatter_sums``' first ``count`` totals."""
+    """Every lane's copy of `scatter_sums`' first `count` totals."""
     shift = width.bit_length() - padded.bit_length()
     return [shuffle(total, g << shift) for g in range(count)]
 
@@ -93,7 +93,7 @@ def spread(pointer, lane, swap):
 
 
 class MoeTail:
-    """One MoE tail launch over caller-owned persistent buffers. ``front_poll`` inputs
+    """One MoE tail launch over caller-owned persistent buffers. `front_poll` inputs
     have three parity slots armed with 0xffff BF16; latent/shared mailboxes [3, TP,
     capacity, 3584 or 7168/TP] are armed with 0x80000000. Only complete chains may use
     the early B1 trigger, which waits for the predecessor before releasing
@@ -381,7 +381,7 @@ class MoeTail:
 
     @cute.jit
     def rearm(self, io, capacity, parity, batch, block, tid, reduced=None):
-        """Re-arms ``parity``'s first ``batch`` tokens (and WaveMoeTail's reduced
+        """Re-arms `parity`'s first `batch` tokens (and WaveMoeTail's reduced
         rows)."""
         latent, shared, g, w, s, _ = io
         if parity >= 0:
@@ -436,14 +436,14 @@ class WaveMoeTail(MoeTail):
     warps (TP16: two sets taking alternate groups) run two seven-step BF16 MMA chains
     per 8-token group, and each 64-row output line has one owner CTA and one multicast
     writer. Past one group (and at TP16) each cluster instead all-reduces every seventh
-    token of its slices once and shares them as BF16 rows through ``reduced``, so all
+    token of its slices once and shares them as BF16 rows through `reduced`, so all
     112 CTAs must be co-resident; RS lines spread over warp pairs, every group's RMS
     sums travel as one vector per peer, all groups normalize before any MMA, the
     groups' MMA chains interleave per K step, and the previous layer's rows are
-    re-armed after the output multicast. ``twoshot`` (B9+): the latent
-    mailbox is this rank's ``common.twoshot`` receive slots [3, TP, capacity, 3584/TP]
+    re-armed after the output multicast. `twoshot` (B9+): the latent
+    mailbox is this rank's `common.twoshot` receive slots [3, TP, capacity, 3584/TP]
     (pushed by the experts), the CTAs of its owned slices reduce them like TP16 but
-    multicast the rows into every rank's ``reduced`` (the gather; its multicast
+    multicast the rows into every rank's `reduced` (the gather; its multicast
     address replaces the latent one), so each GPU receives 2 x B x 7 KB of latent
     instead of TP x B x 7 KB."""
 
@@ -666,7 +666,7 @@ class WaveMoeTail(MoeTail):
 
     @cute.jit
     def column_sums(self, values):
-        """``sum_sources`` (same order and rounding) as one BF16 FMA by 1.0 per term."""
+        """`sum_sources` (same order and rounding) as one BF16 FMA by 1.0 per term."""
         acc, one = zeros(8, Float32), Uint32(0x3F803F80)
         for source in cutlass.range_constexpr(self.tp):
             for k in cutlass.range_constexpr(8):
@@ -675,7 +675,7 @@ class WaveMoeTail(MoeTail):
 
     @cute.jit
     def rearm_rows(self, boxes, capacity, parity, batch, block, tid, reduced):
-        """Division-free ``rearm``: each source's latent and RS rows, then the reduced
+        """Division-free `rearm`: each source's latent and RS rows, then the reduced
         rows, of the previous layer (complete before this launch)."""
         if parity >= 0:
             start, step = block * self.threads + tid, self.grid * self.threads
@@ -695,7 +695,7 @@ class WaveMoeTail(MoeTail):
     def poll_inputs(self, boxes, ring, ids, places, gather=None):
         """Phase 1 and the RS lines in one convergent pass (every round's loads issued
         first). Lanes 0..27 all-reduce the cluster's tokens tile + 7 j of the CTA's
-        slice once into BF16 ``reduced`` rows (``gather`` (multicast address, rank):
+        slice once into BF16 `reduced` rows (`gather` (multicast address, rank):
         only the CTAs of owned slices, from the receive slots into every rank's);
         lanes 28..31 of warps 2 p and 2 p + 1 sum owned lines p, p + 4's RS shard
         (line 16 i + q: token (16 i + q) / lines)."""
@@ -764,7 +764,7 @@ class WaveMoeTail(MoeTail):
 
     @cute.jit
     def poll_rows(self, base, stride, count):
-        """Lamport-poll the first ``count`` 16-byte rows base + r stride."""
+        """Lamport-poll the first `count` 16-byte rows base + r stride."""
         values = cute.make_rmem_tensor((self.groups, 4), Uint32)
         pending = Uint32(0)
         for r in cutlass.range_constexpr(self.groups):
@@ -809,7 +809,7 @@ class WaveMoeTail(MoeTail):
 
     @cute.jit
     def mma_groups(self, a, xs, products, owned, bar, ids):
-        """``mma_group`` over this warp's groups g = sets j + set (TP16: two warp
+        """`mma_group` over this warp's groups g = sets j + set (TP16: two warp
         sets): every MMA chain (the groups' chains interleaved per K step), one warp
         sync, then the owners' pushes (slot j)."""
         q, warp, lane, rw, gq, tq = ids
@@ -912,7 +912,7 @@ class WaveMoeTail(MoeTail):
 
     @cute.jit
     def normalize_groups(self, squares, row, xs, ids):
-        """Past one group: every group's RMS (the 16 slices' sums, ``square_total``'s
+        """Past one group: every group's RMS (the 16 slices' sums, `square_total`'s
         order) first, then the scaled latent words (padding tokens too)."""
         (words, gx, eps), (warp, lane, lat) = row, ids
         base = squares.iterator + (warp * 16 + lane % 16) * self.padded
@@ -932,7 +932,7 @@ class WaveMoeTail(MoeTail):
 
     @cute.jit
     def normalize(self, squares, row, xs, ids):
-        """One group: RMS-normalize the warp's token into ``xs``."""
+        """One group: RMS-normalize the warp's token into `xs`."""
         (words, gx, eps), (warp, lane, _) = row, ids
         if warp < self.batch:
             total = self.square_total(squares, warp, lane)
@@ -965,8 +965,8 @@ class WaveMoeTail(MoeTail):
         store_shared_words(dst, packed)
 
     def x_chunk(self, tile, row, chunk):
-        """16-byte chunk ``chunk`` (K columns 8 chunk ..) of row ``row`` in 128B-
-        swizzled [rows, 64] K tiles of ``self.n`` rows (``tile``: the 8-row block)."""
+        """16-byte chunk `chunk` (K columns 8 chunk ..) of row `row` in 128B-
+        swizzled [rows, 64] K tiles of `self.n` rows (`tile`: the 8-row block)."""
         atom, part = chunk // 8, chunk % 8
         return tile + atom * (self.n * 128) + row * 128 + (part ^ row) * 16
 

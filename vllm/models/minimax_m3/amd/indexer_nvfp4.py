@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """MiniMax M3 lightning indexer over NVFP4 index-K pages on ROCm (gfx950).
 
-Keys score as ``e4m3_rn_satfinite(e2m1 * scale)`` with AITER's init / local
+Keys score as `e4m3_rn_satfinite(e2m1 * scale)` with AITER's init / local
 sentinels; the top-k writes logical block ids for the NVFP4 attend, no page
-table. With ``indexer_decode_cp`` at TP4, decode steps of 4 rows per request
-and at most 256 requests score context-parallel (``ops/index_cp``).
+table. With `indexer_decode_cp` at TP4, decode steps of 4 rows per request
+and at most 256 requests score context-parallel (`ops/index_cp`).
 """
 
 import torch

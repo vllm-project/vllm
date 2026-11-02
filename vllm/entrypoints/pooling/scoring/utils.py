@@ -150,8 +150,8 @@ def score_data_to_prompts(
 
     For plain text inputs, returns the string directly.
     For multimodal inputs (list of content parts), parses them into
-    a :class:`TextPrompt` with attached ``multi_modal_data`` /
-    ``multi_modal_uuids``.
+    a :class:`TextPrompt` with attached `multi_modal_data` /
+    `multi_modal_uuids`.
 
     This is used by late-interaction scoring where each query/document
     is encoded independently.
@@ -246,7 +246,7 @@ def parse_score_data(
     data.
 
     Uses a **single** :class:`MultiModalItemTracker` so that multi-modal
-    items from both inputs are merged into one ``mm_data`` dict.  This is
+    items from both inputs are merged into one `mm_data` dict.  This is
     the correct behaviour for cross-encoder scoring, where query and
     document are concatenated into a single model prompt.
     """

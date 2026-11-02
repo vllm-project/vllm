@@ -13,16 +13,16 @@ def map_local_to_global_slots_cpu(
 ) -> torch.Tensor:
     """Map per-request-local (token or compressed-token) indices to global
     paged-cache slot ids via a block table, mirroring
-    ``compute_global_topk_indices_and_lens``.
+    `compute_global_topk_indices_and_lens`.
 
     Args:
         local_indices: [N, K], -1 sentinel for invalid entries.
-        req_idx: [N], row into ``block_table`` for each of the N rows.
+        req_idx: [N], row into `block_table` for each of the N rows.
         block_table: [num_reqs, max_blocks_per_seq].
         block_size: tokens (or compressed tokens) per physical block.
 
     Returns:
-        [N, K] int64 global slot ids, -1 where ``local_indices`` was invalid.
+        [N, K] int64 global slot ids, -1 where `local_indices` was invalid.
 
     """
     valid = local_indices >= 0

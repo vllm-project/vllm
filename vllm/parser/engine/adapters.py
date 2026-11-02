@@ -165,7 +165,7 @@ class ParserEngineReasoningAdapter(ReasoningParser):
 class ParserEngineToolAdapter(ToolParser):
     """Adapts a :class:`ParserEngine` to the :class:`ToolParser` interface.
 
-    :meth:`extract_tool_calls` starts the parser engine in ``CONTENT``
+    :meth:`extract_tool_calls` starts the parser engine in `CONTENT`
     state so it can parse reasoning-stripped content (i.e. the output of
     :meth:`ReasoningParser.extract_reasoning`).
 

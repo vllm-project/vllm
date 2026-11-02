@@ -126,7 +126,7 @@ def flashinfer_moe_ep_unsupported_reasons(
 ) -> tuple[str, ...]:
     """Deployment constraints of the megakernel beyond the framework's checks.
 
-    ``activation_key`` is ``None`` for MXFP4 checkpoints (the kernel quantizes
+    `activation_key` is `None` for MXFP4 checkpoints (the kernel quantizes
     bf16 activations itself) but marks a W4A16 recipe for NVFP4 weights.
     """
     spec = flashinfer_moe_ep_backend_spec(moe.moe_backend)

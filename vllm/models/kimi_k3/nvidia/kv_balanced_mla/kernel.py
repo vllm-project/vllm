@@ -208,10 +208,10 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
         :param is_var_split_kv: Whether to use variable split KV
         :type is_var_split_kv: bool
         :param window_left: Sliding-window span, or -1 for full history. When
-            non-negative, query row ``q_tok`` of the ``seq_len_q`` block sees
-            keys ``[max(0, K - seq_len_q - window_left + q_tok), k_bound)``:
-            the whole block plus ``window_left`` tokens of history, which is
-            the mask a block drafter's ``sliding_attention`` layers declare.
+            non-negative, query row `q_tok` of the `seq_len_q` block sees
+            keys `[max(0, K - seq_len_q - window_left + q_tok), k_bound)`:
+            the whole block plus `window_left` tokens of history, which is
+            the mask a block drafter's `sliding_attention` layers declare.
         :type window_left: int
         :param reducer_d_tiles: Number of disjoint D512 output bands (1, 2 or 4)
         :type reducer_d_tiles: int
@@ -4464,7 +4464,7 @@ class BlackwellMultiHeadLatentAttentionForwardFP8:
 
     @cute.jit
     def _store_rows(self, tTR_rAcc, tTR_gO, tTR_cO, scale, store_dtype, H):
-        """Scale the accumulator rows, convert and store them (rows < ``H``).
+        """Scale the accumulator rows, convert and store them (rows < `H`).
 
         Subtiled elementwise + STG: elementwise of subtile N+1 overlaps with STG
         of subtile N via instruction-level parallelism. tTR_rAcc shape:

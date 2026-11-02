@@ -9,7 +9,7 @@ and worker classes; the connector classes here only forward calls.
 * :class:`NixlBaseConnector` – common logic shared by pull and push.
 * :class:`NixlPullConnector` – pull-based (READ) KV transfer.
 * :class:`NixlPushConnector` – push-based (WRITE) KV transfer.
-* ``NixlConnector`` – backward-compatible alias for :class:`NixlPullConnector`.
+* `NixlConnector` – backward-compatible alias for :class:`NixlPullConnector`.
 """
 
 from typing import TYPE_CHECKING, Any
@@ -419,7 +419,7 @@ class NixlPushConnector(NixlBaseConnector):
         """Drive push processing on the worker.
 
         The worker enqueues registrations / finished blocks for the
-        background ``nixl-push-writer`` thread; the writer issues the
+        background `nixl-push-writer` thread; the writer issues the
         WRITE transfers and polls NIXL notifs without further
         engine-thread involvement.
         """

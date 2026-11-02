@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""K2b ``moe``: one Kimi-K3 latent-MoE layer, from the MoE input row x to the
+"""K2b `moe`: one Kimi-K3 latent-MoE layer, from the MoE input row x to the
 layer's output, every TP reduction inside the kernel.
 
-One launch a layer and rank, ``BLOCKS`` x ``THREADS``, S <= 64 rows (a
+One launch a layer and rank, `BLOCKS` x `THREADS`, S <= 64 rows (a
 spec-verify step). The original path (vLLM ROCm, see MOE_SPEC.md) replicates the
 router and the latent down projection on every rank; here each rank computes
 its eighth and the rows are all-gathered over the peer buffer.
@@ -172,7 +172,7 @@ def max_tiles(s):
 
 
 def inter_lds(s):
-    """Down reads the picks' INTER from LDS (``load_inter``), else polls each
+    """Down reads the picks' INTER from LDS (`load_inter`), else polls each
     pick's at its use."""
     return s <= INTER_LDS_S
 
@@ -180,7 +180,7 @@ def inter_lds(s):
 def few_rows(s):
     """At most a pick tile of rows: a slot's picks fit one tile, so a slot is
     a tile and the MFMAs' columns are the tokens. The route table is then
-    expert flags and each slot's top-k index a token (``kof``), and the
+    expert flags and each slot's top-k index a token (`kof`), and the
     latent's scale codes a word each: none of the bitmap, the pick order or
     the packed codes' atomics."""
     return s <= PTILE
@@ -231,19 +231,19 @@ def f32_of(w):
 
 
 def tag_x_on(c):
-    """``layer.OPT_TAG_X``, a plain call (see ``back.sent_on``)."""
+    """`layer.OPT_TAG_X`, a plain call (see `back.sent_on`)."""
     return c.get("tag_x", False)
 
 
 def tanh_libm(x):
-    """The ``tanhf`` of x to a few ulp: (1 - e) / (1 + e), e = exp(-2|x|), x's sign."""
+    """The `tanhf` of x to a few ulp: (1 - e) / (1 + e), e = exp(-2|x|), x's sign."""
     e = hw_exp2(abs(x) * fx.Float32(-2.0 * LOG2E))
     t = (fx.Float32(1.0) - e) / (fx.Float32(1.0) + e)
     return (x < fx.Float32(0.0)).select(-t, t)
 
 
 def situ_vllm(g, u):
-    """The ``situ_and_mul`` of vLLM on bf16 g, u:
+    """The `situ_and_mul` of vLLM on bf16 g, u:
     ((2 tanh(g/4)) (1 + tanh(g/2))) (25 tanh(u/25))."""
     a = fx.Float32(0.5 * BETA) * tanh_libm(g * fx.Float32(1.0 / BETA))
     a = a * (fx.Float32(1.0) + tanh_libm(g * fx.Float32(0.5)))
@@ -251,7 +251,7 @@ def situ_vllm(g, u):
 
 
 def tanh_aiter(x):
-    """The ``act.tanh_f32`` of aiter: (1 - e) rcp(1 + e), e = exp2(|x| (-2 log2 e))."""
+    """The `act.tanh_f32` of aiter: (1 - e) rcp(1 + e), e = exp2(|x| (-2 log2 e))."""
     e = hw_exp2(abs(x) * fx.Float32(-2.0 * LOG2E))
     t = (fx.Float32(1.0) - e) * hw_rcp(fx.Float32(1.0) + e)
     return (x > fx.Float32(0.0)).select(t, -t)
@@ -265,7 +265,7 @@ def situ_aiter(g, u):
 
 
 def e8m0_roundup(amax):
-    """The ``_e8m0_roundup(amax, 6)`` of aiter: ceil code of amax * f32(1/6),
+    """The `_e8m0_roundup(amax, 6)` of aiter: ceil code of amax * f32(1/6),
     at most 254."""
     wi = (amax * fx.Float32(1.0 / 6.0)).bitcast(fx.Int32)
     b = fx.Int32(fx.Uint32(wi + fx.Int32(0x7FFFFF)) >> fx.Uint32(23)) & 0xFF
@@ -273,7 +273,7 @@ def e8m0_roundup(amax):
 
 
 def pk_fp4_f32(old, a, b, scale, j):
-    """Two f32 / scale -> E2M1 nibbles into byte j of ``old`` (RNE, saturating)."""
+    """Two f32 / scale -> E2M1 nibbles into byte j of `old` (RNE, saturating)."""
     return fx.Int32(
         rocdl.cvt_scalef32_pk_fp4_f32(
             T.i32,
@@ -287,7 +287,7 @@ def pk_fp4_f32(old, a, b, scale, j):
 
 
 def pk_fp4_bf16(old, word, scale, j):
-    """A packed bf16 pair word / scale -> E2M1 nibbles into byte j of ``old``."""
+    """A packed bf16 pair word / scale -> E2M1 nibbles into byte j of `old`."""
     v = fx.Vector.from_elements([fx.Int32(word)], fx.Int32).bitcast(fx.BFloat16)
     return fx.Int32(
         rocdl.cvt_scalef32_pk_fp4_bf16(
@@ -303,7 +303,7 @@ def pk_fp4_bf16(old, word, scale, j):
 # ---------------------------------------------------------------- early
 @traced
 def early_out(c, kind, i, q, red, t0, n):
-    """Task (i, q) of ``kind`` (0 router, 1 latent, 2 sgu): its 16 rows for
+    """Task (i, q) of `kind` (0 router, 1 latent, 2 sgu): its 16 rows for
     tokens t0 .. t0 + n. A K-split kind's parts q > 0 publish fp32 partials;
     part 0 adds them in part order and publishes the rows (router: fp32 to every
     rank's RLOG, latent: bf16 to every rank's LAT); sgu bf16 to SGU."""
@@ -369,9 +369,9 @@ def early_out(c, kind, i, q, red, t0, n):
 
 @traced
 def latent_mx_out(c, i, q, red, t0, n):
-    """``early_out`` of the latent at ``few_rows``: an even group's part 0 ends
+    """`early_out` of the latent at `few_rows`: an even group's part 0 ends
     the MXFP4 block of its rows and the odd group's (32 rows): the 4 partials in
-    part order, bf16, then aiter's inline quant as ``load_latq`` -> every rank's
+    part order, bf16, then aiter's inline quant as `load_latq` -> every rank's
     LATQ4 (fp4 words, then a code a word). The other tasks publish partials."""
     s, tid = c["S"], c["tid"]
     region = c["lpart"]
@@ -432,8 +432,8 @@ def early_shape(kind):
 
 
 def early_loads(c, kind, i, q):
-    """Early task (i, q) of ``kind``'s weights for this wave: issued as early as
-    the CTA can, then ``early_compute`` takes them."""
+    """Early task (i, q) of `kind`'s weights for this wave: issued as early as
+    the CTA can, then `early_compute` takes them."""
     a = c["args"]
     klen, _ = early_shape(kind)
     if kind == 0:
@@ -447,8 +447,8 @@ def early_loads(c, kind, i, q):
 
 @traced
 def early_compute(c, kind, i, q, ops):
-    """Early task (i, q): x's K slice (the input row, or -- ``xflags`` -- the
-    row this launch's AttnRes stage publishes) against ``ops`` -> ``early_out``."""
+    """Early task (i, q): x's K slice (the input row, or -- `xflags` -- the
+    row this launch's AttnRes stage publishes) against `ops` -> `early_out`."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     klen, _ = early_shape(kind)
     xrow = klen + gemv.LDS_PAD
@@ -532,7 +532,7 @@ def _route_out(c, t, red, sel, rank, me, ms):
 def route_parts(c, t):
     """(OPT_RLOG_PARTS) Token t's router partials (every rank's 4 K
     parts, RLOGP) -> LDS `vals[part][expert]`, wave q < R_PARTS polling part
-    q (one batch: the 14 experts of its lane); ``stage_route`` sums each
+    q (one batch: the 14 experts of its lane); `stage_route` sums each
     expert's parts in part order, as the router's part 0 did."""
     s, lane, wave = c["S"], c["lane"], c["wave"]
     if wave < R_PARTS:
@@ -724,9 +724,9 @@ def poll_route(c):
 
 @traced
 def load_route_few(c):
-    """``few_rows``: ROUTE -> LDS, then U, the experts with picks (ascending):
-    each expert's slot (``eslot``, a flag first), each slot's expert, and
-    ``kof[slot][t]``, token t's top-k index of the slot's expert (-1: not
+    """`few_rows`: ROUTE -> LDS, then U, the experts with picks (ascending):
+    each expert's slot (`eslot`, a flag first), each slot's expert, and
+    `kof[slot][t]`, token t's top-k index of the slot's expert (-1: not
     picked). Returns |U|, the pick tiles' count."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rt = c["rt"]
@@ -773,10 +773,10 @@ def load_route(c):
     and their pick tiles: each expert's slot, each slot's expert, first pick
     and first tile, the picks (t TOPK + k) in slot order (a slot's tokens
     ascending) and each tile's slot. A pick ORs its token's bit into its
-    expert's bitmap (``redi``): a slot's picks are the bitmap's popcount, a
+    expert's bitmap (`redi`): a slot's picks are the bitmap's popcount, a
     pick's rank in its slot the bits below its token. The bitmaps are the same
     whatever order the ORs land in, so every CTA lays out the same table.
-    Returns the pick tiles' count. At ``few_rows``, ``load_route_few``."""
+    Returns the pick tiles' count. At `few_rows`, `load_route_few`."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     if const_expr(few_rows(s)):
         return load_route_few(c)
@@ -855,7 +855,7 @@ def load_route(c):
 
 
 def pick_tile(c, tile):
-    """Pick tile ``tile``: (its slot, its first pick's position in the pick
+    """Pick tile `tile`: (its slot, its first pick's position in the pick
     order, its picks)."""
     rt = c["rt"]
     slot = uniform(fx.ptr_load(rt["tslot"] + tile))
@@ -867,8 +867,8 @@ def pick_tile(c, tile):
 
 @traced
 def load_latq4(c):
-    """``load_latq`` at ``few_rows``: the producer quantized
-    (``latent_mx_out``); a thread a block's 4 words and its code, one poll batch."""
+    """`load_latq` at `few_rows`: the producer quantized
+    (`latent_mx_out`); a thread a block's 4 words and its code, one poll batch."""
     s, tid = c["S"], c["tid"]
     nblk = s * (LAT // 32)
     its = (nblk + THREADS - 1) // THREADS
@@ -894,7 +894,7 @@ def load_latq(c):
     """LAT (every rank's 448 columns) -> MXFP4 as aiter's inline quant: a
     thread a (token, 32-block): amax of |bf16| bits, the ceil code of amax / 6,
     v_cvt_scalef32_pk_fp4_bf16 -> latq words, latsc codes (a word each at
-    ``few_rows``, else 4 a word)."""
+    `few_rows`, else 4 a word)."""
     s, tid = c["S"], c["tid"]
     nblk = s * (LAT // 32)
     if const_expr(not few_rows(s)):
@@ -938,7 +938,7 @@ def load_latq(c):
 
 # ---------------------------------------------------------------- ug
 def w13_scale_word(e, rg, st, lane):
-    """The dword of aiter's gate_up=False ``shuffle_scale`` holding (row rg 16 +
+    """The dword of aiter's gate_up=False `shuffle_scale` holding (row rg 16 +
     lane % 16, K block 4 st + lane / 16) for st's pair and rg's pair: byte
     (st % 2) 2 + rg % 2."""
     n1 = rg // 2
@@ -951,8 +951,8 @@ def w13_scale_word(e, rg, st, lane):
 
 
 def ug_loads(c, task):
-    """Task ``task``'s w13 operands for this wave (its row group, its K half)
-    and their scale words: issued a task ahead (``stage_ug`` takes them)."""
+    """Task `task`'s w13 operands for this wave (its row group, its K half)
+    and their scale words: issued a task ahead (`stage_ug` takes them)."""
     lane, wave = c["lane"], c["wave"]
     a, rt = c["args"], c["rt"]
     if const_expr(few_rows(c["S"])):
@@ -983,10 +983,10 @@ def ug_loads(c, task):
 @traced
 def stage_ug(c, task, ops):
     """Pick tile task / 12, 32-column group task % 12: gate rows 32 g .. and up
-    rows 384 + 32 g .. of the tile's expert (``ops``: ``ug_loads``) against its
+    rows 384 + 32 g .. of the tile's expert (`ops`: `ug_loads`) against its
     picks' MXFP4 latent rows (a lane's column a pick); SiTUv2; MXFP4 a 32-column
-    group -> INTER / ISC of each pick. At ``few_rows`` the slot's tile is
-    every token (a lane's column a token), its picks those with a ``kof``."""
+    group -> INTER / ISC of each pick. At `few_rows` the slot's tile is
+    every token (a lane's column a token), its picks those with a `kof`."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     rt = c["rt"]
     few = few_rows(s)
@@ -1099,7 +1099,7 @@ def load_inter(c):
 
 def w2_scale(c, e, rgd, st, lane):
     """The e8m0 code of w2 (row e 3584 + rgd 16 + lane % 16, K block 4 st +
-    lane / 16) in ``e8m0_shuffle``'s layout (16 codes a row)."""
+    lane / 16) in `e8m0_shuffle`'s layout (16 codes a row)."""
     row = e * LAT + rgd * ROWS + lane % 16
     idx = scale_index(row, st * 4 + lane // 16, 16)
     w = fx.Int32(
@@ -1109,7 +1109,7 @@ def w2_scale(c, e, rgd, st, lane):
 
 
 def poll_inter(c, pick, kb):
-    """A lane's INTER words (3 steps x 4) and ISC codes of ``pick``, polled at
+    """A lane's INTER words (3 steps x 4) and ISC codes of `pick`, polled at
     its use: a slot whose ug tasks are done is multiplied while later slots'
     still run (no wait for all of U)."""
     return c["poll"](
@@ -1124,7 +1124,7 @@ def poll_inter(c, pick, kb):
 
 def down_loads(c, rgd, nt, b0):
     """The w2 tiles and scale codes of a wave's batch from pick tile b0 (tiles
-    b0, b0 + 8, ...; past the last, the last's): flat, ``stage_down`` unpacks."""
+    b0, b0 + 8, ...; past the last, the last's): flat, `stage_down` unpacks."""
     lane = c["lane"]
     r_w = rsrc(c["args"]["w2"])
     rt = c["rt"]
@@ -1153,9 +1153,9 @@ def down_loads(c, rgd, nt, b0):
 def stage_down(c, rgd, nt, ops0):
     """Latent rows 16 rgd ..: every pick tile's w2 against its picks (wave w
     the tiles w, w + 8, ...; a batch of DOWN_BATCH in flight, the next issued
-    under this one's MFMAs; ``ops0`` the first, issued before INTER was waited
+    under this one's MFMAs; `ops0` the first, issued before INTER was waited
     for) -> bf16(w acc) a (token, k) in LDS -> folded in top-k order with a
-    bf16 rounding an add -> every rank's LATR. INTER from LDS (``inter_lds``),
+    bf16 rounding an add -> every rank's LATR. INTER from LDS (`inter_lds`),
     else a tile's polled at its use."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rt = c["rt"]
@@ -1293,7 +1293,7 @@ def load_h(c):
 
 @traced
 def stage_sdown(c, j, ops):
-    """Shared down rows 16 j .. (K 768) against h in LDS (``load_h``): bf16
+    """Shared down rows 16 j .. (K 768) against h in LDS (`load_h`): bf16
     partial -> SHP (this rank's up columns) or every rank's FINAL."""
     s = c["S"]
     for i, (t0, n) in enumerate(gemv.token_tiles(s)):
@@ -1314,7 +1314,7 @@ def stage_sdown(c, j, ops):
 
 @traced
 def sdown_tile(c, j, ops, t0, n):
-    """``stage_sdown`` for the h rows t0 .. t0 + n."""
+    """`stage_sdown` for the h rows t0 .. t0 + n."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     hrow = SI + gemv.LDS_PAD
     acc = gemv.mfmas(lane, wave, c["xl"] + t0 * hrow // 2, hrow, SI, n, ops)
@@ -1374,9 +1374,9 @@ def run_sdown(c, bid, w_sd):
 
 @traced
 def run_sdown_first(c, bid, w_sd):
-    """(OPT_SDOWN_FIRST) ``run_sdown``'s tasks (the up stage polls
+    """(OPT_SDOWN_FIRST) `run_sdown`'s tasks (the up stage polls
     their SHRDY) on CTAs 224 .., each CTA's two tasks' weights issued before H
-    is polled, ahead of its ``run_sdown_rest`` tasks (which only the final
+    is polled, ahead of its `run_sdown_rest` tasks (which only the final
     reduce waits on). Placement only: the same tasks, the same arithmetic."""
     lo = c["rank"] * UP_TASKS
     nsd = BLOCKS - DOWN_TASKS  # 32
@@ -1550,7 +1550,7 @@ def stage_up(c, j, tile=None):
 
 @traced
 def up_tile(c, j, ops, t0, n):
-    """``stage_up`` for the LN rows t0 .. t0 + n."""
+    """`stage_up` for the LN rows t0 .. t0 + n."""
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     row0 = c["rank"] * UP_N + j * ROWS  # the hidden column; w_up is the shard
     lrow = LAT + gemv.LDS_PAD

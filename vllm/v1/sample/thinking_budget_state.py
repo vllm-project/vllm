@@ -72,7 +72,7 @@ class ThinkingBudgetStateHolder:
             self._mask_capacity = max_num_reqs
 
     def has_tracked_requests(self) -> bool:
-        """True when ``sync_batch`` has state for a ``thinking_token_budget`` row.
+        """True when `sync_batch` has state for a `thinking_token_budget` row.
 
         Used to decide whether sampling needs output-token rows and spec combining;
         distinct from merely having a holder instance (reasoning may be on with no

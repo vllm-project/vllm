@@ -365,11 +365,11 @@ def compute_trtllm_sparse_mla_workspace_bytes(
     Under DCP the query is all-gathered across the DCP group in the head dim
     and the kernel is asked for LSE, so trtllm-gen carves the softmax-stats
     slab described above from the workspace before its (batch-independent)
-    counter and scratch regions. ``base_workspace_bytes`` must stay available
+    counter and scratch regions. `base_workspace_bytes` must stay available
     for those regions, so the slab is added on top of it (see #50781).
 
     Without DCP no LSE is requested, no slab is carved, and the base size is
-    returned unchanged. A launch covers at most ``_TRTLLM_GEN_MAX_REQUESTS``
+    returned unchanged. A launch covers at most `_TRTLLM_GEN_MAX_REQUESTS`
     tokens, and launches run in order on one stream, so larger batches reuse
     the same slab.
     """
