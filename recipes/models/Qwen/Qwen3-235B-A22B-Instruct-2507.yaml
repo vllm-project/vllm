@@ -1,0 +1,181 @@
+meta:
+  title: "Qwen3-235B-A22B-Instruct"
+  slug: "qwen3-235b-a22b-instruct-2507"
+  provider: "Qwen"
+  description: "Flagship Qwen3 MoE instruct model with 235B total and 22B active parameters, tuned for high-quality text generation."
+  date_added: 2025-10-15
+  date_updated: 2026-04-17
+  tasks:
+    - text
+  performance_headline: "Verified on 4x/8x H200, MI300X/MI325X/MI355X nodes (BF16 and FP8)"
+  related_recipes: []
+  hardware:
+    h200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+
+model:
+  model_id: "Qwen/Qwen3-235B-A22B-Instruct-2507"
+  min_vllm_version: "0.10.0"
+  architecture: moe
+  parameter_count: "235B"
+  active_parameters: "22B"
+  context_length: 262144
+  base_args:
+    - "--trust-remote-code"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "Enable automatic tool choice with Hermes-compatible parser"
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "hermes"
+
+  spec_decoding:
+    description: "Eagle3 speculative decoding with externally trained draft model; the served checkpoint is unchanged."
+    args:
+      - "--speculative-config"
+      - '{"model": "RedHatAI/Qwen3-235B-A22B-Instruct-2507-speculator.eagle3", "num_speculative_tokens": 3, "method": "eagle3"}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 564
+    description: "Full precision BF16 — requires 4x H200 or 8x MI300X/MI325X/MI355X"
+  fp8:
+    model_id: "Qwen/Qwen3-235B-A22B-FP8"
+    precision: fp8
+    vram_minimum_gb: 240
+    # FP8 block_n=128 + moe_intermediate_size=1536 → TP must divide 12; cap at 4.
+    tp: 4
+    description: "Qwen official FP8 checkpoint for improved efficiency on SM90+"
+  nvfp4:
+    model_id: "nvidia/Qwen3-235B-A22B-Instruct-2507-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 141
+    description: "NVIDIA NVFP4 quantized weights for Blackwell GPUs"
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Qwen3-235B-A22B-Instruct-2507-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 152
+    description: "RedHatAI NVFP4 quantization"
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_dep
+  - multi_node_tep
+  - pd_cluster
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides: {}
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  [Qwen3](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507) is the flagship instruct MoE model in the Qwen3 series, with 235B total parameters and 22B active parameters. This guide covers deploying the model efficiently with vLLM on NVIDIA and AMD GPUs.
+
+  ## Prerequisites
+
+  ### NVIDIA CUDA (pip)
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install -U vllm --torch-backend=auto
+  ```
+
+  ### AMD ROCm (pip)
+  > Note: The vLLM wheel for ROCm requires Python 3.12, ROCm 7.0, and glibc >= 2.35. Use the Docker flow if your environment is incompatible.
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/0.14.1/rocm700
+  ```
+
+  ## Deployment Configurations
+
+  ### BF16 on MI300X/MI325X/MI355X (4 GPUs)
+
+  ```bash
+  HIP_VISIBLE_DEVICES="4,5,6,7" \
+  VLLM_ROCM_USE_AITER=1 \
+  VLLM_ROCM_USE_AITER_MHA=0 \
+  SAFETENSORS_FAST_GPU=1 \
+  vllm serve Qwen/Qwen3-235B-A22B \
+    --trust-remote-code \
+    -tp 4 \
+    --swap-space 32 \
+    --distributed-executor-backend mp \
+    --max-num-batched-tokens 32768 \
+    --max-model-len 32768 \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.8
+  ```
+
+  ### FP8 on MI300X/MI325X/MI355X (4 GPUs)
+
+  ```bash
+  HIP_VISIBLE_DEVICES="4,5,6,7" \
+  VLLM_ROCM_USE_AITER=1 \
+  VLLM_ROCM_USE_AITER_MHA=0 \
+  SAFETENSORS_FAST_GPU=1 \
+  vllm serve Qwen/Qwen3-235B-A22B-FP8 \
+    --trust-remote-code \
+    -tp 4 \
+    --swap-space 16 \
+    --distributed-executor-backend mp \
+    --max-num-batched-tokens 32768 \
+    --max-model-len 32768 \
+    --no-enable-prefix-caching \
+    --gpu-memory-utilization 0.8
+  ```
+
+  ### TPU Deployment
+
+  - [Qwen3-32B on Trillium (v6e)](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Qwen3)
+  - [Qwen3-4B on Trillium (v6e)](https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/inference/trillium/vLLM/Qwen3)
+
+  ## Client Usage
+
+  ```bash
+  vllm bench serve \
+    --model "Qwen/Qwen3-235B-A22B-FP8" \
+    --dataset-name random \
+    --random-input-len 8192 \
+    --random-output-len 1024 \
+    --request-rate 10000 \
+    --num-prompts 16 \
+    --ignore-eos \
+    --trust-remote-code
+  ```
+
+  ## Troubleshooting
+
+  - Use `--max-num-batched-tokens` and `--max-model-len` to fit memory constraints on smaller nodes.
+  - If OOM at startup, lower `--gpu-memory-utilization` (e.g. 0.8) and disable prefix caching.
+  - AMD builds require `VLLM_ROCM_USE_AITER=1` for best performance.
+
+  ## References
+
+  - [Model card](https://huggingface.co/Qwen/Qwen3-235B-A22B-Instruct-2507)
+  - [FP8 checkpoint](https://huggingface.co/Qwen/Qwen3-235B-A22B-FP8)
+  - [vLLM documentation](https://docs.vllm.ai/)

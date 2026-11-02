@@ -21,7 +21,10 @@ from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import _resize_cache
+from vllm.model_executor.layers.fused_moe.utils import (
+    _resize_cache,
+    remap_topk_to_local,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
@@ -43,10 +46,11 @@ def _triton_kernel_moe_supports_current_device() -> bool:
     p = current_platform
     if p.is_cuda():
         cap = p.get_device_capability()
-        # Hopper SM90, datacenter Blackwell SM100/103 and consumer Blackwell
-        # SM120/121. SM12x needs the opt-flag constraints applied by
-        # `_swizzle_mxfp4` and `_constrain_sm12x_block_m` to fit its 99KB of
-        # shared memory; it is still ordered after MARLIN by the selector.
+        # Hopper SM90, datacenter Blackwell SM100/103, Jetson Thor SM110 and
+        # consumer Blackwell SM120/121. SM110 and SM12x need the opt-flag
+        # constraints applied by `_swizzle_mxfp4` (SM12x also
+        # `_constrain_sm12x_block_m` to fit its 99KB of shared memory); both
+        # are still ordered after MARLIN by the selector.
         return cap is not None and (9, 0) <= (cap.major, cap.minor) < (13, 0)
     if p.is_rocm():
         from vllm.platforms.rocm import on_gfx1x, on_gfx9
@@ -844,6 +848,20 @@ def triton_kernel_fused_experts(
     return output_tensor
 
 
+def _tk38_routing_data(
+    col_sum: torch.Tensor,
+    order: torch.Tensor,
+    flat_w: torch.Tensor,
+    topk: int,
+) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
+    """Build 3.8 routing from per-expert counts and the stable expert order."""
+    nrows = order.shape[0]
+    ragged = make_ragged_tensor_metadata(col_sum, nrows)
+    gather_tok = (order // topk).to(torch.int32)
+    routing = RoutingData(ragged, flat_w[order], gather_tok, topk, nrows)
+    return routing, gather_tok, gather_tok
+
+
 def make_routing_data(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
@@ -851,21 +869,18 @@ def make_routing_data(
 ) -> tuple["RoutingData", torch.Tensor, torch.Tensor]:
     if triton_kernels_version == "3.8":
         _, topk = topk_ids.shape
-        flat_e = topk_ids.reshape(-1)
-        valid = flat_e >= 0
-        flat_e = flat_e.to(torch.int64).clamp(min=0)
-        flat_w = topk_weights.reshape(-1).to(torch.float32) * valid.to(torch.float32)
-        nrows = flat_e.shape[0]
-        order = torch.argsort(flat_e, stable=True)
-        col_sum = torch.zeros(
-            num_local_experts, dtype=torch.int32, device=flat_e.device
+        flat_ids = topk_ids.reshape(-1)
+        # -1 (non-local) slots go to expert 0 with zero weight.
+        keys = flat_ids.clamp(min=0)
+        sorted_keys, order = torch.sort(keys, stable=True)
+        experts = torch.arange(
+            num_local_experts + 1, dtype=keys.dtype, device=keys.device
         )
-        col_sum.scatter_add_(0, flat_e, torch.ones_like(flat_e, dtype=torch.int32))
-        ragged = make_ragged_tensor_metadata(col_sum, nrows)
-        gather_tok = (order // topk).to(torch.int32)
-        gammas = flat_w[order]
-        routing = RoutingData(ragged, gammas, gather_tok, topk, nrows)
-        return routing, gather_tok, gather_tok
+        edges = torch.searchsorted(sorted_keys, experts, out_int32=True)
+        col_sum = edges[1:] - edges[:-1]
+        valid = (flat_ids >= 0).to(torch.float32)
+        flat_w = topk_weights.reshape(-1).to(torch.float32) * valid
+        return _tk38_routing_data(col_sum, order, flat_w, topk)
 
     topk_ids = topk_ids.to(torch.int16)
     topk_weights = topk_weights.to(torch.bfloat16)
@@ -933,8 +948,14 @@ def routing_data_from_sparse_topk(
     remapping) that work is redundant.
     """
     if triton_kernels_version == "3.8":
-        # 3.8 routing is rebuilt from raw ids; no SparseMatrix reuse.
-        return make_routing_data(sparse_topk.indx, sparse_topk.vals, n_expts)
+        # topk ids have no -1 slots, so the topk metadata matches make_routing_data.
+        mask_metadata = sparse_topk.mask_metadata
+        return _tk38_routing_data(
+            mask_metadata.col_sum,
+            mask_metadata.col_sorted_indx,
+            sparse_topk.vals.reshape(-1).to(torch.float32),
+            sparse_topk.indx.shape[1],
+        )
 
     dispatch_indx = sparse_topk.mask_metadata.row_sorted_indx
     combine_indx = sparse_topk.mask_metadata.col_sorted_indx
@@ -992,49 +1013,6 @@ def masked_moe_sum(
     _masked_topk_sum_kernel[grid](
         intermediate, topk_ids, output, K, topk=topk, BLOCK_K=BLOCK_K
     )
-
-
-@triton.jit
-def _remap_topk_to_local_kernel(
-    topk_ids_ptr,  # [n] global expert IDs (-1 = invalid)
-    expert_map_ptr,  # [num_experts] global->local (-1 for non-local)
-    out_ptr,  # [n] int64 local expert IDs (-1 for invalid/non-local)
-    n_elements,
-    BLOCK: tl.constexpr,
-):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < n_elements
-    tid = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
-    # Gather expert_map[tid] for valid (tid >= 0); clamp the index so invalid
-    # rows don't read OOB, then select -1 for them. Matches
-    # torch.where(tid >= 0, expert_map[clamp(tid, 0)], -1) -- preserving -1 (a
-    # plain expert_map[-1] would wrap to a valid local id and misroute).
-    valid = tid >= 0
-    idx = tl.where(valid, tid, 0)
-    local = tl.load(expert_map_ptr + idx, mask=mask, other=-1)
-    out = tl.where(valid, local.to(tl.int64), -1)
-    tl.store(out_ptr + offs, out, mask=mask)
-
-
-def remap_topk_to_local(
-    topk_ids: torch.Tensor, expert_map: torch.Tensor
-) -> torch.Tensor:
-    """Fused global->local expert-id mapping over a topk_ids tensor, preserving -1.
-
-    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
-    with one kernel. Returns a NEW int64 tensor -- the caller keeps the original
-    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
-
-    (Distinct from ``deep_gemm_utils.apply_expert_map``, which is a scalar
-    ``@triton.jit`` device helper called from within other kernels.)
-    """
-    out = torch.empty_like(topk_ids, dtype=torch.int64)
-    n = topk_ids.numel()
-    BLOCK = 1024
-    grid = (triton.cdiv(n, BLOCK),)
-    _remap_topk_to_local_kernel[grid](topk_ids, expert_map, out, n, BLOCK=BLOCK)
-    return out
 
 
 class BaseOAITritonExperts(mk.FusedMoEExpertsModular):

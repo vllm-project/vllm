@@ -14,7 +14,6 @@ from transformers import AutoTokenizer
 import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 from vllm.config import ModelConfig
-from vllm.config.utils import getattr_iter
 from vllm.v1.engine.detokenizer import check_stop_strings
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -402,14 +401,7 @@ async def test_same_response_as_chat_completions(client, tokenizer, messages):
             # Post-EOS generation is undefined and may differ
             eos_tokens = {
                 tokenizer.eos_token_id,
-                *getattr_iter(
-                    tokenizer,
-                    [
-                        "extra_special_tokens_ids",  # Transformers v5
-                        "additional_special_tokens_ids",  # Transformers v4
-                    ],
-                    [],
-                ),
+                *tokenizer.extra_special_tokens_ids,
             }
             # Find first EOS in generated tokens
             eos_pos = None
@@ -751,7 +743,10 @@ async def test_text_mode_stream_matches_non_stream(client, tokenizer, messages):
         pytest.param(
             {"sampling_params": {"detokenize": False}}, "detokenize", id="no-detok"
         ),
-        pytest.param({"output_mode": "derender"}, "output_mode", id="unsupported"),
+        pytest.param({"output_mode": "bogus"}, "output_mode", id="unsupported"),
+        pytest.param(
+            {"output_mode": "derender", "stream": True}, "stream", id="derender-stream"
+        ),
     ],
 )
 async def test_text_mode_invalid_requests_return_400(client, overrides, expected):
@@ -763,6 +758,87 @@ async def test_text_mode_invalid_requests_return_400(client, overrides, expected
 
     assert resp.status_code == 400
     assert expected in resp.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+async def test_derender_mode_without_parser_returns_text_message(
+    client, tokenizer, messages
+):
+    """With no parser the message content is the engine's detokenized text."""
+    token_ids = _chat_prompt_token_ids(tokenizer, messages)
+    payload = _text_mode_payload(token_ids)
+
+    text = (await client.post(GEN_ENDPOINT, json=payload)).json()
+    resp = await client.post(GEN_ENDPOINT, json={**payload, "output_mode": "derender"})
+    resp.raise_for_status()
+    data = resp.json()
+
+    assert data["output_mode"] == "derender"
+    assert data["choices"][0]["message"]["content"] == text["choices"][0]["text"]
+    assert data["choices"][0]["token_ids"] == text["choices"][0]["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize(
+    "server",
+    [["--tool-call-parser", "hermes", "--enable-auto-tool-choice"]],
+    indirect=True,
+)
+async def test_derender_mode_with_parser_matches_chat_completions(client, messages):
+    chat = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 24,
+        "temperature": 0.0,
+        "chat_template_kwargs": {"enable_thinking": False},
+    }
+    render = await client.post("/v1/chat/completions/render", json=chat)
+    render.raise_for_status()
+    generate_request = render.json()
+    assert generate_request["parse_context"] is not None
+
+    missing = await client.post(
+        GEN_ENDPOINT,
+        json={
+            **{k: v for k, v in generate_request.items() if k != "parse_context"},
+            "output_mode": "derender",
+        },
+    )
+    assert missing.status_code == 400
+    assert "parse_context" in missing.json()["error"]["message"]
+
+    invalid = await client.post(
+        GEN_ENDPOINT,
+        json={
+            **generate_request,
+            "output_mode": "derender",
+            "parse_context": {
+                "tool_choice": {"type": "function", "function": {"name": "nope"}}
+            },
+        },
+    )
+    assert invalid.status_code == 400
+    assert "tool_choice" in invalid.json()["error"]["message"]
+
+    resp = await client.post(
+        GEN_ENDPOINT, json={**generate_request, "output_mode": "derender"}
+    )
+    resp.raise_for_status()
+    chat_resp = await client.post("/v1/chat/completions", json=chat)
+
+    expected = chat_resp.json()["choices"][0]
+    got = resp.json()["choices"][0]
+    assert got["message"]["content"] == expected["message"]["content"]
+    assert got["message"].get("tool_calls") == expected["message"].get("tool_calls")
+    assert got["finish_reason"] == expected["finish_reason"]
 
 
 @pytest.mark.asyncio

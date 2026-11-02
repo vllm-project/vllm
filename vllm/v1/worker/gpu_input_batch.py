@@ -96,7 +96,6 @@ class InputBatch:
         device: torch.device,
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
-        kernel_block_sizes: list[int],
         max_num_blocks_per_req: list[int],
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
@@ -187,7 +186,6 @@ class InputBatch:
             pin_memory=PIN_MEMORY,
             device=device,
             block_sizes=block_sizes,
-            kernel_block_sizes=kernel_block_sizes,
             max_num_blocks=max_num_blocks_per_req,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
             slot_mapping_modes=slot_mapping_modes,

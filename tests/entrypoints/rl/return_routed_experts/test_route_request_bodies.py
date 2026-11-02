@@ -89,6 +89,11 @@ def test_invalid_field_is_rejected_before_the_engine(client, path, body):
         ("/update_weights", {"update_info": {"names": []}}, "update_weights"),
         ("/update_weights", {"update_info": [{}, {}]}, "update_weights"),
         ("/collective_rpc", {"method": "m"}, "collective_rpc"),
+        (
+            "/shutdown_weight_transfer_engine",
+            {},
+            "shutdown_weight_transfer_engine",
+        ),
     ],
 )
 def test_valid_body_reaches_the_engine(client, path, body, engine_call):
