@@ -109,6 +109,7 @@ features:
         variants:
           - default
           - dspark
+          - redhat_0731_nvfp4
         args:
           - "--speculative-config"
           - '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
@@ -383,6 +384,8 @@ variants:
     vram_minimum_gb: 170
     supported_hardware: [arch:sm100, arch:sm103]
     description: "RedHatAI NVFP4 checkpoint based on the 0731 release"
+    default_modes:
+      spec_decoding: dspark
   dspark:
     # Official fused DSpark checkpoint — the preview weights with the DSpark draft
     # module attached (config.json gains the dspark_* block). A distinct served
