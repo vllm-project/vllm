@@ -415,10 +415,7 @@ class MuseSpark1xMoE(nn.Module):
         self.n_local_physical_experts = self.n_physical_experts // self.ep_size
         self.n_shared_experts = config.num_shared_experts
 
-        self.fp32_router_input = (
-            getattr(config, "muse_spark_fp32_router_input", True)
-            and torch.backends.cuda.matmul.allow_tf32
-        )
+        self.fp32_router_input = torch.backends.cuda.matmul.allow_tf32
         if self.fp32_router_input and not HAS_ROUTER_OUTPUT:
             raise RuntimeError(
                 "FP32 router input requires FlashInfer dual-norm router output"
@@ -530,17 +527,13 @@ class MuseSpark1xMoE(nn.Module):
             and parallel_config.data_parallel_size == 1
             and not envs.VLLM_BATCH_INVARIANT
         )
-        tep_default = (
+        use_tep_optimizations = (
             replicated_tokens
             and current_platform.is_cuda()
             and current_platform.has_device_capability(100)
         )
-        self.shard_pooler = replicated_tokens and getattr(
-            config, "muse_spark_tep_shard_pooler", tep_default
-        )
-        self.shard_unpooler = replicated_tokens and getattr(
-            config, "muse_spark_tep_shard_unpooler", tep_default
-        )
+        self.shard_pooler = use_tep_optimizations
+        self.shard_unpooler = use_tep_optimizations
         if self.shard_pooler or self.shard_unpooler:
             logger.info_once(
                 "Sharding MuseSpark projection outputs over TP: pooler=%s, "
@@ -560,12 +553,8 @@ class MuseSpark1xMoE(nn.Module):
         # NVFP4 TRT-LLM layers can take inputs prepared outside the experts:
         # the pre-expert norm fused with the FP4 quant, and/or top-k routing
         # finished on the router's aux stream.
-        self.fused_input_quant = not self.use_mega_moe and getattr(
-            config, "muse_spark_tep_fused_moe_input_quant", tep_default
-        )
-        self.aux_stream_routing = not self.use_mega_moe and getattr(
-            config, "muse_spark_tep_aux_stream_routing", tep_default
-        )
+        self.fused_input_quant = not self.use_mega_moe and use_tep_optimizations
+        self.aux_stream_routing = not self.use_mega_moe and use_tep_optimizations
         self.all_gather_norm_quant: Any | None = None
         if self.use_mega_moe and self.tp_size > 1 and not self.is_sequence_parallel:
             raise NotImplementedError(
@@ -655,9 +644,7 @@ class MuseSpark1xMoE(nn.Module):
             runner_cls=self.post_norm_runner_cls,
             runner_args={
                 "post_expert_norm": self.post_expert_norm,
-                "fuse_all_reduce": getattr(
-                    config, "muse_spark_tep_fused_moe_all_reduce", tep_default
-                ),
+                "fuse_all_reduce": use_tep_optimizations,
             },
             moe_config_cls=MuseSparkMoEConfig,
         )
@@ -1675,16 +1662,12 @@ class MuseSpark1xModel(LlamaModel):
             if isinstance(layer.feed_forward, MuseSpark1xMoE)
             and layer.feed_forward.shard_unpooler
         ]
-        if (
-            not sharded
-            or not self.fuse_across_layers
-            or not getattr(self.config, "muse_spark_tep_fused_boundary", True)
-        ):
+        if not sharded or not self.fuse_across_layers:
             return
         all_gather = maybe_create_all_gather_dual_norm(
             self.config.hidden_size,
             _SHARDED_PROJECTION_MAX_TOKENS,
-            enable_pdl=getattr(self.config, "muse_spark_tep_fused_boundary_pdl", True),
+            enable_pdl=True,
         )
         if all_gather is None:
             return
