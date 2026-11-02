@@ -633,7 +633,7 @@ def random_sample(
 
 def flashinfer_sample(
     logits: torch.Tensor,
-    k: torch.Tensor | None,
+    k: torch.Tensor | int | None,
     p: torch.Tensor | None,
     generators: dict[int, torch.Generator] = {},  # noqa
 ) -> torch.Tensor:
