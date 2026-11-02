@@ -267,10 +267,16 @@ def check_and_fallback_input_schema(
 ) -> "HummingInputSchema":
     """Resolve *input_schema* against *weight_schema*, falling back if needed.
 
-    ``allow_fp8_sm100``: whether FP8 activations may be honored on SM100-SM119.
-    Humming's dense FP8 UMMA path is fast there, but the MoE grouped-GEMM
-    path is not (tuner can emit invalid two-CTA configs), so the MoE call
-    site passes False.
+    Args:
+        weight_schema: the weight schema the input must be compatible with.
+        input_schema: the requested input schema.
+        param_dtype: model compute dtype, used as the 16-bit fallback.
+        allow_fallback: if False, return the requested schema as-is.
+        allow_fp8_sm100: whether FP8 activations may be honored on
+            SM100-SM119. Humming's dense FP8 UMMA path is fast there, but the
+            MoE grouped-GEMM path is not (the tuner can emit invalid two-CTA
+            configs), so the MoE call sites pass False.
+
     """
     from vllm.utils.humming import HummingInputSchema, InputQuantizationMode
 
