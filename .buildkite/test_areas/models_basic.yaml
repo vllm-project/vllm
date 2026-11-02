@@ -309,6 +309,7 @@ steps:
     - pytest -v -s models/step5
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Step5"
       dind: false
       device: mi355_dpx
@@ -433,6 +434,7 @@ steps:
 
 - label: ":nvidia: (B200) Qwen3.5"
   key: qwen3-5-unit-tests-b200
+  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
