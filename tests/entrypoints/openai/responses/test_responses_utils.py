@@ -4,6 +4,7 @@
 from unittest.mock import patch
 
 import pytest
+from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from openai.types.responses import CustomTool, FunctionTool, ResponseCustomToolCall
 from openai.types.responses.response_function_tool_call import ResponseFunctionToolCall
 from openai.types.responses.response_function_tool_call_output_item import (
@@ -18,6 +19,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 
 from vllm.entrypoints.generate.base.protocol import FunctionCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.utils import (
     _construct_message_from_response_item,
     build_response_output_items,
@@ -925,6 +927,160 @@ class TestConstructChatMessagesCombinePolicy:
     def test_merge_chain_breaks(self, items, num_expected_messages):
         messages = construct_chat_messages_with_tool_call(items)
         assert len(messages) == num_expected_messages
+
+
+class TestConstructInputMessagesContentParts:
+    """Renderers such as Mistral's forward messages to strict chat-only validators,
+    so Responses content parts must already be chat parts."""
+
+    IMAGE_URL = "https://example.com/cat.png"
+
+    @staticmethod
+    def _convert(content):
+        messages = construct_input_messages(
+            request_input=[{"role": "user", "content": content}]
+        )
+        assert len(messages) == 1
+        assert messages[0]["role"] == "user"
+        return messages[0]["content"]
+
+    @pytest.mark.parametrize("part_type", ["input_text", "output_text"])
+    def test_text_parts_become_chat_text(self, part_type):
+        assert self._convert([{"type": part_type, "text": "hello"}]) == [
+            {"type": "text", "text": "hello"}
+        ]
+
+    @pytest.mark.parametrize("detail", ["auto", "low", "high"])
+    def test_input_image_becomes_chat_image_url_with_detail(self, detail):
+        part = {"type": "input_image", "image_url": self.IMAGE_URL, "detail": detail}
+        assert self._convert([part]) == [
+            {
+                "type": "image_url",
+                "image_url": {"url": self.IMAGE_URL, "detail": detail},
+            }
+        ]
+
+    def test_input_image_drops_detail_chat_parts_cannot_carry(self):
+        part = {
+            "type": "input_image",
+            "image_url": self.IMAGE_URL,
+            "detail": "original",
+        }
+        assert self._convert([part]) == [
+            {"type": "image_url", "image_url": {"url": self.IMAGE_URL}}
+        ]
+
+    def test_converted_parts_pass_mistral_common_validation(self):
+        content = self._convert(
+            [
+                {"type": "input_text", "text": "Describe this."},
+                {
+                    "type": "input_image",
+                    "image_url": self.IMAGE_URL,
+                    "detail": "low",
+                    "file_id": "file_1",
+                },
+            ]
+        )
+
+        request = ChatCompletionRequest.from_openai(
+            messages=[{"role": "user", "content": content}]
+        )
+
+        text_chunk, image_chunk = request.messages[0].content
+        assert text_chunk.text == "Describe this."
+        assert image_chunk.image_url.url == self.IMAGE_URL
+        assert image_chunk.image_url.detail == "low"
+
+    @pytest.mark.parametrize(
+        "item",
+        [
+            pytest.param({"type": "function_call_output"}, id="function"),
+            pytest.param(
+                {
+                    "type": "function_call_output",
+                    "id": "fco_1",
+                    "status": "completed",
+                    "created_by": "resp_1",
+                },
+                id="function_output_item",
+            ),
+            pytest.param({"type": "custom_tool_call_output"}, id="custom"),
+            pytest.param(
+                {
+                    "type": "custom_tool_call_output",
+                    "id": "ctco_1",
+                    "status": "completed",
+                },
+                id="custom_output_item",
+            ),
+        ],
+    )
+    def test_tool_output_parts_become_chat_parts(self, item):
+        request = ResponsesRequest(
+            model="test",
+            input=[
+                {
+                    **item,
+                    "call_id": "call_1",
+                    "output": [{"type": "input_text", "text": "22C"}],
+                }
+            ],
+        )
+
+        assert construct_input_messages(request_input=request.input) == [
+            {
+                "role": "tool",
+                "content": [{"type": "text", "text": "22C"}],
+                "tool_call_id": "call_1",
+            }
+        ]
+
+    def test_extra_part_fields_survive_conversion(self):
+        cache_control = {"type": "ephemeral"}
+        converted = self._convert(
+            [
+                {"type": "input_text", "text": "hi", "cache_control": cache_control},
+                {
+                    "type": "input_image",
+                    "image_url": self.IMAGE_URL,
+                    "detail": "auto",
+                    "file_id": "file_1",
+                    "uuid": "cat",
+                },
+            ]
+        )
+        assert converted == [
+            {"type": "text", "text": "hi", "cache_control": cache_control},
+            {
+                "type": "image_url",
+                "image_url": {"url": self.IMAGE_URL, "detail": "auto"},
+                "file_id": "file_1",
+                "uuid": "cat",
+            },
+        ]
+
+    @pytest.mark.parametrize(
+        "part",
+        [
+            pytest.param(
+                {"type": "input_image", "detail": "auto", "file_id": "file_1"},
+                id="file_id_only_image",
+            ),
+            pytest.param(
+                {"type": "input_image", "detail": "auto", "image_url": None},
+                id="null_image_url",
+            ),
+            pytest.param({"type": "input_file", "file_id": "file_1"}, id="input_file"),
+            pytest.param({"type": "text", "text": "hello"}, id="chat_text"),
+            pytest.param(
+                {"type": "image_url", "image_url": {"url": IMAGE_URL}},
+                id="chat_image_url",
+            ),
+        ],
+    )
+    def test_other_parts_are_preserved(self, part):
+        assert self._convert([part]) == [part]
 
 
 class TestConstructInputMessagesInstructionsLeak:

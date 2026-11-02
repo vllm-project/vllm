@@ -40,6 +40,7 @@ from vllm.sampling_params import SamplingParams
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 GPT_OSS_MODEL_NAME = "openai/gpt-oss-20b"
+MISTRAL_MODEL_NAME = "mistralai/Magistral-Small-2509"
 
 
 @pytest.mark.parametrize("multiple", [False, True])
@@ -452,6 +453,33 @@ async def test_responses_render_basic(client):
     assert data["request_id"].startswith("resp_")
     assert data["sampling_params"]["max_tokens"] == 7
     assert data["token_ids"]
+
+
+@pytest.mark.asyncio
+async def test_responses_render_input_text_matches_chat_text_part(client):
+    text = "Which color should I remember?"
+    responses_render = await client.post(
+        "/v1/responses/render",
+        json={
+            "model": MODEL_NAME,
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": text}]}
+            ],
+        },
+    )
+    # The Responses route rejects "text" parts and always adds special tokens.
+    chat_render = await client.post(
+        "/v1/chat/completions/render",
+        json={
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": [{"type": "text", "text": text}]}],
+            "add_special_tokens": True,
+        },
+    )
+
+    assert responses_render.status_code == 200
+    assert chat_render.status_code == 200
+    assert responses_render.json()["token_ids"] == chat_render.json()["token_ids"]
 
 
 @pytest.mark.asyncio
@@ -1081,3 +1109,112 @@ async def test_tokenize_matches_chat_render_for_gpt_oss(gpt_oss_server):
 
     assert render.status_code == tokenize.status_code == 200
     assert tokenize.json()["tokens"] == render.json()["token_ids"]
+
+
+@pytest.fixture(scope="module")
+def mistral_server():
+    args = ["--tokenizer-mode", "mistral"]
+    with RemoteLaunchRenderServer(MISTRAL_MODEL_NAME, args) as remote_server:
+        yield remote_server
+
+
+@pytest.mark.asyncio
+async def test_responses_render_content_parts_match_strings_on_mistral(mistral_server):
+    """Mistral tokenizers only accept chat parts, so Responses parts must convert."""
+    system = "Answer in one word."
+    question = "What is the capital of France?"
+    answer = "Paris."
+    follow_up = "And of Italy?"
+    string_input = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": question},
+        {"role": "assistant", "content": answer},
+        {"role": "user", "content": follow_up},
+    ]
+    parts_input = [
+        {"role": "system", "content": [{"type": "input_text", "text": system}]},
+        {"role": "user", "content": [{"type": "input_text", "text": question}]},
+        {
+            "type": "message",
+            "id": "msg_1",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": answer, "annotations": []}],
+        },
+        {"role": "user", "content": [{"type": "input_text", "text": follow_up}]},
+    ]
+    async with httpx.AsyncClient(
+        base_url=mistral_server.url_for(""), timeout=30.0
+    ) as client:
+        string_render = await client.post(
+            "/v1/responses/render",
+            json={"model": MISTRAL_MODEL_NAME, "input": string_input},
+        )
+        parts_render = await client.post(
+            "/v1/responses/render",
+            json={"model": MISTRAL_MODEL_NAME, "input": parts_input},
+        )
+
+    assert string_render.status_code == 200
+    assert parts_render.status_code == 200, parts_render.text
+    assert parts_render.json()["token_ids"] == string_render.json()["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("call", "output_item"),
+    [
+        pytest.param(
+            {"type": "function_call", "name": "get_weather", "arguments": "{}"},
+            {"type": "function_call_output"},
+            id="function",
+        ),
+        pytest.param(
+            {"type": "function_call", "name": "get_weather", "arguments": "{}"},
+            {
+                "type": "function_call_output",
+                "id": "fco_1",
+                "status": "completed",
+                "created_by": "resp_1",
+            },
+            id="function_output_item",
+        ),
+        pytest.param(
+            {"type": "custom_tool_call", "name": "run", "input": "date"},
+            {"type": "custom_tool_call_output"},
+            id="custom",
+        ),
+        pytest.param(
+            {"type": "custom_tool_call", "name": "run", "input": "date"},
+            {"type": "custom_tool_call_output", "id": "ctco_1", "status": "completed"},
+            id="custom_output_item",
+        ),
+    ],
+)
+async def test_responses_render_tool_output_parts_match_strings_on_mistral(
+    mistral_server, call, output_item
+):
+    def render_body(output):
+        return {
+            "model": MISTRAL_MODEL_NAME,
+            "input": [
+                {"role": "user", "content": "What is the weather in Paris?"},
+                {**call, "call_id": "abcdef123"},
+                {**output_item, "call_id": "abcdef123", "output": output},
+            ],
+        }
+
+    async with httpx.AsyncClient(
+        base_url=mistral_server.url_for(""), timeout=30.0
+    ) as client:
+        string_render = await client.post(
+            "/v1/responses/render", json=render_body("22C")
+        )
+        parts_render = await client.post(
+            "/v1/responses/render",
+            json=render_body([{"type": "input_text", "text": "22C"}]),
+        )
+
+    assert string_render.status_code == 200
+    assert parts_render.status_code == 200, parts_render.text
+    assert parts_render.json()["token_ids"] == string_render.json()["token_ids"]
