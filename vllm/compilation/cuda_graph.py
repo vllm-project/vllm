@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
+import logging
 import weakref
 from collections import Counter
 from collections.abc import Callable
@@ -11,11 +12,10 @@ from unittest.mock import patch
 
 import torch
 
-import vllm.envs as envs
 from vllm.compilation.counter import compilation_counter
+from vllm.compilation.cudagraph_pool import capture_pool
 from vllm.compilation.monitor import validate_cudagraph_capturing_enabled
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
     BatchDescriptor,
     get_forward_context,
@@ -164,7 +164,7 @@ class CUDAGraphWrapper:
     assumption on the dynamic shape (batch size) of the runtime inputs, as a
     trade-off for staying orthogonal to compilation logic. Nevertheless,
     tracing and checking the input addresses to be consistent during replay is
-    guaranteed when VLLM_LOGGING_LEVEL == "DEBUG".
+    guaranteed when vLLM debug logging is enabled.
     """
 
     _all_instances: ClassVar[weakref.WeakSet["CUDAGraphWrapper"]] = weakref.WeakSet()
@@ -188,7 +188,7 @@ class CUDAGraphWrapper:
         self.compilation_config = vllm_config.compilation_config
 
         self.first_run_finished = False
-        self.is_debugging_mode = envs.VLLM_LOGGING_LEVEL == "DEBUG"
+        self.is_debugging_mode = logger.isEnabledFor(logging.DEBUG)
         self._runnable_str = str(runnable) if self.is_debugging_mode else None
 
         # assert runtime_mode is not NONE(no cudagraph), otherwise, we don't
@@ -302,10 +302,9 @@ class CUDAGraphWrapper:
                         )
                     )
 
-                if self.graph_pool is not None:
-                    set_graph_pool_id(self.graph_pool)
-                else:
-                    set_graph_pool_id(current_platform.graph_pool_handle())
+                graph_pool = stack.enter_context(
+                    capture_pool(self.graph_pool, self.vllm_config)
+                )
 
                 # Sync offloader's copy stream before capture.
                 # Ensure any pre-capture prefetches from offloader are complete.
@@ -314,7 +313,7 @@ class CUDAGraphWrapper:
                 # mind-exploding: carefully manage the reference and memory.
                 with torch.cuda.graph(
                     cudagraph,
-                    pool=self.graph_pool,
+                    pool=graph_pool,
                     stream=current_stream(),
                 ):
                     # `output` is managed by pytorch's cudagraph pool

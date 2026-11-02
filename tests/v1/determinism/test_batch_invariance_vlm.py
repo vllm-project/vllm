@@ -9,9 +9,10 @@ import numpy as np
 import pytest
 import torch
 from PIL import Image
-from utils import _extract_step_logprobs, skip_if_not_cuda
+from utils import _extract_step_logprobs, skip_if_not_cuda_alike
 
 from vllm import LLM, SamplingParams
+from vllm.inputs import TextPrompt
 
 VLM_TEST_MODEL = os.getenv("VLLM_VLM_TEST_MODEL", "Qwen/Qwen3-VL-2B-Instruct")
 
@@ -30,8 +31,8 @@ def _make_image(seed: int, size: int) -> Image.Image:
     return Image.fromarray(rng.integers(0, 255, (size, size, 3), dtype=np.uint8))
 
 
-def _make_inputs(input_type: str, num_reqs: int) -> list[dict]:
-    inputs = []
+def _make_inputs(input_type: str, num_reqs: int) -> list[TextPrompt]:
+    inputs: list[TextPrompt] = []
     for i in range(num_reqs):
         if input_type == "image":
             prompt = IMAGE_PROMPT
@@ -54,7 +55,7 @@ def _make_inputs(input_type: str, num_reqs: int) -> list[dict]:
     return inputs
 
 
-def _assert_batch_invariant(llm: LLM, inputs: list[dict], sampling) -> None:
+def _assert_batch_invariant(llm: LLM, inputs: list[TextPrompt], sampling) -> None:
     bs1 = [
         _extract_step_logprobs(llm.generate([inp], sampling, use_tqdm=False)[0])
         for inp in inputs
@@ -88,7 +89,7 @@ def _assert_batch_invariant(llm: LLM, inputs: list[dict], sampling) -> None:
         )
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 @pytest.mark.parametrize("input_type", ["image", "video"])
 @pytest.mark.parametrize("mm_encoder_attn_backend", ["FLASH_ATTN", "TORCH_SDPA"])
 def test_vlm_batch_invariance_bs1_vs_bsN(
@@ -100,7 +101,7 @@ def test_vlm_batch_invariance_bs1_vs_bsN(
     _run_vlm_batch_invariance(input_type, mm_encoder_attn_backend, enforce_eager=True)
 
 
-@skip_if_not_cuda
+@skip_if_not_cuda_alike
 def test_vlm_batch_invariance_default_execution(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
     _run_vlm_batch_invariance("image", "FLASH_ATTN", enforce_eager=False)
@@ -134,4 +135,4 @@ def _run_vlm_batch_invariance(
         _assert_batch_invariant(llm, inputs, sampling)
     finally:
         with contextlib.suppress(Exception):
-            llm.shutdown()
+            llm.llm_engine.engine_core.shutdown()

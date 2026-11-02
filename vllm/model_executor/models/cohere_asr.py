@@ -8,7 +8,7 @@ from typing import Any, ClassVar
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
@@ -1845,23 +1845,13 @@ class CohereASRModel(nn.Module):
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
 
-                # Convert buffer dtype to match loaded weight for pos_bias tensors
-                if "pos_bias" in name and param.dtype != loaded_weight.dtype:
-                    logger.info(
-                        "Converting buffer %s dtype from %s to %s for loading.",
-                        name,
-                        param.dtype,
-                        loaded_weight.dtype,
-                    )
-                    param.data = param.data.to(loaded_weight.dtype)
-
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
 class CohereASRProcessingInfo(BaseProcessingInfo):
-    def get_hf_config(self) -> PretrainedConfig:
+    def get_hf_config(self) -> PreTrainedConfig:
         return self.ctx.get_hf_config()
 
     def get_default_tok_params(self) -> TokenizeParams:

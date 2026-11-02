@@ -5,7 +5,6 @@ datasets. Each dataset subclass of BenchmarkDataset must implement sample
 generation. Supported dataset types include:
   - ShareGPT
   - Random (synthetic)
-  - Sonnet
   - BurstGPT
   - HuggingFace
   - VisionArena
@@ -25,13 +24,12 @@ from dataclasses import dataclass, replace
 from functools import cache
 from io import BytesIO
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import TemporaryDirectory
 from typing import Any, cast
 
 import numpy as np
 import pybase64 as base64
 from PIL import Image
-from typing_extensions import deprecated
 
 from vllm.benchmarks.datasets.utils import (
     RangeRatio,
@@ -975,32 +973,26 @@ class RandomMultiModalDataset(RandomDataset):
             dtype=np.uint8,
         )
 
-        # Create a temporary video file in memory
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         fps = 30  # frames per second
 
-        with NamedTemporaryFile(suffix=".mp4", delete=False) as temp_file:
-            temp_path = temp_file.name
+        with TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir) / "video.mp4"
 
-            # Create video writer
             video_writer = cv2.VideoWriter(
-                temp_path, fourcc=fourcc, fps=fps, frameSize=(width, height)
+                str(temp_path), fourcc=fourcc, fps=fps, frameSize=(width, height)
             )
 
-            if not video_writer.isOpened():
-                raise RuntimeError("Failed to create video writer")
+            try:
+                if not video_writer.isOpened():
+                    raise RuntimeError("Failed to create video writer")
 
-            for frame in random_pixels:
-                video_writer.write(frame)
+                for frame in random_pixels:
+                    video_writer.write(frame)
+            finally:
+                video_writer.release()
 
-            video_writer.release()
-            temp_file.close()
-
-            # Read the video file content
-            with open(temp_path, "rb") as f:
-                video_content = f.read()
-
-            return {"bytes": video_content}
+            return {"bytes": temp_path.read_bytes()}
 
     def map_config_to_modality(self, config: tuple[int, int, int]) -> str:
         """Map the configuration to the modality."""
@@ -1604,7 +1596,6 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         choices=[
             "sharegpt",
             "burstgpt",
-            "sonnet",
             "random",
             "random-mm",
             "random-rerank",
@@ -1628,8 +1619,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         "--dataset-path",
         type=str,
         default=None,
-        help="Path to the sharegpt/sonnet dataset or the HF dataset ID if "
-        "using HF dataset.",
+        help="Path to the ShareGPT dataset or the HF dataset ID if using HF dataset.",
     )
     parser.add_argument(
         "--no-oversample",
@@ -1685,26 +1675,6 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=str,
         default=None,
         help="Category for spec bench dataset. If None, use all categories.",
-    )
-
-    sonnet_group = parser.add_argument_group("sonnet dataset options")
-    sonnet_group.add_argument(
-        "--sonnet-input-len",
-        type=int,
-        default=550,
-        help="Number of input tokens per request, used only for sonnet dataset.",
-    )
-    sonnet_group.add_argument(
-        "--sonnet-output-len",
-        type=int,
-        default=150,
-        help="Number of output tokens per request, used only for sonnet dataset.",
-    )
-    sonnet_group.add_argument(
-        "--sonnet-prefix-len",
-        type=int,
-        default=200,
-        help="Number of prefix tokens per request, used only for sonnet dataset.",
     )
 
     sharegpt_group = parser.add_argument_group("sharegpt dataset options")
@@ -2139,43 +2109,6 @@ def get_samples(
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
         )
-
-    elif args.dataset_name == "sonnet":
-        assert tokenizer is not None, (
-            "Tokenizer must be initialized for the 'sonnet' dataset."
-        )
-        sonnet_dataset = SonnetDataset(
-            dataset_path=args.dataset_path, disable_shuffle=args.disable_shuffle
-        )
-        # For the "sonnet" dataset, formatting depends on the backend.
-        if args.backend == "openai-chat":
-            input_requests = sonnet_dataset.sample(
-                num_requests=args.num_prompts,
-                input_len=args.sonnet_input_len,
-                output_len=args.sonnet_output_len,
-                prefix_len=args.sonnet_prefix_len,
-                tokenizer=tokenizer,
-                return_prompt_formatted=False,
-                request_id_prefix=args.request_id_prefix,
-                no_oversample=args.no_oversample,
-            )
-        else:
-            assert (
-                hasattr(tokenizer, "chat_template") and tokenizer.chat_template
-            ) or (
-                hasattr(tokenizer, "default_chat_template")
-                and tokenizer.default_chat_template
-            ), "Tokenizer/model must have chat template for sonnet dataset."
-            input_requests = sonnet_dataset.sample(
-                num_requests=args.num_prompts,
-                input_len=args.sonnet_input_len,
-                output_len=args.sonnet_output_len,
-                prefix_len=args.sonnet_prefix_len,
-                tokenizer=tokenizer,
-                return_prompt_formatted=True,
-                request_id_prefix=args.request_id_prefix,
-                no_oversample=args.no_oversample,
-            )
 
     elif args.dataset_name == "hf":
         # all following datasets are implemented from the
@@ -3072,106 +3005,6 @@ class SpecBench(CustomDataset):
             chat_template_kwargs=chat_template_kwargs,
             **kwargs,
         )
-
-
-# -----------------------------------------------------------------------------
-# Sonnet Dataset Implementation
-# -----------------------------------------------------------------------------
-
-
-@deprecated(
-    "SonnetDataset is deprecated and will be removed in a future version.",
-)
-class SonnetDataset(BenchmarkDataset):
-    """Simplified implementation of the Sonnet dataset.  Loads poem lines from a
-    text file and generates sample requests.  Default values here copied from
-    `benchmark_serving.py` for the sonnet dataset.
-    """
-
-    DEFAULT_PREFIX_LEN = 200
-    DEFAULT_INPUT_LEN = 550
-    DEFAULT_OUTPUT_LEN = 150
-
-    def __init__(
-        self,
-        **kwargs,
-    ) -> None:
-        super().__init__(**kwargs)
-        self.load_data()
-
-    def load_data(self) -> None:
-        if not self.dataset_path:
-            raise ValueError("dataset_path must be provided.")
-        with open(self.dataset_path, encoding="utf-8") as f:
-            self.data = f.readlines()
-
-    def sample(
-        self,
-        tokenizer: TokenizerLike,
-        num_requests: int,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
-        prefix_len: int = DEFAULT_PREFIX_LEN,
-        input_len: int = DEFAULT_INPUT_LEN,
-        output_len: int = DEFAULT_OUTPUT_LEN,
-        return_prompt_formatted: bool = False,
-        **kwargs,
-    ) -> list[SampleRequest]:
-        poem_lines = self.data
-        assert poem_lines is not None
-        # Calculate average token length for a poem line.
-        tokenized_lines = [tokenizer(line).input_ids for line in poem_lines]
-        avg_len = sum(len(tokens) for tokens in tokenized_lines) / len(tokenized_lines)
-
-        # Build the base prompt.
-        base_prompt = "Pick as many lines as you can from these poem lines:\n"
-        base_msg = [{"role": "user", "content": base_prompt}]
-        base_fmt = tokenizer.apply_chat_template(
-            base_msg,  # type: ignore[arg-type]
-            add_generation_prompt=True,
-            tokenize=False,
-        )
-        assert isinstance(base_fmt, str)
-        base_offset = len(tokenizer(base_fmt).input_ids)
-        if input_len <= base_offset:
-            raise ValueError(
-                f"'input_len' must be higher than the base prompt length "
-                f"({base_offset})."
-            )
-
-        # Determine how many poem lines to use.
-        num_input_lines = max(round((input_len - base_offset) / avg_len), 1)
-        num_prefix_lines = max(round((prefix_len - base_offset) / avg_len), 0)
-        prefix_lines = poem_lines[:num_prefix_lines]
-
-        samples: list[SampleRequest] = []
-        ind = 0
-        while len(samples) < num_requests:
-            extra_lines = random.choices(
-                poem_lines, k=num_input_lines - num_prefix_lines
-            )
-            prompt = f"{base_prompt}{''.join(prefix_lines + extra_lines)}"
-            msg = [{"role": "user", "content": prompt}]
-            prompt_formatted = tokenizer.apply_chat_template(
-                msg,  # type: ignore[arg-type]
-                add_generation_prompt=True,
-                tokenize=False,
-            )
-            assert isinstance(prompt_formatted, str)
-            prompt_len = len(tokenizer(prompt_formatted).input_ids)
-            if prompt_len <= input_len:
-                samples.append(
-                    SampleRequest(
-                        prompt=(
-                            prompt_formatted if return_prompt_formatted else prompt
-                        ),
-                        prompt_len=prompt_len,
-                        expected_output_len=output_len,
-                        request_id=request_id_prefix + str(ind),
-                    )
-                )
-                ind += 1
-        return samples
 
 
 # -----------------------------------------------------------------------------

@@ -26,7 +26,7 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig
@@ -134,7 +134,7 @@ class OpenPanguMLP(nn.Module):
 class OpenPanguMoE(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
@@ -240,7 +240,7 @@ class OpenPanguMoE(nn.Module):
 class OpenPanguMLAAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -389,7 +389,7 @@ class OpenPanguMLAAttention(nn.Module):
 class OpenPanguEmbeddedAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -501,7 +501,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
 
     def _init_rotary_emb(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
     ) -> None:
         is_neox_style = True
@@ -522,7 +522,7 @@ class OpenPanguEmbeddedAttention(nn.Module):
 class OpenPanguSinkAttention(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -743,7 +743,7 @@ class OpenPanguSinkAttention(nn.Module):
 
     def _init_rotary_emb(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         rope_parameters: dict[str, Any] | None,
         quant_config: QuantizationConfig | None,
     ) -> None:
@@ -769,7 +769,7 @@ class OpenPanguSinkAttention(nn.Module):
 class OpenPanguDecoderLayer(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
     ) -> None:

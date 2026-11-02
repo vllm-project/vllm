@@ -1,0 +1,13 @@
+{#- zerank-2 (zeroentropy/zerank-2-reranker): query in the system turn, document in the user turn.
+    The assistant suffix is emitted unconditionally, since score templates are rendered
+    without add_generation_prompt. An optional `instruction` is wrapped as recommended by
+    ZeroEntropy; without it, the prompt is the official zerank-2 prompt. -#}
+{%- set query = messages | selectattr("role", "eq", "query") | map(attribute="content") | list -%}
+{%- set document = messages | selectattr("role", "eq", "document") | map(attribute="content") | list -%}
+{%- set query = query[0] if query else '' -%}
+{%- if instruction is defined and instruction is string and instruction | trim -%}
+{%- set query = '<query>' + query + '</query>\n<instruction>' + instruction + '</instruction>' -%}
+{%- endif -%}
+{{- '<|im_start|>system\n' + query + '<|im_end|>\n' -}}
+{{- '<|im_start|>user\n' + (document[0] if document else '') + '<|im_end|>\n' -}}
+{{- '<|im_start|>assistant\n' -}}

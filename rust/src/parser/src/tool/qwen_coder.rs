@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, delimited, eof, repeat, seq, terminated};
 use winnow::prelude::*;
@@ -146,7 +147,7 @@ impl Qwen3CoderToolParser {
 }
 
 impl ToolParser for Qwen3CoderToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -157,8 +158,8 @@ impl ToolParser for Qwen3CoderToolParser {
         Some(xgrammar_structural_tag::Model::Qwen3Coder.builder())
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
         let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
@@ -306,7 +307,7 @@ mod tests {
     use serde_json::{Value, json};
     use thiserror_ext::AsReport;
 
-    use super::{Qwen3CoderToolParser, ToolParser};
+    use super::{Qwen3CoderToolParser, Tool, ToolParser};
     use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
     use crate::tool::tests::assert_tool_framing_preserves_body_whitespace;
     use crate::tool::{ToolParserOutput, ToolParserTestExt as _};
@@ -542,6 +543,39 @@ mod tests {
             json!({
                 "data": { "key": "value", "count": 42 },
             })
+        );
+    }
+
+    #[test]
+    fn qwen_coder_parse_complete_resolves_schema_references() {
+        let tools = [Tool {
+            name: "plan_trip".to_string(),
+            description: None,
+            parameters: json!({
+                "$defs": {
+                    "Place": { "type": "object", "properties": { "city": { "type": "string" } } },
+                    "Days": { "type": "integer" }
+                },
+                "type": "object",
+                "properties": {
+                    "place": { "$ref": "#/$defs/Place" },
+                    "days": { "$ref": "#/$defs/Days" }
+                }
+            }),
+            strict: None,
+            defer_loading: None,
+        }];
+        let mut parser = Qwen3CoderToolParser::new(&tools);
+        let output = parser
+            .parse_complete(&build_tool_call(
+                "plan_trip",
+                &[("place", "\n{\"city\": \"Paris\"}\n"), ("days", "\n3\n")],
+            ))
+            .unwrap();
+
+        assert_eq!(
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
+            json!({ "place": { "city": "Paris" }, "days": 3 })
         );
     }
 

@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType, SemanticEvent
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
+    ArgValueExtender,
     ParserEngineConfig,
     ParserState,
     Transition,
@@ -66,6 +67,12 @@ def _strip_partial_delim(value: str) -> str:
 
 
 def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
+    return _parse_gemma4_fields(args_str, partial=partial)[0]
+
+
+def _parse_gemma4_fields(
+    args_str: str, *, partial: bool = False
+) -> tuple[dict, str | None]:
     """Parse Gemma4's custom key:value format into a Python dict.
 
     Format examples::
@@ -82,13 +89,15 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             omitted because they may be incomplete and type-unstable
             (e.g. partial boolean parsed as bare string).
 
-    Returns a dict ready for ``json.dumps()``.
+    Returns a dict ready for ``json.dumps()`` and the key of the trailing
+    top-level ``STRING_DELIM`` value left unterminated, if any.
 
     """
     if not args_str or not args_str.strip():
-        return {}
+        return {}, None
 
     result: dict = {}
+    open_key: str | None = None
     i = 0
     n = len(args_str)
 
@@ -120,7 +129,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 result[key] = ""
             break
 
-        if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+        if args_str.startswith(STRING_DELIM, i):
             i += _DELIM_LEN
             val_start = i
             end_pos = args_str.find(STRING_DELIM, i)
@@ -130,6 +139,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 if partial:
                     value = _strip_partial_delim(value)
                 result[key] = value
+                open_key = key
                 break
             result[key] = args_str[val_start:end_pos]
             i = end_pos + _DELIM_LEN
@@ -139,7 +149,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             obj_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if args_str.startswith(STRING_DELIM, i):
                     # Skip over string contents to avoid counting { inside strings
                     i += _DELIM_LEN
                     next_delim = args_str.find(STRING_DELIM, i)
@@ -162,7 +172,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
             arr_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if args_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if args_str.startswith(STRING_DELIM, i):
                     i += _DELIM_LEN
                     next_delim = args_str.find(STRING_DELIM, i)
                     i = n if next_delim == -1 else next_delim + _DELIM_LEN
@@ -199,7 +209,7 @@ def _parse_gemma4_args(args_str: str, *, partial: bool = False) -> dict:
                 break
             result[key] = raw_val
 
-    return result
+    return result, open_key
 
 
 def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
@@ -213,7 +223,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
         if i >= n:
             break
 
-        if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
+        if arr_str.startswith(STRING_DELIM, i):
             i += _DELIM_LEN
             end_pos = arr_str.find(STRING_DELIM, i)
             if end_pos == -1:
@@ -227,7 +237,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             obj_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if arr_str.startswith(STRING_DELIM, i):
                     i += _DELIM_LEN
                     nd = arr_str.find(STRING_DELIM, i)
                     i = nd + _DELIM_LEN if nd != -1 else n
@@ -247,7 +257,7 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
             sub_start = i + 1
             i += 1
             while i < n and depth > 0:
-                if arr_str[i : i + _DELIM_LEN] == STRING_DELIM:
+                if arr_str.startswith(STRING_DELIM, i):
                     i += _DELIM_LEN
                     nd = arr_str.find(STRING_DELIM, i)
                     i = nd + _DELIM_LEN if nd != -1 else n
@@ -283,14 +293,62 @@ def _parse_gemma4_array(arr_str: str, *, partial: bool = False) -> list:
     return items
 
 
+def _drop_call_closer(text: str, paren_excess: bool) -> str:
+    """Drop a trailing ``}`` or, with more ``)`` than ``(``, a trailing ``)``.
+
+    The closer of the call body is dropped before parsing, so a value that
+    itself ends in one loses that character until more text arrives.
+    """
+    if text.endswith("}") or (text.endswith(")") and paren_excess):
+        return text[:-1]
+    return text
+
+
 def _gemma4_arg_converter(raw_args: str, partial: bool) -> str:
     """Convert Gemma4 custom arg format to a JSON string."""
     text = raw_args.strip()
-    if text.endswith("}") or text.endswith(")") and text.count("(") < text.count(")"):
-        text = text[:-1]
-
+    text = _drop_call_closer(text, text.count("(") < text.count(")"))
     parsed = _parse_gemma4_args(text, partial=partial)
     return json.dumps(parsed, ensure_ascii=False)
+
+
+def _gemma4_arg_value_extender(raw_args: str) -> ArgValueExtender | None:
+    """Extend the open top-level ``STRING_DELIM`` value at the end of
+    *raw_args*, if it is the last value in the converted JSON.
+
+    The extender streams exactly what ``_gemma4_arg_converter`` would, so it
+    holds back the same tail: trailing whitespace, a dropped closer and a
+    partial ``STRING_DELIM``. ``STRING_DELIM`` is a special token but not a
+    lexer terminal, so unlike a tag it may reach the extender split across
+    deltas; the held tail doubles as the window that detects the close.
+    """
+    text = raw_args.strip()
+    opens, closes = text.count("("), text.count(")")
+    body = _drop_call_closer(text, opens < closes)
+    params, open_key = _parse_gemma4_fields(body, partial=True)
+    if open_key is None or next(reversed(params)) != open_key:
+        return None
+
+    held_len = (
+        len(raw_args)
+        - len(raw_args.rstrip())
+        + len(text)
+        - len(_strip_partial_delim(body))
+    )
+    held = raw_args[len(raw_args) - held_len :] if held_len else ""
+
+    def extend(delta: str) -> str | None:
+        nonlocal held, opens, closes
+        text = held + delta
+        if STRING_DELIM in text:
+            return None
+        opens += delta.count("(")
+        closes += delta.count(")")
+        visible = _strip_partial_delim(_drop_call_closer(text.rstrip(), opens < closes))
+        held = text[len(visible) :]
+        return json.dumps(visible, ensure_ascii=False)[1:-1]
+
+    return extend
 
 
 @functools.cache
@@ -396,6 +454,7 @@ def gemma4_config(thinking: bool = False) -> ParserEngineConfig:
             ParserState.TOOL_ARGS: EventType.ARG_VALUE_CHUNK,
         },
         arg_converter=_gemma4_arg_converter,
+        arg_value_extender=_gemma4_arg_value_extender,
         tool_args_json=False,
         arg_structural_chars=frozenset(",:{}[]<"),
         preserve_tokens=frozenset({STRING_DELIM}),
@@ -423,12 +482,8 @@ class Gemma4Parser(ParserEngine):
     ) -> None:
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         thinking = chat_kwargs.get("enable_thinking", False)
-        super().__init__(
-            tokenizer,
-            tools,
-            parser_engine_config=gemma4_config(thinking=thinking),
-            **kwargs,
-        )
+        kwargs.setdefault("parser_engine_config", gemma4_config(thinking=thinking))
+        super().__init__(tokenizer, tools, **kwargs)
         vocab = self.vocab
         self._tool_call_token_id: int | None = vocab.get("<|tool_call>")
         self._new_turn_token_id: int | None = vocab.get("<|turn>")

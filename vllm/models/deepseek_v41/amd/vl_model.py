@@ -51,6 +51,7 @@ from ..common.mm_preprocess import (
     DeepseekV4VLProcessingInfo,
 )
 from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
+from ..decoder_replay_layers import DecoderReplayLayers
 from .model import (
     DeepseekV41LLMForCausalLM,
     _linear_scale_param_name,
@@ -79,20 +80,22 @@ class DeepseekV4VLImagePixelInputs(TensorSchema):
     types: Annotated[torch.Tensor, TensorShape("ns", dynamic_dims={"ns"})]
 
 
+_VL_PREFIX_MAPPING: dict[str, str | None] = {
+    "layers.": "language_model.model.layers.",
+    "embed.": "language_model.model.embed.",
+    "norm.": "language_model.model.norm.",
+    "hc_head": "language_model.model.hc_head",
+    "mtp.": "language_model.model.mtp.",
+}
+
+
 def _make_deepseek_v4_vl_weights_mapper(
     expert_dtype: str, linear_scale_name: str
 ) -> WeightsMapper:
     """Text-checkpoint mapping rules re-rooted under ``language_model.``."""
     base = _make_deepseek_v4_weights_mapper(expert_dtype, linear_scale_name)
-    orig_to_new_prefix: dict[str, str | None] = {
-        "layers.": "language_model.model.layers.",
-        "embed.": "language_model.model.embed.",
-        "norm.": "language_model.model.norm.",
-        "hc_head": "language_model.model.hc_head",
-        "mtp.": "language_model.model.mtp.",
-    }
     return WeightsMapper(
-        orig_to_new_prefix=orig_to_new_prefix,
+        orig_to_new_prefix=dict(_VL_PREFIX_MAPPING),
         orig_to_new_regex=base.orig_to_new_regex,
         orig_to_new_suffix={
             "head.weight": "language_model.lm_head.weight",
@@ -130,6 +133,22 @@ class DeepseekV41ForCausalLM(
     """
 
     supports_encoder_tp_data = True
+
+    # Both of these are read off the *class* by
+    # ``configure_quant_config``/``SupportsQuant``, before ``__init__`` runs,
+    # to translate a quantization config's checkpoint-style module names into
+    # runtime prefixes. ``__init__`` later overwrites the instance
+    # ``hf_to_vllm_mapper`` with the full weight-loading mapper; only the
+    # prefix rules matter here. Without the class attributes, per-layer specs
+    # naming ``layers.N.attn.wq_a`` never match this wrapper's
+    # ``language_model.model.layers.N.attn.wq_a`` and silently fall back to
+    # the global spec.
+    packed_modules_mapping = DeepseekV41LLMForCausalLM.packed_modules_mapping
+
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix=dict(_VL_PREFIX_MAPPING),
+        orig_to_new_substr={".shared_experts.w2": ".shared_experts.down_proj"},
+    )
 
     # The MoE router needs raw token ids to detect image-span tokens
     # (all carrying image_token_id, see common/mm_preprocess.py) and apply
@@ -281,6 +300,10 @@ class DeepseekV41ForCausalLM(
     def token_lookback_depth(self) -> int:
         return self.language_model.token_lookback_depth
 
+    @property
+    def decoder_replay_layers(self) -> DecoderReplayLayers | None:
+        return self.language_model.decoder_replay_layers
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -312,22 +335,8 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Map HF names into this wrapper's namespace up front and sort, so
-        # the "language_model." group reaches the child loader as one
-        # contiguous block (AutoWeightsLoader delegates per contiguous group,
-        # and the child's load_weights finalizes fused expert weights, which
-        # must not run on a partially loaded model).
-        mapped = sorted(self.hf_to_vllm_mapper.apply(weights), key=lambda x: x[0])
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(mapped)
-        # The child's load_weights already ran its post-load finalization.
-        self._weights_finalized = True
-        return loaded_params
+        return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
 
     def process_weights_after_loading(self) -> None:
-        # Model-level post-load hook (called by the loader after any load
-        # format). Under DummyModelLoader the child's load_weights — and
-        # hence its finalize step — is bypassed, so run it here instead.
-        if getattr(self, "_weights_finalized", False):
-            return
         self.language_model.process_weights_after_loading()

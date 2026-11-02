@@ -11,15 +11,17 @@ left as noise, one denoise step gives a distribution over each slot. These
 | `diffusion_pinned` | `list[int]` of canvas positions | held at their seed value on every denoise step, so a read past one step keeps its template |
 | `diffusion_max_steps` | `int` | denoise steps before the canvas is emitted |
 | `diffusion_read_only` | `bool` | emit the argmax canvas as soon as the cap is reached, end the request there, and return temperature-1 logprobs at every position |
+| `diffusion_constrained` | `bool` | run the unembedding, sampler and self-conditioning over the request's `logprob_token_ids` only. Logprobs are normalized over that set. A step uses this only when every read in it has the same set |
 
-`structured_server.py` turns a question schema into those fields. It serves
+`structured_server.py` turns a question schema into those fields, with
+`diffusion_constrained` on for every read (`--no-constrained` turns it off). It serves
 `/v1/chat/completions`: the system message is the schema, the user message
 is the state JSON, and the reply content is one distribution per question
 with a standard error over a few noise draws.
 
 ```bash
 vllm serve google/diffusiongemma-26B-A4B-it \
-    --diffusion-config '{"canvas_length": 64}' --max-logprobs 32 --enable-prefix-caching
+    --diffusion-config '{"canvas_length": 64}' --enable-prefix-caching
 python examples/features/structured_diffusion/structured_server.py \
     --upstream http://127.0.0.1:8000 --tokenizer google/diffusiongemma-26B-A4B-it --canvas 64
 curl -s localhost:8011/v1/chat/completions -H 'content-type: application/json' -d '{
@@ -34,10 +36,9 @@ layer when available, otherwise Triton. FlashInfer cannot serve this model (a
 batch mixes causal prefill with bidirectional denoising), and
 `--attention-backend FLASHINFER` is rejected.
 
-Per-request canvas widths smaller than the served canvas require async
-scheduling. The diffusion async scheduler is selected automatically; no
-`--scheduler-cls` argument is needed. Synchronous execution supports full-width
-canvases only.
+Per-request canvas widths may be smaller than the served canvas with either
+synchronous or asynchronous scheduling. Omit `diffusion_canvas_length` to use
+the served canvas width.
 
 Question types: `noul` (yes/no), `choice` with `options`, `score` with
 ordered `levels`. Each label must be a single token in the answer template,
