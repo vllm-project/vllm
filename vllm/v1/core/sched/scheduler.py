@@ -492,11 +492,19 @@ class Scheduler(SchedulerInterface):
         self._inflight_prefills: set[Request] = set()
 
         # Requests with an async KV load, by stage (KV_FETCH_STAGES).
-        # None when not tracked (stats disabled or no KV connector).
+        # None when not tracked (no KV connector, or neither stats nor
+        # --max-num-inflight-kv-loads need it).
+        track_kv_fetches = (
+            self.log_stats
+            or self.scheduler_config.max_num_inflight_kv_loads is not None
+        )
         self._kv_fetch_stages: dict[Request, str] | None = (
-            {} if self.log_stats and self.connector is not None else None
+            {} if track_kv_fetches and self.connector is not None else None
         )
         self._kv_fetch_counts: dict[str, int] = dict.fromkeys(KV_FETCH_STAGES, 0)
+        # Aborted requests whose async KV load still holds their blocks until the
+        # worker reports it done. They count toward --max-num-inflight-kv-loads.
+        self._aborted_kv_loads: set[str] = set()
 
     def _drafts_unused(
         self, request: Request, num_computed_tokens: int, num_new_tokens: int
@@ -1281,6 +1289,11 @@ class Scheduler(SchedulerInterface):
                 # rewriting its cached KV. An async load replays once the KV
                 # has arrived (_update_waiting_for_remote_kv).
                 num_replay_tokens = 0
+
+                if load_kv_async and not self._admits_inflight_kv_load():
+                    # Past --max-num-inflight-kv-loads. Like a load whose blocks
+                    # do not fit, it waits until an in-flight load runs or ends.
+                    break
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
@@ -3012,6 +3025,8 @@ class Scheduler(SchedulerInterface):
                 )
                 self.finished_recving_kv_req_ids.discard(request.request_id)
                 self.failed_recving_kv_req_ids.discard(request.request_id)
+                if delay_free_blocks:
+                    self._aborted_kv_loads.add(request.request_id)
 
             request.status = finished_status
             self._free_request(request, delay_free_blocks=delay_free_blocks)
@@ -3053,6 +3068,7 @@ class Scheduler(SchedulerInterface):
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
+        self._aborted_kv_loads.discard(request.request_id)
         self._free_request_blocks(request)
         del self.requests[request.request_id]
 
@@ -3418,6 +3434,21 @@ class Scheduler(SchedulerInterface):
             if stage is not None:
                 kv_fetch_stages[request] = stage
                 self._kv_fetch_counts[stage] += 1
+
+    def num_inflight_kv_loads(self) -> int:
+        """Requests holding blocks for an async KV load before they run: the
+        load in progress, finished and waiting to be scheduled, or aborted while
+        in progress and not yet reported done."""
+        return (
+            self._kv_fetch_counts[KV_FETCH_IN_PROGRESS]
+            + self._kv_fetch_counts[KV_FETCH_COMPLETED_WAITING]
+            + len(self._aborted_kv_loads)
+        )
+
+    def _admits_inflight_kv_load(self) -> bool:
+        """Whether a new async KV load stays within --max-num-inflight-kv-loads."""
+        limit = self.scheduler_config.max_num_inflight_kv_loads
+        return limit is None or self.num_inflight_kv_loads() < limit
 
     def _inflight_prefill_reserved_blocks(self) -> int:
         """Num blocks in-flight prefills still need to finish (their reservation)."""
