@@ -24,6 +24,7 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.marlin_moe import MarlinExperts
 from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -121,6 +122,12 @@ SELECT_CASES = {
     ),
 }
 
+ASSEMBLY_QUANT_CONFIGS = {
+    # MARLIN/W4A16 builds: `make_nvfp4_moe_kernel` reads this to force A16.
+    "nvfp4_marlin": SimpleNamespace(is_block_quantized=True, use_nvfp4_w4a16=True),
+    "nvfp4_marlin_a16": SimpleNamespace(is_block_quantized=True, use_nvfp4_w4a16=True),
+}
+
 # oracle -> (make_*_moe_kernel call, experts class, expected prepare/finalize
 # extras, expected experts kwargs, optional experts log template).
 ASSEMBLY_CASES = {
@@ -165,6 +172,36 @@ ASSEMBLY_CASES = {
         TritonExperts,
         {"input_dtype": torch.bfloat16},
         {"per_token_activation": True},
+        None,
+    ),
+    # MARLIN consumes A16, so `per_token_activation` must be dropped rather
+    # than forwarded: MarlinExperts takes no such kwarg and the W4A16 quant
+    # config already selects the A16 path.
+    "nvfp4_marlin": (
+        lambda quant_config, moe_config, experts_cls: make_nvfp4_moe_kernel(
+            quant_config,
+            moe_config,
+            experts_cls,
+            NvFp4MoeBackend.MARLIN,
+            per_token_activation=True,
+        ),
+        MarlinExperts,
+        {"input_dtype": None},
+        {},
+        None,
+    ),
+    # Same MARLIN build on the default (per_token_activation=False) path, where
+    # forwarding the flag is an outright TypeError from MarlinExperts.
+    "nvfp4_marlin_a16": (
+        lambda quant_config, moe_config, experts_cls: make_nvfp4_moe_kernel(
+            quant_config,
+            moe_config,
+            experts_cls,
+            NvFp4MoeBackend.MARLIN,
+        ),
+        MarlinExperts,
+        {"input_dtype": None},
+        {},
         None,
     ),
     "unquantized": (
@@ -364,7 +401,9 @@ def test_make_moe_kernel_assembly(oracle, mismatched, batched, monkeypatch):
         expected_experts_kwargs,
         experts_log,
     ) = ASSEMBLY_CASES[oracle]
-    quant_config = SimpleNamespace(is_block_quantized=True)
+    quant_config = ASSEMBLY_QUANT_CONFIGS.get(
+        oracle, SimpleNamespace(is_block_quantized=True)
+    )
     moe_config = make_dummy_moe_config()
     prepare_finalize_kwargs: dict = {}
     experts_kwargs: dict = {}

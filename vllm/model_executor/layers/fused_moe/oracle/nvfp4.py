@@ -605,11 +605,11 @@ def make_nvfp4_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     per_token_activation: bool = False,
 ) -> mk.FusedMoEKernel:
-    extra_kwargs: dict[str, Any] = {}
     # Marlin consumes A16 and must not receive per-token A4 metadata.
     if backend == NvFp4MoeBackend.MARLIN and moe_quant_config.use_nvfp4_w4a16:
-        extra_kwargs["per_token_activation"] = False
+        per_token_activation = False
 
+    extra_kwargs: dict[str, Any] = {}
     if per_token_activation:
         # Prepare dispatched the input unquantized, so an expert that does
         # not quantize it itself would read garbage. The backend selection
