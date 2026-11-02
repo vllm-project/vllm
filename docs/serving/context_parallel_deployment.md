@@ -28,12 +28,17 @@ cache memory per rank.
 ```bash
 VLLM_USE_V2_MODEL_RUNNER=1 vllm serve /path/to/DeepSeek-V4 \
     --prefill-context-parallel-size 2 \
+    --tensor-parallel-size 2 \
+    --enable-expert-parallel \
     --attention-backend FLASHMLA_SPARSE \
     --kv-cache-dtype fp8_ds_mla \
-    --moe-backend triton \
+    --moe-backend triton_unfused \
     --enforce-eager \
     --no-enable-prefix-caching
 ```
+
+The example uses four GPUs and MXFP4 experts. For FP8 expert checkpoints,
+select the `triton` MoE backend instead.
 
 Use DCP, PP, and DP sizes of one. Prefix caching, speculative decoding, KV
 transfer, microbatching, and MegaMoE are not supported in this path. Keep the
