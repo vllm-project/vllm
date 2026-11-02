@@ -912,7 +912,7 @@ def test_failed_store_is_not_reported_as_a_load_error(server, failure):
     assert result.completed_workers == 1
 
 
-def test_publish_failure_is_not_raised(server):
+def test_store_flush_failure_is_reported(server):
     runtime = _runtime()
     topology = RankTopology()
     layout = KVLayoutDescriptor(
@@ -926,12 +926,17 @@ def test_publish_failure_is_not_raised(server):
         0,
         ranges=(KVRange("layer0", 0, 0, source.data_ptr(), 16, 16, 0),),
     )
-    job = worker.wait(worker.store([plan]))
-    server.clients[0].flush_ok = False
+    try:
+        server.clients[0].flush_ok = False
+        job = worker.wait(worker.store([plan]))
 
-    worker.publish(job)
-
-    assert "publish-key" in server.objects
+        assert job.status is TransferJobStatus.FAILED
+        assert job.failed_keys == {plan.key}
+        assert job.completed_keys == set()
+        assert job.completed_bytes == 0
+        assert job.error == "MORI UMBP flush failed"
+    finally:
+        worker.close()
 
 
 def _stalled_store(server, monkeypatch, release: threading.Event):
