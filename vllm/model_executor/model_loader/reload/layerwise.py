@@ -41,6 +41,7 @@ __all__ = [
     "initialize_layerwise_reload",
     "finalize_layerwise_processing",
     "finalize_layerwise_reload",
+    "max_layer_reload_bytes",
 ]
 
 
@@ -80,6 +81,17 @@ def record_metadata_for_reloading(model: torch.nn.Module):
         info = get_layerwise_info(layer)
         info.restore_metadata = capture_layer_to_meta(layer)
         info.restore_device = torch.get_default_device()
+
+
+def max_layer_reload_bytes(model: torch.nn.Module) -> int:
+    """Bytes of the largest layer in checkpoint format, which a layerwise reload
+    materializes on the device, one layer at a time, before processing it."""
+    sizes = (
+        sum(t.nbytes for tensors in info.restore_metadata for t in tensors.values())
+        for layer in model.modules()
+        if (info := LAYERWISE_INFO.get(layer)) is not None
+    )
+    return max(sizes, default=0)
 
 
 @torch.no_grad()
