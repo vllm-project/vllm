@@ -233,6 +233,24 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "interns1": VitCudagraphTestConfig(
+        model="internlm/Intern-S1-mini",
+        num_video_frames=8,
+        image_prompt=internvl_chat_template("<IMG_CONTEXT>\nWhat is in this image?"),
+        video_prompt=internvl_chat_template(
+            "<video>\nDescribe this video in one sentence."
+        ),
+        needs_video_metadata=False,
+        marks=[pytest.mark.core_model],
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="InternS1ForConditionalGeneration",
+            ),
+        },
+    ),
     "idefics3": VitCudagraphTestConfig(
         model="HuggingFaceTB/SmolVLM-256M-Instruct",
         modalities=["image"],

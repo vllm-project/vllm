@@ -795,7 +795,6 @@ def run_interns1(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=8192,
         max_num_seqs=2,
         limit_mm_per_prompt=mm_limit,
-        enforce_eager=True,
     )
 
     image_placeholder = "<IMG_CONTEXT>"
@@ -2260,6 +2259,7 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "qwen3_5",
     "qwen3_5_moe",
     "internvl_chat",
+    "interns1",
     "stepvl",
     "glm4_1v",
     "deepseek_ocr",
