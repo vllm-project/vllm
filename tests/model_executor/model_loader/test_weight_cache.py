@@ -7,6 +7,7 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import multiprocessing
 import os
 import shutil
 import signal
@@ -419,6 +420,64 @@ def test_d2d_warmup_cache_seeding(vllm_runner, tmp_path):
             )
 
     assert mirror_outputs == baseline_outputs
+
+
+@create_new_process_for_each_test()
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.parametrize("case", [DSV2_EP_CASE, K3_CASE], ids=["dsv2-ep", "kimi-k3"])
+def test_mooncake_warmup_cache_store_e2e(vllm_runner, case, tmp_path, monkeypatch):
+    """Autotune tables published to a Mooncake store let a fresh daemon
+    generation skip tuning with no source daemon online."""
+    if not current_platform.is_cuda_alike():
+        pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
+    from vllm.utils.flashinfer import has_flashinfer
+
+    if not (has_flashinfer() and current_platform.has_device_capability(90)):
+        pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
+    if case is K3_CASE and not current_platform.is_device_capability_family(100):
+        pytest.skip("Kimi K3 IPC weight cache requires an SM100 MXFP4 backend")
+
+    # Both daemons run at tp=2: the v1 per-rank cache needs a multi-rank
+    # tuning group (v2 is gated to single-rank).
+    if case.llm_kwargs.get("tensor_parallel_size") != 2:
+        case = replace(case, llm_kwargs={**case.llm_kwargs, "tensor_parallel_size": 2})
+    baseline_outputs = generate(vllm_runner, case, None, fallback=True)
+    assert all(text for _, texts in baseline_outputs for text in texts)
+
+    log_dir = os.environ.get("D2D_E2E_LOG_DIR")
+    log_file = (
+        (lambda name: os.path.join(log_dir, name)) if log_dir else lambda name: None
+    )
+    with MooncakeCluster(tmp_path, monkeypatch):
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=2,
+            extra_args=[*case.daemon_args, "--warmup-cache-stores", "mooncake"],
+            env_extra={"VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": str(tmp_path / "gen1")},
+            log_file=log_file("mooncake-gen1.log"),
+        ) as gen1:
+            gen1.wait_until_ready()
+            # The store started empty, so the first generation tuned in place.
+            assert "Running FlashInfer autotune" in gen1.logs
+            published = "Published the FlashInfer autotune table"
+            assert gen1.logs.count(published) == 2
+
+        # gen1 is fully stopped: only the Mooncake store can serve the tables.
+        with WeightCacheDaemon(
+            case.model,
+            tp_size=2,
+            extra_args=[*case.daemon_args, "--warmup-cache-stores", "mooncake"],
+            env_extra={"VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": str(tmp_path / "gen2")},
+            log_file=log_file("mooncake-gen2.log"),
+        ) as gen2:
+            gen2.wait_until_ready()
+            adopted = "Adopted the FlashInfer autotune table from a shared store"
+            assert gen2.logs.count(adopted) == 2
+            assert "Running FlashInfer autotune" not in gen2.logs
+
+            gen2_outputs = generate(vllm_runner, case, gen2.socket_dir, fallback=False)
+
+    assert gen2_outputs == baseline_outputs
 
 
 def run_cold_start_and_warm_restart(vllm_runner, case: ModelCase, tmp_path, capfd=None):
@@ -1570,10 +1629,18 @@ def test_store_sources_read_order_and_publish_fanout(tmp_path, monkeypatch):
     disk_file.write_text(json.dumps(disk_table))
     assert kind.resolve(_warmup_cache_request(config_hash)) == {filename: disk_table}
 
-    # A publish fans out to every store, disk included.
+    # A publish fans out to every store; use a fresh key, as puts are
+    # first-writer-wins like the real Mooncake backend.
+    pub_params = {"config_hash": "d" * 64, "dp_rank": 0, "rank": 0}
+    monkeypatch.setattr(kind, "request_params", lambda _: pub_params)
+    pub_key = artifact_key("flashinfer_autotune", pub_params["config_hash"], filename)
+    pub_table = {"records": {"op": {"shape": "tuned"}}}
+    pub_file = tmp_path / pub_params["config_hash"] / filename
+    pub_file.parent.mkdir(parents=True)
+    pub_file.write_text(json.dumps(pub_table))
     kind._publish_autotune_table(None)
     for store in (first, second):
-        assert json.loads(store.data[key]) == disk_table
+        assert json.loads(store.data[pub_key]) == pub_table
 
 
 def test_disk_artifact_store_rejects_foreign_keys(tmp_path):
@@ -1659,3 +1726,180 @@ def test_warmup_cache_adopt_from_stores(tmp_path, monkeypatch):
 
     # With no stores configured there is nothing to pull from.
     assert FlashInferWarmupCache()._adopt_from_stores(None) is False
+
+
+def _mooncake_peer(key: str, payload: bytes, mode: str) -> None:
+    """Second-process body: put/get through a real MooncakeArtifactStore."""
+    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+        MooncakeArtifactStore,
+    )
+
+    store = MooncakeArtifactStore()
+    if mode == "put":
+        store.put(key, payload)
+    assert store.get(key) == payload, f"peer {mode} mismatch"
+
+
+class MooncakeCluster:
+    """A real mooncake master plus a standalone-store segment owner."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        self._tmp_path = tmp_path
+        self._monkeypatch = monkeypatch
+        self._procs: list[subprocess.Popen] = []
+        self._log_chunks: list[str] = []
+
+    def _binary(self, name: str) -> str:
+        from pathlib import Path
+
+        path = shutil.which(name)
+        if path is not None:
+            return path
+        try:
+            import mooncake
+        except ImportError:
+            pytest.skip("mooncake is not installed")
+        candidate = Path(mooncake.__file__).parent / name
+        if not candidate.exists():
+            pytest.skip(f"the {name} binary is not available")
+        return str(candidate)
+
+    def __enter__(self) -> "MooncakeCluster":
+        import json
+        import socket
+
+        self.master_port = get_open_port()
+        self.master_addr = f"127.0.0.1:{self.master_port}"
+        self._start(
+            [
+                self._binary("mooncake_master"),
+                "-port",
+                str(self.master_port),
+                "-metrics_port",
+                str(get_open_port()),
+            ]
+        )
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                socket.create_connection(("127.0.0.1", self.master_port), timeout=1)
+                break
+            except OSError:
+                if time.monotonic() > deadline:
+                    raise RuntimeError(
+                        f"mooncake_master did not start:\n{self.logs}"
+                    ) from None
+                time.sleep(0.2)
+
+        config = {
+            "metadata_server": "P2PHANDSHAKE",
+            "master_server_address": self.master_addr,
+            "protocol": "tcp",
+            "mode": "standalone-store",
+            "global_segment_size": 0,
+            "local_buffer_size": "16MB",
+        }
+        config_path = self._tmp_path / "mooncake.json"
+        config_path.write_text(json.dumps(config))
+        self._monkeypatch.setenv("MOONCAKE_CONFIG_PATH", str(config_path))
+        self._monkeypatch.setenv(
+            "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", str(self._tmp_path / "disk_cache")
+        )
+        self._start(
+            [
+                self._binary("mooncake_client"),
+                "-master_server_address",
+                self.master_addr,
+                "-metadata_server",
+                "P2PHANDSHAKE",
+                "-protocol",
+                "tcp",
+                "-global_segment_size",
+                "256MB",
+            ]
+        )
+
+        from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+            MooncakeArtifactStore,
+        )
+
+        # The store round-trips only after the client has mounted its segment.
+        store = MooncakeArtifactStore()
+        deadline = time.monotonic() + 60
+        while True:
+            store.put("vllm-warmup-cache/probe", b"ok")
+            if store.get("vllm-warmup-cache/probe") == b"ok":
+                return self
+            if time.monotonic() > deadline:
+                raise RuntimeError(f"mooncake store is not ready:\n{self.logs}")
+            time.sleep(0.5)
+
+    def __exit__(self, *exc_info) -> None:
+        for proc in reversed(self._procs):
+            proc.terminate()
+        for proc in self._procs:
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+
+    @property
+    def logs(self) -> str:
+        return "".join(self._log_chunks)
+
+    def _start(self, cmd: list[str]) -> None:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
+        )
+        self._procs.append(proc)
+        threading.Thread(target=self._drain, args=(proc,), daemon=True).start()
+
+    def _drain(self, proc: subprocess.Popen) -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            self._log_chunks.append(line)
+
+    def run_peer(self, key: str, payload: bytes, mode: str) -> None:
+        """Drive a second MooncakeArtifactStore in a separate process."""
+        proc = multiprocessing.get_context("spawn").Process(
+            target=_mooncake_peer, args=(key, payload, mode)
+        )
+        proc.start()
+        proc.join(timeout=180)
+        if proc.is_alive():
+            proc.kill()
+            raise TimeoutError(f"peer {mode} timed out:\n{self.logs}")
+        assert proc.exitcode == 0, f"peer {mode} failed (see captured stderr)"
+
+
+def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
+    """A real Mooncake cluster shares autotune tables across processes."""
+    import json
+
+    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+        artifact_key,
+    )
+    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+        FlashInferWarmupCache,
+    )
+
+    with MooncakeCluster(tmp_path, monkeypatch) as cluster:
+        kind = FlashInferWarmupCache(store_names=["mooncake"])
+        filename = "autotune_configs_dp0_rank0.json"
+        params = {"config_hash": "9" * 64, "dp_rank": 0, "rank": 0}
+        monkeypatch.setattr(kind, "request_params", lambda _: params)
+
+        # This process publishes; a second process reads it from the store.
+        table = {"records": {"op": {"shape": 1}}}
+        table_bytes = json.dumps(table).encode()
+        kind.install(None, {filename: table})
+        kind._publish_autotune_table(None)
+        key = artifact_key("flashinfer_autotune", params["config_hash"], filename)
+        cluster.run_peer(key, table_bytes, "get")
+
+        # A second process publishes; resolve falls through disk to the store.
+        peer_table = {"records": {"op": {"shape": "peer"}}}
+        peer_bytes = json.dumps(peer_table).encode()
+        peer_key = artifact_key("flashinfer_autotune", "8" * 64, filename)
+        cluster.run_peer(peer_key, peer_bytes, "put")
+        assert kind.resolve(_warmup_cache_request("8" * 64)) == {filename: peer_table}
