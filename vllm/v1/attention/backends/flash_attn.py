@@ -1179,6 +1179,66 @@ class FlashAttentionImpl(AttentionImpl):
                 vllm_config.scheduler_config.max_num_batched_tokens
             )
 
+        # Cache of the derived K/V cache views, keyed on the kv_cache tensor
+        # identity. See _get_kv_views and issue #59534.
+        self._kv_view_cache: (
+            tuple[
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+                torch.Tensor,
+            ]
+            | None
+        ) = None
+
+    def _get_kv_views(
+        self, kv_cache: torch.Tensor, canonicalize: bool
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # The K/V cache views depend only on kv_cache's storage, shape and
+        # strides, all of which are fixed once the cache is allocated. Deriving
+        # them on every attention call (the transpose/split, plus the stride
+        # canonicalization on the forward path) is pure host overhead on the
+        # critical path for eager prefill/mixed batches. Cache the views and
+        # reuse them while the same kv_cache tensor is passed in (issue #59534).
+        #
+        # The identity check is required: profiling first binds a minimal KV
+        # cache, runs attention on it, frees it, then allocates the real one.
+        # Keying on identity rebuilds the views when the tensor is replaced,
+        # so the cache never points at freed memory.
+        cache = self._kv_view_cache
+        if cache is None or cache[0] is not kv_cache:
+            # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
+            key_cache, value_cache = kv_cache.transpose(1, 2).split(
+                self.head_size, dim=-1
+            )
+            # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
+            # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
+            # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
+            fixed_k = canonicalize_singleton_dim_strides(key_cache)
+            fixed_v = canonicalize_singleton_dim_strides(value_cache)
+            if fixed_k is not key_cache or fixed_v is not value_cache:
+                logger.debug(
+                    "Canonicalized degenerate KV cache strides (FlashAttention): "
+                    "shape=%s, key strides before=%s after=%s, "
+                    "value strides before=%s after=%s",
+                    key_cache.shape,
+                    key_cache.stride(),
+                    fixed_k.stride(),
+                    value_cache.stride(),
+                    fixed_v.stride(),
+                )
+            cache = self._kv_view_cache = (
+                kv_cache,
+                key_cache,
+                value_cache,
+                fixed_k,
+                fixed_v,
+            )
+        if canonicalize:
+            return cache[3], cache[4]
+        return cache[1], cache[2]
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -1253,25 +1313,10 @@ class FlashAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
-        # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
-        # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
-        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
-        fixed_k = canonicalize_singleton_dim_strides(key_cache)
-        fixed_v = canonicalize_singleton_dim_strides(value_cache)
-        if fixed_k is not key_cache or fixed_v is not value_cache:
-            logger.debug(
-                "Canonicalized degenerate KV cache strides (FlashAttention): "
-                "shape=%s, key strides before=%s after=%s, "
-                "value strides before=%s after=%s",
-                key_cache.shape,
-                key_cache.stride(),
-                fixed_k.stride(),
-                value_cache.stride(),
-                fixed_v.stride(),
-            )
-        key_cache, value_cache = fixed_k, fixed_v
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D)), with degenerate
+        # size-1 strides canonicalized for TMA. Cached per kv_cache tensor
+        # to avoid redoing this on every call; see _get_kv_views / #59534.
+        key_cache, value_cache = self._get_kv_views(kv_cache, canonicalize=True)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
@@ -1444,8 +1489,9 @@ class FlashAttentionImpl(AttentionImpl):
 
         # Scatter write into the KV cache using slot_mapping indices.
         # No TMA kernel is invoked here, so stride canonicalization is not needed.
-        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D))
-        key_cache, value_cache = kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
+        # (B, H, N, 2*D) -> ((B, N, H, D), (B, N, H, D)), cached per kv_cache
+        # tensor; see _get_kv_views / #59534.
+        key_cache, value_cache = self._get_kv_views(kv_cache, canonicalize=False)
 
         # Reshape the input keys and values and store them in the cache.
         # Skip this if sharing KV cache with an earlier attention layer.
