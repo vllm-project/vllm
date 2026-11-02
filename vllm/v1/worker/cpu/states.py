@@ -1,0 +1,113 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import numpy as np
+import torch
+
+
+class CPURequestState:
+    def __init__(
+        self,
+        max_num_reqs: int,
+        max_model_len: int,
+        max_num_batched_tokens: int,
+        vocab_size: int,
+        device: torch.device,
+    ):
+        self.max_num_reqs = max_num_reqs
+        self.max_model_len = max_model_len
+        self.max_num_batched_tokens = max_num_batched_tokens
+        self.vocab_size = vocab_size
+        self.device = device
+
+        self.req_id_to_index: dict[str, int] = {}
+        self.index_to_req_id: dict[int, str] = {}
+        self.free_indices = list(range(max_num_reqs))
+
+        # CPU keeps this tensor dense because it is already host-resident.
+        self.all_token_ids = torch.zeros(
+            (self.max_num_reqs, self.max_model_len),
+            dtype=torch.int32,
+            device=device,
+        )
+
+        # NOTE(woosuk): Distinguish clearly between prompt_len and prefill_len:
+        # - prompt_len: Number of tokens in the user-provided prompt.
+        # - prefill_len: Number of tokens passed into the model runner.
+        #   This can include the prompt and additional partial output tokens,
+        #   so prefill_len >= prompt_len.
+        # Usually, prefill_len equals prompt_len, but in cases such as resumption after
+        # preemption, prefill_len may be greater. Differentiating between these values
+        # is crucial, as certain features such as prompt logprobs or frequency penalties
+        # must treat prompt and output tokens separately.
+        self.prompt_len = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
+        self.prompt_len_np = self.prompt_len.numpy()
+        self.prefill_len = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
+        self.prefill_len_np = self.prefill_len.numpy()
+        # total_len = prompt_len + output_len. It grows as the request progresses.
+        self.total_len = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
+
+        # Number of computed tokens.
+        self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.num_computed_tokens = torch.zeros(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
+        self.num_computed_tokens_np = self.num_computed_tokens.numpy()
+
+        # Last sampled tokens.
+        self.last_sampled_tokens = torch.zeros(
+            self.max_num_reqs, 1, dtype=torch.int64, device=device
+        )
+        # Max total seq length (prompt_len + max_tokens).
+        self.max_seq_len = np.zeros(self.max_num_reqs, dtype=np.int32)
+        self.next_prefill_tokens = torch.zeros(
+            1,
+            self.max_num_reqs,
+            dtype=torch.int32,
+            device=device,
+        )
+
+    @property
+    def num_reqs(self) -> int:
+        return len(self.req_id_to_index)
+
+    def add_request(
+        self,
+        req_id: str,
+        prompt_len: int,
+        all_token_ids: list[int],
+        num_computed_tokens: int,
+        max_tokens: int,
+    ) -> None:
+        assert len(self.free_indices) > 0, "No free indices"
+        req_idx = self.free_indices.pop()
+        self.req_id_to_index[req_id] = req_idx
+        self.index_to_req_id[req_idx] = req_id
+
+        self.max_seq_len[req_idx] = prompt_len + max_tokens
+        self.prompt_len_np[req_idx] = prompt_len
+        prefill_len = len(all_token_ids)
+        assert prefill_len >= prompt_len, (
+            f"prefill_len {prefill_len} < prompt_len {prompt_len}"
+        )
+        self.prefill_len_np[req_idx] = prefill_len
+        self.total_len[req_idx] = prefill_len
+        self.all_token_ids[req_idx, :prefill_len] = torch.tensor(
+            all_token_ids, dtype=torch.int32, device=self.device
+        )
+        self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
+        self.num_computed_tokens_np[req_idx] = num_computed_tokens
+
+    def remove_request(self, req_id: str) -> int | None:
+        """Return the freed slot index, or None if the request was not found."""
+        req_idx = self.req_id_to_index.pop(req_id, None)
+        if req_idx is None:
+            return None
+        self.index_to_req_id.pop(req_idx, None)
+        self.free_indices.append(req_idx)
+        return req_idx

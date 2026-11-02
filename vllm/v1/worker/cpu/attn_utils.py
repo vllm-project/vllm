@@ -1,0 +1,357 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from __future__ import annotations
+
+from collections.abc import Iterable, Sequence
+from contextlib import AbstractContextManager, nullcontext
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, cast
+
+import numpy as np
+import torch
+
+import vllm.envs as envs
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.v1.attention.backend import CommonAttentionMetadata
+from vllm.v1.attention.backends.utils import (
+    create_fast_prefill_custom_backend,
+)
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+    UniformTypeKVCacheSpecs,
+)
+from vllm.v1.worker.utils import (
+    AttentionGroup,
+    add_kv_sharing_layers_to_kv_cache_groups,
+    allocate_kv_cache,
+    bind_kv_cache_to_layers,
+    customize_attention_spec,
+    map_kv_caches_to_kernel_blocks,
+    prepare_kernel_block_sizes,
+)
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.cpu.model_states.interface import ModelSpecificAttnMetadata
+
+
+@dataclass(frozen=True)
+class FastPrefillBatchMetadata:
+    """Per-step inputs for the KV-sharing fast prefill path."""
+
+    logits_indices_padded: torch.Tensor
+    num_logits_indices: int
+    max_logits_per_req: int
+
+
+class FastPrefillHelper:
+    """Decides per step whether to arm the KV-sharing fast prefill path."""
+
+    def prepare(
+        self,
+        logits_indices: torch.Tensor,
+        cu_num_logits_np: np.ndarray,
+        has_prefill: bool,
+    ) -> FastPrefillBatchMetadata | None:
+        if not has_prefill:
+            return None
+
+        num_logits = logits_indices.shape[0]
+        assert num_logits > 0
+        return FastPrefillBatchMetadata(
+            logits_indices_padded=logits_indices,
+            num_logits_indices=num_logits,
+            # Largest per-request logits count, known on the host.
+            max_logits_per_req=int(np.diff(cu_num_logits_np).max()),
+        )
+
+
+def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
+    kv_cache_spec: dict[str, KVCacheSpec] = {}
+    layer_type = cast(type[Any], AttentionLayerBase)
+    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    for layer_name, attn_module in attn_layers.items():
+        if getattr(attn_module, "kv_sharing_target_layer_name", None):
+            # This layer will use KV cache of the sharing target layer.
+            continue
+        # Skip modules that don't need KV cache (eg encoder-only attention)
+        if spec := attn_module.get_kv_cache_spec(vllm_config):
+            if isinstance(spec, AttentionSpec):
+                spec = customize_attention_spec(attn_module.get_attn_backend(), spec)
+            kv_cache_spec[layer_name] = spec
+    return kv_cache_spec
+
+
+def get_shared_kv_cache_layers(vllm_config: VllmConfig):
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    return {
+        layer_name: kv_tgt_layer
+        for layer_name, attn_module in attn_layers.items()
+        if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name)
+    }
+
+
+def get_kv_sharing_fast_prefill_eligible_layers(
+    vllm_config: VllmConfig,
+) -> set[str]:
+    """Trailing run of KV-sharing layers, eligible for fast prefill.
+
+    In You Only Cache Once (https://arxiv.org/abs/2405.05254) or other similar
+    KV sharing setups, only the layers that generate KV caches are involved in
+    the prefill phase, enabling prefill to early exit. Layers are registered in
+    execution order, so the eligible layers are the contiguous suffix of
+    KV-sharing layers.
+    """
+    if not vllm_config.cache_config.kv_sharing_fast_prefill:
+        return set()
+    shared_kv_cache_layers = get_shared_kv_cache_layers(vllm_config)
+    if not shared_kv_cache_layers:
+        return set()
+    eligible_layers: set[str] = set()
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    for layer_name in reversed(attn_layers):
+        if layer_name not in shared_kv_cache_layers:
+            break
+        eligible_layers.add(layer_name)
+    return eligible_layers
+
+
+def init_attn_backend(
+    kv_cache_config: KVCacheConfig,
+    vllm_config: VllmConfig,
+    device: torch.device,
+) -> tuple[list[list[AttentionGroup]], list[int]]:
+    # Phase 1: discover attention groups for each kv cache group.
+    attn_groups: list[list[AttentionGroup]] = []
+
+    # Add KV-sharing layers to their target's kv cache group so they are
+    # discovered alongside the target layer in Phase 1 below.
+    add_kv_sharing_layers_to_kv_cache_groups(
+        get_shared_kv_cache_layers(vllm_config), kv_cache_config.kv_cache_groups
+    )
+    fast_prefill_eligible_layers = get_kv_sharing_fast_prefill_eligible_layers(
+        vllm_config
+    )
+
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(
+        kv_cache_config.kv_cache_groups
+    ):
+        layer_names = kv_cache_group_spec.layer_names
+        if not kv_cache_group_spec.kv_cache_spec.has_layer_views:
+            attn_groups.append([])
+            continue
+
+        layer_type = cast(type[Any], AttentionLayerBase)
+        attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
+        group_map: dict[tuple[tuple[str, str], KVCacheSpec, int], AttentionGroup] = {}
+        group_order: list[tuple[tuple[str, str], KVCacheSpec, int]] = []
+
+        for layer_name in layer_names:
+            attn_backend = attn_layers[layer_name].get_attn_backend()
+            if (
+                envs.VLLM_BATCH_INVARIANT
+                and not attn_backend.supports_batch_invariance()
+            ):
+                raise RuntimeError(
+                    "VLLM batch_invariant mode is not supported for "
+                    f"{attn_backend.get_name()}."
+                )
+            if layer_name in fast_prefill_eligible_layers:
+                attn_backend = create_fast_prefill_custom_backend(
+                    "FastPrefill", attn_backend
+                )
+
+            layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
+            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
+
+            # Split on per-rank num_heads_q so layers with different Q-head
+            # counts get separate metadata builders.
+            num_heads_q = getattr(attn_layers[layer_name], "num_heads", 0)
+            key = (attn_backend.full_cls_name(), layer_kv_cache_spec, num_heads_q)
+            if key not in group_map:
+                group_map[key] = AttentionGroup(
+                    attn_backend, [layer_name], layer_kv_cache_spec, kv_cache_group_id
+                )
+                group_order.append(key)
+            else:
+                group_map[key].layer_names.append(layer_name)
+
+        attn_groups.append([group_map[key] for key in group_order])
+
+    # Phase 2: pick a kernel block size per kv cache group that is supported
+    # by all backends within that group.
+    kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
+
+    # Phase 3: create metadata builders.
+    for kv_cache_group_id, groups in enumerate(attn_groups):
+        kernel_block_size: int | None = None
+        if kv_cache_group_id < len(kernel_block_sizes):
+            kernel_block_size = kernel_block_sizes[kv_cache_group_id]
+        for group in groups:
+            group.create_metadata_builders(
+                vllm_config=vllm_config,
+                device=device,
+                kernel_block_size=kernel_block_size,
+            )
+
+    return attn_groups, kernel_block_sizes
+
+
+def init_kv_cache(
+    forward_context: dict[str, Any],
+    kv_cache_config: KVCacheConfig,
+    device: torch.device,
+    kernel_block_sizes: list[int],
+    vllm_config: VllmConfig,
+    kv_cache_allocation_context: AbstractContextManager | None = None,
+    *,
+    attn_groups: Iterable[AttentionGroup] = (),
+) -> dict[str, Any]:
+    allocation_context = kv_cache_allocation_context or nullcontext()
+    with allocation_context:
+        kv_caches = allocate_kv_cache(
+            kv_cache_config,
+            device,
+            vllm_config.cache_config.get_resolved_kv_cache_layout(),
+            kernel_block_sizes,
+        )
+    for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
+        kv_caches[layer_name] = kv_caches[target]
+
+    # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per
+    # decoder layer, so a layer name carries two integers (layer + module index).
+    num_attn_module = (
+        2 if vllm_config.model_config.hf_config.model_type == "longcat_flash" else 1
+    )
+    bindable_caches = map_kv_caches_to_kernel_blocks(
+        {name: cache for name, cache in kv_caches.items() if name in forward_context},
+        attn_groups,
+    )
+    bind_kv_cache_to_layers(
+        bindable_caches,
+        forward_context,
+        num_attn_module,
+        kv_cache_groups=kv_cache_config.kv_cache_groups,
+    )
+    return kv_caches
+
+
+def build_slot_mappings_by_layer(
+    slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
+) -> dict[str, torch.Tensor]:
+    slot_mappings_by_layer: dict[str, torch.Tensor] = {}
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+    for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
+        for layer_name in kv_cache_group.layer_names:
+            slot_mappings_by_layer[layer_name] = slot_mapping
+    return slot_mappings_by_layer
+
+
+def build_attn_metadata(
+    attn_groups: list[list[AttentionGroup]],
+    num_reqs: int,
+    num_tokens: int,
+    query_start_loc: torch.Tensor,
+    max_query_len: int,
+    seq_lens: torch.Tensor,
+    max_seq_len: int,
+    block_tables: Sequence[torch.Tensor],
+    slot_mappings: torch.Tensor,
+    kv_cache_config: KVCacheConfig,
+    seq_lens_cpu_upper_bound: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
+    is_prefilling: torch.Tensor | None = None,
+    mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
+    model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
+    causal: bool | torch.Tensor = True,
+    rswa_prefix_lens: torch.Tensor | None = None,
+    fast_prefill: FastPrefillBatchMetadata | None = None,
+    req_idx: np.ndarray | None = None,
+) -> dict[str, Any]:
+    seq_lens = seq_lens[:num_reqs]
+    if seq_lens_cpu_upper_bound is not None:
+        seq_lens_cpu_upper_bound = seq_lens_cpu_upper_bound[:num_reqs]
+
+    attn_metadata: dict[str, Any] = {}
+    token_to_req_indices: torch.Tensor | None = None
+    # Mamba groups with the same spec and builder differ only in their state
+    # indices, so later groups re-gather those from the first group's metadata.
+    cached_metadata: dict[tuple[KVCacheSpec, type], Any] = {}
+    num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+    for i in range(num_kv_cache_groups):
+        if not attn_groups[i]:
+            continue
+        block_table = block_tables[i]
+        slot_mapping = slot_mappings[i]
+        common_attn_metadata_extra_kwargs = (
+            model_specific_attn_metadata.get_extra_common_attn_kwargs(i, num_reqs)
+            if model_specific_attn_metadata is not None
+            else {}
+        )
+        # Model-specific metadata (e.g. Mamba hybrid) may supply its own
+        # padding-aware is_prefilling, which takes precedence over the default.
+        group_is_prefilling = common_attn_metadata_extra_kwargs.pop(
+            "is_prefilling", is_prefilling
+        )
+        if fast_prefill is not None:
+            common_attn_metadata_extra_kwargs.update(
+                logits_indices_padded=fast_prefill.logits_indices_padded,
+                num_logits_indices=fast_prefill.num_logits_indices,
+                max_logits_per_req=fast_prefill.max_logits_per_req,
+            )
+        common_attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc,
+            seq_lens=seq_lens,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            max_seq_len=max_seq_len,
+            num_reqs=num_reqs,
+            num_actual_tokens=num_tokens,
+            max_query_len=max_query_len,
+            block_table_tensor=block_table,
+            slot_mapping=slot_mapping,
+            causal=causal,
+            positions=positions,
+            is_prefilling=group_is_prefilling,
+            mm_req_doc_ranges=mm_req_doc_ranges,
+            rswa_prefix_lens=rswa_prefix_lens,
+            req_idx=req_idx,
+            _token_to_req_indices_cache=token_to_req_indices,
+            **common_attn_metadata_extra_kwargs,
+        )
+
+        for attn_group in attn_groups[i]:
+            attn_metadata_builder = attn_group.get_metadata_builder()
+            reuse_key = None
+            if attn_metadata_builder.supports_update_block_table and isinstance(
+                attn_group.kv_cache_spec, MambaSpec
+            ):
+                reuse_key = (attn_group.kv_cache_spec, type(attn_metadata_builder))
+            if reuse_key in cached_metadata:
+                metadata = attn_metadata_builder.update_block_table(
+                    cached_metadata[reuse_key], block_table, slot_mapping
+                )
+            else:
+                attn_metadata_extra_kwargs = (
+                    model_specific_attn_metadata.get_extra_attn_kwargs(
+                        attn_metadata_builder,
+                        num_reqs,
+                    )
+                    if model_specific_attn_metadata is not None
+                    else {}
+                )
+                metadata = attn_group.build_metadata(
+                    common_attn_metadata, **attn_metadata_extra_kwargs
+                )
+            if reuse_key is not None and reuse_key not in cached_metadata:
+                cached_metadata[reuse_key] = metadata
+            for layer_name in attn_group.layer_names:
+                attn_metadata[layer_name] = metadata
+        token_to_req_indices = common_attn_metadata._token_to_req_indices_cache
+    return attn_metadata
