@@ -1058,34 +1058,47 @@ def test_skinny_gemm_plans_are_valid(
         assert config.static_k >= 2 * k_tile
 
 
+# One planned (N, K) per capability table, with K = 1024 planned and K = 128 not.
+_PLANNED_SHAPES = {
+    (12, 1): (4096, 1024),
+    (9, 0): (4096, 4096),
+}
+
+
+@pytest.mark.parametrize("capability", sorted(_PLANNED_SHAPES))
 @pytest.mark.parametrize(
-    "dtype,bias,k,ndim,batch_invariant,expected",
+    "dtype,bias,k_planned,ndim,batch_invariant,expected",
     [
-        pytest.param(torch.bfloat16, False, 1024, 2, False, True, id="planned"),
-        pytest.param(torch.float16, False, 1024, 2, False, False, id="fp16"),
-        pytest.param(torch.float32, False, 1024, 2, False, False, id="fp32"),
-        pytest.param(torch.bfloat16, True, 1024, 2, False, False, id="bias"),
-        pytest.param(torch.bfloat16, False, 128, 2, False, False, id="unlisted"),
-        pytest.param(torch.bfloat16, False, 1024, 2, True, False, id="batch-invariant"),
-        pytest.param(torch.bfloat16, False, 1024, 3, False, False, id="conv1d"),
-        pytest.param(torch.bfloat16, False, 1024, 4, False, False, id="conv2d"),
+        pytest.param(torch.bfloat16, False, True, 2, False, True, id="planned"),
+        pytest.param(torch.float16, False, True, 2, False, False, id="fp16"),
+        pytest.param(torch.float32, False, True, 2, False, False, id="fp32"),
+        pytest.param(torch.bfloat16, True, True, 2, False, False, id="bias"),
+        pytest.param(torch.bfloat16, False, False, 2, False, False, id="unlisted"),
+        pytest.param(torch.bfloat16, False, True, 2, True, False, id="batch-invariant"),
+        pytest.param(torch.bfloat16, False, True, 3, False, False, id="conv1d"),
+        pytest.param(torch.bfloat16, False, True, 4, False, False, id="conv2d"),
     ],
 )
 def test_maybe_use_skinny_gemm(
     monkeypatch: pytest.MonkeyPatch,
+    capability: tuple[int, int],
     dtype: torch.dtype,
     bias: bool,
-    k: int,
+    k_planned: bool,
     ndim: int,
     batch_invariant: bool,
     expected: bool,
 ) -> None:
     """Only eligible layers are marked; CPU tensors suffice for selection."""
-    assert (4096, 1024) in skinny_plans.SM121_SKINNY_GEMM_PLANS
-    assert (4096, 128) not in skinny_plans.SM121_SKINNY_GEMM_PLANS
+    n, k = _PLANNED_SHAPES[capability]
+    plans = skinny_plans.SKINNY_GEMM_PLANS_BY_CAPABILITY[capability]
+    assert (n, k) in plans
+    assert (n, 128) not in plans
+    if not k_planned:
+        k = 128
     # Isolate hardware/dependency detection, keeping the real plan lookup.
     monkeypatch.setattr(
-        skinny_plans.current_platform, "get_device_capability", lambda: (12, 1)
+        skinny_plans.current_platform, "get_device_capability", lambda: capability
     )
     monkeypatch.setattr(
         skinny_plans.shape_dynamic_skinny_gemm, "is_available", lambda: True
@@ -1093,15 +1106,58 @@ def test_maybe_use_skinny_gemm(
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", str(int(batch_invariant)))
     layer: nn.Module
     if ndim == 2:
-        layer = nn.Linear(k, 4096, bias=bias, dtype=dtype, device="cpu")
+        layer = nn.Linear(k, n, bias=bias, dtype=dtype, device="cpu")
     elif ndim == 3:
-        layer = nn.Conv1d(k, 4096, 1, bias=bias, dtype=dtype, device="cpu")
+        layer = nn.Conv1d(k, n, 1, bias=bias, dtype=dtype, device="cpu")
     else:
-        layer = nn.Conv2d(k, 4096, 1, bias=bias, dtype=dtype, device="cpu")
+        layer = nn.Conv2d(k, n, 1, bias=bias, dtype=dtype, device="cpu")
 
     maybe_use_skinny_gemm(layer)
 
     assert getattr(layer, "use_skinny_gemm", False) is expected
+    if expected:
+        # The eager dispatch reads the plan from the layer.
+        assert layer.skinny_gemm_plan == plans[(n, k)]
+
+
+_PLAN_RUN_CASES = [
+    pytest.param(capability, n, k, num_tokens, id=f"{capability}-{n}x{k}-m{num_tokens}")
+    for capability, plans in skinny_plans.SKINNY_GEMM_PLANS_BY_CAPABILITY.items()
+    for (n, k), shape_plans in plans.items()
+    for num_tokens in shape_plans
+]
+
+
+@pytest.mark.parametrize("capability,n,k,num_tokens", _PLAN_RUN_CASES)
+def test_skinny_gemm_plans_run_and_match_linear(
+    capability: tuple[int, int], n: int, k: int, num_tokens: int
+) -> None:
+    """Every registered plan compiles, runs on its device and matches F.linear.
+
+    N is capped: correctness does not depend on it, and the LM-head rows would
+    otherwise allocate a 1.5 GB weight per case.
+    """
+    _require_capability_and_cute(capability)
+    config = skinny_plans.SKINNY_GEMM_PLANS_BY_CAPABILITY[capability][(n, k)][
+        num_tokens
+    ]
+    assert skinny_plans.get_skinny_gemm_plan(n, k)[num_tokens] == config
+    n_test = min(n, 4096)
+    n_test -= n_test % config.outputs_per_block
+    torch.manual_seed(42 + num_tokens)
+    x = torch.randn(num_tokens, k, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(n_test, k, dtype=torch.bfloat16, device="cuda") * 0.02
+
+    # Direct call, so a silent F.linear fallback cannot make this pass.
+    output = skinny_plans.shape_dynamic_skinny_gemm(x, weight, config)
+    reference = torch.nn.functional.linear(x, weight)
+
+    assert (torch.bfloat16, config, False) in (
+        skinny_plans.shape_dynamic_skinny_gemm._compiled
+    )
+    assert output.shape == reference.shape
+    max_err = (output.float() - reference.float()).abs().max().item()
+    assert max_err <= 1e-2 * reference.float().abs().max().item()
 
 
 def test_glm52_q_b_nonpacked_single_row_falls_back() -> None:
