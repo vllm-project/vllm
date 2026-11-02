@@ -1101,23 +1101,26 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi
 
 # KV connectors for the P/D and connector suites, so CI jobs never install them
-# at runtime. The lock is hash-pinned and compiled against requirements/test/cuda.txt,
-# so it only adds packages; it targets the stable x86_64 CUDA 13 image.
+# at runtime. Only lock entries the image does not already have are installed,
+# hash-verified; the install must not change any preinstalled package. Targets
+# the stable x86_64 CUDA 13 image.
 COPY requirements/test/kv_connectors_cuda.txt requirements/test/kv_connectors_cuda.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
         && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
         uv pip freeze --system | sort > /tmp/kv-before.txt \
+        && sed 's/[=@ ].*//' /tmp/kv-before.txt | tr 'A-Z_.' 'a-z--' > /tmp/kv-installed.txt \
+        && awk 'NR == FNR { have[$1] = 1; next } /^[A-Za-z0-9]/ { name = tolower($1); sub(/==.*/, "", name); gsub(/[_.]/, "-", name); keep = !(name in have) } /^[A-Za-z0-9 ]/ && keep' \
+            /tmp/kv-installed.txt requirements/test/kv_connectors_cuda.txt > /tmp/kv-new.txt \
         # The NCCL UV_OVERRIDE would enter --require-hashes as an unhashed requirement.
         && env -u UV_OVERRIDE uv pip install --system --require-hashes --no-deps \
-            -r requirements/test/kv_connectors_cuda.txt \
-            --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+            -r /tmp/kv-new.txt \
         && uv pip freeze --system | sort > /tmp/kv-after.txt \
         && if comm -23 /tmp/kv-before.txt /tmp/kv-after.txt | grep .; then \
             echo "kv_connectors_cuda.txt changed the packages above; recompile it" >&2; \
             exit 1; \
         fi \
-        && rm -f /tmp/kv-before.txt /tmp/kv-after.txt; \
+        && rm -f /tmp/kv-before.txt /tmp/kv-after.txt /tmp/kv-installed.txt /tmp/kv-new.txt; \
     fi
 
 # image to run unit testing suite
