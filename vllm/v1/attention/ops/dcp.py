@@ -26,6 +26,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     VllmTritonJitKernel,
     triton_scalar_specialization_rep,
 )
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.attention.ops.cp_common import (
@@ -33,6 +34,7 @@ from vllm.v1.attention.ops.cp_common import (
     direct_cp_enabled,
     direct_cp_multicast_enabled,
 )
+from vllm.v1.attention.ops.mla_dcp_context import _gather_context_rows
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
@@ -1010,6 +1012,13 @@ def dcp_a2a_lse_reduce(
     )
 
 
+def get_dcp_context_workspace_dtype(vllm_config: VllmConfig) -> torch.dtype:
+    """The dtype of the MLA chunked-context workspace under DCP."""
+    if vllm_config.cache_config.cache_dtype == "fp8_ds_mla":
+        return torch.bfloat16
+    return vllm_config.model_config.dtype
+
+
 def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
     # num_speculative_tokens also counts a diffusion canvas.
@@ -1486,6 +1495,26 @@ class MLADCPManager:
                 head_dim=output_head_dim,
                 is_base_e=is_lse_base_on_e,
             )
+        if vllm_config.kernel_config.enable_jit_warmup:
+            # The row gather of the chunked-context loop, for every MLA layer
+            # under DCP. The query head holds the latent and rope parts and the
+            # output head the latent part.
+            dims = dict(
+                kv_lora_rank=output_head_dim,
+                rope_dim=query_head_dim - output_head_dim,
+            )
+            _gather_context_rows.register_warmup(
+                dtype=get_dcp_context_workspace_dtype(vllm_config), **dims
+            )
+            if vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3"):
+                # The backend may keep the rows of a plain fp8 cache fp8 and
+                # dequantize them in the row gather instead (see
+                # MLACommonMetadataBuilder.use_fp8_dcp_context).
+                _gather_context_rows.register_warmup(
+                    dtype=current_platform.fp8_dtype(),
+                    out_dtype=vllm_config.model_config.dtype,
+                    **dims,
+                )
         self.query_gather = (
             None
             if use_pcp

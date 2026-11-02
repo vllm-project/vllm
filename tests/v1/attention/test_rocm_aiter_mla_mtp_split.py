@@ -986,10 +986,7 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     assert builder._mla_kv_dtype == dtypes.fp8
 
     builder.dcp_world_size = 2
-    chunk = object()
-    rows = torch.tensor([0], dtype=torch.int64)
-    build_rows = mock.Mock(return_value=rows)
-    monkeypatch.setattr(rocm_aiter_mla, "context_row_indices", build_rows)
+    chunk = SimpleNamespace(context_row_indices=torch.tensor([3, 1], dtype=torch.int64))
     monkeypatch.setattr(
         rocm_aiter_mla,
         "_supports_fused_dcp_prefill_config",
@@ -1009,10 +1006,13 @@ def test_builder_init_sizes_decode_metadata_and_filters_dcp_maps(
     )
     for _ in range(2):
         metadata = builder.build(0, SimpleNamespace(causal=True))
-        assert metadata.dcp_context_row_indices == ([rows] if needs_row_map else None)
-    assert build_rows.call_args_list == (
-        [mock.call(chunk, torch.device("cpu"))] * 2 if needs_row_map else []
-    )
+        if needs_row_map:
+            # The chunk's row indices, as the int32 the fused gather takes.
+            (rows,) = metadata.dcp_context_row_indices
+            assert rows.dtype == torch.int32
+            assert rows.tolist() == [3, 1]
+        else:
+            assert metadata.dcp_context_row_indices is None
 
 
 def test_builder_sizes_metadata_for_every_decode_qlen(monkeypatch):
