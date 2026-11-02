@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Collection, Mapping
-from typing import ClassVar, Protocol
+from collections.abc import Collection, Mapping, Sequence
+from typing import TYPE_CHECKING, ClassVar, Protocol
 
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     ReqId,
+    TransferJobStatus,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.events import (
     OffloadingEventsTracker,
@@ -24,6 +25,10 @@ from vllm.v1.kv_offload.base import (
     StoreTrigger,
 )
 
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
 
 class StoreJobSink(Protocol):
     """The scheduler's store-job intake for one handler, in one step.
@@ -34,14 +39,14 @@ class StoreJobSink(Protocol):
     """
 
     def prepare_store(
-        self, keys: Collection[OffloadKey], req_context: ReqContext
+        self, keys: Collection[OffloadKey], req_context: ReqContext | None
     ) -> PrepareStoreOutput | None:
         """Offer keys to the manager, with the trigger of this handler."""
         ...
 
     def add_job(
         self,
-        req_id: ReqId,
+        req_id: ReqId | None,
         keys: Collection[OffloadKey],
         src_spec: GPULoadStoreSpec,
         dst_spec: LoadStoreSpec,
@@ -49,7 +54,12 @@ class StoreJobSink(Protocol):
         fenced_block_ids: list[int] | None = None,
         deferred_fence_block_ids: list[int] | None = None,
     ) -> None:
-        """Make a store job, and let the scheduler track it."""
+        """Make a store job, and let the scheduler track it.
+
+        The fences apply only to a job that belongs to a request: a
+        request-free job is waited for before the next forward pass, so no
+        block can be reallocated under it.
+        """
         ...
 
 
@@ -69,6 +79,16 @@ class StoreTriggerHandler(ABC):
     # The trigger that this handler serves.
     trigger: ClassVar[StoreTrigger]
 
+    @classmethod
+    def check_support(
+        cls, vllm_config: "VllmConfig", kv_cache_config: "KVCacheConfig"
+    ) -> None:
+        """Raise ValueError if this handler cannot run with the given config.
+
+        The scheduler calls it before it makes the handler.
+        """
+        return
+
     def __init__(
         self,
         config: SchedulerOffloadConfig,
@@ -81,12 +101,18 @@ class StoreTriggerHandler(ABC):
         self,
         req_status: RequestOffloadState,
         num_cached_tokens: int,
+        load_chunk_ranges: Sequence[tuple[int, int]],
+        load_block_ids: Sequence[Sequence[int]],
     ) -> None:
         """Called when the scheduler makes a load job for a request.
 
         Args:
             req_status: the request of the load.
             num_cached_tokens: the number of tokens on the GPU after the load.
+            load_chunk_ranges: per group, the [start, end) range of the
+                loaded chunks. An empty range if the group loads nothing.
+            load_block_ids: per group, the GPU block ids of the request after
+                the allocation. The request state gets them in a later step.
 
         """
         return
@@ -110,8 +136,57 @@ class StoreTriggerHandler(ABC):
         """
         return
 
-    def reset(self) -> None:
-        """Called when the scheduler resets the cache, after it clears the jobs."""
+    def reset(self, req_states: Mapping[ReqId, "RequestOffloadState"]) -> None:
+        """Called when the scheduler resets the cache, after it clears the jobs.
+
+        Args:
+            req_states: the requests that stay active after the reset.
+
+        """
+        return
+
+    def on_load_complete(self, job_status: TransferJobStatus) -> None:
+        """Called when a load job of a tracked request completes.
+
+        Args:
+            job_status: the status of the completed load job.
+
+        """
+        return
+
+    def on_request_blocks_allocated(
+        self,
+        req_status: "RequestOffloadState",
+        block_ids: Sequence[Sequence[int]],
+        start_block_idxs: Sequence[int],
+    ) -> None:
+        """Called when the block pool gives blocks to a request.
+
+        Called before on_blocks_allocated() of the same step, also for a
+        request that is not in the scheduler output of the step.
+
+        Args:
+            req_status: the request that gets the blocks.
+            block_ids: per offloaded group, the allocated block ids, starting
+                at start_block_idxs[g]. 0 is the null block.
+            start_block_idxs: per offloaded group, the position in the request
+                of the first id of block_ids.
+
+        """
+        return
+
+    def on_blocks_allocated(self, block_ids: Collection[int]) -> None:
+        """Receive the blocks that the pool gave out in the current step.
+
+        Called once per step, after the step's allocations and before
+        build_store_jobs(). Includes the blocks of all KV cache groups and the
+        destinations of block copies.
+
+        Args:
+            block_ids: the allocated block ids, without the null block. A
+                read-only snapshot: the scheduler keeps its own set.
+
+        """
         return
 
     @abstractmethod

@@ -2863,6 +2863,40 @@ def test_req_context_counts_live_until_request_finished(registered):
     assert all(getattr(synthetic, name) is None for name in counts)
 
 
+def test_scheduler_makes_a_handler_per_manager_trigger(request_runner):
+    """The manager selects the triggers, after the layout handlers."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+        extra_config_overrides={
+            "store_triggers": ["ON_COMPUTE"],
+            "self_describing_kv_events": False,
+        },
+    )
+    assert [trigger.name for trigger in runner.connector_scheduler._store_handlers] == [
+        "ON_COMPUTE"
+    ]
+
+
+@pytest.mark.parametrize(
+    "store_triggers",
+    [
+        [],
+        ["ON_COMPUTE", "ON_COMPUTE"],
+    ],
+)
+def test_unsupported_store_triggers_raise(request_runner, store_triggers):
+    """A manager with no trigger, or with two equal triggers, is refused."""
+    with pytest.raises(ValueError):
+        request_runner(
+            block_size=4,
+            num_gpu_blocks=10,
+            async_scheduling=False,
+            extra_config_overrides={"store_triggers": store_triggers},
+        )
+
+
 def test_stores_pass_the_trigger_to_prepare_and_complete(request_runner):
     """The scheduler gives a store job's trigger to both prepare_store and
     complete_store."""
@@ -2900,7 +2934,23 @@ class _RecordingStoreHandler(OnComputeStoreHandler):
 
     def __init__(self, *args: Any):
         super().__init__(*args)
+        self.loads: list[tuple[str, int, list[tuple[int, int]], list[list[int]]]] = []
         self.removed: list[str] = []
+
+    def on_load_scheduled(
+        self, req_status, num_cached_tokens, load_chunk_ranges, load_block_ids
+    ):
+        self.loads.append(
+            (
+                req_status.req.request_id,
+                num_cached_tokens,
+                list(load_chunk_ranges),
+                [list(block_ids) for block_ids in load_block_ids],
+            )
+        )
+        super().on_load_scheduled(
+            req_status, num_cached_tokens, load_chunk_ranges, load_block_ids
+        )
 
     def on_request_removed(self, req_id):
         self.removed.append(req_id)
@@ -2912,6 +2962,33 @@ def _install_recording_handler(runner) -> _RecordingStoreHandler:
     handler = _RecordingStoreHandler(sched.config, sched._events_tracker)
     sched._store_handlers[StoreTrigger.ON_COMPUTE] = handler
     return handler
+
+
+def test_store_handler_gets_the_chunks_and_blocks_of_a_load(request_runner):
+    """A handler gets the loaded chunk range and the GPU block ids of a load,
+    because the request state gets the block ids only in a later step."""
+    block_size = 4
+    blocks_per_chunk = 3
+    tokens_per_chunk = block_size * blocks_per_chunk
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=block_size,
+        num_gpu_blocks=100,
+        async_scheduling=False,
+    )
+    handler = _install_recording_handler(runner)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context, trigger: (
+        generate_store_output([])
+    )
+    runner.new_request(token_ids=[0] * tokens_per_chunk * 2)
+    runner.connector_scheduler._maximal_prefix_lookup = lambda keys, ctx, *_: 1
+    runner.run(decoded_tokens=[], complete_transfers=False)
+
+    req_id = str(runner.req_id)
+    gpu_block_ids = runner.scheduler.kv_cache_manager.get_block_ids(req_id)
+    assert handler.loads == [
+        (req_id, tokens_per_chunk, [(0, 1)], [list(gpu_block_ids[0])])
+    ]
 
 
 def test_store_handler_hears_each_request_removal(request_runner):

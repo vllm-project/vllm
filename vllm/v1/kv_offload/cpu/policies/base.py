@@ -61,9 +61,11 @@ class CachePolicy(ABC):
 
     @abstractmethod
     def insert(
-        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext
+        self, key: OffloadKey, chunk: ChunkStatus, req_context: ReqContext | None
     ) -> None:
         """Add a newly allocated chunk with the storing request's context.
+
+        req_context is None for a store after the request finishes.
 
         For ARC: also removes from ghost lists.
         """
@@ -73,9 +75,11 @@ class CachePolicy(ABC):
         """Remove a chunk (used to clean up after a failed store)."""
 
     def on_store_miss(
-        self, keys: Iterable[OffloadKey], req_context: ReqContext
+        self, keys: Iterable[OffloadKey], req_context: ReqContext | None
     ) -> None:
         """Observe store misses before their cache entries are inserted.
+
+        req_context is None for a store after the request finishes.
 
         Policies may override this hook when a miss has distinct semantics,
         such as ARC adapting to a ghost-list hit.

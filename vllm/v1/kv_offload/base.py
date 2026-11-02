@@ -406,7 +406,7 @@ class OffloadingManager(ABC):
     def prepare_store(
         self,
         keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
         *,
         trigger: StoreTrigger,
     ) -> PrepareStoreOutput | None:
@@ -416,7 +416,8 @@ class OffloadingManager(ABC):
 
         Args:
             keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params).
+            req_context: per-request context (e.g. kv_transfer_params), or
+                None when no request owns the blocks.
             trigger: why the connector asks for the store.
 
         Returns:
@@ -431,7 +432,7 @@ class OffloadingManager(ABC):
     def complete_store(
         self,
         keys: Collection[OffloadKey],
-        req_context: ReqContext,
+        req_context: ReqContext | None,
         *,
         trigger: StoreTrigger,
         success: bool = True,
@@ -443,12 +444,28 @@ class OffloadingManager(ABC):
 
         Args:
             keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params).
+            req_context: per-request context (e.g. kv_transfer_params), or
+                None when no request owns the blocks.
             trigger: the trigger given to the matching prepare_store.
             success: whether the blocks were stored successfully.
 
         """
         return
+
+    @property
+    def store_triggers(self) -> tuple[StoreTrigger, ...]:
+        """The store triggers that this manager asks for, without duplicates.
+
+        The scheduler makes one store handler per trigger, in this order, after
+        the handlers that the KV cache layout requires. A manager with more than
+        one trigger can get the same key from two handlers, so prepare_store
+        must drop the keys that are stored or that have a store in flight.
+
+        A trigger whose stores belong to no request is submitted before the
+        forward pass of its step, so its source blocks must already hold final
+        data.
+        """
+        return (StoreTrigger.ON_COMPUTE,)
 
     @abstractmethod
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
