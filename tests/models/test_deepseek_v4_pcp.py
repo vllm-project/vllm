@@ -116,15 +116,21 @@ def _generate(model_path, output_path, pcp, tp=1, ep=False):
 
 @pytest.mark.distributed
 @pytest.mark.parametrize(
-    "topologies",
-    [((1, 1, False), (2, 1, False)), ((1, 4, True), (2, 2, True))],
-    ids=["pcp", "tp_ep"],
+    "topologies,expert_dtype",
+    [
+        (((1, 1, False), (2, 1, False)), "fp8"),
+        (((1, 4, True), (2, 2, True)), "fp8"),
+        (((1, 4, True), (2, 2, True)), "fp4"),
+    ],
+    ids=["pcp", "tp_ep", "mxfp4_tp_ep"],
 )
-def test_pcp_matches_single_rank_across_compression_boundaries(tmp_path, topologies):
+def test_pcp_generation_across_compression_boundaries(tmp_path, topologies, expert_dtype):
     """Keep attention dimensions with three layers and eight experts."""
     model = tmp_path / "model"
     model.mkdir()
-    (model / "config.json").write_text(json.dumps(_small_config()))
+    config = _small_config()
+    config["expert_dtype"] = expert_dtype
+    (model / "config.json").write_text(json.dumps(config))
     env = dict(
         os.environ,
         VLLM_USE_V2_MODEL_RUNNER="1",
