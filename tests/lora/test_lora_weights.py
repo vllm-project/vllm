@@ -3,6 +3,7 @@
 import pytest
 import torch
 
+from vllm.lora.lora_model import LoRAModel
 from vllm.lora.lora_weights import LoRALayerWeights, PackedLoRALayerWeights
 from vllm.lora.peft_helper import PEFTHelper
 
@@ -110,3 +111,53 @@ def test_from_config_uses_checkpoint_module_name():
     lora = LoRALayerWeights.from_config("model.layers.1.self_attn.q_proj", peft_helper)
     assert lora.rank == RANK
     assert lora.scaling == pytest.approx(ALPHA / RANK)
+
+
+_FOLD_MODULE = "model.layers.0.self_attn.o_proj"
+
+
+def _fold_adapter(r: int, dtype: torch.dtype) -> dict[str, torch.Tensor]:
+    g = torch.Generator().manual_seed(0)
+    return {
+        f"base_model.model.{_FOLD_MODULE}.lora_A.weight": torch.randn(
+            r, 64, generator=g
+        ).to(dtype),
+        f"base_model.model.{_FOLD_MODULE}.lora_B.weight": (
+            torch.randn(256, r, generator=g) * 0.02
+        ).to(dtype),
+    }
+
+
+@pytest.mark.parametrize(
+    "r,alpha,use_rslora",
+    [(8, 16, True), (12, 16, False), (8, 16, False)],
+)
+def test_from_lora_tensors_folds_scaling_before_cast(r, alpha, use_rslora):
+    """A float32 adapter's lora_b must be scaled before it is rounded to
+    lora_dtype, not rounded, scaled in lora_dtype and rounded again."""
+    tensors = _fold_adapter(r, torch.float32)
+    b = tensors[f"base_model.model.{_FOLD_MODULE}.lora_B.weight"].clone()
+    helper = PEFTHelper(
+        r=r, lora_alpha=alpha, target_modules=["o_proj"], use_rslora=use_rslora
+    )
+    lora = LoRAModel.from_lora_tensors(
+        1, tensors, peft_helper=helper, device="cpu", dtype=torch.bfloat16
+    ).loras[_FOLD_MODULE]
+    assert lora.scaling == 1
+    lora.optimize()
+    expected = (b * helper.vllm_lora_scaling_factor).to(torch.bfloat16)
+    torch.testing.assert_close(lora.lora_b, expected, rtol=0, atol=0)
+
+
+def test_from_lora_tensors_does_not_scale_caller_tensors():
+    """Tensors that already have lora_dtype must not be scaled in place."""
+    tensors = _fold_adapter(8, torch.bfloat16)
+    before = {k: v.clone() for k, v in tensors.items()}
+    helper = PEFTHelper(r=8, lora_alpha=16, target_modules=["o_proj"])
+    model = LoRAModel.from_lora_tensors(
+        1, tensors, peft_helper=helper, device=None, dtype=torch.bfloat16
+    )
+    for lora in model.loras.values():
+        lora.optimize()
+    for k, v in tensors.items():
+        torch.testing.assert_close(v, before[k], rtol=0, atol=0)
