@@ -303,7 +303,10 @@ class KernelConfig:
     """If True, run the eligible layers of decode steps on the model's
     MonoKernel: a persistent kernel that runs most or all of one decoder layer
     in a single launch (DeepSeek-V4.1 on MI355X, DeepSeek-V4-Pro at TP8 on
-    MI355X). A deployment that cannot run it is refused at startup."""
+    MI355X; Muse Spark MXFP4 on MI355X with tensor parallel size 8, expert
+    parallelism and a 7-token DSpark draft, for speculative verify steps of 1-16
+    requests, with bf16 MoE activations instead of the checkpoint's MXFP4). A
+    deployment that cannot run it is refused at startup."""
 
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
@@ -361,6 +364,10 @@ class KernelConfig:
       requires VLLM_ROCM_USE_AITER)
 
     Explicit values raise RuntimeError when their constraints are not met.
+
+    On SM100 decode without DCP, persistent (including auto selecting it)
+    reads BF16 logits directly and widens scores inside the kernel, avoiding
+    a full FP32 logits copy. Cooperative still requires FP32 logits.
     """
 
     linear_backend: LinearBackend = "auto"

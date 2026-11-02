@@ -82,6 +82,7 @@ steps:
 
 - label: ":nvidia: (DGX Spark) [Nightly] FlashInfer NVFP4 XQA"
   key: flashinfer-nvfp4-xqa-dgx-spark
+  automatic_shard: true
   timeout_in_minutes: 30
   device: dgx-spark
   optional: true

@@ -41,6 +41,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     # `FalconConfig` class from the official HuggingFace transformers library.
     "RWConfig": "vllm.transformers_utils.configs.falcon",
     "MiDashengLMConfig": "vllm.transformers_utils.configs.midashenglm",
+    "MingV3ASRConfig": "vllm.transformers_utils.configs.ming_v3_asr",
     "MiniMaxM3Config": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3MTPConfig": "vllm.transformers_utils.configs.minimax_m3",
     "MiniMaxM3TextConfig": "vllm.transformers_utils.configs.minimax_m3",
@@ -49,6 +50,9 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Moondream3VisionConfig": "vllm.transformers_utils.configs.moondream3",
     "MossTranscribeDiarizeConfig": (
         "vllm.transformers_utils.configs.moss_transcribe_diarize"
+    ),
+    "Nemotron3_5TranscribeConfig": (
+        "vllm.transformers_utils.configs.nemotron3_5_transcribe"
     ),
     "MoonViTConfig": "vllm.transformers_utils.configs.moonvit",
     "KimiLinearConfig": "vllm.transformers_utils.configs.kimi_linear",
@@ -113,6 +117,7 @@ __all__ = [
     "IsaacConfig",
     "RWConfig",
     "MiDashengLMConfig",
+    "MingV3ASRConfig",
     "MiniMaxM3Config",
     "MiniMaxM3MTPConfig",
     "MiniMaxM3TextConfig",
@@ -120,6 +125,7 @@ __all__ = [
     "Moondream3TextConfig",
     "Moondream3VisionConfig",
     "MossTranscribeDiarizeConfig",
+    "Nemotron3_5TranscribeConfig",
     "MoonViTConfig",
     "KimiLinearConfig",
     "KimiVLConfig",
