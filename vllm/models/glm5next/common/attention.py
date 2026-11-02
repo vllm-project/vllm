@@ -29,7 +29,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     DeepseekV32IndexerCache,
     yarn_get_mscale,
 )
-from vllm.model_executor.utils import maybe_disable_graph_partition
+from vllm.model_executor.utils import maybe_disable_graph_partition, refill_derived
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
@@ -294,6 +294,17 @@ class Indexer(nn.Module):
             tail_cache=self.tail_cache,
         )
 
+    def process_weights_after_loading(self) -> None:
+        """Build the fp32 head-gate projection from the loaded weights; reloads
+        refill it in place."""
+        wp = (
+            self.wk_weights_proj.weight.data[self.head_dim :, :]
+            .t()
+            .contiguous()
+            .float()
+        )
+        refill_derived(self, "_wp_fp32", wp)
+
     def forward(
         self, hidden_states: torch.Tensor, qr: torch.Tensor, positions, rotary_emb
     ) -> torch.Tensor:
@@ -301,16 +312,11 @@ class Indexer(nn.Module):
         q = q.view(-1, self.n_head, self.head_dim)
 
         # Compute the head gate in fp32; bf16 error can change near-tie pool
-        # rankings on long-context tasks. Cache it after weights are loaded.
+        # rankings on long-context tasks. Built after weights are loaded.
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
-        if self._wp_fp32 is None:
-            self._wp_fp32 = (
-                self.wk_weights_proj.weight.data[self.head_dim :, :]
-                .t()
-                .contiguous()
-                .float()
-            )
+        if self._wp_fp32 is None:  # only when post-load processing never ran
+            self.process_weights_after_loading()
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
 
         k = _fused_indexer_k_norm(
