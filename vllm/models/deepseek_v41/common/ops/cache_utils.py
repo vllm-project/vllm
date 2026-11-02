@@ -30,6 +30,10 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonPointerInputVariant,
     TritonWarmupTensor,
 )
+from vllm.models.deepseek_v4.common.ops.cache_utils import (
+    quantize_and_insert_k_kernel,
+    remap_flashinfer_index,
+)
 from vllm.platforms import current_platform
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
@@ -54,131 +58,6 @@ V41_NUM_SCALES = 512 // V41_QUANT_BLOCK  # 16
 V41_NVFP4_BYTES_PER_TOKEN = 288
 V41_NVFP4_QUANT_BLOCK = 16
 V41_NVFP4_NUM_SCALES = 512 // V41_NVFP4_QUANT_BLOCK  # 32
-
-
-@triton.jit
-def quantize_and_insert_k_kernel(
-    # Input tensors
-    k_ptr,  # [num_tokens, 512] bf16
-    slot_mapping_ptr,  # [num_tokens] int64
-    # Output tensor
-    k_cache_ptr,  # [num_blocks, block_bytes] as uint8 (flattened view)
-    # Dimensions
-    num_tokens,
-    input_dim: tl.constexpr,  # 512
-    fp8_dim: tl.constexpr,  # 448
-    bf16_dim: tl.constexpr,  # 64
-    scale_dim: tl.constexpr,  # 8
-    quant_block: tl.constexpr,  # 64 (quantization block size)
-    cache_block_size: tl.constexpr,  # 64 (paged cache block size)
-    token_data_size: tl.constexpr,  # 576 bytes per token data
-    block_stride: tl.constexpr,  # total bytes per block (padded)
-    fp8_max: tl.constexpr,
-    n_quant_blocks: tl.constexpr,  # 8 (7 real + 1 padding)
-    use_fnuz: tl.constexpr = False,
-):
-    """Quantize K tensor and insert into paged K cache.
-
-    K Cache block layout (block_size=64 tokens):
-    - [0, 64*576): Token data, each token has 448 fp8 + 128 bf16
-    - [64*576, 64*576 + 64*8): Scales, each token has 8 uint8 scales
-    - [64*576 + 64*8, block_stride): Padding
-
-    One program per token.
-
-    ``use_fnuz=True`` selects FNUZ (``tl.float8e4b8``); default OCP
-    (``tl.float8e4nv``) matches every production caller.
-    """
-    pid = tl.program_id(0)
-
-    if pid >= num_tokens:
-        return
-
-    # Get slot mapping
-    slot_idx = tl.load(slot_mapping_ptr + pid)
-    if slot_idx == -1:
-        return
-
-    block_idx = slot_idx // cache_block_size
-    pos_in_block = slot_idx % cache_block_size
-
-    # Input pointer for this token
-    input_row_ptr = k_ptr + pid * input_dim
-
-    # int64: block_idx * block_stride can exceed 2^31 with many KV-cache blocks
-    # (e.g. >= 57K at block_stride ~37K). Matches gather path below.
-    cache_block_ptr = k_cache_ptr + block_idx.to(tl.int64) * block_stride
-
-    # Token data pointer: token data is stored contiguously at start of block
-    # Each token's data is at offset pos_in_block * token_data_size
-    token_data_ptr = cache_block_ptr + pos_in_block * token_data_size
-
-    # Scale pointer: scales are stored after ALL token data in the block
-    # Scale for this token is at offset (64 * 576) + pos_in_block * 8
-    token_scale_ptr = (
-        cache_block_ptr + cache_block_size * token_data_size + pos_in_block * scale_dim
-    )
-
-    # Token data layout: [0:448] fp8, [448:576] bf16
-    token_fp8_ptr = token_data_ptr
-    token_bf16_ptr = token_data_ptr + fp8_dim
-
-    # ========== Quantize and store FP8 portion (first 448 elements) ==========
-    # Using UE8M0 quantization strategy (scale is power of 2, stored as uint8 exponent)
-    for qblock_idx in tl.static_range(n_quant_blocks):
-        qblock_start = qblock_idx * quant_block
-
-        if qblock_start < fp8_dim:
-            offsets = qblock_start + tl.arange(0, quant_block)
-            mask = offsets < fp8_dim
-
-            # Load bf16 input
-            x = tl.load(input_row_ptr + offsets, mask=mask, other=0.0)
-
-            # Compute absmax scale (same as CUDA kernel)
-            abs_x = tl.abs(x)
-            block_max = tl.max(abs_x, axis=0)
-            block_max = tl.maximum(block_max, 1e-4)  # Match CUDA: fmaxf(amax, 1e-4)
-
-            # UE8M0: Round scale UP to next power of 2
-            # scale = 2^ceil(log2(block_max / fp8_max))
-            raw_scale = block_max / fp8_max
-            log_scale = tl.log2(raw_scale)
-            exponent = tl.ceil(log_scale)  # Round UP to next integer exponent
-            scale = tl.exp2(exponent)  # scale = 2^exponent (power of 2)
-
-            # Quantize to fp8: fp8_value = bf16_value / scale
-            x_scaled = x / scale
-            x_clamped = tl.clamp(x_scaled, -fp8_max, fp8_max)
-
-            # Convert to fp8 (FNUZ on gfx942, OCP elsewhere), then bitcast to uint8.
-            if use_fnuz:
-                x_fp8 = x_clamped.to(tl.float8e4b8)
-            else:
-                x_fp8 = x_clamped.to(tl.float8e4nv)
-            x_uint8 = x_fp8.to(tl.uint8, bitcast=True)
-
-            # Store as uint8 (1 byte each)
-            tl.store(token_fp8_ptr + offsets, x_uint8, mask=mask)
-
-            # UE8M0 scale encoding: stored_value = exponent + 127 (bias)
-            # During dequant: scale = 2^(stored_value - 127)
-            encoded_scale = exponent + 127.0
-            encoded_scale = tl.maximum(tl.minimum(encoded_scale, 255.0), 0.0)
-            tl.store(token_scale_ptr + qblock_idx, encoded_scale.to(tl.uint8))
-
-    # Padding scale at index 7
-    tl.store(token_scale_ptr + 7, tl.zeros((), dtype=tl.uint8))
-
-    # ========== Store BF16 portion (last 64 elements, no quantization) ==========
-    bf16_input_offset = fp8_dim
-
-    # Process bf16 in chunks of 16
-    bf16_out_ptr = token_bf16_ptr.to(tl.pointer_type(tl.bfloat16))
-    for i in tl.static_range(bf16_dim // 16):
-        chunk_offsets = i * 16 + tl.arange(0, 16)
-        bf16_vals = tl.load(input_row_ptr + bf16_input_offset + chunk_offsets)
-        tl.store(bf16_out_ptr + chunk_offsets, bf16_vals)
 
 
 @triton.jit
@@ -1016,12 +895,6 @@ _COMBINE_TOPK_SWA_POINTER_INPUTS = zip_inputs(
 )
 
 
-def _hf_config_int(vllm_config: Any, name: str, default: int) -> int:
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
-    return int(getattr(hf_config, name, default) or default)
-
-
 def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     """One warmup row per v4.1 layer type (compress ratio) in the model.
 
@@ -1029,21 +902,15 @@ def _combine_topk_swa_warmup_inputs(vllm_config: Any) -> _WarmupInputRows:
     padded width is the same for all rows; SWA-only layers (ratio 0) pass
     ``TOP_K=0``.
     """
-    model_config = getattr(vllm_config, "model_config", None)
-    hf_config = getattr(model_config, "hf_config", None)
+    hf_config = vllm_config.model_config.hf_config
     compress_ratios = get_compress_ratios(hf_config) or [0]
-    topk = _hf_config_int(vllm_config, "index_topk", 0)
+    topk = hf_config.index_topk
     return zip_inputs(
         *(
             dict(compress_ratio=ratio, topk=topk if ratio > 0 else 0, topk_width=topk)
             for ratio in sorted({int(ratio) for ratio in compress_ratios})
         )
     )
-
-
-def _scheduler_config_int(vllm_config: Any, name: str, default: int) -> int:
-    scheduler_config = getattr(vllm_config, "scheduler_config", None)
-    return int(getattr(scheduler_config, name, default) or default)
 
 
 class CombineTopkSwaIndicesKernel(
@@ -1180,10 +1047,7 @@ class CombineTopkSwaIndicesKernel(
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
-        if _scheduler_config_int(vllm_config, "max_num_batched_tokens", 0) <= 0:
-            return []
-
-        window_size = _hf_config_int(vllm_config, "sliding_window", 128)
+        window_size = vllm_config.model_config.hf_config.sliding_window
         return self._trace_dispatch(self.dispatch)(
             _combine_topk_swa_warmup_inputs(vllm_config),
             _COMBINE_TOPK_SWA_POINTER_INPUTS,
@@ -1399,18 +1263,6 @@ def build_flashinfer_mixed_sparse_indices(
     return sparse_indices, sparse_topk_lens
 
 
-@triton.jit
-def _remap_flashinfer_index(values, block_size, block_span):
-    # FlashInfer's DSv4 kernel indexes sparse KV by physical token stride, so
-    # packed pages (#44577) need block*block_size+off -> block*block_span+off.
-    # The launcher declares these indices with sparse_indices_are_storage_offsets=True.
-    is_valid = values >= 0
-    safe_values = tl.where(is_valid, values, 0)
-    values = (safe_values // block_size) * block_span
-    values += safe_values % block_size
-    return tl.where(is_valid, values, -1)
-
-
 @triton.jit(
     do_not_specialize=[
         "sparse_indices_stride",
@@ -1475,7 +1327,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
                 mask=mask,
                 other=-1,
             )
-            values = _remap_flashinfer_index(values, swa_block_size, swa_block_span)
+            values = remap_flashinfer_index(values, swa_block_size, swa_block_span)
             tl.store(
                 sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
                 values,
@@ -1509,7 +1361,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
                 values = block_numbers * compressed_block_size + block_offsets
                 values = tl.where(is_valid, values, -1)
                 compressed_len += tl.sum((is_valid & token_valid).to(tl.int32), axis=0)
-            values = _remap_flashinfer_index(
+            values = remap_flashinfer_index(
                 values, compressed_block_size, compressed_block_span
             )
             tl.store(
@@ -1564,7 +1416,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         block_offsets = pos_offset % swa_block_size
         slot_ids = block_numbers * swa_block_size + block_offsets
         slot_ids = tl.where(offset < swa_len, slot_ids, -1)
-        slot_ids = _remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
+        slot_ids = remap_flashinfer_index(slot_ids, swa_block_size, swa_block_span)
         tl.store(
             sparse_indices_ptr + token_idx * sparse_indices_stride + offset,
             slot_ids,
@@ -1591,7 +1443,7 @@ def _build_flashinfer_mixed_sparse_indices_kernel(
         block_offsets = local_idx % compressed_block_size
         slot_ids = block_numbers * compressed_block_size + block_offsets
         slot_ids = tl.where((offset < topk_len) & is_valid, slot_ids, -1)
-        slot_ids = _remap_flashinfer_index(
+        slot_ids = remap_flashinfer_index(
             slot_ids, compressed_block_size, compressed_block_span
         )
         tl.store(

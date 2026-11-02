@@ -60,10 +60,11 @@ from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import extract_layer_index
+from vllm.models.deepseek_v4.attention import fill_short_context_topk_indices
 from vllm.models.deepseek_v41.common.rope import build_deepseek_v4_rope
 from vllm.models.deepseek_v41.compressor import DeepseekCompressor
 from vllm.platforms import current_platform
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import triton
 from vllm.utils.multi_stream_utils import (
     execute_in_parallel,
     maybe_execute_in_parallel,
@@ -107,25 +108,6 @@ def _indexer_k_cache_head_dim(index_head_dim: int, use_fp4_kv: bool) -> int:
     # NOTE(yifan): FP8 indexer cache uses the same layout as V3.2:
     # head_dim bytes = 128 fp8 + 4 fp32 scale = 132.
     return index_head_dim + index_head_dim // 128 * 4
-
-
-@triton.jit
-def _fill_short_context_topk_indices(
-    output,
-    positions,
-    TOP_K: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    PADDED_TOP_K: tl.constexpr,
-):
-    # small triton kernel that selects every candidate, -1 otherwise
-    row = tl.program_id(0)
-    offsets = tl.arange(0, PADDED_TOP_K)
-    num_compressed = (tl.load(positions + row) + 1) // COMPRESS_RATIO
-    tl.store(
-        output + row * TOP_K + offsets,
-        tl.where(offsets < num_compressed, offsets, -1),
-        mask=offsets < TOP_K,
-    )
 
 
 # Which packed fp8_ds_mla record a V4.1 layer writes. FlashMLA decodes
@@ -1583,7 +1565,7 @@ class DeepseekV4Indexer(nn.Module):
                     + indexer_metadata.num_prefill_tokens
                 )
                 if num_tokens > 0:
-                    _fill_short_context_topk_indices[(num_tokens,)](
+                    fill_short_context_topk_indices[(num_tokens,)](
                         self.topk_indices_buffer,
                         positions,
                         TOP_K=self.topk_tokens,
