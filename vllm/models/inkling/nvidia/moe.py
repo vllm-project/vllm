@@ -328,14 +328,12 @@ class InklingSinkExperts(nn.Module):
         assert key == "w2_weight"
         shard = self.w2_weight.shape[1] // self.n_experts
         shard_start = 0 if weight.shape[2] == shard else self.tp_rank * shard
-        for expert_idx, expert_weight in enumerate(weight):
-            local_weight = expert_weight.narrow(1, shard_start, shard)
-            start = expert_idx * shard
-            self.w2_weight.weight_loader(
-                self.w2_weight,
-                local_weight,
-                lambda p, w, s=start: p.data[:, s : s + shard].copy_(w),
-            )
+        # [S, d_model, shard] into the K-concatenated [d_model, S * shard]
+        self.w2_weight.weight_loader(
+            self.w2_weight,
+            weight.narrow(2, shard_start, shard),
+            lambda p, w: p.data.view(p.shape[0], -1, shard).copy_(w.transpose(0, 1)),
+        )
         return [key]
 
     def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:

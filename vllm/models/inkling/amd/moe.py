@@ -331,14 +331,12 @@ class InklingSinkExperts(nn.Module):
         assert key == "w2_weight"
         shard = self.w2_weight.shape[1] // self.n_experts
         shard_start = 0 if weight.shape[2] == shard else self.tp_rank * shard
-        for expert_idx, expert_weight in enumerate(weight):
-            local_weight = expert_weight.narrow(1, shard_start, shard)
-            start = expert_idx * shard
-            self.w2_weight.weight_loader(
-                self.w2_weight,
-                local_weight,
-                lambda p, w, s=start: p.data[:, s : s + shard].copy_(w),
-            )
+        # [S, d_model, shard] into the K-concatenated [d_model, S * shard]
+        self.w2_weight.weight_loader(
+            self.w2_weight,
+            weight.narrow(2, shard_start, shard),
+            lambda p, w: p.data.view(p.shape[0], -1, shard).copy_(w.transpose(0, 1)),
+        )
         return [key]
 
     def forward(self, x: torch.Tensor, gammas: torch.Tensor) -> torch.Tensor:
@@ -676,8 +674,8 @@ class InklingMoE(nn.Module):
         else:
             # w2: shard the packed intermediate (last) dim. AITER rounds the
             # destination intermediate width to 256, so derive the logical TP
-            # slice from the checkpoint and set the destination tail to the
-            # padding value.
+            # slice from the checkpoint; the destination tail is set to `pad`,
+            # or left to the method when it zeroes it (`weight_loader_numel`).
             if weight.shape[2] % tp_size != 0:
                 raise ValueError(
                     f"cannot TP-shard {name} with shape {tuple(weight.shape)} "
