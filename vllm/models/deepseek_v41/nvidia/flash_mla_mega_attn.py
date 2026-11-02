@@ -232,11 +232,8 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         o_chunk_perm = o_fused_chunk_permutation(WV_GROUP_SIZE, self.head_dim)
         permute_on_load(self.wo_a.weight_scale, o_chunk_perm, dim=1)
         self._use_swapab = _swapab_decode_supported(self)
-        # The swap-AB compile key holds the compressed cache's page, which is
-        # final once the cache is allocated: bind_kv_cache registers it.
-        self._swapab_jit_warmup = (
-            self._use_swapab and vllm_config.kernel_config.enable_jit_warmup
-        )
+        if self._use_swapab and vllm_config.kernel_config.enable_jit_warmup:
+            self._register_swapab_warmup()
 
     # ---- interface contract ------------------------------------------------
 
@@ -250,24 +247,30 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         # it is what an unspecific --kv-cache-dtype resolves to here.
         return "nvfp4_ds_mla"
 
-    def bind_kv_cache(self, kv_cache: torch.Tensor) -> None:
-        super().bind_kv_cache(kv_cache)
-        # Only kv sources own a compressed cache, and the layers reading it
-        # share its swap-AB compile key.
-        if self._swapab_jit_warmup:
-            from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
-                _SWAPAB_DECODE_KERNEL,
-            )
+    def _register_swapab_warmup(self) -> None:
+        """Register the compile key this layer's swap-AB decode steps launch.
 
-            assert self.topk_indices_buffer is not None
-            _SWAPAB_DECODE_KERNEL.register_warmup(
-                heads=self.n_local_heads,
-                swa_width=self.window_size,
-                extra_width=self.topk_indices_buffer.shape[-1],
-                extra_record=self.kv_cache.shape[-1],
-                swa_page=self.swa_cache_layer.block_size,
-                extra_page=self.kv_cache.shape[1],
-            )
+        Every field is fixed at construction. The compressed cache is read in
+        kernel blocks of this backend's single size, which hold
+        ``kernel_block // compress_ratio`` compressed slots each, whatever the
+        KV cache manager's block size is. Layers sharing a key register it
+        once.
+        """
+        from vllm.models.deepseek_v41.nvidia.ops.swapab_decode_attn import (
+            _SWAPAB_DECODE_KERNEL,
+        )
+
+        (kernel_block,) = self.backend_cls.get_supported_kernel_block_sizes()
+        assert isinstance(kernel_block, int)
+        assert self.topk_indices_buffer is not None
+        _SWAPAB_DECODE_KERNEL.register_warmup(
+            heads=self.n_local_heads,
+            swa_width=self.window_size,
+            extra_width=self.topk_indices_buffer.shape[-1],
+            extra_record=self.compressed_bytes_per_token,
+            swa_page=self.swa_cache_layer.block_size,
+            extra_page=kernel_block // self.compress_ratio,
+        )
 
     def _alloc_attn_out(
         self, num_tokens: int, hidden_states: torch.Tensor
