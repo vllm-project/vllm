@@ -14,7 +14,7 @@
 """
 
 from dataclasses import replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -30,6 +30,9 @@ from vllm.v1.worker.utils import AttentionGroup
 from ...model_state import DeepseekV41ModelState
 from .metadata_graphs import AttnMetadataCudaGraphs, GraphKey
 from .warmup import warm_up
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.pcp_manager import PCPManager
 
 
 def padded_decode_batch(
@@ -155,6 +158,7 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         stream: torch.cuda.Stream | None = None,
+        pcp_manager: "PCPManager | None" = None,
     ) -> None:
         # Record the metadata build of every decode step the FULL decode graphs
         # serve, on dummy batches of that step's shape.
@@ -174,5 +178,10 @@ class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
                 finally:
                     self._recording = None
         super().capture_inner_cudagraphs(
-            input_buffers, block_tables, attn_groups, kv_cache_config, stream
+            input_buffers,
+            block_tables,
+            attn_groups,
+            kv_cache_config,
+            stream,
+            pcp_manager=pcp_manager,
         )

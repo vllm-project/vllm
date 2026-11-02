@@ -224,9 +224,14 @@ class DeepseekSparseSWAFlashInferMetadataBuilder(DeepseekV41SparseSWAMetadataBui
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
         replay_start: torch.Tensor | None = None,
+        cache_positions: torch.Tensor | None = None,
     ) -> "DeepseekSparseSWAMetadata":
         metadata = super().build(
-            common_prefix_len, common_attn_metadata, fast_build, replay_start
+            common_prefix_len,
+            common_attn_metadata,
+            fast_build,
+            replay_start,
+            cache_positions,
         )
         if not common_attn_metadata.causal and metadata.num_decode_tokens > 0:
             self._fill_noncausal_decode_lens(metadata)
