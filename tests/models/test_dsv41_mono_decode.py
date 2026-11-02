@@ -46,6 +46,8 @@ def _layer(comp="comp", indexer=None):
         topk_indices_buffer=torch.zeros(64, 512, dtype=torch.int32),
         compress_ratio=1,
         indexer=indexer,
+        kv_mxfp8=False,
+        kv_cache_dtype="fp8_ds_mla",
         _compressed_kv_cache=cache,
     )
     return SimpleNamespace(attn=attn, engram=None, hc_mult=4)

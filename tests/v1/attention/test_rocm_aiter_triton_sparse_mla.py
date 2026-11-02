@@ -331,6 +331,82 @@ def test_aiter_sparse_mla_stays_off_with_kv_connector(monkeypatch, model) -> Non
     assert not rocm._aiter_sparse_mla_enabled(has_kv_transfer=True)
 
 
+def test_aiter_nvfp4_follows_installed_reader(monkeypatch) -> None:
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.models.deepseek_v41.amd import rocm
+
+    try:
+        from aiter.ops.triton.attention.sparse_mla import DSV4_RECORD_BYTES
+    except ImportError:
+        DSV4_RECORD_BYTES = ()
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", "1")
+    rocm_aiter_ops.refresh_env_variables()
+    try:
+        supported = rocm._ON_GFX950 and {528, 288}.issubset(DSV4_RECORD_BYTES)
+        assert rocm._aiter_sparse_mla_enabled(False, "nvfp4_ds_mla") == supported
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
+@pytest.mark.parametrize(
+    ("cache_dtype", "mono", "aiter", "role", "record"),
+    [
+        ("fp8", False, False, None, 528),
+        ("fp8", True, False, None, 528),
+        ("fp8", False, True, None, 584),
+        ("fp8", True, True, None, 584),
+        *[
+            ("nvfp4_ds_mla", mono, aiter, None, 528)
+            for mono in (False, True)
+            for aiter in (False, True)
+        ],
+        *[
+            (dtype, mono, aiter, role, 528)
+            for dtype in ("fp8", "nvfp4_ds_mla")
+            for mono in (False, True)
+            for aiter in (False, True)
+            for role in ("kv_producer", "kv_consumer")
+        ],
+    ],
+)
+def test_v41_record_follows_effective_backend(
+    monkeypatch, cache_dtype, mono, aiter, role, record
+):
+    """Disabled aiter cannot force V4; transfer peers agree despite decode flags."""
+    from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.config import CacheConfig, KernelConfig, KVTransferConfig, VllmConfig
+    from vllm.models.deepseek_v41.attention import _use_v41_mxfp8_kv_record
+    from vllm.platforms.rocm import on_gfx950
+
+    if not on_gfx950():
+        pytest.skip("the V4.1 record is gfx950-only")
+    try:
+        from aiter.ops.triton.attention.sparse_mla import DSV4_RECORD_BYTES
+    except ImportError:
+        DSV4_RECORD_BYTES = ()
+    if cache_dtype == "fp8" and aiter and role is None and 528 in DSV4_RECORD_BYTES:
+        record = 528
+    config = VllmConfig(
+        cache_config=CacheConfig(cache_dtype=cache_dtype),
+        kernel_config=KernelConfig(monokernel=mono),
+        kv_transfer_config=(
+            KVTransferConfig(kv_connector="MoRIIOConnector", kv_role=role)
+            if role
+            else None
+        ),
+    )
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", str(int(aiter)))
+    rocm_aiter_ops.refresh_env_variables()
+    try:
+        assert (528 if _use_v41_mxfp8_kv_record(config) else 584) == record
+    finally:
+        monkeypatch.undo()
+        rocm_aiter_ops.refresh_env_variables()
+
+
 def _swa_forward_mqa_case(
     monkeypatch, rocm, builder_cls, layer_cls, num_heads: int, compress_ratio: int
 ):

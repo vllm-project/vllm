@@ -522,6 +522,7 @@ steps:
     pytest -v -s
     "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-8]"
     "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model[8-28]"
+    "tests/models/test_dsv41_mono_layers.py::test_mono_decode_matches_the_model_nvfp4[8-True]"
 
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd

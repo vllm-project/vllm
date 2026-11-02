@@ -25,7 +25,9 @@ Every layer takes the whole-layer path (K1 + K2); the five hold each variant:
 - 4: ratio-1 index source over 3's candidates and KV
 """
 
+import os
 import zlib
+from functools import partial
 
 import pytest
 import torch
@@ -254,11 +256,21 @@ class MonoProbe:
         return {
             "layers": layers,
             "epoch": -1 if runner is None else int(runner.epoch[0]),
+            "aiter": all(
+                m.attn._use_aiter_sparse_mla for m in self._decoder_layers().values()
+            ),
         }
 
 
 def _decode(
-    vllm_runner, monkeypatch, tp: int, mono: bool, prompts, path: str, arch: str
+    vllm_runner,
+    monkeypatch,
+    tp: int,
+    mono: bool,
+    prompts,
+    path: str,
+    arch: str,
+    kv_cache_dtype: str = "auto",
 ):
     """Greedy decode of ``prompts`` with the mono path on or off: (each
     prompt's output, the workers' mono layers); each decoder layer's outputs
@@ -288,6 +300,7 @@ def _decode(
         worker_extension_cls=f"{__name__}.MonoProbe",
         moe_backend="aiter",
         monokernel=mono,
+        kv_cache_dtype=kv_cache_dtype,
         language_model_only=True,
         tokenizer_mode="deepseek_v41",
         **indexer,
@@ -316,6 +329,21 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
 
 @pytest.mark.parametrize(("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28)])
 def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
+    _compare(vllm_runner, monkeypatch, tmp_path, tp, rows)
+
+
+@pytest.mark.parametrize(("tp", "aiter_sparse"), [(2, False), (2, True), (8, True)])
+def test_mono_decode_matches_the_model_nvfp4(
+    vllm_runner, monkeypatch, tmp_path, tp, aiter_sparse
+):
+    """V4.1's NVFP4 compressed cache beside its MXFP8 window cache (CDNA4)."""
+    if _arch() != "cdna4":
+        pytest.skip("the NVFP4 compressed cache is CDNA4's")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA", str(int(aiter_sparse)))
+    _compare(vllm_runner, monkeypatch, tmp_path, tp, 8, "nvfp4_ds_mla")
+
+
+def _compare(vllm_runner, monkeypatch, tmp_path, tp, rows, kv_cache_dtype="auto"):
     arch = _arch()
     if not arch:
         pytest.skip("the mono kernels target CDNA4 and gfx942")
@@ -338,12 +366,19 @@ def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, r
             break
     prompts = [torch.randint(1000, 60000, (n,), generator=g).tolist() for n in lens]
 
-    on, probe_on = _decode(
-        vllm_runner, monkeypatch, tp, True, prompts, f"{tmp_path}/on", arch
+    decode = partial(
+        _decode, vllm_runner, monkeypatch, tp, arch=arch, kv_cache_dtype=kv_cache_dtype
     )
-    off, probe_off = _decode(
-        vllm_runner, monkeypatch, tp, False, prompts, f"{tmp_path}/off", arch
-    )
+    on, probe_on = decode(True, prompts, f"{tmp_path}/on")
+    off, probe_off = decode(False, prompts, f"{tmp_path}/off")
+    if kv_cache_dtype == "nvfp4_ds_mla":
+        try:
+            from aiter.ops.triton.attention.sparse_mla import DSV4_RECORD_BYTES
+        except ImportError:
+            DSV4_RECORD_BYTES = ()
+        aiter = os.environ.get("VLLM_ROCM_USE_AITER_TRITON_SPARSE_MLA") == "1"
+        aiter = aiter and {528, 288}.issubset(DSV4_RECORD_BYTES)
+        assert all(p["aiter"] == aiter for p in probe_on + probe_off)
 
     # both layer kinds took the mono path on every rank, at every decode step,
     # and on gfx942 from the weight copies made at load
