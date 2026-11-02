@@ -79,11 +79,13 @@ from vllm.models.kimi_k3.amd.specialized_decode.hooks import SpecializedDecodeMi
 from vllm.models.kimi_k3.amd.specialized_decode.runtime import (
     specialized_decode_config,
 )
-from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_linear import KimiLinearConfig
 from vllm.utils.math_utils import cdiv
-from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 logger = init_logger(__name__)
 
@@ -800,23 +802,23 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
         assert config.num_attention_heads % world_size == 0, (
             "num_attention_heads must be divisible by world_size"
         )
-        self.block_residual_bank: torch.Tensor | None = None
-        if config.attn_res_block_size is not None:
-            # One bank for every step; DBO ubatches use disjoint rows of it.
-            self.block_residual_bank = torch.empty(
-                vllm_config.scheduler_config.max_num_batched_tokens,
-                cdiv(self.end_layer, config.attn_res_block_size),
-                config.hidden_size,
-                dtype=vllm_config.model_config.dtype,
-                device=current_platform.device_type,
-            )
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
 
-    def _block_residual_rows(self, num_tokens: int) -> torch.Tensor:
-        bank = self.block_residual_bank
-        assert bank is not None
-        offset = dbo_current_ubatch_token_offset()
-        assert offset + num_tokens <= bank.shape[0]
-        return bank[offset : offset + num_tokens]
+    def _new_block_residual(
+        self, hidden_states: torch.Tensor, num_blocks: int
+    ) -> torch.Tensor:
+        num_tokens, hidden_size = hidden_states.shape
+        if not is_workspace_manager_initialized():
+            return hidden_states.new_empty(num_tokens, num_blocks, hidden_size)
+        bank = current_workspace_manager().get_persistent(
+            "kimi_k3_attn_res_block_residual",
+            (self.max_num_batched_tokens, num_blocks, hidden_size),
+            hidden_states.dtype,
+        )
+        assert num_tokens <= bank.shape[0]
+        return bank[:num_tokens]
 
     def make_empty_intermediate_tensors(
         self,
@@ -910,7 +912,7 @@ class KimiLinearModel(nn.Module, EagleModelMixin):
             return hidden_states
 
         attn_res_block_num = cdiv(self.end_layer, self.config.attn_res_block_size)
-        block_residual = self._block_residual_rows(hidden_states.shape[0])
+        block_residual = self._new_block_residual(hidden_states, attn_res_block_num)
         if residual is not None:
             block_residual[:, : residual.size(1), :].copy_(residual)
         residual = block_residual
