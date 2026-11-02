@@ -37,9 +37,9 @@ from vllm.transformers_utils.config import (
     get_pooling_config,
     get_sentence_transformer_tokenizer_config,
     is_encoder_decoder,
-    is_mla_config,
     iter_rope_parameters,
     mrope_num_dims,
+    transformers_uses_mla,
     try_get_dense_modules,
     try_get_generation_config,
     try_get_tokenizer_config,
@@ -2094,7 +2094,7 @@ class ModelConfig:
         if envs.VLLM_MLA_DISABLE:
             return False
         if self.using_transformers_backend():
-            return is_mla_config(self.hf_text_config)
+            return transformers_uses_mla(self.hf_text_config)
         # Manually maintained list of model types for vLLM model implementations
 
         # Bidirectional DeepSeek variants (is_causal=False, used by some

@@ -2782,7 +2782,7 @@ def test_nested_hf_overrides():
         ({"kv_lora_rank": 512}, True),
         ({"kv_lora_rank": 512, "use_mla": False}, False),
     ],
-    ids=["mla", "opt-out"],
+    ids=["unset", "opt-out"],
 )
 def test_transformers_backend_use_mla(mla_fields: dict, expected: bool):
     """A config that opts out of MLA must not be served with MLA."""

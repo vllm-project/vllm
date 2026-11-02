@@ -758,7 +758,7 @@ def test_attention_dispatch_is_required():
 
 
 @pytest.mark.parametrize(
-    ("use_mla", "head_size"), [(None, 192), (False, 16)], ids=["mla", "opt-out"]
+    ("use_mla", "head_size"), [(None, 192), (False, 16)], ids=["unset", "opt-out"]
 )
 def test_full_attention_head_size_respects_use_mla(use_mla, head_size):
     """MLA fields resize full attention heads only if the config does not opt out.
@@ -768,7 +768,10 @@ def test_full_attention_head_size_respects_use_mla(use_mla, head_size):
     arch_config = SimpleNamespace(head_size=16)
     model = SimpleNamespace(
         text_config=SimpleNamespace(
-            kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, use_mla=use_mla
+            kv_lora_rank=512,
+            qk_nope_head_dim=128,
+            qk_rope_head_dim=64,
+            use_mla=use_mla,
         ),
         model_config=SimpleNamespace(model_arch_config=arch_config),
         attention_fusers={},
