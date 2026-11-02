@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
 import functools
 import json
 from dataclasses import dataclass, field
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -1810,27 +1811,47 @@ async def test_stream_derender_requires_parse_context_with_parser():
     [None, RuntimeError("engine dead")],
     ids=["abort-ok", "abort-fails"],
 )
-async def test_stream_derender_parser_failure_aborts_engine(abort_error):
-    """The engine is aborted, and the client still gets the error event and
-    [DONE] when the abort itself fails."""
+async def test_stream_derender_parser_failure_closes_generate(abort_error):
+    """`generate()` is closed in the background, so its abort neither delays
+    the error event and [DONE] nor loses them if it fails. Closing it aborts by
+    internal ID, sparing other requests that share the external ID."""
     engine = _mock_engine()
-    engine.abort.side_effect = abort_error
+    release = asyncio.Event()
+    closed = asyncio.Event()
 
     class _RaisingParser(_StubParser):
         def parse_delta(self, delta_text, finished=False, **kwargs):
             raise RuntimeError("boom")
 
     async def mock_generate(*args, **kwargs):
-        yield _make_request_output("req-1", token_ids=[10], text="a")
+        try:
+            yield _make_request_output("req-1", token_ids=[10], text="a")
+        except GeneratorExit:
+            await release.wait()
+            closed.set()
+            if abort_error is not None:
+                raise abort_error from None
+            raise
+
+    async def collect_chunks():
+        return [c async for c in await serving.serve_tokens(_derender_request())]
 
     engine.generate = MagicMock(side_effect=mock_generate)
     serving = _derender_serving(engine, parser_cls=_RaisingParser)
 
-    chunks = [c async for c in await serving.serve_tokens(_derender_request())]
+    with patch(
+        "vllm.entrypoints.scale_out.token_in_token_out.serving.logger"
+    ) as logger:
+        chunks = await asyncio.wait_for(collect_chunks(), timeout=5)
+        assert any('"code": 500' in c for c in chunks)
+        assert chunks[-1] == "data: [DONE]\n\n"
 
-    assert any('"code": 500' in c for c in chunks)
-    assert chunks[-1] == "data: [DONE]\n\n"
-    engine.abort.assert_awaited_once()
+        release.set()
+        await asyncio.wait_for(closed.wait(), timeout=5)
+
+    logged = [call.args[0] for call in logger.exception.call_args_list]
+    assert ("Failed to abort request %s." in logged) == (abort_error is not None)
+    engine.abort.assert_not_called()
 
 
 @pytest.mark.asyncio

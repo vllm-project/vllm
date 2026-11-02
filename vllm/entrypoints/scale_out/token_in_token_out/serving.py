@@ -85,9 +85,28 @@ from .protocol import (
     GenerateTokensResponse,
     GenerateTokensStreamChoice,
     GenerateTokensStreamResponse,
+    OutputMode,
 )
 
 logger = init_logger(__name__)
+
+_STREAM_RESPONSE_CLS: dict[OutputMode, Callable[..., GenerateStreamResponseBase]] = {
+    "tokens": GenerateTokensStreamResponse,
+    "text": GenerateTextStreamResponse,
+    "derender": GenerateDerenderStreamResponse,
+}
+
+_background_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _close_result_generator(
+    result_generator: AsyncGenerator[RequestOutput, None], request_id: str
+) -> None:
+    """Close `generate()` so it aborts this request by its internal ID."""
+    try:
+        await result_generator.aclose()
+    except Exception:
+        logger.exception("Failed to abort request %s.", request_id)
 
 
 def _clamp_logprob(logprob: float) -> float:
@@ -676,11 +695,7 @@ class ServingTokens(GenerateBaseServing):
         text_mode = request.output_mode == "text" or derender_mode
         tokenizer = self._logprobs_tokenizer(text_mode)
         num_logprobs, top_limit = self._logprob_settings(sampling_params, derender_mode)
-        response_cls: Callable[..., GenerateStreamResponseBase] = {
-            "tokens": GenerateTokensStreamResponse,
-            "text": GenerateTextStreamResponse,
-            "derender": GenerateDerenderStreamResponse,
-        }[request.output_mode]
+        response_cls = _STREAM_RESPONSE_CLS[request.output_mode]
         role_sent = [False] * sampling_params.n
         finish_reason_sent = [False] * sampling_params.n
 
@@ -861,12 +876,13 @@ class ServingTokens(GenerateBaseServing):
             )
         except Exception as e:
             logger.exception("Error in token generation stream.")
-            # Stop the engine decoding for a stream nobody reads. A failed
-            # abort must not swallow the error event.
-            try:
-                await self.engine_client.abort(request_id)
-            except Exception:
-                logger.exception("Failed to abort request %s.", request_id)
+            # Stop the engine decoding for a stream nobody reads without
+            # delaying the error event or being cancelled by a disconnect.
+            task = asyncio.create_task(
+                _close_result_generator(result_generator, request_id)
+            )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
             data = self.create_streaming_error_response(e)
             yield f"data: {data}\n\n"
         yield "data: [DONE]\n\n"
