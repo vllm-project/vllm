@@ -1596,6 +1596,7 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/skinny_gemms_int4.cu"
+    "csrc/rocm/skinny_gemms_int8.cu"
     "csrc/rocm/attention_dispatch.cu"
     "csrc/rocm/attention_paged_attn_h64_f16_auto.cu"
     "csrc/rocm/attention_paged_attn_h128_f16_auto.cu"
@@ -1656,13 +1657,15 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
   list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
   list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms_int4.cu")
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms_int8.cu")
   set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
   list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
   if(VLLM_SKINNY_ARCHES)
     message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
     set(VLLM_SKINNY_SRC
       "csrc/rocm/skinny_gemms.cu"
-      "csrc/rocm/skinny_gemms_int4.cu")
+      "csrc/rocm/skinny_gemms_int4.cu"
+      "csrc/rocm/skinny_gemms_int8.cu")
     hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "${VLLM_SKINNY_SRC}")
     unset(_VLLM_LAST_HIPIFY_TARGET)
     add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})

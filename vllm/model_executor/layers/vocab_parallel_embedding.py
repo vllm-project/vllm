@@ -3,6 +3,7 @@
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import assert_never
 
 import torch
 import torch.nn.functional as F
@@ -10,6 +11,7 @@ from torch.nn.parameter import Parameter
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.config import get_current_vllm_config_or_none
 from vllm.distributed import (
     GroupCoordinator,
     divide,
@@ -95,6 +97,32 @@ class UnquantizedEmbeddingMethod(QuantizeMethodBase):
     ):
         layer.weight = embed_tokens.weight
         return layer
+
+
+def _maybe_quantize_lm_head(
+    quant_method: QuantizeMethodBase, prefix: str
+) -> QuantizeMethodBase:
+    """Swap in the method selected by ``KernelConfig.lm_head_quantization``."""
+    vllm_config = get_current_vllm_config_or_none()
+    if vllm_config is None:
+        return quant_method
+    quantization = vllm_config.kernel_config.lm_head_quantization
+    if quantization is None:
+        return quant_method
+    # Imported lazily so startup does not load the ROCm-only kernels.
+    if quantization == "int4_per_group_32":
+        from vllm.model_executor.layers.quantization.online.int4_lm_head import (
+            Int4LMHeadMethod,
+        )
+
+        return Int4LMHeadMethod.from_config(quant_method, vllm_config, prefix)
+    if quantization == "int8_per_channel":
+        from vllm.model_executor.layers.quantization.online.int8_lm_head import (
+            Int8LMHeadMethod,
+        )
+
+        return Int8LMHeadMethod.from_config(quant_method, vllm_config, prefix)
+    assert_never(quantization)
 
 
 def pad_vocab_size(vocab_size: int, pad_to: int = DEFAULT_VOCAB_PADDING_SIZE) -> int:
@@ -320,10 +348,13 @@ class VocabParallelEmbedding(PluggableLayer):
 
         # Avoid overriding a preselected model-specific method with generic
         # config-based dispatch.
+        preselected = quant_method is not None
         if quant_method is None and quant_config is not None:
             quant_method = resolve_quant_method(quant_config, self, prefix=prefix)
         if quant_method is None:
             quant_method = UnquantizedEmbeddingMethod()
+        if not preselected and isinstance(self, ParallelLMHead):
+            quant_method = _maybe_quantize_lm_head(quant_method, prefix)
 
         # If we are making an embedding layer, then our quantization linear
         # method must implement the embedding operation. If we are another
