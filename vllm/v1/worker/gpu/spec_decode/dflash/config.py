@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 from vllm.v1.worker.gpu.spec_decode.eagle.config import wrap_eagle_hf_config
 from vllm.v1.worker.gpu.spec_decode.speculator_config import (
@@ -18,6 +18,11 @@ class DFlashSpeculatorConfig(DraftModelSpeculatorConfig):
     )
     uses_target_hidden_states = True
     supports_watermarking = True
+    # Fully-qualified name of the function loading the draft model, called
+    # with (target_model, vllm_config).
+    draft_model_loader: ClassVar[str] = (
+        "vllm.v1.worker.gpu.spec_decode.dflash.utils.load_dflash_model"
+    )
 
     @classmethod
     def matches(cls, spec: "SpeculativeConfig") -> bool:

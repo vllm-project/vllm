@@ -104,6 +104,7 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
+    "confidence_head",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
     "xpress_topc",
@@ -696,6 +697,12 @@ class SpeculativeConfig:
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
+
+    confidence_head: Literal["trained", "online_estimator"] | None = None
+    """How DSpark adaptive verification predicts per-position acceptance.
+    'trained' uses the draft checkpoint's confidence head, 'online_estimator'
+    the online acceptance estimator over the draft logits. If unset, the
+    trained head is used when the checkpoint has one."""
 
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C
@@ -1385,7 +1392,7 @@ class SpeculativeConfig:
         config_cls.apply_options(self)
 
         if (
-            config_cls.adaptive_verification_uses_draft_logits
+            config_cls(self).adaptive_verification_uses_draft_logits
             and self.enable_adaptive_verification
             and self.use_local_argmax_reduction
         ):

@@ -31,6 +31,7 @@ from vllm.v1.watermarking.spec_decode import (
 from vllm.v1.watermarking.watermarker import Watermarker, WatermarkSample
 from vllm.v1.worker.gpu import buffer_utils
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+from vllm.v1.worker.gpu.sample.draft import sample_independently
 from vllm.v1.worker.gpu.sample.watermark import (
     draft_watermarking_mask,
     philox_gumbel_sample,
@@ -1381,8 +1382,10 @@ def test_draft_sampler_uses_draft_key_and_advances_context(monkeypatch):
         lambda *args, **kwargs: torch.tensor([3, 4]),
     )
 
-    sampled = speculator.sample_draft(
-        hidden_states=torch.zeros(2, 4),
+    sampled = sample_independently(
+        watermarker=speculator.draft_watermarker,
+        use_fp64_gumbel=speculator.use_fp64_gumbel,
+        logits=speculator.compute_draft_logits(torch.zeros(2, 4), 0),
         sample_src_positions=torch.zeros(2, dtype=torch.int64),
         idx_mapping=torch.tensor([0, 1]),
         temperature=torch.ones(2),
@@ -1762,8 +1765,10 @@ def test_dflash_draft_sampler_watermarks_drafts_in_step_order(monkeypatch):
         num_reqs, num_steps, vocab_size, dtype=torch.float32, fill=0.0, device="cpu"
     )
 
-    sampled = speculator.sample_draft(
-        hidden_states=logits.view(-1, vocab_size),
+    sampled = sample_independently(
+        watermarker=speculator.draft_watermarker,
+        use_fp64_gumbel=speculator.use_fp64_gumbel,
+        logits=logits.view(-1, vocab_size),
         sample_src_positions=torch.arange(num_reqs * num_steps),
         idx_mapping=batch_slots.repeat_interleave(num_steps),
         temperature=torch.tensor([0.0, 1.0, 0.5]),

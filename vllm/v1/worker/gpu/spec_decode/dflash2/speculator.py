@@ -9,11 +9,15 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_noised_argmax, spec_step_seed
+from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    AcceptanceEstimationInput,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.draft_logits import (
     DraftLogitsCache,
     draft_logits_row,
 )
+from vllm.v1.worker.gpu.spec_decode.draft_token_head import DraftTokenHead
 
 
 @triton.jit
@@ -197,8 +201,13 @@ class DFlash2Speculator(DFlashSpeculator):
     _speculator_name = "DFlash2"
     _candidate_top_k_key = "selector_top_k"
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        draft_token_head: DraftTokenHead,
+    ):
+        super().__init__(vllm_config, device, draft_token_head)
         draft_config = self.draft_model_config.hf_config.dflash_config
         self.top_k = int(draft_config[self._candidate_top_k_key])
         self.candidate_sampler = CandidateSampler(
@@ -252,11 +261,12 @@ class DFlash2Speculator(DFlashSpeculator):
             self.use_fp64_gumbel,
         )
         if self.enable_adaptive_verification:
-            self._maybe_predict_acceptance(
+            estimator_input = AcceptanceEstimationInput(
                 self.candidate_sampler.scores[:num_reqs].flatten(0, 1),
                 self.sample_idx_mapping[:num_sample],
                 self.sample_col[:num_sample],
             )
+            self._maybe_predict_acceptance(estimator_input)
 
     def _score_candidates(
         self,

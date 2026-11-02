@@ -21,6 +21,7 @@ from vllm.utils.import_utils import resolve_obj_by_qualname
 # vllm.config imports this module, so it imports vllm.config lazily.
 if TYPE_CHECKING:
     from vllm.config import ParallelConfig, SpeculativeConfig
+    from vllm.v1.worker.gpu.spec_decode.draft_token_head import DraftTokenHead
 
 _PKG = "vllm.v1.worker.gpu.spec_decode"
 
@@ -52,7 +53,6 @@ class SpeculatorConfig:
     prefer_dense_token_history: ClassVar[bool] = False
     # Proposes draft tokens (unlike e.g. hidden state extraction).
     proposes_draft_tokens: ClassVar[bool] = True
-    adaptive_verification_uses_draft_logits: ClassVar[bool] = True
     # The draft model has its own vocabulary, which must match the target's
     # unless use_heterogeneous_vocab is set.
     draft_has_own_vocab: ClassVar[bool] = False
@@ -105,6 +105,12 @@ class SpeculatorConfig:
         return self.spec_config.num_speculative_tokens
 
     @property
+    def adaptive_verification_uses_draft_logits(self) -> bool:
+        """Whether adaptive verification predicts acceptance from the draft
+        logits (with the online acceptance estimator)."""
+        return True
+
+    @property
     def uses_aux_hidden_states(self) -> bool:
         """Whether the target must also output intermediate hidden states."""
         return False
@@ -136,6 +142,17 @@ class SpeculatorConfig:
         max_num_batched_tokens, which limits max_num_active_seqs, or None if
         unlimited (e.g. when it's sized by the target's scheduled tokens)."""
         return None
+
+    def create_draft_token_head(self) -> "DraftTokenHead":
+        """The draft token head for speculators whose constructor takes one
+        (see `init_speculator`). Samples every draft position independently,
+        unless overridden."""
+        # Imported lazily: speculator configs are used in every process.
+        from vllm.v1.worker.gpu.spec_decode.draft_token_head import (
+            IndependentDraftTokenHead,
+        )
+
+        return IndependentDraftTokenHead()
 
     def hash_factors(self) -> list[Any]:
         """Extra factors of `SpeculativeConfig.compute_hash`."""
