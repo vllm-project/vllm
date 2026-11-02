@@ -46,6 +46,7 @@ from vllm.models.deepseek_v41.nvidia.ops.mega_mhc import (
     is_mega_mhc_supported,
     mhc_shifted_post_pre_deep_gemm,
 )
+from vllm.models.deepseek_v41.nvidia.ops.mhc import hc_expand
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -1889,3 +1890,36 @@ def test_mhc_fused_post_pre_delayed_falls_back_for_large_batches():
 
     assert not rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1)
     assert rocm_aiter_ops.mhc_fused_post_pre_delayed_prefers_unfused(1 << 20)
+
+
+@pytest.mark.parametrize(
+    "num_tokens,hidden_size,hc_mult",
+    [(0, 17, 4), (1, 513, 1), (7, 17, 8), (33, 5137, 4), (8192, 5120, 4)],
+)
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("strided", [False, True])
+def test_hc_expand_preserves_bits_in_eager_and_graph(
+    num_tokens, hidden_size, hc_mult, dtype, strided
+):
+    """Expansion preserves every input bit, including NaNs and signed zero."""
+    set_random_seed(42)
+    storage = torch.randn(num_tokens, 2 * hidden_size + 1, dtype=dtype, device=DEVICE)
+    x = storage[:, 1::2] if strided else storage[:, :hidden_size].contiguous()
+    if num_tokens:
+        x[0, 0] = float("nan")
+        x[0, -1] = -0.0
+
+    def check(actual):
+        expected = x.unsqueeze(1).expand(-1, hc_mult, -1).contiguous()
+        assert actual.shape == expected.shape and actual.dtype == x.dtype
+        assert actual.is_contiguous()
+        if actual.numel():
+            assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
+
+    check(hc_expand(x, hc_mult))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = hc_expand(x, hc_mult)
+    x.copy_(torch.randn_like(x))
+    graph.replay()
+    check(captured)
