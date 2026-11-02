@@ -1108,7 +1108,8 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${CUDA_VERSION%%.*}" = "13" ] && [ "${PYTORCH_NIGHTLY}" != "1" ] \
         && [ "$TARGETPLATFORM" != "linux/arm64" ]; then \
         uv pip freeze --system | sort > /tmp/kv-before.txt \
-        && uv pip install --system --require-hashes --no-deps \
+        # The NCCL UV_OVERRIDE would enter --require-hashes as an unhashed requirement.
+        && env -u UV_OVERRIDE uv pip install --system --require-hashes --no-deps \
             -r requirements/test/kv_connectors_cuda.txt \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && uv pip freeze --system | sort > /tmp/kv-after.txt \
