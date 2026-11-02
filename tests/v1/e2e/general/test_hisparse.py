@@ -274,13 +274,12 @@ def test_hisparse_extensible_kv_cache(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
 ):
-    """HiSparse serves from an extensible KV cache with its host pool kept out.
+    """An extensible KV cache serves HiSparse like a fixed one of its size.
 
-    Warmup used to fail on it: the FlashInfer decode autotune read hot blocks
-    the cache had not committed yet, and the context-prefill warmup gave the
-    hot group blocks for the whole context, more than its fixed-size rows hold.
-    The top-k is large enough for the autotune to read past the first physical
-    granule, which committing the null block already backs.
+    Warmup must commit the hot blocks the FlashInfer decode autotune reads (a
+    top-k of 2048 reaches past the blocks backed at allocation) and keep the
+    hot group within its fixed-size block-table rows. The host pool stays in
+    host memory.
     """
     capability = current_platform.get_device_capability()
     if capability is None or capability.major < 9:
@@ -293,41 +292,44 @@ def test_hisparse_extensible_kv_cache(
         config.update({"index_topk": 2048})
         return config
 
-    prompt = [1000 + i % 64 for i in range(2500)]
-    with vllm_runner(
-        MODEL,
-        load_format="dummy",
-        hf_overrides=shrink_config,
-        attention_config=AttentionConfig(
-            hisparse_config=HiSparseConfig(device_buffer_size=2048)
-        ),
-        kv_transfer_config=KVTransferConfig(
-            kv_connector="HiSparseConnector",
-            kv_role="kv_both",
-            kv_connector_extra_config={"host_pool_gib": 1},
-        ),
-        block_size=64,
-        max_model_len=4096,
-        max_num_batched_tokens=4096,
-        max_num_seqs=4,
-        enable_extensible_kv_cache=True,
-        compilation_config={
-            "cudagraph_mode": "FULL_AND_PIECEWISE",
-            "cudagraph_capture_sizes": [1, 4],
-        },
-    ) as runner:
-        engine_core = runner.llm.llm_engine.engine_core.engine_core
-        model_runner = engine_core.model_executor.driver_worker.worker.model_runner
-        kv_cache = model_runner.extensible_kv_cache
-        assert kv_cache is not None
-        assert kv_cache.num_committed_blocks == model_runner.kv_cache_config.num_blocks
-        worker = _get_hisparse_worker(runner)
-        assert worker.host_caches
-        assert not any(cache.is_cuda for cache in worker.host_caches)
+    def run(**kwargs) -> tuple[int, list]:
+        with vllm_runner(
+            MODEL,
+            load_format="dummy",
+            hf_overrides=shrink_config,
+            attention_config=AttentionConfig(
+                hisparse_config=HiSparseConfig(device_buffer_size=2048)
+            ),
+            kv_transfer_config=KVTransferConfig(
+                kv_connector="HiSparseConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={"host_pool_gib": 1},
+            ),
+            block_size=64,
+            max_model_len=4096,
+            max_num_batched_tokens=4096,
+            max_num_seqs=4,
+            compilation_config={
+                "cudagraph_mode": "FULL_AND_PIECEWISE",
+                "cudagraph_capture_sizes": [1, 4],
+            },
+            **kwargs,
+        ) as runner:
+            worker = _get_hisparse_worker(runner)
+            assert worker.host_caches
+            assert not any(cache.is_cuda for cache in worker.host_caches)
+            engine_core = runner.llm.llm_engine.engine_core.engine_core
+            model_runner = engine_core.model_executor.driver_worker.worker.model_runner
+            outputs = [
+                runner.generate_greedy([prompt], max_tokens=16)[0] for prompt in prompts
+            ]
+            return model_runner.kv_cache_config.num_blocks, outputs
 
-        outputs = runner.generate_greedy([prompt] * 2, max_tokens=16)
+    prompts = [[1000 + i % 64 for i in range(2500)], [7, 8, 9]]
+    num_blocks, extensible = run(enable_extensible_kv_cache=True)
+    _, fixed = run(enable_extensible_kv_cache=False, num_gpu_blocks_override=num_blocks)
 
-        assert outputs[0] == outputs[1]
+    assert extensible == fixed
 
 
 @pytest.mark.skipif(

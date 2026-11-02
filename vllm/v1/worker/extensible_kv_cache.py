@@ -459,6 +459,13 @@ def extend_kv_cache(
             for layer_name, layer in forward_context.items()
             if isinstance(getattr(layer, "kv_cache", None), torch.Tensor)
         }
+    # Host-resident layers keep the views they were allocated with.
+    kv_caches.update(
+        (layer_name, forward_context[layer_name].kv_cache)
+        for tensor in runner.kv_cache_config.kv_cache_tensors
+        if tensor.host_resident
+        for layer_name in tensor.layers
+    )
     runner.kv_connector = get_kv_connector(runner.vllm_config, kv_caches)
 
 

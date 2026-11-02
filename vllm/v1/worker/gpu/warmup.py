@@ -60,9 +60,6 @@ def _reserved_block_count(
     if isinstance(kvcache_spec, CrossAttentionSpec):
         # Cross-attention blocks cover the encoder sequence only.
         return cdiv(max_encoder_len, kvcache_spec.block_size)
-    if isinstance(kvcache_spec, HiSparseHotSpec):
-        # A request's hot buffer has a fixed size, whatever its length.
-        return kvcache_spec.blocks_per_request
     num_speculative_blocks = 0
     if isinstance(kvcache_spec, MambaSpec):
         # MambaManager appends speculative running-state blocks in every cache
@@ -74,7 +71,11 @@ def _reserved_block_count(
     if kvcache_spec.dcp_sharded:
         block_size *= dcp_world_size
     num_tokens = min(num_tokens + num_lookahead_tokens, max_model_len)
-    return cdiv(num_tokens, block_size) + num_speculative_blocks
+    num_blocks = cdiv(num_tokens, block_size) + num_speculative_blocks
+    if isinstance(kvcache_spec, HiSparseHotSpec):
+        # A request's hot buffer has a fixed size, whatever its length.
+        return min(num_blocks, kvcache_spec.blocks_per_request)
+    return num_blocks
 
 
 def _warmup_token_ids(model_runner: GPUModelRunner, num_tokens: int) -> list[int]:
