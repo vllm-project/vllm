@@ -104,6 +104,7 @@ _QWEN3_OMNI_DSPARK_ARCHITECTURE = "Qwen3OmniDSparkModel"
 # See `SpeculatorConfig.supported_options`.
 _METHOD_SPECIFIC_OPTIONS = (
     "dspark_draft_topk",
+    "dspark_markov_quantization",
     "draft_lm_head_quantization",
     "index_share_for_mtp_iteration",
     "xpress_topc",
@@ -696,6 +697,12 @@ class SpeculativeConfig:
     dspark_draft_topk: int | None = Field(default=None, ge=1)
     """For Qwen3 DSpark drafting, evaluate the Markov projection only for the
     top-k base-logit candidates. Requires draft tensor parallel size 1."""
+
+    dspark_markov_quantization: Literal["int8"] | None = None
+    """Run DSpark's sequential Markov walk as one persistent kernel that keeps
+    an int8 copy of the Markov projection on chip, instead of one
+    full-vocabulary GEMV, add and sample per draft token. sm_90 only. The
+    target verifies the draft, so only the acceptance length can change."""
 
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C

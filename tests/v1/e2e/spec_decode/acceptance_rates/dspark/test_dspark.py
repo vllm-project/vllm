@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
 from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
 from vllm.config import CompilationConfig
 from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.spec_decode.dspark.markov_walk import pick_tiles
 
 from ...utils import compute_acceptance_len, compute_acceptance_rate
 
@@ -33,6 +34,7 @@ class DSparkCorrectnessConfig:
     enforce_eager: bool = False
     disable_flashinfer_sampler: bool = False
     language_model_only: bool = False
+    markov_quantization: str | None = None
 
 
 # References from 12 full GSM8K runs at temperature 1.0: accuracy 0.782-0.814,
@@ -44,6 +46,12 @@ QWEN3_DSPARK_DEEPSPEC = DSparkCorrectnessConfig(
     reference_acceptance_rate=0.428,
     reference_acceptance_len=3.994,
     attention_backend="FLASH_ATTN",
+)
+
+# The one-launch int8 Markov walk keeps the references above; batches stay at
+# or below its 64-request limit so every decode step uses it.
+QWEN3_DSPARK_DEEPSPEC_INT8_WALK = replace(
+    QWEN3_DSPARK_DEEPSPEC, max_num_seqs=64, markov_quantization="int8"
 )
 
 # References from five 200-question runs at temperature 1.0: accuracy
@@ -84,6 +92,15 @@ QWEN3_6_DSPARK_SPECULATORS = DSparkCorrectnessConfig(
     "config",
     [
         pytest.param(QWEN3_DSPARK_DEEPSPEC, id="qwen3-deepspec"),
+        pytest.param(
+            QWEN3_DSPARK_DEEPSPEC_INT8_WALK,
+            id="qwen3-deepspec-int8-walk",
+            marks=pytest.mark.skipif(
+                not current_platform.is_device_capability(90)
+                or pick_tiles(151936, current_platform.num_compute_units()) is None,
+                reason="the int8 Markov walk needs a full sm_90 GPU",
+            ),
+        ),
         pytest.param(GEMMA4_DSPARK_DEEPSPEC, id="gemma4-deepspec"),
         pytest.param(QWEN3_6_DSPARK_SPECULATORS, id="qwen3.6-speculators"),
     ],
@@ -103,6 +120,8 @@ def test_dspark_correctness_and_acceptance_rate(
         "num_speculative_tokens": config.num_speculative_tokens,
         "draft_sample_method": "probabilistic",
     }
+    if config.markov_quantization is not None:
+        speculative_config["dspark_markov_quantization"] = config.markov_quantization
     if config.attention_backend is not None and current_platform.is_cuda():
         speculative_config["attention_backend"] = config.attention_backend
 
