@@ -570,6 +570,14 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             "(0 disables keep-alive comments)."
         )
 
+    # Custom mode without a value would silently omit system_fingerprint.
+    if getattr(args, "fingerprint_mode", None) == "custom" and not getattr(
+        args, "fingerprint_value", None
+    ):
+        raise ValueError(
+            "Error: --fingerprint-mode custom requires a non-empty --fingerprint-value."
+        )
+
     if getattr(args, "enable_per_request_metrics", False) and getattr(
         args, "disable_log_stats", False
     ):
