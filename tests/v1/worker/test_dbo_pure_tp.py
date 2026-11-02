@@ -3,6 +3,7 @@
 """DBO under pure tensor parallelism (one DP rank, no EP), without GPUs."""
 
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -174,5 +175,6 @@ def test_all_reduce_uses_device_communicator_outside_a_microbatch(monkeypatch):
     group.device_communicator = SimpleNamespace(all_reduce=lambda x: x + 1)
     x = torch.ones(2)
     assert torch.equal(group._all_reduce_out_place(x), x + 1)
-    group.ubatch_comms = [object(), object()]
+    # spec=[]: any use of a communicator raises.
+    group.ubatch_comms = [Mock(spec=[]), Mock(spec=[])]
     assert torch.equal(group._all_reduce_out_place(x), x + 1)
