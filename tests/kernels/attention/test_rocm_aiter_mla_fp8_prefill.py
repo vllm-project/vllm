@@ -49,7 +49,8 @@ pytestmark = pytest.mark.skipif(
 # q/k/v up to get_fp8_prefill_num_heads(num_heads) and slices the output back.
 # Cover all four regimes:
 #    8 -> padded to 16 (divisor, repeat_interleave), so the real heads sit at
-#         stride 2 in the padded output. Live case: Kimi-K2.x at TP8.
+#         stride 2 in the padded output. is_valid_fp8_prefill_num_heads keeps
+#         Kimi-K2.x at TP8 off this path, but the unpad must stay correct.
 #   12 -> padded to 16 (non-divisor, tile+slice). Live case: a K3 rank at TP8.
 #   16 -> no padding, output aliases the caller's buffer.
 #   24 -> padded to 32. No current model and TP reaches this band (96 heads
