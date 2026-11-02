@@ -540,7 +540,7 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout_values(
 
 
 def _make_unquantized_flashinfer_test_layer(
-    monkeypatch, intermediate, is_gated, *, device="cuda"
+    monkeypatch, intermediate, is_gated, *, device="cuda", layer=None
 ):
     from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
         UnquantizedMoeBackend,
@@ -567,7 +567,7 @@ def _make_unquantized_flashinfer_test_layer(
         lambda _: setattr(method, "moe_kernel", mock_kernel),
     )
 
-    layer = torch.nn.Module()
+    layer = torch.nn.Module() if layer is None else layer
     layer.moe_config = moe_config
     with torch.device(device):
         method.create_weights(
@@ -580,67 +580,100 @@ def _make_unquantized_flashinfer_test_layer(
     return method, layer
 
 
+def _make_unquantized_flashinfer_routed_experts(monkeypatch, intermediate, is_gated):
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+
+    layer = object.__new__(RoutedExperts)
+    torch.nn.Module.__init__(layer)
+    layer.quant_config = None
+    layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
+    layer._loaded_expert_biases = set()
+    layer._fused_shared_expert_quantizer = None
+    method, layer = _make_unquantized_flashinfer_test_layer(
+        monkeypatch, intermediate, is_gated, layer=layer
+    )
+    layer.quant_method = method
+    return method, layer
+
+
 @pytest.mark.parametrize("intermediate", [192, 256])
 @pytest.mark.parametrize("is_gated", [True, False])
-def test_unquantized_flashinfer_trtllm_weights_can_be_reprocessed(
+def test_unquantized_flashinfer_trtllm_refit_writes_block_layout(
     monkeypatch, intermediate, is_gated
 ):
-    """Each raw reload clears padding left dirty by prior in-place conversion."""
+    """load_weights after post-load processing writes BlockMajorK directly."""
     from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
 
-    method, layer = _make_unquantized_flashinfer_test_layer(
+    method, layer = _make_unquantized_flashinfer_routed_experts(
         monkeypatch, intermediate, is_gated
     )
-    w13_shape, w2_shape = layer.w13_weight.shape, layer.w2_weight.shape
-    padded = w2_shape[-1]
-    w13_ptr = layer.w13_weight.data_ptr()
-    w2_ptr = layer.w2_weight.data_ptr()
-    load_numel = (
-        layer.w13_weight.weight_loader_numel,
-        layer.w2_weight.weight_loader_numel,
+    padded = layer.w2_weight.shape[-1]
+    layer.w13_weight.data.fill_(float("nan"))
+    layer.w2_weight.data.fill_(float("nan"))
+    shards = ("w1", "w3", "w2") if is_gated else ("w1", "w2")
+    checkpoint: dict[tuple[int, str], torch.Tensor] = {}
+
+    def load(experts, shards=shards, fused=False):
+        for shard in shards:
+            name = "w2_weight" if shard == "w2" else "w13_weight"
+            shape = (256, intermediate) if shard == "w2" else (intermediate, 256)
+            weights = [
+                torch.randn(shape, dtype=torch.bfloat16, device="cuda") for _ in experts
+            ]
+            checkpoint.update(zip([(e, shard) for e in experts], weights))
+            if fused:
+                weights = [torch.stack(weights)]
+            for expert, weight in zip(experts, weights):
+                layer.weight_loader(getattr(layer, name), weight, name, shard, expert)
+
+    def check():
+        w13 = torch.zeros_like(layer.w13_weight)
+        w2 = torch.zeros_like(layer.w2_weight)
+        for (expert, shard), weight in checkpoint.items():
+            if shard == "w2":
+                w2[expert, :, :intermediate] = weight
+            else:
+                start = padded if shard == "w3" else 0
+                w13[expert, start : start + intermediate] = weight
+        expected = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+            {}, w13, w2, is_gated_act_gemm=is_gated
+        )
+        assert torch.equal(view_as_block_major_k(layer.w13_weight), expected[0])
+        assert torch.equal(view_as_block_major_k(layer.w2_weight), expected[1])
+
+    load(range(2))
+    method.process_weights_after_loading(layer)
+    check()
+    load([0])
+    load(range(2), fused=True)
+    load([1], shards=shards[:1])
+    check()
+    method.process_weights_after_loading(layer)
+    check()
+
+
+def test_unquantized_flashinfer_cutlass_refit_writes_w31_layout():
+    """The [w3; w1] swap runs once; later shards load through its writer."""
+    from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
+        UnquantizedMoeBackend,
+        convert_to_unquantized_kernel_format,
     )
 
-    for _ in range(2):
-        reloaded_w13 = torch.randn_like(layer.w13_weight)
-        reloaded_w2 = torch.randn_like(layer.w2_weight)
-        reloaded_w13[:, intermediate:padded].zero_()
-        if is_gated:
-            reloaded_w13[:, padded + intermediate :].zero_()
-        reloaded_w2[:, :, intermediate:].zero_()
-        expected_w13, expected_w2 = (
-            convert_moe_weights_to_flashinfer_trtllm_block_layout(
-                {},
-                reloaded_w13.clone(),
-                reloaded_w2.clone(),
-                is_gated_act_gemm=is_gated,
-            )
-        )
-
-        # The loader writes only logical checkpoint slices, not padding.
-        layer.w13_weight.fill_(float("nan"))
-        layer.w2_weight.fill_(float("nan"))
-        layer.w13_weight[:, :intermediate].copy_(reloaded_w13[:, :intermediate])
-        if is_gated:
-            layer.w13_weight[:, padded : padded + intermediate].copy_(
-                reloaded_w13[:, padded : padded + intermediate]
-            )
-        layer.w2_weight[:, :, :intermediate].copy_(reloaded_w2[:, :, :intermediate])
-        method.process_weights_after_loading(layer)
-
-        assert layer.w13_weight.shape == w13_shape
-        assert layer.w2_weight.shape == w2_shape
-        assert layer.w13_weight.data_ptr() == w13_ptr
-        assert layer.w2_weight.data_ptr() == w2_ptr
-        assert (
-            layer.w13_weight.weight_loader_numel,
-            layer.w2_weight.weight_loader_numel,
-        ) == load_numel
-        kernel_w13 = view_as_block_major_k(layer.w13_weight)
-        kernel_w2 = view_as_block_major_k(layer.w2_weight)
-        assert torch.equal(kernel_w13, expected_w13)
-        assert torch.equal(kernel_w2, expected_w2)
+    config = SimpleNamespace(is_act_and_mul=True)
+    w13, w2 = torch.randn(2, 8, 4), torch.randn(2, 4, 4)
+    kernel_w13, _ = convert_to_unquantized_kernel_format(
+        UnquantizedMoeBackend.FLASHINFER_CUTLASS, config, w13.clone(), w2
+    )
+    again, _ = convert_to_unquantized_kernel_format(
+        UnquantizedMoeBackend.FLASHINFER_CUTLASS, config, kernel_w13, w2
+    )
+    assert again is kernel_w13
+    w13[1, 4:] = torch.randn(4, 4)
+    with kernel_w13.kernel_layout_writer.checkpoint(kernel_w13[1], "w3") as expert:
+        expert[4:] = w13[1, 4:]
+    assert torch.equal(kernel_w13, swap_w13_to_w31(w13))
 
 
 def _check_flashinfer_ipc_weights(entries, expected, mode, device_index):
