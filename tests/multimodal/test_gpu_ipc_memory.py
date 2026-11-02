@@ -26,6 +26,8 @@ from vllm.utils.mem_constants import GiB_bytes
 def _mm_config(
     *,
     mm_ipc_gpu_memory_gb: float = 0,
+    mm_cuda_ipc_pool_gb: float = 0,
+    mm_tensor_ipc: str = "direct_rpc",
     video_backend: str | None = None,
     hw_decoders: int | None = None,
     max_width: int | None = None,
@@ -43,6 +45,8 @@ def _mm_config(
 
     return MultiModalConfig(
         mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
+        mm_cuda_ipc_pool_gb=mm_cuda_ipc_pool_gb,
+        mm_tensor_ipc=mm_tensor_ipc,
         media_io_kwargs={"video": video_kwargs} if video_kwargs else {},
     )
 
@@ -215,6 +219,38 @@ def test_reserve_mm_ipc_gpu_memory_includes_pynvvideocodec_decoder_budget(
 
     assert reserve_mm_ipc_gpu_memory(available_bytes, mm_config) == (
         available_bytes - int(0.25 * GiB_bytes) - _pynvvideocodec_decoder_budget()
+    )
+
+
+def test_reserve_mm_ipc_gpu_memory_includes_cuda_ipc_pool_budget(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+    mm_config = _mm_config(
+        mm_tensor_ipc="cuda_ipc_pool",
+        mm_cuda_ipc_pool_gb=0.5,
+    )
+
+    assert reserve_mm_ipc_gpu_memory(GiB_bytes, mm_config) == GiB_bytes // 2
+
+
+def test_reserve_mm_ipc_gpu_memory_keeps_video_and_transport_budgets_separate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setenv("VLLM_VIDEO_LOADER_BACKEND", "opencv")
+    mm_config = _mm_config(
+        mm_ipc_gpu_memory_gb=0.25,
+        mm_cuda_ipc_pool_gb=0.5,
+        mm_tensor_ipc="cuda_ipc_pool",
+        video_backend=PYNVVIDEOCODEC_VIDEO_BACKEND,
+    )
+    available_bytes = 4 * GiB_bytes
+
+    assert reserve_mm_ipc_gpu_memory(available_bytes, mm_config) == (
+        available_bytes
+        - int(0.25 * GiB_bytes)
+        - int(0.5 * GiB_bytes)
+        - _pynvvideocodec_decoder_budget()
     )
 
 
