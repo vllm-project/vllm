@@ -125,20 +125,16 @@ SM90_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     (6416, 4096): {
         1: SkinnyGemmConfig(1, 64, 2, vector_width=4, static_k=4096),
         2: SkinnyGemmConfig(2, 128, 1, vector_width=4, static_k=4096),
-        3: SkinnyGemmConfig(3, 32, 4, vector_width=4, static_k=4096),
     },
     # LM head, TP=8.
     (19360, 4096): {
         1: SkinnyGemmConfig(1, 128, 2, k_unroll=2),
-        2: SkinnyGemmConfig(2, 128, 2, k_unroll=2),
-        3: SkinnyGemmConfig(3, 32, 2, vector_width=4, static_k=4096),
     },
     # LM head, TP=4.
     (38720, 4096): {
         1: SkinnyGemmConfig(1, 256, 2, static_k=4096),
         2: SkinnyGemmConfig(2, 256, 2, vector_width=4, static_k=4096),
         3: SkinnyGemmConfig(3, 32, 4, vector_width=4, static_k=4096),
-        4: SkinnyGemmConfig(4, 32, 4, vector_width=4, static_k=4096),
     },
 }
 
