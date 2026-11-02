@@ -1101,6 +1101,32 @@ vllm serve llava-hf/llava-1.5-7b-hf \
   --media-io-kwargs '{"image": {"rgba_background_color": [128, 128, 128]}}'
 ```
 
+#### Image Decoding Backend
+
+vLLM decodes image bytes with one of these backends:
+
+| Backend | Description |
+| --- | --- |
+| `pil` (default) | Pillow, returns PIL images |
+| `torchcodec` | TorchCodec for JPEG, PNG, WebP and AVIF, returning CHW `uint8` tensors; Pillow for everything else |
+
+```bash
+vllm serve Qwen/Qwen2.5-VL-7B-Instruct \
+  --media-io-kwargs '{"image": {"image_backend": "torchcodec"}}'
+```
+
+The `torchcodec` backend decodes faster than Pillow, and the HF image
+processor receives a tensor directly, skipping its PIL-to-tensor conversion.
+The pixel values are identical to the `pil` backend.
+Images with transparency, CMYK or 16-bit images, animated images and
+`image_mode` values other than `RGB` are decoded with Pillow.
+
+!!! note
+    The `torchcodec` backend requires torchcodec >= 0.16 and falls back to
+    Pillow when it is unavailable. Some processors only accept PIL images
+    (e.g. InternVL, DeepSeek-VL2, DeepSeek-OCR, Step3-VL and Kimi-VL) and do
+    not support this backend yet.
+
 ### Audio Inputs
 
 Audio input is supported according to [OpenAI Audio API](https://platform.openai.com/docs/guides/audio?audio-generation-quickstart-example=audio-in).
