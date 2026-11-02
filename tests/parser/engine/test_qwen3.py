@@ -819,6 +819,14 @@ WRITE_CALL_TAIL = "\n</parameter>\n</function>\n</tool_call>"
 # Escapes, non-ASCII, blank lines and tag-like text that must stay inside
 # the value, including prefixes of the closing and next-parameter tags.
 CONTENT_LINE = 'if a < b > c: print("x\\y")  # </p> </param <parameter\té\n\n'
+# A model stuck in a loop repeats closed parameters inside one call.
+LOOP_HEAD = (
+    "<tool_call>\n<function=write_file>\n<parameter=path>\n/repo/app.py\n</parameter>\n"
+)
+LOOP_PARAMS = (
+    "<parameter=content>\na > b\n</parameter>\n<parameter=mode>\n644\n</parameter>\n"
+)
+LOOP_TAIL = "</function>\n</tool_call>"
 
 
 class TestArgValueExtender:
@@ -907,6 +915,92 @@ class TestArgValueExtender:
             return calls
 
         assert streaming_conversions(lines=20) == streaming_conversions(lines=200)
+
+    @pytest.mark.parametrize("size", [1, 7])
+    def test_repeated_closed_params_stream_non_streaming_arguments(
+        self, mock_tokenizer, mock_request, write_tool, size
+    ):
+        """Covers a duplicate open key and a second call sharing the first pair."""
+        from vllm.parser.qwen3 import Qwen3Parser
+
+        mock_request.tools = [write_tool]
+        text = (
+            LOOP_HEAD
+            + LOOP_PARAMS * 20
+            + "<parameter=content>\na > b"
+            + WRITE_CALL_TAIL
+            + LOOP_HEAD
+            + LOOP_TAIL
+        )
+
+        def make_parser():
+            return Qwen3Parser(
+                mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
+            )
+
+        results = simulate_tool_streaming(
+            make_parser(),
+            mock_request,
+            [text[i : i + size] for i in range(0, len(text), size)],
+        )
+        result = make_parser().extract_tool_calls(text, mock_request)
+
+        assert len(result.tool_calls) == 2
+        assert collect_tool_arguments(results) == "".join(
+            c.function.arguments for c in result.tool_calls
+        )
+
+    def test_closed_params_are_parsed_once(
+        self, mock_tokenizer, mock_request, write_tool, monkeypatch
+    ):
+        """Streaming cost must not grow with the closed parameters already seen."""
+        from vllm.parser import qwen3
+
+        mock_request.tools = [write_tool]
+        param_re = qwen3._PARAM_RE
+        matches = 0
+
+        class CountingPattern:
+            def __getattr__(self, name):
+                return getattr(param_re, name)
+
+            def finditer(self, *args):
+                nonlocal matches
+                for match in param_re.finditer(*args):
+                    matches += 1
+                    yield match
+
+            def sub(self, repl, *args):
+                def count(match):
+                    nonlocal matches
+                    matches += 1
+                    return repl
+
+                return param_re.sub(count, *args)
+
+        monkeypatch.setattr(qwen3, "_PARAM_RE", CountingPattern())
+        text = LOOP_HEAD + LOOP_PARAMS * 200 + LOOP_TAIL
+        simulate_tool_streaming(
+            qwen3.Qwen3Parser(
+                mock_tokenizer, chat_template_kwargs={"enable_thinking": False}
+            ),
+            mock_request,
+            [text[i : i + 4] for i in range(0, len(text), 4)],
+        )
+
+        assert matches == len(param_re.findall(text))
+
+    def test_value_closed_by_next_parameter_needs_that_parameter(self):
+        from vllm.parser.qwen3 import _ClosedParams, _qwen3_arg_converter
+
+        closed = _ClosedParams()
+        _qwen3_arg_converter(
+            "<parameter=path>\n/a.py\n<parameter=mode>\n6", True, closed
+        )
+        text = "<parameter=path>\n/a.py\n.bak\n</parameter>"
+        assert _qwen3_arg_converter(text, False, closed) == _qwen3_arg_converter(
+            text, False
+        )
 
     def test_extender_follows_newline_trimming_and_split_end(self):
         from vllm.parser.qwen3 import _qwen3_arg_value_extender

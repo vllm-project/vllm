@@ -419,6 +419,11 @@ A processed item larger than this budget is served uncached (with a warning)
 instead of failing engine startup; raise `mm_processor_cache_gb` if you want
 those items cached.
 
+With processor-only caching, a request can contain more processed multi-modal
+data than the cache budget. Cached tensors and prompt updates needed by the
+request remain referenced while its inputs are merged, even if they are evicted
+from the LRU. The budget limits cache storage, not transient per-request memory.
+
 If you do not benefit much from the cache, you can disable both IPC
 and processor caching completely via `mm_processor_cache_gb=0`.
 

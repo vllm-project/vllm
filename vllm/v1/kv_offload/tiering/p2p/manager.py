@@ -229,8 +229,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     not driven by the engine, so this tier sets ``tolerates_off_thread_polling``
     to be serviced from that thread too; without it a peer's lookup or fetch
     waits for a step boundary, which on a saturated rank can be seconds.
-    ``has_pending_work()`` keeps the engine ticking so the control transport
-    and existing sessions are polled even when no requests are scheduled.
+
+    ``has_pending_work()`` reports peer-originated work, not idle polling,
+    so a peer-only engine can pause and shut down. The tiering manager keeps
+    the engine ticking when the tier-poll thread is off or another secondary
+    tier exists.
     """
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
@@ -430,9 +433,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # in on_schedule_end batches the LookupMsg; a later step's
         # lookup() returns HIT/MISS once LookupRespMsg has arrived.
         # PD path (``remote_prefiller`` sub-dict only) keeps the eager HIT.
+        # Until the peer acks the handshake, prefill locally rather than wait
+        # up to VLLM_P2P_HANDSHAKE_TIMEOUT_S on a peer that may be gone.
         if source.do_probe:
             session = self._sessions.get(source.peer_id)
-            if session is None:
+            if session is None or not session.ready:
                 return LookupResult.MISS
             result = session.register_lookup(source.kv_request_id, key)
             if result is True:
@@ -657,11 +662,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # The engine tick is the only driver of _control.poll() and
-        # session.poll(); without it we miss new peer connects and
-        # inbound fetch messages on existing sessions. Keep the engine
-        # ticking for the lifetime of this manager.
-        return True
+        # Idle polling is excluded, or the engine could never go idle; the
+        # tiering manager keeps it ticking when the tier-poll thread is off.
+        return bool(
+            self._finished_jobs
+            or self._failed_serve_ctxs
+            or self._unbound_stores
+            or any(s.has_pending_work for s in self._sessions.values())
+        )
 
     @override
     def drain_jobs(self) -> None:
@@ -675,6 +683,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         memoryview to be quiescent, not aborted. Results
         accumulate in ``_finished_jobs`` and are surfaced by the next
         ``get_finished_jobs()`` call.
+
+        A load already failed with a deferred release stays pending until
+        its AbortAck, or until a missed AbortAck disconnects the session and
+        the reap's close() sets the event, so every event is set on return.
         """
         start = time.monotonic()
         warned = False
@@ -1117,7 +1129,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             result = session.poll()
             for lr in result.loads:
                 self._finished_jobs.append(
-                    JobResult(job_id=lr.job_id, success=lr.success)
+                    JobResult(
+                        job_id=lr.job_id,
+                        success=lr.success,
+                        deferred_release=lr.deferred_release,
+                    )
                 )
                 if not lr.success:
                     self._failed_req_ids.add(lr.kv_request_id)

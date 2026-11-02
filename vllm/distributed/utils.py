@@ -10,6 +10,7 @@ import functools
 import os
 import pickle
 import socket
+import struct
 import sys
 import time
 import uuid
@@ -19,7 +20,7 @@ from datetime import timedelta
 from typing import Any
 
 import torch
-from torch.distributed import ProcessGroup, Store, TCPStore
+from torch.distributed import ProcessGroup, ReduceOp, Store, TCPStore
 from torch.distributed.distributed_c10d import (
     Backend,
     PrefixStore,
@@ -57,6 +58,18 @@ def ensure_divisibility(numerator, denominator):
 
 # P2P tags [base, base + log2(group size) + 1] are reserved for cpu_all_reduce_.
 _CPU_ALL_REDUCE_TAG_BASE = 27100
+
+
+def all_reduce_int(
+    group: ProcessGroup | None, value: int, op: ReduceOp = ReduceOp.MIN
+) -> int:
+    """All-reduce one integer over a CPU process group, e.g. for ranks to agree
+    on a size or a decision; `value` itself without a group or with one rank."""
+    if group is None or group.size() == 1:
+        return value
+    tensor = torch.tensor([value], dtype=torch.int64, device="cpu")
+    torch.distributed.all_reduce(tensor, op=op, group=group)
+    return int(tensor.item())
 
 
 def cpu_all_reduce_(
@@ -592,13 +605,59 @@ def get_cached_tcp_store_client(host: str, port: int) -> TCPStore:
     return TCPStore(host, port, is_master=False, wait_for_workers=False)
 
 
+def allocate_group_ports(
+    store: Store, key: str, host: str, count: int
+) -> tuple[list[int], list[socket.socket]]:
+    """Bind sockets and publish the ports to *store*.
+
+    Returns ``(ports, sockets)`` with the sockets still open.
+    """
+    socks: list[socket.socket] = []
+    ports: list[int] = []
+    for _ in range(count):
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.bind((host, 0))
+        s.listen()
+        socks.append(s)
+        ports.append(s.getsockname()[1])
+    store.set(key, struct.pack(f"!{count}I", *ports))
+    return ports, socks
+
+
+def fetch_group_ports(store: Store, key: str, count: int) -> list[int]:
+    """Read ports published under *key* by func:`allocate_group_ports`. Blocks until
+    the key is available.
+    """
+    return list(struct.unpack(f"!{count}I", store.get(key)))
+
+
+# Per-process flag: startup (weight load, KV setup, graph capture) is done and
+# the busy loop is about to start. Under FT, gloo groups created before this
+# point are given no cpu timeout, because uneven rank startup would trip it;
+# groups created later (recovery reinit) get the configured timeout.
+_steady_state_entered = False
+
+
+def enter_steady_state() -> None:
+    global _steady_state_entered
+    _steady_state_entered = True
+
+
+def steady_state_entered() -> bool:
+    return _steady_state_entered
+
+
 def get_cpu_distributed_timeout_or_none() -> timedelta | None:
     from vllm.config import get_current_vllm_config_or_none
 
     vllm_config = get_current_vllm_config_or_none()
     if vllm_config is None:
         return None
-    return vllm_config.parallel_config.cpu_distributed_timeout
+    return vllm_config.parallel_config.effective_cpu_distributed_timeout
+
+
+def set_gloo_backend_timeout(group: ProcessGroup, timeout: timedelta) -> None:
+    group._get_backend(torch.device("cpu"))._set_default_timeout(timeout)
 
 
 def get_distributed_timeout_or_none() -> timedelta | None:
