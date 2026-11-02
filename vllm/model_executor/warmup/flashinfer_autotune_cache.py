@@ -117,7 +117,7 @@ def resolve_flashinfer_autotune_v2_root() -> Path | None:
     Unlike :func:`resolve_flashinfer_autotune_file`, no vLLM-side identity
     (config hash, flashinfer version, arch) is folded into the path: the
     managed store keys entries per op and hashes the software/hardware
-    environment itself. ``None`` selects FlashInfer's default root.
+    environment itself. `None` selects FlashInfer's default root.
     """
     override_dir = envs.VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR
     return Path(override_dir).expanduser() if override_dir else None

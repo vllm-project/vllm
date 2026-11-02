@@ -136,19 +136,19 @@ def triton_scalar_specialization_rep(value: int) -> int:
     """Return an integer with the same default Triton JIT specialization.
 
     For an ordinary integer argument, Triton's cache key contains its inferred
-    type (``i32``, ``i64``, or ``u64``) and one of three value classes:
+    type (`i32`, `i64`, or `u64`) and one of three value classes:
 
-    * ``1`` is specialized as the exact constant ``1``.
-    * Multiples of 16 receive a ``tt.divisibility = 16`` attribute.
+    * `1` is specialized as the exact constant `1`.
+    * Multiples of 16 receive a `tt.divisibility = 16` attribute.
     * All other values have no value specialization.
 
     Warmup only needs one concrete value for each cache-key class. This helper
-    returns ``1`` for the exact-one class and otherwise returns a divisible or
+    returns `1` for the exact-one class and otherwise returns a divisible or
     generic representative while preserving the inferred integer type.
 
-    This applies only to non-``constexpr`` integer arguments using Triton's
+    This applies only to non-`constexpr` integer arguments using Triton's
     default specialization. Do not use it for arguments listed in
-    ``do_not_specialize`` or ``do_not_specialize_on_alignment``.
+    `do_not_specialize` or `do_not_specialize_on_alignment`.
     """
     if value == 1:
         return 1
@@ -172,13 +172,13 @@ def triton_scalar_specialization_rep(value: int) -> int:
 class TritonWarmupTensor:
     """Compile-only tensor metadata used by Triton warmup.
 
-    ``strides=None`` represents compact row-major storage. Pass explicit strides
+    `strides=None` represents compact row-major storage. Pass explicit strides
     whenever the runtime tensor can be padded, transposed, or otherwise strided.
 
-    ``ptr_range_bytes`` is the byte size of the storage behind the runtime
-    tensor (its ``untyped_storage()``, not the view). With buffer ops enabled,
+    `ptr_range_bytes` is the byte size of the storage behind the runtime
+    tensor (its `untyped_storage()`, not the view). With buffer ops enabled,
     Triton's ROCm backend gives pointers into storage of at most 2 GB a
-    ``tt.pointer_range = 32`` specialization (32-bit buffer offsets), which is
+    `tt.pointer_range = 32` specialization (32-bit buffer offsets), which is
     part of the compile key. The default 0 assumes such a small storage; set it
     above 2 GB for tensors that view a larger pool, such as a KV cache layer,
     or warmup compiles a variant the runtime never uses. CUDA ignores it.

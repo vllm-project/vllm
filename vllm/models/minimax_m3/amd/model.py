@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only MiniMax M3 (text backbone) model — AMD ROCm implementation.
 
-Self-contained per-platform impl (mirrors ``deepseek_v4/amd``). It is identical
-to ``../nvidia/model.py`` except for RMS normalization: FlashInfer's Gemma
-RMSNorm kernels are CUDA-only, so ``MiniMAXGemmaRMSNorm`` here uses a native
+Self-contained per-platform impl (mirrors `deepseek_v4/amd`). It is identical
+to `../nvidia/model.py` except for RMS normalization: FlashInfer's Gemma
+RMSNorm kernels are CUDA-only, so `MiniMAXGemmaRMSNorm` here uses a native
 (FlashInfer-free) implementation.
 
 The MiniMax-M3-preview config selects a single set of branches:
@@ -190,16 +190,16 @@ def _sparse_attention_layer_ordinals(config: PreTrainedConfig) -> dict[int, int]
 
 
 def _should_skip_index_topk(config: PreTrainedConfig, layer_id: int) -> bool:
-    """ATOM ``index_topk_freq`` (cross-layer index sharing).
+    """ATOM `index_topk_freq` (cross-layer index sharing).
 
-    Only 1 of every ``index_topk_freq`` sparse-attention layers recomputes the
+    Only 1 of every `index_topk_freq` sparse-attention layers recomputes the
     lightning-indexer top-k block selection; the rest reuse the selection the
-    preceding compute layer wrote into the shared ``topk_indices_buffer`` this
-    same forward pass. This cuts the indexer score + top-k cost ~``freq``x but
+    preceding compute layer wrote into the shared `topk_indices_buffer` this
+    same forward pass. This cuts the indexer score + top-k cost ~`freq`x but
     approximates the per-layer selection, so validate accuracy on long-context
-    inputs. Gated by ``use_index_cache`` in the text config; enable via
-    ``--hf-overrides '{"text_config": {"use_index_cache": true,
-    "index_topk_freq": 4}}'``.
+    inputs. Gated by `use_index_cache` in the text config; enable via
+    `--hf-overrides '{"text_config": {"use_index_cache": true,
+    "index_topk_freq": 4}}'`.
     """
     if not getattr(config, "use_index_cache", False):
         return False
@@ -222,19 +222,19 @@ def _is_moe_layer(config: PreTrainedConfig, layer_id: int) -> bool:
 
 
 def _build_rotary_emb(config: PreTrainedConfig, head_dim: int):
-    """Build the (partial NeoX) RoPE, honoring an optional ``rope_scaling`` config.
+    """Build the (partial NeoX) RoPE, honoring an optional `rope_scaling` config.
 
-    Without scaling the cos/sin cache is sized to ``max_position_embeddings``
+    Without scaling the cos/sin cache is sized to `max_position_embeddings`
     (524288 native); a request whose positions exceed that reads the cache out of
-    bounds and the worker hard-crashes (no Python traceback). When ``rope_scaling``
-    is set (e.g. YaRN ``factor: 2`` to reach 1M), thread it into ``get_rope`` so the
+    bounds and the worker hard-crashes (no Python traceback). When `rope_scaling`
+    is set (e.g. YaRN `factor: 2` to reach 1M), thread it into `get_rope` so the
     proper scaled embedding is built and its cache covers
-    ``original_max_position_embeddings * factor`` positions. Default behavior
+    `original_max_position_embeddings * factor` positions. Default behavior
     (no scaling) is unchanged. Shared by the dense and sparse attention layers, and
     the index branch reuses the returned module.
 
-    Note: for the VL checkpoint, set ``rope_scaling`` on the *text* config
-    (``--hf-overrides '{"text_config":{"rope_scaling":{...}}}'``) -- that is the
+    Note: for the VL checkpoint, set `rope_scaling` on the *text* config
+    (`--hf-overrides '{"text_config":{"rope_scaling":{...}}}'`) -- that is the
     config the decoder reads here; a top-level override does not reach it.
     """
     rope_parameters = {
@@ -265,13 +265,13 @@ def _build_rotary_emb(config: PreTrainedConfig, head_dim: int):
 class MiniMAXGemmaRMSNorm(nn.Module):
     """Gemma-style RMS normalization (native ROCm implementation).
 
-    Normalizes in fp32 and scales by ``(1 + weight)`` — numerically equivalent
-    to the FlashInfer ``gemma_rmsnorm`` / ``gemma_fused_add_rmsnorm`` kernels
-    used in the NVIDIA path, which are unavailable on ROCm. When ``residual`` is
-    given, the fused add + norm returns the updated ``(normed, residual)`` pair.
+    Normalizes in fp32 and scales by `(1 + weight)` — numerically equivalent
+    to the FlashInfer `gemma_rmsnorm` / `gemma_fused_add_rmsnorm` kernels
+    used in the NVIDIA path, which are unavailable on ROCm. When `residual` is
+    given, the fused add + norm returns the updated `(normed, residual)` pair.
 
     The fp32 normalize + scale + (optional) residual-add run in a single fused
-    Triton pass (``amd.ops.gemma_rmsnorm`` / ``gemma_fused_add_rmsnorm``) instead
+    Triton pass (`amd.ops.gemma_rmsnorm` / `gemma_fused_add_rmsnorm`) instead
     of a chain of elementwise PyTorch kernels.
     """
 
@@ -353,10 +353,10 @@ def _aiter_moe_fused_shared_experts_enabled(
     """Whether the fused shared expert routes through aiter's grouped top-k MoE.
 
     A strict sub-case of `is_fused_shared_expert_enabled`: shared-expert
-    fusion must already be opted in (``VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS``)
+    fusion must already be opted in (`VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS`)
     and allowed (not under expert parallelism). When additionally on gfx950 with
     an active aiter MoE backend, the shared expert is appended inside aiter's
-    biased grouped top-k kernel (``num_fused_shared_experts``) instead of the
+    biased grouped top-k kernel (`num_fused_shared_experts`) instead of the
     vLLM router's torch concat. Otherwise FSE still runs via the vLLM top-k bias
     router.
     """
@@ -638,15 +638,15 @@ _MAX_KV_INSERT_ROW_STRIDE = 2**31 - 1
 
 
 def _kv_insert_operand(t: torch.Tensor) -> torch.Tensor:
-    """K or V operand for ``aiter.reshape_and_cache``, without a needless copy.
+    """K or V operand for `aiter.reshape_and_cache`, without a needless copy.
 
     The AITER sparse-PA insert takes K and V as column slices of the fused
-    ``[q | k | v | index_q | index_k]`` projection, so they are row-strided
-    views and never contiguous. ``reshape_and_cache`` does not need them to be:
-    it passes ``key.stride(0)`` to the kernel as the row pitch and reads
-    ``key[token_idx * key_stride + i]`` for ``i`` over ``num_heads *
-    head_size``, so the only requirement is that the trailing
-    ``(num_heads, head_size)`` block be contiguous within a row, which such a
+    `[q | k | v | index_q | index_k]` projection, so they are row-strided
+    views and never contiguous. `reshape_and_cache` does not need them to be:
+    it passes `key.stride(0)` to the kernel as the row pitch and reads
+    `key[token_idx * key_stride + i]` for `i` over `num_heads *
+    head_size`, so the only requirement is that the trailing
+    `(num_heads, head_size)` block be contiguous within a row, which such a
     slice always satisfies. Any other layout falls back to a copy.
     """
     if (
@@ -664,15 +664,15 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
     This is a merged attention layer: it owns the projections (qkv + index
     q/k), per-head QK norms and RoPE, *and* the attention-backend wiring that a
-    generic ``Attention`` layer would normally provide — it binds the
-    ``MiniMaxM3SparseBackend`` + main impl, registers the main paged K/V cache,
-    and owns the lightning indexer (``MiniMaxM3Indexer``), which holds the
+    generic `Attention` layer would normally provide — it binds the
+    `MiniMaxM3SparseBackend` + main impl, registers the main paged K/V cache,
+    and owns the lightning indexer (`MiniMaxM3Indexer`), which holds the
     index-key side cache.
 
     The index branch (index_{q,k}_proj + index_{q,k}_norm) feeds the sparse
     top-k block selection. M3 always disables the index value/output
-    projections (``sparse_disable_index_value`` set for every sparse layer), so
-    ``index_{v,o}_proj`` are never created.
+    projections (`sparse_disable_index_value` set for every sparse layer), so
+    `index_{v,o}_proj` are never created.
     """
 
     def __init__(
@@ -1466,10 +1466,10 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
 
 
 def _can_fuse_input_norm_mxfp8(qkv_proj: nn.Module) -> bool:
-    """Whether ``input_layernorm`` can hand ``qkv_proj`` an MXFP8 activation.
+    """Whether `input_layernorm` can hand `qkv_proj` an MXFP8 activation.
 
     The quant key does not encode the scale layout (FlashInfer wants swizzled
-    scales under the same key), so this also requires the ROCm ``dot_scaled``
+    scales under the same key), so this also requires the ROCm `dot_scaled`
     kernel, which reads the row-major scales the fused norm writes.
     """
     if envs.VLLM_BATCH_INVARIANT or get_input_quant_key(qkv_proj) != kMxfp8Dynamic:

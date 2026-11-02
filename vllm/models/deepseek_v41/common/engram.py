@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Engram: n-gram hash lookups gated into the hyper-connection stream.
 
-Port of the reference ``inference/engram.py`` + ``Engram`` /
-``ParallelEngramEmbedding`` from ``inference/model.py`` (DeepSeek V4.1
+Port of the reference `inference/engram.py` + `Engram` /
+`ParallelEngramEmbedding` from `inference/model.py` (DeepSeek V4.1
 checkpoint layout). Engram modules live on the backbone layers listed in
-``engram_layer_ids`` only.
+`engram_layer_ids` only.
 
 Two pieces of cross-forward state are needed because vLLM streams tokens
-chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
-``p-1..p-3``:
+chunk-by-chunk while an n-gram at position `p` needs the token ids at
+`p-1..p-3`:
 
-- ``token_map``: token id -> compressed vocab id, built once from the
+- `token_map`: token id -> compressed vocab id, built once from the
   model's tokenizer at init (deterministic; asserted against
-  ``engram_compressed_vocab_size``).
-- ``hash_cache``: one int32 slot per KV slot of the first local layer's
+  `engram_compressed_vocab_size`).
+- `hash_cache`: one int32 slot per KV slot of the first local layer's
   sliding-window cache, holding the compressed id (or DEAD) of the token
   last written to that slot. Slots are stable per (request, position) —
   the block table pins a position to a physical slot, prefix-cache hits
@@ -26,7 +26,7 @@ chunk-by-chunk while an n-gram at position ``p`` needs the token ids at
 
   Slots are not part of the KV cache, so KV loaded from another instance
   (P/D, offload connectors) leaves them unwritten. The runner therefore
-  passes ``lookback_token_ids``, the ids just before each request's chunk
+  passes `lookback_token_ids`, the ids just before each request's chunk
   start, which take precedence over the slots. The V2 runner reads them
   from its device-resident token history and needs no slot cache; the V1
   runner's CPU token table holds placeholders for generated tokens under

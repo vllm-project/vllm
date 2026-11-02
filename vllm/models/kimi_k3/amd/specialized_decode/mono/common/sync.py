@@ -4,8 +4,8 @@
 # Copyright (C) 2026, Advanced Micro Devices, Inc.:
 # atom/mono/device/sync.py
 """The tagged mailbox: hand-offs between the CTAs of one GPU (device scope) and
-between GPUs (system scope), every address a named region (``Addr``) recorded
-when the kernel is traced (``trace``)."""
+between GPUs (system scope), every address a named region (`Addr`) recorded
+when the kernel is traced (`trace`)."""
 
 from __future__ import annotations
 
@@ -40,13 +40,13 @@ WAIT_TICKS = WAIT_SECONDS * 100_000_000  # s_memrealtime ticks at 100 MHz
 
 @traced
 def _spin(load_all, pending, health, alarm, region_id, index, tag):
-    """Re-issue ``load_all`` until ``pending`` clears, for at most WAIT_TICKS, and
-    not at all once this rank has failed (``health`` word FAILED), so a failed
+    """Re-issue `load_all` until `pending` clears, for at most WAIT_TICKS, and
+    not at all once this rank has failed (`health` word FAILED), so a failed
     step runs to its end instead of hanging. A side-effecting op in the loop keeps
     the loads from being hoisted.
 
-    A CTA's first give-up is recorded in its ``health`` record; it then raises the
-    output rank's flag for this rank (``alarm``) and drains that store before it
+    A CTA's first give-up is recorded in its `health` record; it then raises the
+    output rank's flag for this rank (`alarm`) and drains that store before it
     sets FAILED, so no later store of this rank's can overtake the flag."""
     t0 = memrealtime()
     v = load_all()
@@ -80,9 +80,9 @@ def _spin(load_all, pending, health, alarm, region_id, index, tag):
 
 @traced
 def stall(fault_rank, fault_epoch, fault_layer, ticks, rank, epoch, layer):
-    """The fault hook (tests only): CTA 0 of rank ``fault_rank`` stalls ``ticks``
-    once, in the launch for slot ``fault_layer`` of the step at epoch
-    ``fault_epoch``."""
+    """The fault hook (tests only): CTA 0 of rank `fault_rank` stalls `ticks`
+    once, in the launch for slot `fault_layer` of the step at epoch
+    `fault_epoch`."""
     if (
         (rank == fault_rank)
         & (uniform(ld_i32(epoch, 0)) == fault_epoch)
@@ -105,7 +105,7 @@ def ld_health(health, i):
 @dataclass(frozen=True)
 class Addr:
     """A mailbox region's address: the region's name and space, recorded when the
-    kernel is traced (``trace``), and the traced address. The space also
+    kernel is traced (`trace`), and the traced address. The space also
     sets the hand-off's scope: device for SCRATCH, system for PEER."""
 
     region: str
@@ -114,18 +114,18 @@ class Addr:
 
 
 def sreg(base, offset, region):
-    """Scratch region ``region`` at byte ``offset`` of ``base``."""
+    """Scratch region `region` at byte `offset` of `base`."""
     return Addr(region, Space.SCRATCH, base + fx.Int64(offset))
 
 
 def preg(base, offset, region):
-    """Peer-symmetric region ``region`` at byte ``offset`` of a rank's buffer
-    ``base``."""
+    """Peer-symmetric region `region` at byte `offset` of a rank's buffer
+    `base`."""
     return Addr(region, Space.PEER, base + fx.Int64(offset))
 
 
 def shift(a, delta):
-    """``a`` moved by ``delta`` bytes (a traced or Python integer), same region."""
+    """`a` moved by `delta` bytes (a traced or Python integer), same region."""
     return Addr(a.region, a.space, a.value + delta)
 
 
@@ -143,16 +143,16 @@ class Mailbox:
 
     Every 32-bit value is stored next to this launch's tag; a consumer
     polls the payload until all tags match, so a hand-off costs one round trip
-    (no store drain, no separate flag). The tag is ``layer + 1``: it tells the
+    (no store drain, no separate flag). The tag is `layer + 1`: it tells the
     layers of one step apart, and the runner zeroes every mailbox at a step's
-    start (``StepMailboxes.begin_step``), so a pair from an earlier step never
-    carries a live tag. Every address is an ``Addr``: its space picks the scope.
+    start (`StepMailboxes.begin_step`), so a pair from an earlier step never
+    carries a live tag. Every address is an `Addr`: its space picks the scope.
     """
 
     def __init__(self, layer, health, alarm, region_ids):
-        """``health``: this rank's health words (FAILED, then a wait record a
-        CTA); ``alarm``: this rank's flag word on the output rank;
-        ``region_ids``: region name -> the id a record names it by."""
+        """`health`: this rank's health words (FAILED, then a wait record a
+        CTA); `alarm`: this rank's flag word on the output rank;
+        `region_ids`: region name -> the id a record names it by."""
         self.tag = layer + 1
         self.health = health
         self.alarm = alarm
@@ -195,7 +195,7 @@ class Mailbox:
         )
 
     def poll(self, specs, batch=POLL_MAX):
-        """Batched poll of pairs ``specs`` = [(Addr, pair index, npairs in {1, 2})],
+        """Batched poll of pairs `specs` = [(Addr, pair index, npairs in {1, 2})],
         all of one space.
 
         All pairs are re-loaded together while any tag is stale, so a batch costs
@@ -244,8 +244,8 @@ class Mailbox:
 
 @traced
 def publish(put, a, i, v, who):
-    """This CTA's plain stores made readable by every CTA, then (thread ``who``)
-    the mailbox pair (``a``, i) := v. The stores are drained first: a flag may
+    """This CTA's plain stores made readable by every CTA, then (thread `who`)
+    the mailbox pair (`a`, i) := v. The stores are drained first: a flag may
     not overtake the data it announces, and a workgroup-scope release fence does
     not wait for them (LLVM's AMDGPU memory model omits vmcnt outside tgsplit
     mode: the workgroup's waves share one CU, the readers here do not)."""
@@ -266,14 +266,14 @@ SENT_NAN = -4128832  # 0xFFC0FFC0
 
 
 def sent_word(w):
-    """A pushed bf16-pair word (an f32-typed ``bf16_pair``), never the
+    """A pushed bf16-pair word (an f32-typed `bf16_pair`), never the
     sentinel."""
     w = w.bitcast(fx.Int32) if isinstance(w, fx.Float32) else fx.Int32(w)
     return (w == fx.Int32(SENT)).select(fx.Int32(SENT_NAN), w)
 
 
 def put_sent(a, i, word):
-    """Word ``i`` of the peer sentinel region ``a`` := ``word`` (``sent_word``),
+    """Word `i` of the peer sentinel region `a` := `word` (`sent_word`),
     system scope."""
     bo.buffer_store(
         fx.Int32(word), rsrc(_noted(a, "put")), i, cache_modifier=_SCOPE_CM[a.space]
@@ -281,10 +281,10 @@ def put_sent(a, i, word):
 
 
 def poll_sent(mb, a, idxs, lives=None, rearm=True):
-    """Poll words ``idxs`` of this rank's sentinel region ``a`` until none is
-    the sentinel (with fail-stop), then re-arm them. ``lives``: dead indices
+    """Poll words `idxs` of this rank's sentinel region `a` until none is
+    the sentinel (with fail-stop), then re-arm them. `lives`: dead indices
     are not waited for or re-armed. A read is destructive: one thread a word.
-    ``rearm=False``: the caller re-arms later (``rearm_sent``)."""
+    `rearm=False`: the caller re-arms later (`rearm_sent`)."""
     base = _noted(a, "poll")
     cm = _SCOPE_CM[a.space]
     n = len(idxs)
@@ -327,8 +327,8 @@ def poll_sent(mb, a, idxs, lives=None, rearm=True):
 
 
 def rearm_sent(a, idxs, lives=None, noted=True):
-    """Words ``idxs`` of this rank's sentinel region ``a`` := the sentinel (a
-    dead index skipped), after this thread read them (``poll_sent``)."""
+    """Words `idxs` of this rank's sentinel region `a` := the sentinel (a
+    dead index skipped), after this thread read them (`poll_sent`)."""
     base = _noted(a, "put") if noted else a.value
     cm = _SCOPE_CM[a.space]
     for e in range_constexpr(len(idxs)):

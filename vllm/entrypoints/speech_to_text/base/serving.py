@@ -84,7 +84,7 @@ def asr_inter_chunk_separator(
 ) -> str:
     """Space to insert between ASR text chunks for streaming and non-streaming join.
 
-    Languages in ``no_space_languages`` (e.g. Chinese, Japanese) use an empty
+    Languages in `no_space_languages` (e.g. Chinese, Japanese) use an empty
     separator; others use a single ASCII space.
     """
     return "" if language and language.lower() in no_space_languages else " "
@@ -221,8 +221,8 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         """Auto-detect the spoken language from an audio chunk.
 
         Delegates prompt construction and output parsing to the model class
-        via ``get_language_detection_prompt`` and
-        ``parse_language_detection_output``.
+        via `get_language_detection_prompt` and
+        `parse_language_detection_output`.
         """
         prompt = self.model_cls.get_language_detection_prompt(
             audio_chunk,

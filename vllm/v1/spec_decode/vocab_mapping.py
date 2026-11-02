@@ -43,8 +43,8 @@ def _get_unk_token_id(tokenizer, role: str) -> int:
     """Return a safe fallback token ID for out-of-intersection tokens.
 
     Preferred: unk_token_id → eos_token_id → ValueError.
-    Checking with ``is not None`` is required because token ID 0 is a valid
-    (and common) unk ID on many tokenizers; using ``or 0`` would silently
+    Checking with `is not None` is required because token ID 0 is a valid
+    (and common) unk ID on many tokenizers; using `or 0` would silently
     mishandle those cases.
     """
     unk = getattr(tokenizer, "unk_token_id", None)

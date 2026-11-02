@@ -2,17 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Routing record of the DeepSeek-V4.1 low-batch routed-expert GEMMs in CuTe DSL.
 
-The routed-expert GEMMs (``routed_expert_gemm_cute.py``) multiply token tiles of
+The routed-expert GEMMs (`routed_expert_gemm_cute.py`) multiply token tiles of
 at most eight rows by the weights of one expert each. The top-k expert ids of
 up to eight rows become the expert-major, tile-padded row permutation and the
 per-tile tables both GEMMs read. The result is that of FlashInfer's TRT-LLM-gen
 routing kernel with precomputed ids and an 8-token tile:
 
-* local experts (ids in ``[0, experts)``) in ascending id order, each one's
+* local experts (ids in `[0, experts)`) in ascending id order, each one's
   rows in ascending token order, every expert's segment padded to a multiple
   of the tile (8 rows);
-* ``permuted[t, k]`` = the slot's row in that order, -1 for an id outside
-  ``[0, experts)``;
+* `permuted[t, k]` = the slot's row in that order, -1 for an id outside
+  `[0, experts)`;
 * the record (int32, one buffer per call)::
 
       [0]                      8 * tiles (padded rows)
@@ -22,11 +22,11 @@ routing kernel with precomputed ids and an 8-token tile:
       [4 + C, 4 + 2C)          tile -> row limit min((c + 1) * 8, first + count)
       [4 + 2C, 4 + 2C + 8 M)   padded row -> token (GEMM1 only)
 
-  where ``M`` is :func:`max_tiles` (the most tiles any routing of the call's
-  slots needs) and ``C`` is ``M`` rounded up to a multiple of four.
+  where `M` is :func:`max_tiles` (the most tiles any routing of the call's
+  slots needs) and `C` is `M` rounded up to a multiple of four.
 
 The ids come from a top-k selection, so the valid ids of one row are distinct:
-an expert is chosen by at most ``rows <= 8`` slots and owns exactly one tile.
+an expert is chosen by at most `rows <= 8` slots and owns exactly one tile.
 The expert's tile is then the number of distinct selected experts below it (a
 presence bitmap), and a slot's rank the number of earlier rows that chose the
 expert (a row mask per expert): a few population counts, no scans.
@@ -48,7 +48,7 @@ ROUTE_THREADS = 64  # >= rows * top_k (at most 8 * 8 slots)
 
 @cute.jit
 def max_tiles(rows: Int32, top_k: Int32, experts: Int32) -> Int32:
-    """The most 8-row token tiles any routing of ``rows * top_k`` slots needs."""
+    """The most 8-row token tiles any routing of `rows * top_k` slots needs."""
     slots = rows * top_k
     filled = slots
     if experts < slots:
@@ -58,7 +58,7 @@ def max_tiles(rows: Int32, top_k: Int32, experts: Int32) -> Int32:
 
 @cute.jit
 def tile_words(tiles: Int32) -> Int32:
-    """``C``: ``tiles`` rounded up to a multiple of four."""
+    """`C`: `tiles` rounded up to a multiple of four."""
     return (tiles + 3) // 4 * 4
 
 
@@ -113,10 +113,10 @@ def build_record(
     experts: Int32,
     thread: Int32,
 ):
-    """Build the permutation and the record from ``ids`` (visible to every
+    """Build the permutation and the record from `ids` (visible to every
     thread of the block) into a zeroed record. Every thread of the block calls
-    it (it synchronizes the block once); thread ``s < rows * top_k`` handles
-    slot ``s``. ``experts``: a multiple of 32, at most 384; ``rows <= 8``."""
+    it (it synchronizes the block once); thread `s < rows * top_k` handles
+    slot `s`. `experts`: a multiple of 32, at most 384; `rows <= 8`."""
     slots = rows * top_k
     words = tile_words(max_tiles(rows, top_k, experts))
     row = thread // top_k
@@ -186,8 +186,8 @@ class RoutedExpertRoute:
         experts: Int32,
         stream: cuda.CUstream,
     ):
-        """``ids``/``permuted``: int32 [rows, top_k]; rows in [1, 8],
-        ``rows * top_k <= 64``."""
+        """`ids`/`permuted`: int32 [rows, top_k]; rows in [1, 8],
+        `rows * top_k <= 64`."""
         slots = cute.make_layout(rows * top_k)
         self.kernel(
             cute.make_tensor(ids_ptr, slots),

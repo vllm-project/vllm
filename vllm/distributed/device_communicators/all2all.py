@@ -41,7 +41,7 @@ logger = init_logger(__name__)
 
 
 class PassThroughAll2AllManager(All2AllManagerBase):
-    """Placeholder for ``all2all_backend="passthrough"``.
+    """Placeholder for `all2all_backend="passthrough"`.
 
     The MoE backend dispatches and combines itself, so there is no all2all to
     manage.

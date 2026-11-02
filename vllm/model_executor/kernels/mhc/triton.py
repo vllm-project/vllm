@@ -39,7 +39,7 @@ def _rmsnorm_nw_kernel(
 def rmsnorm_nw(x: Tensor, eps: float) -> Tensor:
     """Weight-free RMSNorm over the last dimension.
 
-    Treats *x* as ``[num_rows, D]`` where ``num_rows = product(shape[:-1])``.
+    Treats *x* as `[num_rows, D]` where `num_rows = product(shape[:-1])`.
     Returns a contiguous tensor with the same shape and dtype as *x*.
     """
     orig_shape = x.shape
@@ -207,8 +207,8 @@ def mhc_pre_mix_triton(
 ) -> Tensor:
     """Pre-mix gate for the delayed mHC pre, from AITER's split-k GEMM output.
 
-    AITER's ``mhc_pre_big_fuse`` consumes the unreduced ``[splitk, tokens,
-    hc_mult3]`` GEMM output and the matching row square-sums, but only returns
+    AITER's `mhc_pre_big_fuse` consumes the unreduced `[splitk, tokens,
+    hc_mult3]` GEMM output and the matching row square-sums, but only returns
     the post and comb gates. The delayed formulation also needs the pre gate,
     to carry into the next sublayer seam. It is the same slice of the same
     numbers, so recover it here rather than repeating the projection.

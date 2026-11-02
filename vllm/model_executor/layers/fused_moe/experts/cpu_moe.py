@@ -71,8 +71,8 @@ def swigluoai_w13_interleave_perm(
     two_i: int,
     device: torch.device,
 ) -> torch.Tensor | None:
-    """Index taking a half-split w13 ``[gate | up]`` to the interleaved order
-    ZenDNN's ``swiglu_oai_mul`` expects, or None when no reorder is needed.
+    """Index taking a half-split w13 `[gate | up]` to the interleaved order
+    ZenDNN's `swiglu_oai_mul` expects, or None when no reorder is needed.
     Callers apply it along whichever axis holds their output channels."""
     if not getattr(experts_cls, "requires_interleaved_w13", False):
         return None

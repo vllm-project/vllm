@@ -253,13 +253,13 @@ def _split_disk_offload_load_batches(
 ) -> tuple[list[tuple[list[str], list[list[int]], list[list[int]]]], str | None]:
     """Split a GET into sub-batches that fit the owner's staging buffer.
 
-    ``addrs[i]`` / ``sizes[i]`` are scatter-gather lists (K/V or multi-layer
-    segments) for key ``i``. ``usable_budget_bytes`` caps a multi-key batch;
-    ``raw_budget_bytes`` is the hard per-key cap.
+    `addrs[i]` / `sizes[i]` are scatter-gather lists (K/V or multi-layer
+    segments) for key `i`. `usable_budget_bytes` caps a multi-key batch;
+    `raw_budget_bytes` is the hard per-key cap.
 
-    Returns ``(batches, oversize_key)``. Aborts with ``([], key)`` if any
-    single key exceeds ``raw_budget_bytes``; otherwise ``oversize_key`` is
-    ``None``.
+    Returns `(batches, oversize_key)`. Aborts with `([], key)` if any
+    single key exceeds `raw_budget_bytes`; otherwise `oversize_key` is
+    `None`.
     """
     batches: list[tuple[list[str], list[list[int]], list[list[int]]]] = []
     batch_keys: list[str] = []
@@ -708,7 +708,7 @@ class KVCacheStoreSendingThread(KVTransferThread):
     def _maybe_offload_boundary_states(self, req_meta: ReqMeta) -> bool:
         """Persist this job's boundary puts, deduped against the store.
 
-        These are every mamba key the connector writes (``store_mask`` excludes
+        These are every mamba key the connector writes (`store_mask` excludes
         mamba groups from the positional normal save) plus the other groups'
         partial-tail blocks in the normal save's lcm gap.
 
@@ -2392,7 +2392,7 @@ class MooncakeStoreWorker:
         """Check how many prefix tokens exist in the store.
 
         Checks across all rank-specific key namespaces that may be loaded. A
-        hit covering all ``num_tokens`` is re-derived below the request end so
+        hit covering all `num_tokens` is re-derived below the request end so
         the last token is recomputed for sampling.
         """
         if self._capacity_only:
@@ -2514,7 +2514,7 @@ class MooncakeStoreWorker:
     ) -> tuple[TailKeyBoundary, ...]:
         """Return the hash boundary used to store each group's tail block.
 
-        With fine-grained prefix matching, ``hit_length`` may fall within a
+        With fine-grained prefix matching, `hit_length` may fall within a
         physical cache block and may not align with the hash boundary used to
         store that block. For each KV-cache group, return the token boundary
         whose hash was used as the store key.
@@ -2565,7 +2565,7 @@ class MooncakeStoreWorker:
 
         Closing the store frees its TransferEngine, the registered RDMA
         buffers, and the connection to the master server. Idempotent so it is
-        safe to call from both the explicit shutdown path and ``__del__``.
+        safe to call from both the explicit shutdown path and `__del__`.
         """
         store = getattr(self, "store", None)
         if store is None:
@@ -2599,9 +2599,9 @@ class LookupKeyServer:
     """ZMQ server on worker rank 0 for the LookupKey admin channel.
 
     Handles two request types, tagged at frame 0:
-    - ``LOOKUP_MSG``: prefix-cache hit query, returns its load plan.
-    - ``RESET_MSG``: drains the send thread queue, then runs
-      ``store.remove_all(force=True)``. Caller must have paused the
+    - `LOOKUP_MSG`: prefix-cache hit query, returns its load plan.
+    - `RESET_MSG`: drains the send thread queue, then runs
+      `store.remove_all(force=True)`. Caller must have paused the
       scheduler first.
     """
 
@@ -2678,8 +2678,8 @@ class LookupKeyClient:
     """ZMQ client for the LookupKey admin channel.
 
     Routes both prefix-cache lookups and admin commands (currently:
-    ``reset``) to ``LookupKeyServer`` on worker rank 0. The first frame
-    of every request is a named tag from ``protocol.py``.
+    `reset`) to `LookupKeyServer` on worker rank 0. The first frame
+    of every request is a named tag from `protocol.py`.
     """
 
     def __init__(self, vllm_config: VllmConfig):
@@ -2736,13 +2736,13 @@ class LookupKeyClient:
             del self.futures[req_id]
 
     def discard(self, req_id: str) -> None:
-        """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
+        """Drop any cached/in-flight lookup for `req_id` (e.g. on abort)."""
         future = self.futures.pop(req_id, None)
         if future is not None:
             future.cancel()
 
     def _reset(self) -> bool:
-        """Trigger ``store.remove_all(force=True)`` on worker rank 0.
+        """Trigger `store.remove_all(force=True)` on worker rank 0.
 
         Ordering assumption: caller MUST ensure no in-flight Mooncake
         lookups or transfers when invoking reset. In RL workflows this

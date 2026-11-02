@@ -6,7 +6,7 @@ The step needs, for every canvas position, the argmax of the
 temperature-scaled logits, a Gumbel-max sample from them, the entropy of
 their softmax, and the softmax itself in the model dtype for the
 self-conditioning matmul. As PyTorch ops these are several passes over a
-``[rows, vocab]`` fp32 tensor plus a same-sized noise tensor. The Triton
+`[rows, vocab]` fp32 tensor plus a same-sized noise tensor. The Triton
 kernel reads each row once with an online max and sum, draws the noise
 inline, and writes the probabilities once.
 """
@@ -118,8 +118,8 @@ def sample_row_stats(
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]:
     """Argmax, Gumbel-max sample, entropy and (optionally) softmax per row.
 
-    ``logits`` is ``[rows, vocab]`` and row ``i`` uses temperature
-    ``temps[i // canvas_len]``. A zero temperature is greedy: the sample is
+    `logits` is `[rows, vocab]` and row `i` uses temperature
+    `temps[i // canvas_len]`. A zero temperature is greedy: the sample is
     the argmax, and the entropy is the reference's, which clamps the
     temperature at 1e-10.
     """

@@ -305,7 +305,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
     @classmethod
     def _nth_prime_after(cls, start: int, count: int) -> int:
-        """Return the ``count``-th prime strictly greater than ``start``."""
+        """Return the `count`-th prime strictly greater than `start`."""
         prime = int(start)
         for _ in range(count):
             candidate = prime + 1

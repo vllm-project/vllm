@@ -116,7 +116,7 @@ def minimax_m3_nvfp4_sparse_decode_fly(
     """Sparse decode attention over the NVFP4 K/V pages.
 
     Row i is query row i % decode_query_len of request i // decode_query_len
-    and attends to the tokens of its ``topk_idx`` blocks up to its position.
+    and attends to the tokens of its `topk_idx` blocks up to its position.
     """
     rows, num_heads, head_dim = q.shape
     if rows == 0:

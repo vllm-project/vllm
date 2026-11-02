@@ -3,10 +3,10 @@
 
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
-"""K1 ``mono_pre``: one MiniMax-M3 sparse layer, input norm through cache insert.
+"""K1 `mono_pre`: one MiniMax-M3 sparse layer, input norm through cache insert.
 
-One launch per layer and rank, ``BLOCKS`` CTAs x ``THREADS`` threads, for S =
-``tokens`` decode rows, ``q_len`` consecutive rows a request (each row below is
+One launch per layer and rank, `BLOCKS` CTAs x `THREADS` threads, for S =
+`tokens` decode rows, `q_len` consecutive rows a request (each row below is
 per token)::
 
     acc = ar + res (f32)  -> residual out bf16(acc)
@@ -16,9 +16,9 @@ per token)::
       -> q, index_q out (bf16); K / V -> page-16 SHUFFLE cache with per-token
          scales; index_k -> index cache (E4M3, unit scale)
 
-It reads exactly what the original path leaves in memory (the ``ar`` / ``res``
+It reads exactly what the original path leaves in memory (the `ar` / `res`
 pair of the custom all-reduce, the loaded weights, the bound caches) and writes
-what the original ``fused_qknorm_idxrqknorm`` writes, so either path can run any
+what the original `fused_qknorm_idxrqknorm` writes, so either path can run any
 layer. The numerical contracts (reduction orders, where values round to bf16)
 follow the aiter kernels the original path uses; see each stage.
 """
@@ -126,7 +126,7 @@ def _ld_bf16x4(r, k):
 
 
 def ld_raw8(r, lt):
-    """Logical thread lt's 8 bf16 of a row, as loaded (for ``bf16x8_f32``)."""
+    """Logical thread lt's 8 bf16 of a row, as loaded (for `bf16x8_f32`)."""
     return fx.Vector(bo.buffer_load(r, lt * 4, vec_width=4, dtype=T.i32))
 
 
@@ -185,9 +185,9 @@ def emit_pre_attn(
     tid, bid, lane, wave, x8, red, mb_put, mb_put_words, mb_poll, qkv_mb, x8_mb,
     x8s_mb, stamp, eps, tokens, heads, ptrs, signal=None, long_step=None,
 ):  # fmt: skip
-    """K1's body: the GEMV tasks (ROWS_PER_TASK of the ``heads`` projection's rows
+    """K1's body: the GEMV tasks (ROWS_PER_TASK of the `heads` projection's rows
     each: the rank's own on CTAs 0 .. ONE_GEMV, its other index q heads' on CTAs
-    XT0 .., in a step where ``long_step()``), the head tasks (CTAs HT0 .., a token
+    XT0 .., in a step where `long_step()`), the head tasks (CTAs HT0 .., a token
     per half wave) and, with S > 2, one norm task per token (CTAs NT0 ..) feeding
     the GEMV tasks."""
     rows = heads.rows
@@ -203,8 +203,8 @@ def emit_pre_attn(
     cm_out = CM_DEV if signal is not None else 0
 
     def publish_done(mb_addr, idx, who=None):
-        """The CTA's stores done, then flag idx of ``mb_addr`` (from thread 0, or
-        from every thread where ``who``)."""
+        """The CTA's stores done, then flag idx of `mb_addr` (from thread 0, or
+        from every thread where `who`)."""
         if const_expr(signal is not None):
             fx.memory_fence(
                 syncscope=rocdl.SyncScope.Workgroup, ordering=fx.AtomicOrdering.Release
@@ -234,7 +234,7 @@ def emit_pre_attn(
         return raw_g, raw_ar
 
     def norm_quant(toks, raw_g, raw_ar, store_residual):
-        """Tokens toks: the residual out (where ``store_residual(j)``), gemma RMSNorm
+        """Tokens toks: the residual out (where `store_residual(j)`), gemma RMSNorm
         and per-token FP8 into x8 row j (the j-th of toks) -> the x scales."""
         gs = [bf16x8_f32(raw) for raw in raw_g]
         accs = [  # [j][lt][8]
@@ -608,10 +608,10 @@ def emit_k1(
     q_len, init_blocks, local_blocks, heads, ptrs, bt_width, signal=False,
 ):  # fmt: skip
     """K1 whole: the GEMV / head / norm tasks, then every CTA's indexer scores.
-    ``x8``: tokens * HIDDEN / 4 words of LDS, ``red``: WAVES * 256 floats, ``qs``:
-    tokens * heads.count * HEAD_DIM / 2 floats. ``q_len``: tokens per request
-    (speculative verify rows). ``heads``: the index q heads of the fused projection
-    (``IndexHeads``). ``signal`` (the fused layer kernel): the head tasks and
+    `x8`: tokens * HIDDEN / 4 words of LDS, `red`: WAVES * 256 floats, `qs`:
+    tokens * heads.count * HEAD_DIM / 2 floats. `q_len`: tokens per request
+    (speculative verify rows). `heads`: the index q heads of the fused projection
+    (`IndexHeads`). `signal` (the fused layer kernel): the head tasks and
     residual writers publish done flags (SCRATCH_HDONE / SCRATCH_RDONE)."""
     (
         ar, res, h_out, g_in, w_qkv, s_qkv, g_q, g_k, g_iq, g_ik, cos_sin, positions,
@@ -629,7 +629,7 @@ def emit_k1(
     mb_poll = mbox.poll
 
     def index_q_row(tk, head):
-        """Token tk's index q of the projection's index head ``head`` into qs (row
+        """Token tk's index q of the projection's index head `head` into qs (row
         tk * heads.count + head, HEAD_DIM / 2 words), made from the GEMV's raw rows
         with the index-q head's math, by this wave's lanes < 32."""
         d0 = lane * ELEMS
@@ -661,7 +661,7 @@ def emit_k1(
         gpu.barrier()
 
     def q_frag_head(tk, s, head):
-        """This lane's MFMA B operand of token tk's index q of head ``head``,
+        """This lane's MFMA B operand of token tk's index q of head `head`,
         k-chunk s."""
         row = (tk * heads.count + head) * (HEAD_DIM // 2)
         return fx.Vector(
@@ -677,7 +677,7 @@ def emit_k1(
         return q_frag_head(tk, s, heads.own)
 
     def long_step():
-        """A request of the step is long (``step_rows``): it scores every index q
+        """A request of the step is long (`step_rows`): it scores every index q
         head (indexer context parallelism)."""
         return step_rows(seq_lens, tokens, q_len, heads).any_long()
 
@@ -727,9 +727,9 @@ def build_pre_attn_kernel(
     timeline: bool = False,
     heads: IndexHeads = ONE_INDEX_HEAD,
 ):
-    """``@flyc.jit`` launcher of K1 for this model's RMSNorm epsilon, attention
-    scale and sparse pinned blocks, a decode batch of ``tokens`` (<= MAX_TOKENS)
-    rows and the fused projection's index q ``heads``."""
+    """`@flyc.jit` launcher of K1 for this model's RMSNorm epsilon, attention
+    scale and sparse pinned blocks, a decode batch of `tokens` (<= MAX_TOKENS)
+    rows and the fused projection's index q `heads`."""
     assert 1 <= tokens <= MAX_TOKENS
     index_scale = index_scale_log2e(sm_scale)
 
@@ -802,7 +802,7 @@ def build_pre_attn_kernel(
         qs = lds.qs.ptr
 
         def stamp(k):
-            """``timeline``: s_memrealtime (100 MHz) of this CTA passing point k, kept
+            """`timeline`: s_memrealtime (100 MHz) of this CTA passing point k, kept
             in LDS until the kernel ends."""
             # The compile-time and traced conditions cannot share one ``and``.
             if const_expr(timeline):  # noqa: SIM102

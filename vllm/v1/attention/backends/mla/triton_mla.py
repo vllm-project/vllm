@@ -57,7 +57,7 @@ def _reserve_attn_logits_workspace(
 
     Reserving at the worst case (max_model_len -> max num_kv_splits,
     max_decode_rows) before warmup/cudagraph capture means the per-call
-    ``get_simultaneous`` in ``forward_mqa`` never has to grow the buffer at
+    `get_simultaneous` in `forward_mqa` never has to grow the buffer at
     runtime (which would raise once the workspace is locked).
     """
     if not is_workspace_manager_initialized():

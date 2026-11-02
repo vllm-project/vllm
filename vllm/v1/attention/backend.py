@@ -471,7 +471,7 @@ class CommonAttentionMetadata:
     Reference Sliding Window Attention (R-SWA). Tokens with logical index below
     this stay globally visible; later (generated) tokens additionally see a
     fixed sliding window. None disables R-SWA. The attention backend copies this
-    into its own persistent buffer and reads ``rswa_window`` from model config."""
+    into its own persistent buffer and reads `rswa_window` from model config."""
 
     replayssm_decode_base_cpu: torch.Tensor | None = None
     """(batch_size,) CPU ring origin for Mamba2 ReplaySSM decode: num_computed
@@ -769,7 +769,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Speculators can record this call inside their draft decode CUDA graphs,
         so it runs once at capture and never again in Python. Implementations
         must emit only capture-safe operations and write results into persistent
-        tensors that ``metadata`` already references.
+        tensors that `metadata` already references.
         """
         raise NotImplementedError
 

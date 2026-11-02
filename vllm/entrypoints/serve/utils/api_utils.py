@@ -148,12 +148,12 @@ def json_or_sse_responses(
     chunk_model: type[BaseModel],
     error_responses: dict[int, dict[str, Any]],
 ) -> dict[str, Any]:
-    """Route kwargs for an endpoint answering with ``unary_model`` as JSON, or
-    with SSE ``data`` events carrying ``chunk_model`` when ``stream=true``.
+    """Route kwargs for an endpoint answering with `unary_model` as JSON, or
+    with SSE `data` events carrying `chunk_model` when `stream=true`.
 
-    FastAPI only registers models reachable from ``response_model`` or an
-    additional response's ``model``. The chunk model rides on the 200 entry,
-    which also overwrites the JSON schema, so ``openapi_extra`` restores it.
+    FastAPI only registers models reachable from `response_model` or an
+    additional response's `model`. The chunk model rides on the 200 entry,
+    which also overwrites the JSON schema, so `openapi_extra` restores it.
     """
     unary_ref = {"$ref": f"#/components/schemas/{unary_model.__name__}"}
     chunk_ref = {"$ref": f"#/components/schemas/{chunk_model.__name__}"}
