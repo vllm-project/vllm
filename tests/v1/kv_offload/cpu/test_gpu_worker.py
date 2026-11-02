@@ -7,6 +7,7 @@ import time
 import uuid
 from unittest.mock import MagicMock
 
+import numpy as np
 import pytest
 import torch
 
@@ -18,6 +19,7 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    DevicePointers,
     GPULoadStoreSpec,
     TransferResult,
 )
@@ -237,8 +239,15 @@ def _submittable_handler(monkeypatch: pytest.MonkeyPatch, gpu_to_cpu: bool = Tru
 
 
 def _submit(handler, job_id: int) -> bool:
-    spec = GPULoadStoreSpec(block_ids=[0], group_sizes=[1], block_indices=[0])
-    return handler.transfer_async(job_id, spec, spec)
+    device_ptrs = DevicePointers(
+        ptrs=np.zeros(1, dtype=np.uint64),
+        sizes=np.zeros(1, dtype=np.uint64),
+        group_block_counts=(1,),
+        group_data_ref_counts=(1,),
+        block_indices=(0,),
+    )
+    cpu_spec = CPULoadStoreSpec(block_ids=[0])
+    return handler.transfer_async(job_id, device_ptrs, cpu_spec)
 
 
 def test_submit_failure_is_not_reported_until_stream_drains(
