@@ -1221,6 +1221,21 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "Building Kimi K3 AttnRes for archs: ${KIMI_K3_ATTN_RES_ARCHS}")
   endif()
 
+  # Qwen4Exp HyperConnection up projection + gate mix (tcgen05).
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS
+      "10.0f" "${CUDA_ARCHS}")
+  endif()
+  if(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS)
+    set(QWEN4_EXP_HC_UP_GATE_MIX_SRC "csrc/qwen4_exp/hc_up_gate_mix.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}"
+      CUDA_ARCHS "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${QWEN4_EXP_HC_UP_GATE_MIX_SRC}")
+    message(STATUS "Building Qwen4Exp HC up+gate mix for archs: "
+      "${QWEN4_EXP_HC_UP_GATE_MIX_ARCHS}")
+  endif()
+
   # Hadacore kernels
   cuda_archs_loose_intersection(HADACORE_ARCHS "8.0+PTX;9.0+PTX" "${CUDA_ARCHS}")
   if(HADACORE_ARCHS)
@@ -1326,6 +1341,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     if(KIMI_K3_ATTN_RES_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE
         VLLM_ENABLE_KIMI_K3_ATTN_RES=1)
+    endif()
+    if(QWEN4_EXP_HC_UP_GATE_MIX_ARCHS)
+      target_compile_definitions(_C_stable_libtorch PRIVATE
+        VLLM_ENABLE_QWEN4_EXP_HC_UP_GATE_MIX=1)
     endif()
     if(BEAM_KERNEL_ARCHS)
       target_compile_definitions(_C_stable_libtorch PRIVATE

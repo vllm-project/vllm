@@ -184,6 +184,34 @@ def hc_gate_mix(x: torch.Tensor, gate: torch.Tensor, hc_count: int) -> torch.Ten
     return out
 
 
+# On B300 the fused kernel beats the GEMM + hc_gate_mix chain from M ~ 1280;
+# decode-sized batches keep the unfused path.
+MIN_FUSED_UP_M = 1280
+
+
+def hc_up_gate_mix_supported(w_up: torch.Tensor, hc_count: int) -> bool:
+    return (
+        hasattr(torch.ops._C, "qwen4_exp_hc_up_gate_mix")
+        and current_platform.is_device_capability_family(100)
+        and hc_count == 4
+        and w_up.dtype == torch.bfloat16
+        and tuple(w_up.shape) == (4 * 2560, 320)
+    )
+
+
+def hc_up_gate_mix(
+    lowrank: torch.Tensor, xn: torch.Tensor, w_up: torch.Tensor
+) -> torch.Tensor:
+    """``hc_gate_mix(xn, F.linear(lowrank, w_up), 4)`` in one SM100 kernel.
+
+    The gate stays on chip; the result is bitwise equal to the unfused chain.
+    Only hc_count 4, hidden size 2560 and rank 320 are supported.
+    """
+    out = xn.new_empty(xn.shape[0], xn.shape[1] // 4)
+    torch.ops._C.qwen4_exp_hc_up_gate_mix(out, lowrank, xn, w_up)
+    return out
+
+
 @triton.jit
 def _hc_combine_kernel(
     block_ptr,
