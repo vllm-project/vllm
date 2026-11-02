@@ -91,13 +91,17 @@ class SessionCloseResult(NamedTuple):
     server stores) the manager must mark failed. `failed_req_ids` is every
     client-side kv_request_id whose lookup() must fail (in-flight loads plus
     unresolved probes); `failed_serves` is the server-side lookup state the
-    dead peer can no longer resolve.
+    dead peer can no longer resolve. `retained` maps each server transfer
+    that may still be writing to the store jobs it reads: they are not in
+    `failed_stores`, and stay pinned until the transport reports it stopped.
     """
 
     failed_jobs: list[int]  # client load job_ids
     failed_req_ids: list[str]  # client kv_request_ids (loads + probes)
     failed_stores: list[int]  # server store job_ids
     failed_serves: list[ReqContext]  # server-side lookup ctxs needing release
+    # transfer_id → store job_ids it still reads
+    retained: dict[int, frozenset[int]]
 
 
 class P2PSession:
@@ -144,6 +148,7 @@ class P2PSession:
         # First cause recorded by _mark_dead; see death_reason.
         self._death_reason: str | None = None
         self._peer_fault_at: float | None = None
+        self._abort_ack_fault: str | None = None
 
         now = time.monotonic()
         self._connected_at: float | None = None
@@ -211,8 +216,15 @@ class P2PSession:
 
     @property
     def data_plane_fault(self) -> str | None:
-        """The transport's peer fault, if one was reported (see server role)."""
-        return self._server.peer_fault
+        """The data-plane fault that ended this session, if any.
+
+        Either the transport's peer fault (see server role) or an AbortAck
+        that never arrived, which leaves this side unable to tell whether
+        the peer's WRITE stopped.
+        """
+        if self._server.peer_fault is not None:
+            return self._server.peer_fault
+        return self._abort_ack_fault
 
     @property
     def last_activity_at(self) -> float:
@@ -351,6 +363,7 @@ class P2PSession:
         stores = self._server.collect_results()
         self._server.drain_pending_aborts()
         self._escalate_peer_fault()
+        self._escalate_abort_ack_timeout()
 
         # Drain buffered replies and completed transfers before expiring a peer.
         expired_lookup = self._client.get_expired_lookup()
@@ -384,6 +397,8 @@ class P2PSession:
         failed_serves: synthetic lookup ctxs still owing
             ``parent.on_request_finished`` (the manager flushes these on
             its next ``serve_external_requests``).
+        retained: server transfers that may still be writing, with the
+            store jobs they read (held until they stop).
         """
         # Abandon any in-flight registration: nothing will ack this peer
         # now. The manager's remove_remote_peer bumps the transport's
@@ -394,7 +409,7 @@ class P2PSession:
             self._pending_registration = None
 
         client_result = self._client.close()
-        failed_stores, failed_serves = self._server.close()
+        failed_stores, failed_serves, retained = self._server.close()
 
         if self._conn is not None:
             with contextlib.suppress(Exception):
@@ -407,6 +422,7 @@ class P2PSession:
             failed_req_ids=client_result.failed_req_ids,
             failed_stores=failed_stores,
             failed_serves=failed_serves,
+            retained=retained,
         )
 
     # ------------------------------------------------------------------
@@ -477,12 +493,36 @@ class P2PSession:
                 self.peer_id,
                 fault,
             )
+        # A stalled transfer would never drain, and teardown retains
+        # whatever is still running, so waiting buys nothing.
         if (
             self._server.has_inflight_transfers
+            and not self._server.transfer_stalled
             and now - self._peer_fault_at < _PEER_FAULT_DRAIN_S
         ):
             return
         self._disconnect(f"data plane: {fault}")
+
+    def _escalate_abort_ack_timeout(self) -> None:
+        """Fault the peer once one of its AbortAcks times out.
+
+        The timed-out load already failed in this poll's results. Without
+        this, the session stays up and every later fetch to the same stuck
+        peer waits out the full load and abort-ack timeouts again.
+        """
+        expired = self._client.expired_abort_ack
+        if expired is None or self._abort_ack_fault is not None:
+            return
+        req_id, round_seq = expired
+        self._abort_ack_fault = "abort ack timed out"
+        logger.warning(
+            "P2PSession %s: abort_ack for kv_request_id=%s round=%s timed out; "
+            "disconnecting peer session",
+            self.peer_id,
+            req_id,
+            round_seq,
+        )
+        self._disconnect(self._abort_ack_fault)
 
     def _disconnect(self, reason: str) -> None:
         """Best-effort DisconnectMsg, then mark the connection dead."""

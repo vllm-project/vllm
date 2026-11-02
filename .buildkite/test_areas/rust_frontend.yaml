@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Rust Frontend OpenAI Coverage"
   key: rust-frontend-openai-coverage
+  automatic_shard: true
   timeout_in_minutes: 50
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -62,6 +63,7 @@ steps:
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Rust Frontend OpenAI Coverage"
+      automatic_shard: true
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 55

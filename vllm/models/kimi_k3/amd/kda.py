@@ -45,7 +45,10 @@ from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import is_weights_pre_processed, set_weight_attrs
-from vllm.models.kimi_k3.amd.kda_metadata import KimiK3ROCmKDABackend
+from vllm.models.kimi_k3.amd.kda_metadata import (
+    PREFILL_CONV_BLOCK_M,
+    KimiK3ROCmKDABackend,
+)
 from vllm.models.kimi_k3.amd.ops.kda_checkpoint import (
     KimiK3ROCmKDAPrefillCheckpointExporter,
 )
@@ -68,6 +71,35 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 from vllm.v1.kv_cache_interface import MambaSpec
 
 logger = init_logger(__name__)
+
+
+class _PaddedKimiGDNMergedColumnParallelLinear(_KimiGDNMergedColumnParallelLinear):
+    """Merged projection with ``padding_size`` zero rows appended per rank."""
+
+    def __init__(self, *args, padding_size: int = 0, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.padding_size = padding_size
+        if padding_size:
+            assert isinstance(self.weight, torch.Tensor)
+            # Exclude padding rows from the load-completion count.
+            set_weight_attrs(
+                self.weight,
+                {"weight_loader_numel": self.weight[:-padding_size].numel()},
+            )
+            self.weight.data[-padding_size:].zero_()
+
+    def weight_loader(self, param, loaded_weight, loaded_shard_id=None) -> None:
+        super().weight_loader(param, loaded_weight, loaded_shard_id)
+        self._zero_padding(param)
+
+    def weight_loader_v2(self, param, loaded_weight, loaded_shard_id=None) -> None:
+        super().weight_loader_v2(param, loaded_weight, loaded_shard_id)
+        self._zero_padding(param)
+
+    def _zero_padding(self, param: torch.Tensor) -> None:
+        # Online processing materializes the weight after __init__ zeroing.
+        if self.padding_size and param is self.weight:
+            param.data[-self.padding_size :].zero_()
 
 
 class KimiK3DeltaAttention(GatedDeltaNetAttention):
@@ -95,10 +127,18 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> MambaSpec:
         spec = super().get_kv_cache_spec(vllm_config)
         assert isinstance(spec, MambaSpec)
-        # Only the fused path exports the checkpoint snapshots
+        # Only the fused path exports the checkpoint snapshots. AITER's
+        # chunk_kda cannot, so the gluon backend hands the steps that carry a
+        # checkpoint to the fused kernel when the build has it.
         can_checkpoint = (
             self.use_prefill_checkpoint
-            and self.kda_prefill_backend == "fused"
+            and (
+                self.kda_prefill_backend == "fused"
+                or (
+                    self.kda_prefill_backend == "gluon"
+                    and is_fused_kda_chunk_supported()
+                )
+            )
             and self.use_safe_gate
         )
         if can_checkpoint and vllm_config.cache_config.mamba_cache_mode == "align":
@@ -156,17 +196,16 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         if self.in_proj_padding:
             in_proj_output_sizes.append(self.in_proj_padding * self.tp_size)
 
-        self.in_proj_qkvgfab = _KimiGDNMergedColumnParallelLinear(
+        self.in_proj_qkvgfab = _PaddedKimiGDNMergedColumnParallelLinear(
             self.hidden_size,
             in_proj_output_sizes,
             replicated_shard_id=4,
             tp_size=self.tp_size,
+            padding_size=self.in_proj_padding,
             bias=False,
             quant_config=self.quant_config,
             prefix=f"{prefix}.in_proj_qkvgfab",
         )
-        if self.in_proj_padding:
-            self.in_proj_qkvgfab.weight.data[-self.in_proj_padding :].zero_()
 
         self.f_b_proj = ColumnParallelLinear(
             self.head_dim,
@@ -611,7 +650,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                         cache_indices=non_spec_state_indices_tensor,
                         has_initial_state=has_initial_state,
                         activation="silu",
-                        block_m=8,
+                        block_m=PREFILL_CONV_BLOCK_M,
                         metadata=m,
                         preserve_input_dtype=True,
                     )
@@ -729,7 +768,12 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
                     cu_seqlens=prefill_query_start_loc,
                     chunk_indices=m.chunk_indices,
                     chunk_offsets=m.chunk_offsets,
-                    backend=self.kda_prefill_backend,
+                    # Checkpoint metadata exists only when get_kv_cache_spec
+                    # reserved the block, which it does only with the fused
+                    # kernel available.
+                    backend=(
+                        "fused" if checkpoint is not None else self.kda_prefill_backend
+                    ),
                     out=core_attn_out[:, nd_tok:num_actual_tokens] if direct else None,
                     checkpoint_state=checkpoint_state,
                     checkpoint_offsets=checkpoint_offsets,
