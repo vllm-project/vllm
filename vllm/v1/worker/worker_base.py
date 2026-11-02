@@ -179,6 +179,11 @@ class WorkerBase:
         """Whether this worker can update its configured speculative model."""
         return False
 
+    def has_incomplete_weight_update(self) -> bool:
+        """Whether a weight update started and has not finished successfully,
+        so the model weights may be incomplete."""
+        return False
+
     def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
@@ -208,12 +213,6 @@ class WorkerBase:
         self, grammar_output: GrammarOutput
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         """Should be called immediately after execute_model iff it returned None."""
-        raise NotImplementedError
-
-    def get_cache_block_size_bytes(self) -> int:
-        """Return the size of a single cache block, in bytes. Used in
-        speculative decoding.
-        """
         raise NotImplementedError
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
