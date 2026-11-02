@@ -375,6 +375,7 @@ def _apply(experts, kernel_weights, context, x, ids, weights, expert_map):
 def _slots(pattern: str, T: int) -> list[int]:
     return {
         "none": [-1] * T,
+        "no-context": [-1] * T,
         "one": [0] * T,
         "mixed": [(-1, 0, 1)[t % 3] for t in range(T)],
         "four": [t % 4 for t in range(T)],
@@ -388,6 +389,7 @@ def _slots(pattern: str, T: int) -> list[int]:
         (64, 16, "mixed", None, False),
         (64, 64, "four", None, False),
         (33, 16, "none", None, False),
+        (33, 16, "no-context", None, False),
         (64, 16, "mixed", 1.0, False),
         (64, 16, "mixed", None, True),
         (800, 16, "mixed", None, False),
@@ -398,6 +400,7 @@ def _slots(pattern: str, T: int) -> list[int]:
         "mixed-r16",
         "4-adapters-r64",
         "no-lora",
+        "no-lora-context",
         "clamp",
         "ep2",
         "above-192-per-expert",
@@ -420,7 +423,8 @@ def test_apply_with_lora_matches_reference(T, rank, pattern, clamp, ep):
     slots = _slots(pattern, T)
     context = _make_lora(rank, slots, num_local)
 
-    out = _apply(experts, kernel_weights, context, x, ids, weights, expert_map)
+    applied = None if pattern == "no-context" else context
+    out = _apply(experts, kernel_weights, applied, x, ids, weights, expert_map)
     offset = num_local * ep_rank
     ref = _lora_reference(reference, context, x, ids, weights, slots, offset, clamp)
     no_lora = [-1] * T
@@ -428,7 +432,7 @@ def test_apply_with_lora_matches_reference(T, rank, pattern, clamp, ep):
         reference, context, x, ids, weights, no_lora, offset, clamp
     )
     assert _rel_err(out, ref) < 0.05
-    if pattern == "none":
+    if pattern in ("none", "no-context"):
         base = torch.empty_like(out)
         experts.invoke_routed_moe(
             hidden_states=x,

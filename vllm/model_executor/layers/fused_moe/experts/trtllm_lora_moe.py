@@ -272,7 +272,6 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         apply_router_weight_on_input: bool,
     ):
         lora_context = self._lora_context
-        assert lora_context is not None, "LoRA context must be set"
         num_tokens = hidden_states.size(0)
         top_k = self.topk
         intermediate_size = self.intermediate_size_per_partition
@@ -283,7 +282,7 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
         # When no token in the batch selects a LoRA adapter, skip the LoRA machinery
         # and run the plain base MoE with do_finalize=True, which writes the finalized
         # result straight into `output`.
-        if self._batch_has_no_lora(lora_context):
+        if lora_context is None or self._batch_has_no_lora(lora_context):
             self.invoke_routed_moe(
                 hidden_states=hidden_states,
                 w1=w1,
