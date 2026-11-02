@@ -7,7 +7,7 @@ link that mkdocs-autorefs tries to resolve. Shapes and indexing written outside
 code spans therefore produce broken cross-references:
 
     [block][2][16]        # BUG: looks up targets "2" and "16"
-    ``[block][2][16]``    # OK: code span
+    `[block][2][16]`      # OK: code span
     [LLM][vllm.LLM]       # OK: intended cross-reference
 """
 
@@ -76,7 +76,7 @@ def main() -> int:
         print("❌ Docstring text that mkdocs will read as a cross-reference:")
         print("\n".join(f"   {v}" for v in violations))
         print(
-            "   Wrap shapes and indexing in backticks (``[block][2][16]``), or "
+            "   Wrap shapes and indexing in backticks (`[block][2][16]`), or "
             "use a fully qualified target ([LLM][vllm.LLM])."
         )
         return 1
