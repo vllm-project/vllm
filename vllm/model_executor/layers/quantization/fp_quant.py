@@ -116,6 +116,15 @@ class FPQuantLinearMethod(LinearMethodBase):
     ):
         del output_size  # Unused.
         del input_size  # Unused.
+        if current_platform.is_cuda() and not (
+            current_platform.is_device_capability_family(100)
+        ):
+            # QuTLASS is built for SM10x only (cmake/external_projects/qutlass.cmake).
+            raise ValueError(
+                "FPQuant requires the QuTLASS kernels, which are only built for "
+                "SM 10.x (datacenter Blackwell); got compute capability "
+                f"{current_platform.get_device_capability()}."
+            )
 
         if params_dtype != torch.bfloat16:
             raise ValueError("Only bfloat16 is currently supported by FPQuant")

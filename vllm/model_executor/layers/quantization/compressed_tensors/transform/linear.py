@@ -48,9 +48,10 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
 
         assert input_tfms or output_tfms
 
+        # QuTLASS is built for SM10x only (cmake/external_projects/qutlass.cmake).
         if is_qutlass_fp4_scheme(
             quant_scheme, input_tfms
-        ) and current_platform.has_device_capability(100):
+        ) and current_platform.is_device_capability_family(100):
             return QutlassNvFP4LinearMethod(quant_method, input_tfms, output_tfms)
 
         # hadacore or dense gemm is selected by Transform module
@@ -120,6 +121,8 @@ class CompressedTensorsLinearTransformMethod(LinearMethodBase):
             )
             layer.register_module(transform_name, transform)
             self.input_transform = transform
+            # The transform must see the unquantized activation.
+            layer.requires_unquantized_input = True
 
         if len(self.output_tfms) > 0:
             scheme_name = list(self.output_tfms.values())[0].scheme_name
