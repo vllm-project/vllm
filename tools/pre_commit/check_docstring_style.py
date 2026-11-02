@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Lint and fix docstring style that matters once docstrings render as Markdown.
+"""Lint docstring style that matters once docstrings render as Markdown.
 
-- Code spans use single backticks. ``x`` is rewritten to `x` in place.
 - `[a][b]` is a reference link that mkdocs-autorefs tries to resolve, so shapes
   and indexing written outside code spans produce broken cross-references:
 
@@ -20,7 +19,6 @@ import regex as re
 
 FENCE = re.compile(r"^\s*(```|~~~)")
 DOCTEST = re.compile(r"^\s*>>>")
-DOUBLE_BACKTICKS = re.compile(r"(?<!`)``([^`\n]+?)``(?!`)")
 CODE_SPAN = re.compile(r"(`+).+?\1", re.DOTALL)
 REF_LINK = re.compile(r"\[([^\[\]\n]+)\]\[([^\[\]\n]*)\]")
 # Fully qualified Python paths, e.g. `vllm.LLM` or `torch.Tensor`
@@ -63,46 +61,22 @@ def prose(doc: str) -> str:
     return "\n".join(line for line, p in zip(lines, prose_mask(lines)) if p)
 
 
-def docstring_nodes(tree: ast.Module, rendered_only: bool) -> list[ast.Constant]:
-    """Docstring constants; `rendered_only` skips what mkdocstrings won't show."""
-    if rendered_only:
-        nodes, stack = [], [tree]
-        while stack:
-            node = stack.pop()
-            nodes.append(node)
-            if isinstance(node, (ast.Module, ast.ClassDef)):
-                stack.extend(c for c in node.body if isinstance(c, DEFS))
-    else:
-        nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.Module, *DEFS))]
+def docstring_nodes(tree: ast.Module) -> list[ast.Constant]:
+    """Docstring constants that mkdocstrings renders (not nested functions)."""
+    nodes, stack = [], [tree]
+    while stack:
+        node = stack.pop()
+        nodes.append(node)
+        if isinstance(node, (ast.Module, ast.ClassDef)):
+            stack.extend(c for c in node.body if isinstance(c, DEFS))
     return [
         n.body[0].value for n in nodes if ast.get_docstring(n, clean=False) is not None
     ]
 
 
-def fix_backticks(source: str, tree: ast.Module) -> str:
-    lines = source.splitlines(keepends=True)
-    nodes = docstring_nodes(tree, rendered_only=False)
-    # Bottom up, so splicing a docstring doesn't shift the ones still to come
-    for node in sorted(nodes, key=lambda n: n.lineno, reverse=True):
-        first, last = node.lineno - 1, node.end_lineno - 1
-        # AST column offsets count UTF-8 bytes
-        head = lines[first].encode()[: node.col_offset].decode()
-        tail = lines[last].encode()[node.end_col_offset :].decode()
-        body = lines[first : last + 1]
-        body[-1] = body[-1].encode()[: node.end_col_offset].decode()
-        body[0] = body[0][len(head) :]
-        mask = prose_mask([line.rstrip("\n") for line in body])
-        body = [
-            DOUBLE_BACKTICKS.sub(r"`\1`", line) if p else line
-            for line, p in zip(body, mask)
-        ]
-        lines[first : last + 1] = [head + "".join(body) + tail]
-    return "".join(lines)
-
-
 def crossref_violations(filepath: str, tree: ast.Module) -> list[str]:
     violations = []
-    for node in docstring_nodes(tree, rendered_only=True):
+    for node in docstring_nodes(tree):
         for match in REF_LINK.finditer(CODE_SPAN.sub("", prose(node.value))):
             label, target = match.groups()
             if target and TARGET.fullmatch(target):
@@ -114,25 +88,15 @@ def crossref_violations(filepath: str, tree: ast.Module) -> list[str]:
 
 
 def main() -> int:
-    fixed, violations = [], []
+    violations = []
     for filepath in sys.argv[1:]:
         try:
             with open(filepath, encoding="utf-8") as f:
-                source = f.read()
-            tree = ast.parse(source, filename=filepath)
+                tree = ast.parse(f.read(), filename=filepath)
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
-        new_source = fix_backticks(source, tree)
-        if new_source != source:
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write(new_source)
-            fixed.append(filepath)
-            tree = ast.parse(new_source, filename=filepath)
         violations.extend(crossref_violations(filepath, tree))
 
-    if fixed:
-        print("Rewrote ``code`` as `code` in docstrings:")
-        print("\n".join(f"   {f}" for f in fixed))
     if violations:
         print("❌ Docstring text that mkdocs will read as a cross-reference:")
         print("\n".join(f"   {v}" for v in violations))
@@ -140,7 +104,8 @@ def main() -> int:
             "   Wrap shapes and indexing in backticks (`[block][2][16]`), or "
             "use a fully qualified target ([LLM][vllm.LLM], [int][])."
         )
-    return 1 if fixed or violations else 0
+        return 1
+    return 0
 
 
 if __name__ == "__main__":
