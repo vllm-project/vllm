@@ -1364,6 +1364,14 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
         self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
 
+    @property
+    def supports_eplb(self) -> bool:
+        # The modular MXFP8 backends (DeepGEMM, Marlin, Humming, Triton,
+        # emulation) take vLLM's expert_map and the same kernel-format
+        # conversion as the block-FP8 method that already supports EPLB;
+        # TRT-LLM's fused routing owns the expert ids and does not.
+        return self.mxfp8_backend != Fp8MoeBackend.FLASHINFER_TRTLLM
+
     def create_weights(
         self,
         layer: RoutedExperts,
