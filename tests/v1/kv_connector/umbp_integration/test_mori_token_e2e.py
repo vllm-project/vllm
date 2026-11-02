@@ -11,6 +11,7 @@ import time
 import pytest
 
 import vllm.envs as envs
+from tests.utils import multi_gpu_marks
 from tests.v1.kv_connector.rocm_pd_accuracy_utils import _REVISIONS, QWEN_MODEL
 from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
 from vllm import SamplingParams, TokensPrompt
@@ -27,14 +28,16 @@ PARAMS = SamplingParams(temperature=0, max_tokens=16, logprobs=5, ignore_eos=Tru
 
 
 @pytest.fixture
-def umbp_llm(request, vllm_runner, socket_dir, monkeypatch):
-    pool = getattr(request, "param", {"capacity_bytes": 1 << 30})
+def umbp_llm(vllm_runner, socket_dir, monkeypatch, request):
+    options = dict(getattr(request, "param", {}))
+    tp_size = options.pop("tensor_parallel_size", 1)
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     with vllm_runner(
         QWEN_MODEL,
         revision=_REVISIONS[QWEN_MODEL],
         enforce_eager=True,
+        tensor_parallel_size=tp_size,
         block_size=BLOCK_SIZE,
         enable_prefix_caching=True,
         disable_log_stats=False,
@@ -43,8 +46,9 @@ def umbp_llm(request, vllm_runner, socket_dir, monkeypatch):
             kv_role="kv_both",
             kv_connector_extra_config={
                 "mode": "embedded",
+                "capacity_bytes": 1 << 30,
                 "lookup_dir": socket_dir,
-                **pool,
+                **options,
             },
         ),
     ) as runner:
@@ -93,6 +97,18 @@ def _assert_same_outputs(expected, actual) -> None:
         ]
 
 
+@pytest.mark.parametrize(
+    "umbp_llm",
+    [
+        pytest.param({"tensor_parallel_size": 1}, id="tp1"),
+        pytest.param(
+            {"tensor_parallel_size": 2},
+            id="tp2",
+            marks=multi_gpu_marks(num_gpus=2),
+        ),
+    ],
+    indirect=True,
+)
 def test_restore_matches_recompute(umbp_llm):
     """A batch of prompts ending mid-block restores every full block exactly."""
     prompts = [

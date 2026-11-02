@@ -408,6 +408,8 @@ class InprocClient(EngineCoreClient):
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()
         self.engine_core.post_step(model_executed=model_executed)
+        # Read by LLMEngine.step() to keep the DP ranks' collectives aligned.
+        self.last_step_model_executed = model_executed
         return outputs and outputs.get(0) or EngineCoreOutputs()
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
