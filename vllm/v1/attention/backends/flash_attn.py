@@ -380,15 +380,17 @@ class FlashAttentionBackend(AttentionBackend):
             current_platform.is_device_capability_family(100)
             and (vllm_config := get_current_vllm_config_or_none()) is not None
             and vllm_config.model_config is not None
+            and (head_size := vllm_config.model_config.get_head_size()) >= 128
             and get_flash_attn_version(
-                head_size=vllm_config.model_config.get_head_size(),
+                head_size=head_size,
                 head_size_v=cls.head_size_v,
                 supports_fa4_hd256=True,
             )
             == 4
         ):
-            # FA4's SM100 kernels load paged KV via TMA only when the page
-            # size equals the 128-token KV tile; other sizes take a gather path.
+            # FA4's SM100 kernels load paged KV via TMA only when the page size
+            # equals the 128-token KV tile. Below head_size 128, prefill is
+            # faster on the non-TMA path, so keep the default there.
             return max(default_block_size, 128)
         return super().get_preferred_block_size(default_block_size)
 

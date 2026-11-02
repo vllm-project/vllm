@@ -701,6 +701,7 @@ def test_fa4_hd256_fallback_matrix(kwargs, config_kwargs, expected):
         ("FLASH_ATTN", {}, 128, True),
         ("FLASH_ATTN", {"softcap": 50.0}, 16, False),
         ("FLASH_ATTN", {"head_size": 128}, 128, False),
+        ("FLASH_ATTN", {"head_size": 64}, 16, False),
         ("FLASH_ATTN", {"cache_dtype": "fp8"}, 16, False),
         ("FLASH_ATTN_DIFFKV", {}, 16, False),
     ],
