@@ -195,6 +195,12 @@ class KVConnectorBase_V1(ABC):
         return False
 
     @property
+    def supports_null_head_block_ids(self) -> bool:
+        """Whether new-request block ids are read only via ``yield_req_data`` (or
+        not at all), so null heads may be sent as counts. Defaults to False."""
+        return False
+
+    @property
     def requires_kv_delivery(self) -> bool:
         """Whether this connector hands off KV that must be reliably delivered.
 

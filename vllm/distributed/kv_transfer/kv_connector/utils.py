@@ -328,7 +328,7 @@ def yield_req_data(
     """
     # new requests
     for req_data in scheduler_output.scheduled_new_reqs:
-        yield req_data.req_id, req_data.block_ids, True
+        yield req_data.req_id, req_data.full_block_ids(), True
 
     # cached requests
     cached_reqs = scheduler_output.scheduled_cached_reqs

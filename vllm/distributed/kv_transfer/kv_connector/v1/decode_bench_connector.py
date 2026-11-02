@@ -163,6 +163,10 @@ class DecodeBenchConnector(KVConnectorBase_V1, SupportsHMA):
                 vllm_config, kv_cache_config
             )
 
+    @property
+    def supports_null_head_block_ids(self) -> bool:
+        return True
+
     # ==============================
     # Worker-side methods
     # ==============================

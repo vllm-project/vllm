@@ -54,6 +54,8 @@ class NewRequestData:
     prefill_token_ids: list[int] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
+    # Per group, the number of leading null blocks left out of block_ids.
+    block_id_null_heads: tuple[int, ...] | None = None
 
     @classmethod
     def from_request(
@@ -62,6 +64,7 @@ class NewRequestData:
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
         uses_mrope: bool = False,
+        block_id_null_heads: tuple[int, ...] | None = None,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -80,6 +83,16 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+            block_id_null_heads=block_id_null_heads,
+        )
+
+    def full_block_ids(self) -> tuple[list[int], ...]:
+        """block_ids with the null heads restored (null block id 0)."""
+        if self.block_id_null_heads is None:
+            return self.block_ids
+        return tuple(
+            [0] * head + ids
+            for ids, head in zip(self.block_ids, self.block_id_null_heads)
         )
 
     @property

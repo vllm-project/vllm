@@ -217,6 +217,12 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
         )
 
     @property
+    def supports_null_head_block_ids(self) -> bool:
+        return bool(self._connectors) and all(
+            c.supports_null_head_block_ids for c in self._connectors
+        )
+
+    @property
     def requires_kv_delivery(self) -> bool:
         return any(c.requires_kv_delivery for c in self._connectors)
 
