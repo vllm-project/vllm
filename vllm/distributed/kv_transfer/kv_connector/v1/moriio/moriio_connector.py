@@ -1985,9 +1985,6 @@ class MoRIIOConnectorWorker:
         # This step's posted reads, awaited in start_load_kv before the forward.
         self._reads_issued_this_step: list = []
 
-        # Track the expiration time of requests that are waiting to be sent.
-        self._reqs_to_send: dict[ReqId, float] = {}
-
         # Background thread for handling new handshake requests.
         self._moriio_handshake_listener_t: threading.Thread | None = None
         # Background thread for initializing new MoRIIO handshakes.
@@ -3405,7 +3402,6 @@ class MoRIIOConnectorWorker:
                 break
 
         self._await_reads_issued_this_step()
-        self._reqs_to_send.update(metadata.reqs_to_send)
 
     def wait_for_save(self, metadata: MoRIIOConnectorMetadata):
         if self.mode == MoRIIOMode.WRITE and self.is_producer:
