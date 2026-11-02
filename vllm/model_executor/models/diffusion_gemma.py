@@ -381,10 +381,20 @@ def _concat_logprob_stashes(
     def pad(t: torch.Tensor, value: float) -> torch.Tensor:
         return F.pad(t, (0, width - t.shape[1]), value=value)
 
+    def per_token_ranks(t: torch.Tensor) -> torch.Tensor:
+        if t.ndim == 2:
+            return pad(t, 0)
+        # Only the selected rank is known: give the other columns the default
+        # ranks append_logprobs_for_next_position uses for a 1D rank.
+        others = torch.arange(1, width, dtype=t.dtype, device=t.device)
+        return torch.cat((t.unsqueeze(1), others.expand(t.shape[0], -1)), dim=1)
+
     return LogprobsTensors(
         logprob_token_ids=torch.cat([pad(p.logprob_token_ids, 0) for p in parts]),
         logprobs=torch.cat([pad(p.logprobs, float("-inf")) for p in parts]),
-        selected_token_ranks=torch.cat([p.selected_token_ranks for p in parts]),
+        selected_token_ranks=torch.cat(
+            [per_token_ranks(p.selected_token_ranks) for p in parts]
+        ),
         cu_num_generated_tokens=cu_num_generated_tokens,
     )
 

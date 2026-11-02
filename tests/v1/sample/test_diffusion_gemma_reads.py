@@ -310,6 +310,28 @@ def test_stashes_of_different_widths_join():
     assert torch.equal(out.logprobs[3:], wide.logprobs)
 
 
+def test_stashes_join_per_token_and_selected_ranks():
+    # compute_topk_scores stashes one rank per column. A stash scored over an
+    # allowed set carries only the selected rank.
+    per_token = _stash(1, 4, 100)._replace(
+        selected_token_ranks=torch.tensor([[7, 2, 3, 5]], dtype=torch.int64)
+    )
+    narrow = _stash(1, 2, 0)._replace(
+        selected_token_ranks=torch.tensor([[1, 2]], dtype=torch.int64)
+    )
+    selected_only = _stash(1, 3, 50)._replace(
+        selected_token_ranks=torch.tensor([9], dtype=torch.int64)
+    )
+
+    out = _concat_logprob_stashes([per_token, narrow, selected_only], [0, 1, 2, 3])
+
+    assert out.selected_token_ranks.tolist() == [
+        [7, 2, 3, 5],
+        [1, 2, 0, 0],
+        [9, 1, 2, 3],
+    ]
+
+
 @pytest.mark.parametrize("width", [4, CL])
 @pytest.mark.parametrize("steps", [1, 2])
 def test_read_emits_at_convergence_while_generation_waits_for_commit(width, steps):
