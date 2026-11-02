@@ -17,7 +17,7 @@ layout [max_pos, 64] = cos || sin. Q output optionally lands in FlashMLA's
 chunk-interleaved layout (32 chunks of [num_heads, 16]).
 
 Paged-cache record layout per block of bs tokens, selected by kv_mxfp8:
-  V4    (584 B/token): [0, bs*576) token data (448 fp8 + 128 bf16 each),
+  V4    (584 B/token): [0, bs*576) token data (448 fp8 + 128 fp16/bf16 each),
          then [bs*576, bs*584) UE8M0 scales, 7 real + 1 pad per token.
   V4.1  (528 B/token, kv_mxfp8): per-token inline records,
          [i*528, i*528+512) fp8 data + [i*528+512, (i+1)*528) 16 UE8M0
@@ -26,8 +26,8 @@ Paged-cache record layout per block of bs tokens, selected by kv_mxfp8:
 The full-cache variants write a contiguous 512-wide token row in the cache's
 own dtype (bf16, or per-tensor-scaled e4m3) with no Q padding.
 
-Bit-exactness notes carried over from the .cu: the KV branch double-rounds
-through bf16 before the absmax, the warp reductions use the same shuffle
+Bit-exactness notes carried over from the .cu: the KV branch rounds through
+the input dtype before the absmax, the warp reductions use the same shuffle
 order (fp addition is not associative), and ceil(log2(absmax/448)) is
 computed from the float's exponent field, which is exact for normal inputs.
 Scalar min/max/abs/rsqrt go through cute.arch/cute.math, which lower to the
@@ -50,7 +50,7 @@ import cutlass
 import cutlass.cute as cute
 import torch
 from cuda.bindings.driver import CUstream
-from cutlass import Float32, Int32, Int64, Uint8, Uint32
+from cutlass import Constexpr, Float32, Int32, Int64, Uint8, Uint32
 from cutlass._mlir.dialects import llvm
 from cutlass.cutlass_dsl import T, dsl_user_op
 
@@ -172,10 +172,14 @@ def _warp2_max_abs(val: Float32) -> Float32:
 
 
 @cute.jit
-def _decode_words(words: cute.Tensor, elems: cute.Tensor) -> None:
-    # bf16x2_to_fp32x2 returns the low half first: (even element, odd element).
+def _decode_words(
+    words: cute.Tensor, elems: cute.Tensor, input_fp16: Constexpr[bool]
+) -> None:
     for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-        even, odd = bf16x2_to_fp32x2(words[w])
+        if cutlass.const_expr(input_fp16):
+            even, odd = _fp16x2_to_fp32x2(words[w])
+        else:
+            even, odd = bf16x2_to_fp32x2(words[w])
         elems[2 * w] = even
         elems[2 * w + 1] = odd
 
@@ -257,10 +261,57 @@ def _q_tail_store_bf16(
     return Uint32(out)
 
 
+@dsl_user_op
+def _fp16x2_to_fp32x2(data: Uint32, *, loc=None, ip=None) -> tuple[Float32, Float32]:
+    out = llvm.inline_asm(
+        llvm.StructType.get_literal([T.f32(), T.f32()]),
+        [data.ir_value(loc=loc, ip=ip)],
+        "{ .reg .b16 lo, hi; mov.b32 {lo, hi}, $2; "
+        "cvt.f32.f16 $0, lo; cvt.f32.f16 $1, hi; }",
+        "=f,=f,r",
+        has_side_effects=False,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    return (
+        Float32(llvm.extractvalue(T.f32(), out, [0], loc=loc, ip=ip)),
+        Float32(llvm.extractvalue(T.f32(), out, [1], loc=loc, ip=ip)),
+    )
+
+
+@dsl_user_op
+def _fp32x2_to_fp16x2(a: Float32, b: Float32, *, loc=None, ip=None) -> Uint32:
+    out = llvm.inline_asm(
+        T.i32(),
+        [a.ir_value(loc=loc, ip=ip), b.ir_value(loc=loc, ip=ip)],
+        "cvt.rn.f16x2.f32 $0, $2, $1;",
+        "=r,f,f",
+        has_side_effects=False,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    return Uint32(out)
+
+
 @cute.jit
-def _encode_words(elems: cute.Tensor, words: cute.Tensor) -> None:
+def _encode_words(
+    elems: cute.Tensor, words: cute.Tensor, input_fp16: Constexpr[bool]
+) -> None:
     for w in cutlass.range_constexpr(BF16_WORDS_PER_LANE):
-        words[w] = fp32x2_to_bf16x2(elems[2 * w], elems[2 * w + 1])
+        if cutlass.const_expr(input_fp16):
+            words[w] = _fp32x2_to_fp16x2(elems[2 * w], elems[2 * w + 1])
+        else:
+            words[w] = fp32x2_to_bf16x2(elems[2 * w], elems[2 * w + 1])
+
+
+@cute.jit
+def _round_to_fp16(elems: cute.Tensor) -> None:
+    for i in cutlass.range_constexpr(ELEMS_PER_LANE):
+        w = _fp32x2_to_fp16x2(elems[i], elems[i])
+        lo, _ = _fp16x2_to_fp32x2(w)
+        elems[i] = lo
 
 
 @cute.jit
@@ -487,6 +538,7 @@ def _check_common(
     slot_mapping: torch.Tensor,
     position_ids: torch.Tensor,
     cos_sin_cache: torch.Tensor,
+    allow_fp16: bool = False,
 ) -> None:
     if not current_platform.is_cuda():
         raise RuntimeError(
@@ -495,12 +547,9 @@ def _check_common(
         )
     if not kv.is_cuda:
         raise ValueError(f"{op_name}: kv must be a CUDA tensor")
-    if kv.dtype == torch.float16:
-        raise NotImplementedError(
-            f"{op_name}: float16 is not ported to the CuTe DSL kernel"
-        )
-    if kv.dtype != torch.bfloat16:
-        raise ValueError(f"{op_name}: kv must be bfloat16, got {kv.dtype}")
+    if kv.dtype != torch.bfloat16 and not (allow_fp16 and kv.dtype == torch.float16):
+        expected = "bfloat16 or float16" if allow_fp16 else "bfloat16"
+        raise ValueError(f"{op_name}: kv must be {expected}, got {kv.dtype}")
     if kv.dim() != 2 or kv.shape[1] != HEAD_DIM or kv.stride(1) != 1:
         raise ValueError(f"{op_name}: kv must be [tokens, {HEAD_DIM}] row-major")
     if kv.stride(0) % 8 != 0:
@@ -565,6 +614,7 @@ class PagedCompileKey:
     is_q_interleaved: bool
     kv_mxfp8: bool
     has_kv_norm: bool
+    input_fp16: bool
     eps: float
 
 
@@ -582,6 +632,7 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
         Q_INTERLEAVED = compile_key.is_q_interleaved
         KV_MXFP8 = compile_key.kv_mxfp8
         HAS_KV_NORM = compile_key.has_kv_norm
+        INPUT_FP16 = compile_key.input_fp16
         EPS = Float32(compile_key.eps)
         USE_PDL = current_platform.is_arch_support_pdl()
 
@@ -625,7 +676,7 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                     elems = cute.make_rmem_tensor((ELEMS_PER_LANE,), Float32)
                     words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
                     cute.copy(load_atom, kv[token, Int32(lane), None], words[None])
-                    _decode_words(words, elems)
+                    _decode_words(words, elems, INPUT_FP16)
                     if cutlass.const_expr(HAS_KV_NORM):
                         _apply_kv_norm(elems, dim_base, EPS, norm_w)
                     if dim_base >= Int32(NOPE_DIM):
@@ -634,7 +685,10 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                     if sid >= Int64(0):
                         block = sid // Int64(block_size)
                         pib = sid % Int64(block_size)
-                        _round_to_bf16(elems)
+                        if cutlass.const_expr(INPUT_FP16):
+                            _round_to_fp16(elems)
+                        else:
+                            _round_to_bf16(elems)
                         local_max = Float32(0.0)
                         for i in cutlass.range_constexpr(ELEMS_PER_LANE):
                             local_max = cute.arch.fmax(
@@ -690,7 +744,7 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                                         block, pib, Int64(V4_SCALE_BYTES - 1)
                                     ] = Uint8(0)
                         else:
-                            _encode_words(elems, words)
+                            _encode_words(elems, words, INPUT_FP16)
                             # The rope tail lands at words [8L-112, 8L-104)
                             # of the token row = tile L-14 of the 8-word view.
                             cute.copy(
@@ -728,13 +782,13 @@ class _PagedInsertKernel(VllmCuTeDSLJitKernel[PagedCompileKey]):
                             q_in[token, slot, Int32(lane), None],
                             words[None],
                         )
-                    _decode_words(words, elems)
+                    _decode_words(words, elems, INPUT_FP16)
                     if cutlass.const_expr(APPLY_Q_NORM):
                         _apply_q_norm(elems, EPS)
                     if cutlass.const_expr(APPLY_Q_ROPE):  # noqa: SIM102
                         if dim_base >= Int32(NOPE_DIM):
                             _apply_rope(elems, cos_v, sin_v)
-                    _encode_words(elems, words)
+                    _encode_words(elems, words, INPUT_FP16)
                     if cutlass.const_expr(Q_INTERLEAVED):
                         cute.copy(
                             store_atom,
@@ -1030,6 +1084,7 @@ class FullCacheCompileKey:
     has_kv_norm: bool
     store_q_fp8: bool
     store_kv_fp8: bool
+    input_fp16: bool
     eps: float
     block_size: int = FULL_CACHE_BLOCK_SIZE
 
@@ -1046,6 +1101,7 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
         HAS_KV_NORM = compile_key.has_kv_norm
         STORE_Q_FP8 = compile_key.store_q_fp8
         STORE_KV_FP8 = compile_key.store_kv_fp8
+        INPUT_FP16 = compile_key.input_fp16
         FC_BLOCK = compile_key.block_size
         FC_WARPS = FC_BLOCK // 32
         EPS = Float32(compile_key.eps)
@@ -1091,7 +1147,7 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
                         elems = cute.make_rmem_tensor((ELEMS_PER_LANE,), Float32)
                         words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
                         cute.copy(load_atom, kv[token, Int32(lane), None], words[None])
-                        _decode_words(words, elems)
+                        _decode_words(words, elems, INPUT_FP16)
                         if cutlass.const_expr(HAS_KV_NORM):
                             _apply_kv_norm(elems, dim_base, EPS, norm_w)
                         # Full-cache rows rope the KV unconditionally; this
@@ -1119,7 +1175,7 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
                                     cache_fp8[block, pib, Int32(lane), None],
                                 )
                             else:
-                                _encode_words(elems, words)
+                                _encode_words(elems, words, INPUT_FP16)
                                 cute.copy(
                                     store_atom,
                                     words[None],
@@ -1138,7 +1194,7 @@ class _FullCacheInsertKernel(VllmCuTeDSLJitKernel[FullCacheCompileKey]):
                     elems = cute.make_rmem_tensor((ELEMS_PER_LANE,), Float32)
                     words = cute.make_rmem_tensor((BF16_WORDS_PER_LANE,), Uint32)
                     cute.copy(load_atom, q[token, slot, Int32(lane), None], words[None])
-                    _decode_words(words, elems)
+                    _decode_words(words, elems, INPUT_FP16)
                     if cutlass.const_expr(APPLY_Q_NORM):
                         _apply_q_norm(elems, EPS)
                     if dim_base >= Int32(NOPE_DIM):
@@ -1386,7 +1442,7 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
     only the first slot_mapping rows.
     """
     op_name = "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"
-    _check_common(op_name, kv, slot_mapping, position_ids, cos_sin_cache)
+    _check_common(op_name, kv, slot_mapping, position_ids, cos_sin_cache, True)
     if q_in.dim() != 3 or q_in.shape[2] != HEAD_DIM:
         raise ValueError(f"{op_name}: q_in shape [N, num_heads_q, {HEAD_DIM}]")
     if q_in.dtype != kv.dtype:
@@ -1446,6 +1502,7 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
         is_q_interleaved=is_q_interleaved,
         kv_mxfp8=kv_mxfp8,
         has_kv_norm=False,
+        input_fp16=q_in.dtype == torch.float16,
         eps=eps if apply_q_norm else 0.0,
     )
     return q_out
@@ -1546,6 +1603,7 @@ def fused_deepseek_v4_kv_rope_insert(
             is_q_interleaved=False,
             kv_mxfp8=kv_mxfp8,
             has_kv_norm=has_kv_norm,
+            input_fp16=False,
             eps=eps,
         )
     elif k_cache.dtype == torch.float8_e4m3fn:
@@ -1567,6 +1625,7 @@ def fused_deepseek_v4_kv_rope_insert(
             has_kv_norm=has_kv_norm,
             store_q_fp8=False,
             store_kv_fp8=True,
+            input_fp16=False,
             eps=eps,
         )
     else:
@@ -1588,6 +1647,7 @@ def fused_deepseek_v4_kv_rope_insert(
             has_kv_norm=has_kv_norm,
             store_q_fp8=False,
             store_kv_fp8=False,
+            input_fp16=False,
             eps=eps,
         )
 
@@ -1601,8 +1661,10 @@ def _full_cache_checks(
     position_ids: torch.Tensor,
     cos_sin_cache: torch.Tensor,
     cache_block_size: int,
+    cache_dtype: torch.dtype,
+    allow_fp16: bool = False,
 ) -> None:
-    _check_common(op_name, kv, slot_mapping, position_ids, cos_sin_cache)
+    _check_common(op_name, kv, slot_mapping, position_ids, cos_sin_cache, allow_fp16)
     if q.dim() != 3 or q.shape[2] != HEAD_DIM:
         raise ValueError(f"{op_name}: q shape [N, H, {HEAD_DIM}]")
     if q.dtype != kv.dtype:
@@ -1617,9 +1679,9 @@ def _full_cache_checks(
         raise ValueError(
             f"{op_name}: q/kv row counts must match ({q.shape[0]} vs {kv.shape[0]})"
         )
-    if k_cache.dtype not in (torch.bfloat16, torch.float8_e4m3fn):
+    if k_cache.dtype != cache_dtype:
         raise ValueError(
-            f"{op_name}: k_cache must be bfloat16 or float8_e4m3fn, got {k_cache.dtype}"
+            f"{op_name}: k_cache must be {cache_dtype}, got {k_cache.dtype}"
         )
     if k_cache.device != kv.device:
         raise ValueError(f"{op_name}: k_cache must be on the KV device")
@@ -1656,6 +1718,7 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
         position_ids,
         cos_sin_cache,
         cache_block_size,
+        torch.bfloat16,
     )
     if k_cache.stride(0) % 8 != 0 or k_cache.stride(1) % 8 != 0:
         raise ValueError(f"{op_name}: bf16 cache strides must be 16-byte aligned")
@@ -1681,6 +1744,7 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert(
         has_kv_norm=False,
         store_q_fp8=False,
         store_kv_fp8=False,
+        input_fp16=False,
         eps=eps if apply_q_norm else 0.0,
     )
 
@@ -1710,6 +1774,8 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
         position_ids,
         cos_sin_cache,
         cache_block_size,
+        torch.float8_e4m3fn,
+        True,
     )
     if (
         q_fp8.dtype != torch.float8_e4m3fn
@@ -1749,6 +1815,7 @@ def fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
         has_kv_norm=False,
         store_q_fp8=True,
         store_kv_fp8=True,
+        input_fp16=q.dtype == torch.float16,
         eps=eps if apply_q_norm else 0.0,
         block_size=(
             FULL_CACHE_FP8_L2_BLOCK_SIZE

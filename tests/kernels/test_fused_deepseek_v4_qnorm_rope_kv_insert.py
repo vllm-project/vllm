@@ -11,8 +11,7 @@ We compare against:
   - Existing Triton `quantize_and_insert_k_cache` + round-trip via
     `dequantize_and_gather_k_cache` for KV
 
-The kernel is imported from
-`vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert`.
+The kernel is imported through the platform dispatch module.
 """
 
 import pytest
@@ -120,24 +119,36 @@ def rmsnorm_no_weight(x: torch.Tensor, eps: float) -> torch.Tensor:
     return xf * torch.rsqrt(variance + eps)
 
 
-# ── Dispatch to the CuTe DSL kernel (skip cleanly without cutlass) ──────────
+# ── Dispatch to the available platform kernel ───────────────────────────────
 
 
 def _op_available() -> bool:
+    if current_platform.is_rocm():
+        return hasattr(
+            torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert"
+        )
     return has_cutedsl()
 
 
 def _full_cache_fp8_op_available() -> bool:
+    if current_platform.is_rocm():
+        return hasattr(
+            torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert"
+        )
     return has_cutedsl()
 
 
 def _full_cache_bf16_op_available() -> bool:
+    if current_platform.is_rocm():
+        return hasattr(
+            torch.ops._C, "fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert"
+        )
     return has_cutedsl()
 
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or not _op_available(),
-    reason="CUDA not available or CuTe DSL (cutlass) not installed",
+    reason="GPU unavailable or fused insert backend unavailable",
 )
 
 
@@ -153,7 +164,7 @@ def _call_fused(
     bs,
     apply_q_norm=None,
 ):
-    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
         fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
     )
 
@@ -228,6 +239,7 @@ def _assert_kv_cache_parity(
 
 
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 64, 2048])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize(
     "n_heads,padded_heads",
     [
@@ -244,10 +256,11 @@ def _assert_kv_cache_parity(
         (64, 128),
     ],
 )
-def test_q_path_matches_reference(num_tokens: int, n_heads: int, padded_heads: int):
+def test_q_path_matches_reference(
+    num_tokens: int, n_heads: int, padded_heads: int, dtype: torch.dtype
+):
     torch.manual_seed(0)
     device = "cuda"
-    dtype = torch.bfloat16
     eps = 1e-6
     max_pos = 4096
 
@@ -257,7 +270,7 @@ def test_q_path_matches_reference(num_tokens: int, n_heads: int, padded_heads: i
 
     # Reference: RMSNorm (no weight) per head, then GPT-J RoPE on last 64.
     # Keep the chain in fp32 (rmsnorm_no_weight returns fp32) and round to
-    # bf16 once at the end, matching the kernel.
+    # the input dtype once at the end, matching the kernel.
     q_ref = rmsnorm_no_weight(q, eps)
     q_ref = apply_rope_gptj_last_k(q_ref, positions, cos_sin_cache).to(dtype)
 
@@ -434,6 +447,55 @@ def test_kv_path_matches_reference(num_tokens: int, block_size: int):
     )
 
 
+def test_fp16_paged_insert_preserves_fp8_payload_and_fp16_rope_tail():
+    torch.manual_seed(6)
+    device = "cuda"
+    num_tokens = 4
+    block_size = 16
+    kv = torch.randn(num_tokens, HEAD_DIM, dtype=torch.float16, device=device)
+    assert (kv.to(torch.bfloat16).to(torch.float16) != kv).any().item()
+    q = torch.zeros(num_tokens, 1, HEAD_DIM, dtype=torch.float16, device=device)
+    positions = torch.arange(num_tokens, dtype=torch.int64, device=device)
+    slots = positions.clone()
+    cos_sin = make_cos_sin_cache(64, ROPE_DIM, torch.float32, device)
+    cache = torch.zeros(2, block_size * HEAD_BYTES, dtype=torch.uint8, device=device)
+
+    _call_fused(q, 0, kv, cache, slots, positions, cos_sin, 1e-6, block_size)
+
+    data = cache[0, : block_size * 576].view(block_size, 576)
+    nope = (
+        kv[:, :NOPE_DIM]
+        .float()
+        .reshape(num_tokens, NOPE_DIM // QUANT_BLOCK, QUANT_BLOCK)
+    )
+    scales = _ue8m0_per_block_scales(kv[:, :NOPE_DIM].float(), QUANT_BLOCK)
+    reference_fp8 = (
+        (nope / scales.unsqueeze(-1))
+        .clamp(-FP8_MAX, FP8_MAX)
+        .to(FP8_STORE_DTYPE)
+        .view(torch.uint8)
+        .reshape(num_tokens, NOPE_DIM)
+    )
+    torch.testing.assert_close(
+        data[:num_tokens, :NOPE_DIM],
+        reference_fp8,
+        rtol=0,
+        atol=0,
+    )
+    scale_codes = (torch.log2(scales) + 127).to(torch.uint8)
+    stored_scales = cache[0, block_size * 576 :].view(block_size, 8)
+    torch.testing.assert_close(
+        stored_scales[:num_tokens, :7],
+        scale_codes,
+        rtol=0,
+        atol=0,
+    )
+    assert stored_scales[:num_tokens, 7].count_nonzero().item() == 0
+    tail = data[:num_tokens, NOPE_DIM:].contiguous().view(torch.float16)
+    expected = apply_rope_gptj_last_k(kv, positions, cos_sin)[:, NOPE_DIM:]
+    torch.testing.assert_close(tail, expected, rtol=1e-3, atol=1e-3)
+
+
 # ── Test 2c: DeepSeek V4.1 MXFP8 record (kv_mxfp8=True) ──────────────────────
 
 V41_HEAD_BYTES = HEAD_DIM + HEAD_DIM // 32  # 512 fp8 + 16 UE8M0 scales = 528
@@ -449,7 +511,7 @@ def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int
     match the Triton encoder exactly apart from the documented 1-ULP bf16
     rounding split on the rotation itself.
     """
-    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
         fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
     )
     from vllm.models.deepseek_v41.common.ops import (
@@ -540,13 +602,14 @@ def test_kv_path_mxfp8_record_matches_reference(num_tokens: int, block_size: int
 @pytest.mark.parametrize("num_tokens", [1, 17, 64])
 @pytest.mark.parametrize("block_size", [32, 64])
 @pytest.mark.parametrize("row_width", [HEAD_DIM, HEAD_DIM * 3])
+@pytest.mark.skipif(current_platform.is_rocm(), reason="KV norm requires CuTe DSL")
 def test_kv_insert_fused_norm_row_strided(
     num_tokens: int, block_size: int, row_width: int
 ):
     """The KV-only insert with ``kv_norm_weight`` matches RMSNorm followed by
     the unfused insert, reading a row-strided kv (the layer's half of a merged
     multi-layer projection output)."""
-    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
         fused_deepseek_v4_kv_rope_insert,
     )
 
@@ -628,7 +691,7 @@ def test_q_interleaved_pads_without_rope(
     zero. ``q_head_padded=0`` drops the Q pass entirely and returns nothing,
     for a shard already at the kernel's head count.
     """
-    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
         fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
     )
 
@@ -685,7 +748,7 @@ def test_q_interleaved_survives_graph_replay(n_heads: int):
     input -- that is what lets the layer prepare Q inside the captured region
     rather than in ``forward_mqa``.
     """
-    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
         fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
     )
 
@@ -755,7 +818,7 @@ def test_q_interleaved_is_orthogonal_to_norm_and_rope(
     interleaved layout must equal running the interleaved path on a permuted
     input, bit for bit, for every norm/RoPE combination.
     """
-    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
         fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
     )
     from vllm.models.deepseek_v41.common.ops.fused_layout import permute_q_to_fused
@@ -948,7 +1011,7 @@ def _call_full_cache_fp8_fused(
     bs,
     apply_q_norm=None,
 ):
-    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
         fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert,
     )
 
@@ -983,7 +1046,7 @@ def _call_full_cache_bf16_fused(
     bs,
     apply_q_norm=None,
 ):
-    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert import (  # noqa: E501
+    from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
         fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_bf16_insert,
     )
 
@@ -1066,6 +1129,7 @@ def _bf16_full_cache_reference(
 )
 @pytest.mark.parametrize("num_tokens", [4, 17])
 @pytest.mark.parametrize("n_heads", [8, 17])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("positions_dtype", [torch.int32, torch.int64])
 @pytest.mark.parametrize(
     "apply_q_norm",
@@ -1078,12 +1142,12 @@ def _bf16_full_cache_reference(
 def test_full_cache_per_tensor_fp8_matches_reference(
     num_tokens: int,
     n_heads: int,
+    dtype: torch.dtype,
     positions_dtype: torch.dtype,
     apply_q_norm: bool | None,
 ):
     torch.manual_seed(4)
     device = "cuda"
-    dtype = torch.bfloat16
     eps = 1e-6
     block_size = 16
     max_pos = 4096
@@ -1230,3 +1294,35 @@ def test_full_cache_bf16_matches_reference(
 
     torch.testing.assert_close(q_fused, q_ref, rtol=1e-2, atol=1e-2)
     torch.testing.assert_close(k_cache_fused, k_cache_ref, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(current_platform.is_rocm(), reason="CuTe DSL validation")
+def test_full_cache_entrypoints_reject_the_other_cache_dtype():
+    device = "cuda"
+    q = torch.zeros(1, 1, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    kv = torch.zeros(1, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    positions = torch.zeros(1, dtype=torch.int64, device=device)
+    cos_sin = make_cos_sin_cache(1, ROPE_DIM, torch.float32, device)
+    bf16_cache = torch.zeros(1, 16, HEAD_DIM, dtype=torch.bfloat16, device=device)
+    fp8_cache = torch.zeros(1, 16, HEAD_DIM, dtype=torch.float8_e4m3fn, device=device)
+    q_fp8 = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    scale = torch.ones(1, dtype=torch.float32, device=device)
+
+    with pytest.raises(ValueError, match="k_cache must be torch.bfloat16"):
+        _call_full_cache_bf16_fused(
+            q, kv, fp8_cache, positions, positions, cos_sin, 1e-6, 16
+        )
+    with pytest.raises(ValueError, match="k_cache must be torch.float8_e4m3fn"):
+        _call_full_cache_fp8_fused(
+            q,
+            kv,
+            q_fp8,
+            bf16_cache,
+            positions,
+            positions,
+            cos_sin,
+            scale,
+            scale,
+            1e-6,
+            16,
+        )
