@@ -16,6 +16,12 @@ Engines then load from the daemons with:
 Tensor, expert and data parallelism are supported, including across nodes;
 see vllm/model_executor/model_loader/weight_cache/daemon.py for the rank
 layout and rendezvous details.
+
+A second replica's daemons can fill their weights from an already-loaded
+replica instead of the checkpoint: ``--weight-cache-seed`` switches the
+affected daemons to the ``peer_cache`` load format, so each daemon still
+builds its model locally (config files required, safetensors not) and pulls
+the post-processed weights from its rank-matched source daemon.
 """
 
 import argparse
@@ -40,6 +46,13 @@ from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
+    parse_seed_address,
+)
+from vllm.model_executor.model_loader.weight_cache.weight_seed.utils import (
+    mirror_device_indices,
+    peer_cache_config,
+    seed_address,
+    split_addresses,
 )
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.network_utils import get_distributed_init_method, get_open_port
@@ -112,18 +125,36 @@ def _validate_seed_args(
     ):
         if (host is None) != (port is None):
             raise ValueError(f"{flag}-host and {flag}-port must be provided together")
-    has_endpoint = any(
-        value is not None
-        for value in (
-            args.seed_listen_host,
-            args.seed_listen_port,
-            args.seed_source_host,
-            args.seed_source_port,
+    if args.weight_cache_seed is not None and args.seed_source_host is not None:
+        raise ValueError(
+            "--weight-cache-seed conflicts with --seed-source-host/--seed-source-port"
         )
+    parsed = [
+        parse_seed_address(address)
+        for address in split_addresses(args.weight_cache_seed)
+    ]
+    remote_seed = any(not isinstance(address, str) for address in parsed)
+    if len(parsed) > 1 and remote_seed:
+        raise ValueError(
+            "Per-GPU --weight-cache-seed addresses must be Unix socket "
+            "paths; a remote source takes a single host:base_port"
+        )
+    # A token only protects the TCP planes: the listener and a remote source.
+    has_remote = (
+        args.seed_listen_host is not None
+        or args.seed_source_host is not None
+        or remote_seed
     )
-    if has_endpoint != bool(args.seed_token):
-        raise ValueError("Preload daemons must set --seed-token to enable D2D transfer")
-    for base_port in (args.seed_listen_port, args.seed_source_port):
+    if has_remote != bool(args.seed_token):
+        raise ValueError(
+            "Remote daemon-to-daemon seeding requires --seed-token (and a "
+            "token without a remote endpoint has no effect)"
+        )
+    for base_port in (
+        args.seed_listen_port,
+        args.seed_source_port,
+        *(address[1] for address in parsed if isinstance(address, tuple)),
+    ):
         if base_port is None:
             continue
         max_port = base_port + num_groups * world_size - 1
@@ -209,6 +240,21 @@ class PreloadSubcommand(CLISubcommand):
             help="Shared secret for daemon-to-daemon requests. The JSON "
             "connection is unencrypted; use a trusted network.",
         )
+        parser.add_argument(
+            "--weight-cache-seed",
+            type=str,
+            default=None,
+            help="Fill these daemons from an already-loaded replica instead "
+            "of the checkpoint: each daemon still builds its model (config "
+            "files required, safetensors not) and pulls the post-processed "
+            "weights from its source rank. Either one source Unix socket "
+            "path per local GPU (comma separated, in device order) for "
+            "same-host CUDA IPC copies, or one host:base_port for cross-host "
+            "copies over Mooncake RDMA, where each rank dials base_port + "
+            "its global rank. The host:base_port form also seeds the "
+            "speculative draft daemon group, whose listeners sit past the "
+            "target group's port block.",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -219,7 +265,7 @@ class PreloadSubcommand(CLISubcommand):
             get_draft_daemon_config,
             plan_local_ranks,
         )
-        from vllm.model_executor.model_loader.weight_cache.seed import SeedConfig
+        from vllm.model_executor.model_loader.weight_cache.transport import SeedConfig
         from vllm.model_executor.model_loader.weight_cache.utils import (
             format_daemon_role,
         )
@@ -232,10 +278,12 @@ class PreloadSubcommand(CLISubcommand):
             else None
         )
         vllm_config = engine_args.create_engine_config(usage_context=usage_context)
-        if vllm_config.load_config.load_format == "ipc_cache":
+        load_format = vllm_config.load_config.load_format
+        if load_format in ("ipc_cache", "peer_cache"):
             raise ValueError(
-                "The weight cache daemon itself must load from disk; use the "
-                "default --load-format"
+                f"--load-format {load_format} is not accepted here: the "
+                "weight cache daemon loads from disk by default, and "
+                "--weight-cache-seed switches it to peer_cache internally"
             )
         # Config-only so it can fail before any model loading; the quant
         # method check needs the created model and runs in
@@ -326,6 +374,17 @@ class PreloadSubcommand(CLISubcommand):
                 return None
             return host, base_port + offset
 
+        mirror_devices = None
+        seed_addresses = split_addresses(args.weight_cache_seed)
+        if seed_addresses and all(
+            isinstance(parse_seed_address(address), str) for address in seed_addresses
+        ):
+            # Same-host mirror: place every local daemon on a GPU the
+            # source replica does not use, inferred from the source's GPUs.
+            mirror_devices = mirror_device_indices(
+                args.weight_cache_seed, local_world_size
+            )
+
         procs: list[BaseProcess] = []
         for group_index, (is_draft, config, init_method) in enumerate(groups):
             # Draft daemons live past the target group's port block so both
@@ -334,13 +393,26 @@ class PreloadSubcommand(CLISubcommand):
             for local_rank, dp_rank, pp_rank, tp_rank in placements:
                 global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
                 offset = port_offset + global_rank
+                peer_source = seed_address(
+                    args.weight_cache_seed, local_rank, global_rank, port_offset
+                )
+                source: str | tuple[str, int] | None
+                if peer_source is not None:
+                    daemon_config = peer_cache_config(config, is_draft=is_draft)
+                    # The mirror also adopts the source's warmup caches (the
+                    # FlashInfer autotune table) from the same address
+                    # through the ordinary warmup-cache seeding path.
+                    source = peer_source
+                else:
+                    daemon_config = config
+                    source = _seed_endpoint(
+                        args.seed_source_host, args.seed_source_port, offset
+                    )
                 seed_config = SeedConfig(
                     listen=_seed_endpoint(
                         args.seed_listen_host, args.seed_listen_port, offset
                     ),
-                    source=_seed_endpoint(
-                        args.seed_source_host, args.seed_source_port, offset
-                    ),
+                    source=source,
                     token=args.seed_token,
                 )
                 procs.append(
@@ -349,7 +421,7 @@ class PreloadSubcommand(CLISubcommand):
                         args=(
                             global_rank,
                             local_rank,
-                            config,
+                            daemon_config,
                             init_method,
                             args.weight_cache_socket_dir,
                             ready_queue,
@@ -357,6 +429,9 @@ class PreloadSubcommand(CLISubcommand):
                             dp_rank,
                             pp_rank,
                             seed_config,
+                            mirror_devices[local_rank]
+                            if mirror_devices is not None
+                            else None,
                         ),
                         name=(
                             f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
