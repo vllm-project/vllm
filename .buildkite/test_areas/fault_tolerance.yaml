@@ -4,10 +4,10 @@ depends_on:
 steps:
 # Disabled until the KV connectors installation is locked.
 # - label: ":nvidia: (H100) Fault Tolerance E2E"
-#   key: fault-tolerance-e2e-2xh100
+#   key: fault-tolerance-e2e-4xh100
 #   timeout_in_minutes: 35
 #   device: h100
-#   num_devices: 2
+#   num_devices: 4
 #   working_dir: "/vllm-workspace/tests"
 #   source_file_dependencies:
 #   - vllm/v1/fault_tolerance/
@@ -94,6 +94,7 @@ steps:
   - tests/v1/fault_tolerance/
   - tests/v1/distributed/test_external_lb_dp.py
   commands:
+  - pytest -v -s v1/fault_tolerance/test_expert_reload.py
   - VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s -rs kernels/moe/test_moe_layer.py::test_moe_layer_mori_graph
   - VLLM_TEST_ENABLE_MORI_MOE_LAYER=1 VLLM_WORKER_MULTIPROC_METHOD=spawn pytest -v -s -rs 'kernels/moe/test_moe_layer.py::test_moe_layer[False-mori_high_throughput-2-1-True]' --subtests='[32-512-512-8-2-bfloat16-None-False-False-False-False-mori_high_throughput-2-2-1]'
   dind: false
