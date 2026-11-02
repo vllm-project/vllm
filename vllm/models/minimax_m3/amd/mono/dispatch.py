@@ -76,6 +76,13 @@ def _config_refusal(vllm_config: VllmConfig, model) -> str | None:
             or _separate_shared_ok(model.layers),
             "shared expert neither fused nor a separate MLP",
         ),
+        (
+            not any(
+                getattr(layer.self_attn, "skip_index_topk", False)
+                for layer in model.layers
+            ),
+            "index sharing",
+        ),
         (_dense_prefix_ok(model.layers), "layer mix"),
     )
     for ok, why in checks:
