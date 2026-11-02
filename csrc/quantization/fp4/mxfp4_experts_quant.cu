@@ -61,14 +61,14 @@ static constexpr int MXFP4_NUM_THREADS_PER_SF =
 // When FUSE_SILU_MUL=true, expects input with gate||up layout and fuses
 // SiLU(gate)*up before quantization.
 template <class Type, bool FUSE_SILU_MUL = false,
-          bool SMALL_NUM_EXPERTS = false>
+          bool SMALL_NUM_EXPERTS = false, bool GATHER_INPUT = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     mxfp4_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
                           fp4_packed_t* out, uint32_t* SFout,
                           uint32_t* input_offset_by_experts,
                           uint32_t* output_scale_offset_by_experts,
                           int n_experts, int32_t const* sorted_expert_ids,
-                          bool low_latency) {
+                          int32_t const* input_permutation, bool low_latency) {
   using PackedVec = PackedVec<Type, CVT_FP4_PACK16>;
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
@@ -133,7 +133,11 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     }
 
     // Load input and optionally apply fused SiLU+Mul
-    int64_t inOffset = rowIdx * inColsPerRow + colIdx;
+    int64_t input_row = rowIdx;
+    if constexpr (GATHER_INPUT) {
+      input_row = __ldca(&input_permutation[rowIdx]);
+    }
+    int64_t inOffset = input_row * inColsPerRow + colIdx;
     PackedVec in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
     PackedVec quant_input;
     if constexpr (FUSE_SILU_MUL) {
@@ -167,13 +171,14 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
 // Large M_topk variant using shared memory for expert offsets
 template <class Type, bool FUSE_SILU_MUL = false,
-          bool SMALL_NUM_EXPERTS = false>
+          bool SMALL_NUM_EXPERTS = false, bool GATHER_INPUT = false>
 __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
     mxfp4_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols, Type const* in,
                           fp4_packed_t* out, uint32_t* SFout,
                           uint32_t* input_offset_by_experts,
                           uint32_t* output_scale_offset_by_experts,
-                          int n_experts, int32_t const* sorted_expert_ids) {
+                          int n_experts, int32_t const* sorted_expert_ids,
+                          int32_t const* input_permutation) {
   using PackedVec = PackedVec<Type, CVT_FP4_PACK16>;
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
@@ -236,7 +241,11 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
       }
     }
 
-    int64_t inOffset = rowIdx * inColsPerRow + colIdx;
+    int64_t input_row = rowIdx;
+    if constexpr (GATHER_INPUT) {
+      input_row = __ldca(&input_permutation[rowIdx]);
+    }
+    int64_t inOffset = input_row * inColsPerRow + colIdx;
     PackedVec in_vec = reinterpret_cast<PackedVec const*>(in)[inOffset];
     PackedVec quant_input;
     if constexpr (FUSE_SILU_MUL) {
@@ -266,11 +275,12 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
   }
 }
 
-template <typename T, bool FUSE_SILU_MUL = false>
+template <typename T, bool FUSE_SILU_MUL = false, bool GATHER_INPUT = false>
 void mxfp4_quant_impl(void* output, void* output_scale, void* input,
                       void* input_offset_by_experts,
                       void* output_scale_offset_by_experts,
-                      int32_t const* sorted_expert_ids, int m_topk, int k,
+                      int32_t const* sorted_expert_ids,
+                      int32_t const* input_permutation, int m_topk, int k,
                       int n_experts, cudaStream_t stream) {
   int multiProcessorCount =
       get_device_attribute(cudaDevAttrMultiProcessorCount, -1);
@@ -292,44 +302,45 @@ void mxfp4_quant_impl(void* output, void* output_scale, void* input,
   if (blockRepeat > 1) {
     size_t shared_mem_size = (n_experts + 1) * sizeof(uint32_t);
     if (n_experts >= 4) {
-      mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false>
+      mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false, GATHER_INPUT>
           <<<grid, block, shared_mem_size, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),
               reinterpret_cast<fp4_packed_t*>(output),
               reinterpret_cast<uint32_t*>(output_scale),
               reinterpret_cast<uint32_t*>(input_offset_by_experts),
               reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
-              n_experts, sorted_expert_ids);
+              n_experts, sorted_expert_ids, input_permutation);
     } else {
-      mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, true>
+      mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, true, GATHER_INPUT>
           <<<grid, block, shared_mem_size, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),
               reinterpret_cast<fp4_packed_t*>(output),
               reinterpret_cast<uint32_t*>(output_scale),
               reinterpret_cast<uint32_t*>(input_offset_by_experts),
               reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
-              n_experts, sorted_expert_ids);
+              n_experts, sorted_expert_ids, input_permutation);
     }
   } else {
     if (n_experts >= 16) {
-      mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false>
+      mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, false, GATHER_INPUT>
           <<<grid, block, 0, stream>>>(
               m_topk, k, reinterpret_cast<T*>(input),
               reinterpret_cast<fp4_packed_t*>(output),
               reinterpret_cast<uint32_t*>(output_scale),
               reinterpret_cast<uint32_t*>(input_offset_by_experts),
               reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
-              n_experts, sorted_expert_ids,
+              n_experts, sorted_expert_ids, input_permutation,
               /* bool low_latency */ true);
     } else {
-      mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, true><<<grid, block, 0, stream>>>(
-          m_topk, k, reinterpret_cast<T*>(input),
-          reinterpret_cast<fp4_packed_t*>(output),
-          reinterpret_cast<uint32_t*>(output_scale),
-          reinterpret_cast<uint32_t*>(input_offset_by_experts),
-          reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
-          n_experts, sorted_expert_ids,
-          /* bool low_latency */ true);
+      mxfp4_cvt_fp16_to_fp4<T, FUSE_SILU_MUL, true, GATHER_INPUT>
+          <<<grid, block, 0, stream>>>(
+              m_topk, k, reinterpret_cast<T*>(input),
+              reinterpret_cast<fp4_packed_t*>(output),
+              reinterpret_cast<uint32_t*>(output_scale),
+              reinterpret_cast<uint32_t*>(input_offset_by_experts),
+              reinterpret_cast<uint32_t*>(output_scale_offset_by_experts),
+              n_experts, sorted_expert_ids, input_permutation,
+              /* bool low_latency */ true);
     }
   }
 }
@@ -359,6 +370,7 @@ static void validate_mxfp4_experts_quant_inputs(
     torch::stable::Tensor const& input_offset_by_experts,
     torch::stable::Tensor const& output_scale_offset_by_experts,
     std::optional<torch::stable::Tensor> const& sorted_expert_ids,
+    std::optional<torch::stable::Tensor> const& input_permutation,
     int64_t n_experts, int64_t m_topk, int64_t k) {
   CHECK_INPUT(output, "output");
   CHECK_INPUT(output_scale, "output_scale");
@@ -371,6 +383,14 @@ static void validate_mxfp4_experts_quant_inputs(
     STD_TORCH_CHECK(sorted_expert_ids->scalar_type() == INT);
     STD_TORCH_CHECK(sorted_expert_ids->size(0) == m_topk);
     STD_TORCH_CHECK(sorted_expert_ids->get_device_index() ==
+                    input.get_device_index());
+  }
+  if (input_permutation.has_value()) {
+    CHECK_INPUT(input_permutation.value(), "input_permutation");
+    STD_TORCH_CHECK(input_permutation->dim() == 1);
+    STD_TORCH_CHECK(input_permutation->scalar_type() == INT);
+    STD_TORCH_CHECK(input_permutation->size(0) == m_topk);
+    STD_TORCH_CHECK(input_permutation->get_device_index() ==
                     input.get_device_index());
   }
 
@@ -416,19 +436,26 @@ void mxfp4_experts_quant(
     torch::stable::Tensor const& input_offset_by_experts,
     torch::stable::Tensor const& output_scale_offset_by_experts,
     int64_t n_experts,
-    std::optional<torch::stable::Tensor> const& sorted_expert_ids) {
+    std::optional<torch::stable::Tensor> const& sorted_expert_ids,
+    std::optional<torch::stable::Tensor> const& input_permutation) {
 #if VLLM_MXFP4_EXPERTS_QUANT_SUPPORTED
   int32_t sm = get_sm_version_num();
   STD_TORCH_CHECK(mxfp4_experts_quant_sm_supported(sm),
                   "No compiled MXFP4 experts quant kernel for SM ", sm,
                   ". Recompile with SM10x/11x FP4 support and CUDA >= 12.9.");
 
-  auto m_topk = input.size(0);
+  STD_TORCH_CHECK(input.dim() == 2);
+  if (input_permutation.has_value()) {
+    STD_TORCH_CHECK(input_permutation->dim() == 1);
+  }
+  auto m_topk = input_permutation.has_value() ? input_permutation->size(0)
+                                              : input.size(0);
   auto k = input.size(1);
 
   validate_mxfp4_experts_quant_inputs(
       output, output_scale, input, input_offset_by_experts,
-      output_scale_offset_by_experts, sorted_expert_ids, n_experts, m_topk, k);
+      output_scale_offset_by_experts, sorted_expert_ids, input_permutation,
+      n_experts, m_topk, k);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -437,14 +464,28 @@ void mxfp4_experts_quant(
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "mxfp4_experts_quant_kernel", [&] {
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
-        vllm::mxfp4_quant_impl<cuda_type, /*FUSE_SILU_MUL=*/false>(
-            output.data_ptr(), output_scale.data_ptr(), input.data_ptr(),
-            input_offset_by_experts.data_ptr(),
-            output_scale_offset_by_experts.data_ptr(),
+        int32_t const* sorted_expert_ids_ptr =
             sorted_expert_ids.has_value()
                 ? static_cast<int32_t const*>(sorted_expert_ids->data_ptr())
-                : nullptr,
-            m_topk, k, n_experts, stream);
+                : nullptr;
+        int32_t const* input_permutation_ptr =
+            input_permutation.has_value()
+                ? static_cast<int32_t const*>(input_permutation->data_ptr())
+                : nullptr;
+        if (input_permutation_ptr != nullptr) {
+          vllm::mxfp4_quant_impl<cuda_type, /*FUSE_SILU_MUL=*/false,
+                                 /*GATHER_INPUT=*/true>(
+              output.data_ptr(), output_scale.data_ptr(), input.data_ptr(),
+              input_offset_by_experts.data_ptr(),
+              output_scale_offset_by_experts.data_ptr(), sorted_expert_ids_ptr,
+              input_permutation_ptr, m_topk, k, n_experts, stream);
+        } else {
+          vllm::mxfp4_quant_impl<cuda_type, /*FUSE_SILU_MUL=*/false>(
+              output.data_ptr(), output_scale.data_ptr(), input.data_ptr(),
+              input_offset_by_experts.data_ptr(),
+              output_scale_offset_by_experts.data_ptr(), sorted_expert_ids_ptr,
+              nullptr, m_topk, k, n_experts, stream);
+        }
       });
 #else
   STD_TORCH_CHECK_NOT_IMPLEMENTED(false,
@@ -472,7 +513,8 @@ void silu_and_mul_mxfp4_experts_quant(
 
   validate_mxfp4_experts_quant_inputs(
       output, output_scale, input, input_offset_by_experts,
-      output_scale_offset_by_experts, sorted_expert_ids, n_experts, m_topk, k);
+      output_scale_offset_by_experts, sorted_expert_ids, std::nullopt,
+      n_experts, m_topk, k);
 
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
@@ -488,7 +530,7 @@ void silu_and_mul_mxfp4_experts_quant(
             sorted_expert_ids.has_value()
                 ? static_cast<int32_t const*>(sorted_expert_ids->data_ptr())
                 : nullptr,
-            m_topk, k, n_experts, stream);
+            nullptr, m_topk, k, n_experts, stream);
       });
 #else
   STD_TORCH_CHECK_NOT_IMPLEMENTED(

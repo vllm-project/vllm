@@ -248,7 +248,8 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "mxfp4_experts_quant(Tensor! output, Tensor! output_scale,"
       "Tensor input, Tensor input_offset_by_experts,"
       "Tensor output_scale_offset_by_experts, int n_experts, "
-      "Tensor? sorted_expert_ids=None) -> ()");
+      "Tensor? sorted_expert_ids=None, "
+      "Tensor? input_permutation=None) -> ()");
 
   // Fused SiLU+Mul+MXFP4 experts quantization.
   ops.def(

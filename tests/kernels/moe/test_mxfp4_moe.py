@@ -25,21 +25,43 @@ def _mxfp4_experts_quant_for_test(
     blockscale_offsets: torch.Tensor,
     n_experts: int,
     sorted_expert_ids: torch.Tensor | None = None,
+    input_permutation: torch.Tensor | None = None,
+    *,
+    fill_unwritten: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Call the raw quant op with a compact, zero-initialized scale buffer."""
-    m_numtopk, k = input_tensor.shape
+    """Call the raw quant op with a compact scale buffer."""
+    m_numtopk = (
+        input_permutation.numel()
+        if input_permutation is not None
+        else input_tensor.size(0)
+    )
+    k = input_tensor.size(1)
     scales_k = k // MXFP4_BLOCK_SIZE
     padded_k = (scales_k + 3) // 4
     num_sf_rows = int(blockscale_offsets[-1].item())
-    output = torch.empty(
-        m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
-    )
-    output_scales = torch.zeros(
-        num_sf_rows,
-        padded_k,
-        dtype=torch.int32,
-        device=input_tensor.device,
-    )
+    if fill_unwritten:
+        output = torch.full(
+            (m_numtopk, k // 2),
+            0xA5,
+            device=input_tensor.device,
+            dtype=torch.uint8,
+        )
+        output_scales = torch.full(
+            (num_sf_rows, padded_k),
+            0x5A5A5A5A,
+            dtype=torch.int32,
+            device=input_tensor.device,
+        )
+    else:
+        output = torch.empty(
+            m_numtopk, k // 2, device=input_tensor.device, dtype=torch.uint8
+        )
+        output_scales = torch.zeros(
+            num_sf_rows,
+            padded_k,
+            dtype=torch.int32,
+            device=input_tensor.device,
+        )
     torch.ops._C.mxfp4_experts_quant(
         output,
         output_scales,
@@ -48,8 +70,40 @@ def _mxfp4_experts_quant_for_test(
         blockscale_offsets,
         n_experts,
         sorted_expert_ids,
+        input_permutation,
     )
     return output, output_scales.view(torch.uint8)
+
+
+def _mxfp4_scale_written_mask(
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    k: int,
+    device: torch.device,
+) -> torch.Tensor:
+    counts = (expert_offsets[1:] - expert_offsets[:-1]).cpu().tolist()
+    scale_offsets = blockscale_offsets.cpu().tolist()
+    num_k_tiles = (k + 127) // 128
+    mask = torch.zeros(
+        scale_offsets[-1] * num_k_tiles * 4, dtype=torch.bool, device="cpu"
+    )
+    for expert, count in enumerate(counts):
+        base = scale_offsets[expert] * num_k_tiles * 4
+        for row in range(count):
+            m_tile = row // 128
+            outer_m = row % 32
+            inner_m = (row // 32) % 4
+            for scale_idx in range(k // MXFP4_BLOCK_SIZE):
+                k_tile, inner_k = divmod(scale_idx, 4)
+                offset = (
+                    base
+                    + ((m_tile * num_k_tiles + k_tile) << 9)
+                    + (outer_m << 4)
+                    + (inner_m << 2)
+                    + inner_k
+                )
+                mask[offset] = True
+    return mask.to(device)
 
 
 def _silu_and_mul_mxfp4_experts_quant_for_test(
@@ -618,6 +672,154 @@ def test_mxfp4_experts_quant_sorted_expert_ids_matches_offset_search(
 
     assert torch.equal(baseline_out, direct_out)
     assert torch.equal(baseline_sf, direct_sf)
+
+
+@pytest.mark.skipif(
+    not is_sm100_supported(),
+    reason="mxfp4_experts_quant requires CUDA SM100",
+)
+@pytest.mark.parametrize(
+    ("m", "topk", "num_experts", "k", "dtype", "routing"),
+    [
+        pytest.param(4, 8, 256, 6144, torch.bfloat16, "mixed_invalid", id="decode"),
+        pytest.param(32, 8, 16, 512, torch.bfloat16, "skewed", id="small-experts"),
+        pytest.param(32, 1, 256, 512, torch.float16, "topk1", id="topk1-fp16"),
+        pytest.param(8192, 1, 256, 512, torch.bfloat16, "topk1", id="large-route"),
+        pytest.param(4, 8, 256, 512, torch.bfloat16, "all_invalid", id="all-invalid"),
+    ],
+)
+def test_mxfp4_experts_quant_gathers_original_rows(
+    m: int,
+    topk: int,
+    num_experts: int,
+    k: int,
+    dtype: torch.dtype,
+    routing: str,
+):
+    set_random_seed(2)
+    if routing == "all_invalid":
+        topk_ids = torch.full((m, topk), -1, device="cuda", dtype=torch.int32)
+    elif routing == "topk1":
+        topk_ids = (torch.arange(m, device="cuda", dtype=torch.int32) % 5).view(m, 1)
+    else:
+        topk_ids = torch.arange(topk, device="cuda", dtype=torch.int32)
+        topk_ids = topk_ids.expand(m, -1).clone()
+        if routing == "mixed_invalid":
+            topk_ids[0, -1] = -1
+            topk_ids[-1, -2] = -1
+        elif routing == "skewed":
+            topk_ids[-4:] += topk
+
+    expert_offsets = torch.empty(num_experts + 1, device="cuda", dtype=torch.int32)
+    blockscale_offsets = torch.empty_like(expert_offsets)
+    problem_sizes1 = torch.empty(num_experts, 3, device="cuda", dtype=torch.int32)
+    problem_sizes2 = torch.empty_like(problem_sizes1)
+    input_permutation = torch.empty(m * topk, device="cuda", dtype=torch.int32)
+    output_permutation = torch.empty_like(input_permutation)
+    sorted_expert_ids = (
+        torch.empty_like(input_permutation) if num_experts > 16 else None
+    )
+
+    ops.get_cutlass_moe_mm_data(
+        topk_ids,
+        expert_offsets,
+        problem_sizes1,
+        problem_sizes2,
+        input_permutation,
+        output_permutation,
+        num_experts,
+        128,
+        k,
+        blockscale_offsets,
+        is_gated=True,
+        sorted_expert_ids=sorted_expert_ids,
+    )
+
+    activations = torch.randn(m, k, device="cuda", dtype=dtype) / 5
+    shuffled_activations = ops.shuffle_rows(activations, input_permutation)
+    baseline_out, baseline_sf = _mxfp4_experts_quant_for_test(
+        shuffled_activations,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        sorted_expert_ids,
+        fill_unwritten=True,
+    )
+    gathered_out, gathered_sf = _mxfp4_experts_quant_for_test(
+        activations,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+        sorted_expert_ids,
+        input_permutation,
+        fill_unwritten=True,
+    )
+
+    num_valid_rows = int(expert_offsets[-1].item())
+    valid_sources = input_permutation[:num_valid_rows]
+    assert torch.all((valid_sources >= 0) & (valid_sources < m))
+    assert torch.all(input_permutation[num_valid_rows:] == -1)
+    assert torch.equal(baseline_out[:num_valid_rows], gathered_out[:num_valid_rows])
+    assert torch.all(baseline_out[num_valid_rows:] == 0xA5)
+    assert torch.all(gathered_out[num_valid_rows:] == 0xA5)
+    assert torch.equal(baseline_sf, gathered_sf)
+
+    written_sf = _mxfp4_scale_written_mask(
+        expert_offsets, blockscale_offsets, k, activations.device
+    )
+    assert written_sf.numel() == baseline_sf.numel()
+    for output_sf in (baseline_sf, gathered_sf):
+        assert torch.all(output_sf.reshape(-1)[~written_sf] == 0x5A)
+
+    if routing == "skewed":
+        n = 128
+        weight_rows_per_expert = 2 * n
+        weight = (
+            torch.randn(
+                num_experts * weight_rows_per_expert,
+                k,
+                device="cuda",
+                dtype=dtype,
+            )
+            / 5
+        )
+        weight_offsets = (
+            torch.arange(num_experts + 1, device="cuda", dtype=torch.int32)
+            * weight_rows_per_expert
+        )
+        weight_fp4, weight_sf = ops.mxfp4_experts_quant(
+            weight,
+            weight_offsets,
+            weight_offsets,
+            num_experts,
+            topk=1,
+        )
+        weight_fp4 = weight_fp4.view(num_experts, weight_rows_per_expert, k // 2)
+        weight_sf = weight_sf.view(-1)[
+            : num_experts * weight_rows_per_expert * (k // MXFP4_BLOCK_SIZE)
+        ].view(num_experts, weight_rows_per_expert, k // MXFP4_BLOCK_SIZE)
+
+        baseline_gemm = torch.empty(
+            m * topk, weight_rows_per_expert, device="cuda", dtype=dtype
+        )
+        gathered_gemm = torch.empty_like(baseline_gemm)
+        for quantized_input, quantized_scale, gemm_output in (
+            (baseline_out, baseline_sf, baseline_gemm),
+            (gathered_out, gathered_sf, gathered_gemm),
+        ):
+            ops.cutlass_mxfp4_moe_mm(
+                gemm_output,
+                quantized_input,
+                weight_fp4,
+                quantized_scale,
+                weight_sf,
+                problem_sizes1,
+                expert_offsets[:-1],
+                blockscale_offsets[:-1],
+            )
+        assert torch.equal(
+            baseline_gemm[:num_valid_rows], gathered_gemm[:num_valid_rows]
+        )
 
 
 @pytest.mark.skipif(

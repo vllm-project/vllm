@@ -924,7 +924,6 @@ def run_cutlass_moe_mxfp4(
         sorted_expert_ids=sorted_expert_ids,
     )
 
-    a = ops.shuffle_rows(a, a_map)
     rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quant(
         a,
         expert_offsets,
@@ -932,6 +931,7 @@ def run_cutlass_moe_mxfp4(
         e,
         num_topk,
         sorted_expert_ids,
+        input_permutation=a_map,
     )
     c1 = _resize_cache(workspace13, (m * topk, w1_n))
     c2 = _resize_cache(workspace2, (m * topk, n))

@@ -1741,19 +1741,23 @@ def mxfp4_experts_quant(
     n_experts: int,
     topk: int,
     sorted_expert_ids: torch.Tensor | None = None,
+    input_permutation: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize input tensor to MXFP4 for packed MoE inputs.
     Uses 32-element blocks with E8M0 (power-of-two) scale factors.
     MXFP4 has no global scale - only block-level E8M0 scale factors.
 
     Args:
-        input_tensor: [m_topk, k] BF16/FP16 activations
+        input_tensor: [m_topk, k] BF16/FP16 activations, or [m, k] when
+            input_permutation is provided
         expert_offsets: [n_experts+1] token boundaries per expert
         blockscale_offsets: [n_experts+1] SF row boundaries per expert
         n_experts: number of experts
         topk: number of top-k experts
         sorted_expert_ids: Optional expert ID per sorted row; skips offset
             lookup in the CUDA kernel when provided.
+        input_permutation: Optional map from expert-ordered output rows to
+            source token rows. When provided, it must contain m * topk entries.
 
     Returns:
         output: [m_topk, k//2] packed E2M1 values (uint8)
@@ -1764,7 +1768,14 @@ def mxfp4_experts_quant(
     assert input_tensor.ndim == 2
 
     MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
-    m_numtopk, k = input_tensor.shape
+    m, k = input_tensor.shape
+    m_numtopk = input_permutation.numel() if input_permutation is not None else m
+    if input_permutation is not None:
+        assert input_permutation.ndim == 1
+        assert input_permutation.dtype == torch.int32
+        assert input_permutation.is_contiguous()
+        assert input_permutation.device == input_tensor.device
+        assert m_numtopk == m * topk
 
     assert m_numtopk <= MAX_TOKENS_PER_EXPERT * topk, (
         f"m_numtopk must be less than MAX_TOKENS_PER_EXPERT("
@@ -1792,6 +1803,7 @@ def mxfp4_experts_quant(
         blockscale_offsets,
         n_experts,
         sorted_expert_ids,
+        input_permutation,
     )
     # E8M0 SFs are stored as uint8
     output_scales = output_scales.view(torch.uint8)
