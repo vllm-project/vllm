@@ -139,7 +139,7 @@ def _item_type(item: ResponseInputOutputItem) -> str | None:
 
 
 def _item_dict(item: ResponseInputOutputItem) -> dict[str, Any]:
-    return item if isinstance(item, dict) else item.model_dump()
+    return item if isinstance(item, dict) else item.model_dump(exclude_none=True)
 
 
 def response_item_status(
