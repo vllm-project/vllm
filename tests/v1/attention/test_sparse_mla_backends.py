@@ -204,10 +204,19 @@ def test_rocm_long_bf16_prefill_avoids_nonpersistent_aiter(
     if not current_platform.is_rocm():
         pytest.skip("ROCm sparse MLA regression")
     from vllm._aiter_ops import rocm_aiter_ops
+    from vllm.v1.attention.ops import rocm_aiter_mla_sparse
 
-    # Exercise the gfx942 routing decision on other ROCm devices too;
-    # the numerical kernel still compiles for the actual device.
+    # Exercise the gfx942 routing decision on other ROCm devices too.
+    # Pin get_cdna_version() to the physical chip before the on_gfx942()
+    # patch, so an MI350 stays off pa_prefill_sparse and the Triton kernel
+    # that compiles there is the one that runs.
+    physical_cdna_version = rocm_aiter_mla_sparse.get_cdna_version()
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx942", lambda: True)
+    monkeypatch.setattr(
+        rocm_aiter_mla_sparse,
+        "get_cdna_version",
+        lambda: physical_cdna_version,
+    )
 
     def unsupported_aiter(*args, **kwargs):
         pytest.fail("Long gfx942 BF16 prefill reached nonpersistent AITER")
