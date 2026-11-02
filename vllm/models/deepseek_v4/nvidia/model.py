@@ -33,8 +33,10 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_MXFP4,
+    MEGA_MOE_MXFP8,
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
+    MegaMoEWeightFormat,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
@@ -204,6 +206,30 @@ def make_deepseek_v4_expert_params_mapping(
     ]
 
 
+def resolve_mega_moe_weight_format(
+    vllm_config: VllmConfig,
+) -> tuple[MegaMoEWeightFormat, bool]:
+    """Pick the MegaMoE expert precision and whether to quantize online.
+
+    A bf16 checkpoint served with ``--quantization mxfp8`` carries no expert
+    scales, so the routed weights are quantized to MXFP8 while loading. Every
+    other checkpoint shape keeps the existing MXFP4 (offline) behavior.
+    """
+    from vllm.model_executor.layers.quantization.online.base import (
+        OnlineQuantizationConfig,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    quant_config = vllm_config.quant_config
+    if isinstance(quant_config, OnlineQuantizationConfig):
+        moe_spec = quant_config.args.moe
+        if moe_spec is not None and moe_spec.weight == kMxfp8Dynamic:
+            return MEGA_MOE_MXFP8, True
+    return MEGA_MOE_MXFP4, False
+
+
 class DeepseekV4MoE(nn.Module):
     def __init__(
         self,
@@ -227,6 +253,11 @@ class DeepseekV4MoE(nn.Module):
         self.reduce_results = reduce_results
         moe_backend = vllm_config.kernel_config.moe_backend
         self.use_native_mega_moe = moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        self.mega_moe_weight_format, self.mega_moe_online_quant = (
+            resolve_mega_moe_weight_format(vllm_config)
+            if self.use_native_mega_moe
+            else (MEGA_MOE_MXFP4, False)
+        )
         if (
             self.use_native_mega_moe
             and not vllm_config.parallel_config.enable_expert_parallel
@@ -260,9 +291,14 @@ class DeepseekV4MoE(nn.Module):
             raise NotImplementedError(
                 "DeepSeek V4 MegaMoE requires normalized top-k probabilities."
             )
-        if self.use_native_mega_moe and getattr(config, "expert_dtype", "fp4") != "fp4":
+        if (
+            self.use_native_mega_moe
+            and not self.mega_moe_online_quant
+            and getattr(config, "expert_dtype", "fp4") != "fp4"
+        ):
             raise NotImplementedError(
-                "DeepSeek V4 MegaMoE only supports fp4 experts; got expert_dtype="
+                "DeepSeek V4 MegaMoE only supports fp4 experts unless the "
+                "experts are quantized online; got expert_dtype="
                 f"{config.expert_dtype!r}. Drop --kernel-config moe_backend="
                 f"{moe_backend} for this checkpoint."
             )
@@ -388,7 +424,8 @@ class DeepseekV4MoE(nn.Module):
             top_k=self.n_activated_experts,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            weight_format=MEGA_MOE_MXFP4,
+            weight_format=self.mega_moe_weight_format,
+            online_quant=self.mega_moe_online_quant,
             activation=MegaMoEActivation(
                 "swiglu",
                 clamp=None if self.swiglu_limit is None else float(self.swiglu_limit),

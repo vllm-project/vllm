@@ -276,12 +276,21 @@ class DeepGemmMegaMoEExperts(nn.Module):
         fast_math: bool = True,
         max_num_tokens: int | None = None,
         prefix: str = "",
+        online_quant: bool = False,
     ):
         super().__init__()
         if activation.name not in weight_format.activations:
             raise NotImplementedError(
                 f"DeepGEMM MegaMoE {weight_format.name} experts support "
                 f"{sorted(weight_format.activations)}, not {activation.name!r}."
+            )
+        if online_quant and (
+            weight_format.routed.dtype != torch.float8_e4m3fn
+            or weight_format.routed.scale_group_k != 32
+        ):
+            raise NotImplementedError(
+                "MegaMoE online quantization can only produce the MXFP8 format; "
+                f"got {weight_format.name}."
             )
         device = torch.get_default_device()
         if device.type != current_platform.device_type:  # meta under ipc_cache
@@ -310,6 +319,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.weight_format = weight_format
         self.activation = activation
         self.fast_math = fast_math
+        self.online_quant = online_quant
         self._kernel_kwargs = activation.kernel_kwargs()
         self.eplb_state = EplbLayerState()
         # L2 input scale of every logical expert; the NVFP4 kernel takes the max.
@@ -495,11 +505,42 @@ class DeepGemmMegaMoEExperts(nn.Module):
         for local_expert_id in local_expert_ids:
             if is_global_scale:
                 param.data[local_expert_id].copy_(loaded_weight.reshape(()))
+            elif self.online_quant and not is_scale:
+                self._load_online_weight(
+                    param, local_expert_id, loaded_weight, shard_id
+                )
             else:
                 self._load_weight(
                     param.data[local_expert_id], loaded_weight, shard_id, is_scale
                 )
         return True if return_success else None
+
+    def _load_online_weight(
+        self,
+        param: nn.Parameter,
+        local_expert_id: int,
+        loaded_weight: torch.Tensor,
+        shard_id: str,
+    ) -> None:
+        """Quantize a full-precision checkpoint shard to MXFP8 and store it.
+
+        The checkpoint has no ``weight_scale`` tensors, so the quantized values
+        and their canonical per-32 UE8M0 scales are written from this one call.
+        """
+        from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+            mxfp8_e4m3_quantize,
+        )
+
+        source = loaded_weight.to(
+            device=param.device, dtype=torch.bfloat16, non_blocking=True
+        )
+        if not source.is_contiguous():
+            source = source.contiguous()
+        quantized, scales = mxfp8_e4m3_quantize(source, is_sf_swizzled_layout=False)
+        prefix = "w2_" if shard_id == "w2" else "w13_"
+        scale_param = getattr(self, prefix + "weight_scale")
+        self._load_weight(param.data[local_expert_id], quantized, shard_id, False)
+        self._load_weight(scale_param.data[local_expert_id], scales, shard_id, True)
 
     def _record_global_scale(
         self, weight_name: str, scale: torch.Tensor, shard_id: str, expert_id: int

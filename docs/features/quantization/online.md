@@ -53,6 +53,26 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
 
+## MXFP8 Experts with DeepGEMM MegaMoE
+
+On Blackwell (SM100), DeepSeek-V4 can run its routed experts in MXFP8 while the
+checkpoint stays BF16. With `--moe-backend deep_gemm_mega_moe`, dynamic MXFP8
+experts are quantized during loading: each BF16 expert shard is converted to
+`fp8_e4m3` with canonical per-1x32 UE8M0 block scales, so the checkpoint needs
+neither pre-quantized expert weights nor expert scales.
+
+```bash
+vllm serve <deepseek-v4-checkpoint> \
+  --quantization mxfp8 \
+  --moe-backend deep_gemm_mega_moe \
+  --enable-expert-parallel
+```
+
+This path is chosen automatically when `quantization_config.moe.weight`
+resolves to dynamic MXFP8; every other expert precision keeps the offline
+path and loads the weights the checkpoint provides. Grouped expert loading
+requires expert parallelism.
+
 ## Advanced Configuration
 
 For fine-grained control, use a `quantization_config` dictionary.
