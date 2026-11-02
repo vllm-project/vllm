@@ -185,6 +185,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync_state=decode_batch_sync,
+            parallel_config=self.vllm_config.parallel_config,
         )
 
         self._prepare_decode_inputs(

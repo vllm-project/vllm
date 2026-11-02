@@ -42,7 +42,6 @@ from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
-from vllm.v1.worker.gpu.spec_decode.cudagraph_utils import SpeculatorCudaGraphManager
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
