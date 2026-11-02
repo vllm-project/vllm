@@ -327,9 +327,7 @@ EOF
 }
 
 # Build the EP-mode (WIDE_EP_MODE=1) serve command into the global CMD array.
-# DP + expert parallel. Masters expose the API server. Every MoRIIO node,
-# including the headless child, gets KV transfer so ranks 8-15 open handshake
-# ports on their own IP. NIXL stays on the master only.
+# MoRIIO --kv-transfer-config on master and child. NIXL on the master only.
 build_ep_cmd() {
     #   prefill -> mori_high_throughput  (paired with --enforce-eager in models.yaml)
     #   decode  -> mori_low_latency      (paired with CUDA graphs in models.yaml)
@@ -356,9 +354,6 @@ build_ep_cmd() {
         CMD+=(--gpu-memory-utilization 0.75)
     fi
 
-    # MoRIIO: both pods. remote_hosts is the other role's node IPs, master
-    # first. remote_dp_size_local is the per-node DP size, so rank 12 is dialed
-    # on the second node at port offset 4. NIXL keeps its own config below.
     local kv_cfg="" read_mode_kv peer_hosts
     if [[ "${KV_CONNECTOR:-}" != Nixl* ]]; then
         read_mode_kv="$(moriio_read_mode_kv)"
