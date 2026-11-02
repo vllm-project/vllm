@@ -189,8 +189,11 @@ physical at submission.
 
 The completion notif sent from P to D after a WRITE is the existing
 `<request_id>:<tp_size>` format used in pull mode (here ``request_id``
-is D's own request id, taken from the registration), so the D-side
-accounting code is unchanged.
+is D's own request id, taken from the registration). D marks the
+request received after one notif from each P rank whose KV cache specs
+slice bytes for it, counted at the handshake. KV that several P ranks
+replicate (e.g. MLA when P TP > D TP) is written by one of them; the
+others write nothing and finish the request at once.
 
 ## Pipeline parallelism and hybrid KV caches
 
