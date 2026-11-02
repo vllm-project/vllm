@@ -1236,6 +1236,7 @@ class Worker(WorkerBase):
                     self.device,
                     init_free_memory=self.init_free_memory,
                     requested_memory=int(self.requested_memory),
+                    init_process_memory=self.init_snapshot.process_memory,
                 )
             )
 

@@ -557,6 +557,7 @@ def measure_kv_cache_bytes(
     committed_bytes: int,
     requested_memory: int,
     transient_peak_bytes: int = 0,
+    process_memory_increase: int | None = None,
     margin_floor_bytes: int = KV_CACHE_MARGIN_FLOOR_BYTES,
     margin_fraction: float = KV_CACHE_MARGIN_FRACTION,
 ) -> int:
@@ -569,8 +570,18 @@ def measure_kv_cache_bytes(
     measured transient_peak_bytes are then kept free in full. The margin
     guards physical memory, so it never reduces an explicit budget that already
     leaves that much free.
+
+    process_memory_increase, this process's own device memory growth since
+    startup, replaces the drop in free memory as what the engine uses when
+    given, so other processes allocating or releasing memory meanwhile do not
+    move the budget. The headroom stays device-wide.
     """
-    non_kv_used = init_free_memory - free_memory - committed_bytes
+    used = (
+        init_free_memory - free_memory
+        if process_memory_increase is None
+        else process_memory_increase
+    )
+    non_kv_used = used - committed_bytes
     headroom = free_memory + committed_bytes
     margin = max(margin_floor_bytes, int(transient_peak_bytes * margin_fraction))
     available = min(requested_memory - non_kv_used, headroom - margin)
@@ -585,6 +596,7 @@ def measure_kv_cache_blocks(
     *,
     init_free_memory: int,
     requested_memory: int,
+    init_process_memory: int | None = None,
 ) -> int:
     """Size an extensible KV cache from the memory free after warmup.
 
@@ -592,12 +604,19 @@ def measure_kv_cache_blocks(
     warmup's allocated (not reserved) transient peak. Torch's cache is emptied
     first: its blocks may not fit the large workspaces the first real steps
     allocate. Then caps torch's caching allocator to leave
-    KV_CACHE_NON_TORCH_RESERVE_BYTES free for allocations outside it.
+    KV_CACHE_NON_TORCH_RESERVE_BYTES free for allocations outside it. With
+    init_process_memory, the budget counts this process's own memory growth
+    where the platform reports it; see `measure_kv_cache_bytes`.
     """
     torch.accelerator.synchronize()
     gc.collect()
     torch.accelerator.empty_cache()
     free_memory = current_platform.free_device_memory(device)
+    process_memory_increase = None
+    if init_process_memory is not None:
+        process_memory = current_platform.get_process_memory_usage(device.index or 0)
+        if isinstance(process_memory, int):
+            process_memory_increase = process_memory - init_process_memory
     transient_peak = kv_cache.reserved_headroom_bytes
     available = measure_kv_cache_bytes(
         init_free_memory=init_free_memory,
@@ -605,6 +624,7 @@ def measure_kv_cache_blocks(
         committed_bytes=kv_cache.physical_bytes,
         requested_memory=requested_memory,
         transient_peak_bytes=transient_peak,
+        process_memory_increase=process_memory_increase,
     )
     kv_cache_bytes = reserve_mm_ipc_gpu_memory(
         available,
