@@ -110,9 +110,10 @@ def _qwen3_parse_params(
         closed.params = dict(params)
         closed.outside = "".join(outside)
 
-    open_param = None
-    if partial:
-        open_param = _PARTIAL_PARAM_RE.search("".join(outside) + raw_args[pos:])
+    # A model can end the call without closing the last parameter; the trailing
+    # value must survive the final conversion (partial False) too, not just the
+    # streamed partial ones, so capture it regardless of partial.
+    open_param = _PARTIAL_PARAM_RE.search("".join(outside) + raw_args[pos:])
     return params, open_param
 
 
