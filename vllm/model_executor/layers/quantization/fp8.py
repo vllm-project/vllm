@@ -711,6 +711,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if is_weights_pre_processed():
