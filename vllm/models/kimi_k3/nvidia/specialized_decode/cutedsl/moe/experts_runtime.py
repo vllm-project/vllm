@@ -61,7 +61,7 @@ def stealing(batch):
 
 @functools.cache
 def compile_experts(tp, experts, batch, grid, device, publish=False, *knobs):
-    """Only code and geometry are cached; no owner tensors or descriptors. ``knobs``:
+    """Only code and geometry are cached; no owner tensors or descriptors. `knobs`:
     (B<=8 stream, pregrouped, steal)."""
     defaults = (streamed(batch), False, False)
     stream, grouped, steal = knobs + defaults[len(knobs) :]
@@ -84,7 +84,7 @@ def compile_experts(tp, experts, batch, grid, device, publish=False, *knobs):
 
 @functools.cache
 def compile_group(tp, experts, batch, grid, device, early=False):
-    """The pregrouped experts' unit-table kernel: (ids, workspace, batch); ``early``:
+    """The pregrouped experts' unit-table kernel: (ids, workspace, batch); `early`:
     it releases the experts at entry."""
     capacity = 1 << (batch - 1).bit_length()
     kernel = ExpertsGroupKernel(tp, capacity, experts, grid, early=early)
@@ -104,7 +104,7 @@ def compile_plan(batch, device):
 
 def scratch(tp, device):
     """Model-owned expert buffers: the workspace and the grouped plan (MXFP8 x, written
-    by the routing kernel or ``compile_plan``)."""
+    by the routing kernel or `compile_plan`)."""
     size, u8 = (ExpertsGeometry(tp).workspace_bytes, torch.uint8)
     workspace = torch.full((size,), 255, device=device, dtype=u8)
     plan = torch.empty(PLAN_BYTES, device=device, dtype=u8)
@@ -151,10 +151,10 @@ class PersistentExperts:
     def prepare(
         self, batch, buffers, out, publish=(), planned=False, twoshot=False, early=False
     ):
-        """``publish``: (multicast, parity, rank) of the WaveMoeTail latent slot to
-        publish (``twoshot``: the ``common.twoshot`` push box); ``planned``: B>8 calls
+        """`publish`: (multicast, parity, rank) of the WaveMoeTail latent slot to
+        publish (`twoshot`: the `common.twoshot` push box); `planned`: B>8 calls
         find the plan written (by the routing kernel), else run writes it from x first;
-        ``early``: the caller runs ``group`` (pregrouped batches) before ``run``."""
+        `early`: the caller runs `group` (pregrouped batches) before `run`."""
         mode = "twoshot" if twoshot else bool(publish)
         grouped = pregrouped(self.tp, batch)
         args: tuple = (batch, self.grid_for(batch), self.device.index, mode)
@@ -178,8 +178,8 @@ class PersistentExperts:
         self.prepared[batch] = (out, tensor(out), ws, code, publish, plan, maps, group)
 
     def group(self, ids):
-        """Pregrouped batches prepared ``early``: the unit-table kernel (run it on the
-        stream after routing; ``run`` then skips it)."""
+        """Pregrouped batches prepared `early`: the unit-table kernel (run it on the
+        stream after routing; `run` then skips it)."""
         group = self.prepared[ids.shape[0]][7]
         if group is not None and group[2]:
             self.launch_group(ids, group)

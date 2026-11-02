@@ -2,19 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pluggable sleep-mode backends (RFC #34303).
 
-vLLM's sleep/wake-up today is hard-wired to ``CuMemAllocator``: the GPU worker
-calls ``allocator.sleep(...)`` / ``allocator.wake_up(...)`` directly. RFC #34303
+vLLM's sleep/wake-up today is hard-wired to `CuMemAllocator`: the GPU worker
+calls `allocator.sleep(...)` / `allocator.wake_up(...)` directly. RFC #34303
 proposes additional mechanisms for freeing and restoring GPU state - CUDA
 process checkpoint, CRIU, durable snapshot/restore - that share the *dispatch*
-(``/sleep`` endpoint -> engine -> executor -> worker) but differ in *mechanism*
+(`/sleep` endpoint -> engine -> executor -> worker) but differ in *mechanism*
 and in which resources they preserve (NCCL communicators, compiled kernels,
 CUDA graphs, survival across process restart).
 
 This module introduces a thin backend abstraction so those mechanisms can be
-selected by name without changing the public API. The default ``cumem`` backend
-wraps today's ``CuMemAllocator`` path 1:1, so existing users see no behavior
-change. The factory mirrors ``KVConnectorFactory`` and lets third-party
-backends register through a ``vllm.general_plugins`` entry point at import time.
+selected by name without changing the public API. The default `cumem` backend
+wraps today's `CuMemAllocator` path 1:1, so existing users see no behavior
+change. The factory mirrors `KVConnectorFactory` and lets third-party
+backends register through a `vllm.general_plugins` entry point at import time.
 """
 
 from __future__ import annotations
@@ -38,10 +38,10 @@ class SleepModeBackend(ABC):
     """Interface for a mechanism that frees and restores GPU state.
 
     A backend owns the *mechanism* of suspend/resume. The dispatch path
-    (``/sleep`` endpoint -> engine -> executor -> worker) is shared across all
+    (`/sleep` endpoint -> engine -> executor -> worker) is shared across all
     backends and lives outside this class.
 
-    Capability flags are ``@classmethod`` so callers (executor, ``/health``,
+    Capability flags are `@classmethod` so callers (executor, `/health`,
     AUTO selection) can introspect a backend without instantiating it, matching
     the capability-flag convention used by attention backends.
     """
@@ -53,7 +53,7 @@ class SleepModeBackend(ABC):
     def suspend(self, level: int = 1) -> None:
         """Free GPU state.
 
-        ``level`` follows existing sleep-mode semantics: level 1 offloads
+        `level` follows existing sleep-mode semantics: level 1 offloads
         weights to host RAM (restorable in-process); level 2 discards weights
         (reloaded from the model source on resume).
         """
@@ -63,13 +63,13 @@ class SleepModeBackend(ABC):
     def resume(self, tags: list[str] | None = None) -> None:
         """Restore previously-suspended GPU state.
 
-        ``tags`` optionally limits which tagged allocations are restored
-        (e.g. ``["weights"]`` or ``["kv_cache"]``).
+        `tags` optionally limits which tagged allocations are restored
+        (e.g. `["weights"]` or `["kv_cache"]`).
         """
         raise NotImplementedError
 
     def state(self) -> SleepModeState:
-        """Current lifecycle state. Lets ``/health`` distinguish a healthy-idle
+        """Current lifecycle state. Lets `/health` distinguish a healthy-idle
         (suspended) engine from a healthy-serving one (see RFC #34303)."""
         return self._state
 
@@ -90,7 +90,7 @@ class SleepModeBackend(ABC):
     @classmethod
     def preserves_communicators(cls) -> bool:
         """If False, collective communicators (e.g. NCCL) are destroyed by
-        ``suspend`` and the executor must re-initialize them on ``resume``."""
+        `suspend` and the executor must re-initialize them on `resume`."""
         return False
 
     @classmethod
@@ -118,8 +118,8 @@ class CuMemBackend(SleepModeBackend):
 
     Wraps the platform sleep-mode allocator exactly as the GPU worker did
     before this abstraction existed, so behavior is identical to vLLM's current
-    sleep/wake-up. ``get_mem_allocator_instance()`` resolves to
-    ``CuMemAllocator`` on CUDA and ``XpuMemAllocator`` on XPU; suspend offloads
+    sleep/wake-up. `get_mem_allocator_instance()` resolves to
+    `CuMemAllocator` on CUDA and `XpuMemAllocator` on XPU; suspend offloads
     per-allocation between GPU and host, with NCCL buffers left untouched (they
     are allocated outside the allocator pool).
     """
@@ -160,9 +160,9 @@ class CuMemBackend(SleepModeBackend):
 class SleepModeBackendFactory:
     """Registry and resolver for sleep-mode backends.
 
-    Mirrors ``KVConnectorFactory``: lazy module/class registration and a
+    Mirrors `KVConnectorFactory`: lazy module/class registration and a
     built-in registry populated at import time. Third-party backends register
-    the same way from a ``vllm.general_plugins`` entry point.
+    the same way from a `vllm.general_plugins` entry point.
     """
 
     _registry: dict[str, Callable[[], type[SleepModeBackend]]] = {}
@@ -192,7 +192,7 @@ class SleepModeBackendFactory:
 
     @classmethod
     def create_backend(cls, model_config: ModelConfig) -> SleepModeBackend:
-        """Instantiate the backend selected by ``model_config``."""
+        """Instantiate the backend selected by `model_config`."""
         name = model_config.sleep_mode_backend
         backend_cls = cls.get_backend_class(name)
         if not backend_cls.is_supported():

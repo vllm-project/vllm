@@ -35,10 +35,10 @@ def compute_token_to_req_indices(
     num_mapped_tokens: int,
     num_tokens: int,
 ) -> torch.Tensor:
-    """Map each of the first ``num_tokens`` tokens to its request index.
+    """Map each of the first `num_tokens` tokens to its request index.
 
-    Reads only the device ``query_start_loc``, so it is safe to record in a
-    CUDA graph. Tokens at or past ``num_mapped_tokens`` are mapped to 0.
+    Reads only the device `query_start_loc`, so it is safe to record in a
+    CUDA graph. Tokens at or past `num_mapped_tokens` are mapped to 0.
     """
     _token_request_mapping_kernel[((num_tokens + 255) // 256,)](
         query_start_loc,

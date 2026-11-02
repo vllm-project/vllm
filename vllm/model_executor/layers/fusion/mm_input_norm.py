@@ -75,14 +75,14 @@ def fused_mm_input_norm_triton(
     """Fused per-channel affine transform for normalisation.
 
     Args:
-        inputs: Input tensor, shape ``(N, C, L)``. A contiguous copy is
+        inputs: Input tensor, shape `(N, C, L)`. A contiguous copy is
             materialized internally if needed.
-        outputs: Output tensor, contiguous and shaped exactly ``(N, C, L)``.
-        weight: Per-channel scale, shape ``(C,)``.
-        bias: Per-channel shift, shape ``(C,)``.
+        outputs: Output tensor, contiguous and shaped exactly `(N, C, L)`.
+        weight: Per-channel scale, shape `(C,)`.
+        bias: Per-channel shift, shape `(C,)`.
 
     Returns:
-        ``outputs``, for chaining.
+        `outputs`, for chaining.
 
     """
     N, C, L = inputs.shape
@@ -132,8 +132,8 @@ class NormParams(NamedTuple):
 
     @property
     def is_identity(self) -> bool:
-        """Whether ``weight = rescale/std`` and ``bias = -mean/std`` are
-        numerically the identity transform (mirrors ``torch.allclose``'s
+        """Whether `weight = rescale/std` and `bias = -mean/std` are
+        numerically the identity transform (mirrors `torch.allclose`'s
         default fp32 tolerances)."""
         return all(
             math.isclose(self.rescale_factor / s, 1.0, rel_tol=1e-5, abs_tol=1e-8)
@@ -182,9 +182,9 @@ def _load_norm_params(model_config: ModelConfig) -> NormParams:
 class IdentityInputNorm(nn.Module):
     """Stand-in used when the processor requires no rescale/normalise.
 
-    Not a no-op: with ``mm_device_do_normalize`` enabled, raw ``uint8``
+    Not a no-op: with `mm_device_do_normalize` enabled, raw `uint8`
     pixels travel to the device unprocessed and must be cast to
-    ``visual_dtype`` here.
+    `visual_dtype` here.
     """
 
     @property
@@ -204,22 +204,22 @@ class FusedMMInputNorm(CustomOp):
 
     Dtype semantics:
 
-    * Input dtype — the dtype of the ``pixel_values`` argument to ``forward_*``.
-      It is ``uint8`` when ``mm_device_do_normalize`` is enabled (raw bytes
-      travel to the device unprocessed) and equals ``visual_dtype``
+    * Input dtype — the dtype of the `pixel_values` argument to `forward_*`.
+      It is `uint8` when `mm_device_do_normalize` is enabled (raw bytes
+      travel to the device unprocessed) and equals `visual_dtype`
       otherwise.
-    * Output dtype — the ``visual_dtype`` argument of ``forward_*``. The
+    * Output dtype — the `visual_dtype` argument of `forward_*`. The
       computation itself is always fp32, independent of the output dtype
       (e.g. compute fp32, emit bf16).
 
     Platform dispatch:
 
-    * ``forward_native`` — pure PyTorch eager path, used as the semantic
+    * `forward_native` — pure PyTorch eager path, used as the semantic
       reference and default fallback on all platforms.
-    * ``forward_cuda`` — Triton kernel path for CUDA devices.
-    * ``forward_xpu`` — custom XPU kernel path.
-    * ``forward_oot`` — out-of-tree platform override entry point; falls back
-      to ``forward_native`` unless a plugin overrides it.
+    * `forward_cuda` — Triton kernel path for CUDA devices.
+    * `forward_xpu` — custom XPU kernel path.
+    * `forward_oot` — out-of-tree platform override entry point; falls back
+      to `forward_native` unless a plugin overrides it.
     """
 
     def __init__(
@@ -339,9 +339,9 @@ class FusedMMInputNorm(CustomOp):
 def build_mm_input_norm(model_config: ModelConfig) -> nn.Module:
     """Build the input normalisation module for a model.
 
-    Returns an ``IdentityInputNorm`` when device-side normalisation is
+    Returns an `IdentityInputNorm` when device-side normalisation is
     disabled or the processor's rescale/normalise is numerically the identity
-    transform; otherwise a ``FusedMMInputNorm`` built from the processor's
+    transform; otherwise a `FusedMMInputNorm` built from the processor's
     parameters.
     """
     mm_config = getattr(model_config, "multimodal_config", None)

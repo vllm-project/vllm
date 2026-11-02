@@ -143,7 +143,7 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
     """Resolve the flashinfer allreduce backend for the current setup.
 
     Returns:
-        A ``(backend, allow_trtllm_fallback)`` tuple. ``backend`` is ``None``
+        A `(backend, allow_trtllm_fallback)` tuple. `backend` is `None`
         when automatic selection has no supported backend for the process
         group.
 
@@ -257,7 +257,7 @@ def get_fi_ar_quant_workspace(
     """Return the allreduce workspace for quant patterns, initializing if needed.
 
     Backend is controlled by VLLM_FLASHINFER_ALLREDUCE_BACKEND env var, matching
-    non-quant fusion. With ``auto`` this prefers mnnvl and falls back to trtllm
+    non-quant fusion. With `auto` this prefers mnnvl and falls back to trtllm
     only on single-node topologies where mnnvl multicast is unavailable.
     """
     global _fi_ar_quant_workspace, _fi_ar_quant_workspace_failed

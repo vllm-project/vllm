@@ -262,8 +262,8 @@ def gathered_prefill_shards(
     request's slice of this rank's KV shard.
 
     PCP gives a rank two adjacent chunk rows of a split prefill; they share
-    one context, so the workspace holds it once. ``row_shard_rows`` is
-    ``CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound``: the
+    one context, so the workspace holds it once. `row_shard_rows` is
+    `CommonAttentionMetadata.dcp_local_seq_lens_cpu_upper_bound`: the
     largest DCP shard of the whole request on every row, identical on every
     PCP rank, so the all-gather is shaped the same everywhere.
 

@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Low-batch MXFP8 attention projections.
 
-At up to ``LOW_BATCH_MAX_ROWS`` rows the executor runs ``fused_wqa_wkv``,
-``wq_b`` and ``wo_b`` on FlashInfer ``mm_mxfp8`` with its
-``cutedsl_low_latency`` backend whenever their input is already MXFP8; the
-stock layers keep ``cute-dsl``. Both backends read the same weights, weight
+At up to `LOW_BATCH_MAX_ROWS` rows the executor runs `fused_wqa_wkv`,
+`wq_b` and `wo_b` on FlashInfer `mm_mxfp8` with its
+`cutedsl_low_latency` backend whenever their input is already MXFP8; the
+stock layers keep `cute-dsl`. Both backends read the same weights, weight
 scales and F8_128x4 activation scales.
 
 The backend's tactics differ by under 1 us when tuned in isolation, but split-K
@@ -49,7 +49,7 @@ _PINNED_MIN_ROWS = LOW_BATCH_MAX_ROWS // 2 + 1
 
 
 def mxfp8_mm(layer: nn.Module, qa: QuantizedActivation) -> torch.Tensor:
-    """``layer``'s GEMM on ``cutedsl_low_latency``."""
+    """`layer`'s GEMM on `cutedsl_low_latency`."""
     out = vllm_flashinfer.mm_mxfp8(
         qa.data,
         layer.weight,
@@ -75,14 +75,14 @@ def _backend_supported() -> bool:
 
 
 def _mxfp8_kernel(layer: nn.Module) -> FlashInferCutedslMxfp8LinearKernel | None:
-    """``layer``'s kernel when it is exactly the ``cute-dsl`` MXFP8 one."""
+    """`layer`'s kernel when it is exactly the `cute-dsl` MXFP8 one."""
     method = getattr(layer, "scheme", getattr(layer, "quant_method", None))
     kernel = getattr(method, "kernel", None)
     return kernel if type(kernel) is FlashInferCutedslMxfp8LinearKernel else None
 
 
 def mxfp8_eligible(layer: nn.Module) -> bool:
-    """Whether ``layer`` is a ``cute-dsl`` MXFP8 linear whose weights the
+    """Whether `layer` is a `cute-dsl` MXFP8 linear whose weights the
     low-latency backend also takes."""
     kernel = _mxfp8_kernel(layer)
     return (
@@ -96,8 +96,8 @@ def mxfp8_eligible(layer: nn.Module) -> bool:
 def low_latency_mm(
     layer: nn.Module, x: torch.Tensor | QuantizedActivation
 ) -> torch.Tensor | None:
-    """``layer``'s GEMM of ``x`` on ``cutedsl_low_latency`` for an eligible
-    layer, or None when ``x`` is not an MXFP8 input of the backend's layout."""
+    """`layer`'s GEMM of `x` on `cutedsl_low_latency` for an eligible
+    layer, or None when `x` is not an MXFP8 input of the backend's layout."""
     kernel = _mxfp8_kernel(layer)
     assert kernel is not None
     qa = as_quantized_activation(x, kernel.input_quant_key())
@@ -117,7 +117,7 @@ def shape_representatives(linears: Iterable[nn.Module]) -> list[nn.Module]:
 
 
 def run_zeros(linear: nn.Module, rows: int) -> torch.Tensor:
-    """Call ``linear`` on an input laid out like the fused quantize producers'."""
+    """Call `linear` on an input laid out like the fused quantize producers'."""
     k = linear.weight.shape[0]  # column-major [K, N]
     device = linear.weight.device
     shape = torch.Size((rows, k))
@@ -135,7 +135,7 @@ def run_zeros(linear: nn.Module, rows: int) -> torch.Tensor:
 def pinned_tactics() -> Iterator[None]:
     """Offer FlashInfer's tuner only the pinned tactic for pinned problems. The
     tuner's tactic list is a FlashInfer internal: when it has no
-    ``autotune_tactics`` or does not list a pinned tactic, every tactic is
+    `autotune_tactics` or does not list a pinned tactic, every tactic is
     tuned."""
     if not current_platform.is_device_capability(103):
         yield

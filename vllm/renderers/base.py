@@ -81,8 +81,8 @@ _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 class _SwappableExecutor(Executor):
     """Executor whose inner pool can be replaced without changing identity.
 
-    ``make_async`` captures the executor object at wrap time. Replacing
-    ``self._executor`` with a new ``ThreadPoolExecutor`` would leave those
+    `make_async` captures the executor object at wrap time. Replacing
+    `self._executor` with a new `ThreadPoolExecutor` would leave those
     wrappers (tokenize, decode, pooling, derender) bound to a shutdown pool.
     """
 
@@ -606,7 +606,7 @@ class BaseRenderer(ABC, Generic[_T]):
         """Whether this renderer's tokenizer can emit char-level offsets.
 
         Defaults to False; only renderers backed by an HF fast tokenizer
-        (see ``HfRenderer``) can produce ``offset_mapping``.
+        (see `HfRenderer`) can produce `offset_mapping`.
         """
         return False
 
@@ -631,9 +631,9 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> "TokensPrompt":
         """Build a TokensPrompt from already-extracted token ids.
 
-        ``offset_mapping`` is the per-token ``(start, end)`` sequence from
+        `offset_mapping` is the per-token `(start, end)` sequence from
         a BatchEncoding; pass it only when offsets were requested, and it
-        is attached as ``prompt_token_offsets``.
+        is attached as `prompt_token_offsets`.
         """
         if offset_mapping is not None:
             return TokensPrompt(

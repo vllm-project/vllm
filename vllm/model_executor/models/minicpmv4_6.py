@@ -201,7 +201,7 @@ def _scoped_mm_kwarg(
 ) -> Any:
     """Read a processor kwarg for one modality.
 
-    ``merged`` is what ``_merge_and_resolve_mm_processor_kwargs`` returns: it
+    `merged` is what `_merge_and_resolve_mm_processor_kwargs` returns: it
     routes a flat key into every scope whose processor declares it, and a value
     scoped to the other modality stays there, so it is not visible here.
     """
@@ -731,7 +731,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         Args:
             image_size: Size of the source image.
             max_slice_nums: Maximum number of slices, or None for the default.
-            downsample_mode: ``"16x"`` (default, full merge) or ``"4x"``
+            downsample_mode: `"16x"` (default, full merge) or `"4x"`
                 (skip vit_merger, 4x more visual tokens).
 
         Returns:

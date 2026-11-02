@@ -90,8 +90,8 @@ class EmbeddingBatchChatRequest(
 ):
     """OpenAI embeddings request with batched top-level chat conversations.
 
-    Mirrors ``BatchChatCompletionRequest`` by keeping batched conversations in
-    ``messages`` instead of introducing a separate batch-specific field.
+    Mirrors `BatchChatCompletionRequest` by keeping batched conversations in
+    `messages` instead of introducing a separate batch-specific field.
     """
 
     messages: Sequence[
@@ -109,7 +109,7 @@ class EmbeddingBatchChatRequest(
 class EmbeddingChatInputRequest(
     EmbeddingChatRequest,
 ):
-    """OpenAI embeddings request with one chat conversation in ``input``."""
+    """OpenAI embeddings request with one chat conversation in `input`."""
 
     input: list[ChatCompletionMessageParam]
 
@@ -132,7 +132,7 @@ class EmbeddingChatInputRequest(
 
 
 class EmbeddingBatchChatInputRequest(EmbeddingBatchChatRequest):
-    """OpenAI embeddings request with batched chat conversations in ``input``."""
+    """OpenAI embeddings request with batched chat conversations in `input`."""
 
     input: Sequence[
         Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]

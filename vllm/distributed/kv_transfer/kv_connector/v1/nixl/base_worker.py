@@ -131,11 +131,11 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
 class _RegionPairs:
     """How a peer's KV regions transfer with the local ones.
 
-    Pairs come from the layers both sides hold (``region_members``): pair ``k``
-    moves the peer's region ``remote[k]`` and local region ``local[k]`` at
-    cache group ``group[k]``'s blocks. A region shared by several cache groups
+    Pairs come from the layers both sides hold (`region_members`): pair `k`
+    moves the peer's region `remote[k]` and local region `local[k]` at
+    cache group `group[k]`'s blocks. A region shared by several cache groups
     pairs once per group it holds a layer of, so which layers share a region
-    may differ between the two sides. ``remote`` indexes ``remote_regions``,
+    may differ between the two sides. `remote` indexes `remote_regions`,
     the peer's regions that pair (in its order), which are the ones its
     descriptor list holds.
     """
@@ -178,11 +178,11 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs.
 
-        ``pairs`` is ``(regions, keys)``: region ``regions[k]`` is read at
-        ``block_ids[keys[k]]``, a cache group's blocks (a region's, for
+        `pairs` is `(regions, keys)`: region `regions[k]` is read at
+        `block_ids[keys[k]]`, a cache group's blocks (a region's, for
         region-mapped transfers).
 
-        ``ssm_regions`` lists this side's SSM regions in the order its SSM
+        `ssm_regions` lists this side's SSM regions in the order its SSM
         descriptors are built; it defaults to the local ones.
         """
         num_ssm_regions = 0
@@ -364,7 +364,7 @@ class NixlBaseConnectorWorker:
         """Replicate flag per FA strided desc, given each one's flat block index.
 
         _build_fa_local emits regions in order, with
-        ``region_num_blocks[i] * block_size_ratio`` blocks per region. A strided
+        `region_num_blocks[i] * block_size_ratio` blocks per region. A strided
         desc never spans regions, so the region owning its first block decides.
         """
         assert self.transfer_topo is not None
@@ -382,7 +382,7 @@ class NixlBaseConnectorWorker:
         return replicated[np.searchsorted(region_ends, desc_starts, side="right")]
 
     def _is_region_replicated(self, region_idx: int) -> bool:
-        """Whether region ``region_idx`` is transferred REPLICATE vs SPLIT.
+        """Whether region `region_idx` is transferred REPLICATE vs SPLIT.
 
         REPLICATE (MLA): identical on every rank, whole block read from one
         rank at offset 0, key-only. SPLIT (full-attn): head-sharded across TP.
@@ -444,7 +444,7 @@ class NixlBaseConnectorWorker:
         A block-outermost peer may register one region whose block is a full
         row holding every layer's page, while this worker registers one region
         per layer (a PP push stage, or a HiSparse decoder on LB*). Using the
-        advertised ``packed_member_layouts``, each row is rewritten in place as
+        advertised `packed_member_layouts`, each row is rewritten in place as
         one virtual region per layer, so that layers pair one to one:
 
             remote row b:  [ L0 page | L1 page | ... ]   base=B, stride=S
@@ -642,7 +642,7 @@ class NixlBaseConnectorWorker:
     def _select_remote_regions(
         nixl_agent_meta: NixlAgentMetadata, remote_regions: Sequence[int]
     ) -> None:
-        """Keep the remote regions ``remote_regions``, in that order."""
+        """Keep the remote regions `remote_regions`, in that order."""
         for attr in (
             "kv_caches_base_addr",
             "block_lens",
@@ -1465,8 +1465,8 @@ class NixlBaseConnectorWorker:
     ) -> Future[tuple[dict[tuple[int, int], str], float]] | None:
         """Ensure a handshake is in-flight (or already done) for *engine_id*.
 
-        Returns the ``Future`` if a handshake is pending (or was just
-        started), or ``None`` if the handshake already completed
+        Returns the `Future` if a handshake is pending (or was just
+        started), or `None` if the handshake already completed
         successfully.  Callers can attach per-request callbacks to the
         returned future.
         Failures to handshake are logged and the request is marked as failed.
@@ -2120,7 +2120,7 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Build remote desc regions (conv sub-projections + ssm) per layer.
         For hetero-TP, each D rank reads only its sub-projection slice from
-        the P rank. The remote SSM and PLE regions come from ``pairs``.
+        the P rank. The remote SSM and PLE regions come from `pairs`.
         Returns Nx5 uint64 strided descs."""
         assert nixl_agent_meta.kv_caches_base_addr, (
             "Remote KV cache base addresses must not be empty."
@@ -2267,9 +2267,9 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Build remote FA descriptors as Nx5 uint64 strided descs.
 
-        ``local_region_ids`` gives a local region each remote region pairs with
-        (``_RegionPairs.partner``); remote region ``i`` pairs with local region
-        ``i`` without it.
+        `local_region_ids` gives a local region each remote region pairs with
+        (`_RegionPairs.partner`); remote region `i` pairs with local region
+        `i` without it.
         """
         assert self.transfer_topo is not None
         assert nixl_agent_meta.kv_caches_base_addr, (
@@ -2738,8 +2738,8 @@ class NixlBaseConnectorWorker:
         """Validate the remote agent handshake metadata ensuring the
         invariants hold true.
 
-        ``local_region_ids`` gives a local region each remote region pairs
-        with; remote region ``i`` pairs with local region ``i`` without it.
+        `local_region_ids` gives a local region each remote region pairs
+        with; remote region `i` pairs with local region `i` without it.
         """
         remote_engine_id = nixl_agent_meta.engine_id
 
@@ -3075,17 +3075,17 @@ class NixlBaseConnectorWorker:
     ):
         """Post process device kv cache after receiving from remote.
 
-        3 types of conversion supported (``convert``):
+        3 types of conversion supported (`convert`):
             * kv_cache_postprocess_layout => convert from HND to NHD
             * kv_cache_postprocess_blksize => convert from small block size
               to large block size
             * kv_cache_postprocess_blksize_and_layout => convert from small
               block size to large block size and convert from HND to NHD
 
-        The transfer only covers ``covered_sub_blocks`` remote-sized
+        The transfer only covers `covered_sub_blocks` remote-sized
         sub-blocks of each request's local attention blocks; the rest was
         clipped, either by remote-block pairing (block-size ratio) or by the
-        hetero-ppl front trim in ``_apply_prefix_caching``. Those blocks were
+        hetero-ppl front trim in `_apply_prefix_caching`. Those blocks were
         excluded from the scheduler's alloc-time KV zeroing (which would race
         the RDMA write), so everything past the covered range is zeroed here.
         Stale bytes would otherwise surface as garbage or NaNs once decode
@@ -3381,9 +3381,9 @@ class NixlBaseConnectorWorker:
         raise NotImplementedError
 
     def _reap_expired_send_leases(self, done_sending: set[str]) -> None:
-        """Reclaim expired send-side KV leases into ``done_sending``.
+        """Reclaim expired send-side KV leases into `done_sending`.
 
-        ``_reqs_to_send`` is not ordered by expiry: heartbeats update the
+        `_reqs_to_send` is not ordered by expiry: heartbeats update the
         deadline in place, and mixed TTLs share the map, so a live head
         entry can sit in front of already-expired ones. Scan every entry
         rather than stopping at the first still-live request.
@@ -3607,7 +3607,7 @@ class NixlBaseConnectorWorker:
     ) -> tuple[BlockIds, BlockIds]:
         """Map attention-group block ids to remote-block granularity.
 
-        Each local attention block is split into ``block_size_ratio``
+        Each local attention block is split into `block_size_ratio`
         sub-blocks paired 1:1 with remote blocks. Sub-blocks beyond the
         remote list — the untransferred tail of the last local block — are
         clipped here and zeroed in the receive post-process. Mamba state
@@ -3678,9 +3678,9 @@ class NixlBaseConnectorWorker:
     ) -> tuple[list[int], list[int]]:
         """Match local and remote block IDs by global DCP position.
 
-        ``local_ids`` excludes blocks already satisfied by the local prefix
-        cache, while ``remote_ids`` contains the full transferable remote list.
-        ``num_remote_blocks``, when provided, is the global block count before
+        `local_ids` excludes blocks already satisfied by the local prefix
+        cache, while `remote_ids` contains the full transferable remote list.
+        `num_remote_blocks`, when provided, is the global block count before
         DCP partitioning and excludes allocation padding.
 
         Example:
@@ -3800,12 +3800,12 @@ class NixlBaseConnectorWorker:
         with each side's physical-per-logical ratio. Both pull and push call this after
         that expansion so the trim happens at kernel granularity.
 
-        The prefix-cache hit is always on the decode (D) side, so ``decode``
+        The prefix-cache hit is always on the decode (D) side, so `decode`
         holds only its uncomputed blocks while prefill (P) holds the full
         sequence. This is mode-independent: pull passes its own (D) blocks as
-        ``decode``, push passes the remote D registration as ``decode``.
+        `decode`, push passes the remote D registration as `decode`.
 
-        For non-Mamba models: end-trim ``prefill`` to match ``decode`` count, so
+        For non-Mamba models: end-trim `prefill` to match `decode` count, so
         already-cached prefix blocks are skipped in the transfer.
 
         For Mamba hybrid: SSM groups pair state slots by position and FA

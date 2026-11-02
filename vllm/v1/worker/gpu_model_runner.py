@@ -6621,14 +6621,14 @@ class GPUModelRunner(
         class AttentionGroupKey(NamedTuple):
             """Deduplication key for attention groups within a KV cache group.
 
-            Splits on per-rank ``num_heads_q`` in addition to backend + spec
+            Splits on per-rank `num_heads_q` in addition to backend + spec
             so layers with different Q-head counts (e.g. a spec-decode draft
             with fewer attention heads than its target) get separate metadata
-            builders. The builders' scratch (e.g. ``softmax_segm_*`` in
-            ``triton_attn``, ``num_qo_heads`` in FlashInfer) is sized by
-            ``num_heads_q`` and assumes uniformity within the group; see
-            ``get_num_attention_heads_from_layers`` in
-            ``vllm/v1/attention/backends/utils.py``.
+            builders. The builders' scratch (e.g. `softmax_segm_*` in
+            `triton_attn`, `num_qo_heads` in FlashInfer) is sized by
+            `num_heads_q` and assumes uniformity within the group; see
+            `get_num_attention_heads_from_layers` in
+            `vllm/v1/attention/backends/utils.py`.
             """
 
             attn_backend: type[AttentionBackend]

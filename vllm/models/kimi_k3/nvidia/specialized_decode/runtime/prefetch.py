@@ -5,17 +5,17 @@
 Small-batch decode is bound by HBM bandwidth, and each kernel that starts on weights
 not yet in L2 stalls on DRAM. Some kernels leave bandwidth idle, such as the attention
 core and the all-reduces. At fixed points of each layer, this module launches a small
-kernel (``cutedsl/common/prefetch.py``) on a side stream. It pulls the byte ranges of
+kernel (`cutedsl/common/prefetch.py`) on a side stream. It pulls the byte ranges of
 the weights the next kernels read into L2, so that they start warm.
 
-Prefetch points (``fork(point, layer, batch)``), each with its batches per TP:
+Prefetch points (`fork(point, layer, batch)`), each with its batches per TP:
 
-- ``oproj_down``: after the o-projection (B3-8), the MoE front's packed
+- `oproj_down`: after the o-projection (B3-8), the MoE front's packed
   router + latent-down rows.
-- ``attention_moe``: at TP8 only, after the KDA input projection (B5-8) or the MLA
+- `attention_moe`: at TP8 only, after the KDA input projection (B5-8) or the MLA
   core (B8), the same front rows plus the shared expert's weights.
-- ``next_attention``: once the routed experts are launched, the next layer's
-  attention weights, capped in MiB per batch (``NEXT_ATTENTION``). Not above B8,
+- `next_attention`: once the routed experts are launched, the next layer's
+  attention weights, capped in MiB per batch (`NEXT_ATTENTION`). Not above B8,
   where the HBM-bound experts lose more bandwidth than the attention gains.
 
 The front and shared-expert ranges are on the critical path. They launch with the
@@ -23,9 +23,9 @@ highest stream priority and the maximum shared-memory carveout, which needs a dr
 launch because CuTe drops both attributes.
 
 Each fork records an event on the main stream that the side stream waits on, so a
-prefetch starts only after the work it overlaps. ``join()`` at the end of the step
+prefetch starts only after the work it overlaps. `join()` at the end of the step
 makes the main stream wait for the side stream, so a captured graph always rejoins
-it. This lives in ``runtime/`` rather than ``cutedsl/`` because it is host-side
+it. This lives in `runtime/` rather than `cutedsl/` because it is host-side
 orchestration across layers: a stream, events, and per-(point, layer, batch) tables
 built from the model's layers.
 """

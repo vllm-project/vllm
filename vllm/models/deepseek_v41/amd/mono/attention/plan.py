@@ -66,7 +66,7 @@ class Dims:
     @property
     def head_tiles(self) -> int:
         """16-head MFMA tiles a rank: TP8's 8 heads take one, half of it
-        padding (``heads_pad``)."""
+        padding (`heads_pad`)."""
         return cdiv(self.heads, HEAD_TILE)
 
     @property
@@ -154,7 +154,7 @@ def front_scratch(s: int, d: Dims) -> dict:
 
 
 def back_scratch(s: int, d: Dims, start: int = 0) -> dict:
-    """K2's scratch regions, laid out past ``start``: published data (plain)
+    """K2's scratch regions, laid out past `start`: published data (plain)
     and flag pairs."""
     ck = (
         64 if GFX942 or (d.head_tiles == 2 and s * cdiv(KEYS, 64) <= 256) else 128

@@ -2,15 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Manual fusion of tensor-parallel all-reduce with the following GemmaRMSNorm.
 
-Under tensor parallelism a ``RowParallelLinear`` (e.g. attention ``o_proj``)
+Under tensor parallelism a `RowParallelLinear` (e.g. attention `o_proj`)
 produces a per-rank partial sum that is all-reduced, and the result is then fed
-into a ``GemmaRMSNorm`` that adds the residual and normalizes. flashinfer ships a
+into a `GemmaRMSNorm` that adds the residual and normalizes. flashinfer ships a
 kernel that fuses all-reduce + residual-add + RMSNorm into a single launch; this
 helper drives it directly (no torch.compile pass) for models that run eager.
 
 Scope: attention output only, no quantization. When the flashinfer fast path is
 not applicable (TP==1, flashinfer/NVSwitch unavailable, unsupported dtype, or an
-oversize batch) it falls back to ``all_reduce`` + ``GemmaRMSNorm``, which is
+oversize batch) it falls back to `all_reduce` + `GemmaRMSNorm`, which is
 numerically identical to the unfused model path.
 """
 
@@ -55,7 +55,7 @@ _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
 
 def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | None:
     """Workspace token budget for flashinfer fused all-reduce, or None if the
-    current world size / device is unsupported. Mirrors ``FlashInferAllReduce``."""
+    current world size / device is unsupported. Mirrors `FlashInferAllReduce`."""
     from vllm.config.compilation import PassConfig
 
     max_size_mb = PassConfig.default_fi_allreduce_fusion_max_size_mb().get(tp_size)
@@ -141,12 +141,12 @@ def fused_allreduce_gemma_rms_norm(
     residual: torch.Tensor,
     norm: GemmaRMSNorm,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """All-reduce ``hidden_states`` + add ``residual`` + GemmaRMSNorm, fused.
+    """All-reduce `hidden_states` + add `residual` + GemmaRMSNorm, fused.
 
-    ``hidden_states`` is the per-rank *partial* (un-reduced) output of a
-    row-parallel linear; ``norm`` is the GemmaRMSNorm applied right after.
-    Returns ``(normed_output, new_residual)``, equivalent to
-    ``norm(all_reduce(hidden_states), residual)``.
+    `hidden_states` is the per-rank *partial* (un-reduced) output of a
+    row-parallel linear; `norm` is the GemmaRMSNorm applied right after.
+    Returns `(normed_output, new_residual)`, equivalent to
+    `norm(all_reduce(hidden_states), residual)`.
     """
     tp_size = get_tensor_model_parallel_world_size()
     if tp_size == 1:
