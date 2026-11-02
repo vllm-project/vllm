@@ -340,8 +340,31 @@ def _mega_moe_expert_weight(
     return name, weight
 
 
+def _consumes_mxfp8_128x4(linear: nn.Module) -> bool:
+    """Whether ``linear`` takes a pre-quantized MXFP8 activation whose UE8M0
+    scales are in FlashInfer's 128x4 swizzled layout (what the MXFP8 norm
+    kernels write)."""
+    if get_input_quant_key(linear) != kMxfp8Dynamic:
+        return False
+    from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+        FlashInferCutedslMxfp8LinearKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+    )
+
+    kernel = getattr(getattr(linear, "quant_method", None), "kernel", None)
+    return type(kernel) in (
+        FlashInferCutedslMxfp8LinearKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+    )
+
+
 class MiniMAXGemmaRMSNorm(nn.Module):
-    """Gemma-style RMS normalization backed by FlashInfer kernels.
+    """Gemma-style RMS normalization.
+
+    2-D inputs run the Triton kernel in ``ops/norm_mxfp8.py``; with
+    ``mxfp8=True`` the normed activation is emitted as MXFP8 (a
+    ``QuantizedActivation``) for a consumer linear instead of BF16. Other
+    shapes (the dspark drafter's per-head norms) keep the FlashInfer kernels.
 
     When ``residual`` is given, the fused add + norm runs in place and the
     updated ``(x, residual)`` pair is returned.
@@ -360,7 +383,33 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         self,
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
+        mxfp8: bool = False,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if x.dim() == 2:
+            from vllm.models.minimax_m3.nvidia.ops.norm_mxfp8 import (
+                gemma_rmsnorm_mxfp8,
+            )
+
+            out, scale = gemma_rmsnorm_mxfp8(
+                x,
+                self.weight,
+                self.variance_epsilon,
+                residual=residual,
+                mxfp8=mxfp8,
+            )
+            if mxfp8:
+                out = QuantizedActivation(
+                    data=out,
+                    scale=scale,
+                    orig_dtype=x.dtype,
+                    orig_shape=x.shape,
+                    quant_key=kMxfp8Dynamic,
+                )
+            if residual is None:
+                return out
+            return out, residual
+
+        assert not mxfp8
         from flashinfer.norm import gemma_fused_add_rmsnorm, gemma_rmsnorm
 
         if residual is None:
@@ -1345,11 +1394,16 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 hidden_states, residual, self.input_layernorm
             )
         else:
+            # MXFP8 output when qkv_proj consumes it (checked per call: LoRA
+            # wrappers installed after construction change the key).
+            mxfp8 = _consumes_mxfp8_128x4(self.self_attn.qkv_proj)
             if residual is None:
                 residual = hidden_states
-                hidden_states = self.input_layernorm(hidden_states)
+                hidden_states = self.input_layernorm(hidden_states, mxfp8=mxfp8)
             else:
-                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+                hidden_states, residual = self.input_layernorm(
+                    hidden_states, residual, mxfp8=mxfp8
+                )
         return hidden_states, residual
 
     def forward_after_input_norm(
