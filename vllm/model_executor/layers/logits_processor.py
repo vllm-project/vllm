@@ -160,7 +160,8 @@ class LogitsProcessor(PluggableLayer):
         model_config = get_current_vllm_config().model_config
         self.head_dtype = model_config.head_dtype if model_config is not None else None
         # Set to torch.float32 by a caller that would cast the gathered logits
-        # to FP32 anyway (the sampler); the fused gather then writes FP32
+        # to FP32 anyway (the model runner, for a model that opts in with
+        # SupportsFP32LogitsGather); the fused gather then writes FP32
         # where nothing in this layer runs on the logits after the gather.
         # None keeps the head's dtype.
         self.gather_out_dtype: torch.dtype | None = None

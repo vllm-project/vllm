@@ -2,17 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The fused vocab-parallel logits gather equals a last-dim all-gather, the
 vocab slice and the dtype cast, bitwise, and LogitsProcessor uses it only
-where it reproduces the unfused path."""
+where it reproduces the unfused path. The model runner asks it for FP32 only
+for a model that opts in with SupportsFP32LogitsGather."""
 
+from types import SimpleNamespace
+
+import numpy as np
 import pytest
 import torch
 import torch.multiprocessing as mp
+import torch.nn as nn
 
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
+)
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.models.interfaces import (
+    SupportsFP32LogitsGather,
+    supports_fp32_logits_gather,
 )
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
@@ -71,17 +81,45 @@ def _worker(local_rank: int, world_size: int, port: int):
             )
 
         _check_logits_processor(world_size, device)
+        _check_model_opt_in(world_size, device)
 
 
-def _check_logits_processor(world_size: int, device: torch.device):
-    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+class UnfusedLogitsProcessor(LogitsProcessor):
+    # Overriding _gather_logits (as a custom all-gather does) keeps the
+    # unfused path: gather, slice, then scale / soft cap in the head dtype.
+    def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        return super()._gather_logits(logits)
+
+
+class PassthroughModel(nn.Module):
+    """compute_logits returns the logits processor's output unchanged."""
+
+    def __init__(self, lm_head: nn.Module, processor: LogitsProcessor):
+        super().__init__()
+        self.lm_head = lm_head
+        self.logits_processor = processor
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states)
+
+
+class OptedInModel(PassthroughModel, SupportsFP32LogitsGather):
+    pass
+
+
+class SoftCapModel(PassthroughModel):
+    """Post-processes the processor's output, as HunYuan-V4 does."""
+
+    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return torch.tanh(super().compute_logits(hidden_states) / 30.0) * 30.0
+
+
+class OptedInSoftCapModel(SoftCapModel, SupportsFP32LogitsGather):
+    pass
+
+
+def _make_lm_head(world_size: int, device: torch.device):
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
-
-    class UnfusedLogitsProcessor(LogitsProcessor):
-        # Overriding _gather_logits (as a custom all-gather does) keeps the
-        # unfused path: gather, slice, then scale / soft cap in the head dtype.
-        def _gather_logits(self, logits: torch.Tensor) -> torch.Tensor:
-            return super()._gather_logits(logits)
 
     vocab_size, hidden_size = 1000 * world_size - 37, 64
     with torch.device(device):
@@ -90,6 +128,11 @@ def _check_logits_processor(world_size: int, device: torch.device):
     hidden_states = torch.randn(
         33, hidden_size, device=device, generator=torch.Generator(device).manual_seed(0)
     ).bfloat16()
+    return vocab_size, lm_head, hidden_states
+
+
+def _check_logits_processor(world_size: int, device: torch.device):
+    vocab_size, lm_head, hidden_states = _make_lm_head(world_size, device)
     for scale, soft_cap in ((1.0, None), (0.5, None), (1.0, 30.0)):
         for gather_out_dtype in (None, torch.float32):
             processors = [
@@ -115,3 +158,71 @@ def test_vocab_parallel_logits_gather(world_size):
         mp.spawn(_worker, args=(world_size, get_open_port()), nprocs=world_size)
     finally:
         cleanup_dist_env_and_memory()
+
+
+def _check_model_opt_in(world_size: int, device: torch.device):
+    """The runner's target logits on a step that would take FP32: FP32 only for
+    a model that opts in, and bitwise equal to main (head-dtype gather, then
+    the sampler's FP32 copy) in either case."""
+    from vllm.v1.worker.gpu.model_runner import (
+        GPUModelRunner,
+        fp32_gather_logits_processors,
+    )
+
+    vocab_size, lm_head, hidden_states = _make_lm_head(world_size, device)
+    # A step whose logits the sampler would copy to FP32 and process in place.
+    sampler = SimpleNamespace(can_process_logits_in_place=lambda _: True)
+    input_batch = SimpleNamespace(idx_mapping_np=np.zeros(1, dtype=np.int32))
+    for model_cls in (PassthroughModel, SoftCapModel):
+        # main: no FP32 request reaches the gather.
+        main = model_cls(lm_head, UnfusedLogitsProcessor(vocab_size)).compute_logits(
+            hidden_states
+        )
+        assert main.dtype == torch.bfloat16
+        opted_in_cls = {
+            PassthroughModel: OptedInModel,
+            SoftCapModel: OptedInSoftCapModel,
+        }[model_cls]
+        for cls in (model_cls, opted_in_cls):
+            model = cls(lm_head, LogitsProcessor(vocab_size))
+            processors = fp32_gather_logits_processors(model)
+            opted_in = cls is opted_in_cls
+            assert processors == ([model.logits_processor] if opted_in else [])
+            model_state = SimpleNamespace(compute_sample_logits=model.compute_logits)
+            runner = SimpleNamespace(
+                sampler=sampler,
+                fp32_logits_processors=processors,
+                vocab_size=vocab_size,
+                model_state=model_state,
+            )
+            logits = GPUModelRunner._compute_logits(
+                runner,  # type: ignore[arg-type]
+                hidden_states,
+                input_batch,  # type: ignore[arg-type]
+            )
+            assert model.logits_processor.gather_out_dtype is None
+            assert logits.dtype == (torch.float32 if opted_in else torch.bfloat16)
+            if not opted_in:
+                # Not opted in: the same tensor as main, and so the same copy.
+                assert torch.equal(logits, main)
+            elif model_cls is PassthroughModel:
+                # Opted in: exactly the sampler's FP32 copy of main's logits.
+                assert torch.equal(logits, main.float())
+            else:
+                # Why post-processing models must not opt in: the soft cap
+                # then runs on FP32 logits and the result differs from main.
+                assert not torch.equal(logits, main.float())
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
+def test_fp32_logits_gather_opt_in_flags():
+    from vllm.models.minimax_m3 import (
+        MiniMaxM3SparseForCausalLM,
+        MiniMaxM3SparseForConditionalGeneration,
+    )
+
+    assert supports_fp32_logits_gather(MiniMaxM3SparseForCausalLM)
+    assert supports_fp32_logits_gather(MiniMaxM3SparseForConditionalGeneration)
+    assert supports_fp32_logits_gather(OptedInModel)
+    assert not supports_fp32_logits_gather(PassthroughModel)
+    assert not supports_fp32_logits_gather(SoftCapModel)

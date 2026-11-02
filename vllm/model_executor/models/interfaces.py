@@ -1194,6 +1194,37 @@ def has_noops(
 
 
 @runtime_checkable
+class SupportsFP32LogitsGather(Protocol):
+    """The interface for models whose `compute_logits` returns the output of
+    their `LogitsProcessor` unchanged.
+
+    On a step whose logits the sampler would cast to FP32 anyway, the TP
+    gather of such a model may write FP32 directly (exact, and the sampler
+    skips its copy). A model that post-processes the processor's output
+    (e.g. a soft cap or multiplier in `compute_logits`) must not opt in: those
+    ops would then run on FP32 rather than head-dtype logits.
+    """
+
+    supports_fp32_logits_gather: ClassVar[Literal[True]] = True
+
+
+@overload
+def supports_fp32_logits_gather(
+    model: type[object],
+) -> TypeIs[type[SupportsFP32LogitsGather]]: ...
+
+
+@overload
+def supports_fp32_logits_gather(model: object) -> TypeIs[SupportsFP32LogitsGather]: ...
+
+
+def supports_fp32_logits_gather(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsFP32LogitsGather]] | TypeIs[SupportsFP32LogitsGather]:
+    return getattr(model, "supports_fp32_logits_gather", False)
+
+
+@runtime_checkable
 class SupportsMambaPrefixCaching(Protocol):
     """The interface for attention-free Mamba models that support prefix
     caching. Hybrid models get the same methods from `IsHybrid`.
