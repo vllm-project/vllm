@@ -36,6 +36,7 @@ from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import compile_model_with_stock_torch
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
+from vllm.config.model import PROCESSED_LOGPROBS_MODES
 from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed.aux_output_connector.worker import (
     AuxOutputWorkerConnector,
@@ -1690,15 +1691,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # A diffusion prefill has no logit rows even when a bitmask row
         # arrived for it.
+        apply_grammar = None
         if grammar_output is not None and logits.shape[0] > 0:
-            # Apply grammar bitmask to the logits in-place.
             assert self.structured_outputs_worker is not None
-            self.structured_outputs_worker.apply_grammar_bitmask(
-                logits,
+            grammar_args = (
                 input_batch,
                 grammar_output.structured_output_request_ids,
                 grammar_output.grammar_bitmask,
             )
+            if (
+                self.sampler is not None
+                and self.sampler.logprobs_mode not in PROCESSED_LOGPROBS_MODES
+                and self.sampler.get_logprobs_dims(input_batch.idx_mapping_np)
+                is not None
+            ):
+                apply_grammar = self.structured_outputs_worker.prepare_grammar_bitmask(
+                    *grammar_args
+                )
+            else:
+                self.structured_outputs_worker.apply_grammar_bitmask(
+                    logits, *grammar_args
+                )
 
         sampler_output: SamplerOutput | None
         if input_batch.num_reqs == 0:
@@ -1707,7 +1720,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output = None
         elif input_batch.num_draft_tokens == 0 or self.rejection_sampler is None:
             assert self.sampler is not None
-            sampler_output = self.sampler(logits, input_batch)
+            sampler_output = self.sampler(
+                logits, input_batch, apply_grammar=apply_grammar
+            )
         else:
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
@@ -1717,6 +1732,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                apply_grammar=apply_grammar,
             )
 
         if shard_metadata is not None:

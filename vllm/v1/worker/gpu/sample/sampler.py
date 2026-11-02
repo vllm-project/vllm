@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import torch
@@ -135,6 +135,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         input_batch: InputBatch,
+        apply_grammar: Callable[[torch.Tensor, int], None] | None = None,
     ) -> SamplerOutput:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
         idx_mapping = input_batch.idx_mapping
@@ -161,6 +162,7 @@ class Sampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
             return_logprobs=logprobs_dims is not None,
+            apply_grammar=apply_grammar,
         )
 
         if self.trace_replay_state is not None:
@@ -234,12 +236,19 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
         skip_top_k_top_p: bool = False,
+        apply_grammar: Callable[[torch.Tensor, int], None] | None = None,
+        logits_start: int = 0,
     ) -> torch.Tensor:
-        if not np.any(self.needs_logits_processing[idx_mapping_np]):
+        needs_processing = np.any(self.needs_logits_processing[idx_mapping_np])
+        if not needs_processing and apply_grammar is None:
             return logits
 
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
+        if apply_grammar is not None:
+            apply_grammar(logits, logits_start)
+        if not needs_processing:
+            return logits
 
         ctx = LogitsContext(
             expanded_idx_mapping=expanded_idx_mapping,
@@ -286,6 +295,7 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         seq_lens_upper_bound_np: np.ndarray,
         return_logprobs: bool = False,
+        apply_grammar: Callable[[torch.Tensor, int], None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
             logits,
@@ -297,6 +307,7 @@ class Sampler:
             expanded_local_pos,
             seq_lens_upper_bound_np,
             skip_top_k_top_p=True,
+            apply_grammar=apply_grammar,
         )
         top_k, top_p, has_topp_only_rows = self.sampling_states.get_top_k_top_p(
             expanded_idx_mapping, idx_mapping_np, logits.shape[-1]

@@ -113,6 +113,17 @@ def apply_grammar_bitmask(
         logits (torch.Tensor): The output logits of model forward.
 
     """
+    prepare_grammar_bitmask(scheduler_output, grammar_output, input_batch, logits)(
+        logits, None
+    )
+
+
+def prepare_grammar_bitmask(
+    scheduler_output: SchedulerOutput,
+    grammar_output: GrammarOutput,
+    input_batch: InputBatch,
+    logits: torch.Tensor,
+) -> Callable[[torch.Tensor, torch.Tensor | None], None]:
     # Serialization of np.ndarray is much more efficient than a tensor,
     # so we receive it in that format.
     grammar_bitmask = grammar_output.grammar_bitmask
@@ -177,21 +188,23 @@ def apply_grammar_bitmask(
                 out_indices, dtype=torch.int32, device=logits.device
             )
 
-        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
-        return
-
-    # CPU case, use list for indices.
-    indices = None if skip_out_indices else out_indices
-    # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
-    # See: https://github.com/vllm-project/vllm/issues/31901
-    if logits.dtype != torch.float32:
-        # Convert to float32, apply bitmask, then convert back
-        logits_fp32 = logits.to(torch.float32)
-        xgr.apply_token_bitmask_inplace(logits_fp32, grammar_bitmask, indices=indices)
-        # Copy the modified values back to the original tensor
-        logits.copy_(logits_fp32.to(logits.dtype))
     else:
-        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=indices)
+        index_tensor = None if skip_out_indices else out_indices
+
+    def apply(logits: torch.Tensor, logits_indices: torch.Tensor | None) -> None:
+        bitmask = grammar_bitmask
+        indices = index_tensor
+        if logits_indices is not None:
+            bitmask = bitmask[logits_indices]
+            indices = None
+        if logits.is_cpu and logits.dtype != torch.float32:
+            logits_fp32 = logits.float()
+            xgr.apply_token_bitmask_inplace(logits_fp32, bitmask, indices=indices)
+            logits.copy_(logits_fp32)
+        else:
+            xgr.apply_token_bitmask_inplace(logits, bitmask, indices=indices)
+
+    return apply
 
 
 class OutlinesVocabulary:

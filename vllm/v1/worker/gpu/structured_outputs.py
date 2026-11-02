@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
+from functools import partial
+
 import numpy as np
 import torch
 
@@ -28,6 +31,7 @@ class StructuredOutputsWorker:
         )
         self.device = device
         self.copy_stream = torch.cuda.Stream()
+        self.copy_stream.wait_stream(torch.cuda.current_stream())
         self.mask_stride = mask_stride
 
     def apply_grammar_bitmask(
@@ -37,9 +41,20 @@ class StructuredOutputsWorker:
         grammar_req_ids: list[str],
         grammar_bitmask: np.ndarray,
     ) -> None:
-        if not grammar_req_ids:
-            return
+        apply_grammar = self.prepare_grammar_bitmask(
+            input_batch, grammar_req_ids, grammar_bitmask
+        )
+        if apply_grammar is not None:
+            apply_grammar(logits, 0)
 
+    def prepare_grammar_bitmask(
+        self,
+        input_batch: InputBatch,
+        grammar_req_ids: list[str],
+        grammar_bitmask: np.ndarray,
+    ) -> Callable[[torch.Tensor, int], None] | None:
+        if not grammar_req_ids:
+            return None
         # Asynchronously copy the bitmask to GPU.
         with torch.cuda.stream(self.copy_stream):
             bitmask = async_tensor_h2d(
@@ -69,8 +84,24 @@ class StructuredOutputsWorker:
         current_stream = torch.cuda.current_stream()
         current_stream.wait_stream(self.copy_stream)
 
+        assert bitmask.shape[0] == len(mapping)
+        return partial(
+            self._apply_grammar_bitmask,
+            logits_indices=logits_indices,
+            cu_num_logits=input_batch.cu_num_logits,
+            bitmask=bitmask,
+        )
+
+    def _apply_grammar_bitmask(
+        self,
+        logits: torch.Tensor,
+        logits_start: int,
+        *,
+        logits_indices: torch.Tensor,
+        cu_num_logits: torch.Tensor,
+        bitmask: torch.Tensor,
+    ) -> None:
         num_masks = bitmask.shape[0]
-        assert num_masks == len(mapping)
         vocab_size = logits.shape[-1]
         BLOCK_SIZE = GRAMMAR_BITMASK_BLOCK_SIZE
         grid = (num_masks, triton.cdiv(vocab_size, BLOCK_SIZE))
@@ -78,17 +109,19 @@ class StructuredOutputsWorker:
             logits,
             logits.stride(0),
             logits_indices,
-            input_batch.cu_num_logits,
+            cu_num_logits,
             bitmask,
             bitmask.stride(0),
             vocab_size,
+            logits_start,
+            logits.shape[0],
             MASK_STRIDE=self.mask_stride,
             BLOCK_SIZE=BLOCK_SIZE,
         )
 
         # Ensure the copy stream waits for the device tensors to finish being used
         # before it re-uses or deallocates them
-        self.copy_stream.wait_stream(current_stream)
+        self.copy_stream.wait_stream(torch.cuda.current_stream())
 
 
 # Adapted from
@@ -102,6 +135,8 @@ def _apply_grammar_bitmask_kernel(
     bitmask_ptr,
     bitmask_stride,
     vocab_size,
+    logits_start,
+    num_logits,
     MASK_STRIDE: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -111,8 +146,10 @@ def _apply_grammar_bitmask_kernel(
     position_idx = mapping_idx % MASK_STRIDE
     logits_idx = tl.load(cu_num_logits_ptr + req_idx)
     num_req_logits = tl.load(cu_num_logits_ptr + req_idx + 1) - logits_idx
-    logits_idx += position_idx
-    position_is_active = position_idx < num_req_logits
+    logits_idx += position_idx - logits_start
+    position_is_active = (
+        (position_idx < num_req_logits) & (logits_idx >= 0) & (logits_idx < num_logits)
+    )
 
     # Load the bitmask.
     block_id = tl.program_id(1)

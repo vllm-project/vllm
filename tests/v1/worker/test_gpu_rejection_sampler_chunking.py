@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import replace
 from types import MethodType, SimpleNamespace
 from typing import get_args
 
@@ -8,14 +9,20 @@ import numpy as np
 import pytest
 import torch
 
+from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.config.model import PROCESSED_LOGPROBS_MODES, LogprobsMode
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
+from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
+from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
 )
+from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 
 
 def _make_input_batch(
@@ -40,7 +47,9 @@ def _make_input_batch(
                 [np.arange(count, dtype=np.int32) for count in num_logits_per_req]
             )
         ).to(device),
-        seq_lens_cpu_upper_bound=torch.full((num_reqs,), 64, dtype=torch.int32),
+        seq_lens_cpu_upper_bound=torch.full(
+            (num_reqs,), 64, dtype=torch.int32, device="cpu"
+        ),
     )
 
 
@@ -75,6 +84,75 @@ def test_iter_request_chunks_preserves_request_boundaries():
     not (current_platform.is_cuda() or current_platform.is_xpu()),
     reason="Requires CUDA or XPU",
 )
+@pytest.mark.parametrize("temperature", [0.0, 0.7])
+def test_chunked_grammar_preserves_raw_scores(temperature):
+    device = torch.device(current_platform.device_type)
+    vocab_size = 32
+    counts = np.array([3, 1, 2], dtype=np.int32)
+    cu = np.array([0, 3, 4, 6], dtype=np.int32)
+    batch = InputBatch.make_dummy(3, 6, InputBuffers(3, 6, device))
+    batch = replace(
+        batch,
+        cu_num_logits_np=cu,
+        cu_num_logits=torch.from_numpy(cu).to(device),
+        expanded_idx_mapping=torch.from_numpy(
+            np.repeat(batch.idx_mapping_np, counts)
+        ).to(device),
+        expanded_local_pos=torch.tensor([0, 1, 2, 0, 0, 1], device=device),
+    )
+    req_states = RequestState(3, 16, 6, 2, vocab_size, device)
+    sampler = Sampler(VllmConfig(), 3, vocab_size, device, req_states)
+    for i in range(3):
+        sampler.add_request(
+            i, SamplingParams(temperature=temperature, logprobs=2, seed=7)
+        )
+    sampler.apply_staged_writes()
+    rejection_sampler = RejectionSampler(
+        sampler,
+        SpeculativeConfig(method="ngram", num_speculative_tokens=2),
+        device,
+    )
+    worker = StructuredOutputsWorker(9, vocab_size, device, mask_stride=3)
+    # Reverse grammar order, leave req 1 unconstrained, and pad req 2's last row.
+    allowed = [4, 5, 6, 1, 2, 3]
+    bitmask = np.array([[1 << token] for token in allowed], dtype=np.int32)
+    apply_grammar = worker.prepare_grammar_bitmask(
+        batch, [batch.req_ids[2], batch.req_ids[0]], bitmask
+    )
+    logits = (
+        torch.arange(6 * vocab_size, device=device, dtype=torch.float32).view(
+            6, vocab_size
+        )
+        / 100
+    )
+    original = logits.clone()
+    draft = torch.tensor([0, 1, 2, 0, 0, 4], dtype=torch.int32, device=device)
+    args = (logits, batch, None, draft, torch.arange(6, device=device))
+    chunked = rejection_sampler._verify_in_chunks(
+        *args, max_chunk_logits=3, max_num_logprobs=2, apply_grammar=apply_grammar
+    )
+    full = rejection_sampler._verify_in_chunks(
+        *args, max_chunk_logits=6, max_num_logprobs=2, apply_grammar=apply_grammar
+    )
+    torch.testing.assert_close(logits, original, rtol=0, atol=0)
+    for result in (chunked, full):
+        sampled, num_sampled, scores, _ = result
+        assert sampled[0, :3].tolist() == [1, 2, 3]
+        assert sampled[2, :2].tolist() == [4, 5]
+        assert num_sampled.tolist() == [3, 1, 2]
+        assert scores is not None
+        expected = torch.log_softmax(original, dim=-1)
+        torch.testing.assert_close(
+            scores.logprobs[:3, 0], expected[:3, [1, 2, 3]].diag()
+        )
+    assert chunked[2] is not None and full[2] is not None
+    torch.testing.assert_close(chunked[2].logprobs, full[2].logprobs)
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() or current_platform.is_xpu()),
+    reason="Requires CUDA or XPU",
+)
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
 def test_chunked_scores_match_full_batch(
     monkeypatch: pytest.MonkeyPatch, logprobs_mode: str
@@ -98,6 +176,7 @@ def test_chunked_scores_match_full_batch(
         cu_num_logits,
         idx_mapping,
         *_mappings,
+        **_grammar,
     ):
         num_sampled = torch.diff(cu_num_logits).to(torch.int32)
         sampled = (
@@ -191,7 +270,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
             ),
         ),
         use_fp64_gumbel=False,
-        apply_sampling_params=lambda logits, *_: logits,
+        apply_sampling_params=lambda logits, *_, **_grammar: logits,
         trace_replay_state=None,
     )
     rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps)
