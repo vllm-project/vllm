@@ -12,7 +12,6 @@
 """
 
 import ast
-import inspect
 import sys
 
 import regex as re
@@ -57,8 +56,10 @@ def prose_mask(lines: list[str]) -> list[bool]:
 
 
 def prose(doc: str) -> str:
-    lines = inspect.cleandoc(doc).splitlines()
-    return "\n".join(line for line, p in zip(lines, prose_mask(lines)) if p)
+    """The docstring with code blocks and code spans blanked, lines preserved."""
+    lines = doc.splitlines()
+    text = "\n".join(ln if p else "" for ln, p in zip(lines, prose_mask(lines)))
+    return CODE_SPAN.sub(lambda m: "\n" * m.group().count("\n"), text)
 
 
 def docstring_nodes(tree: ast.Module) -> list[ast.Constant]:
@@ -77,13 +78,18 @@ def docstring_nodes(tree: ast.Module) -> list[ast.Constant]:
 def crossref_violations(filepath: str, tree: ast.Module) -> list[str]:
     violations = []
     for node in docstring_nodes(tree):
-        for match in REF_LINK.finditer(CODE_SPAN.sub("", prose(node.value))):
+        text = prose(node.value)
+        for match in REF_LINK.finditer(text):
             label, target = match.groups()
             if target and TARGET.fullmatch(target):
                 continue
             if not target and COLLAPSED_TARGET.fullmatch(label):
                 continue
-            violations.append(f"{filepath}:{node.lineno}: {match.group()}")
+            lineno = node.lineno + text.count("\n", 0, match.start())
+            violations.append(
+                f"{filepath}:{lineno}: `{match.group()}` in a docstring is a "
+                "cross-reference; wrap it in backticks or use a qualified target"
+            )
     return violations
 
 
@@ -96,16 +102,8 @@ def main() -> int:
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
         violations.extend(crossref_violations(filepath, tree))
-
-    if violations:
-        print("❌ Docstring text that mkdocs will read as a cross-reference:")
-        print("\n".join(f"   {v}" for v in violations))
-        print(
-            "   Wrap shapes and indexing in backticks (`[block][2][16]`), or "
-            "use a fully qualified target ([LLM][vllm.LLM], [int][])."
-        )
-        return 1
-    return 0
+    print("\n".join(violations), end="\n" if violations else "")
+    return 1 if violations else 0
 
 
 if __name__ == "__main__":
