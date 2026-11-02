@@ -142,12 +142,16 @@ _AITER_TUNED_SHAPE = (1536, 6144)
 
 
 @contextmanager
-def _patch_rocm_platform():
-    """Patch the platform so kernel selection runs as on a CDNA4 GPU. Both
-    native MXFP8 kernels report as supported; AITER has tuned configs only
-    for _AITER_TUNED_SHAPE."""
+def _patch_rocm_platform(linear_backend: str = "auto"):
+    """Patch the platform so kernel selection runs as on a CDNA4 GPU under
+    ``linear_backend``. Both native MXFP8 kernels report as supported; AITER
+    has tuned configs only for _AITER_TUNED_SHAPE."""
     with (
         patch("vllm.model_executor.kernels.linear.current_platform") as platform,
+        patch(
+            "vllm.model_executor.kernels.linear._get_linear_backend",
+            return_value=linear_backend,
+        ),
         patch.object(AiterMxfp8LinearKernel, "is_supported", return_value=(True, None)),
         patch.object(
             RocmDotScaledMxfp8LinearKernel, "is_supported", return_value=(True, None)
@@ -176,6 +180,16 @@ def test_init_mxfp8_linear_kernel_rocm(weight_shape, expected_kernel_cls):
         kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
 
     assert isinstance(kernel, expected_kernel_cls)
+
+
+@pytest.mark.parametrize("weight_shape", [_AITER_TUNED_SHAPE, (1056, 4128)])
+def test_init_mxfp8_linear_kernel_rocm_forced_aiter(weight_shape):
+    """--linear-backend aiter puts untuned shapes on AITER too, instead of
+    failing engine startup."""
+    with _patch_rocm_platform(linear_backend="aiter"):
+        kernel = init_mxfp8_linear_kernel(weight_shape=weight_shape)
+
+    assert isinstance(kernel, AiterMxfp8LinearKernel)
 
 
 @pytest.mark.parametrize(

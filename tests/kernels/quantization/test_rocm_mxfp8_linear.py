@@ -202,6 +202,39 @@ def test_aiter_mxfp8_linear_3d_input_and_bias():
     torch.testing.assert_close(out.reshape(-1, n), flat + bias)
 
 
+@pytest.mark.usefixtures("aiter_enabled")
+@pytest.mark.parametrize("n,k", [(1056, 4128), (64, 256)])
+@pytest.mark.parametrize("num_tokens", [1, 64, 8192, 8193])
+@torch.inference_mode()
+def test_aiter_mxfp8_linear_forced_untuned_shape(monkeypatch, n, k, num_tokens):
+    """A forced untuned (N, K) matches the reference on AITER's default tile,
+    either side of its M <= 8192 bucket."""
+    from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
+    from vllm.model_executor.kernels.linear.mxfp8 import aiter
+
+    if not is_aiter_found_and_supported():
+        pytest.skip("AITER is not available")
+    assert not rocm_aiter_ops.is_triton_gemm_afp8wfp8_tuned(n, k)
+    monkeypatch.setattr(aiter, "_aiter_backend_forced", lambda: True)
+    config = Mxfp8LinearLayerConfig(weight_shape=(n, k))
+    assert aiter.AiterMxfp8LinearKernel.can_implement(config) == (True, None)
+
+    torch.manual_seed(num_tokens)
+    layer = _make_layer(n, k, "cuda")
+    kernel = aiter.AiterMxfp8LinearKernel(config)
+    kernel.process_weights_after_loading(layer)
+    x = torch.randn(num_tokens, k, device="cuda", dtype=torch.bfloat16) * 0.5
+    out = kernel.apply_weights(layer, x)
+
+    x_q, x_scale = mxfp8_e4m3_quantize(x)
+    expected = (
+        dequant_mxfp8_to_bf16(x_q, x_scale).float()
+        @ dequant_mxfp8_to_bf16(layer.weight, layer.weight_scale).float().T
+    )
+    assert torch.isfinite(out).all()
+    assert _rel_err(out, expected) < 5e-3
+
+
 @torch.inference_mode()
 def test_rocm_mxfp8_linear_handles_extreme_magnitudes():
     """Rows that are all-zero or near the E4M3 range must not produce NaNs.

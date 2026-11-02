@@ -5,6 +5,7 @@ import torch
 
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
@@ -13,6 +14,15 @@ from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
+
+logger = init_logger(__name__)
+
+
+def _aiter_backend_forced() -> bool:
+    """Whether ``--linear-backend`` explicitly requests AITER for MXFP8."""
+    from vllm.model_executor.kernels.linear import _get_linear_backend
+
+    return _get_linear_backend(quantization="mxfp8") == "aiter"
 
 
 class AiterMxfp8LinearKernel(Mxfp8LinearKernel):
@@ -44,8 +54,15 @@ class AiterMxfp8LinearKernel(Mxfp8LinearKernel):
             return False, "batched MXFP8 GEMM is not supported"
         if K % MXFP8_BLOCK_SIZE != 0:
             return False, f"K={K} is not a multiple of {MXFP8_BLOCK_SIZE}"
-        if not rocm_aiter_ops.is_triton_gemm_afp8wfp8_tuned(N, K):
+        if rocm_aiter_ops.is_triton_gemm_afp8wfp8_tuned(N, K):
+            return True, None
+        # Untuned shapes are slower than native, so take them only when forced.
+        if not _aiter_backend_forced():
             return False, f"AITER has no tuned MXFP8 config for N={N}, K={K}"
+        logger.info_once(
+            "--linear-backend=aiter: MXFP8 shapes without a tuned AITER config "
+            "use AITER's default tile, which is slower than the native kernel."
+        )
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
