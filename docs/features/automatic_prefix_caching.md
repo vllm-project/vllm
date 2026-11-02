@@ -28,6 +28,10 @@ reads and writes recurrent state directly in the paged cache and exports
 checkpoints on its 64-token chunk grid. Every Mamba layer in a hybrid model
 must support internal checkpoints for this optimization to take effect.
 
+The checkpoint's offset from the start of the current prefill must be a
+multiple of 64; the total prompt length need not be. If the scheduler cannot
+place a valid internal checkpoint, it uses the split prefill path.
+
 To select Triton/FLA explicitly:
 
 ```bash
