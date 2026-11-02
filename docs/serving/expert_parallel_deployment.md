@@ -185,6 +185,8 @@ While MoE models are typically trained so that each expert receives a similar nu
 
 Enable EPLB with the `--enable-eplb` flag.
 
+Models managed by EPLB reject `reload_weights` and [weight updates](../training/weight_transfer/README.md), so level 2 sleep cannot restore their weights either.
+
 When enabled, vLLM collects load statistics with every forward pass and periodically rebalances expert distribution.
 
 ### EPLB Parameters
