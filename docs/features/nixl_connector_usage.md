@@ -413,6 +413,171 @@ The `kv_load_failure_policy` setting controls how the system handles failures wh
 
 GB-series GPUs support multi-node NVLink. NIXL supports this capability, but KVCache must be registered as VMM during KVCache registration. To enable this feature, you need to set the `--enable-cumem-allocator` flag, and set `UCX_CUDA_IPC_ENABLE_MNNVL: 'y'` env. Otherwise, NIXL can only use RDMA/TCP for cross-node KVCache transfers.
 
+## Troubleshooting
+
+### Incorrect output after successful KV transfers
+
+A completed transfer and the expected byte count do not verify KV contents.
+If disaggregated prefill/decode (P/D) produces incorrect or repetitive output
+without transfer errors, compare the data as well as the transfer status.
+`kv_load_failure_policy` handles reported load failures; it does not itself
+detect incorrect bytes in a transfer reported as successful.
+
+1. **Establish a local baseline.** Compare P/D with requests sent directly to
+   the decode instance, keeping the model revision, tokenizer, prompt, sampling
+   settings, dtype, and attention backend fixed. Also check the prefill
+   instance alone. Avoid prefix-cache reuse when testing a new transfer.
+   Output differences are a symptom, not proof of corruption: near-tied logits
+   can change generated tokens even when the transferred KV is correct.
+2. **Record the actual transport and environment.** Capture both engines'
+   vLLM, NIXL, loaded UCX, CUDA, driver, kernel, and RDMA-stack versions, GPU
+   and CPU architecture, NIC model and firmware, KV layout, block size, TP
+   size, and UCX settings. Enable `UCX_LOG_LEVEL=info` and, for UCX protocols
+   v2, `UCX_PROTO_INFO=y` during diagnosis to inspect protocol selection.
+   A system `ucx_info` installation may differ from the UCX bundled with NIXL.
+3. **Locate the first data mismatch.** In a diagnostic build, compare
+   per-layer, per-block checksums of the transferred bytes on P after its GPU
+   writes complete and on D after the NIXL READ completes, before decode
+   consumes the data. Keep the source blocks live until the comparison is
+   complete. Match logical blocks through the transfer's source/destination
+   mapping, rather than assuming physical block IDs match. Compare equivalent
+   layouts and valid byte ranges; exclude padding and unused tokens. Record
+   the registered base address and region length on both sides, the first bad
+   offset, and whether data is zero, stale, or repeated from another offset.
+   Use byte comparisons to investigate checksum mismatches. This requires
+   instrumentation; successful-transfer metrics are not a checksum facility.
+4. **Change one factor per experiment.** Keep the workload and software fixed
+   while comparing registration, transport, or staging choices separately.
+   Restart both engines when changing startup settings, and record the new
+   registered addresses and lengths for every run. Allocation addresses can
+   change across restarts, so a clean restart alone does not establish that a
+   setting fixed the problem. Use the upstream reproducer when a controlled
+   registration experiment is needed.
+
+See the [UCX FAQ](https://openucx.readthedocs.io/en/master/faq.html#protocol-selection)
+for protocol logging and the
+[closed NIXL investigation](https://github.com/ai-dynamo/nixl/issues/2512)
+for diagnostic instrumentation and a NIXL-only reproducer.
+
+### RDMA-core truncation with >= 4 GiB-aligned GPU registrations (reported on GH200)
+
+In [vLLM #64048](https://github.com/vllm-project/vllm/issues/64048), the reporter
+observed incorrect KV contents despite successful transfers on two nodes
+described as "GH200 480GB", with aarch64 and mlx5 InfiniBand. NIC firmware
+32.38.3056 and 32.43.1014 were both affected. The reported stack used vLLM
+0.31.0, NIXL/nixl-cu13 1.5.0 with bundled UCX, PyTorch 2.13.0+cu130, CUDA
+toolkit 13.2, driver 595.58.03, and `nvidia_peermem` loaded. The model was
+Qwen3-8B with TP=1, block size 32, prefix caching, `kv_buffer_device="cuda"`,
+and `UCX_TLS=rc,cuda_copy,self`.
+
+The following results belong to the reporter, not an independent validation
+by vLLM. In the forced-alignment runs, a request matched when its first five
+generated tokens matched decode-only output.
+
+| Control | Reported evidence | Scope |
+| ------- | ----------------- | ----- |
+| Decode KV base aligned to exactly 2^32 bytes, default dma-buf registration | 0/6 requests matched; layers 0–2 matched, while layers 3–35 were incorrect over 262 blocks. | The first bad layer started beyond 4 GiB in this allocation. |
+| Same forced alignment, `UCX_CUDA_COPY_DMABUF=no` on both engines | 6/6 requests and all 36 layers matched. | A workaround on the reported stack, not a driver fix. |
+| Unforced KV bases aligned to 2^29–2^31 bytes, default dma-buf or `UCX_CUDA_COPY_DMABUF=no` (two starts) | 6/6 requests matched in each start; all 262 blocks matched. | A clean control with smaller base alignment. |
+| CPU staging, or GPU buffers with UCX TCP | Short-prompt P/D output matched decode-only. | Separate diagnostic controls; performance can differ. |
+
+The reporter [identified the root cause](https://github.com/vllm-project/vllm/issues/64048#issuecomment-6506101537)
+in the RDMA core DMA block iterator, below vLLM, NIXL, and UCX. For contiguous
+DMA blocks of 4 GiB or more, 32-bit `block_offset` and `delta` values in
+`__rdma_block_iter_next()` can truncate, producing incorrect DMA addresses
+and a wrapping memory registration. The upstream Linux fix,
+[15fe76e23615](https://github.com/torvalds/linux/commit/15fe76e23615)
+("RDMA/umem: Fix truncation for block sizes >= 4G"), changes these values to
+`dma_addr_t`, is included in Linux v7.1, and is marked for stable backporting.
+
+The reported dma-buf failure requires the GPU registration's base to be
+aligned to exactly 2^k bytes, with k >= 32, in both virtual and DMA addresses,
+and the registration to be longer than 2^k bytes. With a contiguous DMA
+mapping that permits blocks of that size, offsets at or beyond 2^k wrap to
+offset modulo 2^k, even though the transfer reports success with the full
+byte count. Alignment to 2^31 was clean in all reported runs.
+
+The reported KV allocation was layer-major, with a stride of about 1.48 GiB
+per layer. With the base aligned to 2^32, layers 0–2 matched over the checked
+blocks, and layer 3 was the first bad layer, starting beyond the 4 GiB offset.
+The failure was observed on the dma-buf registration path;
+`UCX_CUDA_COPY_DMABUF=no` avoided it through the alternative `nvidia_peermem`
+registration path on the reported hosts.
+
+The [B300/x86 follow-up](https://github.com/ai-dynamo/nixl/issues/2512#issuecomment-6467855165)
+did not reproduce corruption with the same forced virtual-address alignments
+(2^31, 2^32, and 2^33). A base aligned to 2^32 or more is necessary for this
+failure pattern, but virtual-address alignment alone is insufficient: the
+DMA block size also depends on the DMA addresses in the exported scatterlist.
+These reports do not establish all affected hardware or software versions,
+or show that x86 systems are immune.
+
+#### Upgrade the active RDMA stack
+
+The affected GH200 hosts ran Linux 6.8.0-136-generic with DOCA-OFED
+26.01-1.0.0 DKMS modules; their `ib_core` still contained the truncating
+implementation. Those modules replace the kernel-provided RDMA modules, so
+**upgrading the kernel alone may leave the bug in place**.
+
+Use an RDMA stack containing the upstream fix or an equivalent backport:
+a DOCA-OFED release that includes it, or a fixed kernel with its in-tree
+RDMA drivers. Confirm that the `ib_core` and RDMA drivers actually loaded on
+both hosts include the fix; the running kernel version alone is insufficient
+when external DKMS modules are installed. For example, `modinfo -n ib_core`
+locates the module file selected for the running kernel; an `updates/` path
+usually indicates an external DKMS/OFED module. The path alone does not prove
+that the fix is present or that an updated file is already loaded. Check the
+module's package or backported source and reload the fixed modules or reboot
+into the fixed stack. Then repeat the KV content comparisons before removing
+the workaround.
+
+Until the active RDMA stack is fixed, the reported workaround below remains
+an option, subject to its alternative-registration prerequisites.
+
+#### Test the reported workaround
+
+Set this in **both engines' worker environments before starting them**:
+
+```bash
+export UCX_CUDA_COPY_DMABUF=no
+```
+
+Keep the GPU KV buffer and RDMA transport settings unchanged for this test.
+Verify the effective configuration, compare KV contents and output with the
+baseline, and record the registration addresses after restarting.
+
+Disabling dma-buf requires a working alternative GPU-memory registration path
+to retain GPUDirect RDMA, such as a loaded `nvidia_peermem` module and a
+compatible driver/RDMA stack. The reporter observed continued `rc_mlx5`
+zero-copy operation, but this is not a guarantee of availability or unchanged
+performance on another system. Check the selected protocol and measure
+performance in your deployment. See the
+[UCX GPUDirect RDMA prerequisites](https://openucx.readthedocs.io/en/master/faq.html#does-ucx-support-zero-copy-for-gpu-memory-over-rdma).
+
+For separate diagnostic controls, change `kv_buffer_device` to `"cpu"` on both
+engines to test host staging, or keep GPU buffers and select TCP:
+
+```bash
+export UCX_TLS=tcp,cuda_copy,self
+unset UCX_NET_DEVICES
+```
+
+Unsetting `UCX_NET_DEVICES` removes an RDMA-only restriction such as
+`mlx5_0:1`; alternatively, select a reachable Ethernet interface. Test each
+control independently and record the effective settings. Restore the
+original settings between experiments. Neither host staging nor TCP should
+be assumed to preserve RDMA performance.
+
+The reporter also lists registrations of at most 2 GiB, or avoiding bases
+aligned to 2^32 or more, as workarounds. These require lower-level
+allocation or registration changes; they are not vLLM startup settings.
+
+When reporting results, include the baseline and changed configurations,
+registered addresses and lengths, affected layers/offsets, content comparison
+results, and protocol logs. The
+[closed NIXL investigation](https://github.com/ai-dynamo/nixl/issues/2512)
+contains the diagnostic data and a NIXL-only reproducer.
+
 ## Experimental Feature
 
 ### Heterogeneous KV Layout support
