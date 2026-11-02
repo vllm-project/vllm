@@ -1776,7 +1776,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": lambda: bool(
         int(os.getenv("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "0"))
     ),
-    # IP address used for NIXL handshake between remote agents.
+    # IP address used for NIXL handshake between remote agents. After a process
+    # checkpoint restore, an interface address becomes the address of the same
+    # interface in the restored process's network.
     "VLLM_NIXL_SIDE_CHANNEL_HOST": lambda: os.getenv(
         "VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"
     ),

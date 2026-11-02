@@ -511,6 +511,23 @@ def test_empty_kv_cache_groups_preserve_dcp_interleave_size():
     assert config.parallel_config.cp_kv_cache_interleave_size == 1
 
 
+def test_refresh_identity_replaces_the_previous_restore():
+    """A restore replaces the previous restore's suffix, and repeating one is
+    a no-op, as an engine and its in-process worker share a config."""
+    config = VllmConfig(
+        device_config=DeviceConfig(device="cpu"),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_both", engine_id="source"
+        ),
+    )
+
+    config.refresh_identity("a")
+    config.refresh_identity("b")
+    config.refresh_identity("b")
+
+    assert config.kv_transfer_config.engine_id == "source_b"
+
+
 def test_kv_offloading_does_not_skip_dcp_interleave_validation():
     config = SimpleNamespace(
         cache_config=SimpleNamespace(

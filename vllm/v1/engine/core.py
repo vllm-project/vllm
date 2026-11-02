@@ -44,7 +44,7 @@ from vllm.outputs import RequestError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.utils import numa_utils
+from vllm.utils import numa_utils, random_uuid
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
     maybe_attach_gc_debug_callback,
@@ -974,6 +974,10 @@ class EngineCore:
                 self._reset_caches()
             if preparing:
                 self.release_kv_cache_memory()
+                # The scheduler-side connector stops before the workers release
+                # what it uses, and restarts after the workers rebuild it.
+                if (kv_connector := self.scheduler.get_kv_connector()) is not None:
+                    kv_connector.checkpoint_prepare()
                 self.collective_rpc("checkpoint_prepare")
                 self.collective_rpc("synchronize_device")
                 self._checkpoint_state = CheckpointState.PREPARED
@@ -2328,6 +2332,14 @@ class EngineCoreProc(EngineCore):
             return "Preparing for a checkpoint requires --enable-sleep-mode"
         if self.model_executor.is_sleeping:
             return "Preparing for a checkpoint requires an awake engine"
+        kv_connector = self.scheduler.get_kv_connector()
+        if kv_connector is not None and not kv_connector.supports_checkpoint(
+            self.vllm_config
+        ):
+            return (
+                f"{type(kv_connector).__name__} does not support process "
+                "checkpoints with this configuration"
+            )
         self._checkpoint_state = CheckpointState.PREPARING
         try:
             self.pause_generation(mode=mode, clear_cache=False)
@@ -2338,8 +2350,9 @@ class EngineCoreProc(EngineCore):
         return None
 
     def checkpoint_restore(self) -> None:
-        """Bring back what preparing released, wake the KV cache and resume
-        scheduling. Repeating is a no-op."""
+        """Give the instance a new identity, bring back what preparing
+        released, wake the KV cache and resume scheduling. Repeating is a
+        no-op."""
         state = self._checkpoint_state
         if state.is_restored:
             return
@@ -2348,7 +2361,11 @@ class EngineCoreProc(EngineCore):
         logger.info("Restoring from a process checkpoint")
         self._checkpoint_state = CheckpointState.RESTORING
         try:
-            self.collective_rpc("checkpoint_restore")
+            restore_id = random_uuid()
+            self.vllm_config.refresh_identity(restore_id)
+            self.collective_rpc("checkpoint_restore", args=(restore_id,))
+            if (kv_connector := self.scheduler.get_kv_connector()) is not None:
+                kv_connector.checkpoint_restore()
             self.wake_up(["kv_cache"])
         except Exception as e:
             self._fail_checkpoint(e)

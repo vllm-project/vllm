@@ -327,6 +327,18 @@ class NixlBaseConnector(KVConnectorBase_V1, SupportsHMA):
         if self.connector_scheduler is not None:
             self.connector_scheduler.shutdown()
 
+    def checkpoint_prepare(self) -> None:
+        super().checkpoint_prepare()
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.checkpoint_prepare()
+
+    def checkpoint_restore(self) -> None:
+        super().checkpoint_restore()
+        if self.connector_worker is not None:
+            self.connector_worker.checkpoint_restore()
+        if self.connector_scheduler is not None:
+            self.connector_scheduler.checkpoint_restore()
+
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """Get the KVConnector handshake metadata for this connector.
         This metadata is used for out-of-band connector handshake
@@ -372,6 +384,13 @@ class NixlPullConnector(NixlBaseConnector):
     def supports_sleep_mode(cls, kv_transfer_config: KVTransferConfig) -> bool:
         # Sleep mode is only validated with the UCX backend.
         return kv_transfer_config.get_from_extra_config("backends", ["UCX"]) == ["UCX"]
+
+    @classmethod
+    def supports_checkpoint(cls, vllm_config: VllmConfig) -> bool:
+        # Once UCX is initialized, a checkpoint of the process cannot be
+        # restored, even after the agent is destroyed. So the agent must be
+        # created only at restore.
+        return vllm_config.model_config.checkpoint_prepare_on_startup
 
     def unregister_kv_caches(self) -> None:
         assert self.connector_worker is not None

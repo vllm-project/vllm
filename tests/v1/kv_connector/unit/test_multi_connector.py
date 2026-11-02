@@ -1044,6 +1044,20 @@ Options:
 """)
 
 
+@pytest.mark.cpu_test
+def test_checkpoint_restore_refreshes_each_connector_config(mc):
+    """Each connector holds its own copy of the KV transfer config, so a
+    restore must refresh the engine id in every copy."""
+    source = mc._vllm_config.kv_transfer_config.engine_id
+    mc._vllm_config.refresh_identity("restored")
+    mc.checkpoint_restore()
+
+    expected = f"{source}_restored"
+    assert [c.kv_transfer_config.engine_id for c in mc._configs] == [expected] * 2
+    for connector in mc._connectors:
+        connector.checkpoint_restore.assert_called_once_with()
+
+
 def test_multi_connector_worker_metadata(mc):
     class MockConnectorWorkerMetadata(KVConnectorWorkerMetadata):
         def __init__(self, data: set[str]):

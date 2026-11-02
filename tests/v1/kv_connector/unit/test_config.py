@@ -112,6 +112,7 @@ def _build_config(
     kv_connector_extra_config: dict | None = None,
     enable_sleep_mode: bool = False,
     enable_cumem_allocator: bool = False,
+    checkpoint_prepare_on_startup: bool = False,
 ) -> VllmConfig:
     """Build a VllmConfig that exercises _verify_kv_transfer_compat without
     requiring a real model (avoids HF downloads in CI)."""
@@ -131,6 +132,7 @@ def _build_config(
     cfg.model_config = SimpleNamespace(
         enable_sleep_mode=enable_sleep_mode,
         enable_cumem_allocator=(enable_cumem_allocator or enable_sleep_mode),
+        checkpoint_prepare_on_startup=checkpoint_prepare_on_startup,
     )
     cfg._verify_kv_transfer_compat()
     return cfg
@@ -185,6 +187,36 @@ def test_sleep_mode_refuses_unsupported_kv_connector(
             kv_connector_extra_config=extra_config,
             enable_sleep_mode=True,
         )
+
+
+_NIXL = {"kv_connector": "NixlConnector", "kv_role": "kv_both"}
+_OFFLOAD = {"kv_connector": "OffloadingConnector", "kv_role": "kv_both"}
+
+
+@pytest.mark.parametrize(
+    "kv_connector,extra_config,prepare_on_startup,supported",
+    [
+        ("NixlConnector", None, True, True),
+        # UCX state from an agent created before capture breaks the restore.
+        ("NixlConnector", None, False, False),
+        ("MooncakeConnector", None, True, False),
+        ("MultiConnector", {"connectors": [_NIXL]}, True, True),
+        ("MultiConnector", {"connectors": [_NIXL, _OFFLOAD]}, True, False),
+    ],
+)
+def test_kv_connectors_opt_in_to_process_checkpoints(
+    kv_connector, extra_config, prepare_on_startup, supported
+):
+    """The engine prepares only with connectors whose checkpoint restores; a
+    MultiConnector needs every child to."""
+    config = _build_config(
+        kv_connector=kv_connector,
+        kv_connector_extra_config=extra_config,
+        enable_sleep_mode=True,
+        checkpoint_prepare_on_startup=prepare_on_startup,
+    )
+    connector_cls = KVConnectorFactory.get_connector_class(config.kv_transfer_config)
+    assert connector_cls.supports_checkpoint(config) == supported
 
 
 def test_mooncake_store_supports_sleep_with_explicit_rdma(monkeypatch, tmp_path):
