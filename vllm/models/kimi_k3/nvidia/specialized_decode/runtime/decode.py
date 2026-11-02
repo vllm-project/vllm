@@ -18,6 +18,7 @@ from vllm.utils.math_utils import round_up
 from ..cutedsl.attn_res.prepared import PreparedAttnRes
 from ..cutedsl.common.embedding import PreparedEmbedding
 from ..cutedsl.common.twoshot import TwoShot
+from ..cutedsl.kda.prepared import PreparedKda
 from ..cutedsl.moe.dense import PreparedDenseMLP
 from ..cutedsl.moe.experts_runtime import PersistentExperts
 from ..cutedsl.moe.front import SharedFront
@@ -191,8 +192,8 @@ class SpecializedDecode:
                     layer.mlp
                 )
             core = self.attention[layer.layer_idx].core
-            # KDA; MLA reads the backbone's
-            if hasattr(core, "process_weights_after_loading"):
+            # KDA keeps derived copies; MLA reads the backbone's tensors
+            if isinstance(core, PreparedKda):
                 core.process_weights_after_loading(layer.self_attn)
 
     def prepare_kv(self):
