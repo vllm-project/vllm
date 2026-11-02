@@ -204,6 +204,24 @@ impl MaybeTlsListener {
                 .listen(listener),
         )
     }
+
+    /// Accept connections until `stop` completes, then drop the listener so new
+    /// connections are refused while the open ones drain.
+    pub fn incoming_until(
+        self,
+        stop: impl Future<Output = ()>,
+    ) -> impl futures::Stream<Item = Result<MaybeTlsStream>> {
+        futures::stream::unfold(
+            (self, Box::pin(stop)),
+            |(mut listener, mut stop)| async move {
+                tokio::select! {
+                    biased;
+                    () = &mut stop => None,
+                    io = futures::StreamExt::next(&mut listener) => io.map(|io| (io, (listener, stop))),
+                }
+            },
+        )
+    }
 }
 
 /// Listener I/O type that may be either a plain TCP/UDS stream or a TLS stream over it.
