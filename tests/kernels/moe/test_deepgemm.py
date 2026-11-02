@@ -4,6 +4,7 @@
 Compare DeepGEMM path against the Triton fallback inside vLLM's fused_experts.
 """
 
+import ctypes
 import importlib
 import math
 
@@ -45,6 +46,151 @@ from vllm.utils.deep_gemm import (
 )
 
 BLOCK_SIZE = [128, 128]
+
+
+@pytest.mark.parametrize("tokens", [0, 7, 259])
+@pytest.mark.parametrize("mapped", [False, True])
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@torch.inference_mode()
+def test_cuda_stable_expert_permutation_keeps_codes_scales_and_padding(
+    tokens, mapped, index_dtype
+):
+    """Stable token/slot grouping handles chunk tails and unowned routes."""
+    from vllm.model_executor.kernels.batch_invariant import stable_expert_permute
+
+    experts, topk, width, alignment = 4, 6, 256, 16
+    generator = torch.Generator().manual_seed(913)
+    codes = torch.randint(-4, 5, (tokens, width), generator=generator).to(
+        torch.float8_e4m3fn
+    )
+    scale = torch.ldexp(
+        torch.ones(tokens, 2), torch.randint(-2, 3, (tokens, 2), generator=generator)
+    )
+    routes = torch.randint(
+        -1, 10 if mapped else 6, (tokens, topk), generator=generator
+    ).to(index_dtype)
+    if tokens == 7:
+        routes.fill_(0)
+        routes[0, -1] = -1
+        routes[-1, -1] = 8 if mapped else experts
+    expert_map = (
+        torch.tensor([0, -1, 1, -1, 2, -1, 3, -1], dtype=torch.int32)
+        if mapped
+        else None
+    )
+    routed = torch.full(routes.shape, -1, dtype=torch.int64)
+    valid = (routes >= 0) & (routes < (8 if mapped else experts))
+    if expert_map is not None:
+        routed[valid] = expert_map[routes[valid].long()].long()
+    else:
+        routed[valid] = routes[valid].long()
+    bound = tokens * topk + min(tokens * topk, experts) * (alignment - 1)
+    capacity = (bound + alignment - 1) // alignment * alignment
+    expected = torch.zeros(capacity, width, dtype=torch.uint8)
+    expected_scale = torch.ones(capacity, 2)
+    expected_layout = torch.full((capacity,), -1, dtype=torch.int32)
+    expected_inverse = torch.full(routes.shape, -1, dtype=torch.int32)
+    start = 0
+    for expert in range(experts):
+        pairs = (routed == expert).nonzero()
+        for rank, (token, slot) in enumerate(pairs.tolist()):
+            row = start + rank
+            expected[row] = codes[token].view(torch.uint8)
+            expected_scale[row] = scale[token]
+            expected_layout[row] = expert
+            expected_inverse[token, slot] = row
+        start += (len(pairs) + alignment - 1) // alignment * alignment
+    a = torch.empty(tokens, width * 2, device="cuda", dtype=codes.dtype)[:, ::2]
+    a.copy_(codes)
+    sf = scale.cuda().T.contiguous().T
+    gpu_routes = routes.cuda().T.contiguous().T
+    output = torch.empty(capacity, width, device="cuda", dtype=codes.dtype)
+    output.view(torch.uint8).fill_(127)
+    actual, actual_scale, layout, inverse = stable_expert_permute(
+        a,
+        sf,
+        gpu_routes,
+        experts,
+        capacity,
+        alignment,
+        expert_map=expert_map.cuda() if expert_map is not None else None,
+        output=output,
+    )
+    assert actual.data_ptr() == output.data_ptr()
+    assert torch.equal(actual.view(torch.uint8).cpu(), expected)
+    assert torch.equal(actual_scale.cpu(), expected_scale)
+    assert torch.equal(layout.cpu(), expected_layout)
+    assert torch.equal(inverse.cpu(), expected_inverse)
+
+
+@pytest.mark.parametrize("ep", [4, 8])
+@pytest.mark.parametrize("width", [7, 128, 5120])
+@pytest.mark.parametrize("index_dtype", [torch.int32, torch.int64])
+@pytest.mark.parametrize("arm", ["fma-midpoint", "slot-order"])
+@torch.inference_mode()
+def test_cuda_ordered_expert_slots_preserve_fma_and_ownership(
+    ep, width, index_dtype, arm
+):
+    """Local assembly excludes poisoned inverse rows before ordered FP32 FMA.
+
+    This tests slot kernels, not the numerical behavior of an EP collective.
+    """
+    from vllm.model_executor.kernels.batch_invariant import (
+        gather_expert_slots,
+        ordered_topk_combine,
+    )
+
+    fma = ctypes.CDLL("libm.so.6").fmaf
+    fma.argtypes = [ctypes.c_float] * 3
+    fma.restype = ctypes.c_float
+    tokens, topk, experts = 3, 6, 8
+    routes = torch.tensor([0, 2, 4, 6, 1, 3], dtype=index_dtype).repeat(tokens, 1)
+    weights = torch.ones(tokens, topk)
+    values = torch.zeros(tokens, topk, width, dtype=torch.bfloat16)
+    if arm == "slot-order":
+        values[:, 0], values[:, 1], values[:, 2] = 2**30, 1, -(2**30)
+    else:
+        values[:, 0], values[:, 1] = -(1 + 2**-7), 1 + 2**-7
+        weights[:, 1] = 1 + 2**-23
+    values[:, 3] = (torch.arange(width) % 7 - 3) / 16
+    routes[::2, 0], routes[0, 5], routes[1, 5] = -1, -1, experts
+    invalid = (routes < 0) | (routes >= experts)
+    weights[invalid] = float("nan")
+    values[invalid] = float("nan")
+    expected = torch.empty(tokens, width)
+    for token in range(tokens):
+        for column in range(width):
+            total = 0.0
+            for slot in range(topk):
+                if not invalid[token, slot]:
+                    total = fma(
+                        values[token, slot, column], weights[token, slot], total
+                    )
+            expected[token, column] = total
+    expected = expected.bfloat16()
+    gpu_routes, gpu_weights = routes.cuda(), weights.cuda()
+    total_slots = torch.zeros(tokens, topk, width, device="cuda")
+    for rank in range(ep):
+        lo, hi = rank * (experts // ep), (rank + 1) * (experts // ep)
+        owned = (routes >= lo) & (routes < hi)
+        pairs = owned.nonzero()
+        rows = values[pairs[:, 0], pairs[:, 1]].cuda()
+        inverse = torch.full(routes.shape, -999999, dtype=torch.int32)
+        inverse[pairs[:, 0], pairs[:, 1]] = torch.arange(len(pairs), dtype=torch.int32)
+        expert_map = torch.full((experts,), -1, device="cuda", dtype=torch.int32)
+        expert_map[lo:hi] = torch.arange(hi - lo, device="cuda", dtype=torch.int32)
+        slots = gather_expert_slots(rows, gpu_routes, inverse.cuda(), expert_map)
+        target = values.float().masked_fill(~owned.unsqueeze(-1), 0)
+        assert torch.equal(slots.cpu(), target)
+        total_slots += slots
+    actual = ordered_topk_combine(
+        total_slots,
+        gpu_weights,
+        torch.bfloat16,
+        routes=gpu_routes,
+        global_num_experts=experts,
+    )
+    assert torch.equal(actual.cpu(), expected)
 
 
 def test_ep_gather_uses_64_bit_row_offsets():
