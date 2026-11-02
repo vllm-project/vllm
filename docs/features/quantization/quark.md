@@ -264,6 +264,8 @@ dynamic per-token FP8 E4M3 activations. Install a FlyDSL build that provides
 `flydsl.kernels.gemm.rdna4_mxfp4`; vLLM imports the implementation from that
 package. Weight preparation runs once during model loading and retains
 compressed weights. GEMM uses native FP8 WMMA with FP32 accumulation.
+The [FlyDSL kernel source and deployment guide](https://github.com/big-yellow-duck/FlyDSL/tree/6f7b095accb1ed4c8a43ebf60237e6a975baac56/kernels/gemm/rdna4_mxfp4)
+provide the implementation and its selector data.
 
 ```bash
 vllm serve amd/Qwen3.8-27B-Quark-AWQ-MXFP4 \
@@ -297,6 +299,26 @@ disables vLLM's JIT warmup, so it can still compile configurations on first use.
 For an emulation reference that retains BF16 weights between calls, set
 `VLLM_MXFP4_EMULATION_DEQUANT_AT_LOAD=1`; this uses more model memory than the
 compressed FlyDSL backend.
+
+The adaptive selector chooses register or hybrid GEMM using measured profiles
+and a CPU configuration cost model. Profiles respect decode specialization,
+aligned versus partial M tiles, and bounded launch-grid changes. Ordinary
+inference performs no GPU configuration search. Unseen shapes can still miss
+the fastest measured configuration; use optional calibration before startup
+when deployment-specific tuning is needed.
+
+Validation on gfx1201 covers Qwen3.8-27B and Gemma4-12B/31B linear shapes at
+TP1/2/4, including checkpoint rank shards and BF16/FP16 output. TP4 coverage is
+per-rank kernels on two physical GPUs. Gemma12 MLX checkpoint operands are
+adapted for kernel tests; this does not establish vLLM loader compatibility.
+Paired Qwen TP1 agent serving against the preceding native selector has
+essentially flat throughput and mixed TTFT changes, with no inference JIT
+warnings or executable events at or above 50ms in either retained pass.
+Full paired GSM8K scores are 1,271/1,319 versus 1,269/1,319, with zero invalid
+answers. Both cases use the same FP8 activation override; these results compare
+native selectors rather than the checkpoint's default MXFP4 activation path.
+[Per-case configurations, timings, accuracy and ISA resources](https://github.com/big-yellow-duck/FlyDSL/blob/6f7b095accb1ed4c8a43ebf60237e6a975baac56/tests/perf/data/rdna4_mxfp4_comprehensive.json)
+record the reference banks, resource tradeoffs and validation limits.
 
 vLLM supports loading MXFP4 and MXFP6 models quantized offline through AMD Quark, compliant with [Open Compute Project (OCP) specification](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf).
 
