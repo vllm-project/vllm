@@ -1046,3 +1046,117 @@ def draft_philox_gumbel_sample(
         )
         finish_step(step)
     return sampled.view(-1)
+
+
+@triton.jit
+def _watermark_contexts_kernel(
+    contexts_ptr,
+    expanded_idx_mapping_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    prompt_len_ptr,
+    total_len_ptr,
+    max_model_len,
+    CONTEXT_WIDTH: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    row = tl.program_id(0).to(tl.int64)
+    req_idx = tl.load(expanded_idx_mapping_ptr + row).to(tl.int64)
+    valid_req = req_idx >= 0
+    req_idx = tl.maximum(req_idx, 0)
+    total_len = tl.load(total_len_ptr + req_idx)
+    prompt_len = tl.load(prompt_len_ptr + req_idx)
+    offsets = tl.arange(0, BLOCK_SIZE)
+    in_context = offsets < CONTEXT_WIDTH
+    positions = total_len - CONTEXT_WIDTH + offsets
+    valid = valid_req & in_context & (positions >= prompt_len)
+    tokens = tl.load(
+        all_token_ids_ptr
+        + req_idx * all_token_ids_stride
+        + tl.minimum(tl.maximum(positions, 0), max_model_len - 1),
+        mask=valid,
+        other=-1,
+    )
+    tl.store(contexts_ptr + row * CONTEXT_WIDTH + offsets, tokens, mask=in_context)
+
+
+def watermark_contexts(
+    expanded_idx_mapping: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prompt_len: torch.Tensor,
+    total_len: torch.Tensor,
+    context_width: int,
+) -> torch.Tensor:
+    """Last `context_width` generated tokens of each row's request, -1 padded."""
+    num_rows = expanded_idx_mapping.shape[0]
+    contexts = all_token_ids.new_empty(num_rows, context_width)
+    if num_rows == 0:
+        return contexts
+    _watermark_contexts_kernel[(num_rows,)](
+        contexts,
+        expanded_idx_mapping,
+        all_token_ids,
+        all_token_ids.stride(0),
+        prompt_len,
+        total_len,
+        all_token_ids.shape[1],
+        CONTEXT_WIDTH=context_width,
+        BLOCK_SIZE=triton.next_power_of_2(context_width),
+    )
+    return contexts
+
+
+@triton.jit
+def _watermark_skip_mask_kernel(
+    skip_ptr,
+    expanded_idx_mapping_ptr,
+    watermarking_ptr,
+    temperature_ptr,
+    repeated_ptr,
+    num_rows,
+    HAS_REPEATED: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    rows = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = rows < num_rows
+    req_idx = tl.load(expanded_idx_mapping_ptr + rows, mask=mask, other=-1)
+    valid = req_idx >= 0
+    watermarking = tl.load(watermarking_ptr + req_idx, mask=valid, other=0) != 0
+    watermarking &= tl.load(temperature_ptr + req_idx, mask=valid, other=0.0) != 0.0
+    if HAS_REPEATED:
+        watermarking &= tl.load(repeated_ptr + rows, mask=mask, other=0) == 0
+    tl.store(skip_ptr + rows, ~watermarking, mask=mask)
+
+
+def watermark_skip_mask(
+    expanded_idx_mapping: torch.Tensor,
+    watermarking: torch.Tensor,
+    temperature: torch.Tensor,
+    repeated_contexts: torch.Tensor | None,
+) -> torch.Tensor:
+    """Rows to sample without the watermark: opted out, greedy, or repeated."""
+    if watermarking.device.type == "cpu":
+        req_indices = expanded_idx_mapping.to(torch.int64)
+        safe_req_indices = req_indices.clamp_min(0)
+        apply = (
+            (req_indices >= 0)
+            & watermarking[safe_req_indices].to(torch.bool)
+            & (temperature[safe_req_indices] != 0)
+        )
+        if repeated_contexts is not None:
+            apply &= ~repeated_contexts
+        return ~apply
+    num_rows = expanded_idx_mapping.shape[0]
+    skip_mask = torch.empty(num_rows, dtype=torch.bool, device=watermarking.device)
+    block_size = 1024
+    _watermark_skip_mask_kernel[(triton.cdiv(num_rows, block_size),)](
+        skip_mask,
+        expanded_idx_mapping,
+        watermarking,
+        temperature,
+        repeated_contexts,
+        num_rows,
+        HAS_REPEATED=repeated_contexts is not None,
+        BLOCK_SIZE=block_size,
+    )
+    return skip_mask

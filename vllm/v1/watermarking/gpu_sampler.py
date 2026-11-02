@@ -12,7 +12,11 @@ from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.watermarking.watermarker import RandomSampler, Watermarker
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.sample.sampler import Sampler
-from vllm.v1.worker.gpu.sample.watermark import repeated_context_mask
+from vllm.v1.worker.gpu.sample.watermark import (
+    repeated_context_mask,
+    watermark_contexts,
+    watermark_skip_mask,
+)
 
 logger = init_logger(__name__)
 
@@ -86,16 +90,15 @@ class GPUWatermarkSampler(Sampler):
                 expanded_idx_mapping, contexts
             )
 
-        temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
         needs_mixed_sampling = repeated_contexts is not None or not np.all(enabled)
         skip_mask = None
         if needs_mixed_sampling:
-            watermarking = self.watermarking.gpu[expanded_idx_mapping] & (
-                temperatures != 0
+            skip_mask = watermark_skip_mask(
+                expanded_idx_mapping,
+                self.watermarking.gpu,
+                self.sampling_states.temperature.gpu,
+                repeated_contexts,
             )
-            if repeated_contexts is not None:
-                watermarking &= ~repeated_contexts
-            skip_mask = ~watermarking
 
         random_sampler = RandomSampler(
             expanded_idx_mapping=expanded_idx_mapping,
@@ -115,6 +118,7 @@ class GPUWatermarkSampler(Sampler):
         # Expanded rows each copy a request's temperature, so checking the
         # request temperatures covers all expanded rows
         if self.sampling_states.any_greedy(idx_mapping_np):
+            temperatures = self.sampling_states.temperature.gpu[expanded_idx_mapping]
             sampled = torch.where(
                 temperatures == 0,
                 processed_logits.argmax(dim=-1),
@@ -160,6 +164,18 @@ class GPUWatermarkSampler(Sampler):
         and ``[20, 21]``. The first verification row precedes the first draft.
         """
         context_width = self.watermarker.context_width
+        if (
+            expanded_local_pos is None
+            and draft_sampled is None
+            and expanded_idx_mapping.device.type != "cpu"
+        ):
+            return watermark_contexts(
+                expanded_idx_mapping,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prompt_len.gpu,
+                self.req_states.total_len.gpu,
+                context_width,
+            )
         req_indices = expanded_idx_mapping.to(torch.int64)
         valid_reqs = req_indices >= 0
         safe_req_indices = req_indices.clamp_min(0)
