@@ -8,7 +8,7 @@ into a ``GemmaRMSNorm`` that adds the residual and normalizes. flashinfer ships 
 kernel that fuses all-reduce + residual-add + RMSNorm into a single launch; this
 helper drives it directly (no torch.compile pass) for models that run eager.
 
-Scope: attention output only. When the flashinfer fast path is
+Scope: attention output only, no quantization. When the flashinfer fast path is
 not applicable (TP==1, flashinfer/NVSwitch unavailable, unsupported dtype, or an
 oversize batch) it falls back to ``all_reduce`` + ``GemmaRMSNorm``, which is
 numerically identical to the unfused model path.
@@ -22,14 +22,8 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
     get_tp_group,
 )
-from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    kNvfp4Dynamic,
-)
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
 
 MiB = 1024 * 1024
 
@@ -42,32 +36,18 @@ try:
     )
     from vllm.distributed.device_communicators.flashinfer_all_reduce import (
         flashinfer_comm,
-        get_fi_ar_quant_workspace,
         get_fi_ar_workspace,
     )
 
-    _AR_RESIDUAL_RMS_NORM_OUT_QUANT: dict[str, int] | None
-    if flashinfer_comm is not None:
-        _AR_RESIDUAL_RMS_NORM = (
-            flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm
-        )
-        _AR_RESIDUAL_RMS_NORM_OUT_QUANT = {
-            "fp8": (
-                flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormOutFP8Quant
-            ),
-            "nvfp4": (
-                flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormOutFP4Quant
-            ),
-        }
-    else:
-        _AR_RESIDUAL_RMS_NORM = None
-        _AR_RESIDUAL_RMS_NORM_OUT_QUANT = None
+    _AR_RESIDUAL_RMS_NORM = (
+        flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm
+        if flashinfer_comm is not None
+        else None
+    )
 except (ImportError, AttributeError):
     flashinfer_trtllm_fused_allreduce_norm = None  # type: ignore[assignment]
     get_fi_ar_workspace = None  # type: ignore[assignment]
-    get_fi_ar_quant_workspace = None  # type: ignore[assignment]
     _AR_RESIDUAL_RMS_NORM = None
-    _AR_RESIDUAL_RMS_NORM_OUT_QUANT = None
 
 
 _FI_SUPPORTED_DTYPES = (torch.bfloat16, torch.float16)
@@ -85,18 +65,12 @@ def _max_token_num(tp_size: int, hidden_size: int, dtype: torch.dtype) -> int | 
     return int(max_size_mb * MiB) // (hidden_size * element_size)
 
 
-def _can_use_flashinfer(
-    hidden_states: torch.Tensor, tp_size: int, quant: bool = False
-) -> tuple[bool, int]:
-    """Whether the flashinfer fused path applies; returns (ok, max_token_num).
-
-    ``quant`` selects the workspace for the FP8/NVFP4 quant patterns.
-    """
+def _can_use_flashinfer(hidden_states: torch.Tensor, tp_size: int) -> tuple[bool, int]:
+    """Whether the flashinfer fused path applies; returns (ok, max_token_num)."""
     if (
         flashinfer_trtllm_fused_allreduce_norm is None
         or get_fi_ar_workspace is None
         or _AR_RESIDUAL_RMS_NORM is None
-        or (quant and _AR_RESIDUAL_RMS_NORM_OUT_QUANT is None)
     ):
         return False, 0
     if (
@@ -114,19 +88,14 @@ def _can_use_flashinfer(
 
     # Lazily create / fetch the (globally cached) workspace; returns None on
     # GPUs without NVSwitch, in which case we fall back gracefully.
-    get_workspace = get_fi_ar_quant_workspace if quant else get_fi_ar_workspace
-    try:
-        workspace = get_workspace(
-            world_size=tp_size,
-            rank=get_tensor_model_parallel_rank(),
-            max_token_num=max_token_num,
-            hidden_dim=hidden_size,
-            dtype=hidden_states.dtype,
-            group=get_tp_group().cpu_group,
-        )
-    except ValueError:
-        # e.g. quant patterns with the trtllm backend across nodes
-        return False, 0
+    workspace = get_fi_ar_workspace(
+        world_size=tp_size,
+        rank=get_tensor_model_parallel_rank(),
+        max_token_num=max_token_num,
+        hidden_dim=hidden_size,
+        dtype=hidden_states.dtype,
+        group=get_tp_group().cpu_group,
+    )
     if workspace is None:
         return False, 0
     # The token-count bound above uses the whole workspace budget, but a backend
@@ -219,77 +188,3 @@ def fused_allreduce_gemma_rms_norm(
     # Fallback: explicit all-reduce + GemmaRMSNorm (matches the unfused model).
     reduced = tensor_model_parallel_all_reduce(hidden_states)
     return norm(reduced, residual)
-
-
-def fused_allreduce_gemma_rms_norm_quant(
-    hidden_states: torch.Tensor,
-    residual: torch.Tensor,
-    norm: GemmaRMSNorm,
-    linear: torch.nn.Module,
-    key: QuantKey,
-) -> tuple[QuantizedActivation, torch.Tensor, torch.Tensor]:
-    """``fused_allreduce_gemma_rms_norm`` with ``linear``'s input quant fused.
-
-    Returns the quantized normed activation, the normed activation in
-    ``hidden_states``' dtype (GDN's ``in_proj_ba`` reads it), and the new
-    residual. With the flashinfer path the outputs are bitwise identical to
-    ``fused_allreduce_gemma_rms_norm`` followed by ``linear``'s input quant.
-
-    ``norm`` must provide ``forward_quant`` for the fallback path (explicit
-    all-reduce + norm-quant, e.g. oversize batch), which is likewise fused.
-    """
-    tp_size = get_tensor_model_parallel_world_size()
-    nvfp4 = key == kNvfp4Dynamic
-    scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
-
-    ok, max_token_num = _can_use_flashinfer(hidden_states, tp_size, quant=True)
-    if not ok:
-        reduced = tensor_model_parallel_all_reduce(hidden_states)
-        qa, y, res = norm.forward_quant(reduced, residual, linear, key, write_y=True)
-        assert y is not None
-        return qa, y, res
-
-    num_tokens, hidden_size = hidden_states.shape
-    assert _AR_RESIDUAL_RMS_NORM_OUT_QUANT is not None
-    norm_out = torch.empty_like(hidden_states)
-    quant_out = torch.empty(
-        (num_tokens, hidden_size // 2 if nvfp4 else hidden_size),
-        dtype=torch.uint8 if nvfp4 else current_platform.fp8_dtype(),
-        device=hidden_states.device,
-    )
-    if nvfp4:
-        scale_out = torch.empty(
-            (round_up(num_tokens, 128), round_up(hidden_size // 16, 4) // 4),
-            dtype=torch.int32,
-            device=norm_out.device,
-        ).view(current_platform.fp8_dtype())
-        pattern_code = _AR_RESIDUAL_RMS_NORM_OUT_QUANT["nvfp4"]
-    else:
-        scale_out = None
-        pattern_code = _AR_RESIDUAL_RMS_NORM_OUT_QUANT["fp8"]
-    # With norm_out provided, the kernel writes the new residual
-    # (all_reduce(hidden_states) + residual) into the hidden_states buffer.
-    flashinfer_trtllm_fused_allreduce_norm(
-        allreduce_in=hidden_states,
-        residual=residual,
-        rms_gamma=norm.weight,
-        rms_eps=norm.variance_epsilon,
-        world_size=tp_size,
-        weight_bias=1.0,  # GemmaRMSNorm-style
-        launch_with_pdl=True,
-        fp32_acc=True,
-        max_token_num=max_token_num,
-        pattern_code=pattern_code,
-        norm_out=norm_out,
-        quant_out=quant_out,
-        scale_out=scale_out,
-        scale_factor=scale,
-    )
-    qa = QuantizedActivation(
-        data=quant_out,
-        scale=scale_out if nvfp4 else scale,
-        orig_dtype=hidden_states.dtype,
-        orig_shape=hidden_states.shape,
-        quant_key=key,
-    )
-    return qa, norm_out, hidden_states

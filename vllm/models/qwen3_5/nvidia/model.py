@@ -48,7 +48,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_allreduce_gemma_rms_norm import (
     flashinfer_trtllm_fused_allreduce_norm,
     fused_allreduce_gemma_rms_norm,
-    fused_allreduce_gemma_rms_norm_quant,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.fusion.quant_activation import (
@@ -126,6 +125,7 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
+from .ops.fused_allreduce_norm_quant import fused_allreduce_gemma_rms_norm_quant
 from .ops.fused_gdn_gated_norm import fused_gdn_gated_rms_norm
 from .ops.fused_norm_quant import FP8_DTYPE, gemma_add_rms_norm_quant
 
@@ -229,6 +229,31 @@ class Qwen3_5RMSNorm(nn.Module):
             quant_key=key,
         )
         return qa, y, x if residual is None else residual
+
+    def forward_allreduce_quant(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        linear: LinearBase,
+        key: QuantKey,
+    ) -> tuple[QuantizedActivation, torch.Tensor, torch.Tensor]:
+        """``forward_quant`` on the TP all-reduce of the partial ``x``.
+
+        Returns the quantized normed activation, the normed activation in x's
+        dtype, and the new residual. Uses FlashInfer's fused AR+norm+quant;
+        above its workspace budget, an explicit all-reduce + ``forward_quant``.
+        """
+        nvfp4 = key == kNvfp4Dynamic
+        scale = linear.input_global_scale_inv if nvfp4 else linear.input_scale
+        out = fused_allreduce_gemma_rms_norm_quant(
+            x, residual, self.weight, self.variance_epsilon, scale, key
+        )
+        if out is not None:
+            return out
+        x = tensor_model_parallel_all_reduce(x)
+        qa, y, residual = self.forward_quant(x, residual, linear, key, write_y=True)
+        assert y is not None
+        return qa, y, residual
 
 
 class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
@@ -375,8 +400,8 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         if residual is not None and self.mlp_output_is_partial:
             if (key := _norm_quant_key(in_proj)) is not None:
                 in_proj_input, hidden_states, residual = (
-                    fused_allreduce_gemma_rms_norm_quant(
-                        hidden_states, residual, self.input_layernorm, in_proj, key
+                    self.input_layernorm.forward_allreduce_quant(
+                        hidden_states, residual, in_proj, key
                     )
                 )
             else:
@@ -420,8 +445,10 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         gate_up = self.mlp.gate_up_proj if isinstance(self.mlp, Qwen3NextMLP) else None
         if self.use_fused_allreduce_norm:
             if gate_up is not None and (key := _norm_quant_key(gate_up)) is not None:
-                hidden_states, _, residual = fused_allreduce_gemma_rms_norm_quant(
-                    hidden_states, residual, self.post_attention_layernorm, gate_up, key
+                hidden_states, _, residual = (
+                    self.post_attention_layernorm.forward_allreduce_quant(
+                        hidden_states, residual, gate_up, key
+                    )
                 )
             else:
                 hidden_states, residual = fused_allreduce_gemma_rms_norm(

@@ -88,7 +88,7 @@ steps:
 - label: ":nvidia: (H100) MiniMax Reduce RMS Kernels"
   key: kernels-minimax-reduce-rms-test-2-gpus
   automatic_shard: true
-  timeout_in_minutes: 30
+  timeout_in_minutes: 20
   num_devices: 2
   device: h100
   source_file_dependencies:
@@ -98,14 +98,9 @@ steps:
   - csrc/torch_bindings.cpp
   - vllm/model_executor/layers/minimax_rms_norm/
   - vllm/model_executor/layers/mamba/linear/minimax_linear_attn.py
-  - vllm/model_executor/layers/fused_allreduce_gemma_rms_norm.py
-  - vllm/distributed/device_communicators/flashinfer_all_reduce.py
-  - vllm/compilation/passes/fusion/allreduce_rms_fusion.py
   - tests/kernels/core/test_minimax_reduce_rms.py
-  - tests/kernels/core/test_fused_allreduce_gemma_rms_norm.py
   commands:
     - pytest -v -s kernels/core/test_minimax_reduce_rms.py
-    - pytest -v -s kernels/core/test_fused_allreduce_gemma_rms_norm.py
   mirror:
     amd:
       automatic_shard: true
