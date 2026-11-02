@@ -260,3 +260,34 @@ def test_lora_sink_experts_reload_takes_new_weights(dist_init):
     assert got.keys() == want.keys()
     for name in want:
         assert torch.equal(got[name], want[name]), name
+
+
+@pytest.mark.parametrize("platform", ["nvidia", "amd"])
+def test_mtp_writes_go_through_weight_loader(platform):
+    import importlib
+
+    mtp = importlib.import_module(f"vllm.models.inkling.{platform}.mtp")
+    module = nn.Module()
+    module.model = nn.Module()
+    module.model.num_mtp_layers = 1
+    module.model.chain_norm = None
+    module.model.layers = nn.ModuleList([nn.Module()])
+    norm = nn.Parameter(torch.zeros(4), requires_grad=False)
+    module.model.layers[0].norm = nn.Module()
+    module.model.layers[0].norm.weight = norm
+    calls = []
+
+    def weight_loader(param: torch.Tensor, weight: torch.Tensor) -> None:
+        calls.append(param)
+        param.copy_(weight)
+
+    norm.weight_loader = weight_loader
+
+    # same shape as the parameter: a layerwise reload wraps `weight_loader`,
+    # so the write must go through it
+    mtp._load_inkling_mtp_weights(
+        module, [("model.mtp.layers.0.norm.weight", torch.ones(4))]
+    )
+
+    assert calls == [norm]
+    torch.testing.assert_close(norm, torch.ones(4))
