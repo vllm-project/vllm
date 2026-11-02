@@ -322,6 +322,7 @@ async def test_dp_pause_resume_basic(expert_parallel: bool):
 
 
 @pytest.mark.asyncio
+@pytest.mark.timeout(600, method="thread")
 async def test_dp_duplicate_resume_while_one_rank_starts_a_wave():
     """A duplicate resume must not send only some ranks into the resume barrier.
 

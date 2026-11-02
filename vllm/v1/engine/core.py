@@ -2509,7 +2509,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 "flight. Wait for the pause future to resolve before "
                 "resuming."
             )
-        # Use the consensus wave gate, also set for new Elastic EP ranks.
+        # Set at pause consensus, so all ranks take the same branch.
         if not self.ignore_start_dp_wave:
             logger.debug("Resume called while engines are not paused, ignoring.")
             return
