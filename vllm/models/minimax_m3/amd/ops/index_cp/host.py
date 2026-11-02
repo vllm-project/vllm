@@ -111,8 +111,6 @@ def init(device: torch.device, max_width: int) -> None:
     from vllm.platforms.rocm import on_gfx950
 
     tp = get_tp_group()
-    # Also with DBO: a microbatched step scores locally (``_decode_cp`` checks
-    # ``dbo_enabled()``), so the one set of buffers and flags is never shared.
     if tp.world_size != WORLD or not on_gfx950():
         return
     _CP = IndexCP(tp.rank_in_group, tp.cpu_group, device, _kernel.MAX_ROWS, max_width)

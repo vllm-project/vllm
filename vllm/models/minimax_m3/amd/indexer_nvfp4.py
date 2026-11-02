@@ -4,8 +4,8 @@
 
 Keys score as ``e4m3_rn_satfinite(e2m1 * scale)`` with AITER's init / local
 sentinels; the top-k writes logical block ids for the NVFP4 attend, no page
-table. With ``indexer_decode_cp`` at TP4, decode steps of a multiple of 4 rows
-per request (DSpark 3 or 7) and at most 256 4-row requests score
+table. With ``indexer_decode_cp`` at TP4, decode steps 4/8 rows
+per request (DSpark 3/7) and at most 256 4-row requests score
 context-parallel (``ops/index_cp``).
 """
 
@@ -34,9 +34,8 @@ logger = init_logger(__name__)
 
 # Index heads per rank (TP4 / TP2 / TP1).
 NUM_INDEX_HEADS = (1, 2, 4)
-# Decode CP: rows per request (DSpark 3) and the request cap.
+# Decode CP: rows per request (DSpark 3).
 CP_QUERY_LEN = 4
-CP_MAX_REQS = 256
 
 
 def _cp_requests(
@@ -158,7 +157,6 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             or dbo_enabled()
             or self.num_index_heads != 1
             or query_len % CP_QUERY_LEN
-            or num_decodes * query_len // CP_QUERY_LEN > CP_MAX_REQS
             or num_decodes * query_len > cp.max_rows
         ):
             return None
