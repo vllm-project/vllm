@@ -122,7 +122,7 @@ def convert_to_w4a8_moe_kernel_format(
     torch.Tensor | None,
 ]:
     if backend == W4A8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming import (
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
             convert_to_humming_moe_kernel_format,
         )
         from vllm.utils.humming import (
@@ -212,7 +212,7 @@ def make_w4a8_moe_quant_config(
 ) -> FusedMoEQuantConfig:
     if backend == W4A8MoeBackend.HUMMING:
         from vllm.model_executor.layers.fused_moe import RoutedExperts
-        from vllm.model_executor.layers.quantization.utils.humming import (
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
             get_humming_moe_quant_config,
         )
 
@@ -241,7 +241,7 @@ def make_w4a8_moe_kernel(
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
     if backend == W4A8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.quantization.utils.humming import (
+        from vllm.model_executor.layers.fused_moe.oracle.humming import (
             make_humming_moe_kernel,
         )
 
