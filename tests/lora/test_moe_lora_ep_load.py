@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.lora.layers.fused_moe import FusedMoEWithLoRA
+from vllm.lora.layers.fused_moe import FusedMoE3DWithLoRA, FusedMoEWithLoRA
 from vllm.lora.lora_model import LoRAModel, MoEEPLoadSpec
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
@@ -93,6 +93,30 @@ def _load(lora_dir, peft_helper, *, moe_ep_spec, lora_id):
         device="cpu",
         moe_ep_spec=moe_ep_spec,
     )
+
+
+@pytest.mark.parametrize(
+    "tp_size,tp_rank", [(1, 0), (2, 0), (2, 1)], ids=["tp1", "tp2-rank0", "tp2-rank1"]
+)
+def test_fused_3d_w13_lora_b_up_starts_at_padded_intermediate(tp_size, tp_rank):
+    unpadded, padded, rank = 96, 128, 4
+    layer = FusedMoE3DWithLoRA.__new__(FusedMoE3DWithLoRA)
+    torch.nn.Module.__init__(layer)
+    layer.moe_config = SimpleNamespace(
+        intermediate_size_per_partition=padded,
+        intermediate_size_per_partition_unpadded=unpadded,
+    )
+    layer.tp_size, layer.tp_rank = tp_size, tp_rank
+    layer._base_model = "Qwen3MoeForCausalLM"
+    gate = torch.randn(2, unpadded * tp_size, rank)
+    up = torch.randn(2, unpadded * tp_size, rank)
+    shard = slice(tp_rank * unpadded, (tp_rank + 1) * unpadded)
+
+    sliced = layer._slice_w13_b(torch.cat([gate, up], dim=1))
+
+    assert torch.equal(sliced[:, :unpadded], gate[:, shard])
+    assert not sliced[:, unpadded:padded].any()
+    assert torch.equal(sliced[:, padded:], up[:, shard])
 
 
 @pytest.mark.parametrize("ep_rank", [0, 1])

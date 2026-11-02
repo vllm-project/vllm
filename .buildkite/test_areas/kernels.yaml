@@ -719,6 +719,7 @@ steps:
   - vllm/model_executor/layers/fused_moe/experts/cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/flashinfer_cutlass_moe.py
   - vllm/model_executor/layers/fused_moe/experts/trtllm_nvfp4_moe.py
+  - vllm/model_executor/layers/fused_moe/experts/trtllm_lora_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/nvfp4.py
   - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_one_sided.py
   - vllm/model_executor/layers/fused_moe/prepare_finalize/flashinfer_nvlink_two_sided.py
@@ -753,6 +754,8 @@ steps:
   - tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
   - tests/kernels/quantization/test_block_fp8.py
   - tests/models/quantization/test_nvfp4.py
+  - tests/lora/test_trtllm_nvfp4_lora_moe.py
+  - tests/lora/test_trtllm_mxfp4_lora_moe.py
   commands:
     - nvidia-smi
     - python3 examples/basic/offline_inference/chat.py
@@ -784,6 +787,8 @@ steps:
     - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
+    - pytest -v -s tests/lora/test_trtllm_nvfp4_lora_moe.py
+    - pytest -v -s tests/lora/test_trtllm_mxfp4_lora_moe.py
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
   mirror:
     amd:

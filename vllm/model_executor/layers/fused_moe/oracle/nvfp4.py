@@ -199,6 +199,19 @@ def _use_a16(backend: NvFp4MoeBackend, checkpoint_uses_a16: bool) -> bool:
     )
 
 
+def _requested_kernel_cls(
+    backend: NvFp4MoeBackend,
+    config: FusedMoEConfig,
+) -> list[type[mk.FusedMoEExperts]]:
+    if not config.is_lora_enabled or backend != NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        return backend_to_kernel_cls(backend)
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+        TrtLlmNvFp4LoRAExperts,
+    )
+
+    return [TrtLlmNvFp4LoRAExperts]
+
+
 def select_nvfp4_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -285,7 +298,7 @@ def select_nvfp4_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEExperts]]:
-        for k_cls in backend_to_kernel_cls(backend):
+        for k_cls in _requested_kernel_cls(backend, config):
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
             )

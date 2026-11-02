@@ -38,12 +38,14 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
     TrtLlmNvFp4ExpertsModular,
 )
+from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     prepare_static_weights_for_trtllm_fp4_moe,
     reorder_w1w3_to_w3w1,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     NVFP4_PER_TOKEN_BASE_GLOBAL_SCALE,
+    activation_to_flashinfer_int,
 )
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
@@ -190,6 +192,7 @@ def test_trtllm_fp4_moe_no_graph(
     torch_activation: MoEActivation | type[SiluAndMulWithClamp] | type[SituAndMul],
     swiglu_limit: float | None,
     per_token_activation: bool,
+    monkeypatch: pytest.MonkeyPatch,
     workspace_init,
 ):
     # FlashInfer's trtllm_batched_gemm_runner has no precompiled tile
@@ -306,6 +309,18 @@ def test_trtllm_fp4_moe_no_graph(
                 trtllm_experts.fused_experts.g1_scale_c, quant_config.a2_gscale
             )
 
+        import flashinfer
+
+        routed_moe = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe
+        calls: list[dict] = []
+
+        def spy(**kwargs):
+            calls.append(kwargs)
+            return routed_moe(**kwargs)
+
+        monkeypatch.setattr(
+            flashinfer.fused_moe, "trtllm_fp4_block_scale_routed_moe", spy
+        )
         trtllm_output = trtllm_experts.apply(
             hidden_states=a,
             w1=w1_q,
@@ -318,6 +333,63 @@ def test_trtllm_fp4_moe_no_graph(
             apply_router_weight_on_input=False,
         )
         assert isinstance(trtllm_output, torch.Tensor)
+
+        experts = trtllm_experts.fused_experts
+        assert isinstance(experts, TrtLlmNvFp4ExpertsModular)
+        assert len(calls) == 1
+        kwargs = calls[0]
+        hidden_states = kwargs.pop("hidden_states")
+        hidden_states_scale = kwargs.pop("hidden_states_scale")
+        per_token_scale = kwargs.pop("per_token_scale")
+        output = kwargs.pop("output")
+        assert hidden_states.shape == (m, k // 2)
+        assert hidden_states_scale.dtype == torch.float8_e4m3fn
+        assert hidden_states_scale.shape[0] == m
+        assert (per_token_scale is not None) == per_token_activation
+        assert output is not None
+        expected = dict(
+            topk_ids=(topk_ids, topk_weights),
+            routing_bias=None,
+            gemm1_weights=w1_q,
+            gemm1_weights_scale=w1_scale.view(torch.float8_e4m3fn),
+            gemm1_bias=None,
+            gemm1_alpha=experts.gemm1_alpha,
+            gemm1_beta=experts.gemm1_beta,
+            gemm1_clamp_limit=experts.gemm1_clamp_limit,
+            gemm2_weights=w2_q,
+            gemm2_weights_scale=w2_scale.view(torch.float8_e4m3fn),
+            gemm2_bias=None,
+            output1_scale_scalar=experts.g1_scale_c,
+            output1_scale_gate_scalar=quant_config.g1_alphas,
+            output2_scale_scalar=quant_config.g2_alphas,
+            num_experts=e,
+            top_k=topk,
+            n_group=0,
+            topk_group=0,
+            intermediate_size=experts.intermediate_size_per_partition,
+            local_expert_offset=0,
+            local_num_experts=e,
+            routed_scaling_factor=None,
+            routing_method_type=1,
+            do_finalize=True,
+            activation_type=activation_to_flashinfer_int(activation),
+            tune_max_num_tokens=min(
+                fi_moe_largest_bucket(moe_config), experts._get_chunk_size()
+            ),
+        )
+        assert kwargs.keys() == expected.keys()
+        for name, value in expected.items():
+            actual = kwargs[name]
+            if isinstance(value, tuple):
+                assert all(
+                    torch.equal(x, y) for x, y in zip(actual, value, strict=True)
+                ), name
+            elif isinstance(value, torch.Tensor):
+                assert isinstance(actual, torch.Tensor), name
+                assert actual.dtype == value.dtype, name
+                assert torch.equal(actual, value), name
+            else:
+                assert actual == value, name
 
         # Reference: round-trip activations and weights through FP4
         # quant/dequant so the comparison isolates kernel/activation behavior
