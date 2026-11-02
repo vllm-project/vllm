@@ -150,6 +150,11 @@ class FileSystemTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
+        # Keys of in-flight store jobs, tracked so a successful store can
+        # invalidate this tier's cached absent verdicts for those keys (and,
+        # when enabled, emit KV events).
+        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Event metadata is retained only when this tier emits KV events.
         self._store_jobs: dict[JobId, TransferJob] = {}
         # Keys of in-flight load (promotion) jobs, so a failed load can mark
         # its own cached lookup verdicts False (see get_finished_jobs).
@@ -221,6 +226,7 @@ class FileSystemTierManager(SecondaryTierManager):
     @override
     def submit_store(self, job_metadata: TransferJob) -> None:
         keys = list(job_metadata.keys)
+        self._store_job_keys[job_metadata.job_id] = keys
         if self.events is not None:
             self._store_jobs[job_metadata.job_id] = job_metadata
         task = functools.partial(
@@ -282,12 +288,15 @@ class FileSystemTierManager(SecondaryTierManager):
         for job_id, success, transfer_time in self._pool.get_finished():
             block_count = self._job_block_counts.pop(job_id, 0)
             transfer_bytes = block_count * self._block_size if block_count else None
-            if self.events is not None:
-                job = self._store_jobs.pop(job_id, None)
-                if success and job is not None and job.keys:
+            keys = self._store_job_keys.pop(job_id, None)
+            job = self._store_jobs.pop(job_id, None)
+            if keys and success:
+                # Successful store makes previously absent keys known-present.
+                self._lookup_manager.mark_present(keys)
+                if self.events is not None and job is not None and job.keys:
                     self.events.append(
                         OffloadingEvent(
-                            keys=list(job.keys),
+                            keys=keys,
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,

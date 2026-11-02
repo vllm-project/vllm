@@ -149,6 +149,9 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
                     "emit events.",
                     tier_type,
                 )
+        # Keys of in-flight store jobs, used for lookup invalidation and events.
+        self._store_job_keys: dict[JobId, list[OffloadKey]] = {}
+        # Event metadata is retained only when this tier emits KV events.
         self._store_jobs: dict[JobId, TransferJob] = {}
         # Keys of in-flight load (promotion) jobs, so a failed download can
         # mark its own cached lookup verdicts False (see get_finished_jobs).
@@ -293,6 +296,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         return LookupResult.HIT if result else LookupResult.MISS
 
     def submit_store(self, job_metadata: TransferJob) -> None:
+        self._store_job_keys[job_metadata.job_id] = list(job_metadata.keys)
         if self.events is not None:
             self._store_jobs[job_metadata.job_id] = job_metadata
         obj_keys = (self._file_mapper.get_file_name(k) for k in job_metadata.keys)
@@ -388,12 +392,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         results = self._pending_results
         self._pending_results = []
         for result in results:
-            if self.events is not None:
-                job = self._store_jobs.pop(result.job_id, None)
-                if result.success and job is not None and job.keys:
+            keys = self._store_job_keys.pop(result.job_id, None)
+            job = self._store_jobs.pop(result.job_id, None)
+            if result.success and keys:
+                self._lookup_manager.mark_present(keys)
+                if self.events is not None and job is not None and job.keys:
                     self.events.append(
                         OffloadingEvent(
-                            keys=list(job.keys),
+                            keys=keys,
                             medium=self.medium,
                             removed=False,
                             locality=self.locality,
