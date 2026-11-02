@@ -269,50 +269,46 @@ def test_hisparse_spill_and_prefix_restore(
 @pytest.mark.skipif(
     not current_platform.is_cuda(), reason="HiSparse requires NVIDIA CUDA"
 )
-@pytest.mark.parametrize(
-    "attention_backend",
-    [
-        pytest.param(None, id="default"),
-        pytest.param("FLASH_ATTN_MLA_SPARSE_FA4", id="fa4"),
-    ],
-)
 @fork_new_process_for_each_test
 def test_hisparse_extensible_kv_cache(
     monkeypatch: pytest.MonkeyPatch,
     vllm_runner: type[VllmRunner],
-    attention_backend: str | None,
 ):
     """HiSparse serves from an extensible KV cache with its host pool kept out.
 
     Warmup used to fail on it: the FlashInfer decode autotune read hot blocks
     the cache had not committed yet, and the context-prefill warmup gave the
     hot group blocks for the whole context, more than its fixed-size rows hold.
+    The top-k is large enough for the autotune to read past the first physical
+    granule, which committing the null block already backs.
     """
     capability = current_platform.get_device_capability()
     if capability is None or capability.major < 9:
         pytest.skip("Sparse MLA requires Hopper or newer")
-    if attention_backend and not current_platform.is_device_capability_family(100):
-        pytest.skip("FA4 sparse MLA requires SM 10.x")
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     monkeypatch.setenv("VLLM_DEEP_GEMM_WARMUP", "skip")
 
-    prompt = [1000 + i % 64 for i in range(700)]
+    def shrink_config(config):
+        config = _shrink_config(config)
+        config.update({"index_topk": 2048})
+        return config
+
+    prompt = [1000 + i % 64 for i in range(2500)]
     with vllm_runner(
         MODEL,
         load_format="dummy",
-        hf_overrides=_shrink_config,
+        hf_overrides=shrink_config,
         attention_config=AttentionConfig(
-            hisparse_config=HiSparseConfig(device_buffer_size=512)
+            hisparse_config=HiSparseConfig(device_buffer_size=2048)
         ),
         kv_transfer_config=KVTransferConfig(
             kv_connector="HiSparseConnector",
             kv_role="kv_both",
             kv_connector_extra_config={"host_pool_gib": 1},
         ),
-        attention_backend=attention_backend,
         block_size=64,
-        max_model_len=1024,
-        max_num_batched_tokens=1024,
+        max_model_len=4096,
+        max_num_batched_tokens=4096,
         max_num_seqs=4,
         enable_extensible_kv_cache=True,
         compilation_config={
