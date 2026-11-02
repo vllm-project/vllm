@@ -179,6 +179,25 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         },
         marks=[pytest.mark.core_model],
     ),
+    "kimi_k3": VitCudagraphTestConfig(
+        model="moonshotai/Kimi-K3",
+        modalities=["image"],
+        image_prompt="<|kimi_image_placeholder|>What is in this image?",
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [512],
+        },
+        # 1 text + 1 vision layer with random weights, as for kimi_vl.
+        vllm_runner_kwargs={
+            "trust_remote_code": True,
+            "enable_chunked_prefill": True,
+            "load_format": "dummy",
+            "hf_overrides": partial(
+                dummy_hf_overrides,
+                model_arch="KimiK3ForConditionalGeneration",
+            ),
+        },
+        marks=[pytest.mark.core_model],
+    ),
     "minimax_m3": VitCudagraphTestConfig(
         model="MiniMaxAI/MiniMax-M3",
         modalities=["image"],
@@ -673,3 +692,87 @@ def test_eonly_vit_cudagraph_outputs(
         for result in results:
             assert result["stats"][0]["token_budgets"] == token_budgets
         print(f"E-only {model_id}: {results}")
+
+
+def _check_k3_replay_and_threshold(worker, cases):
+    """Run image batches through the real manager; compare with eager.
+
+    Args:
+        cases: (grid_thw list, expected graph hits, expected eager misses) per batch.
+
+    """
+    import torch
+
+    runner = worker.model_runner
+    manager = (
+        runner.model_state.encoder_runner.cudagraph_manager
+        if hasattr(runner, "model_state")
+        else runner.encoder_cudagraph_manager
+    )
+    assert manager is not None and manager.is_captured()
+    model = runner.model
+    vision_config = runner.model_config.hf_config.vision_config
+    patch = vision_config.patch_size
+    generator = torch.Generator(device=runner.device).manual_seed(0)
+    with torch.inference_mode():
+        for grids, hits, misses in cases:
+            num_patches = sum(t * h * w for t, h, w in grids)
+            kwargs = {
+                # The input norm takes raw 8-bit pixels.
+                "pixel_values": torch.randint(
+                    0,
+                    256,
+                    (num_patches, 3, patch, patch),
+                    device=runner.device,
+                    dtype=torch.uint8,
+                    generator=generator,
+                ),
+                "grid_thws": grids,
+            }
+            before = manager.get_cumulative_stats()
+            actual = torch.cat(manager.execute(kwargs))
+            after = manager.get_cumulative_stats()
+            assert after["graph_hits"] - before["graph_hits"] == hits, grids
+            assert after["graph_misses"] - before["graph_misses"] == misses, grids
+            expected = model.encoder_eager_forward(kwargs)
+            assert actual.shape == expected.shape
+            assert torch.isfinite(actual).all() and expected.abs().max() > 0
+            # Two bf16 ulps at the output scale: replay runs padded GEMMs.
+            bound = 2 * expected.abs().max().item() * 2**-7
+            diff = (actual.float() - expected.float()).abs().max().item()
+            assert diff <= bound, f"{grids}: max abs diff {diff} > {bound}"
+    return manager.token_budgets
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="AMD Kimi-K3 encoder graphs")
+def test_kimi_k3_vit_cudagraph_replay_and_threshold(vllm_runner, monkeypatch):
+    """Replay matches eager; graphs serve items up to the largest budget (512
+    output tokens by default) and larger items run eagerly."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    config = MODEL_CONFIGS["kimi_k3"]
+    compilation_config = get_compilation_config(config)
+    compilation_config.pop("encoder_cudagraph_token_budgets")
+    compilation_config["encoder_cudagraph_max_vision_items_per_batch"] = 2
+    small, mid, full, over = [1, 16, 16], [1, 28, 28], [1, 32, 64], [1, 34, 64]
+    cases = [
+        ([small], 1, 0),  # 64 tokens fill the smallest budget
+        ([mid], 1, 0),  # 196 tokens replay a padded budget
+        ([full], 1, 0),  # 512 tokens fill the largest budget
+        ([over], 0, 1),  # 544 tokens exceed it
+        ([mid, mid], 2, 0),  # two images share one replay
+        ([mid, over], 1, 1),  # only the oversize image runs eagerly
+    ]
+    with vllm_runner(
+        config.model,
+        dtype=config.dtype,
+        max_model_len=config.max_model_len,
+        max_num_seqs=config.max_num_seqs,
+        limit_mm_per_prompt={"image": 1},
+        compilation_config=compilation_config,
+        **config.vllm_runner_kwargs,
+    ) as vllm_model:
+        results = vllm_model.llm.collective_rpc(
+            partial(_check_k3_replay_and_threshold, cases=cases)
+        )
+    for token_budgets in results:
+        assert token_budgets[-1] == 512
