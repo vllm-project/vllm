@@ -778,7 +778,7 @@ class DerenderStreamState(BaseModel):
     Two separate sets of fields support two different streaming modes:
 
     - For plain streaming (no parser configured including the completions path):
-      `prev_tokens`, `prefix_offset` and `read_offset` maintain a bounded incremental
+      `prev_token_ids`, `prefix_offset` and `read_offset` maintain a bounded incremental
       decoding window. This requires O(window) transport and O(delta) computation
       per chunk.
     - For parser enabled chat streaming: `output_token_ids`, `output_chunk_lens`,
@@ -794,10 +794,11 @@ class DerenderStreamState(BaseModel):
     The detokenization strategy carries the incremental decode offsets
     directly rather than re-sending the whole token history each chunk.
     `detokenize_incrementally` only ever reads the trailing token window
-    `prev_tokens[prefix_offset:]`, so we carry just that tail plus the two
-    offsets. Each chunk resumes exactly where the last one stopped, including
-    any partially processed multi-byte character (tracked by `read_offset`),
-    then trims and rebases the window so it never grows with generation length.
+    from `prefix_offset`, so we carry just that tail, as ids because pieces may
+    be raw bytes, plus the two offsets. Each chunk resumes exactly where the
+    last one stopped, including any partially processed multi-byte character
+    (tracked by `read_offset`), then trims and rebases the window so it never
+    grows with generation length.
 
     Performance:
     - Compute per chunk is O(delta). One `detokenize_incrementally` call per
@@ -807,8 +808,9 @@ class DerenderStreamState(BaseModel):
       O(n) rather than the O(n^2) a full history round trip would incur.
     """
 
-    prev_tokens: list[str] = Field(default_factory=list)
-    """Trailing decode window. Token strings from `prefix_offset` onward.
+    prev_token_ids: list[NonNegativeInt] = Field(default_factory=list)
+    """Trailing decode window. Token ids from `prefix_offset` onward, excluding
+    ids that `skip_special_tokens` drops.
 
     Bounded, trimmed and rebased each chunk to the tail
     `detokenize_incrementally` still reads, so it does not grow with the
@@ -816,20 +818,22 @@ class DerenderStreamState(BaseModel):
     """
 
     prefix_offset: int = Field(default=0, ge=0)
-    """Prefix offset into `prev_tokens` for incremental detokenization."""
+    """Prefix offset into `prev_token_ids` for incremental detokenization."""
 
     read_offset: int = Field(default=0, ge=0)
-    """Read offset into `prev_tokens` for incremental detokenization."""
+    """Read offset into `prev_token_ids` for incremental detokenization."""
 
-    @field_validator("prev_tokens")
+    @field_validator("prev_token_ids")
     @classmethod
-    def _bound_prev_tokens(cls, v: list[str]) -> list[str]:
+    def _bound_prev_token_ids(cls, v: list[int]) -> list[int]:
         # INITIAL_INCREMENTAL_DETOKENIZATION_OFFSET is small (5) and the trimmed
         # window is O(offset). A generous limit rejects unusually large or malformed
         # payloads without restricting legitimate multi-byte sequences.
         limit = 1024
         if len(v) > limit:
-            raise ValueError(f"prev_tokens length ({len(v)}) exceeds maximum ({limit})")
+            raise ValueError(
+                f"prev_token_ids length ({len(v)}) exceeds maximum ({limit})"
+            )
         return v
 
     role_sent: bool = False

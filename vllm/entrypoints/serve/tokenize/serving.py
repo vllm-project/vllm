@@ -125,7 +125,11 @@ class ServingTokenization(BaseServing):
         token_strs = None
         if request.return_token_strs:
             tokenizer = self.renderer.get_tokenizer()
-            token_strs = tokenizer.convert_ids_to_tokens(input_ids)
+            token_strs = [
+                # Tekken tokenizer returns byte-fallback as bytes
+                t.decode("utf-8", errors="replace") if isinstance(t, bytes) else t
+                for t in tokenizer.convert_ids_to_tokens(input_ids)
+            ]
 
         return TokenizeResponse(
             tokens=input_ids,
