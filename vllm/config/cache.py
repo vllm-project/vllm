@@ -315,6 +315,13 @@ class CacheConfig:
     prompt tail. Off by default; only takes effect with prefix caching enabled,
     EAGLE on the Mamba group, and a prefix match unit smaller than the Mamba
     block size."""
+    evict_superseded_mamba_states: bool = False
+    """When a request finishes, evict first the Mamba "align" states it resumed
+    from that a deeper cached state on its own tokens supersedes, e.g. the
+    previous turn's state in a multi-turn conversation. They keep their hashes
+    until reused, but a branch that resumes from one misses sooner. States up to
+    a detected shared-prefix junction are kept. Off by default; only takes
+    effect with prefix caching enabled."""
     replayssm_buffer_len: int = Field(default=16, gt=0)
     """ReplaySSM logical history length B for Mamba2. Triton uses B physical
     rows and FlashInfer uses B+T, where T is the target verification length.
@@ -414,6 +421,7 @@ class CacheConfig:
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "prefix_match_unit",
             "enable_mamba_shared_prefix_checkpoint",
+            "evict_superseded_mamba_states",
             "mamba_page_size_padded",
             "skip_page_size_padded",
             "user_specified_block_size",
