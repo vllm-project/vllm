@@ -44,14 +44,17 @@ class DecodeConfig:
     m1: bool = True
     # the DCP KV cache interleave (AITER's decode path, M1a's query pad)
     interleave: int = 1
+    # the most requests a step has (``step_reasons``: max_num_seqs x q <= MAX_ROWS)
+    max_num_seqs: int = 1
 
     @property
     def widths(self) -> tuple[int, ...]:
-        """The rows a launch serves: whole requests, at most MAX_ROWS rows. Every
-        uniform verify step up to MAX_ROWS rows is one of them, so an eager step
-        never pads; a FULL replay pads whole requests the way vLLM's stock decode
-        does."""
-        return tuple(range(self.q, MAX_ROWS + 1, self.q))
+        """The rows a launch serves: whole requests, 1 .. max_num_seqs of them.
+        Every uniform verify step is one of them (vLLM captures no uniform decode
+        graph wider than max_num_seqs x q), so an eager step never pads; a FULL
+        replay pads whole requests the way vLLM's stock decode does."""
+        rows = min(MAX_ROWS, self.max_num_seqs * self.q)
+        return tuple(range(self.q, rows + 1, self.q))
 
 
 def decode_backend(vllm_config) -> str:
@@ -95,6 +98,7 @@ def specialized_decode_config(vllm_config) -> DecodeConfig | None:
         q=spec.num_speculative_tokens + 1,
         m1=not m1,
         interleave=vllm_config.parallel_config.cp_kv_cache_interleave_size,
+        max_num_seqs=vllm_config.scheduler_config.max_num_seqs,
     )
 
 
@@ -102,9 +106,19 @@ def m1_reasons(vllm_config) -> list[str]:
     """Why the MLA layers cannot run M1 (empty: they can). At DCP8 not a refusal:
     those layers run vLLM's attention ops instead, then K2 (``step_reasons``)."""
     import vllm.envs as envs
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     cc = vllm_config.cache_config
+    backend = vllm_config.attention_config.backend
     checks = (
+        # M1 reads AITER MLA's decode metadata (max_qo_len, paged_kv_*,
+        # asm_decode_num_heads); the loaded layers' backend is checked too
+        # (``guards.mla_weight_reasons``)
+        (
+            not envs.VLLM_ROCM_USE_AITER_MLA
+            or backend not in (None, AttentionBackendEnum.ROCM_AITER_MLA),
+            "the ROCM_AITER_MLA attention backend",
+        ),
         # M1a writes the MLA layers' fp8 KV and hands AITER an fp8 query
         (not cc.cache_dtype.startswith("fp8"), "an fp8 KV cache"),
         # M1 runs W_UK / W_UV as AITER's MXFP4 bmms

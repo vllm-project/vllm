@@ -121,8 +121,8 @@ def mla_weight_reasons(model) -> list[str]:
 
 
 def _mla_reasons(p: str, w, need) -> list[str]:
-    """An MLA layer as M1a / M1b (and ``runtime/mla.py``) run it: NoPE, gated,
-    DCP1 or DCP8, an fp8 cache, W_UK / W_UV as MXFP4 bmms."""
+    """An MLA layer as M1a / M1b (and ``runtime/mla.py``) run it: AITER MLA's
+    metadata, NoPE, gated, DCP1 or DCP8, an fp8 cache, W_UK / W_UV as MXFP4 bmms."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
         HIDDEN as H,
     )
@@ -136,6 +136,9 @@ def _mla_reasons(p: str, w, need) -> list[str]:
             w.qk_rope_head_dim, w.v_head_dim)  # fmt: skip
     if dims != (MLA_HEADS, MLA_Q, MLA_KV, MLA_NOPE, MLA_ROPE, MLA_V):
         return [f"{p}: MLA heads/q_lora/kv_lora/nope/rope/v {dims}"]
+    # auto-selection can still pick another backend (``runtime.m1_reasons``)
+    if (backend := a.attn_backend.get_name()) != "ROCM_AITER_MLA":
+        reasons.append(f"{p}: MLA backend {backend}, needs ROCM_AITER_MLA")
     if w.rotary_emb is not None or w.indexer is not None or w.dcp_q_replicate:
         reasons.append(f"{p}: needs NoPE, dense, unreplicated-query MLA")
     w_qkv, w_g = qkv_gate_weights(w)

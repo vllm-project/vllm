@@ -44,10 +44,11 @@ decoding with at most 15 speculative tokens, Model Runner V2, BF16 conv / FP32
 recurrent KDA states. M1 assumes no KV cache interleave (it writes the slots vLLM
 maps), but at DCP8 vLLM's AITER MLA backend serves DSpark at interleave 1 only.
 
-M1 also needs an fp8 KV cache and MLA's W_UK / W_UV as AITER MXFP4 bmms
+M1 also needs the `ROCM_AITER_MLA` attention backend (it reads AITER MLA's decode
+metadata), an fp8 KV cache and MLA's W_UK / W_UV as AITER MXFP4 bmms
 (`VLLM_ROCM_USE_AITER_FP4BMM=1`). Without them the MLA layers run vLLM's
-attention ops, then K2, and startup logs why. The KDA layers run K1 and K2 either
-way.
+attention ops, then K2, and startup logs why; DCP1 runs only with M1 and is
+refused. The KDA layers run K1 and K2 either way.
 
 KV transfer support is limited to built-in MoRIIO READ and WRITE consumers.
 Keep the producer on `decode_backend=auto` and use matching cache layouts.
@@ -64,8 +65,8 @@ If you request the specialized decode for anything else, startup fails with one
   GPU.
 - **Loaded weights, when the model state builds the executor:** each kernel
   layer's weight shapes and dtypes and the MoE backend (`AITER_MXFP4_BF16`, K3
-  SiTU). Each MLA layer's shapes, gate, DCP setup, fp8 cache and bmm weights
-  decide M1 or vLLM's ops (not a refusal).
+  SiTU). Each MLA layer's attention backend, shapes, gate, DCP setup, fp8 cache
+  and bmm weights decide M1 or vLLM's ops (not a refusal at DCP8).
 - **KV caches, at every bind:** the KDA state dtypes and layout, and with M1 the
   MLA cache's fp8 dense rows.
 
@@ -75,9 +76,10 @@ Every TP rank agrees on each verdict before anything collective runs.
 
 `plan()` runs once per step. It picks the kernels for a pure spec-verify step of
 whole uniform requests whose width is one of the built widths: every multiple of
-`num_speculative_tokens + 1` up to 16 rows. With M1 the MLA layers' metadata must
-agree (pure decode, the same width, AITER's non-Gluon decode). Every other step
-runs vLLM's layers: prefill, mixed, wider and PIECEWISE steps.
+`num_speculative_tokens + 1` up to `max_num_seqs` requests (at most 16 rows).
+With M1 the MLA layers' metadata must agree (pure decode, the same width, AITER's
+non-Gluon decode). Every other step runs vLLM's layers: prefill, mixed, wider and
+PIECEWISE steps.
 
 Under FULL graphs the plan is baked in at capture. vLLM's capture sizes are not
 changed. A replay with fewer requests than its graph pads whole requests. Those

@@ -35,6 +35,7 @@ from vllm.models.kimi_k3.amd.specialized_decode.runtime.guards import (
     mla_weight_reasons,
     weight_reasons,
 )
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 
 def _vllm_config(**over) -> SimpleNamespace:
@@ -90,6 +91,7 @@ def _vllm_config(**over) -> SimpleNamespace:
         weight_transfer_config=None,
         speculative_config=spec,
         scheduler_config=SimpleNamespace(max_num_seqs=1),
+        attention_config=SimpleNamespace(backend=None),
         use_v2_model_runner=True,
         compilation_config=SimpleNamespace(
             mode=CompilationMode.VLLM_COMPILE,
@@ -108,6 +110,7 @@ def _vllm_config(**over) -> SimpleNamespace:
 @pytest.fixture(autouse=True)
 def fp4_bmm(monkeypatch):
     monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", "1")
+    monkeypatch.setenv("VLLM_ROCM_USE_AITER_MLA", "1")
 
 
 @pytest.fixture
@@ -116,16 +119,27 @@ def on_mi355x(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "k, want",
+    "seqs, k, want",
     [
-        (7, (8, 16)),
-        (3, (4, 8, 12, 16)),
-        (1, tuple(range(2, 17, 2))),
-        (15, (16,)),
+        (1, 7, (8,)),
+        (2, 7, (8, 16)),
+        (1, 3, (4,)),
+        (2, 3, (4, 8)),
+        (4, 3, (4, 8, 12, 16)),
+        (1, 1, (2,)),
+        (8, 1, tuple(range(2, 17, 2))),
+        (1, 15, (16,)),
     ],
 )
-def test_widths_are_whole_requests_up_to_max_rows(k, want):
-    assert DecodeConfig(q=k + 1).widths == want
+def test_widths_are_whole_requests_up_to_max_num_seqs(seqs, k, want):
+    """No width wider than a full step: vLLM captures no uniform decode graph
+    wider than max_num_seqs x q, and wider eager steps are not uniform."""
+    assert DecodeConfig(q=k + 1, max_num_seqs=seqs).widths == want
+
+
+def test_decode_config_carries_max_num_seqs(on_mi355x):
+    cfg = _step(8, 2, 3)
+    assert specialized_decode_config(cfg) == DecodeConfig(q=4, max_num_seqs=2)
 
 
 def _k3_text_config():
@@ -255,16 +269,30 @@ def test_any_interleave_is_accepted(on_mi355x, dcp, interleave):
     assert specialized_decode_config(cfg) == DecodeConfig(q=8, interleave=interleave)
 
 
+_NO_AITER_MLA = [
+    # ROCm then offers only TRITON_MLA
+    ({}, {"VLLM_ROCM_USE_AITER_MLA": "0"}),
+    ({"attention_config.backend": AttentionBackendEnum.TRITON_MLA}, {}),
+    ({"attention_config.backend": AttentionBackendEnum.ROCM_AITER_TRITON_MLA}, {}),
+]
+
+
 @pytest.mark.parametrize(
     "over, env, why",
     [
-        ({"cache_config.cache_dtype": "auto"}, "1", "an fp8 KV cache"),
-        ({}, "0", "VLLM_ROCM_USE_AITER_FP4BMM=1"),
+        ({"cache_config.cache_dtype": "auto"}, {}, "an fp8 KV cache"),
+        (
+            {},
+            {"VLLM_ROCM_USE_AITER_FP4BMM": "0"},
+            "VLLM_ROCM_USE_AITER_FP4BMM=1",
+        ),
+        *((o, e, "the ROCM_AITER_MLA attention backend") for o, e in _NO_AITER_MLA),
     ],
 )
 def test_mla_without_m1_runs_vllm_ops(on_mi355x, monkeypatch, over, env, why):
     """What only M1 needs is no refusal: the MLA layers run vLLM's ops, K2."""
-    monkeypatch.setenv("VLLM_ROCM_USE_AITER_FP4BMM", env)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
     cfg = _vllm_config(**over)
     assert runtime.unsupported(cfg) == []
     reasons = runtime.m1_reasons(cfg)
@@ -348,6 +376,25 @@ def test_served_steps_are_accepted(on_mi355x, dcp, seqs, k):
 def test_unserved_steps_are_refused(on_mi355x, dcp, seqs, k, reason):
     reasons = runtime.unsupported(_step(dcp, seqs, k))
     assert len(reasons) == 1 and reason in reasons[0], reasons
+
+
+@pytest.mark.parametrize("over, env", _NO_AITER_MLA)
+def test_dcp1_without_aiter_mla_is_refused(on_mi355x, monkeypatch, over, env):
+    """M1 reads AITER MLA's decode metadata: DCP1 without it is refused at
+    startup, not an AttributeError at the first verify step."""
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    cfg = _vllm_config(**over, **{"parallel_config.decode_context_parallel_size": 1})
+    reasons = runtime.unsupported(cfg)
+    assert len(reasons) == 1, reasons
+    assert "DCP1 without M1 (the ROCM_AITER_MLA attention backend)" in reasons[0]
+
+
+def test_aiter_mla_backend_is_served(on_mi355x):
+    cfg = _vllm_config(
+        **{"attention_config.backend": AttentionBackendEnum.ROCM_AITER_MLA}
+    )
+    assert runtime.m1_reasons(cfg) == []
 
 
 def test_dcp1_without_m1_is_refused(on_mi355x):
