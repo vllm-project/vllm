@@ -321,6 +321,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             self.kv_cache_dtype = "auto"
 
         dtype = torch.get_default_dtype()
+        self.act_dtype = dtype
         self.attn_backend = get_attn_backend(
             self.head_size,
             dtype,
@@ -436,7 +437,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             non_causal_multi_token_decode=self.non_causal_multi_token_decode,
         )
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         """Absorb ``kv_b_proj`` into decode-time ``W_UK_T`` / ``W_UV`` bmm weights.
 
         ``kv_b_proj`` produces ``[k_nope; v]`` per head from the ``kv_lora_rank``
@@ -449,7 +450,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
         if not (is_weights_pre_processed() and getattr(self, "W_UV", None) is not None):
             W_UK, W_UV = split_kv_b_proj(
                 self.kv_b_proj,
-                act_dtype,
+                self.act_dtype,
                 self.kv_lora_rank,
                 self.num_local_heads,
                 self.qk_nope_head_dim,

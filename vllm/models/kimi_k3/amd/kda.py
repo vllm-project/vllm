@@ -345,7 +345,7 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
         compilation_config.static_forward_context[prefix] = self
 
     @torch.no_grad()
-    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+    def process_weights_after_loading(self) -> None:
         if is_weights_pre_processed():
             return
         if self.decode_conv1d_weight is not None:

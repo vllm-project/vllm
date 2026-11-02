@@ -740,8 +740,5 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | drop_mapper)
 
-    def process_weights_after_loading(self) -> None:
-        self.model.process_weights_after_loading()
-
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()
