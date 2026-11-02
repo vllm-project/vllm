@@ -17,6 +17,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
+from vllm.distributed.pp_transport import (
+    make_empty_intermediate_tensors_factory as make_empty_intermediate_tensors_factory,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.mtp_validation import (
@@ -1119,35 +1122,6 @@ def copy_pp_buffers(
     for key, buffer in buffers.items():
         tensor = intermediate_tensors[key]
         buffer[: tensor.shape[0]].copy_(tensor)
-
-
-def make_empty_intermediate_tensors_factory(
-    keys: list[str],
-    hidden_size: int,
-    buffers: Mapping[str, torch.Tensor] | None = None,
-):
-    """``buffers`` are token-major cross-layer state sent along with ``keys``."""
-    buffers = buffers or {}
-
-    def make_empty_intermediate_tensors(
-        batch_size: int,
-        dtype: torch.dtype,
-        device: torch.device,
-    ) -> IntermediateTensors:
-        return IntermediateTensors(
-            {
-                key: torch.zeros((batch_size, hidden_size), dtype=dtype, device=device)
-                for key in keys
-            }
-            | {
-                key: torch.zeros(
-                    (batch_size, *buffer.shape[1:]), dtype=buffer.dtype, device=device
-                )
-                for key, buffer in buffers.items()
-            }
-        )
-
-    return make_empty_intermediate_tensors
 
 
 def maybe_prefix(prefix: str, name: str) -> str:

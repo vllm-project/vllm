@@ -31,6 +31,7 @@ from vllm.distributed.parallel_state import (
     graph_capture,
     is_global_first_rank,
 )
+from vllm.distributed.pp_transport import PPTransport, copy_intermediate_tensors
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import requires_raw_input_tokens
@@ -615,6 +616,9 @@ class ModelCudaGraphManager(CudaGraphManager):
         self.aux_hidden_states: list[torch.Tensor] = []
         self.use_aux_hidden_state_outputs = False
         self.intermediate_tensors: IntermediateTensors | None = None
+        self.intermediate_tensor_views: dict[
+            BatchExecutionDescriptor, IntermediateTensors
+        ] = {}
 
     def capture(
         self,
@@ -633,6 +637,7 @@ class ModelCudaGraphManager(CudaGraphManager):
     ) -> None:
         """Capture CUDA graphs for model forward pass."""
         self.use_aux_hidden_state_outputs = use_aux_hidden_state_outputs
+        pp_transport = getattr(model, "pp_transport", PPTransport())
         if self.use_breakable_cg:
             self.init_breakable_cg_runner(model)
 
@@ -646,8 +651,11 @@ class ModelCudaGraphManager(CudaGraphManager):
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=1 or cudagraph_mode=NONE/FULL."
             )
 
-        def store_capture_output(num_tokens: int, model_output: Any) -> None:
+        def store_capture_output(
+            desc: BatchExecutionDescriptor, model_output: Any
+        ) -> None:
             """Copy outputs to persistent buffers, allocating on first use."""
+            num_tokens = desc.num_tokens
             if self.is_last_pp_rank:
                 # Last PP rank (common case).
                 if self.use_aux_hidden_state_outputs:
@@ -672,8 +680,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                     self.intermediate_tensors = IntermediateTensors.empty_like(
                         intermediate_tensors
                     )
-                for k, v in intermediate_tensors.tensors.items():
-                    self.intermediate_tensors[k][:num_tokens] = v
+                self.intermediate_tensor_views[desc] = copy_intermediate_tensors(
+                    self.intermediate_tensors, intermediate_tensors
+                )
 
         def create_forward_fn(
             desc: BatchExecutionDescriptor, warmup: bool
@@ -703,7 +712,9 @@ class ModelCudaGraphManager(CudaGraphManager):
                     model_inputs["input_ids"] = None
                 model_inputs["inputs_embeds"] = None
                 assert intermediate_tensors is not None
-                model_inputs["intermediate_tensors"] = intermediate_tensors[:num_tokens]
+                model_inputs["intermediate_tensors"] = pp_transport.prepare_inputs(
+                    intermediate_tensors, num_tokens
+                )
 
             if desc.num_ubatches > 1:
                 # Prepare and park threads before capture; finish runs inside it.
@@ -734,7 +745,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     assert cg_mode != CUDAGraphMode.PIECEWISE, (
                         "DBO does not support PIECEWISE cudagraphs"
                     )
-                    store_capture_output(num_tokens, finish())
+                    store_capture_output(desc, finish())
 
                 return ubatch_forward_fn
 
@@ -787,7 +798,7 @@ class ModelCudaGraphManager(CudaGraphManager):
                     # model outputs. No need to keep track of the hidden states.
                     return None
 
-                store_capture_output(num_tokens, model_output)
+                store_capture_output(desc, model_output)
 
             return forward_fn
 
@@ -799,8 +810,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         """Replay a captured FULL cudagraph and return hidden states."""
         super().run_fullgraph(desc)
         if not self.is_last_pp_rank:
-            assert self.intermediate_tensors is not None
-            return self.intermediate_tensors[: desc.num_tokens]
+            return self.intermediate_tensor_views[desc]
 
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[: desc.num_tokens]
