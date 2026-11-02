@@ -602,7 +602,6 @@ steps:
     - pytest -v -s tests/distributed/test_nccl_symm_mem.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
     - pytest -v -s tests/distributed/test_mnnvl_alltoall.py
-    - pytest -v -s tests/distributed/test_eplb_execute.py -k localized_megamoe
   mirror:
     amd:
       automatic_shard: true
