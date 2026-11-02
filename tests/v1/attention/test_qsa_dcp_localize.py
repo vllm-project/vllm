@@ -150,8 +150,15 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
 ):
     from vllm.models.qwen4_exp.nvidia.ops.qsa import qsa_sparse_paged_attention
     from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp import qsa_localize_dcp_indices
+    from vllm.platforms import current_platform
     from vllm.v1.attention.ops.dcp import _lse_weighted_combine
 
+    if (
+        cache_dtype == torch.float8_e4m3fn
+        and not current_platform.has_device_capability(89)
+    ):
+        # Below sm_89 the reader takes the e4m3 bytes as uint8.
+        cache_dtype = torch.uint8
     import_module("vllm.models.qwen4_exp.nvidia.model")
     qsa_backend = import_module("vllm.models.qwen4_exp.nvidia.qsa").Qwen4ExpQSABackend
     assert qsa_backend.get_impl_cls().lse_base_on_e is False
