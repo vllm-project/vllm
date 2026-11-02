@@ -29,7 +29,6 @@ import json
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.generate.base.protocol import ExtractedToolCallInformation
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
 from vllm.parser.engine.parser_engine_config import (
@@ -293,32 +292,6 @@ class InklingParser(ParserEngine):
             if in_reasoning:
                 count += 1
         return count
-
-    def _single_pass_parse(
-        self,
-        text: str,
-        token_ids: Sequence[int],
-        initial_state: ParserState | None = None,
-    ) -> tuple[str | None, str | None, ExtractedToolCallInformation]:
-        reasoning, content, tool_call_info = super()._single_pass_parse(
-            text, token_ids, initial_state=initial_state
-        )
-        # The engine defers content that follows tool-call events within a
-        # single pass; Inkling allows text blocks after tool-call blocks, so
-        # flush the trailing text (matching the Rust unified parser).
-        if self._deferred_content:
-            trailing = self._deferred_content
-            self._deferred_content = ""
-            content = self._strip_content_whitespace(
-                (content or "") + trailing,
-                tool_call_info.tools_called,
-            )
-            tool_call_info = ExtractedToolCallInformation(
-                tools_called=tool_call_info.tools_called,
-                tool_calls=tool_call_info.tool_calls,
-                content=content,
-            )
-        return reasoning, content, tool_call_info
 
     @staticmethod
     def _extract_args_value(parsed: dict) -> str | None:

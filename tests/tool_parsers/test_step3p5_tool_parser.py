@@ -1034,7 +1034,7 @@ rectangle
     assert args_dict_1["dimensions"]["width"] == 10
     assert args_dict_1["dimensions"]["height"] == 5
 
-    assert extracted_tool_calls.content == "hello"
+    assert extracted_tool_calls.content == "hellohi"
 
     # Verify that tool call tags are NOT in the content
     assert "<function=get_current_weather>" not in extracted_tool_calls.content, (

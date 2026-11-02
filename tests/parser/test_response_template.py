@@ -850,8 +850,7 @@ def test_gemma4_response_template_preserves_content_after_tool_call():
         enable_auto_tools=True,
     )
 
-    assert registered_content is None
-    assert metadata_content == "Done."
+    assert registered_content == metadata_content == "Done."
     assert normalize_calls(metadata_calls) == normalize_calls(registered_calls)
 
 
