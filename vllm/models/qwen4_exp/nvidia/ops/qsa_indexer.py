@@ -8,7 +8,7 @@ import vllm.envs as envs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
-from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
+from vllm.models.qwen4_exp.common.qsa_indexer import QSADCPShard
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up

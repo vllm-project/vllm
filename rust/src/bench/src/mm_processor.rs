@@ -135,6 +135,9 @@ pub struct MmProcessorArgs {
 
 /// Entry point for `vllm-bench mm-processor`.
 pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats) -> Result<()> {
+    if args.max_concurrency == 0 {
+        anyhow::bail!("--max-concurrency must be greater than 0");
+    }
     if args.engine.data_parallel_size_local == Some(0) {
         anyhow::bail!(
             "`--data-parallel-size-local 0` is not supported; the benchmark requires \
@@ -157,6 +160,7 @@ pub async fn run_mm_processor(args: MmProcessorArgs, timing: RequestTimingStats)
         handshake_host: args.engine.handshake_host.clone(),
         handshake_port,
         data_parallel_size: args.engine.data_parallel_size,
+        client_handshake_address: None,
         python_args,
     };
     eprintln!(
@@ -215,14 +219,15 @@ async fn run_mm_processor_with_engine(
     }
 
     // Connect to the engine over the same transport the serving frontend uses.
+    let engine_count =
+        args.engine.data_parallel_size_local.unwrap_or(args.engine.data_parallel_size);
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: format!("tcp://{}:{}", args.engine.handshake_host, handshake_port),
             advertised_host: args.engine.handshake_host.clone(),
-            engine_count: args
-                .engine
-                .data_parallel_size_local
-                .unwrap_or(args.engine.data_parallel_size),
+            engine_start_index: 0,
+            engine_count,
+            data_parallel_size: engine_count,
             ready_timeout: ENGINE_READY_TIMEOUT,
             local_input_address: None,
             local_output_address: None,

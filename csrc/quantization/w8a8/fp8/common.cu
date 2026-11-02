@@ -95,7 +95,7 @@ __global__ void scaled_fp8_quant_kernel_strided_group_shape(
                                               int size, float inv_scale) {
     vectorize_with_alignment<VEC_SIZE>(
         in, out, size, tid, blockDim.x,
-        [=] __device__(fp8_type & dst, const scalar_t& src) {
+        [=] __device__(fp8_type& dst, const scalar_t& src) {
           dst = scaled_fp8_conversion<true, fp8_type>(static_cast<float>(src),
                                                       inv_scale);
         });
@@ -194,7 +194,7 @@ __global__ void scaled_fp8_quant_kernel_strided_dynamic(
   const float reciprocal_scale = 1.0f / (*scale);
   vectorize_with_alignment<16>(
       token_in, token_out, hidden_size, tid, blockDim.x,
-      [=] __device__(fp8_type & dst, const scalar_t& src) {
+      [=] __device__(fp8_type& dst, const scalar_t& src) {
         dst = scaled_fp8_conversion<true, fp8_type>(static_cast<float>(src),
                                                     reciprocal_scale);
       });
@@ -238,7 +238,7 @@ __global__ void dynamic_per_token_scaled_fp8_quant_kernel_strided(
   // 2) quantize
   vectorize_with_alignment<16>(
       token_in, token_out, hidden_size, tid, blockDim.x,
-      [=] __device__(fp8_type & dst, const scalar_t& src) {
+      [=] __device__(fp8_type& dst, const scalar_t& src) {
         dst = scaled_fp8_conversion<false, fp8_type>(static_cast<float>(src),
                                                      token_scale);
       });

@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for attention-related v1 tests."""
 
+import os
 from dataclasses import dataclass
 
 import pytest
@@ -232,15 +233,25 @@ def create_vllm_config(
     if hf_config_override:
         model_config.hf_config.update(hf_config_override)
 
-    return VllmConfig(
-        model_config=model_config,
-        cache_config=cache_config,
-        parallel_config=parallel_config,
-        scheduler_config=scheduler_config,
-        device_config=device_config,
-        load_config=load_config,
-        compilation_config=compilation_config,
-    )
+    # VllmConfig() auto-enables breakable cudagraphs process-wide via
+    # VLLM_USE_BREAKABLE_CUDAGRAPH for breakable-by-default models; keep
+    # that from leaking into unrelated tests sharing this process.
+    breakable_env = os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH")
+    try:
+        return VllmConfig(
+            model_config=model_config,
+            cache_config=cache_config,
+            parallel_config=parallel_config,
+            scheduler_config=scheduler_config,
+            device_config=device_config,
+            load_config=load_config,
+            compilation_config=compilation_config,
+        )
+    finally:
+        if breakable_env is None:
+            os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        else:
+            os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = breakable_env
 
 
 @dataclass

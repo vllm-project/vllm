@@ -3,7 +3,7 @@
 import pytest
 import torch
 
-from vllm.models.qwen4_exp.common.qsa_cache import (
+from vllm.models.qwen4_exp.common.qsa_indexer import (
     _build_qsa_metadata_torch,
     build_qsa_metadata_triton,
 )

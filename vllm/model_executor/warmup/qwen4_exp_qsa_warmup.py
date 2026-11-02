@@ -10,7 +10,7 @@ import torch
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
-    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAFlashAttentionImpl
+    from vllm.models.qwen4_exp.nvidia.qsa import Qwen4ExpQSAImpl
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner as GPUModelRunnerV2
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
     """Warm every reachable QSA specialization: indexer decode-query-length
     profiles plus the sparse attention split-K/merge configs."""
-    qsa_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.indexer_qsa")
+    qsa_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa_indexer")
     attn_module = sys.modules.get("vllm.models.qwen4_exp.nvidia.qsa")
     if qsa_module is None or attn_module is None:
         return
@@ -77,7 +77,7 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
 
     kv_cache = owner.kv_cache
     assert kv_cache.numel()
-    dcp_world_size = cast("Qwen4ExpQSAFlashAttentionImpl", owner.impl).dcp_world_size
+    dcp_world_size = cast("Qwen4ExpQSAImpl", owner.impl).dcp_world_size
     attention_profiles = warmup_qsa_sparse_paged_attention(
         kv_cache,
         block_table_for(owner.layer_name),
@@ -98,22 +98,22 @@ def qwen4_exp_qsa_triton_warmup(worker: "Worker") -> None:
         warmup_qsa_localize_dcp_indices(
             selection_width=indexer.output_width,
             dcp_world_size=dcp_world_size,
-            dcp_rank=cast("Qwen4ExpQSAFlashAttentionImpl", owner.impl).dcp_rank,
+            dcp_rank=cast("Qwen4ExpQSAImpl", owner.impl).dcp_rank,
             cp_kv_cache_interleave_size=cast(
-                "Qwen4ExpQSAFlashAttentionImpl", owner.impl
+                "Qwen4ExpQSAImpl", owner.impl
             ).cp_kv_cache_interleave_size,
         )
         logger.info("Warmed up Qwen4Exp QSA DCP localization kernel.")
 
-    from vllm.models.qwen4_exp.common.qsa_cache import qsa_dcp_selector_is_sharded
+    from vllm.models.qwen4_exp.common.qsa_indexer import qsa_dcp_selector_is_sharded
 
     if dcp_world_size > 1 and qsa_dcp_selector_is_sharded(worker.vllm_config):
-        from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
+        from vllm.models.qwen4_exp.common.qsa_indexer import QSADCPShard
         from vllm.models.qwen4_exp.nvidia.ops.qsa_dcp_selector import (
             warmup_qsa_dcp_selector,
         )
 
-        impl = cast("Qwen4ExpQSAFlashAttentionImpl", owner.impl)
+        impl = cast("Qwen4ExpQSAImpl", owner.impl)
         token_shard = impl.dcp_token_shard
         selector_block_table = block_table_for(indexer.compressed_key_cache.prefix)
         warmup_qsa_dcp_selector(

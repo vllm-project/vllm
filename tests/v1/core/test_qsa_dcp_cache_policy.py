@@ -7,11 +7,11 @@ import pytest
 import torch
 
 from vllm.config import AttentionConfig, DeviceConfig, ModelConfig, VllmConfig
-from vllm.models.qwen4_exp.common import qsa_cache
-from vllm.models.qwen4_exp.common.qsa_cache import (
+from vllm.models.qwen4_exp.common import qsa_indexer
+from vllm.models.qwen4_exp.common.qsa_indexer import (
     QSACompressedKeyCache,
     QSADCPShard,
-    QSAStateBackend,
+    QSAIndexerBackend,
     _build_qsa_metadata_torch,
     compressed_qsa_slot_mapping,
 )
@@ -262,7 +262,7 @@ def _packed_qsa_views(dcp_world_size: int, selector_layout: str = "replicated"):
     attn_groups = [
         [
             AttentionGroup(
-                QSAStateBackend if name == "selector" else _QSAMainBackend,
+                QSAIndexerBackend if name == "selector" else _QSAMainBackend,
                 [name],
                 specs[name],
                 group_id,
@@ -542,7 +542,7 @@ def test_mixed_group_copy_preserves_runner_width(
 def test_qsa_side_cache_builder_keeps_spec_rows_as_decodes(dcp_world_size):
     """The QSA side caches are replicated on every DCP rank, so MTP verify
     rows keep the reorder threshold 1 + num_spec under DCP too."""
-    from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
+    from vllm.models.qwen4_exp.common.qsa_indexer import QSAIndexerMetadataBuilder
 
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size),
@@ -552,7 +552,7 @@ def test_qsa_side_cache_builder_keeps_spec_rows_as_decodes(dcp_world_size):
         use_v2_model_runner=True,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64, max_num_seqs=4),
     )
-    builder = QSAMetadataBuilder(
+    builder = QSAIndexerMetadataBuilder(
         _qsa_selector(dcp_world_size), ["layer.0"], config, torch.device("cpu")
     )
 
@@ -619,7 +619,7 @@ def test_packed_sharded_selector_keeps_its_original_view(monkeypatch) -> None:
     as the DCP=1 cache does (no virtual pages), and its builder takes this
     rank's shard in compressed states."""
     monkeypatch.setattr(
-        qsa_cache, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=1)
+        qsa_indexer, "get_dcp_group", lambda: SimpleNamespace(rank_in_group=1)
     )
     run = _packed_qsa_views(2, selector_layout="sharded")
     assert run.kernel_sizes == [BLOCK_SIZE]

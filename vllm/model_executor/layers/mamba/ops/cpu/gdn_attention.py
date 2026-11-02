@@ -526,12 +526,14 @@ def _spec_forward(
     bias = layer.conv1d.bias
     silu = layer.activation == "silu"
 
+    # The native kernel appends the new tokens at the end of the buffer, which
+    # is where the next step expects them only when every row is full-length.
     can_use_native_conv = (
         (is_amx or is_arm_bf16())
         and width == 4
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
-        and int(seq_lens[0].item()) > 0
+        and int(seq_lens[0].item()) == state_len - (width - 2)
     )
     if can_use_native_conv:
         q_i = int(seq_lens[0].item())
@@ -567,11 +569,9 @@ def _spec_forward(
             if silu:
                 out = F.silu(out)
             conv_out[start : start + q_i] = out.transpose(0, 1).to(conv_out.dtype)
-            # Roll the buffer: drop the accepted history from the front, append
-            # the new draft tokens, keep total length == state_len.
-            keep = B[:, offset + 1 : offset + 1 + (state_len - q_i)]
-            new_B = torch.cat([keep, x_seq], dim=-1)
-            B.copy_(new_B)
+            # Same layout as causal_conv1d_update: the next step reads its
+            # history at column ``num_accepted - 1``.
+            B[:, : width - 2 + q_i] = conv_in[0, :, 1:]
 
     # ---- 2. Recurrent (multi-slot SSM state) ----
     # Single fused kernel call: it runs the recurrence over each sequence's

@@ -31,6 +31,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     mxfp4_round_up_hidden_size_and_intermediate_size,
     select_deepseek_v4_mxfp4_moe_backend,
     select_mxfp4_moe_backend,
+    triton_weight,
 )
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -366,8 +367,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_weight_scale", w13_scale)
             replace_parameter(layer, "w2_weight_scale", w2_scale)
         else:
-            layer.w13_weight = w13
-            layer.w2_weight = w2
+            layer.w13_weight_triton = w13
+            layer.w2_weight_triton = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
 
@@ -444,8 +445,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -467,8 +468,8 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             router_logits=router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
@@ -501,6 +502,108 @@ def _use_k3_situ_aiter(moe: FusedMoEConfig) -> bool:
         and moe.activation_situ_linear_beta is not None
         and rocm_aiter_ops.get_aiter_activation_type("situ") is not None
     )
+
+
+# The gfx942 int4 requant unpacks MXFP4 to f32 and peaks above 20 GiB per rank
+# if all experts convert at once, so it converts in chunks. Chunks are sized by
+# unpacked values rather than experts so that pure TP, which holds every expert
+# at 1/tp width, runs as many chunks as EP.
+_K3_INT4_CONVERT_CHUNK_VALUES = 1 << 27
+
+
+def _mxfp4_experts_to_int4_gfx942(
+    weight: torch.nn.Parameter,
+    scale: torch.nn.Parameter,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Requantize packed MXFP4 experts to shuffled groupwise int4 for gfx942.
+
+    Takes ``(E, N, K // 2)`` MXFP4 weights with ``(E, N, K // 32)`` E8M0
+    scales and returns ``(E, N, K // 2)`` packed int4 with flattened
+    per-32 scales.
+    """
+    from aiter import dtypes as aiter_dtypes
+    from aiter.ops.quant import per_1x32_i4_quant
+    from aiter.ops.shuffle import (
+        pack_int8_to_packed_int4,
+        shuffle_scale_for_int4,
+        shuffle_weight,
+    )
+    from aiter.utility import fp4_utils
+
+    fp4_dtype = torch.float4_e2m1fn_x2
+    e8m0_dtype = torch.float8_e8m0fnu
+
+    w_all = weight.data.view(fp4_dtype)
+    s_all = scale.data.view(e8m0_dtype)
+    num_experts, rows, packed_cols = w_all.shape
+    chunk = min(
+        num_experts,
+        max(1, _K3_INT4_CONVERT_CHUNK_VALUES // (rows * packed_cols * 2)),
+    )
+
+    # Write chunks into a preallocated output. torch.cat of a list
+    # would hold the full result twice at the join.
+    out_packed: torch.Tensor | None = None
+    out_scale: torch.Tensor | None = None
+    scale_stride = 0
+    for lo in range(0, num_experts, chunk):
+        # Shift the last chunk back so every chunk has the same shapes. Under
+        # load_model's max_split_size_mb, a shorter chunk cannot reuse the
+        # cached blocks. The overlapping experts are recomputed identically.
+        lo = min(lo, num_experts - chunk)
+        hi = lo + chunk
+        weight_f32 = fp4_utils.mxfp4_to_f32(w_all[lo:hi])
+        scale_f32 = fp4_utils.e8m0_to_f32(s_all[lo:hi])
+        chunk_experts, output_size, input_size = weight_f32.shape
+        weight_bf16 = (
+            (
+                weight_f32.view(chunk_experts, output_size, input_size // 32, 32)
+                * scale_f32.view(chunk_experts, output_size, input_size // 32, 1)
+            )
+            .view(chunk_experts, output_size, input_size)
+            .to(torch.bfloat16)
+        )
+        del weight_f32, scale_f32
+
+        weight_int4, weight_scale = per_1x32_i4_quant(weight_bf16)
+        del weight_bf16
+        weight_int4 = weight_int4.view(aiter_dtypes.i4x2).view(
+            chunk_experts, output_size, input_size
+        )
+        weight_packed = pack_int8_to_packed_int4(
+            shuffle_weight(weight_int4.view(aiter_dtypes.i8), (16, 16))
+        )
+        del weight_int4
+        chunk_packed = weight_packed.view(
+            chunk_experts, output_size, input_size // 2
+        ).view(aiter_dtypes.i4x2)
+        chunk_scale = (
+            shuffle_scale_for_int4(weight_scale, group_size=32).view(-1).contiguous()
+        )
+        if out_packed is None:
+            out_packed = torch.empty(
+                (num_experts,) + tuple(chunk_packed.shape[1:]),
+                dtype=chunk_packed.dtype,
+                device=chunk_packed.device,
+            )
+            scale_stride = chunk_scale.numel() // chunk_experts
+            out_scale = torch.empty(
+                num_experts * scale_stride,
+                dtype=chunk_scale.dtype,
+                device=chunk_scale.device,
+            )
+        assert out_packed is not None
+        assert out_scale is not None
+        out_packed[lo:hi].copy_(chunk_packed)
+        out_scale[lo * scale_stride : hi * scale_stride].copy_(chunk_scale)
+        # No empty_cache() here: the next chunk reuses these cached
+        # blocks, while releasing them costs a hipFree per temporary.
+        del weight_packed, weight_scale, chunk_packed, chunk_scale
+
+    del w_all, s_all
+    assert out_packed is not None
+    assert out_scale is not None
+    return out_packed, out_scale
 
 
 def _use_k3_situ_int4_gfx942(moe: FusedMoEConfig) -> bool:
@@ -851,8 +954,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             replace_parameter(layer, "w13_weight_scale", w13_scale)
             replace_parameter(layer, "w2_weight_scale", w2_scale)
         else:
-            layer.w13_weight = w13
-            layer.w2_weight = w2
+            layer.w13_weight_triton = w13
+            layer.w2_weight_triton = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
 
@@ -891,109 +994,17 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 "SiLU. Rebuild with the replacement A16W4/int4 pipeline."
             )
 
-        from aiter import dtypes as aiter_dtypes
-        from aiter.ops.quant import per_1x32_i4_quant
-        from aiter.ops.shuffle import (
-            pack_int8_to_packed_int4,
-            shuffle_scale_for_int4,
-            shuffle_weight,
+        w13, w13_scale = _mxfp4_experts_to_int4_gfx942(
+            layer.w13_weight, layer.w13_weight_scale
         )
-        from aiter.utility import fp4_utils
-
-        fp4_dtype = torch.float4_e2m1fn_x2
-        e8m0_dtype = torch.float8_e8m0fnu
-
-        # mxfp4_to_f32 grows the packed weight 8x and peaks above 20 GiB per
-        # rank if all experts convert at once. Convert 8 experts at a time.
-        _CONVERT_CHUNK = 8
-
-        def convert(
-            weight: torch.nn.Parameter,
-            scale: torch.nn.Parameter,
-        ) -> tuple[torch.Tensor, torch.Tensor]:
-            # Drop the source before returning. Packed int4 is the same size as
-            # packed MXFP4, so holding both doubles the footprint. That fits
-            # under expert parallel (1/ep_size experts per rank) and does not
-            # fit under pure tensor parallel.
-            w_all = weight.data.view(fp4_dtype)
-            s_all = scale.data.view(e8m0_dtype)
-            num_experts = w_all.shape[0]
-
-            # Write chunks into a preallocated output. torch.cat of a list
-            # would hold the full result twice at the join.
-            out_packed: torch.Tensor | None = None
-            out_scale: torch.Tensor | None = None
-            scale_stride = 0
-            for lo in range(0, num_experts, _CONVERT_CHUNK):
-                hi = min(lo + _CONVERT_CHUNK, num_experts)
-                weight_f32 = fp4_utils.mxfp4_to_f32(w_all[lo:hi])
-                scale_f32 = fp4_utils.e8m0_to_f32(s_all[lo:hi])
-                chunk_experts, output_size, input_size = weight_f32.shape
-                weight_bf16 = (
-                    (
-                        weight_f32.view(
-                            chunk_experts, output_size, input_size // 32, 32
-                        )
-                        * scale_f32.view(
-                            chunk_experts, output_size, input_size // 32, 1
-                        )
-                    )
-                    .view(chunk_experts, output_size, input_size)
-                    .to(torch.bfloat16)
-                )
-                del weight_f32, scale_f32
-
-                weight_int4, weight_scale = per_1x32_i4_quant(weight_bf16)
-                del weight_bf16
-                weight_int4 = weight_int4.view(aiter_dtypes.i4x2).view(
-                    chunk_experts, output_size, input_size
-                )
-                weight_packed = pack_int8_to_packed_int4(
-                    shuffle_weight(weight_int4.view(aiter_dtypes.i8), (16, 16))
-                )
-                del weight_int4
-                chunk_packed = weight_packed.view(
-                    chunk_experts, output_size, input_size // 2
-                ).view(aiter_dtypes.i4x2)
-                chunk_scale = (
-                    shuffle_scale_for_int4(weight_scale, group_size=32)
-                    .view(-1)
-                    .contiguous()
-                )
-                if out_packed is None:
-                    out_packed = torch.empty(
-                        (num_experts,) + tuple(chunk_packed.shape[1:]),
-                        dtype=chunk_packed.dtype,
-                        device=chunk_packed.device,
-                    )
-                    scale_stride = chunk_scale.numel() // chunk_experts
-                    out_scale = torch.empty(
-                        num_experts * scale_stride,
-                        dtype=chunk_scale.dtype,
-                        device=chunk_scale.device,
-                    )
-                assert out_packed is not None
-                assert out_scale is not None
-                out_packed[lo:hi].copy_(chunk_packed)
-                out_scale[lo * scale_stride : hi * scale_stride].copy_(chunk_scale)
-                del weight_packed, weight_scale, chunk_packed, chunk_scale
-                torch.accelerator.empty_cache()
-
-            del w_all, s_all
-            assert out_packed is not None
-            assert out_scale is not None
-            weight.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
-            scale.data = torch.empty(0, dtype=torch.uint8, device=out_packed.device)
-            torch.accelerator.empty_cache()
-            return out_packed, out_scale
-
-        w13, w13_scale = convert(layer.w13_weight, layer.w13_weight_scale)
         replace_parameter(layer, "w13_weight", w13)
         replace_parameter(layer, "w13_weight_scale", w13_scale)
         del w13, w13_scale
         torch.accelerator.empty_cache()
 
-        w2, w2_scale = convert(layer.w2_weight, layer.w2_weight_scale)
+        w2, w2_scale = _mxfp4_experts_to_int4_gfx942(
+            layer.w2_weight, layer.w2_weight_scale
+        )
         replace_parameter(layer, "w2_weight", w2)
         replace_parameter(layer, "w2_weight_scale", w2_scale)
         del w2, w2_scale
@@ -1099,8 +1110,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             activation=layer.activation,
@@ -1122,8 +1133,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
+            w1=triton_weight(layer, "w13_weight"),
+            w2=triton_weight(layer, "w2_weight"),
             router_logits=router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,

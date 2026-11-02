@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from tests.v1.core.test_prefix_caching import make_kv_cache_manager
-from vllm.models.qwen4_exp.common import qsa_cache
+from vllm.models.qwen4_exp.common import qsa_indexer
 from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp, qsa_dcp_selector
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
@@ -78,9 +78,9 @@ def _reference(dcp_rank, dcp_size, interleave, block_table):
 @pytest.mark.parametrize(
     "build",
     [
-        pytest.param(qsa_cache._build_qsa_metadata_torch, marks=pytest.mark.cpu_test),
+        pytest.param(qsa_indexer._build_qsa_metadata_torch, marks=pytest.mark.cpu_test),
         pytest.param(
-            qsa_cache.build_qsa_metadata_triton,
+            qsa_indexer.build_qsa_metadata_triton,
             marks=pytest.mark.skipif(
                 not current_platform.is_cuda() or not HAS_TRITON,
                 reason="QSA metadata kernel requires CUDA and Triton",
@@ -94,7 +94,7 @@ def test_sharded_metadata_matches_runner_dcp_placement(build, dcp_size, interlea
     """Each compressed state is written once, by the rank that owns its tokens,
     at the local slot the runner gives its last token; visible-state counts
     split the same way."""
-    device = "cuda" if build is qsa_cache.build_qsa_metadata_triton else "cpu"
+    device = "cuda" if build is qsa_indexer.build_qsa_metadata_triton else "cpu"
     num_tokens = sum(QUERY_LENS)
     query_start_loc = torch.tensor([0, QUERY_LENS[0], num_tokens], dtype=torch.int32)
     # Block 0 is the null block, which never receives a write.
@@ -110,7 +110,9 @@ def test_sharded_metadata_matches_runner_dcp_placement(build, dcp_size, interlea
         token_to_req_indices=lambda buffer: buffer.copy_(token_to_req),
     )
     for dcp_rank in range(dcp_size):
-        shard = qsa_cache.QSADCPShard(dcp_rank, dcp_size, interleave // COMPRESS_RATIO)
+        shard = qsa_indexer.QSADCPShard(
+            dcp_rank, dcp_size, interleave // COMPRESS_RATIO
+        )
         local_visible = torch.empty(num_tokens, dtype=torch.int32, device=device)
         _, _, visible, slots = build(
             common,
@@ -149,10 +151,10 @@ def test_sharded_qsa_groups_pass_hybrid_coordinator_under_dcp(dcp_size):
         ),
         compress_ratio=COMPRESS_RATIO,
     )
-    ring = qsa_cache.QSAKeyStateCache(prefix="ring", **cache_args).get_kv_cache_spec(
+    ring = qsa_indexer.QSARawKeyCache(prefix="ring", **cache_args).get_kv_cache_spec(
         SimpleNamespace(num_speculative_tokens=3)
     )
-    compressed = qsa_cache.QSACompressedKeyCache(
+    compressed = qsa_indexer.QSACompressedKeyCache(
         prefix="compressed", **cache_args
     ).get_kv_cache_spec(_sharded_config(dcp_size, COMPRESS_RATIO))
     full = FullAttentionSpec(
@@ -239,7 +241,7 @@ def _sharded_topk_case(dcp_size, topk=32, interleave=4, width=400):
     ]
     ranks = []
     for rank in range(dcp_size):
-        shard = qsa_cache.QSADCPShard(rank, dcp_size, interleave)
+        shard = qsa_indexer.QSADCPShard(rank, dcp_size, interleave)
         local_logits = logits[
             :, shard.global_positions(torch.arange(width // dcp_size))
         ]
@@ -325,7 +327,7 @@ def test_triton_pack_is_bit_identical(topk, world, interleave):
     local = torch.where(torch.arange(topk) < keep, order, -1).int()
     logits, local = logits.cuda(), local.cuda()
     for rank in range(world):
-        shard = qsa_cache.QSADCPShard(rank, world, interleave)
+        shard = qsa_indexer.QSADCPShard(rank, world, interleave)
         expected = _pack_reference(logits, local, shard)
         actual = qsa_dcp_selector.pack_qsa_dcp_candidates(logits, local, shard)
         assert torch.equal(actual.view(torch.int32), expected.view(torch.int32))
@@ -374,7 +376,7 @@ def test_sorted_key_merge_matches_select(world, interleave, case, rows):
             local[torch.rand(rows, topk, generator=generator) < 0.25] = -1
             if rank > 0:
                 local[0] = -1
-        shard = qsa_cache.QSADCPShard(rank, world, interleave)
+        shard = qsa_indexer.QSADCPShard(rank, world, interleave)
         logits, local = logits.cuda(), local.cuda()
         candidates.append(
             qsa_dcp_selector.pack_qsa_dcp_candidates(logits, local, shard)
@@ -457,7 +459,7 @@ def test_fused_expand_localize_matches_expand_then_localize(
             compress_ratio,
             token_topk,
             fused,
-            qsa_cache.QSADCPShard(rank, world, interleave),
+            qsa_indexer.QSADCPShard(rank, world, interleave),
         )
         reference = expanded.clone()
         qsa_localize_dcp_indices(reference, reference, world, rank, interleave)
@@ -471,8 +473,8 @@ def test_sharded_selector_warmup_compiles(world, token_interleave):
     """The warmup compiles the merge and fused expand+localize kernels for a
     sharded deployment; the world-1 shard warms nothing."""
     token_topk, compress_ratio = 2048, 4
-    token_shard = qsa_cache.QSADCPShard(world - 1, world, token_interleave)
-    selector_shard = qsa_cache.QSADCPShard(
+    token_shard = qsa_indexer.QSADCPShard(world - 1, world, token_interleave)
+    selector_shard = qsa_indexer.QSADCPShard(
         world - 1, world, token_interleave // compress_ratio
     )
     qsa_dcp_selector.warmup_qsa_dcp_selector(
@@ -486,8 +488,8 @@ def test_sharded_selector_warmup_compiles(world, token_interleave):
         logits_width=4096,
         token_topk=token_topk,
         compress_ratio=compress_ratio,
-        selector_shard=qsa_cache.QSADCPShard(),
-        token_shard=qsa_cache.QSADCPShard(),
+        selector_shard=qsa_indexer.QSADCPShard(),
+        token_shard=qsa_indexer.QSADCPShard(),
     )
 
 
@@ -606,7 +608,7 @@ def _e2e_cache(keys, shard):
     )
     for request, request_keys in enumerate(keys):
         positions = torch.arange(request_keys.shape[0] * COMPRESS_RATIO).cuda()
-        slots = qsa_cache.compressed_qsa_slot_mapping(
+        slots = qsa_indexer.compressed_qsa_slot_mapping(
             table,
             torch.full_like(positions, request),
             positions,
@@ -675,7 +677,7 @@ def test_sharded_selection_matches_replicated_expand_and_localize(
     max_seq_len = max(s for s, _ in E2E_REQUESTS)
     output_width = E2E_TOKEN_TOPK + COMPRESS_RATIO - 1
 
-    full_cache, full_table = _e2e_cache(keys, qsa_cache.QSADCPShard())
+    full_cache, full_table = _e2e_cache(keys, qsa_indexer.QSADCPShard())
     full_blocks = _e2e_select(
         q, full_cache, full_table, query_start_loc, visible, max_seq_len, None
     )
@@ -691,13 +693,13 @@ def test_sharded_selection_matches_replicated_expand_and_localize(
     selector_interleave = token_interleave // COMPRESS_RATIO
     ranks = []
     for rank in range(world):
-        shard = qsa_cache.QSADCPShard(rank, world, selector_interleave)
+        shard = qsa_indexer.QSADCPShard(rank, world, selector_interleave)
         cache, table = _e2e_cache(keys, shard)
         ranks.append((shard, cache, table, shard.local_lengths(visible)))
 
     def run_rank(rank):
         shard, cache, table, local_visible = ranks[rank]
-        token_shard = qsa_cache.QSADCPShard(rank, world, token_interleave)
+        token_shard = qsa_indexer.QSADCPShard(rank, world, token_interleave)
         local_rows = torch.full(
             (q.shape[0], output_width + 1), 7, dtype=torch.int32, device="cuda"
         )

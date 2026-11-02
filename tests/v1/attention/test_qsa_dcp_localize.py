@@ -92,7 +92,7 @@ def _localize_in_place(selection, world, rank, interleave):
     impl = SimpleNamespace(
         dcp_world_size=world, dcp_rank=rank, cp_kv_cache_interleave_size=interleave
     )
-    _qsa_module().Qwen4ExpQSAFlashAttentionImpl.localize_dcp_selection_(impl, selection)
+    _qsa_module().Qwen4ExpQSAImpl.localize_dcp_selection_(impl, selection)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Triton kernel needs a GPU")
@@ -193,13 +193,13 @@ def _select_with_indexer(
     """
     from types import SimpleNamespace
 
-    from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
+    from vllm.models.qwen4_exp.common.qsa_indexer import QSADCPShard
     from vllm.models.qwen4_exp.nvidia import indexer_qsa
     from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp as qsa_dcp_ops
     from vllm.models.qwen4_exp.nvidia.ops import qsa_dcp_selector
     from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 
-    Qwen4ExpQSAFlashAttentionImpl = _qsa_module().Qwen4ExpQSAFlashAttentionImpl
+    Qwen4ExpQSAImpl = _qsa_module().Qwen4ExpQSAImpl
 
     num_tokens, token_topk, compress_ratio = 2, 4, 2
     impl_calls, kernel_calls, select_calls = [], [], []
@@ -212,7 +212,7 @@ def _select_with_indexer(
 
     def localize_dcp_selection_(selection):
         impl_calls.append(selection)
-        Qwen4ExpQSAFlashAttentionImpl.localize_dcp_selection_(impl, selection)
+        Qwen4ExpQSAImpl.localize_dcp_selection_(impl, selection)
 
     impl.localize_dcp_selection_ = localize_dcp_selection_
     monkeypatch.setattr(
@@ -531,9 +531,7 @@ def test_sharded_ranks_reproduce_the_single_rank_result(
         # Below sm_89 the reader takes the e4m3 bytes as uint8.
         cache_dtype = torch.uint8
     import_module("vllm.models.qwen4_exp.nvidia.model")
-    qsa_backend = import_module(
-        "vllm.models.qwen4_exp.nvidia.qsa"
-    ).Qwen4ExpQSAFlashAttentionBackend
+    qsa_backend = import_module("vllm.models.qwen4_exp.nvidia.qsa").Qwen4ExpQSABackend
     assert qsa_backend.get_impl_cls().lse_base_on_e is False
 
     torch.manual_seed(1234 + seq_len)
@@ -670,13 +668,13 @@ def test_qsa_impl_passes_the_mtp_interleave_check(monkeypatch, interleave):
 
     from vllm.v1.worker import cp_utils
 
-    Qwen4ExpQSAFlashAttentionImpl = _qsa_module().Qwen4ExpQSAFlashAttentionImpl
+    Qwen4ExpQSAImpl = _qsa_module().Qwen4ExpQSAImpl
 
     impl = SimpleNamespace(
         dcp_world_size=4,
         need_to_return_lse_for_decode=True,
         supports_mtp_with_cp_non_trivial_interleave_size=(
-            Qwen4ExpQSAFlashAttentionImpl.supports_mtp_with_cp_non_trivial_interleave_size
+            Qwen4ExpQSAImpl.supports_mtp_with_cp_non_trivial_interleave_size
         ),
     )
     config = SimpleNamespace(

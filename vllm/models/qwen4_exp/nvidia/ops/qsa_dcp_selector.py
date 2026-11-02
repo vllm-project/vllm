@@ -17,7 +17,7 @@ import torch
 
 from vllm.distributed import get_dcp_group
 from vllm.model_executor.warmup.jit_warmup_triton_helper import TritonWarmupTensor
-from vllm.models.qwen4_exp.common.qsa_cache import QSADCPShard
+from vllm.models.qwen4_exp.common.qsa_indexer import QSADCPShard
 from vllm.triton_utils import tl, triton
 
 
@@ -464,7 +464,7 @@ def expand_localize_qsa_block_indices(
     ``visible_blocks`` the global visible counts. ``token_shard`` is this
     rank's share of the main KV cache, in tokens. ``out`` receives the
     selected tokens this rank owns as rank-local indices plus their count,
-    the rows ``Qwen4ExpQSAFlashAttentionImpl.localize_dcp_selection_`` writes.
+    the rows ``Qwen4ExpQSAImpl.localize_dcp_selection_`` writes.
     """
     assert token_topk % compress_ratio == 0
     output_width = token_topk + compress_ratio - 1
