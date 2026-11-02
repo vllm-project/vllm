@@ -444,6 +444,45 @@ def get_current_attn_backend(
     return get_current_attn_backends(vllm_config, layer_names)[0]
 
 
+def contiguous_byte_ranges(
+    src: torch.Tensor, dst: torch.Tensor
+) -> list[tuple[int, int, int]]:
+    """Split two same-shape views into byte ranges contiguous in both.
+
+    Pairs views returned by `KVCacheSpec.slice_for_tp_transfer` on either
+    side, which may differ in physical layout. Returns `(src_offset,
+    dst_offset, num_bytes)` per range, with offsets in bytes from the start of
+    each view's storage, in row-major order of the logical shape.
+    """
+    if src.shape != dst.shape or src.element_size() != dst.element_size():
+        raise ValueError(
+            f"Cannot pair {tuple(src.shape)} x {src.element_size()}B with "
+            f"{tuple(dst.shape)} x {dst.element_size()}B."
+        )
+    if src.numel() == 0:
+        return []
+    elem = src.element_size()
+    dims = [
+        (size, s, d)
+        for size, s, d in zip(src.shape, src.stride(), dst.stride())
+        if size != 1
+    ]
+    contiguous = 1
+    while dims and dims[-1][1] == contiguous and dims[-1][2] == contiguous:
+        contiguous *= dims.pop()[0]
+
+    src_offsets = torch.tensor([src.storage_offset()], dtype=torch.int64, device="cpu")
+    dst_offsets = torch.tensor([dst.storage_offset()], dtype=torch.int64, device="cpu")
+    for size, s, d in dims:
+        idx = torch.arange(size, dtype=torch.int64, device="cpu")
+        src_offsets = (src_offsets[:, None] + idx * s).flatten()
+        dst_offsets = (dst_offsets[:, None] + idx * d).flatten()
+    return [
+        (s * elem, d * elem, contiguous * elem)
+        for s, d in zip(src_offsets.tolist(), dst_offsets.tolist())
+    ]
+
+
 # ---- Per-engine transfer info ----
 
 
@@ -601,7 +640,7 @@ class TransferTopology:
         """Remote ranks whose DCP slice overlaps mine (MLA, `remote_dcp_size > 1`).
 
         Shared by `handshake_target_ranks` (who to query metadata from) and
-        `compute_tp_mapping` (who to actually read from) — for MLA the two
+        NIXL's per-group source ranks (who to actually read from) — for MLA the two
         questions have the identical answer, since DCP sharding is the only
         thing keeping a remote rank from being interchangeable with any other.
         """

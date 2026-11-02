@@ -53,8 +53,12 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Advertise each attention layer's KV heads for spec-driven TP slicing
+#  18: Register Mamba state as regions like any other; replace
+#      physical_blocks_per_logical_kv_block, ssm_sizes and ple_block_len with
+#      physical_blocks_per_group
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 18
 
 
 @dataclass
@@ -68,23 +72,23 @@ class NixlAgentMetadata:
     block_strides: list[int]
     kv_cache_layout: str
     block_size: int
-    ssm_sizes: tuple[int, int]
     attn_backend_name: str
-    physical_blocks_per_logical_kv_block: int
+    # Kernel blocks each logical block of each cache group spans.
+    physical_blocks_per_group: list[int]
     region_num_blocks: list[int] | None = None
     region_group_ids: list[int] | None = None
     region_names: list[str] | None = None
     region_mem_types: list[str] | None = None
     dcp_size: int = 1
     pcp_size: int = 1
-    # Page length of the PLE short-conv state (None when the model has none).
-    ple_block_len: int | None = None
     # Layer names sharing each advertised region, in region order.
     region_members: list[list[str]] = field(default_factory=list)
     # Cache group of each layer in region_members.
     layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # KV heads of each attention layer on this rank, to rebuild its spec.
+    layer_num_kv_heads: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -217,6 +221,16 @@ def compute_nixl_compatibility_hash(
         attn_backend_name,
     )
     return compat_hash
+
+
+@dataclass(frozen=True)
+class ReadSpec:
+    """Specification for a single remote block read operation."""
+
+    remote_rank: int
+    local_block_ids: BlockIds
+    remote_block_ids: BlockIds
+    block_ids_by_region: bool = False
 
 
 @dataclass

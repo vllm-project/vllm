@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields
 from enum import Enum
 from functools import partial
 from typing import ClassVar
@@ -145,6 +145,27 @@ def _nvfp4_kv_views(
         for side in range(2)
     )
     return (k_data, v_data), (k_scale, v_scale), "HND" if hnd else "NHD"
+
+
+@dataclass(frozen=True, kw_only=True)
+class NVFP4AttentionSpec(AttentionSpec):
+    """Slices each of an NVFP4 block's K/V data and scale views by KV head
+    (see `_nvfp4_kv_views`), rather than its `2 * H` slots.
+    """
+
+    def slice_for_tp_transfer(
+        self, cache: torch.Tensor, *args, **kwargs
+    ) -> list[torch.Tensor]:
+        (k_data, v_data), (k_scale, v_scale), layout = _nvfp4_kv_views(
+            cache, self.num_kv_heads
+        )
+        return [
+            sliced
+            for view in (k_data, k_scale, v_data, v_scale)
+            for sliced in super().slice_for_tp_transfer(
+                view if layout == "HND" else view.transpose(1, 2), *args, **kwargs
+            )
+        ]
 
 
 def _get_trtllm_workspace_buffer():
@@ -564,11 +585,10 @@ class FlashInferBackend(AttentionBackend):
         hs_k = nvfp4_kv_cache_full_dim(spec.head_size)
         hs_v = nvfp4_kv_cache_full_dim(spec.head_size_v)
         assert hs_k == hs_v, "nvfp4 with asymmetric K/V head sizes not yet supported"
-        return replace(
-            spec,
-            num_head_slots=2 * spec.num_kv_heads,
-            state_content_bytes=hs_k * get_dtype_size(spec.dtype),
-        )
+        kwargs = {f.name: getattr(spec, f.name) for f in fields(spec) if f.init}
+        kwargs["num_head_slots"] = 2 * spec.num_kv_heads
+        kwargs["state_content_bytes"] = hs_k * get_dtype_size(spec.dtype)
+        return NVFP4AttentionSpec(**kwargs)
 
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [

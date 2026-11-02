@@ -54,6 +54,14 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
             ctx.destroy(linger=0)
 
 
+def _is_attention_spec(spec_type: type[KVCacheSpec]) -> bool:
+    return issubclass(spec_type, AttentionSpec)
+
+
+def _is_ssm_spec(spec_type: type[KVCacheSpec]) -> bool:
+    return issubclass(spec_type, MambaSpec)
+
+
 def get_representative_spec_type(group: KVCacheGroup) -> type[KVCacheSpec]:
     if group.kv_cache_specs:
         return type(next(iter(group.kv_cache_specs.values())))

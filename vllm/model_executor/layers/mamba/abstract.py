@@ -105,6 +105,7 @@ class MambaBase(AttentionLayerBase):
             num_prefill_checkpoint_blocks=int(checkpoint_alignment is not None),
             prefill_checkpoint_alignment=checkpoint_alignment,
         )
+        return self.get_attn_backend().customize_mamba_spec(spec)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
         """Get the attention backend class for this Mamba layer."""

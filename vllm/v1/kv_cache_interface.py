@@ -261,6 +261,34 @@ class KVCacheSpec:
         """
         return True
 
+    def slice_for_tp_transfer(
+        self,
+        cache: torch.Tensor,
+        tp_size: int,
+        tp_rank: int,
+        other_spec: KVCacheSpec,
+        other_tp_size: int,
+        other_tp_rank: int,
+        *,
+        receiving: bool,
+    ) -> list[torch.Tensor]:
+        """Views of `cache` moved between this rank and another TP rank.
+
+        `cache` is this rank's `[B, H, N, C]` view of one layer's cache,
+        real or on the meta device. The other rank's call, given this rank as
+        its peer and the opposite `receiving`, returns views of the same
+        shapes in the same order, so the two lists pair up for transfer.
+        Empty when the pair moves nothing, so the other rank is not a source
+        (or destination) of this one.
+        """
+        if tp_size == other_tp_size and tp_rank == other_tp_rank:
+            return [cache]
+        if tp_size == other_tp_size:
+            return []
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support heterogeneous TP transfers."
+        )
+
 
 def get_block_table_width(
     max_num_blocks: int,
@@ -467,6 +495,50 @@ class AttentionSpec(KVCacheSpec):
             return self.num_head_slots
         return self.num_kv_heads
 
+    # NOTE: KV-head placement across TP belongs to a GQA spec subclass; it
+    # moves there (or goes away) with the spec split of RFC #42449 (#61452).
+    def slice_for_tp_transfer(
+        self,
+        cache: torch.Tensor,
+        tp_size: int,
+        tp_rank: int,
+        other_spec: KVCacheSpec,
+        other_tp_size: int,
+        other_tp_rank: int,
+        *,
+        receiving: bool,
+    ) -> list[torch.Tensor]:
+        """Narrow `cache` to the KV heads moved between the two ranks.
+
+        A cache whose dim 1 is not its KV heads (custom `num_head_slots`)
+        moves whole.
+        """
+        assert isinstance(other_spec, AttentionSpec)
+        n, other_n = self.num_kv_heads, other_spec.num_kv_heads
+        heads, other_heads = tp_size * n, other_tp_size * other_n
+        # Number each side's heads across all its ranks (a replicated head
+        # counts on every rank); a receiving head reads the sending head at
+        # the same position. Pairs are (our head, their head).
+        if receiving:
+            pairs = [(h, h * other_heads // heads) for h in range(heads)]
+        else:
+            pairs = [(h * heads // other_heads, h) for h in range(other_heads)]
+        moved = [
+            ours % n
+            for ours, theirs in pairs
+            if ours // n == tp_rank and theirs // other_n == other_tp_rank
+        ]
+        if not moved:
+            return []
+        if cache.shape[1] == self.num_kv_heads:
+            return [cache[:, moved[0] : moved[-1] + 1]]
+        if self.num_kv_heads == other_spec.num_kv_heads:
+            return [cache]
+        raise NotImplementedError(
+            f"{type(self).__name__} with {self.num_head_slots} head slots cannot "
+            "be sliced by KV head."
+        )
+
     @property
     def state_content_size_bytes(self) -> int:
         """Bytes per (head slot, stored state) cell of the page."""
@@ -564,6 +636,72 @@ class MambaSpec(KVCacheSpec):
             assert self.page_size_padded >= page_size
             return self.page_size_padded
         return page_size
+
+    def _tp_segments(self) -> tuple[tuple[int, ...], ...] | None:
+        """Per state, the local sizes of the consecutive leading-dim segments
+        that are each sharded evenly across TP. None if unknown, so only
+        same-TP transfers are supported. Mamba backends override this."""
+        return None
+
+    def slice_for_tp_transfer(
+        self,
+        cache: torch.Tensor,
+        tp_size: int,
+        tp_rank: int,
+        other_spec: KVCacheSpec,
+        other_tp_size: int,
+        other_tp_rank: int,
+        *,
+        receiving: bool,
+    ) -> list[torch.Tensor]:
+        """Narrow each sharded segment of each state to the rows both ranks hold.
+
+        `cache` is the layer's `[B, 1, 1, C]` int8 page view (see
+        `MambaBase.bind_kv_cache`); one view is returned per shared segment.
+        """
+        assert isinstance(other_spec, MambaSpec)
+        if self.tp_replicated:
+            # Every rank holds the whole state; a receiver takes it from the
+            # sender at its position.
+            if receiving:
+                source = tp_rank * other_tp_size // tp_size
+                return [cache] if other_tp_rank == source else []
+            return (
+                [cache] if tp_rank == other_tp_rank * tp_size // other_tp_size else []
+            )
+        segments = self._tp_segments()
+        other_segments = other_spec._tp_segments()
+        if segments is None or other_segments is None:
+            return super().slice_for_tp_transfer(
+                cache,
+                tp_size,
+                tp_rank,
+                other_spec,
+                other_tp_size,
+                other_tp_rank,
+                receiving=receiving,
+            )
+        pages = cache.flatten(1)
+        views: list[torch.Tensor] = []
+        offset = 0
+        for shape, dtype, sizes, other_sizes in zip(
+            self.shapes, self.dtypes, segments, other_segments, strict=True
+        ):
+            row_bytes = prod(shape[1:]) * get_dtype_size(dtype)
+            for size, other_size in zip(sizes, other_sizes, strict=True):
+                if size * tp_size != other_size * other_tp_size:
+                    raise NotImplementedError(
+                        f"{type(self).__name__} segment of {size} rows at TP "
+                        f"{tp_size} does not shard evenly with {other_size} "
+                        f"rows at TP {other_tp_size}."
+                    )
+                start = max(tp_rank * size, other_tp_rank * other_size)
+                stop = min((tp_rank + 1) * size, (other_tp_rank + 1) * other_size)
+                if start < stop:
+                    first = offset + (start - tp_rank * size) * row_bytes
+                    views.append(pages[:, first : first + (stop - start) * row_bytes])
+                offset += size * row_bytes
+        return views
 
 
 def get_mamba_prefill_checkpoint_position(

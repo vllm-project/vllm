@@ -35,7 +35,6 @@ import queue
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Sequence
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, Any
 
@@ -52,14 +51,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlAgentMetadata,
     NixlConnectorMetadata,
+    ReadSpec,
     RemoteMeta,
     ReqId,
     ReqMeta,
     TransferHandle,
-)
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
-    ReadSpec,
-    _is_attention_spec,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import get_base_request_id
 from vllm.logger import init_logger
@@ -86,6 +82,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     _TRANSFER_MODE: str = "push"
 
     _supports_pp_hma = True
+
+    def _validate_remote_parallel_config(
+        self, agent_metadata: NixlAgentMetadata
+    ) -> None:
+        super()._validate_remote_parallel_config(agent_metadata)
+        local = (self.block_size, tuple(self._physical_blocks_per_group))
+        remote = (
+            agent_metadata.block_size,
+            tuple(agent_metadata.physical_blocks_per_group),
+        )
+        if local != remote:
+            raise NotImplementedError(
+                "NixlPushConnector requires identical P/D block sizes. Kernel "
+                "block size and kernel blocks per logical block: local "
+                f"{local}, remote engine {agent_metadata.engine_id} {remote}."
+            )
 
     def __init__(
         self,
@@ -136,22 +148,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         self._push_writer_stop = threading.Event()
         self._push_writer_thread: threading.Thread | None = None
 
-    def _validate_remote_parallel_config(
-        self, agent_metadata: NixlAgentMetadata
-    ) -> None:
-        super()._validate_remote_parallel_config(agent_metadata)
-        local = (self.block_size, self._physical_blocks_per_logical_kv_block)
-        remote = (
-            agent_metadata.block_size,
-            agent_metadata.physical_blocks_per_logical_kv_block,
-        )
-        if local != remote:
-            raise NotImplementedError(
-                "NixlPushConnector requires identical P/D block sizes. Kernel "
-                "block size and kernel blocks per logical block: local "
-                f"{local}, remote engine {agent_metadata.engine_id} {remote}."
-            )
-
     # --- Lifecycle ----------------------------------------------------- #
 
     def register_kv_caches(self, kv_caches: dict[str, "torch.Tensor"]):
@@ -168,26 +164,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             )
             self._push_writer_thread.start()
             logger.info("nixl-push-writer thread started (rank=%d)", self.tp_rank)
-
-    def _validate_remote_agent_handshake(
-        self,
-        nixl_agent_meta: NixlAgentMetadata,
-        remote_tp_size: int,
-        remote_dcp_size: int = 1,
-        local_region_ids: Sequence[int] | None = None,
-    ) -> None:
-        super()._validate_remote_agent_handshake(
-            nixl_agent_meta, remote_tp_size, remote_dcp_size, local_region_ids
-        )
-        assert self.transfer_topo is not None
-        if (
-            self._head_sharded_draft_regions
-            and self.transfer_topo.tp_size != remote_tp_size
-        ):
-            raise NotImplementedError(
-                "NIXL push mode does not support a head-sharded draft's KV "
-                "under an MLA target with heterogeneous TP. Use pull mode."
-            )
 
     def shutdown(self) -> None:
         self._push_writer_stop.set()
@@ -214,7 +190,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # D-side: track reqs waiting for P to push.
         for req_id, meta in metadata.reqs_to_recv.items():
             meta.local_physical_block_ids = self._logical_to_kernel_block_ids(
-                meta.local_block_ids, self._physical_blocks_per_logical_kv_block
+                meta.local_block_ids, self._physical_blocks_per_group
             )
             assert meta.remote is not None
             remote_engine_id = meta.remote.engine_id
@@ -524,7 +500,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         logical_local = self._as_grouped_block_ids(local_block_ids)
         logical_remote = self._as_grouped_block_ids(remote_block_ids)
         physical_local = self._logical_to_kernel_block_ids(
-            logical_local, self._physical_blocks_per_logical_kv_block
+            logical_local, self._physical_blocks_per_group
         )
 
         push_meta = ReqMeta(
@@ -566,100 +542,58 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         """Issue WRITE transfers to one or more remote TP ranks."""
         assert meta.remote is not None and self.transfer_topo is not None
         engine_id = meta.remote.engine_id
-        plan = self.tp_mappings[engine_id]
-        remote_info = self.transfer_topo.get_engine_info(engine_id)
-        tp_ratio = self.transfer_topo.tp_ratio(remote_info.remote_tp_size)
+        source_ranks = self.source_ranks[engine_id]
 
         # Expand D's logical IDs using the ratio learned during the
         # NIXL handshake. ``meta`` is freshly built by
         # ``_do_start_push_kv`` so mutating it here is safe.
         meta.remote.block_ids = self._logical_to_kernel_block_ids(
-            meta.remote.block_ids,
-            remote_info.remote_physical_blocks_per_logical,
+            meta.remote.block_ids, self._remote_physical_blocks_per_group[engine_id]
         )
-        remote_block_ids = meta.remote.block_ids
-        local_block_ids = meta.local_physical_block_ids
         if not self._dst_pairs[engine_id].groups_match:
             raise NotImplementedError(
                 "NixlPushConnector does not support different producer and "
                 "consumer cache-group layouts"
             )
 
-        # MLA latent is replicated across D's TP ranks: the tp-mapping
-        # collapses it to one rank (fine for reads), but push must WRITE every
-        # D rank or the rest decode stale KV. For hybrid MLA+SSM the sharded
-        # SSM state already targets every covered D rank, so only the
-        # attention groups need widening; pure MLA writes to all handshaked
-        # ranks (only the dst differs per rank).
-        replicate_attn = self.use_mla and tp_ratio < 0
-        if replicate_attn and not self._has_mamba:
-            assert len(plan.all_source_ranks) == 1
-            write_ranks = sorted(self.dst_xfer_side_handles[engine_id])
-        else:
-            write_ranks = list(plan.all_source_ranks)
-
-        num_groups = len(local_block_ids)
-
         def group_ids(block_ids: BlockIds, rank: int) -> BlockIds:
             return [
-                list(block_ids[g])
-                if (self._is_csa_linear and tp_ratio < 0)
-                or (replicate_attn and _is_attention_spec(self._group_spec_types[g]))
-                or rank in plan.source_ranks_per_group[g]
-                else []
-                for g in range(num_groups)
+                list(group) if rank in source_ranks[g] else []
+                for g, group in enumerate(block_ids)
             ]
 
-        read_specs = [
-            ReadSpec(
-                remote_rank=rank,
-                local_block_ids=group_ids(local_block_ids, rank),
-                remote_block_ids=group_ids(remote_block_ids, rank),
-            )
-            for rank in write_ranks
-        ]
-
+        # Each D rank takes the byte ranges the specs slice for it, so KV that
+        # D's ranks replicate (e.g. MLA's latent) is written to every one.
+        ranks = sorted(set().union(*source_ranks))
         handles: list[int] = []
-        for i, spec in enumerate(read_specs):
-            remote_block_size = remote_info.remote_block_size
+        for rank in ranks:
+            spec = ReadSpec(
+                remote_rank=rank,
+                local_block_ids=group_ids(meta.local_physical_block_ids, rank),
+                remote_block_ids=group_ids(meta.remote.block_ids, rank),
+            )
             logger.debug(
-                "Remote agent %s available, calling _xfer_blocks"
-                " on remote rank %s with remote block size %s for req %s",
-                meta.remote.engine_id,
-                spec.remote_rank,
-                remote_block_size,
+                "Remote agent %s available, calling _xfer_blocks on remote rank %s "
+                "for req %s",
+                engine_id,
+                rank,
                 req_id,
             )
-            if tp_ratio < 0 and (not self.use_mla or len(plan.all_source_ranks) > 1):
-                # Multiple targets: write each rank its chunk of local memory.
-                # Hybrid MLA+SSM also lands here: its split handles replicate
-                # the attention descriptors and chunk only the SSM state.
-                split_key = (tp_ratio, remote_block_size)
-                local_xfer_side_handle = self.src_xfer_handles_by_tp_ratio[split_key][i]
-            else:
-                local_xfer_side_handle = self.src_xfer_handles_by_block_size[
-                    remote_block_size
-                ]
-
-            remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
-            ]
-
             handle = self._xfer_blocks(
                 read_spec=spec,
                 request_id=req_id,
-                dst_engine_id=meta.remote.engine_id,
+                dst_engine_id=engine_id,
                 remote_request_id=meta.remote.request_id,
-                local_xfer_side_handle=local_xfer_side_handle,
-                remote_xfer_side_handle=remote_xfer_side_handle,
+                remote_xfer_side_handle=self.dst_xfer_side_handles[engine_id][rank],
             )
             if handle is not None:
                 handles.append(handle)
 
         # Publish all the request's WRITE handles in one locked update: a
         # partial set would let ``_pop_done_transfers`` finish the request
-        # early, then double-report it as the remaining writes land.
-        if handles:
+        # early, then double-report it as the remaining writes land. A rank
+        # whose KV other ranks write (a replica) has nothing to write: done.
+        if handles or not ranks:
             with self._sending_transfers_lock:
                 self._sending_transfers[req_id].extend(handles)
 
@@ -669,7 +603,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
-        local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
     ) -> int | None:
         """Post a WRITE point-to-point xfer request.
@@ -683,6 +616,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = read_spec.remote_block_ids
 
         remote_info = self.transfer_topo.get_engine_info(dst_engine_id)
+        block_size_ratio = self.transfer_topo.block_size_ratio(
+            remote_info.remote_block_size
+        )
+        if block_size_ratio > 1:
+            local_block_ids, remote_block_ids = (
+                self._map_block_ids_for_block_size_ratio(
+                    local_block_ids, remote_block_ids, block_size_ratio
+                )
+            )
 
         notif_id = f"{remote_request_id}:{self.world_size}".encode()
 
@@ -713,34 +655,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 f"{len(remote_block_ids[i])} remote blocks"
             )
 
-        # Get descs ids. Pair k writes local region pairs.local[k] into remote
-        # region pairs.remote[k] at its cache group's blocks.
-        pairs = self._dst_pairs[dst_engine_id]
-        remote_block_descs_ids = self._compute_desc_ids(
-            block_ids=remote_block_ids,
-            dst_num_blocks=self.dst_num_blocks[dst_engine_id],
-            block_size_ratio=None,
-            physical_blocks_per_logical=remote_info.remote_physical_blocks_per_logical,
-            region_num_blocks=self.dst_region_num_blocks[dst_engine_id],
-            pairs=(pairs.remote, pairs.group),
-            ssm_regions=pairs.remote_ssm_regions,
+        local_block_descs_ids, remote_block_descs_ids = self._compute_desc_ids(
+            dst_engine_id, remote_rank, local_block_ids, remote_block_ids
         )
-        local_block_descs_ids = self._compute_desc_ids(
-            block_ids=local_block_ids,
-            dst_num_blocks=self.dst_num_blocks[self.engine_id],
-            block_size_ratio=None,
-            physical_blocks_per_logical=self._physical_blocks_per_logical_kv_block,
-            region_num_blocks=self.dst_region_num_blocks[self.engine_id],
-            pairs=(pairs.local, pairs.group),
-        )
-
         assert len(local_block_descs_ids) == len(remote_block_descs_ids)
 
         handle = None
         try:
             handle = self.nixl_wrapper.make_prepped_xfer(
                 "WRITE",
-                local_xfer_side_handle,
+                self._local_descs[dst_engine_id].handle,
                 local_block_descs_ids,
                 remote_xfer_side_handle,
                 remote_block_descs_ids,
@@ -789,7 +713,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 self._handle_heartbeat(msg[3:])
                 continue
 
-            req_id, tp_size = msg.rsplit(":", 1)
+            req_id = msg.rsplit(":", 1)[0]
 
             if (meta := self._recving_metadata.get(req_id)) is None:
                 # The lease may have expired before the notif arrived.
@@ -798,11 +722,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     "Unrecognized request %s notif (may have expired).", req_id
                 )
                 continue
-            # Consumer waits for one notif per producer rank writing
-            # here: pp_size stages * producers-per-consumer (>1 when
-            # producer TP > consumer TP; tp_size is the producer TP).
-            producers_per_consumer = max(1, int(tp_size) // self.world_size)
-            expected_notifs = meta.pp_size * producers_per_consumer
+            # One notif per producer rank writing here, in every PP stage.
+            assert meta.remote is not None
+            expected_notifs = sum(self._push_senders[meta.remote.engine_id].values())
             self.consumer_notification_counts_by_req[req_id] += 1
             if self.consumer_notification_counts_by_req[req_id] < expected_notifs:
                 continue

@@ -67,7 +67,7 @@ what may differ.
 
 <sup>4</sup> MLA KV cache is replicated across TP workers, so heterogeneous TP works but there is no head-splitting. When P TP > D TP, only a single read is executed (redundant ranks are skipped). D TP > P TP also works.
 
-<sup>5</sup> Hybrid SSM/Mamba models (including GDN) support heterogeneous TP in both directions, provided one TP size is an integer multiple of the other.
+<sup>5</sup> Hybrid SSM/Mamba models (including GDN) support heterogeneous TP in both directions, provided one TP size is an integer multiple of the other and the conv state uses the DS layout (set `VLLM_SSM_CONV_STATE_LAYOUT=DS`). Mamba2 additionally requires both TP sizes to divide `n_groups`; otherwise the handshake fails.
 
 <sup>6</sup> HMA (required by hybrid models) does not support different remote block sizes.
 
