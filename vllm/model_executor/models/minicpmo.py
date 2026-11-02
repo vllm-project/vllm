@@ -40,7 +40,7 @@ from transformers.models.whisper.modeling_whisper import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import AudioDummyOptions, BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
@@ -131,13 +131,12 @@ if os.getenv("USE_FLAGOS") == "1":
 
 
 class MiniCPMOAudioFeatureInputs(TensorSchema):
-    """
-    Dimensions:
-        - bns: Batch size * number of audios * number of slices
-        - bn: Batch size * number of audios
-        - c: Number of channels
-        - l: Length
-        - s: Number of slices
+    """Dimensions:
+    - bns: Batch size * number of audios * number of slices
+    - bn: Batch size * number of audios
+    - c: Number of channels
+    - l: Length
+    - s: Number of slices
     """
 
     type: Literal["audio_features"] = "audio_features"
@@ -163,8 +162,7 @@ class MiniCPMOAudioFeatureInputs(TensorSchema):
 
 
 class MiniCPMOAudioEmbeddingInputs(TensorSchema):
-    """
-    Dimensions:
+    """Dimensions:
         - bn: Batch size * number of audios
         - s: Number of slices
         - h: Hidden size (must match language model backbone)
@@ -404,22 +402,18 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder[MiniCPMOProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_audios = mm_counts.get("audio", 0)
         audio_len = (
             self.info.get_max_audio_chunks_with_most_features()
             * self.info.get_default_audio_sampling_rate()
         )
 
-        audio_overrides = mm_options.get("audio")
-        assert audio_overrides is None or isinstance(audio_overrides, AudioDummyOptions)
-
         audio_mm_data = {
             "audio": self._get_dummy_audios(
                 length=audio_len,
-                num_audios=num_audios,
-                overrides=audio_overrides,
+                num_audios=mm_counts.get("audio", 0),
+                overrides=mm_options.get("audio"),
             )
         }
 
@@ -447,7 +441,7 @@ class MiniCPMOMultiModalProcessor(MiniCPMVMultiModalProcessor[MiniCPMOProcessing
         mm_data: Mapping[str, object],
         mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, NestedTensors]:
-        if (audios := mm_data.get("audios")) is None:
+        if (audios := mm_data.get("audio")) is None:
             return {}
 
         mm_items = self.info.parse_mm_data({"audio": audios}, validate=False)
@@ -1008,8 +1002,7 @@ _MINICPMO_SUPPORT_VERSION = {
     dummy_inputs=MiniCPMODummyInputsBuilder,
 )
 class MiniCPMO(MiniCPMOBaseModel, MiniCPMV2_6):
-    """
-    MiniCPM-O model with audio support.
+    """MiniCPM-O model with audio support.
     Different versions use different LLM backbones:
     - Version 2.6: Uses Qwen2
     - Version 4.5: Uses Qwen3

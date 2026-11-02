@@ -8,8 +8,15 @@ from typing import TYPE_CHECKING
 
 import regex as re
 
+from vllm.logger import init_logger
+
 if TYPE_CHECKING:
+    import torch
+
     from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
+    from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+
+logger = init_logger(__name__)
 
 
 def get_quark_ocp_mx_group_size(
@@ -44,7 +51,78 @@ def get_quark_ocp_mx_group_size(
         return None
 
     assert weight_quant is not None
-    return int(weight_quant["group_size"])
+    group_size = weight_quant.get("group_size")
+    if group_size is None:
+        block_size = weight_quant.get("block_size")
+        if isinstance(block_size, list | tuple) and len(block_size) >= 2:
+            group_size = block_size[1]
+    return int(group_size) if group_size is not None else None
+
+
+def _get_effective_quant_keys(
+    quant_config: "QuantizationConfig",
+    prefix: str,
+    layer_type: "type[torch.nn.Module]",
+) -> tuple["QuantKey | None", "QuantKey | None"]:
+    """Return the (weight, activation) keys a layer runs with: its online
+    quantization target if any, else its checkpoint format. ``None`` denotes an
+    unquantized weight, or an unknown/unquantized activation.
+
+    Raises:
+        NotImplementedError: If the checkpoint format can not be determined.
+
+    """
+    from vllm.model_executor.layers.linear import UnquantizedLinearMethod
+
+    online_quant_config = quant_config.online_quantization_config
+    target = (
+        online_quant_config.resolve_quant_method_cls(layer_type, prefix)
+        if online_quant_config is not None
+        else None
+    )
+    if target is not None:
+        _, _, _, quant_spec, method_cls = target
+        if method_cls in (None, UnquantizedLinearMethod):
+            return None, None
+        # NOTE: The online shorthands' `QuantSpec` (`_ONLINE_SHORTHANDS` in
+        # quantization.py) do not define the activation key: use the method's.
+        return quant_spec.weight, getattr(method_cls, "activation_quant_key", None)
+    return get_checkpoint_quant_keys(quant_config, prefix, layer_type)
+
+
+def get_checkpoint_quant_keys(
+    quant_config: "QuantizationConfig",
+    prefix: str,
+    layer_type: "type[torch.nn.Module]",
+) -> tuple["QuantKey | None", "QuantKey | None"]:
+    """Return the (weight, activation) keys a layer is stored with in the
+    checkpoint. ``None`` denotes an unquantized weight, or an unknown/unquantized
+    activation.
+
+    Raises:
+        NotImplementedError: If the checkpoint format can not be determined.
+
+    """
+    from vllm.model_executor.layers.fused_moe import RoutedExperts
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Static
+
+    if isinstance(quant_config, QuarkConfig):
+        weight_key, activation_key, _ = quant_config.get_quant_method_target(
+            prefix, layer_type
+        )
+        return weight_key, activation_key
+    if isinstance(quant_config, ModelOptMxFp8Config):
+        # Non-excluded linears are MXFP8. TODO: activation keys are left unknown.
+        if quant_config.is_layer_excluded(prefix):
+            return None, None
+        if issubclass(layer_type, RoutedExperts):
+            return quant_config.routed_expert_weight_key(), None
+        return kMxfp8Static, None
+    raise NotImplementedError(
+        f"Cannot determine the checkpoint format of {type(quant_config).__name__}."
+    )
 
 
 def is_shared_expert_quant_fse_compatible(
@@ -52,6 +130,7 @@ def is_shared_expert_quant_fse_compatible(
     expert_prefix: str,
     shared_expert_prefix: str,
     projection_names: list[str] | None = None,
+    moe_backend: str | None = None,
 ) -> tuple[bool, str | None]:
     """Check whether quantization permits fused shared-expert execution.
 
@@ -60,29 +139,103 @@ def is_shared_expert_quant_fse_compatible(
         expert_prefix: Routed-expert module prefix.
         shared_expert_prefix: Shared-expert module prefix.
         projection_names: Shared-expert projection names.
+        moe_backend: MoE backend that runs the fused shared expert.
 
     Returns:
         A compatibility flag and, when incompatible, the reason.
+
     """
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.model_executor.layers.quantization.modelopt import ModelOptMxFp8Config
+    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        is_layer_skipped,
+        kMxfp4Static,
+        kMxfp8Static,
+    )
+    from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
+    from vllm.models.deepseek_v41.quant_config import (
+        DeepseekV4FP8Config as DeepseekV41FP8Config,
+    )
+
     if projection_names is None:
         projection_names = ["gate_up_proj", "down_proj"]
 
     if quant_config is None:
         return True, None
 
-    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-    from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
-    from vllm.model_executor.layers.quantization.utils.quant_utils import (
-        is_layer_skipped,
-    )
-    from vllm.models.deepseek_v4.quant_config import DeepseekV4FP8Config
+    # Re-quantization of a pre-quantized checkpoint.
+    online_quant_config = quant_config.online_quantization_config
+    if online_quant_config is not None:
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
+        from vllm.model_executor.layers.linear import LinearBase
 
-    if isinstance(quant_config, DeepseekV4FP8Config):
+        online_quant_config.packed_modules_mapping = quant_config.packed_modules_mapping
+        shared_prefixes = [
+            f"{shared_expert_prefix}.{projection_name}"
+            for projection_name in projection_names
+        ]
+        is_online_quantized = any(
+            online_quant_config.resolve_quant_method_cls(layer_type, prefix) is not None
+            for layer_type, prefix in [
+                (RoutedExperts, expert_prefix),
+                *((LinearBase, prefix) for prefix in shared_prefixes),
+            ]
+        )
+        if is_online_quantized:
+            # Only check that the routed and shared experts run with the same
+            # keys. Unsupported loading paths (e.g. the format the shared expert
+            # is stored in) raise NotImplementedError at weight loading.
+            try:
+                if (
+                    isinstance(
+                        quant_config, (DeepseekV4FP8Config, DeepseekV41FP8Config)
+                    )
+                    and quant_config.expert_dtype == "fp4"
+                    and moe_backend == "aiter_mega_moe"
+                ):
+                    routed_keys: tuple[QuantKey | None, QuantKey | None] = (
+                        kMxfp4Static,
+                        None,
+                    )
+                else:
+                    routed_keys = _get_effective_quant_keys(
+                        quant_config, expert_prefix, RoutedExperts
+                    )
+                shared_keys = {
+                    _get_effective_quant_keys(quant_config, prefix, LinearBase)
+                    for prefix in shared_prefixes
+                }
+            except NotImplementedError as e:
+                logger.warning_once(str(e))
+                return False, str(e)
+            if moe_backend == "aiter_mega_moe":
+                # AITER MegaMoE quantizes the activations of every slot itself.
+                routed_keys = (routed_keys[0], None)
+                shared_keys = {(weight_key, None) for weight_key, _ in shared_keys}
+            if shared_keys != {routed_keys}:
+                return (
+                    False,
+                    f"shared expert (weight, activation) keys {shared_keys} at "
+                    f"{shared_expert_prefix} do not match the routed expert keys "
+                    f"{routed_keys}",
+                )
+            return True, None
+
+    if moe_backend == "aiter_mega_moe":
+        return (
+            False,
+            "AITER MegaMoE fuses the shared experts only when they are "
+            "requantized to MXFP4, e.g. with --quantization-config.targets "
+            '\'{"*shared_experts*": "mxfp4"}\'',
+        )
+
+    if (
+        isinstance(quant_config, (DeepseekV4FP8Config, DeepseekV41FP8Config))
+        and quant_config.expert_dtype == "fp4"
+    ):
         from vllm.config import get_current_vllm_config
         from vllm.model_executor.models.utils import extract_layer_index
-
-        if quant_config.expert_dtype != "fp4":
-            return False, "DeepSeek-V4 routed experts are not MXFP4"
 
         hf_config = get_current_vllm_config().model_config.hf_config
 
@@ -91,10 +244,13 @@ def is_shared_expert_quant_fse_compatible(
         # logic in DeepseekV4FP8Config.
         quantization_config = getattr(hf_config, "quantization_config", None)
         if quantization_config is None:
-            return False, "DeepSeek-V4 has no quantization configuration"
+            return False, "DeepSeek-V4/V4.1 has no quantization configuration"
 
         if not quant_config._is_quark_mxfp4_ocp(quantization_config):
-            return False, "DeepSeek-v4 FSE is only implemented/tested with Quark MXFP4"
+            return (
+                False,
+                "DeepSeek-V4/V4.1 FSE is only implemented/tested with Quark MXFP4",
+            )
 
         layer_idx = extract_layer_index(shared_expert_prefix)
         if layer_idx >= hf_config.num_hidden_layers:
@@ -111,7 +267,7 @@ def is_shared_expert_quant_fse_compatible(
         ):
             return (
                 False,
-                f"DeepSeek-V4 excludes shared experts at {shared_expert_prefix}",
+                f"DeepSeek-V4/V4.1 excludes shared experts at {shared_expert_prefix}",
             )
 
         shared_expert_weight_name = f"{shared_expert_prefix}.w1"
@@ -137,7 +293,7 @@ def is_shared_expert_quant_fse_compatible(
             return True, None
         return (
             False,
-            f"DeepSeek-V4 shared experts at {shared_expert_prefix} are not MXFP4",
+            f"DeepSeek-V4/V4.1 shared experts at {shared_expert_prefix} are not MXFP4",
         )
 
     if isinstance(quant_config, QuarkConfig):
@@ -238,6 +394,32 @@ def is_shared_expert_quant_fse_compatible(
 
         return True, None
 
+    if isinstance(quant_config, ModelOptMxFp8Config):
+        expert_excluded = quant_config.is_layer_excluded(expert_prefix)
+        if any(
+            quant_config.is_layer_excluded(f"{shared_expert_prefix}.{projection_name}")
+            != expert_excluded
+            for projection_name in projection_names
+        ):
+            return (
+                False,
+                "MXFP8 excludes routed and shared experts inconsistently at "
+                f"{shared_expert_prefix}",
+            )
+        # The shared expert is stored as MXFP8, so it can take an expert slot
+        # only when the routed experts are MXFP8 too (not NVFP4-routed hybrids).
+        if (
+            not expert_excluded
+            and quant_config.routed_expert_weight_key() != kMxfp8Static
+        ):
+            return (
+                False,
+                "routed experts do not run as MXFP8 like the shared expert at "
+                f"{shared_expert_prefix}",
+            )
+
+        return True, None
+
     # TODO: Extend FSE support detection to other quantization methods. Typically,
     # one would check that the experts and shared_experts use the same
     # quantization config. This may be refactored as part of QuantizationConfig later.
@@ -303,13 +485,11 @@ def is_equal_or_regex_match(
     check_contains: bool = False,
     use_fnmatch: bool = False,
 ) -> bool:
-    """
-    Checks whether a value is exactly equal or a regex match for target
+    """Checks whether a value is exactly equal or a regex match for target
     if target starts with 're:'. If check_contains is set to True,
     additionally checks if the target string is contained within the value.
     If use_fnmatch is set, supports shell-style patterns in target.
     """
-
     if target.startswith("re:"):
         pattern = target[3:]
         if re.match(pattern, value):

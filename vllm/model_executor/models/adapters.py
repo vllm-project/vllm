@@ -29,6 +29,24 @@ _T = TypeVar("_T", bound=nn.Module)
 
 logger = init_logger(__name__)
 
+# Load formats whose weight iterators yield tensors that are never reused
+_OWNED_TENSOR_LOAD_FORMATS = frozenset(
+    {
+        "auto",
+        "hf",
+        "safetensors",
+        "mistral",
+        "pt",
+        "npcache",
+        "instanttensor",
+        "tensorizer",
+        "sharded_state",
+        "modelexpress",
+        "runai_streamer",
+        "runai_streamer_sharded",
+    }
+)
+
 _GENERATE_SUFFIXES = [
     "ForCausalLM",
     "ForConditionalGeneration",
@@ -39,7 +57,6 @@ _GENERATE_SUFFIXES = [
 
 def _load_st_projector(model_config: "ModelConfig") -> nn.Module | None:
     """Load Sentence-Transformers Dense projection layers."""
-
     dense_modules = try_get_dense_modules(
         model_config.model, revision=model_config.revision
     )
@@ -191,9 +208,14 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
             target_prefix = ""
 
             seen_weights = list[tuple[str, torch.Tensor]]()
+            owned = (
+                self.vllm_config.load_config.load_format in _OWNED_TENSOR_LOAD_FORMATS
+            )
             for name, loaded_weight in weights:
                 # Clone because the iterator may reuse the tensor buffer
-                seen_weights.append((name, loaded_weight.clone()))
+                seen_weights.append(
+                    (name, loaded_weight if owned else loaded_weight.clone())
+                )
 
                 lookup_name = name
                 if hf_to_vllm_mapper is not None:
@@ -227,8 +249,8 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
                     self._get_name(),
                 )
 
-            # Lazy chain so buffer-reusing weight iterators (e.g.
-            # runai_streamer) are consumed one tensor at a time.
+            # Lazy chain so buffer-reusing weight iterators are consumed
+            # one tensor at a time.
             mapped_weights = (
                 (target_prefix + name, weight)
                 for name, weight in itertools.chain(seen_weights, weights)
@@ -249,8 +271,7 @@ def _create_pooling_model_cls(orig_cls: type[_T]) -> type[_T]:
 
 
 def as_embedding_model(cls: type[_T]) -> type[_T]:
-    """
-    Subclass an existing vLLM model to support embeddings.
+    """Subclass an existing vLLM model to support embeddings.
 
     By default, the embeddings of the whole prompt are extracted from the
     normalized hidden state corresponding to the last token.
@@ -258,6 +279,7 @@ def as_embedding_model(cls: type[_T]) -> type[_T]:
     Note:
         We assume that no extra layers are added to the original model;
         please implement your own model if this is not the case.
+
     """
     # Avoid modifying existing embedding models
     if is_pooling_model(cls):
@@ -285,7 +307,7 @@ def as_embedding_model(cls: type[_T]) -> type[_T]:
 def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     """Resolve the label count for a sequence classification head.
 
-    ``PretrainedConfig.num_labels`` is derived from ``id2label``, which always
+    ``PreTrainedConfig.num_labels`` is derived from ``id2label``, which always
     carries a default of two entries. Composite configs (such as multimodal
     checkpoints) declare their label space on the top-level config, so reading
     ``num_labels`` from ``get_text_config()`` silently returns that default and
@@ -298,16 +320,15 @@ def _resolve_num_labels(hf_config: Any, text_config: Any) -> int:
     if text_config is hf_config:
         return hf_config.num_labels
 
-    from transformers import PretrainedConfig
+    from transformers import PreTrainedConfig
 
-    if hf_config.num_labels != PretrainedConfig().num_labels:
+    if hf_config.num_labels != PreTrainedConfig().num_labels:
         return hf_config.num_labels
     return text_config.num_labels
 
 
 def as_seq_cls_model(cls: type[_T]) -> type[_T]:
-    """
-    Subclass an existing vLLM model to support classify and score tasks.
+    """Subclass an existing vLLM model to support classify and score tasks.
 
     By default, the class probabilities are extracted from the softmaxed
     hidden state corresponding to the last token.
@@ -316,6 +337,7 @@ def as_seq_cls_model(cls: type[_T]) -> type[_T]:
         We assume that the classification head is a single linear layer
         stored as the attribute `score` of the top-level model;
         please implement your own model if this is not the case.
+
     """
     # Avoid modifying existing classification models
     if is_pooling_model(cls):
@@ -446,8 +468,7 @@ class SequenceClassificationConfig(VerifyAndUpdateConfig):
 
 
 def _get_language_model_for_seq_cls(model: nn.Module) -> nn.Module:
-    """
-    Get the language model component for sequence classification conversion.
+    """Get the language model component for sequence classification conversion.
     For VLMs, returns the inner language model. For standard LLMs, returns model itself.
     """
     multimodal_model: object = model
@@ -481,8 +502,7 @@ def _get_language_model_for_seq_cls(model: nn.Module) -> nn.Module:
 
 @contextmanager
 def _disable_seq_cls_loading_on_inner_model(language_model, is_vlm: bool):
-    """
-    Context manager to temporarily disable sequence classification loading
+    """Context manager to temporarily disable sequence classification loading
     on inner VLM models to prevent recursive seq_cls_model_loader calls.
     """
     if not is_vlm:
@@ -542,7 +562,7 @@ def load_weights_using_from_2_way_softmax(
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    if language_model.config.get_text_config().tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.
@@ -611,7 +631,7 @@ def load_weights_no_post_processing(model, weights: Iterable[tuple[str, torch.Te
         text_config.vocab_size,
         text_config.hidden_size,
     )
-    if text_config.tie_word_embeddings:
+    if language_model.config.get_text_config().tie_word_embeddings:
         # embed_tokens is the assumed name for input embeddings. If the model does not
         # have this attribute, we fall back to get_input_embeddings(), which is used by
         # the Transformers modeling backend.

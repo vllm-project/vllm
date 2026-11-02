@@ -181,8 +181,9 @@ run_scale_out_ec() {
     # Encode-only EC producer instance. It runs the vision encoder and
     # publishes embeddings through the ECExampleConnector shared storage.
     echo "Starting encode instance on GPU $GPU_E, port $ENCODE_PORT"
-    env CUDA_VISIBLE_DEVICES="$GPU_E" VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 \
+    env CUDA_VISIBLE_DEVICES="$GPU_E" \
         vllm serve "$MODEL" \
+        --enable-scale-out \
         --port "$ENCODE_PORT" \
         --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \
@@ -204,8 +205,9 @@ run_scale_out_ec() {
     # features plus ec_transfer_params and loads the embeddings that the
     # encode instance published.
     echo "Starting prefill instance on GPU $GPU_PD, port $PREFILL_PORT"
-    env CUDA_VISIBLE_DEVICES="$GPU_PD" VLLM_ENABLE_SCALE_OUT_ENDPOINTS=1 \
+    env CUDA_VISIBLE_DEVICES="$GPU_PD" \
         vllm serve "$MODEL" \
+        --enable-scale-out \
         --port "$PREFILL_PORT" \
         --max-model-len "$MAX_MODEL_LEN" \
         --enforce-eager \

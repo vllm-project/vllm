@@ -8,7 +8,10 @@ import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
-from vllm.config import CacheConfig, get_current_vllm_config
+from vllm.config import (
+    CacheConfig,
+    get_current_vllm_config,
+)
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.logger import init_logger
@@ -100,6 +103,7 @@ def _largest_kernel_block_within(
     per_token_bytes: int,
     page_budget: int,
     fallback: int,
+    kv_cache_spec: KVCacheSpec | None = None,
 ) -> int:
     """Largest supported kernel block size whose page fits in ``page_budget``.
 
@@ -111,7 +115,7 @@ def _largest_kernel_block_within(
     """
     from vllm.v1.attention.backend import MultipleOf
 
-    sizes = attn_backend.get_supported_kernel_block_sizes()
+    sizes = attn_backend.get_supported_kernel_block_sizes(kv_cache_spec)
     max_block_size = page_budget // per_token_bytes
     candidates = [s for s in sizes if isinstance(s, int)]
     candidates.extend(
@@ -166,8 +170,8 @@ def _init_kv_cache_quant(
         layer: The attention layer instance to initialize.
         quant_config: Optional quantization configuration.
         prefix: Layer name prefix for quantization method lookup.
-    """
 
+    """
     # Note [Register q/k/v/prob scales in state dict]
     # When calling model.to(device), only parameters/buffers in state dict are
     # moved. If not registering q/k/v/prob scales in state dict, there would
@@ -252,10 +256,10 @@ class Attention(nn.Module, AttentionLayerBase):
         mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
+        query_pre_quantized: bool = False,
         **extra_impl_args,
     ) -> None:
-        """
-        The KV cache is stored inside this class and is accessed via
+        """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
         """
         super().__init__()
@@ -274,6 +278,11 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = cache_config.cache_dtype
         else:
             kv_cache_dtype = "auto"
+
+        if quant_config is not None and kv_cache_dtype == "auto":
+            checkpoint_kv_cache_dtype = quant_config.get_kv_cache_dtype(prefix)
+            if checkpoint_kv_cache_dtype is not None:
+                kv_cache_dtype = checkpoint_kv_cache_dtype
 
         # llm-compressor models declare an FP8 KV-cache scheme in their
         # checkpoint config. Honor it only when the user did not explicitly
@@ -449,6 +458,8 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        # Set by models that write KV before calling attention with key=None.
+        self.kv_cache_update_bypass = False
         # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
         # (read by the Triton backend impl). Default False for all other models.
         self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
@@ -464,7 +475,11 @@ class Attention(nn.Module, AttentionLayerBase):
         # for attn backends supporting query quantization
         self.query_quant = None
         if (
-            self.impl.supports_quant_query_input
+            # A model whose fused QK-norm/RoPE kernel already emits the
+            # quantized query (MiniMax-M3's DSpark draft) passes
+            # query_pre_quantized and skips this second quantization.
+            not query_pre_quantized
+            and self.impl.supports_quant_query_input
             and (
                 self.kv_cache_dtype.startswith("fp8")
                 or self.kv_cache_dtype.startswith("nvfp4")
@@ -493,8 +508,7 @@ class Attention(nn.Module, AttentionLayerBase):
         output_shape: torch.Size | None = None,
         output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
-        """
-        The KV cache is stored inside this class and is accessed via
+        """The KV cache is stored inside this class and is accessed via
         `self.kv_cache`.
 
         Attention metadata (`attn_metadata`) is set using a context manager in
@@ -515,7 +529,10 @@ class Attention(nn.Module, AttentionLayerBase):
             )
 
             # check if query quantization is supported
-            if self.impl.supports_quant_query_input:
+            if (
+                self.impl.supports_quant_query_input
+                and query.dtype != current_platform.fp8_dtype()
+            ):
                 query, _ = self.query_quant(query, self._q_scale)
 
         if output_shape is None:
@@ -634,7 +651,7 @@ class Attention(nn.Module, AttentionLayerBase):
             # ``unify`` scales it up by an integer ratio.
             shared_page = vllm_config.cache_config.skip_page_size_padded
             # The backend owns its packing
-            sw_per_token = self.attn_backend.customize_spec(
+            kv_cache_spec = self.attn_backend.customize_spec(
                 SlidingWindowSpec(
                     block_size=1,
                     num_kv_heads=self.num_kv_heads,
@@ -644,10 +661,15 @@ class Attention(nn.Module, AttentionLayerBase):
                     kv_quant_mode=quant_mode,
                     sliding_window=self.sliding_window,
                 )
-            ).real_page_size_bytes
+            )
+            sw_per_token = kv_cache_spec.real_page_size_bytes
             page_budget = shared_page or sw_per_token * block_size
             sw_block_size = _largest_kernel_block_within(
-                self.attn_backend, sw_per_token, page_budget, block_size
+                self.attn_backend,
+                sw_per_token,
+                page_budget,
+                block_size,
+                kv_cache_spec,
             )
             return SlidingWindowSpec(
                 block_size=sw_block_size,
@@ -691,6 +713,7 @@ def get_attention_context(
 
         Note: attn_metadata may be None, but attn_layer and kv_cache are always
         extracted from the forward context.
+
     """
     forward_context: ForwardContext = get_forward_context()
     attn_metadata_raw = forward_context.attn_metadata
@@ -718,8 +741,7 @@ def unified_kv_cache_update(
     value: torch.Tensor,
     layer_name: LayerNameType,
 ) -> torch.Tensor:
-    """
-    Returns a dummy that is passed to unified_attention to signal a side effect and
+    """Returns a dummy that is passed to unified_attention to signal a side effect and
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)

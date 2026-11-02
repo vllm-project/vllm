@@ -12,6 +12,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 from vllm.v1.kv_offload.base import LookupResult, OffloadKey, ReqContext
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
+    SecondaryTierManager,
     TieringOffloadingMetrics,
     TransferJob,
 )
@@ -41,6 +42,7 @@ class _TierState:
     active_cascade_count: int = 0
     primary_write_chunk_count: int = 0
     primary_read_chunk_count: int = 0
+    deferred_release_chunk_count: int = 0
 
 
 class TieringMetricsTracker:
@@ -123,12 +125,59 @@ class TieringMetricsTracker:
         self, job_metadata: _JobMetadataLike, result: JobResult
     ) -> None:
         self._observe_finished_job_stats(job_metadata, result)
+        if job_metadata.transfer_job.is_promotion:
+            self._observe_promotion_latency(job_metadata, result)
         self._decrement_tier_state(job_metadata)
+
+    def on_release_deferred(self, tier_idx: int, chunk_count: int) -> None:
+        self._tier_states[tier_idx].deferred_release_chunk_count += chunk_count
+
+    def on_deferred_release_done(
+        self, tier_idx: int, chunk_count: int, hold_duration: float
+    ) -> None:
+        state = self._tier_states[tier_idx]
+        state.deferred_release_chunk_count -= chunk_count
+        assert state.deferred_release_chunk_count >= 0
+        self._stats.observe_histogram(
+            TieringOffloadingMetrics.DEFERRED_RELEASE_HOLD,
+            hold_duration,
+            self.tier_label(tier_idx),
+        )
 
     def on_promotion_allocation_failure(self) -> None:
         self._stats.increase_counter(
             TieringOffloadingMetrics.PROMOTION_ALLOCATION_FAILURES
         )
+
+    def record_backpressure(
+        self,
+        tiers: list[SecondaryTierManager],
+    ) -> None:
+        for i, tier in enumerate(tiers):
+            detector = tier.bp_detector
+            if detector is None:
+                continue
+            label = self.tier_label(i)
+            ema = detector.stats.get("store_latency_ema")
+            if ema is not None:
+                self._stats.set_gauge(
+                    TieringOffloadingMetrics.BACKPRESSURE_STORE_LATENCY_EMA,
+                    ema,
+                    labelvalues=label,
+                )
+            stores_dropped, blocks_dropped = detector.policy.pop_stores_dropped()
+            if stores_dropped > 0:
+                self._stats.increase_counter(
+                    TieringOffloadingMetrics.BACKPRESSURE_STORES_DROPPED,
+                    stores_dropped,
+                    labelvalues=label,
+                )
+            if blocks_dropped > 0:
+                self._stats.increase_counter(
+                    TieringOffloadingMetrics.BACKPRESSURE_BLOCKS_DROPPED,
+                    blocks_dropped,
+                    labelvalues=label,
+                )
 
     def take_stats(self) -> OffloadingConnectorStats | None:
         active_transfer_stats = OffloadingConnectorStats()
@@ -151,6 +200,7 @@ class TieringMetricsTracker:
             and state.active_cascade_count == 0
             and state.primary_write_chunk_count == 0
             and state.primary_read_chunk_count == 0
+            and state.deferred_release_chunk_count == 0
             for state in self._tier_states
         )
 
@@ -206,6 +256,24 @@ class TieringMetricsTracker:
                 time_metric, completed_job.transfer_time, labelvalues
             )
 
+    def _observe_promotion_latency(
+        self, job_metadata: _JobMetadataLike, result: JobResult
+    ) -> None:
+        """Record promotion time from job creation to reported completion.
+
+        This is broader than the tier-reported `JobResult.transfer_time`, which
+        covers only the active data movement, and so includes tier queueing.
+        Failed promotions are observed too; PROMOTION_JOB_FAILURES counts them.
+        """
+        self._stats.observe_histogram(
+            TieringOffloadingMetrics.PROMOTION_LATENCY,
+            time.monotonic() - job_metadata.transfer_job.submit_time,
+            (
+                *self.tier_label(job_metadata.tier_idx),
+                "success" if result.success else "failure",
+            ),
+        )
+
     def _observe_active_transfer_stats(self, stats: OffloadingConnectorStats) -> None:
         for tier_idx, state in enumerate(self._tier_states):
             labelvalues = self.tier_label(tier_idx)
@@ -237,6 +305,11 @@ class TieringMetricsTracker:
             stats.set_gauge(
                 TieringOffloadingMetrics.ACTIVE_CASCADE_JOBS,
                 state.active_cascade_count,
+                labelvalues,
+            )
+            stats.set_gauge(
+                TieringOffloadingMetrics.DEFERRED_RELEASE_CHUNKS,
+                state.deferred_release_chunk_count,
                 labelvalues,
             )
 

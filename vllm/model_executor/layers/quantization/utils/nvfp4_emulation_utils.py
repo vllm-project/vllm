@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
 from types import SimpleNamespace
 
 import torch
@@ -11,10 +12,14 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 __all__ = [
     "break_fp4_bytes",
+    "dequantize_nvfp4_moe_weights",
     "dequantize_to_dtype",
     "nvfp4_gathered_bias",
     "ref_nvfp4_quant",
 ]
+
+# Target size of the dequantized expert chunks yielded for requantization.
+_DEQUANT_CHUNK_BYTES = 1 << 30
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT4_E2M1_MAX_RECIPROCAL = 1 / FLOAT4_E2M1_MAX
@@ -43,6 +48,22 @@ def _e2m1_inline(nibble):
     val = tl.where(magnitude == 1, 0.5, val)
 
     return tl.where(sign == 1, -val, val)
+
+
+@triton.jit
+def _e4m3_inline(byte):
+    """Decode an FP8 E4M3FN byte to float32 without an FP8 pointer type.
+
+    Typed FP8 loads need SM89+ in Triton; reading the scale as uint8 and
+    decoding here keeps the caller portable.
+    """
+    bits = byte.to(tl.int32)
+    exponent = (bits >> 3) & 0xF
+    mantissa = (bits & 0x7).to(tl.float32)
+    normal = (1.0 + mantissa * 0.125) * tl.exp2((exponent - 7).to(tl.float32))
+    val = tl.where(exponent == 0, mantissa * 0.001953125, normal)
+    val = tl.where((bits & 0x7F) == 0x7F, float("nan"), val)
+    return tl.where((bits & 0x80) != 0, -val, val)
 
 
 @triton.jit
@@ -613,6 +634,99 @@ def dequantize_to_dtype(
     return out.to(dtype)
 
 
+def _dequantize_nvfp4_moe_experts(
+    w13_weight_packed: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w13_weight_global_scale: torch.Tensor,
+    w2_weight_packed: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+    w2_weight_global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    group_size: int,
+    invert_global_scales: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if invert_global_scales:
+        w13_weight_global_scale = 1.0 / w13_weight_global_scale
+        w2_weight_global_scale = 1.0 / w2_weight_global_scale
+
+    w13_num_shards = w13_weight_global_scale.shape[1]
+    w13_weights = torch.chunk(w13_weight_packed, w13_num_shards, dim=1)
+    w13_scales = torch.chunk(w13_weight_scale, w13_num_shards, dim=1)
+    w13 = torch.cat(
+        [
+            dequantize_to_dtype(
+                weight,
+                scale,
+                w13_weight_global_scale[:, shard_idx].contiguous(),
+                dtype,
+                block_size=group_size,
+                swizzle=False,
+            )
+            for shard_idx, (weight, scale) in enumerate(
+                zip(w13_weights, w13_scales, strict=True)
+            )
+        ],
+        dim=1,
+    )
+    w2 = dequantize_to_dtype(
+        w2_weight_packed,
+        w2_weight_scale,
+        w2_weight_global_scale,
+        dtype,
+        block_size=group_size,
+        swizzle=False,
+    )
+    return w13, w2
+
+
+@torch.no_grad()
+def dequantize_nvfp4_moe_weights(
+    w13_weight_packed: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w13_weight_global_scale: torch.Tensor,
+    w2_weight_packed: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+    w2_weight_global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    group_size: int = 16,
+    *,
+    invert_global_scales: bool = True,
+) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+    """Dequantize serialized NVFP4 MoE weights for requantization.
+
+    Compressed-tensors stores global encode scales, while ModelOpt stores
+    ``weight_scale_2`` as the corresponding decode multiplier. Set
+    ``invert_global_scales`` according to the source checkpoint convention.
+
+    Returns:
+        An iterator of ``(experts, w13, w2)`` over groups of experts, so that
+        the dequantized staging tensors stay around ``_DEQUANT_CHUNK_BYTES``.
+
+    """
+    num_experts = w13_weight_packed.shape[0]
+    # Two fp4 values per packed byte.
+    expert_bytes = (
+        dtype.itemsize
+        * 2
+        * (w13_weight_packed[0].numel() + w2_weight_packed[0].numel())
+    )
+    experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+    for start in range(0, num_experts, experts_per_chunk):
+        experts = slice(start, min(start + experts_per_chunk, num_experts))
+        w13, w2 = _dequantize_nvfp4_moe_experts(
+            w13_weight_packed[experts],
+            w13_weight_scale[experts],
+            w13_weight_global_scale[experts],
+            w2_weight_packed[experts],
+            w2_weight_scale[experts],
+            w2_weight_global_scale[experts],
+            dtype,
+            group_size,
+            invert_global_scales,
+        )
+        yield experts, w13, w2
+
+
 def get_reciprocal(x):
     if isinstance(x, torch.Tensor):
         # torch.where yields operation not permitted when stream is capturing.
@@ -657,8 +771,7 @@ def ref_nvfp4_quant(x, global_scale, block_size):
 def ref_nvfp4_quant_dequant(
     x: torch.Tensor, global_scale: torch.Tensor, block_size: int
 ) -> torch.Tensor:
-    """
-    NVFP4 quantize-dequantize operation.
+    """NVFP4 quantize-dequantize operation.
 
     `global_scale` is expected to have a single element.
     """

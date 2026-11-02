@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Triton-based W4A16 GEMM kernel for ROCm MI300.
+"""Triton-based W4A16 GEMM kernel for ROCm MI300.
 
 Implements fused int4-weight dequantization + fp16 GEMM in a single kernel,
 using GPTQ sequential packing (8 int4 values per int32, shifts [0,4,...,28]).
@@ -67,8 +66,7 @@ def triton_w4a16_gemm_kernel(
     BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
-    """
-    Fused W4A16 GEMM: C[M,N] = A[M,K] @ dequant(B)[K,N]
+    """Fused W4A16 GEMM: C[M,N] = A[M,K] @ dequant(B)[K,N].
 
     B is stored as [K, N//8] int32 using GPTQ sequential packing:
       each int32 packs 8 consecutive N-values at bit offsets [0,4,8,12,16,20,24,28].
@@ -81,7 +79,8 @@ def triton_w4a16_gemm_kernel(
     pid_n = tl.program_id(1)
 
     # Row/col offsets for this tile
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    # int64 rows: offs_m * stride_am and offs_m * stride_cm pass 2**31 for large M
+    offs_m = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
     # b/zeros are stored with N packed: N//8 int32 columns per K row
@@ -170,8 +169,7 @@ def _triton_w4a16_gemm_impl(
     group_size: int,
     zp_bias: int = 8,  # bias for uint4b8 when qzeros is None
 ) -> torch.Tensor:
-    """
-    Fused W4A16 GEMM using GPTQ-packed int4 weights.
+    """Fused W4A16 GEMM using GPTQ-packed int4 weights.
 
     Args:
         a:          Activation matrix [M, K], float16 or bfloat16.
@@ -184,6 +182,7 @@ def _triton_w4a16_gemm_impl(
 
     Returns:
         Output matrix [M, N], same dtype as a.
+
     """
     assert a.is_contiguous(), "Activation matrix must be contiguous"
     assert b_q.is_contiguous(), "Weight matrix must be contiguous"
@@ -302,8 +301,7 @@ def triton_w4a16_gemm(
 
 
 class TritonW4A16LinearKernel(MPLinearKernel):
-    """
-    Triton-based W4A16 GEMM kernel for ROCm (MI300 and newer).
+    """Triton-based W4A16 GEMM kernel for ROCm (MI300 and newer).
 
     Supports GPTQ-format int4 weights (uint4b8 symmetric, uint4 asymmetric)
     with grouped quantization. Weight tensors are transposed from the
@@ -360,8 +358,7 @@ class TritonW4A16LinearKernel(MPLinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        """
-        Convert compressed-tensors checkpoint layout to kernel layout.
+        """Convert compressed-tensors checkpoint layout to kernel layout.
 
         Checkpoint (from compressed_tensors_wNa16.create_weights):
           weight_packed:     [N, K//8]  int32   input_dim=1, output_dim=0, packed_dim=1

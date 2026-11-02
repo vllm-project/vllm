@@ -5,6 +5,7 @@ from unittest import mock
 
 import pytest
 import torch
+import torch.nn as nn
 
 from tests.v1.attention.utils import (
     BatchSpec,
@@ -23,12 +24,38 @@ from vllm.config import (
 )
 from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_glm_mtp_defers_lm_head(default_vllm_config):
+    from vllm.model_executor.models import deepseek_mtp
+    from vllm.models.glm5next.common import mtp
+
+    config = mock.MagicMock(
+        hidden_size=16,
+        rms_norm_eps=1e-5,
+        index_topk=8,
+        index_kpool=4,
+    )
+    vllm_config = mock.MagicMock()
+    vllm_config.speculative_config.draft_model_config.hf_text_config = config
+    vllm_config.scheduler_config.max_num_batched_tokens = 4
+
+    with (
+        mock.patch.object(mtp, "Glm5NextDecoderLayer", return_value=nn.Identity()),
+        mock.patch.object(deepseek_mtp, "ParallelLMHead") as parallel_lm_head,
+        mock.patch.object(mtp.current_platform, "device_type", "cpu"),
+    ):
+        layer = mtp.Glm5NextMultiTokenPredictorLayer(vllm_config, "model.layers.1")
+
+    parallel_lm_head.assert_not_called()
+    assert layer.shared_head.head is None
 
 
 def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
@@ -66,7 +93,6 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
 @mock.patch("vllm.v1.spec_decode.llm_base_proposer.get_model")
 def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_group):
     """Test MTP-specific model loading with unified model approach."""
-
     # Setup mocks
     mock_model = mock.MagicMock()
     mock_model.model.embed_tokens.weight.shape = (131072, 4096)
@@ -78,15 +104,8 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
 
     target_attn_layers = {"target_attn_1": mock.MagicMock()}
     all_attn_layers = {**target_attn_layers, "draft_attn_1": mock.MagicMock()}
-    target_indexer_layers: dict = {}
-    all_indexer_layers: dict = {}
 
-    mock_get_layers.side_effect = [
-        target_attn_layers,
-        target_indexer_layers,
-        all_attn_layers,
-        all_indexer_layers,
-    ]
+    mock_get_layers.side_effect = [target_attn_layers, all_attn_layers]
 
     mock_pp_group = mock.MagicMock()
     mock_pp_group.world_size = 1
@@ -113,12 +132,13 @@ def test_mtp_load_model_unified(mock_get_model, mock_get_layers, mock_get_pp_gro
     assert proposer.model.lm_head == target_model.lm_head
     # MTP shares embed_tokens with target model
     assert proposer.model.model.embed_tokens == target_model.model.embed_tokens
+    assert proposer._draft_attn_layer_names == {"draft_attn_1"}
+    assert all_attn_layers["draft_attn_1"].is_draft_layer is True
 
 
 @pytest.mark.parametrize("num_speculative_tokens", [1])
 def test_mtp_propose(num_speculative_tokens, monkeypatch):
-    """Test that MTP's forward method returns hidden states directly"""
-
+    """Test that MTP's forward method returns hidden states directly."""
     device = torch.device(DEVICE_TYPE)
     batch_size = 2
     seq_lens = [5, 3]
@@ -196,7 +216,6 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
         device=device,
     )
 
-    proposer.runner = mock.MagicMock()
     mock_attn_group = mock.MagicMock()
     mock_attn_group.get_metadata_builder.return_value = attn_metadata_builder
     mock_attn_group.layer_names = list(proposer._draft_attn_layer_names)
@@ -219,3 +238,24 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
     assert model_mock.called
     # Verify output shape
     assert result.shape == (batch_size, num_speculative_tokens)
+
+
+@pytest.mark.parametrize(
+    ("method", "expected"),
+    [
+        (None, False),
+        ("ngram", False),
+        ("mtp", True),
+        ("eagle3", True),
+        ("draft_model", True),
+        ("dspark", False),
+    ],
+)
+def test_deepseek_v4_mtp_hidden_buffer_skips_dspark(method, expected):
+    """Only drafters that read DeepSeek V4's pre-hc_head residual get the
+    buffer; DSpark drafts from the target's aux hidden states."""
+    spec_config = None
+    if method is not None:
+        spec_config = SpeculativeConfig.__new__(SpeculativeConfig)
+        object.__setattr__(spec_config, "method", method)
+    assert needs_mtp_hidden_buffer(spec_config) is expected

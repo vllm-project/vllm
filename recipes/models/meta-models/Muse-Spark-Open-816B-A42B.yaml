@@ -1,0 +1,407 @@
+meta:
+  title: "Muse Spark Open"
+  slug: "muse-spark-open-816b-a42b"
+  provider: "Muse (Meta)"
+  description: "Sparse MoE reasoning model with 816B total / 42B active parameters and a 1M-token context, built for long-horizon agentic coding. Native image and video perception, channel-scoped reasoning and tool calls via the `muse` parsers, and an optional DSpark draft model for speculative decoding."
+  date_added: 2026-10-15
+  date_updated: 2026-10-16
+  tasks:
+    - text
+    - multimodal
+  performance_headline: "MXFP4 and BF16 on one 8-GPU node: TP + expert parallel with DSpark for interactive serving, TP + expert parallel alone for peak MXFP4 throughput"
+  related_recipes: ["meta-models/Muse-Glimmer-30B"]
+  default_hardware: mi355x
+  default_variant:
+    amd: mxfp4
+  hardware:
+    h200: verified
+    gb200: verified
+    gb300: verified
+    mi350x: verified
+    mi355x: verified
+
+model:
+  model_id: "meta-models/Muse-Spark-Open-816B-A42B"
+  # Support is not upstream yet: vllm-project/vllm#61879 lands it in the nightly
+  # wheel. Revise to the release that actually carries the merge.
+  min_vllm_version: "0.33.0"
+  nightly_required: true
+  docker_image:
+    nvidia: "vllm/vllm-openai:muse-spark-open"
+    amd: "vllm/vllm-openai-rocm:muse-spark-open"
+  install:
+    docker:
+      note: "Serve from the image of your GPU vendor — no pip wheel is available now."
+    pip: false
+  # The CPU-side Rust frontend works with both CUDA and ROCm engine cores.
+  default_frontend: rust
+  architecture: moe
+  # Derived from the checkpoint config, not just the name. 62 layers, hidden
+  # 8192, 256 experts at top-8, experts running at the compressed width 4096
+  # with SwiGLU intermediate 4096:
+  #   experts   62 x 256 x 3 x 4096 x 4096   = 798.9 B
+  #   attention 62 x (128+16+16+128)x64x8192 =  13.5 B
+  #   squeeze/expand 62 x 2 x 8192 x 4096    =   4.2 B
+  #   router + embed + untied lm_head        =   3.4 B   -> 820.0 B
+  # Active excludes embeddings: 62 x 690.0 M = 42.8 B.
+  parameter_count: "816B"
+  active_parameters: "42B"
+  # max_position_embeddings: 1048576 in the checkpoint config, matching
+  # tokenizer_config.json. Serving the full window needs --max-model-len.
+  context_length: 1048576
+  # No --trust-remote-code: all six Muse Spark configs are registered in-tree
+  # (vllm/transformers_utils/config.py).
+  base_args: []
+  base_env: {}
+
+features:
+  reasoning:
+    description: "Channel-scoped chain-of-thought. Strength is set per request with the top-level `reasoning_effort` field — low/medium/high/xhigh map to strength hints 8/32/256/512, defaulting to xhigh when the field is omitted. Legacy `disable_reasoning` and `enable_thinking` kwargs are ignored."
+    args:
+      - "--reasoning-parser"
+      - "muse"
+  tool_calling:
+    description: "Channel-scoped tool calls. The parser is scoped to the tool channel, so an invocation echoed back inside ordinary assistant text is not re-parsed as a call. The template always offers `self` as a valid recipient."
+    args:
+      - "--enable-auto-tool-choice"
+      - "--tool-call-parser"
+      - "muse"
+  spec_decoding:
+    # The standalone draft checkpoint and its MuseSparkDSparkModel architecture
+    # are validated on NVIDIA Blackwell (NVFP4, on by default there via the
+    # variant's default_modes) and ROCm gfx950 (MI350X/MI355X).
+    description: "DSpark speculative decoding, drafting up to seven tokens per pass. On NVIDIA, adaptive verification keeps only the draft slots worth verifying, so it stays on at large batch sizes; on AMD it is a fixed seven-token profile, best for latency-bound serving."
+    default_mode: dspark
+    modes:
+      dspark:
+        label: "DSpark"
+        description: "Seven-token DSpark profile used for BF16, MXFP4, and NVFP4."
+        variants: [bf16, mxfp4, default]
+        args:
+          - "--speculative-config"
+          - '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
+        hardware_overrides:
+          amd:
+            args:
+              - "--speculative-config"
+              - '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":false,"attention_backend":"ROCM_AITER_FA"}'
+            env:
+              AITER_UNIFIED_ATTN_SHORT_QUERY_3D: "1"
+              VLLM_KV_CACHE_LAYOUT: "LBHNC"
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  bf16:
+    model_id: "meta-models/Muse-Spark-Open-816B-A42B"
+    precision: bf16
+    # 816B x 2 bytes x 1.2
+    vram_minimum_gb: 1959
+    description: "BF16 reference weights for NVIDIA and AMD; the ROCm path is validated on gfx950 (MI350X/MI355X)."
+    hardware_overrides:
+      amd:
+        extra_args:
+          - "--moe-backend"
+          - "triton"
+          - "--attention-backend"
+          - "ROCM_AITER_FA"
+          - "--max-model-len"
+          - "32768"
+          - "--max-num-seqs"
+          - "32"
+          - "--max-num-batched-tokens"
+          - "4096"
+          - "--gpu-memory-utilization"
+          - "0.95"
+  mxfp4:
+    model_id: "amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4"
+    precision: mxfp4
+    # Checkpoint total_size 508,864,619,120 bytes, plus 20% serving headroom.
+    vram_minimum_gb: 611
+    supported_hardware: [mi350x, mi355x]
+    description: "AMD Quark OCP MXFP4 W4A4 weights for gfx950 on the AITER MXFP4 MoE kernels."
+    hardware_overrides:
+      amd:
+        extra_args:
+          - "--attention-backend"
+          - "ROCM_AITER_FA"
+          - "--max-model-len"
+          - "32768"
+          - "--max-num-seqs"
+          - "128"
+          - "--max-num-batched-tokens"
+          - "8192"
+          - "--gpu-memory-utilization"
+          - "0.90"
+  default:
+    model_id: "meta-models/Muse-Spark-Open-816B-A42B-NVFP4"
+    precision: nvfp4
+    # Checkpoint total_size 533,010,718,720 bytes, plus 20% serving headroom.
+    vram_minimum_gb: 640
+    description: "NVFP4 weights for Blackwell. The primary NVIDIA serving path."
+    # The launch blog's NVIDIA command runs DSpark on this checkpoint.
+    default_modes:
+      spec_decoding: dspark
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - single_node_dep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+# The vLLM launch blog serves NVFP4 as TP8 + --enable-expert-parallel (TEP);
+# TEP is also the MXFP4 throughput path on AMD (see the guide).
+default_strategy: single_node_tep
+
+# The ROCm MoE path requires DP1 (muse_moe_runner._validate_tp_post_norm_deployment).
+strategy_hardware:
+  single_node_dep:
+    amd: unsupported
+  multi_node_dep:
+    amd: unsupported
+
+hardware_overrides:
+  amd:
+    extra_args:
+      - "--dtype"
+      - "bfloat16"
+      - "--distributed-executor-backend"
+      - "mp"
+      - "--language-model-only"
+      - "--compilation-config"
+      - '{"cudagraph_mode":"FULL_AND_PIECEWISE"}'
+      - "--no-enable-prefix-caching"
+      - "--enable-chunked-prefill"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_MUSE_MOE_REDUCE_DTYPE: "bf16"
+      VLLM_USE_BREAKABLE_CUDAGRAPH: "1"
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  Muse Spark Open is a sparse-MoE reasoning model — 816B total parameters, 42B
+  active — with a 1M-token context window, aimed at long-horizon agentic coding.
+  It is the model Muse Glimmer 30B was distilled from.
+
+  ## Architecture
+
+  62 layers, hidden size 8192, and **every layer is a mixture-of-experts layer** —
+  there are no dense layers. Each holds 256 experts and uses 8 per token. The
+  experts are 799B of the 816B; everything else is small.
+
+  **The experts work narrow.** A learned matrix squeezes each token from 8192 to
+  4096, all 256 experts run at that width, and a second matrix widens the result
+  back. Both stay in full precision even when the experts are 4-bit. The router
+  reads the token *before* the squeeze, and in fp32 — picking the wrong expert
+  costs more than running a smaller one. There is no shared expert.
+
+  **Attention is 128 query heads sharing 16 key-value heads**, head dim 64, so the
+  KV cache is eight times smaller than with one key-value head per query head.
+
+  **Layers alternate between a narrow and a wide view**, on a cycle of four:
+
+  ```
+  sliding_window: 2048
+  layer_types: [sliding_attention, full_attention, sliding_attention, sliding_attention, ...]
+  ```
+
+  Three layers in each cycle look back 2048 tokens; the other (layers 1, 5, …,
+  61) sees the whole context and drops rotary position (`layer_rope_theta: 0`),
+  because rotary becomes unreliable over very long distances.
+  Across 62 layers that is **46 narrow layers and 16 wide ones**, and it is what
+  makes a 1M-token context affordable — only the 16 wide layers hold KV for the
+  whole sequence.
+
+  **Normalization appears in more places than usual**, each doing a job: a norm
+  before *and* after each block (the ones after carry no learnable weight), on
+  queries and keys before rotary position, on each attention head before its
+  sigmoid gate, and on every expert's output before the weighted blend. The
+  residual stream is carried in fp32.
+
+  Logits are scaled and then squashed through tanh (`final_logit_softcapping: 20.0`)
+  before the softmax.
+
+  ## Prerequisites
+
+  - **vLLM**: Use Docker image for now until the code is in vLLM main repo.
+  - **Hardware**: the checkpoints hold ~1.64 TB of weights in BF16 and
+    ~509 GB in Quark MXFP4, before KV cache. NVFP4 (~533 GB) is the primary
+    NVIDIA Blackwell path and fits one 8-GPU node. On AMD, all three AMD
+    variants are validated on gfx950 (MI350X/MI355X).
+
+  ## NVIDIA
+
+  Meta ships BF16 and NVFP4 checkpoints. On Blackwell, serve
+  `meta-models/Muse-Spark-Open-816B-A42B-NVFP4` on one 8-GPU node with
+  **Tensor + Expert Parallel** (TP8 + `--enable-expert-parallel`), the default
+  strategy here. The command builder turns DSpark on by default for NVFP4; see
+  [Speculative decoding](#speculative-decoding-dspark).
+
+  NVIDIA supports every parallelism this recipe offers: TP, TP + PP, TP + expert
+  parallel, data + expert parallel, and prefill/decode disaggregation. AMD
+  supports only TP and TP + expert parallel.
+
+  ## AMD ROCm variants
+
+  Quark MXFP4 is the default AMD variant.
+
+  | Variant | Checkpoint | AMD hardware | Experts / attention |
+  | --- | --- | --- | --- |
+  | MXFP4 | `amd/Muse-Spark-Open-816B-A42B-Quark-MXFP4` | MI350X, MI355X | AITER MXFP4 MoE / AITER FA |
+  | BF16 → MXFP4 | `meta-models/Muse-Spark-Open-816B-A42B` | MI350X, MI355X | experts of layers 1-60 rounded to MXFP4 at load, AITER MXFP4 MoE / AITER FA |
+  | BF16 | `meta-models/Muse-Spark-Open-816B-A42B` | MI350X, MI355X | Triton BF16 MoE / AITER FA |
+
+  In both MXFP4 variants the experts of the first and last layers stay BF16 and
+  run on Triton BF16 MoE.
+
+  On AMD, the recipe's commands are text-only (`--language-model-only`), use the
+  V2 model runner, disable prefix caching, enable chunked prefill, and request
+  breakable `FULL_AND_PIECEWISE` graphs. The ROCm MoE path supports the Tensor
+  Parallel and Tensor + Expert Parallel strategies; data-parallel strategies
+  are not available on AMD.
+
+  ### Choosing TP or TP + expert parallel (MXFP4 variants)
+
+  Use plain **TP** for latency-bound serving (a handful of concurrent requests)
+  and the **Tensor + Expert Parallel** strategy (TP8 + `--enable-expert-parallel`,
+  32 of 256 experts per GPU) for throughput at 32 or more concurrent requests,
+  where it also lowers TTFT. Accuracy is the same under both. Keep **TP** for
+  BF16: its Triton experts are slower with expert parallelism. With DSpark on,
+  expert parallelism pays off from a few concurrent requests; see the DSpark
+  section.
+
+  The AMD commands use `--max-model-len 32768`. For the full
+  1M-token context, the MXFP4 variant is validated on TP with
+  `--max-model-len 1048576` and `--max-num-seqs 8`, with either the default or
+  `--kv-cache-dtype fp8` KV cache.
+
+  ## Launching the Server
+
+  NVIDIA Blackwell, NVFP4, TP8 + expert parallel, with DSpark:
+
+  ```bash
+  export VLLM_USE_RUST_FRONTEND=1
+
+  vllm serve meta-models/Muse-Spark-Open-816B-A42B-NVFP4 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --max-model-len 1048576 \
+    --reasoning-parser muse \
+    --tool-call-parser muse \
+    --enable-auto-tool-choice \
+    --speculative-config '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"block","enable_adaptive_verification":true}'
+  ```
+
+  ## Frontends
+
+  Commands use the Rust frontend by default on NVIDIA and AMD ROCm.
+
+  To use the Python frontend, select Python in the command builder or replace
+  `VLLM_USE_RUST_FRONTEND=1` with `VLLM_USE_RUST_FRONTEND=0` in the generated
+  command.
+
+  ## Reasoning effort
+
+  Set the strength per request with the top-level `reasoning_effort` field:
+
+  | `reasoning_effort` | Strength hint |
+  | --- | --- |
+  | `low` | 8 |
+  | `medium` | 32 |
+  | `high` | 256 |
+  | `xhigh` | 512 (default) |
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "model": "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
+      "messages": [{"role": "user", "content": "Refactor this module."}],
+      "reasoning_effort": "xhigh"
+    }'
+  ```
+
+  ### Multimodal
+
+  Muse Spark is a native multimodal model that understands image, audio and video. Video is
+  processed through a series of sampled video frames at load time. On AMD,
+  the recipe serves text only.
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H 'Content-Type: application/json' \
+    -d '{
+      "model": "meta-models/Muse-Spark-Open-816B-A42B-NVFP4",
+      "messages": [{"role": "user", "content": [
+        {"type": "video_url", "video_url": {"url": "https://example.com/demo.mp4"}},
+        {"type": "text", "text": "What happens, and when?"}
+      ]}]
+    }'
+  ```
+
+  The audio track of a video is not processed. To include it, extract the
+  audio and send it as a separate audio part in the same request.
+
+  Video sampling rate can be changed when starting the server.
+
+  ```bash
+  --media-io-kwargs '{"video": {"fps": 1}}'
+  ```
+
+  ## Speculative decoding (DSpark)
+
+  Inferact trained a DSpark speculator for this model. The draft is a
+  small sliding-window model that reads the target's residual stream at selected
+  layers (`target_layer_ids`) and proposes a block per forward.
+
+  On NVIDIA, DSpark is on by default for NVFP4. It drafts up to seven tokens and
+  uses **adaptive verification** (`enable_adaptive_verification: true`), which
+  uses draft confidence to verify only the slots likely to be accepted. Because
+  of that it keeps paying off at large batch sizes, not just for single-request
+  latency. Turn off **Spec Decoding** in the builder to serve without the
+  draft.
+
+  On AMD, selecting **DSpark** emits the fixed seven-token profile with AITER FA
+  attention on every variant. Its causal multi-token decode is handled by
+  AITER unified attention, with the gfx950 short-query 3D schedule enabled.
+  DSpark gains the most when only a few requests are in flight, and still
+  stays ahead of plain TP at 32 concurrent requests. It also runs under the
+  **Tensor + Expert Parallel** strategy on the MXFP4 variants (TP8 +
+  `--enable-expert-parallel`), which is the faster combination from a few
+  concurrent requests up to about 64 at the same accuracy; plain TP + DSpark
+  remains the lowest-latency choice for a single request. With expert
+  parallelism, DSpark is validated up to `--max-num-seqs 128`; with plain TP,
+  keep `--max-num-seqs 32`. For throughput beyond about 64 concurrent
+  requests, use expert parallelism without DSpark.
+
+  ### Adaptive DSpark (manual opt-in, Triton attention)
+
+  Adaptive verification captures variable-length decode CUDA graphs, which
+  the AITER FA attention backend does not support; with the AMD MXFP4
+  command above it fails at startup. To use it on MI350X/MI355X, switch the
+  target to Triton attention and use the adaptive config:
+
+  ```bash
+  export VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN=8192
+
+  --attention-backend TRITON_ATTN \
+  --speculative-config '{"method":"dspark","model":"Inferact/Muse-Spark-Open-DSpark","num_speculative_tokens":7,"draft_sample_method":"probabilistic","rejection_sample_method":"standard","enable_adaptive_verification":true,"attention_backend":"TRITON_ATTN"}'
+  ```
+
+  Seven tokens remain the maximum draft depth. At startup, adaptive verification
+  profiles the DSpark and target costs, then uses draft confidence to keep only
+  the slots whose expected accepted-token benefit justifies their verification
+  cost. There is no hand-tuned acceptance threshold. Keep the profile context
+  representative of production traffic.
+
+
+  ## References
+
+  - [Muse Glimmer 30B recipe](/meta-models/Muse-Glimmer-30B) — the distilled 30B sibling

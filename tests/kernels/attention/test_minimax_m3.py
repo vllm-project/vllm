@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Correctness tests for MiniMax M3 sparse prefill attention kernels."""
 
+from functools import partial
+
 import pytest
 import torch
 
@@ -19,7 +21,10 @@ from vllm.models.minimax_m3.common.ops.sparse_attn import (
     minimax_m3_sparse_attn,
     minimax_m3_sparse_attn_decode,
 )
-from vllm.models.minimax_m3.common.sparse_attention import MiniMaxM3SparseTritonImpl
+from vllm.models.minimax_m3.common.sparse_attention import (
+    MiniMaxM3SparseTritonImpl,
+    minimax_m3_rebase_slots_to_page16,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.utils import record_kv_cache_layout
@@ -28,6 +33,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     MLAAttentionSpec,
     compute_layer_kv_cache_shape_bytes,
+    get_kv_quant_mode,
 )
 
 if not (current_platform.is_cuda() or current_platform.is_rocm()):
@@ -35,6 +41,15 @@ if not (current_platform.is_cuda() or current_platform.is_rocm()):
         "MiniMax M3 attention kernels require CUDA or ROCm.",
         allow_module_level=True,
     )
+
+
+PREFILL_KERNELS = [pytest.param(minimax_m3_sparse_attn, id="scalar")]
+if current_platform.is_cuda() and current_platform.is_device_capability_family(90):
+    from vllm.models.minimax_m3.nvidia.ops.sparse_prefill import (
+        minimax_m3_sparse_attn as minimax_m3_sparse_attn_tiled,
+    )
+
+    PREFILL_KERNELS.append(pytest.param(minimax_m3_sparse_attn_tiled, id="query_tiled"))
 
 
 @pytest.fixture
@@ -610,14 +625,27 @@ def _reference_decode_index_score(
     return out
 
 
-def test_prefill_index_topk_correctness():
+# 3600: 29 blocks over 12 splits of 3, so the last busy split has 2 blocks.
+@pytest.mark.parametrize("prefix_len", [1024, 3600])
+@pytest.mark.parametrize("device_capability", [80, 90, 120])
+def test_prefill_index_topk_correctness(monkeypatch, prefix_len, device_capability):
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability",
+        lambda cap, *_: device_capability == cap[0] * 10 + cap[1],
+    )
+    monkeypatch.setattr(
+        current_platform,
+        "is_device_capability_family",
+        lambda cap, *_: device_capability // 10 == cap // 10,
+    )
     topk = 6
     init_blocks = 0
     local_blocks = 1
     num_idx_heads = 2
     head_dim = 16
     q_lens = torch.tensor((4, 3), device="cuda", dtype=torch.int32)
-    prefix_lens = torch.tensor((0, 1024), device="cuda", dtype=torch.int32)
+    prefix_lens = torch.tensor((0, prefix_len), device="cuda", dtype=torch.int32)
     seq_lens = prefix_lens + q_lens
     batch = q_lens.numel()
     max_seq_len = seq_lens.max().item()
@@ -942,6 +970,616 @@ def test_msa_indexer_impl_matches_triton(topk, index_dtype, monkeypatch):
     assert tri_prefill.data_ptr() == buf_htk[:, nd:, :].data_ptr()
 
 
+def _reference_aiter_sparse_table(
+    topk: torch.Tensor,
+    page16_block_table: torch.Tensor,
+    row_req_id: list[int],
+    row_pos: list[int],
+    num_kv_heads: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Page table and context the AITER top-k emits for the sparse attend.
+
+    One row per (token, kv head), head minor; index head ``h`` drives kv head
+    ``h``. Full blocks keep their top-k order and the query's own block goes
+    last, since only it is partially visible.
+    """
+    pages_per_block = BLOCK_SIZE // 16
+    num_tokens = topk.shape[1]
+    sparse_bt = torch.zeros(
+        num_tokens * num_kv_heads, TOPK * pages_per_block, dtype=torch.int32
+    )
+    sparse_ctx = torch.zeros(num_tokens * num_kv_heads, dtype=torch.int32)
+    topk_cpu = topk.cpu().tolist()
+    page16_cpu = page16_block_table.cpu().tolist()
+    for n, (req_id, pos) in enumerate(zip(row_req_id, row_pos)):
+        self_block = pos // BLOCK_SIZE
+        for kv_head in range(num_kv_heads):
+            selected = [b for b in topk_cpu[kv_head][n] if 0 <= b <= self_block]
+            full = [b for b in selected if b < self_block]
+            row = n * num_kv_heads + kv_head
+            for slot, block in enumerate(full + [b for b in selected if b not in full]):
+                base = page16_cpu[req_id][block] * pages_per_block * num_kv_heads
+                for j in range(pages_per_block):
+                    sparse_bt[row, slot * pages_per_block + j] = (
+                        base + kv_head + j * num_kv_heads
+                    )
+            if len(full) < len(selected):
+                sparse_ctx[row] = (
+                    len(full) * BLOCK_SIZE + pos + 1 - self_block * BLOCK_SIZE
+                )
+            else:
+                sparse_ctx[row] = min(len(selected) * BLOCK_SIZE, pos + 1)
+    return sparse_bt, sparse_ctx
+
+
+# ROCm counterpart of test_msa_indexer_impl_matches_triton.
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="The AITER MSA indexer is ROCm-only.",
+)
+@pytest.mark.parametrize("num_idx_heads", [1, 2])
+@pytest.mark.parametrize(("init_blocks", "local_blocks"), [(0, 0), (1, 2)])
+def test_aiter_indexer_impl_matches_reference(
+    num_idx_heads, init_blocks, local_blocks, monkeypatch
+):
+    import vllm.models.minimax_m3.amd.indexer_msa as indexer_msa_mod
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.amd.indexer_msa import (
+        MiniMaxM3IndexerMSAImpl,
+        MiniMaxM3IndexerMSAMetadataBuilder,
+    )
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        PAGES_PER_SPARSE_BLOCK,
+        minimax_m3_rebase_block_table_to_page16,
+    )
+
+    monkeypatch.setattr(
+        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
+    )
+    if reason := indexer_msa_mod.msa_indexer_unsupported_reason(
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
+        num_index_heads=num_idx_heads,
+        index_head_dim=HEAD_DIM,
+        indexer_kv_dtype="fp8",
+        max_model_len=8192,
+    ):
+        pytest.skip(f"AITER MSA indexer unavailable: {reason}")
+
+    set_random_seed(0)
+    device = torch.device("cuda")
+    monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads,
+        "sparse_block_size": BLOCK_SIZE,
+    }
+
+    # Decode-first mixed batch; two rows see fewer than TOPK blocks.
+    batch = BatchSpec(
+        seq_lens=[300, 4097, 5000, 2624, 200], query_lens=[1, 1, 1, 64, 200]
+    )
+    common = create_common_attn_metadata(
+        batch, BLOCK_SIZE, device, arange_block_indices=True
+    )
+    num_tokens = batch.compute_num_tokens()
+    common.positions = torch.cat(
+        [
+            torch.arange(s - q, s, device=device, dtype=torch.int64)
+            for s, q in zip(batch.seq_lens, batch.query_lens)
+        ]
+    )
+    index_bt = common.block_table_tensor
+    num_pages = index_bt.numel()
+    index_bt.copy_(
+        torch.randperm(num_pages, device=device, dtype=torch.int32).view_as(index_bt)
+    )
+    # A distinct attend table catches a top-k resolved through the index table.
+    attn_bt = torch.flip(index_bt, dims=(1,)) + num_pages
+    page16_bt = minimax_m3_rebase_block_table_to_page16(attn_bt)
+
+    # e4m3-exact, unique block scores make the fp8 top-k deterministic.
+    index_cache = torch.zeros(
+        num_pages, BLOCK_SIZE, HEAD_DIM, device=device, dtype=torch.float8_e4m3fn
+    )
+    values = torch.tensor(_E4M3_EXACT_VALUES, dtype=torch.float32)
+    for r, seq_len in enumerate(batch.seq_lens):
+        num_blocks = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        assert num_blocks <= len(values)
+        perm = values[torch.randperm(len(values))]
+        for b in range(num_blocks):
+            index_cache[index_bt[r, b]] = float(perm[b])
+    head_sign = torch.tensor([(-1.0) ** h for h in range(num_idx_heads)])
+    index_q = (
+        head_sign.view(1, num_idx_heads, 1)
+        .expand(num_tokens, num_idx_heads, HEAD_DIM)
+        .to(device=device, dtype=torch.float8_e4m3fn)
+    )
+
+    spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.float8_e4m3fn,
+    )
+    rows = num_tokens * num_idx_heads
+    topk_buf = torch.full(
+        (num_idx_heads, num_tokens, TOPK), -2, dtype=torch.int32, device=device
+    )
+    sparse_bt = torch.full(
+        (rows, TOPK * PAGES_PER_SPARSE_BLOCK), -27182, dtype=torch.int32, device=device
+    )
+    sparse_ctx = torch.full((rows,), -27182, dtype=torch.int32, device=device)
+    with set_current_vllm_config(vllm_config):
+        impl = MiniMaxM3IndexerMSAImpl(
+            num_kv_heads=num_idx_heads,
+            scale=HEAD_DIM**-0.5,
+            topk_blocks=TOPK,
+            sparse_block_size=BLOCK_SIZE,
+            num_index_heads=num_idx_heads,
+            index_head_dim=HEAD_DIM,
+            prefix="idx_aiter",
+            init_blocks=init_blocks,
+            local_blocks=local_blocks,
+            indexer_kv_dtype="fp8",
+            topk_indices_buffer=topk_buf,
+        )
+        builder = MiniMaxM3IndexerMSAMetadataBuilder(
+            spec, [impl.index_cache.prefix], vllm_config, device
+        )
+    impl.index_cache.kv_cache = index_cache
+    impl.sparse_bt_buffer = sparse_bt
+    impl.sparse_ctx_buffer = sparse_ctx
+
+    md = builder.build(0, common)
+    nd = md.num_decode_tokens
+    assert md.num_decodes == 3 and nd == 3
+    with set_forward_context({impl.index_cache.prefix: md}, vllm_config):
+        decode_topk, prefill_topk = impl(
+            index_q.view(num_tokens, -1),
+            decode_page16_block_table=page16_bt[: md.num_decodes],
+            prefill_page16_block_table=page16_bt[md.num_decodes :],
+        )
+    torch.accelerator.synchronize()
+
+    assert decode_topk is not None and prefill_topk is not None
+    assert decode_topk.data_ptr() == topk_buf[:, :nd].data_ptr()
+    assert prefill_topk.data_ptr() == topk_buf[:, nd:].data_ptr()
+
+    q_lens = torch.tensor(batch.query_lens, device=device, dtype=torch.int32)
+    seq_lens = torch.tensor(batch.seq_lens, device=device, dtype=torch.int32)
+    expected = _reference_index_topk(
+        index_q,
+        index_cache,
+        index_bt,
+        q_lens,
+        seq_lens,
+        seq_lens - q_lens,
+        TOPK,
+        init_blocks,
+        local_blocks,
+    )
+    _assert_topk_indices_equal_unordered(topk_buf, expected)
+
+    row_req_id = [r for r, q in enumerate(batch.query_lens) for _ in range(q)]
+    expected_bt, expected_ctx = _reference_aiter_sparse_table(
+        topk_buf, page16_bt, row_req_id, common.positions.tolist(), num_idx_heads
+    )
+    assert torch.equal(sparse_bt.cpu(), expected_bt)
+    assert torch.equal(sparse_ctx.cpu(), expected_ctx)
+
+
+# NVFP4 index cache (SM100/SM103): MSA Q8KV4 decode on the packed pages, FP8
+# gather + Q8KV8 prefill. Both rank pages from e4m3_rn_satfinite(e2m1 * scale).
+_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
+_NVFP4_PAGE_WIDTH = HEAD_DIM // 2 + HEAD_DIM // 16
+_requires_q8_indexer = pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability(100)
+        or current_platform.is_device_capability(103)
+        or current_platform.is_device_capability(107)
+    ),
+    reason="The MSA Q8KV4/Q8KV8 indexers require SM100, SM103 or SM107.",
+)
+
+
+def _random_nvfp4_index_pages(
+    num_pages: int, scale_max: float = 0.5, page_pad: int = 0
+) -> torch.Tensor:
+    """``[num_pages, 128, 72]`` uint8 pages: random E2M1 codes, then E4M3 scales."""
+    data_bytes = BLOCK_SIZE * HEAD_DIM // 2
+    page_bytes = BLOCK_SIZE * _NVFP4_PAGE_WIDTH
+    raw = torch.zeros(
+        num_pages, page_bytes + page_pad, dtype=torch.uint8, device="cuda"
+    )
+    raw[:, :data_bytes] = torch.randint(
+        0, 256, (num_pages, data_bytes), dtype=torch.uint8, device="cuda"
+    )
+    scale = torch.rand(num_pages, page_bytes - data_bytes, device="cuda") * scale_max
+    raw[:, data_bytes:page_bytes] = scale.to(torch.float8_e4m3fn).view(torch.uint8)
+    return raw[:, :page_bytes].view(num_pages, BLOCK_SIZE, _NVFP4_PAGE_WIDTH)
+
+
+def _dequant_nvfp4_index_pages(pages: torch.Tensor) -> torch.Tensor:
+    """Reference ``[P, 128, 128]`` e4m3: e2m1 * scale, clamped, rounded once."""
+    num_pages = pages.shape[0]
+    flat = pages.reshape(num_pages, -1)
+    data = flat[:, : BLOCK_SIZE * HEAD_DIM // 2].view(num_pages, BLOCK_SIZE, -1)
+    scale = flat[:, BLOCK_SIZE * HEAD_DIM // 2 :].view(torch.float8_e4m3fn)
+    codes = torch.stack((data & 0xF, data >> 4), dim=-1).reshape(
+        num_pages, BLOCK_SIZE, HEAD_DIM
+    )
+    magnitude = torch.tensor(_E2M1_VALUES, device="cuda")[(codes & 7).long()]
+    value = torch.where(codes >= 8, -magnitude, magnitude)
+    value = value * scale.float().view(num_pages, BLOCK_SIZE, -1).repeat_interleave(
+        16, dim=-1
+    )
+    return value.clamp_(-448.0, 448.0).to(torch.float8_e4m3fn)
+
+
+@_requires_q8_indexer
+@pytest.mark.parametrize("use_qmul4", [False, True])
+@pytest.mark.parametrize("scale_max", [0.5, 448.0])
+def test_gather_nvfp4_index_k_fp8_bitwise(
+    scale_max: float, use_qmul4: bool, monkeypatch
+):
+    """Each request's leading pages land at its compact offset, bit-identical
+    to the reference dequant (incl. saturation), and nothing else is written,
+    on both the QMUL4 and the fp32 dequant paths."""
+    import vllm.models.minimax_m3.nvidia.ops.gather_nvfp4_index_k as gather_mod
+    from vllm.models.minimax_m3.nvidia.ops.gather_nvfp4_index_k import (
+        minimax_m3_gather_nvfp4_index_k_fp8,
+    )
+
+    if use_qmul4 and not gather_mod._qmul4_supported(0):
+        pytest.skip("Triton's Blackwell ptxas emits PTX older than 9.4 (no QMUL4).")
+    monkeypatch.setattr(gather_mod, "_qmul4_supported", lambda _: use_qmul4)
+
+    torch.manual_seed(0)
+    num_physical = 40
+    kv = _random_nvfp4_index_pages(num_physical, scale_max, page_pad=32)
+    block_table = torch.randperm(num_physical, device="cuda", dtype=torch.int32)[
+        :36
+    ].view(3, 12)
+    num_pages = torch.tensor([5, 0, 12], dtype=torch.int32, device="cuda")
+    page_offsets = torch.cumsum(num_pages, 0, dtype=torch.int32) - num_pages
+    total = int(num_pages.sum())
+    out = torch.full((total + 1, BLOCK_SIZE, HEAD_DIM), 1.0, device="cuda").to(
+        torch.float8_e4m3fn
+    )
+
+    minimax_m3_gather_nvfp4_index_k_fp8(
+        kv, block_table, num_pages, page_offsets, 12, out
+    )
+
+    expected = _dequant_nvfp4_index_pages(kv)
+    for req, (count, offset) in enumerate(
+        zip(num_pages.tolist(), page_offsets.tolist())
+    ):
+        pages = block_table[req, :count].long()
+        assert torch.equal(
+            out[offset : offset + count].view(torch.uint8),
+            expected[pages].view(torch.uint8),
+        )
+    assert torch.all(out[total].float() == 1.0)
+
+
+def _assert_forced_tail_topk(
+    actual: torch.Tensor, scores: torch.Tensor, lengths: torch.Tensor
+) -> None:
+    """Check the Q8 top-k contract on ``[rows, 16]`` output.
+
+    ``scores[row, :lengths[row] - 1]`` are the reference history-page scores.
+    Rows with <= 16 candidates are ``0 .. length - 1`` then ``-1``. Longer rows
+    hold 15 distinct history pages, then the local page. The ranked pages must
+    be the top 15 up to the kernel's 16-bit score-key quantization.
+    """
+    actual = actual.long()
+    rows, max_pages = scores.shape
+    cols = torch.arange(TOPK, device=actual.device)
+    short = lengths <= TOPK
+    expected_short = torch.where(cols < lengths[:, None], cols, -1)
+    assert torch.equal(actual[short], expected_short[short])
+
+    long_rows = (~short).nonzero().flatten()
+    if long_rows.numel() == 0:
+        return
+    actual, scores, lengths = actual[long_rows], scores[long_rows], lengths[long_rows]
+    assert torch.equal(actual[:, -1], lengths - 1)
+    ranked = actual[:, :-1]
+    assert torch.all((ranked >= 0) & (ranked < (lengths - 1)[:, None]))
+    assert torch.all(ranked.sort(dim=1).values.diff(dim=1) > 0)
+    valid = torch.arange(max_pages, device=scores.device) < (lengths - 1)[:, None]
+    history = scores.masked_fill(~valid, float("-inf"))
+    high = history.amax(dim=1)
+    low = scores.masked_fill(~valid, float("inf")).amin(dim=1)
+    tol = 1.5 * (high - low) / 65534.0 + 1e-5 * high.abs()
+    threshold = history.topk(TOPK - 1, dim=1).values[:, -1]
+    assert torch.all(history.gather(1, ranked) >= (threshold - tol)[:, None])
+    must_pick = history > (threshold + tol)[:, None]
+    picked = torch.zeros_like(must_pick).scatter_(1, ranked, True)
+    assert not torch.any(must_pick & ~picked)
+
+
+@_requires_q8_indexer
+@pytest.mark.parametrize("num_idx_heads", [1, 2, 4])
+@pytest.mark.parametrize("decode_query_len", [1, 3, 8])
+def test_nvfp4_indexer_impl_matches_reference(
+    num_idx_heads, decode_query_len, monkeypatch, workspace_init
+):
+    """Drive MiniMaxM3IndexerNvfp4Impl through its metadata builder on a mixed
+    batch (short and full 8-query decodes, fresh and chunked prefills, a request
+    without history pages, several gather chunks) and check every row against
+    a reference computed from the dequantized NVFP4 keys."""
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.nvidia.indexer_nvfp4 import (
+        MiniMaxM3IndexerNvfp4Impl,
+        MiniMaxM3IndexerNvfp4MetadataBuilder,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads
+    }
+
+    decode_seq_lens = [2305, 2561, 9]
+    prefill = [(2624, 64), (2720, 96), (100, 100), (1500, 1500)]
+    batch = BatchSpec(
+        seq_lens=decode_seq_lens + [s for s, _ in prefill],
+        query_lens=[decode_query_len] * len(decode_seq_lens) + [q for _, q in prefill],
+    )
+    common = create_common_attn_metadata(batch, BLOCK_SIZE, device)
+    num_blocks = common.block_table_tensor.shape[1]
+    num_physical = batch.batch_size * num_blocks
+    block_table = torch.randperm(num_physical, device=device, dtype=torch.int32)
+    common.block_table_tensor = block_table.view(batch.batch_size, num_blocks)
+    num_tokens = batch.compute_num_tokens()
+
+    index_cache = _random_nvfp4_index_pages(num_physical)
+    index_q = (
+        torch.randn(num_tokens, num_idx_heads * HEAD_DIM, device=device) * 0.5
+    ).to(torch.float8_e4m3fn)
+
+    impl_kwargs = dict(
+        num_kv_heads=num_idx_heads,
+        scale=HEAD_DIM**-0.5,
+        topk_blocks=TOPK,
+        sparse_block_size=BLOCK_SIZE,
+        num_index_heads=num_idx_heads,
+        index_head_dim=HEAD_DIM,
+        init_blocks=0,
+        local_blocks=1,
+        indexer_kv_dtype="nvfp4",
+    )
+    spec = MLAAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=1,
+        head_size=_NVFP4_PAGE_WIDTH,
+        dtype=torch.uint8,
+    )
+    with set_current_vllm_config(vllm_config):
+        impl = MiniMaxM3IndexerNvfp4Impl(prefix="idx_nvfp4", **impl_kwargs)
+        builder = MiniMaxM3IndexerNvfp4MetadataBuilder(
+            spec, [impl.index_cache.prefix], vllm_config, device
+        )
+    index_spec = impl.index_cache.get_kv_cache_spec(vllm_config)
+    assert isinstance(index_spec, MLAAttentionSpec)
+    assert index_spec.page_size_bytes == BLOCK_SIZE * _NVFP4_PAGE_WIDTH
+    assert index_spec.dtype == torch.uint8
+    # Spec decode would raise the threshold to 1 + num_speculative_tokens.
+    builder.reorder_batch_threshold = decode_query_len
+    # Fit the longest request's 21 history pages but not two such requests.
+    builder.max_gather_pages = 30
+    impl.index_cache.kv_cache = index_cache
+    impl.topk_indices_buffer = torch.full(
+        (num_tokens, num_idx_heads, TOPK), -2, dtype=torch.int32, device=device
+    )
+
+    # Planning reads only host-side metadata: any device sync is an error.
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        md = builder.build(0, common)
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
+    assert md.num_decode_tokens == decode_query_len * len(decode_seq_lens)
+    assert len(md.prefill_chunks) == 3
+    with set_forward_context({impl.index_cache.prefix: md}, vllm_config):
+        assert impl(index_q) == (None, None)
+
+    # Reference: max over each history page's 128 tokens of q . k.
+    keys = _dequant_nvfp4_index_pages(index_cache).float()
+    q = index_q.float().view(num_tokens, num_idx_heads, HEAD_DIM)
+    max_pages = num_blocks
+    scores = torch.full(
+        (num_tokens, num_idx_heads, max_pages), float("-inf"), device=device
+    )
+    lengths = torch.empty(num_tokens, dtype=torch.long, device=device)
+    token = 0
+    for req, (seq_len, q_len) in enumerate(zip(batch.seq_lens, batch.query_lens)):
+        pages = (seq_len + BLOCK_SIZE - 1) // BLOCK_SIZE
+        k = keys[common.block_table_tensor[req, :pages].long()]
+        rows = slice(token, token + q_len)
+        scores[rows, :, :pages] = torch.einsum("nhd,pkd->nhpk", q[rows], k).amax(dim=-1)
+        positions = torch.arange(seq_len - q_len, seq_len, device=device)
+        lengths[rows] = positions // BLOCK_SIZE + 1
+        token += q_len
+    _assert_forced_tail_topk(
+        impl.topk_indices_buffer.view(-1, TOPK),
+        scores.view(-1, max_pages),
+        lengths.repeat_interleave(num_idx_heads),
+    )
+
+
+@_requires_q8_indexer
+@pytest.mark.parametrize("decode_query_len", [1, 3, 8])
+@pytest.mark.parametrize("num_idx_heads", [1, 2, 4])
+def test_nvfp4_indexer_decode_cuda_graph_replay(
+    decode_query_len, num_idx_heads, monkeypatch, workspace_init
+):
+    """A full CUDA graph captures the decode indexer once per padded batch
+    size; re-planning a later step (new lengths, pages and keys, one
+    zero-length padding request) outside capture and replaying must give that
+    step's top-k, which fails if any captured tensor was re-allocated. The
+    decode reads index_q and writes the top-k in place, copying nothing."""
+    import vllm.models.minimax_m3.common.indexer as indexer_mod
+    from tests.v1.attention.utils import (
+        BatchSpec,
+        create_common_attn_metadata,
+        create_vllm_config,
+    )
+    from vllm.config import set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.models.minimax_m3.nvidia.indexer_nvfp4 import (
+        MiniMaxM3IndexerNvfp4Impl,
+        MiniMaxM3IndexerNvfp4MetadataBuilder,
+    )
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    monkeypatch.setattr(indexer_mod, "get_tensor_model_parallel_world_size", lambda: 1)
+    vllm_config = create_vllm_config(
+        block_size=BLOCK_SIZE, max_model_len=8192, max_num_batched_tokens=8192
+    )
+    vllm_config.model_config.hf_config.sparse_attention_config = {
+        "sparse_num_index_heads": num_idx_heads
+    }
+    num_reqs, max_blocks = 4, 24
+    num_tokens = num_reqs * decode_query_len
+    num_physical = num_reqs * max_blocks
+    index_cache = _random_nvfp4_index_pages(num_physical)
+
+    with set_current_vllm_config(vllm_config):
+        impl = MiniMaxM3IndexerNvfp4Impl(
+            prefix="idx_nvfp4_graph",
+            num_kv_heads=num_idx_heads,
+            scale=HEAD_DIM**-0.5,
+            topk_blocks=TOPK,
+            sparse_block_size=BLOCK_SIZE,
+            num_index_heads=num_idx_heads,
+            index_head_dim=HEAD_DIM,
+            init_blocks=0,
+            local_blocks=1,
+            indexer_kv_dtype="nvfp4",
+        )
+        builder = MiniMaxM3IndexerNvfp4MetadataBuilder(
+            MLAAttentionSpec(
+                block_size=BLOCK_SIZE,
+                num_kv_heads=1,
+                head_size=_NVFP4_PAGE_WIDTH,
+                dtype=torch.uint8,
+            ),
+            [impl.index_cache.prefix],
+            vllm_config,
+            device,
+        )
+    builder.reorder_batch_threshold = decode_query_len
+    impl.index_cache.kv_cache = index_cache
+    impl.topk_indices_buffer = torch.full(
+        (num_tokens, num_idx_heads, TOPK), -2, dtype=torch.int32, device=device
+    )
+    index_q = torch.empty(num_tokens, num_idx_heads * HEAD_DIM, device=device).to(
+        torch.float8_e4m3fn
+    )
+
+    def step(seq_lens, query_lens):
+        common = create_common_attn_metadata(
+            BatchSpec(seq_lens=seq_lens, query_lens=query_lens), BLOCK_SIZE, device
+        )
+        common.block_table_tensor = torch.randperm(
+            num_physical, device=device, dtype=torch.int32
+        )[: num_reqs * max_blocks].view(num_reqs, max_blocks)
+        index_q.copy_(
+            (torch.randn(num_tokens, num_idx_heads * HEAD_DIM, device=device) * 0.5).to(
+                torch.float8_e4m3fn
+            )
+        )
+        return common, builder.build(0, common)
+
+    # Warm up (compiles), then capture the forward of a full batch.
+    common, md = step([2305, 2561, 2944, 700], [decode_query_len] * num_reqs)
+    with set_forward_context({impl.index_cache.prefix: md}, vllm_config):
+        impl(index_q)
+        with torch.profiler.profile(
+            activities=[
+                torch.profiler.ProfilerActivity.CPU,
+                torch.profiler.ProfilerActivity.CUDA,
+            ]
+        ) as prof:
+            impl(index_q)
+            torch.accelerator.synchronize()
+        copies = [
+            e.name for e in prof.events() if "Memcpy" in e.name or "copy_" in e.name
+        ]
+        assert not copies, copies
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            impl(index_q)
+
+    # A later step: the last request pads the graph batch with no tokens.
+    seq_lens = [2800, 1500, 3000, 0]
+    query_lens = [decode_query_len] * 3 + [0]
+    common, md = step(seq_lens, query_lens)
+    assert md.decode_q8kv4.num_reqs == num_reqs
+    # An eager step of another batch size runs before the replay; every decode
+    # wrapper shares one page-score scratch, which this one overwrites.
+    other = create_common_attn_metadata(
+        BatchSpec(seq_lens=[1800, 900], query_lens=[decode_query_len] * 2),
+        BLOCK_SIZE,
+        device,
+    )
+    other.block_table_tensor = common.block_table_tensor[:2].clone()
+    other_md = builder.build(0, other)
+    with set_forward_context({impl.index_cache.prefix: other_md}, vllm_config):
+        impl(index_q[: 2 * decode_query_len])
+    assert len(builder.decode_wrappers) == 2
+    impl.topk_indices_buffer.fill_(-2)
+    graph.replay()
+
+    num_real = 3 * decode_query_len
+    keys = _dequant_nvfp4_index_pages(index_cache).float()
+    q = index_q[:num_real].float().view(num_real, num_idx_heads, HEAD_DIM)
+    scores = torch.full(
+        (num_real, num_idx_heads, max_blocks), float("-inf"), device=device
+    )
+    lengths = torch.empty(num_real, dtype=torch.long, device=device)
+    for req in range(3):
+        pages = (seq_lens[req] + BLOCK_SIZE - 1) // BLOCK_SIZE
+        k = keys[common.block_table_tensor[req, :pages].long()]
+        rows = slice(req * decode_query_len, (req + 1) * decode_query_len)
+        scores[rows, :, :pages] = torch.einsum("nhd,pkd->nhpk", q[rows], k).amax(dim=-1)
+        positions = torch.arange(
+            seq_lens[req] - decode_query_len, seq_lens[req], device=device
+        )
+        lengths[rows] = positions // BLOCK_SIZE + 1
+    _assert_forced_tail_topk(
+        impl.topk_indices_buffer[:num_real].view(-1, TOPK),
+        scores.view(-1, max_blocks),
+        lengths.repeat_interleave(num_idx_heads),
+    )
+
+
 @pytest.mark.parametrize(
     ("decode_query_len", "max_decode_query_len"),
     [
@@ -1025,17 +1663,20 @@ def test_decode_index_topk_correctness(
         "expected",
     ),
     [
-        (0, 24, 1, 16, True, (2, False, False)),
-        (1, 1, 1, 16, True, (16, True, True)),
-        (512, 4, 1, 16, True, (16, True, True)),
-        (513, 24, 4, 16, True, (16, True, True)),
-        (2760, 5, 2, 16, True, (16, True, True)),
-        (8192, 64, 4, 16, True, (16, True, True)),
-        (8193, 4, 1, 16, True, (16, False, False)),
-        (8193, 16, 1, 16, True, (4, False, False)),
-        (65534, 64, 1, 16, True, (1, False, False)),
-        (513, 16, 1, 13, True, (4, False, False)),
-        (513, 16, 4, 16, False, (1, False, False)),
+        (0, 24, 1, 16, True, (2, 512, 8, 2, False, False)),
+        (1, 1, 1, 16, True, (1, 128, 2, 1, True, True)),
+        (74, 4, 1, 16, True, (1, 128, 2, 1, True, True)),
+        (128, 4, 1, 16, True, (1, 128, 2, 1, True, True)),
+        (129, 4, 1, 16, True, (16, 512, 4, 2, True, True)),
+        (512, 4, 1, 16, True, (16, 512, 4, 2, True, True)),
+        (513, 24, 4, 16, True, (16, 512, 4, 2, True, True)),
+        (2760, 5, 2, 16, True, (16, 512, 4, 2, True, True)),
+        (8192, 64, 4, 16, True, (16, 512, 4, 2, True, True)),
+        (8193, 4, 1, 16, True, (16, 512, 8, 2, False, False)),
+        (8193, 16, 1, 16, True, (4, 512, 8, 2, False, False)),
+        (65534, 64, 1, 16, True, (1, 512, 8, 2, False, False)),
+        (513, 16, 1, 13, True, (4, 512, 8, 2, False, False)),
+        (513, 16, 4, 16, False, (1, 512, 8, 2, False, False)),
     ],
 )
 def test_amd_decode_topk_launch_policy(
@@ -1044,9 +1685,9 @@ def test_amd_decode_topk_launch_policy(
     num_idx_heads: int,
     topk: int,
     is_gfx950: bool,
-    expected: tuple[int, bool, bool],
+    expected: tuple[int, int, int, int, bool, bool],
 ):
-    """All supported head and query layouts use adaptive selection."""
+    """The short-context specialization has strict dispatch boundaries."""
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         _decode_topk_launch_policy,
     )
@@ -1073,19 +1714,23 @@ def test_amd_decode_topk_launch_policy(
         "single_tile_guaranteed",
         "adaptive_final_merge",
         "max_blocks",
+        "block_size_k",
+        "num_warps",
+        "num_stages",
         "topk",
         "num_idx_heads",
     ),
     [
-        (1, False, False, 65534, 16, 1),
-        (2, False, False, 8193, 16, 1),
-        (4, False, False, 8193, 16, 1),
-        (8, False, False, 8193, 16, 1),
-        (16, False, False, 8193, 16, 1),
-        (16, False, False, 65534, 16, 1),
-        (2, True, False, 513, 13, 1),
-        (4, False, True, 8192, 16, 2),
-        (16, True, True, 8192, 16, 4),
+        (1, False, False, 65534, 512, 8, 2, 16, 1),
+        (2, False, False, 8193, 512, 8, 2, 16, 1),
+        (4, False, False, 8193, 512, 8, 2, 16, 1),
+        (8, False, False, 8193, 512, 8, 2, 16, 1),
+        (16, False, False, 8193, 512, 8, 2, 16, 1),
+        (16, False, False, 65534, 512, 8, 2, 16, 1),
+        (2, True, False, 513, 512, 8, 2, 13, 1),
+        (4, False, True, 8192, 512, 4, 2, 16, 2),
+        (16, True, True, 8192, 512, 4, 2, 16, 4),
+        (1, True, True, 74, 128, 2, 1, 16, 1),
     ],
 )
 def test_amd_decode_fused_topk_total_order_and_replay(
@@ -1093,10 +1738,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     single_tile_guaranteed: bool,
     adaptive_final_merge: bool,
     max_blocks: int,
+    block_size_k: int,
+    num_warps: int,
+    num_stages: int,
     topk: int,
     num_idx_heads: int,
 ):
-    """Atomic multi-chunk selection is ordered and resets graph state."""
+    """Selector specializations preserve ordering and graph state."""
     from vllm.models.minimax_m3.amd.ops.index_topk import (
         SPARSE_BLOCK_SIZE,
         _decode_topk_fused_kernel,
@@ -1104,18 +1752,25 @@ def test_amd_decode_fused_topk_total_order_and_replay(
 
     set_random_seed(0)
     block_size_t = 1 << (topk - 1).bit_length()
+    block_counts = tuple(
+        count
+        for count in (
+            15,
+            16,
+            17,
+            block_size_k // 2 - 1,
+            block_size_k // 2,
+            block_size_k // 2 + 1,
+            block_size_k - 1,
+            block_size_k,
+            block_size_k + 1,
+        )
+        if count <= max_blocks
+    )
     long_seq_lens_list = [
         0,
         1,
-        15 * SPARSE_BLOCK_SIZE,
-        16 * SPARSE_BLOCK_SIZE,
-        17 * SPARSE_BLOCK_SIZE,
-        255 * SPARSE_BLOCK_SIZE,
-        256 * SPARSE_BLOCK_SIZE,
-        257 * SPARSE_BLOCK_SIZE,
-        511 * SPARSE_BLOCK_SIZE,
-        512 * SPARSE_BLOCK_SIZE,
-        513 * SPARSE_BLOCK_SIZE,
+        *(blocks * SPARSE_BLOCK_SIZE for blocks in block_counts),
         max_blocks * SPARSE_BLOCK_SIZE,
     ]
     short_seq_lens_list = [0, 1, 127, 128, 129, 0, 1, 128, 129, 0, 1, 129]
@@ -1126,12 +1781,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
         boundary_limit = 4
     if boundary_limit:
         boundary_blocks = [
-            (active_chunks - 1) * 512 + 1
+            (active_chunks - 1) * block_size_k + 1
             for active_chunks in range(3, boundary_limit + 1)
         ]
-        assert [(num_blocks + 511) // 512 for num_blocks in boundary_blocks] == list(
-            range(3, boundary_limit + 1)
-        )
+        assert [
+            (num_blocks + block_size_k - 1) // block_size_k
+            for num_blocks in boundary_blocks
+        ] == list(range(3, boundary_limit + 1))
         long_seq_lens_list.extend(
             num_blocks * SPARSE_BLOCK_SIZE for num_blocks in boundary_blocks
         )
@@ -1139,6 +1795,8 @@ def test_amd_decode_fused_topk_total_order_and_replay(
             num_blocks * SPARSE_BLOCK_SIZE for num_blocks in reversed(boundary_blocks)
         )
     batch = len(long_seq_lens_list)
+    repeats = (batch + len(short_seq_lens_list) - 1) // len(short_seq_lens_list)
+    short_seq_lens_list = (short_seq_lens_list * repeats)[:batch]
     score = torch.randn((num_idx_heads, batch, max_blocks), device="cuda")
     score[:, :, 0] = float("nan")
     score[:, :, 1] = float("inf")
@@ -1147,8 +1805,9 @@ def test_amd_decode_fused_topk_total_order_and_replay(
     score[:, :, 4] = -0.0
     score[:, :, 5] = 7.0
     score[:, :, 6] = -1e30
-    score[:, :, 256] = 7.0
-    score[:, :, 512] = 7.0
+    for index in (block_size_k // 2, block_size_k):
+        if index < max_blocks:
+            score[:, :, index] = 7.0
 
     seq_lens = torch.empty(batch, device="cuda", dtype=torch.int32)
     partial = torch.full(
@@ -1198,13 +1857,13 @@ def test_amd_decode_fused_topk_total_order_and_replay(
             pages_per_sparse_block=8,
             block_page_stride=8,
             NUM_TOPK_CHUNKS=num_topk_chunks,
-            BLOCK_SIZE_K=512,
+            BLOCK_SIZE_K=block_size_k,
             BLOCK_SIZE_T=block_size_t,
             EMIT_SPARSE_TABLE=False,
             SINGLE_TILE_GUARANTEED=single_tile_guaranteed,
             ADAPTIVE_FINAL_MERGE=adaptive_final_merge,
-            num_warps=4 if adaptive_final_merge else 8,
-            num_stages=2,
+            num_warps=num_warps,
+            num_stages=num_stages,
         )
 
     score_cpu = score.cpu()
@@ -1251,6 +1910,7 @@ def test_amd_decode_fused_topk_total_order_and_replay(
         (16, False, False, 8193),
         (4, False, True, 8192),
         (16, True, True, 8192),
+        (1, True, True, 74),
     ):
         graph = torch.cuda.CUDAGraph()
         torch.accelerator.synchronize()
@@ -1410,19 +2070,21 @@ def test_decode_index_topk_fp8(num_idx_heads: int):
     reason="CuteDSL index decode score requires Blackwell.",
 )
 @pytest.mark.parametrize(
-    ("dtype", "decode_query_len", "max_decode_query_len"),
+    ("dtype", "decode_query_len", "max_decode_query_len", "concurrent_writes"),
     [
-        (torch.bfloat16, 1, 1),
-        (torch.bfloat16, 3, 8),
-        (torch.float8_e4m3fn, 1, 1),
-        (torch.float8_e4m3fn, 3, 8),
-        (torch.float8_e4m3fn, 8, 8),
+        (torch.bfloat16, 1, 1, False),
+        (torch.bfloat16, 3, 8, False),
+        (torch.float8_e4m3fn, 1, 1, False),
+        (torch.float8_e4m3fn, 3, 8, False),
+        (torch.float8_e4m3fn, 8, 8, False),
+        pytest.param(torch.float8_e4m3fn, 1, 1, True, id="concurrent-writes"),
     ],
 )
 def test_decode_index_score_cutedsl_correctness(
     dtype: torch.dtype,
     decode_query_len: int,
     max_decode_query_len: int,
+    concurrent_writes: bool,
 ):
     pytest.importorskip("cutlass")
     from vllm.models.minimax_m3.nvidia.ops import (
@@ -1432,7 +2094,8 @@ def test_decode_index_score_cutedsl_correctness(
     torch.manual_seed(0)
     init_blocks, local_blocks = 0, 0
     num_idx_heads, head_dim = 4, 128
-    active_seq_lens = torch.tensor((1025, 4097), device="cuda", dtype=torch.int32)
+    lengths = (131326, 131289, 131252, 131215) if concurrent_writes else (1025, 4097)
+    active_seq_lens = torch.tensor(lengths, device="cuda", dtype=torch.int32)
     batch = active_seq_lens.numel()
     total_q = batch * decode_query_len
     max_seq_len = int(active_seq_lens.max())
@@ -1454,7 +2117,8 @@ def test_decode_index_score_cutedsl_correctness(
     )
     score = unified_score.transpose(0, 1)
 
-    minimax_m3_index_decode_score_cutedsl(
+    launch = partial(
+        minimax_m3_index_decode_score_cutedsl,
         idx_q,
         index_kv_cache,
         block_table,
@@ -1467,6 +2131,7 @@ def test_decode_index_score_cutedsl_correctness(
         max_decode_query_len=max_decode_query_len,
         score_out=score,
     )
+    launch()
     expected = _reference_decode_index_score(
         idx_q,
         index_kv_cache,
@@ -1476,6 +2141,23 @@ def test_decode_index_score_cutedsl_correctness(
         score_block_stride,
     )
     torch.testing.assert_close(score, expected)
+
+    if concurrent_writes:
+        # Concurrent stores expose shared-memory reuse before ldmatrix reads finish.
+        quiet = score.clone()
+        noise = torch.zeros(1 << 26, device="cuda")
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        try:
+            for _ in range(20):
+                with torch.cuda.stream(side):
+                    for _ in range(40):
+                        noise.mul_(1.0)
+                launch()
+                torch.testing.assert_close(score, quiet, atol=0, rtol=0)
+                side.synchronize()
+        finally:
+            side.synchronize()
 
 
 # Sparse attention kernels.
@@ -1529,6 +2211,7 @@ def _reference_sparse_attn(
 
 
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize("sparse_attn", PREFILL_KERNELS)
 @pytest.mark.parametrize(
     ("q_lens", "kv_lens"),
     [
@@ -1537,6 +2220,7 @@ def _reference_sparse_attn(
     ],
 )
 def test_prefill_sparse_attention_correctness(
+    sparse_attn,
     kv_layout: KVCacheLayout,
     q_lens: tuple[int, ...],
     kv_lens: tuple[int, ...],
@@ -1594,7 +2278,7 @@ def test_prefill_sparse_attention_correctness(
         q_start += q_len
 
     actual = torch.empty_like(q)
-    minimax_m3_sparse_attn(
+    sparse_attn(
         q,
         kv_cache,
         topk_idx,
@@ -1650,8 +2334,9 @@ def test_main_cache_layout_contract():
         assert set(order) == set(range(len(order)))
 
 
-def test_aiter_sparse_pa_layout_contract(monkeypatch):
-    """The shuffle-only AITER path retains separately contiguous K/V storage."""
+@pytest.mark.parametrize("layout", [KVCacheLayout.LHBNC, KVCacheLayout.LBHNC])
+def test_aiter_sparse_pa_layout_contract(monkeypatch, layout):
+    """Build the exact separate and packed page-16 views used by the model."""
     import vllm.models.minimax_m3.common.sparse_attention as sparse_attn_mod
 
     monkeypatch.setattr(sparse_attn_mod.rocm_aiter_ops, "is_enabled", lambda: True)
@@ -1662,22 +2347,46 @@ def test_aiter_sparse_pa_layout_contract(monkeypatch):
     )
 
     backend = sparse_attn_mod.MiniMaxM3SparseBackend
-    assert KVCacheLayout.LHBNC in backend.supported_kv_cache_layouts()
+    layouts = backend.supported_kv_cache_layouts()
+    assert layouts is not None
+    assert KVCacheLayout.LHBNC in layouts
+    assert KVCacheLayout.LBHNC in layouts
 
-    nb, h = 7, 1
+    nb, h = 3, 1
+    cache_dtype = current_platform.fp8_dtype()
     spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=h,
         head_size=HEAD_DIM,
-        dtype=DTYPE,
+        dtype=cache_dtype,
+        kv_quant_mode=get_kv_quant_mode("fp8"),
         num_head_slots=2,
-        state_content_bytes=h * HEAD_DIM * DTYPE.itemsize,
+        state_content_bytes=h * HEAD_DIM * cache_dtype.itemsize,
     )
     raw = torch.zeros(nb * spec.page_size_bytes, dtype=torch.int8)
-    view = dense_kv_cache_views(raw, spec, nb, 1, KVCacheLayout.LHBNC)[0]
-    key_cache, value_cache = view.unbind(1)
-    assert key_cache.is_contiguous()
-    assert value_cache.is_contiguous()
+    kv_cache = dense_kv_cache_views(raw, spec, nb, 1, layout)[0].view(cache_dtype)
+    key_cache, value_cache = kv_cache.unbind(1)
+    x = 16 // cache_dtype.itemsize
+    pages_per_side = BLOCK_SIZE // 16
+    if key_cache.is_contiguous() and value_cache.is_contiguous():
+        k_src, v_src = key_cache, value_cache
+        block_pages, v_page_offset = pages_per_side, 0
+    else:
+        assert kv_cache.is_contiguous()
+        k_src = v_src = kv_cache
+        block_pages, v_page_offset = 2 * pages_per_side, pages_per_side
+
+    num_phys16 = nb * block_pages
+    k_view = k_src.view(num_phys16, h, HEAD_DIM // x, 16, x)
+    v_view = v_src.view(num_phys16, h, 16 // x, HEAD_DIM, x)[v_page_offset:]
+    assert k_view.is_contiguous()
+    assert v_view.is_contiguous()
+    if layout is KVCacheLayout.LHBNC:
+        assert k_view.shape == (24, 1, 8, 16, 16)
+        assert v_view.shape == (24, 1, 1, 128, 16)
+    else:
+        assert k_view.shape == (48, 1, 8, 16, 16)
+        assert v_view.shape == (40, 1, 1, 128, 16)
 
 
 def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
@@ -1713,16 +2422,16 @@ def test_aiter_sparse_pa_rejects_multiple_kv_heads(monkeypatch):
     assert backend.get_builder_cls().__name__ == "MiniMaxM3SparseAiterPAMetadataBuilder"
 
 
-def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
+def test_msa_indexer_requires_the_aiter_attend(monkeypatch):
     """The top-k emits the attend's page table, so it needs that attend.
 
     Selected without it, the indexer would reach its top-k with no table to
     resolve through; falling back instead surfaces the fp8 index cache as the
     configuration error it is.
     """
-    import vllm.models.minimax_m3.amd.indexer_aiter as indexer_aiter_mod
+    import vllm.models.minimax_m3.amd.indexer_msa as indexer_msa_mod
 
-    monkeypatch.setattr(indexer_aiter_mod.current_platform, "is_rocm", lambda: True)
+    monkeypatch.setattr(indexer_msa_mod.current_platform, "is_rocm", lambda: True)
     kwargs = dict(
         topk_blocks=TOPK,
         sparse_block_size=BLOCK_SIZE,
@@ -1733,18 +2442,342 @@ def test_aiter_indexer_requires_the_aiter_attend(monkeypatch):
     )
 
     monkeypatch.setattr(
-        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
+        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: False
     )
-    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    reason = indexer_msa_mod.msa_indexer_unsupported_reason(**kwargs)
     assert reason is not None and "AITER sparse PA attend" in reason
 
     # With the attend asked for, the gate moves on to the kernel-contract
     # checks rather than stopping here.
     monkeypatch.setattr(
-        indexer_aiter_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
+        indexer_msa_mod, "_minimax_m3_aiter_sparse_pa_requested", lambda: True
     )
-    reason = indexer_aiter_mod.aiter_indexer_unsupported_reason(**kwargs)
+    reason = indexer_msa_mod.msa_indexer_unsupported_reason(**kwargs)
     assert reason is None or "AITER sparse PA attend" not in reason
+
+
+def test_aiter_consolidated_qknorm_enabled(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+
+    scale = torch.tensor([0.25])
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8", scale, scale)
+    assert rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e4m3", scale, scale)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8")
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8", scale, None)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e5m2", scale, scale)
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", False)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: False)
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("auto")
+
+
+def _fake_aiter_qknorm_args(kv_cache_dtype: str = "auto") -> dict:
+    tensor = torch.empty(1)
+    return {
+        "qkv": tensor,
+        "q_norm_weight": tensor,
+        "k_norm_weight": tensor,
+        "cos_sin_cache": tensor,
+        "positions": tensor,
+        "num_heads": 16,
+        "num_kv_heads": 1,
+        "rotary_dim": 64,
+        "eps": 1e-6,
+        "slot_mapping": tensor,
+        "kv_cache_k": tensor,
+        "kv_cache_v": tensor,
+        "q_out": tensor,
+        "kv_cache_dtype": kv_cache_dtype,
+    }
+
+
+def _install_fake_aiter_qknorm(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
+    """Stub ``aiter.fused_qknorm_idxrqknorm`` so mapping tests run without AITER."""
+    import sys
+    import types
+    from typing import Any
+
+    calls: list[dict] = []
+
+    def fake_op(*args, **kwargs):
+        calls.append(kwargs)
+
+    existing = sys.modules.get("aiter")
+    if existing is not None:
+        monkeypatch.setattr(existing, "fused_qknorm_idxrqknorm", fake_op, raising=False)
+    else:
+        fake_mod: Any = types.ModuleType("aiter")
+        fake_mod.fused_qknorm_idxrqknorm = fake_op
+        monkeypatch.setitem(sys.modules, "aiter", fake_mod)
+    return calls
+
+
+def test_aiter_consolidated_qknorm_packed_shuffle_unequal_spans(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    call_args = _fake_aiter_qknorm_args()
+    call_args["kv_cache_k"] = torch.empty(2, 1)
+    call_args["kv_cache_v"] = torch.empty(1, 1)
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "aiter_dtype", "passes_scales"),
+    [
+        ("auto", "auto", False),
+        ("fp8", "fp8_e4m3_static", True),
+        ("fp8_e4m3", "fp8_e4m3_static", True),
+    ],
+)
+def test_aiter_consolidated_qknorm_dtype_and_layout_mapping(
+    monkeypatch, kv_cache_dtype, aiter_dtype, passes_scales
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    call_args = _fake_aiter_qknorm_args(kv_cache_dtype)
+    k_scale = torch.tensor([0.25])
+    v_scale = torch.tensor([0.5])
+    call_args.update(k_scale=k_scale, v_scale=v_scale)
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert len(calls) == 1
+    kwargs = calls[0]
+    assert kwargs["kv_cache_dtype"] == aiter_dtype
+    assert kwargs["index_cache_dtype"] == "auto"
+    assert kwargs["block_size"] == 16
+    assert kwargs["asm_layout"] is True
+    if passes_scales:
+        assert kwargs["k_scale"] is k_scale
+        assert kwargs["v_scale"] is v_scale
+    else:
+        assert kwargs["k_scale"] is None
+        assert kwargs["v_scale"] is None
+
+
+def test_aiter_consolidated_qknorm_fp8_index_dtype_mapping(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    fp8 = current_platform.fp8_dtype()
+    call_args = _fake_aiter_qknorm_args("fp8")
+    call_args.update(
+        k_scale=torch.tensor([0.25]),
+        v_scale=torch.tensor([0.5]),
+        index_cache=torch.empty(1, dtype=fp8),
+        index_q_out=torch.empty(1, dtype=fp8),
+        num_index_heads=1,
+    )
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    assert calls[0]["index_cache_dtype"] == "fp8"
+    assert calls[0]["kv_cache_dtype"] == "fp8_e4m3_static"
+
+
+@pytest.mark.parametrize("skip_index_branch", [False, True])
+def test_aiter_consolidated_qknorm_full_and_skip_index_args(
+    monkeypatch, skip_index_branch
+):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    calls = _install_fake_aiter_qknorm(monkeypatch)
+    call_args = _fake_aiter_qknorm_args()
+    if skip_index_branch:
+        call_args.update(skip_index_branch=True)
+    else:
+        tensor = torch.empty(1)
+        call_args.update(
+            index_q_norm_weight=tensor,
+            index_k_norm_weight=tensor,
+            num_index_heads=1,
+            index_cache=tensor,
+            index_q_out=tensor,
+            index_slot_mapping=tensor,
+        )
+
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(**call_args)
+    kwargs = calls[0]
+    assert kwargs["skip_index_branch"] is skip_index_branch
+    if skip_index_branch:
+        assert kwargs["index_q_norm_weight"] is None
+        assert kwargs["index_k_norm_weight"] is None
+        assert kwargs["index_cache"] is None
+        assert kwargs["index_q_out"] is None
+        assert kwargs["index_slot_mapping"] is None
+    else:
+        assert kwargs["index_q_norm_weight"] is not None
+        assert kwargs["index_k_norm_weight"] is not None
+        assert kwargs["index_cache"] is not None
+        assert kwargs["index_q_out"] is not None
+        assert kwargs["index_slot_mapping"] is not None
+
+
+def test_aiter_consolidated_qknorm_rejects_fp8_e5m2(monkeypatch):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    monkeypatch.setattr("vllm._aiter_ops.is_aiter_found_and_supported", lambda: True)
+    monkeypatch.setattr(rocm_aiter_ops, "_AITER_ENABLED", True)
+    scale = torch.tensor([0.25])
+    assert not rocm_aiter_ops.fused_qknorm_idxrqknorm_enabled("fp8_e5m2", scale, scale)
+
+
+def test_aiter_sparse_pa_slot_rebase_preserves_page_offsets():
+    slots = torch.tensor([0, 15, 16, 127, 128, 129, -1])
+    actual = minimax_m3_rebase_slots_to_page16(slots, block_size=128)
+    expected = torch.tensor([0, 15, 16, 127, 256, 257, -1])
+    assert torch.equal(actual, expected)
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="The consolidated packed-SHUFFLE AITER op is ROCm-only",
+)
+@pytest.mark.parametrize("skip_index_branch", [False, True])
+@pytest.mark.parametrize("fp8_index", [False, True])
+def test_aiter_consolidated_qknorm_real_packed_shuffle(skip_index_branch, fp8_index):
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    torch.manual_seed(20260831)
+    num_tokens = 4
+    num_heads = 16
+    num_kv_heads = 1
+    num_index_heads = 1
+    rotary_dim = 64
+    head_dim = 128
+    logical_block_size = 128
+    num_blocks = 3
+    fp8_dtype = current_platform.fp8_dtype()
+
+    qkv = torch.randn(
+        num_tokens,
+        (num_heads + 2 * num_kv_heads + num_index_heads + 1) * head_dim,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    weights = [
+        torch.randn(head_dim, dtype=torch.bfloat16, device="cuda") for _ in range(4)
+    ]
+    cos_sin_cache = torch.randn(16, rotary_dim, dtype=torch.bfloat16, device="cuda")
+    positions = torch.arange(num_tokens, dtype=torch.int64, device="cuda")
+    logical_slots = torch.tensor([0, 127, 128, -1], dtype=torch.int64, device="cuda")
+    slot_mapping = minimax_m3_rebase_slots_to_page16(logical_slots, logical_block_size)
+    index_slot_mapping = logical_slots.clone()
+
+    packed = torch.zeros(
+        num_blocks,
+        2,
+        logical_block_size,
+        head_dim,
+        dtype=fp8_dtype,
+        device="cuda",
+    )
+    x = 16 // packed.element_size()
+    pages_per_side = logical_block_size // 16
+    num_phys16 = num_blocks * 2 * pages_per_side
+    kv_cache_k = packed.view(num_phys16, num_kv_heads, head_dim // x, 16, x)
+    kv_cache_v = packed.view(num_phys16, num_kv_heads, 16 // x, head_dim, x)[
+        pages_per_side:
+    ]
+    assert kv_cache_k.shape == (48, 1, 8, 16, 16)
+    assert kv_cache_v.shape == (40, 1, 1, 128, 16)
+
+    q_out = torch.zeros(
+        num_tokens, num_heads * head_dim, dtype=torch.bfloat16, device="cuda"
+    )
+    index_dtype = fp8_dtype if fp8_index else torch.bfloat16
+    if fp8_index:
+        index_q_out = torch.empty(
+            (num_tokens, num_index_heads * head_dim),
+            dtype=index_dtype,
+            device="cuda",
+        )
+        index_cache = torch.empty(
+            (num_blocks, logical_block_size, head_dim),
+            dtype=index_dtype,
+            device="cuda",
+        )
+        index_q_out.view(torch.uint8).fill_(7)
+        index_cache.view(torch.uint8).fill_(7)
+    else:
+        index_q_out = torch.full(
+            (num_tokens, num_index_heads * head_dim),
+            7,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+        index_cache = torch.full(
+            (num_blocks, logical_block_size, head_dim),
+            7,
+            dtype=torch.bfloat16,
+            device="cuda",
+        )
+    scale = torch.tensor([0.02], dtype=torch.float32, device="cuda")
+
+    kwargs = {}
+    if not skip_index_branch:
+        kwargs = {
+            "index_q_norm_weight": weights[2],
+            "index_k_norm_weight": weights[3],
+            "index_cache": index_cache,
+            "index_q_out": index_q_out,
+            "index_slot_mapping": index_slot_mapping,
+        }
+    rocm_aiter_ops.fused_qknorm_idxrqknorm(
+        qkv,
+        weights[0],
+        weights[1],
+        cos_sin_cache,
+        positions,
+        num_heads,
+        num_kv_heads,
+        rotary_dim,
+        1e-6,
+        slot_mapping,
+        kv_cache_k,
+        kv_cache_v,
+        q_out,
+        "fp8",
+        scale,
+        scale,
+        num_index_heads=num_index_heads,
+        skip_index_branch=skip_index_branch,
+        **kwargs,
+    )
+    torch.accelerator.synchronize()
+
+    assert torch.isfinite(q_out).all()
+    assert torch.count_nonzero(q_out) > 0
+    assert torch.count_nonzero(packed) > 0
+    if fp8_index:
+        index_q_untouched = torch.all(index_q_out.view(torch.uint8) == 7)
+        index_cache_untouched = torch.all(index_cache.view(torch.uint8) == 7)
+        index_cache_t0 = torch.all(index_cache[0, 0].view(torch.uint8) == 7)
+        index_cache_t127 = torch.all(index_cache[0, 127].view(torch.uint8) == 7)
+        index_cache_t128 = torch.all(index_cache[1, 0].view(torch.uint8) == 7)
+    else:
+        index_q_untouched = torch.all(index_q_out == 7)
+        index_cache_untouched = torch.all(index_cache == 7)
+        index_cache_t0 = torch.all(index_cache[0, 0] == 7)
+        index_cache_t127 = torch.all(index_cache[0, 127] == 7)
+        index_cache_t128 = torch.all(index_cache[1, 0] == 7)
+    if skip_index_branch:
+        assert index_q_untouched
+        assert index_cache_untouched
+    else:
+        assert not index_q_untouched
+        assert not index_cache_t0
+        assert not index_cache_t127
+        assert not index_cache_t128
 
 
 def test_indexer_cache_squeezes_to_contiguous_3d():
@@ -2200,6 +3233,103 @@ def test_decode_sparse_attention_correctness(
     error = (actual[:active_tokens].float() - expected.float()).abs()
     assert error.mean().item() < 2.5e-4
     assert error.max().item() < 1.7e-2
+
+
+@pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
+@pytest.mark.parametrize("capture_graph", [False, True])
+@pytest.mark.parametrize("num_reqs", [2, 17], ids=["split-k", "single-chunk"])
+@pytest.mark.parametrize(
+    "invalid_block", [-1, 1_000_000], ids=["sentinel", "out-of-range"]
+)
+def test_decode_sparse_attention_ignores_invalid_topk(
+    kv_layout: KVCacheLayout, capture_graph: bool, num_reqs: int, invalid_block: int
+):
+    """Unused top-k entries must not be dereferenced as block-table indices."""
+    torch.manual_seed(0)
+    decode_query_len = 4
+    seq_lens = torch.full(
+        (num_reqs,), decode_query_len, device="cuda", dtype=torch.int32
+    )
+    seq_lens[1] = 4096
+    q = torch.randn(
+        seq_lens.numel() * decode_query_len,
+        NUM_Q_HEADS,
+        HEAD_DIM,
+        device="cuda",
+        dtype=DTYPE,
+    )
+    kv_cache = _allocate_main_kv_via_contract(1, kv_layout)
+
+    # All logical blocks alias the single valid page. With a contiguous multi-row
+    # table, row 1's raw pointer offset -1 resolves to the final element of row
+    # 0. Poison that exact location so an unsafe load deterministically forms an
+    # out-of-range KV-cache pointer.
+    clean_block_table = torch.zeros(num_reqs, 32, device="cuda", dtype=torch.int32)
+    block_table = clean_block_table.clone()
+    block_table[0, -1] = 1_000_000
+    topk_idx = torch.full(
+        (NUM_KV_HEADS, q.shape[0], TOPK),
+        -1,
+        device="cuda",
+        dtype=torch.int32,
+    )
+    topk_idx[..., 0] = 0
+    # Request 1 has invalid entries both before and after its valid block.
+    # Two requests produce empty split-K chunks; 17 put the full top-k in one
+    # chunk, exercising neutral updates before and after a nonempty softmax.
+    request_topk = topk_idx[:, decode_query_len : 2 * decode_query_len]
+    request_topk.fill_(invalid_block)
+    request_topk[..., TOPK // 2] = 0
+
+    # A valid-only run isolates sentinel handling from BF16-vs-FP32 rounding.
+    # Include block 0 exactly once; replacing sentinels with 0 would duplicate
+    # its contribution. The general correctness test covers reference accuracy.
+    valid_topk = torch.zeros(
+        (NUM_KV_HEADS, q.shape[0], 1), device="cuda", dtype=torch.int32
+    )
+    expected = torch.empty_like(q)
+    minimax_m3_sparse_attn_decode(
+        q,
+        kv_cache,
+        valid_topk,
+        clean_block_table,
+        seq_lens,
+        NUM_KV_HEADS,
+        SM_SCALE,
+        expected,
+        decode_query_len,
+    )
+    actual = torch.empty_like(q)
+
+    def run_decode() -> None:
+        minimax_m3_sparse_attn_decode(
+            q,
+            kv_cache,
+            topk_idx,
+            block_table,
+            seq_lens,
+            NUM_KV_HEADS,
+            SM_SCALE,
+            actual,
+            decode_query_len,
+        )
+
+    if capture_graph:
+        # An unfixed kernel faults during capture and leaves the CUDA context
+        # unusable. Run negative-control reproductions in a dedicated process.
+        run_decode()
+        current_platform.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run_decode()
+        for _ in range(3):
+            graph.replay()
+    else:
+        run_decode()
+    current_platform.synchronize()
+
+    assert torch.isfinite(actual).all()
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 def test_decode_wrong_layout_breaks_parity():

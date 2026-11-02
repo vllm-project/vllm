@@ -4,11 +4,14 @@
 from collections.abc import Callable
 
 import torch
-from torch.nn import Parameter
 
 from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import init_fp8_linear_kernel
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_scale_parameter,
@@ -36,6 +39,7 @@ from vllm.model_executor.parameter import (
     ModelWeightParameter,
     PerTensorScaleParameter,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 __all__ = ["QuarkW8A8Fp8", "QuarkW8A8Fp8PerBlock"]
@@ -85,7 +89,7 @@ class QuarkW8A8Fp8(QuarkScheme):
                     input_scale=input_scale,
                 )
                 if input_scale is not None:
-                    layer.input_scale = Parameter(input_scale, requires_grad=False)
+                    replace_parameter(layer, "input_scale", input_scale)
             else:
                 max_w_scale = layer.weight_scale
                 weight = layer.weight
@@ -96,8 +100,10 @@ class QuarkW8A8Fp8(QuarkScheme):
                 logical_widths=layer.logical_widths,
             )
 
-            layer.weight = Parameter(weight.t(), requires_grad=False)
-            layer.weight_scale = Parameter(max_w_scale, requires_grad=False)
+            replace_parameter(layer, "weight", weight.t())
+            # The param keeps its checkpoint dims; Humming reads the (K, N) layout.
+            layer.processed_weight_dims = (0, 1)
+            replace_parameter(layer, "weight_scale", max_w_scale)
 
         # If channelwise, scales are already lined up, so just transpose.
         elif self.weight_qscheme == "per_channel":
@@ -111,23 +117,24 @@ class QuarkW8A8Fp8(QuarkScheme):
                     input_scale=input_scale,
                 )
                 if input_scale is not None:
-                    layer.input_scale = Parameter(input_scale, requires_grad=False)
+                    replace_parameter(layer, "input_scale", input_scale)
             else:
                 weight_scale = layer.weight_scale.data
 
             assert self.activation_quant_key is not None
             if self.activation_quant_key.scale.group_shape == GroupShape.PER_TOKEN:
                 weight_scale = weight_scale.view(-1, 1)
-            layer.weight = Parameter(weight.t(), requires_grad=False)
+            replace_parameter(layer, "weight", weight.t())
+            layer.processed_weight_dims = (0, 1)
             # required by torch.compile to be torch.nn.Parameter
-            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            replace_parameter(layer, "weight_scale", weight_scale)
 
         else:
             raise ValueError(f"Unknown quantization scheme {self.weight_qscheme}")
 
         # INPUT SCALE
         if self.is_static_input_scheme:
-            layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
+            replace_parameter(layer, "input_scale", layer.input_scale.max())
 
         self.fp8_linear.process_weights_after_loading(layer)
 
@@ -195,10 +202,12 @@ class QuarkW8A8Fp8(QuarkScheme):
             module_name=self.__class__.__name__,
         )
 
+        expose_input_quant_key(layer, self.fp8_linear)
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply_weights(layer, x, bias)

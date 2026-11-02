@@ -23,6 +23,9 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.model_loader.mtp_validation import (
+    is_mtp_completeness_check_enabled,
+)
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
@@ -413,18 +416,13 @@ class KimiK3MTP(nn.Module):
             self.model.mtp_start_layer_idx,
             self.model.mtp_start_layer_idx + self.model.num_mtp_layers,
         ):
-            if layer_idx not in loaded_layers:
+            if layer_idx not in loaded_layers and is_mtp_completeness_check_enabled():
                 raise ValueError(
                     f"MTP speculative decoding layer {layer_idx} weights "
                     f"missing from checkpoint. The checkpoint may not include "
                     f"the MTP layer weights. Use a checkpoint that includes "
                     f"MTP layer weights, or disable speculative decoding."
                 )
-
-        if use_mega_moe:
-            for module in self.modules():
-                if isinstance(module, KimiMoE) and module.use_mega_moe:
-                    module.experts.finalize_weights()
 
         return loaded_params
 

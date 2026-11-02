@@ -19,8 +19,10 @@ from tests.quantization.utils import is_quant_method_supported
 
 from ..utils import check_logprobs_close
 
-# Small MoE model that fits on a single GPU and exercises both linear + MoE.
-MOE_MODEL = "allenai/OLMoE-1B-7B-0125-Instruct"
+# Small MoE models that fit on a single GPU and exercise both linear + MoE,
+# one per modeling backend.
+MOE_MODEL = "ibm-granite/granite-3.0-1b-a400m-base"
+TRANSFORMERS_MOE_MODEL = "allenai/OLMoE-1B-7B-0125-Instruct"
 # Small dense model (no MoE) to validate the linear-only path.
 DENSE_MODEL = "Qwen/Qwen3-0.6B"
 
@@ -34,9 +36,14 @@ NUM_LOG_PROBS = 8
     reason="fp8 is not supported on this GPU type.",
 )
 @pytest.mark.quant_model
-@pytest.mark.parametrize("model", [DENSE_MODEL, MOE_MODEL], ids=["dense", "moe"])
+@pytest.mark.parametrize(
+    "model",
+    [DENSE_MODEL, MOE_MODEL, TRANSFORMERS_MOE_MODEL],
+    ids=["dense", "moe", "moe_transformers"],
+)
 def test_fp8_per_channel_logprobs(
     vllm_runner,
+    quant_baseline_logprobs,
     example_prompts,
     model: str,
     monkeypatch: pytest.MonkeyPatch,
@@ -52,14 +59,13 @@ def test_fp8_per_channel_logprobs(
     with monkeypatch.context() as m:
         m.setenv("TOKENIZERS_PARALLELISM", "true")
 
-        with vllm_runner(
+        baseline_outputs = quant_baseline_logprobs(
             model,
+            example_prompts,
             max_model_len=MAX_MODEL_LEN,
-            enforce_eager=True,
-        ) as vllm_model:
-            baseline_outputs = vllm_model.generate_greedy_logprobs(
-                example_prompts, MAX_TOKENS, NUM_LOG_PROBS
-            )
+            max_tokens=MAX_TOKENS,
+            num_logprobs=NUM_LOG_PROBS,
+        )
 
         with vllm_runner(
             model,

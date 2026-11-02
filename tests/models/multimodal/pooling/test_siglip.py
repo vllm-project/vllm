@@ -149,7 +149,7 @@ def test_models(
     _run_test(
         hf_runner,
         vllm_runner,
-        input_cases,  # type: ignore[arg-type]
+        input_cases,
         model,
         dtype=dtype,
     )

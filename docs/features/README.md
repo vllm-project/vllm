@@ -1,5 +1,9 @@
 # Features
 
+## KV Cache Offloading
+
+- [UMBPStoreConnector](umbp_store_connector_usage.md)
+
 ## Compatibility Matrix
 
 The tables below show mutually exclusive features and the support on some hardware.
@@ -64,7 +68,7 @@ th:not(:first-child) {
 | [CP](../configuration/optimization.md#chunked-prefill) | [❌](https://github.com/vllm-project/vllm/issues/2729) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [APC](automatic_prefix_caching.md) | [❌](https://github.com/vllm-project/vllm/issues/3687) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | [LoRA](lora.md) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| [SD](speculative_decoding/README.md) | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ |
+| [SD](speculative_decoding/README.md) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | CUDA graph | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | [❌](https://github.com/vllm-project/vllm/issues/26970) |
 | [pooling](../models/pooling_models/README.md) | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | <abbr title="Encoder-Decoder Models">enc-dec</abbr> | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ |
@@ -78,4 +82,4 @@ th:not(:first-child) {
 | beam-search | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 !!! note
-    For information on feature support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
+    For information on feature support on Google TPU, please refer to the [TPU-Inference Feature Matrix](https://docs.vllm.ai/projects/tpu/en/latest/features/) documentation.

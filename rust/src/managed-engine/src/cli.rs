@@ -7,6 +7,7 @@ use std::ffi::OsString;
 use clap::error::ErrorKind;
 use clap::{Args, CommandFactory};
 
+use crate::data_parallel::DataParallelTopology;
 use crate::{ManagedEngineConfig, allocate_handshake_port};
 
 /// Managed Python headless-engine CLI arguments.
@@ -84,7 +85,6 @@ impl ManagedEngineArgs {
     pub fn into_config(
         self,
         model: String,
-        revision: Option<String>,
         max_logprobs: Option<i32>,
         profiler_config: Option<String>,
         reasoning_parser: Option<&str>,
@@ -93,13 +93,13 @@ impl ManagedEngineArgs {
         shutdown_timeout: u64,
         handshake_port: u16,
         limit_mm_per_prompt: Option<String>,
+        hf_overrides: Option<String>,
+        structured_outputs_config: Option<String>,
+        topology: &DataParallelTopology,
+        client_handshake_address: Option<String>,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
         // Manually forward some args to the Python engine.
-        if let Some(revision) = revision {
-            python_args.push("--revision".to_string());
-            python_args.push(revision);
-        }
         if let Some(max_model_len) = self.max_model_len {
             python_args.push("--max-model-len".to_string());
             python_args.push(max_model_len);
@@ -128,13 +128,28 @@ impl ManagedEngineArgs {
             python_args.push("--shutdown-timeout".to_string());
             python_args.push(shutdown_timeout.to_string());
         }
-        if let Some(data_parallel_size_local) = self.data_parallel_size_local {
+        // This node's engines launch as a headless internal-LB node; hybrid
+        // and external LB differ only in which frontend they handshake with,
+        // which `client_handshake_address` carries.
+        if self.data_parallel_size_local.is_some() || topology.local_engines_only {
             python_args.push("--data-parallel-size-local".to_string());
-            python_args.push(data_parallel_size_local.to_string());
+            python_args.push(topology.local_size.to_string());
+        }
+        if topology.start_rank != 0 {
+            python_args.push("--data-parallel-start-rank".to_string());
+            python_args.push(topology.start_rank.to_string());
         }
         if let Some(limit_mm_per_prompt) = limit_mm_per_prompt {
             python_args.push("--limit-mm-per-prompt".to_string());
             python_args.push(limit_mm_per_prompt);
+        }
+        if let Some(hf_overrides) = hf_overrides {
+            python_args.push("--hf-overrides".to_string());
+            python_args.push(hf_overrides);
+        }
+        if let Some(structured_outputs_config) = structured_outputs_config {
+            python_args.push("--structured-outputs-config".to_string());
+            python_args.push(structured_outputs_config);
         }
 
         ManagedEngineConfig {
@@ -143,21 +158,9 @@ impl ManagedEngineArgs {
             handshake_host: self.handshake_host,
             handshake_port,
             data_parallel_size: self.data_parallel_size,
+            client_handshake_address,
             python_args,
         }
-    }
-
-    /// Return the number of engines that the Rust frontend should expect to
-    /// coordinate with.
-    fn local_engine_count(&self) -> usize {
-        self.data_parallel_size_local.unwrap_or(self.data_parallel_size)
-    }
-
-    /// Return whether the managed Rust frontend only needs to communicate with
-    /// colocated engines.
-    pub fn frontend_local_only(&self) -> bool {
-        self.data_parallel_size_local != Some(0)
-            && self.local_engine_count() == self.data_parallel_size
     }
 }
 

@@ -10,11 +10,17 @@ import torch
 
 from tests.quantization.utils import is_quant_method_supported
 from vllm import LLM, SamplingParams
-from vllm.config import CompilationConfig, CompilationMode, CUDAGraphMode, PassConfig
+from vllm.config import (
+    CacheConfig,
+    CompilationConfig,
+    CompilationMode,
+    CUDAGraphMode,
+    PassConfig,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import is_torch_equal_or_newer
 
-from ...utils import create_new_process_for_each_test
+from ...utils import create_new_process_for_each_test, wait_for_memory_to_settle
 
 
 def models_list(*, all: bool = True, keywords: list[str] | None = None):
@@ -53,7 +59,7 @@ def models_list(*, all: bool = True, keywords: list[str] | None = None):
     [CompilationMode.DYNAMO_TRACE_ONCE, CompilationMode.VLLM_COMPILE],
 )
 @pytest.mark.parametrize("model, model_kwargs", models_list(all=True))
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_full_graph(
     monkeypatch: pytest.MonkeyPatch,
     model: str,
@@ -92,17 +98,6 @@ def test_full_graph(
         for model_info in models_list(keywords=["FP8-dynamic"])
     ]
     + [
-        # Test depyf integration works
-        (
-            CompilationConfig(
-                mode=CompilationMode.VLLM_COMPILE,
-                debug_dump_path=Path(tempfile.gettempdir()),
-            ),
-            "facebook/opt-125m",
-            {},
-        ),
-    ]
-    + [
         # graph inductor partition
         (
             CompilationConfig(
@@ -134,7 +129,7 @@ def test_full_graph(
     ],
 )
 # only test some of the models
-@create_new_process_for_each_test()
+@create_new_process_for_each_test("spawn")
 def test_custom_compile_config(
     compilation_config: CompilationConfig,
     model: str,
@@ -147,6 +142,23 @@ def test_custom_compile_config(
 
     print(f"MODEL={model}")
     run_model(compilation_config, model, **model_kwargs)
+
+
+@create_new_process_for_each_test()
+def test_depyf_integration(disable_vllm_compile_cache):
+    """Compile with depyf's debugging hooks installed.
+
+    ``disable_vllm_compile_cache`` is what makes this a test rather than a
+    formality: depyf only ever sees a compilation that actually runs, so served
+    from a warm cache this exercises none of its hooks.
+    """
+    run_model(
+        CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE,
+            debug_dump_path=Path(tempfile.gettempdir()),
+        ),
+        "facebook/opt-125m",
+    )
 
 
 def run_model(
@@ -172,6 +184,14 @@ def run_model(
     # No cudagraphs by default
     if compilation_config.cudagraph_mode is None:
         compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+    # V1 startup requires free_memory >= total * gpu_memory_utilization, so a
+    # device that is not free yet fails engine init rather than waiting for it.
+    # VllmRunner guards this; building LLM directly does not. No-op off ROCm.
+    wait_for_memory_to_settle(
+        threshold_ratio=1.0
+        - model_kwargs.get("gpu_memory_utilization", CacheConfig.gpu_memory_utilization)
+    )
 
     llm = LLM(
         model=model,

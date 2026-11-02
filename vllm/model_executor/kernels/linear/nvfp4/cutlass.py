@@ -14,6 +14,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     slice_nvfp4_output,
     swizzle_blockscale,
 )
+from vllm.model_executor.utils import replace_parameter
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
@@ -34,11 +35,13 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale = torch.nn.Parameter(
-            swizzle_blockscale(layer.weight_scale.data), requires_grad=False
+        replace_parameter(
+            layer,
+            "weight_scale",
+            swizzle_blockscale(layer.weight_scale.data),
         )
         padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
-        layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
+        replace_parameter(layer, "weight", padded_weight)
 
     def apply_weights(
         self,

@@ -19,6 +19,7 @@ import math
 from collections.abc import Iterable, Mapping
 
 import torch
+import torch.nn.functional as F
 from torch import nn
 from transformers.models.gemma4_unified.configuration_gemma4_unified import (
     Gemma4UnifiedConfig,
@@ -28,7 +29,6 @@ from transformers.models.gemma4_unified.processing_gemma4_unified import (
 )
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import VideoDummyOptions
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.models.gemma3n_mm import batch_audio_features
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
@@ -49,6 +49,7 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 
 from .utils import (
     AutoWeightsLoader,
@@ -87,6 +88,9 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
         patch_dim = config.model_patch_size**2 * 3
         mm_embed_dim = config.mm_embed_dim
 
+        self.patch_dim = patch_dim
+        self.mm_embed_dim = mm_embed_dim
+
         self.patch_ln1 = nn.LayerNorm(patch_dim)
         self.patch_dense = ColumnParallelLinear(
             patch_dim,
@@ -103,34 +107,36 @@ class Gemma4UnifiedVisionEmbedder(nn.Module):
         )
         self.pos_norm = nn.LayerNorm(mm_embed_dim)
 
-    def _factorized_posemb(self, positions_xy: torch.Tensor) -> torch.Tensor:
-        clamped_pos = positions_xy.clamp(min=0).long()
-        valid_mask = positions_xy != -1
+    def _factorized_posemb(
+        self,
+        positions_xy: torch.Tensor,
+    ) -> torch.Tensor:
+        """Factorized 2D positional embedding lookup: sum of x and y tables.
 
-        pos_embs = torch.zeros(
-            *positions_xy.shape[:-1],
-            self.pos_embedding.shape[-1],
-            device=positions_xy.device,
-            dtype=self.pos_embedding.dtype,
-        )
-        for i in range(2):
-            axis_pe = self.pos_embedding[:, i, :][clamped_pos[..., i]]
-            mask = valid_mask[..., i].unsqueeze(-1).to(axis_pe.dtype)
-            pos_embs = pos_embs + (axis_pe * mask)
-        return pos_embs
+        pos_embedding has shape (max_pos, 2, D). Padding positions (-1) are
+        clamped before indexing and zeroed via mask.
+        """
+        max_pos, _, embed_dim = self.pos_embedding.shape
+        clamped_pos = positions_xy.clamp(min=0, max=max_pos - 1).to(torch.long) * 2
+        clamped_pos[..., 1] += 1
+        embs = F.embedding(clamped_pos, self.pos_embedding.view(-1, embed_dim))
+        embs.masked_fill_((positions_xy < 0).unsqueeze(-1), 0.0)
+        return embs[..., 0, :].add_(embs[..., 1, :])
 
     def forward(
         self,
         pixel_values: torch.Tensor,
         pixel_position_ids: torch.Tensor,
     ) -> torch.Tensor:
-        hidden_states = self.patch_ln1(pixel_values.to(self.pos_embedding.dtype))
+        dtype = self.pos_embedding.dtype
+        if pixel_values.dtype != dtype:
+            pixel_values = pixel_values.to(dtype)
+        hidden_states = self.patch_ln1(pixel_values)
         hidden_states, _ = self.patch_dense(hidden_states)
         hidden_states = self.patch_ln2(hidden_states)
 
         pos_embs = self._factorized_posemb(pixel_position_ids)
-        hidden_states = hidden_states + pos_embs
-        hidden_states = self.pos_norm(hidden_states)
+        hidden_states = self.pos_norm(hidden_states + pos_embs)
         return hidden_states
 
 
@@ -177,10 +183,7 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
         num_frames = _VIDEO_MAX_FRAMES
         mm_config = self.ctx.model_config.get_multimodal_config()
         video_opts = mm_config.limit_per_prompt.get("video")
-        if (
-            isinstance(video_opts, VideoDummyOptions)
-            and video_opts.num_frames is not None
-        ):
+        if video_opts is not None and video_opts.num_frames is not None:
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
@@ -349,66 +352,139 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
     # Multimodal processing (encoder-free overrides)
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _vision_chunk(
+        patches_per_item: int,
+        free_bytes: int,
+        total_bytes: int,
+        patch_dim: int = 6912,
+        mm_embed_dim: int = 3840,
+    ) -> int:
+        """Max items (images or video frames) to embed in one batch."""
+        if patches_per_item <= 0:
+            return 1
+        budget = min(free_bytes // 2, total_bytes // 10)
+        # Peak transient memory per patch across patch_ln1, patch_dense,
+        # _factorized_posemb, and embed_vision (~64 KB/patch in bf16).
+        cost = patches_per_item * (2 * patch_dim + 4 * mm_embed_dim) * 2
+        return max(1, budget // max(1, cost))
+
+    def _embed_vision_patches(
+        self,
+        pixel_values: torch.Tensor,
+        pixel_position_ids: torch.Tensor,
+    ) -> torch.Tensor:
+        weight = self.embed_vision.embedding_projection.weight
+        target_dtype = weight.dtype
+        if pixel_values.numel() == 0:
+            return torch.empty(
+                (*pixel_values.shape[:-1], weight.shape[0]),
+                device=pixel_values.device,
+                dtype=target_dtype,
+            )
+
+        total_items = pixel_values.shape[0]
+        if total_items <= 1:
+            embedded = self.vision_embedder(pixel_values, pixel_position_ids)
+            return self.embed_vision(embedded.to(target_dtype))
+
+        patches_per_item = pixel_values.shape[1] if pixel_values.ndim == 3 else 1
+        free_bytes, total_bytes = (
+            torch.accelerator.get_memory_info()
+            if pixel_values.is_cuda
+            else (1 << 60, 1 << 60)
+        )
+        max_batch = self._vision_chunk(
+            patches_per_item,
+            free_bytes,
+            total_bytes,
+            pixel_values.shape[-1],
+            self.vision_embedder.mm_embed_dim,
+        )
+        if total_items <= max_batch:
+            embedded = self.vision_embedder(pixel_values, pixel_position_ids)
+            return self.embed_vision(embedded.to(target_dtype))
+
+        chunks: list[torch.Tensor] = []
+        for idx in range(0, total_items, max_batch):
+            pv_chunk = pixel_values[idx : idx + max_batch]
+            pp_chunk = pixel_position_ids[idx : idx + max_batch]
+            embedded = self.vision_embedder(pv_chunk, pp_chunk)
+            chunks.append(self.embed_vision(embedded.to(target_dtype)))
+        return torch.cat(chunks, dim=0)
+
     def _process_image_input(
         self,
         image_input: Gemma4ImageInputs,
     ) -> list[torch.Tensor]:
-        """Project raw image patches directly to LM space.
-
-        No vision tower: each image's pre-patchified pixel values are
-        embedded via Gemma4UnifiedVisionEmbedder, projected through
-        Gemma4MultimodalEmbedder, and padding patches (pp == -1) are
-        stripped per image.
-        """
         pixel_values = image_input["pixel_values"]
         pixel_position_ids = image_input["pixel_position_ids"]
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
 
-        per_image_features: list[torch.Tensor] = []
-        for pv, pp in zip(pixel_values, pixel_position_ids, strict=True):
-            pv = pv.unsqueeze(0)
-            pp = pp.unsqueeze(0)
-            embedded = self.vision_embedder(pv, pp)
-            projected = self.embed_vision(embedded.to(target_dtype))
-            padding_mask = (pp.squeeze(0) == -1).all(dim=-1)
-            valid_features = projected.squeeze(0)[~padding_mask]
-            per_image_features.append(valid_features)
-        return per_image_features
+        if isinstance(pixel_values, (list, tuple)):
+            if len(pixel_values) == 0:
+                return []
+            lengths = [pv.shape[0] for pv in pixel_values]
+            pixel_values = torch.cat(pixel_values, dim=0)
+            pixel_position_ids = torch.cat(pixel_position_ids, dim=0)
+        else:
+            lengths = None
+
+        projected = self._embed_vision_patches(pixel_values, pixel_position_ids)
+        padding_mask = (pixel_position_ids == -1).all(dim=-1)
+
+        if lengths is not None:
+            proj_chunks: torch.Tensor | tuple[torch.Tensor, ...] = torch.split(
+                projected, lengths, dim=0
+            )
+            mask_chunks: torch.Tensor | tuple[torch.Tensor, ...] = torch.split(
+                padding_mask, lengths, dim=0
+            )
+        else:
+            proj_chunks = projected
+            mask_chunks = padding_mask
+
+        with gpu_sync_allowed():
+            return [
+                chunk[~mask]
+                for chunk, mask in zip(proj_chunks, mask_chunks, strict=True)
+            ]
 
     def _process_video_input(
         self,
         video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
-        """Project video frames to LM space, one frame at a time.
-
-        Frames are split per video, each frame is embedded + projected,
-        and per-frame valid embeddings are concatenated per video.
-        """
         pixel_values = video_input["pixel_values_videos"]
         pixel_position_ids = video_input["pixel_position_ids_videos"]
         frame_counts = video_input["video_frame_counts"]
-        target_dtype = self.embed_vision.embedding_projection.weight.dtype
 
         if isinstance(frame_counts, torch.Tensor):
-            fc_list = frame_counts.tolist()
+            with gpu_sync_allowed():
+                fc_list = frame_counts.tolist()
         else:
             fc_list = list(frame_counts)
 
-        pv_per_video = torch.split(pixel_values, fc_list, dim=0)
-        pp_per_video = torch.split(pixel_position_ids, fc_list, dim=0)
+        if isinstance(pixel_values, (list, tuple)):
+            if len(pixel_values) == 0:
+                return []
+            pixel_values = torch.cat(pixel_values, dim=0)
+            pixel_position_ids = torch.cat(pixel_position_ids, dim=0)
 
-        per_video_embeddings: list[torch.Tensor] = []
-        for pv_chunk, pp_chunk in zip(pv_per_video, pp_per_video):
-            frame_embs: list[torch.Tensor] = []
-            for i in range(pv_chunk.shape[0]):
-                pv = pv_chunk[i].unsqueeze(0)
-                pp = pp_chunk[i].unsqueeze(0)
-                embedded = self.vision_embedder(pv, pp)
-                projected = self.embed_vision(embedded.to(target_dtype))
-                padding_mask = (pp.squeeze(0) == -1).all(dim=-1)
-                frame_embs.append(projected.squeeze(0)[~padding_mask])
-            per_video_embeddings.append(torch.cat(frame_embs, dim=0))
-        return per_video_embeddings
+        if pixel_values.shape[0] == 0:
+            return []
+
+        projected = self._embed_vision_patches(pixel_values, pixel_position_ids)
+        padding_mask = (pixel_position_ids == -1).all(dim=-1)
+
+        proj_per_video = torch.split(projected, fc_list, dim=0)
+        mask_per_video = torch.split(padding_mask, fc_list, dim=0)
+
+        with gpu_sync_allowed():
+            return [
+                proj_chunk[~mask_chunk]
+                for proj_chunk, mask_chunk in zip(
+                    proj_per_video, mask_per_video, strict=True
+                )
+            ]
 
     def _process_audio_input(
         self,
@@ -428,8 +504,9 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         target_dtype = self.embed_audio.embedding_projection.weight.dtype
         audio_features = self.embed_audio(input_features.to(target_dtype))
         per_audio: list[torch.Tensor] = []
-        for enc, mask in zip(audio_features, input_features_mask, strict=True):
-            per_audio.append(enc[mask])
+        with gpu_sync_allowed():
+            for enc, mask in zip(audio_features, input_features_mask, strict=True):
+                per_audio.append(enc[mask])
         return per_audio
 
     # ------------------------------------------------------------------ #

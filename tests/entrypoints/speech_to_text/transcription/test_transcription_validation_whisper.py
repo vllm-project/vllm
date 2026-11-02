@@ -89,6 +89,7 @@ async def test_basic_audio(whisper_client, mary_had_lamb):
         language="en",
         response_format="text",
         temperature=0.0,
+        extra_body={"vllm_xargs": json.dumps({"frontend_window": 128})},
     )
     out = json.loads(transcription)
     out_text = out["text"]
@@ -238,8 +239,7 @@ async def test_stream_options(winning_call, whisper_client):
 
 @pytest.mark.asyncio
 async def test_sampling_params(mary_had_lamb, whisper_client):
-    """
-    Compare sampling with params and greedy sampling to assert results
+    """Compare sampling with params and greedy sampling to assert results
     are different when extreme sampling parameters values are picked.
     """
     transcription = await whisper_client.audio.transcriptions.create(

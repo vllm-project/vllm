@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Unit tests for ECExampleConnector.
-"""
+"""Unit tests for ECExampleConnector."""
 
 import os
 from unittest.mock import Mock, patch
@@ -18,6 +16,7 @@ from vllm.distributed.ec_transfer.ec_connector.example_connector import (
     ECExampleConnectorMetadata,
     MMMeta,
 )
+from vllm.distributed.ec_transfer.ec_connector.utils import collect_ec_item_metadata
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -41,6 +40,48 @@ class MockRequest:
     def get_num_encoder_embeds(self, input_id: int) -> int:
         assert input_id < len(self._token_counts)
         return self._token_counts[input_id]
+
+
+def test_metadata_preserves_repeated_item_positions():
+    request = MockRequest("request", ["A", "B", "A"], [4, 4, 4])
+    resolver = Mock()
+    resolver.fields_for.return_value = {"image_grid_thw"}
+    for feature in request.mm_features:
+        feature.data = Mock()
+        feature.data.get_data.return_value = {"image_grid_thw": torch.tensor([1, 2, 2])}
+    items = collect_ec_item_metadata(request.mm_features, resolver)
+    assert items == {
+        "A": {
+            "modality": "image",
+            "metadata": {"image_grid_thw": [1, 2, 2]},
+            "item_indices": [0, 2],
+        },
+        "B": {
+            "modality": "image",
+            "metadata": {"image_grid_thw": [1, 2, 2]},
+            "item_indices": [1],
+        },
+    }
+
+
+def test_audio_metadata_survives_processor_cache_hit():
+    resolver = Mock()
+    resolver.fields_for.return_value = {"audio_num_tokens"}
+    feature = MultiModalFeatureSpec(
+        data=None,
+        modality="audio",
+        identifier="audio",
+        mm_position=PlaceholderRange(
+            offset=0, length=4, is_embed=torch.tensor([False, True, True, False])
+        ),
+    )
+    assert collect_ec_item_metadata([feature], resolver) == {
+        "audio": {
+            "modality": "audio",
+            "metadata": {"audio_num_tokens": [2]},
+            "item_indices": [0],
+        }
+    }
 
 
 @pytest.fixture
@@ -217,6 +258,18 @@ class TestCacheExistence:
         assert result[1]  # Second exists
         assert not result[2]  # Third doesn't exist
 
+    def test_has_cache_item_miss_creates_no_folder(
+        self, mock_vllm_config_consumer, temp_storage
+    ):
+        """Test a cache miss leaves no empty folder in the shared storage."""
+        connector = ECExampleConnector(
+            vllm_config=mock_vllm_config_consumer,
+            role=ECConnectorRole.SCHEDULER,
+        )
+
+        assert not connector.has_cache_item("missing_hash")
+        assert os.listdir(temp_storage) == []
+
 
 class TestStateManagement:
     """Test connector state management."""
@@ -315,6 +368,7 @@ class TestStateManagement:
 
         # Build again should return empty metadata
         metadata2 = connector.build_connector_meta(scheduler_output)
+        assert isinstance(metadata2, ECExampleConnectorMetadata)
         assert len(metadata2.mm_datas) == 0
 
 

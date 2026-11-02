@@ -1,0 +1,258 @@
+meta:
+  title: "GPT-OSS 20B"
+  slug: "gpt-oss-20b"
+  provider: "OpenAI"
+  description: "OpenAI's gpt-oss-20b — 21B-total / 3.6B-active MoE reasoning model with native MXFP4 quant; supports GPU, XPU, and Xeon 6 CPU serving"
+  date_added: 2025-08-05
+  date_updated: 2026-09-12
+  tasks:
+    - text
+  performance_headline: "21B/3.6B-A MoE reasoning model with native MXFP4 — runs on 16GB"
+  related_recipes:
+    - "openai/gpt-oss-120b"
+  hardware:
+    h100: verified
+    h200: verified
+    b200: verified
+    mi300x: verified
+    mi325x: verified
+    mi355x: verified
+    arc_pro_b60: verified
+    arc_pro_b70: verified
+    xeon6: verified
+
+model:
+  model_id: "openai/gpt-oss-20b"
+  min_vllm_version: "0.10.1"
+  architecture: moe
+  parameter_count: "21B"
+  active_parameters: "3.6B"
+  context_length: 131072
+  base_args: []
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "OpenAI harmony tool-call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "openai"
+      - "--enable-auto-tool-choice"
+
+  spec_decoding:
+    description: "Eagle3 speculative decoding with externally trained draft model; the served checkpoint is unchanged."
+    args:
+      - "--speculative-config"
+      - '{"model": "RedHatAI/gpt-oss-20b-speculator.eagle3", "num_speculative_tokens": 3, "method": "eagle3"}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    precision: mxfp4
+    vram_minimum_gb: 16
+    description: "MXFP4 MoE weights — fits in 16GB VRAM on a single consumer or datacenter GPU"
+    supported_hardware: [h100, h200, b200, mi300x, mi325x, mi355x, arc_pro_b60, arc_pro_b70, xeon6]
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides:
+  cpu:
+    extra_args:
+      - "--max-num-batched-tokens"
+      - "16384"
+      - "--gpu-memory-utilization"
+      - "0.8"
+  amd:
+    extra_args:
+      - "--attention-backend"
+      - "ROCM_AITER_UNIFIED_ATTN"
+      - "-cc.pass_config.fuse_rope_kvcache=True"
+      - "-cc.use_inductor_graph_partition=True"
+      - "--gpu-memory-utilization"
+      - "0.95"
+      - "--block-size=64"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: "INT4"
+      HSA_NO_SCRATCH_RECLAIM: "1"
+      AMDGCN_USE_BUFFER_OPS: "0"
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  [`gpt-oss-20b`](https://huggingface.co/openai/gpt-oss-20b) is OpenAI's smaller open-weight reasoning model: 21B total parameters with 3.6B activated per token across 32 experts (top-4 routing), shipped with native MXFP4 quantization on the MoE weights. It targets lower-latency and on-device use cases — the model loads in ~16GB of VRAM, runs on a single H100/H200/B200 or AMD MI300X/MI325X/MI355X, and supports the same harmony chat format, configurable reasoning effort (low / medium / high), and built-in tools (browser, python, function calling) as its larger sibling [`gpt-oss-120b`](https://huggingface.co/openai/gpt-oss-120b).
+
+  Architectural notes:
+  - 24 layers alternating sliding-window (window=128) and full attention.
+  - YaRN rope scaling (factor=32) extending 4K → 131K context.
+  - MXFP4 quant on `model.layers.*.mlp` experts; attention, router, embeddings stay in BF16.
+
+  ## Prerequisites
+
+  - Hardware: NVIDIA H100/H200/B200, AMD MI300X/MI325X/MI355X, Intel XPU B60/B70, or 4x Xeon 6 CPUs.
+  - vLLM >= 0.10.1.
+  - CUDA >= 12.8 if building from source for NVIDIA GPUs (must match between install and serving).
+
+  ### Install vLLM
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install vllm --torch-backend=auto
+  ```
+
+  ### pip (Intel Xeon 6 CPUs)
+
+  For Intel and AMD x86 CPUs, follow the
+  [CPU pre-built wheels](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/#pre-built-wheels)
+  installation instructions.
+
+  ### Docker (Intel Xeon 6 CPUs)
+
+  ```bash
+  docker pull vllm/vllm-openai-cpu:latest-x86_64
+  ```
+
+  Docker quickstart:
+
+  ```bash
+  docker run --gpus all -p 8000:8000 --ipc=host vllm/vllm-openai --model openai/gpt-oss-20b
+  ```
+
+  AMD ROCm wheels:
+
+  ```bash
+  uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm
+  ```
+
+  Intel XPU (B60 / B70):
+  ```bash
+  docker pull vllm/vllm-openai-xpu:latest
+  ```
+
+  ## Launch commands
+
+  Single GPU (default — works on any 16GB+ card):
+
+  ```bash
+  vllm serve openai/gpt-oss-20b
+  ```
+
+  ### Intel Xeon 6
+
+  Choose the tensor parallel size based on the system topology and deployment
+  requirements. Add `--tensor-parallel-size <N>` when needed; the recipe does
+  not prescribe a Xeon 6 TP value or hard-code NUMA node IDs.
+
+  ```bash
+
+  vllm serve openai/gpt-oss-20b \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.8
+  ```
+
+  Docker:
+
+  ```bash
+  docker run \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-cpu:latest-x86_64 openai/gpt-oss-20b \
+    --tensor-parallel-size 1 \
+    --max-num-batched-tokens 16384 \
+    --gpu-memory-utilization 0.8 \
+    --tool-call-parser openai \
+    --enable-auto-tool-choice
+  ```
+
+  Blackwell (B200) with FlashInfer MXFP4+MXFP8 MoE:
+
+  ```bash
+  vllm serve openai/gpt-oss-20b
+  ```
+
+  On vLLM v0.28.0+ the FlashInfer TRTLLM MXFP4 MoE path is selected automatically on Blackwell; it can be pinned explicitly with `--moe-backend flashinfer_trtllm --quantization-config.moe.activation mxfp8`.
+
+  Hopper (H100/H200): same as Blackwell minus `--kv-cache-dtype fp8` and the FlashInfer MoE flags.
+
+  AMD MI300X/MI325X/MI355X:
+
+  ```bash
+  export HSA_NO_SCRATCH_RECLAIM=1
+  export AMDGCN_USE_BUFFER_OPS=0
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4
+
+  vllm serve openai/gpt-oss-20b \
+    --attention-backend ROCM_AITER_UNIFIED_ATTN \
+    -cc.pass_config.fuse_rope_kvcache=True \
+    -cc.use_inductor_graph_partition=True \
+    --gpu-memory-utilization 0.95 \
+    --block-size 64
+  ```
+
+  ### Intel XPU(B60, B70)
+
+
+  ```bash
+  docker run --device /dev/dri \
+    -v /dev/dri/by-path:/dev/dri/by-path --shm-size=16g \
+    --privileged --ipc=host -p 8000:8000 \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai-xpu:latest \
+    openai/gpt-oss-20b \
+    --max-model-len 8192
+  ```
+
+  ## Tool use
+
+  The `/v1/responses` endpoint supports built-in tools (browsing, python, MCP). Setup requires `uv pip install gpt-oss` and either Docker (for the Python sandbox) or `PYTHON_EXECUTION_BACKEND=dangerously_use_uv`. For demo tools:
+
+  ```bash
+  vllm serve openai/gpt-oss-20b --tool-server demo
+  ```
+
+  For user-defined function calling (toggle the **Tool Calling** feature above, or pass manually):
+
+  ```bash
+  vllm serve openai/gpt-oss-20b --tool-call-parser openai --enable-auto-tool-choice
+  ```
+
+  ## Reasoning effort
+
+  gpt-oss exposes three reasoning levels — low, medium, high — selected via the system prompt:
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  response = client.chat.completions.create(
+      model="openai/gpt-oss-20b",
+      messages=[
+          {"role": "system", "content": "Reasoning: high"},
+          {"role": "user", "content": "Explain why eigenvalues matter."},
+      ],
+  )
+  print(response.choices[0].message.content)
+  ```
+
+  ## Troubleshooting
+
+  - **Attention sinks dtype error on Blackwell:** pass `--quantization-config.moe.activation mxfp8` and `--kv-cache-dtype fp8`.
+  - **`tl.language not defined`:** make sure no extra Triton (e.g., `pytorch-triton`) is installed alongside vLLM's bundled Triton.
+  - **Harmony vocab download failure:** pre-download tiktoken files and set `TIKTOKEN_ENCODINGS_BASE`.
+
+  ## References
+
+  - [Model card — gpt-oss-20b](https://huggingface.co/openai/gpt-oss-20b)
+  - [Sibling — gpt-oss-120b](https://huggingface.co/openai/gpt-oss-120b)
+  - [OpenAI announcement](https://openai.com/index/introducing-gpt-oss/)
+  - [gpt-oss model card paper (arXiv:2508.10925)](https://arxiv.org/abs/2508.10925)
+  - [vLLM gpt-oss cookbook](https://cookbook.openai.com/articles/gpt-oss/run-vllm)
