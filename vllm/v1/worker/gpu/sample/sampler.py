@@ -87,6 +87,9 @@ class Sampler:
         # words/custom); these mutate logit values directly, so they always
         # matter, greedy or not, unlike temperature/min_p/top_k/top_p below.
         self.needs_other_processing = np.zeros(max_num_reqs, dtype=bool)
+        # Whether processing may leave -inf in a request's logits (filters,
+        # forcing, logits processors) rather than only scale them.
+        self.may_mask_logits = np.zeros(max_num_reqs, dtype=bool)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -106,6 +109,9 @@ class Sampler:
             needs_other |= processor.add_request(req_idx, sampling_params)
         self.needs_other_processing[req_idx] = needs_other
         self.needs_logits_processing[req_idx] = needs_temp_or_restriction or needs_other
+        self.may_mask_logits[req_idx] = (
+            self.sampling_states.masks_logits(req_idx) or needs_other
+        )
 
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         if self.trace_replay_state is not None:
