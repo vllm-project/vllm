@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen4 architecture preview with a 125B-parameter main model, supplemented by an additional 51B N-gram embeddings, with 6B parameters activated per token."
   date_added: 2026-08-26
-  date_updated: 2026-10-27
+  date_updated: 2026-10-30
   tasks:
     - multimodal
     - text
@@ -138,6 +138,13 @@ variants:
           - "--max-num-batched-tokens"
           - "8192"
           - "--enable-prefix-caching"
+
+  redhat_nvfp4:
+    model_id: "RedHatAI/Qwen3.8-Flash-Next-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHatAI)"
+    vram_minimum_gb: 130
+    description: "RedHatAI NVFP4 MoE expert weights and activations; non-expert weights retain BF16 precision"
           - "--distributed-executor-backend"
           - "mp"
           - "-cc.mode"
@@ -503,6 +510,8 @@ guide: |
   These results cover this text-only configuration, not the builder's larger tier/chunk defaults or other variants.
 
   ## References
+
+  - [RedHatAI Qwen3.8-Flash-Next NVFP4 checkpoint](https://huggingface.co/RedHatAI/Qwen3.8-Flash-Next-NVFP4)
 
   - [Qwen3.8-Flash-Next model card](https://huggingface.co/Qwen/Qwen3.8-Flash-Next)
   - [Qwen3.8-Flash-Next FP8 checkpoint](https://huggingface.co/Qwen/Qwen3.8-Flash-Next-FP8)

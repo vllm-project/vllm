@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "2.4T-parameter hybrid-attention MoE (~95B active) with linear attention on 69 of 92 layers, 512 routed experts, a built-in MTP draft head, 262K native context window and extensible to 1M context"
   date_added: 2026-08-10
-  date_updated: 2026-09-14
+  date_updated: 2026-10-30
   tasks:
     - text
   # Measured, not a capacity claim. The previous headline said "down to a single node",
@@ -151,6 +151,40 @@ variants:
     vram_minimum_gb: 1373
     supported_hardware: [b200, b300, gb200, gb300]
     description: "NVFP4 quantization + 25% uniform expert pruning via REAP — 4.25x compression with ~99% accuracy recovery"
+  redhat_nvfp4:
+    model_id: "RedHatAI/Qwen3.8-2.4T-A95B-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHatAI)"
+    # Estimated from a related NVFP4 checkpoint; verify the shard index before
+    # capacity planning.
+    vram_minimum_gb: 1737
+    supported_hardware: [b200, b300, gb200, gb300]
+    description: "RedHatAI NVFP4 MoE expert weights and activations; attention and other unquantized layers retain their source precision. VRAM minimum is an estimate pending exact shard-size inspection."
+  redhat_nvfp4_fp8:
+    model_id: "RedHatAI/Qwen3.8-2.4T-A95B-NVFP4-FP8"
+    precision: nvfp4
+    label: "NVFP4 + FP8 (RedHatAI)"
+    # Mixed FP4 MoE experts and block-FP8 attention; confirm the exact checkpoint
+    # footprint before using this estimate for capacity planning.
+    vram_minimum_gb: 1770
+    supported_hardware: [b200, b300, gb200, gb300]
+    description: "RedHatAI mixed precision: NVFP4 MoE expert weights/activations and block-FP8 attention weights/activations."
+  redhat_nvfp4_reap50:
+    model_id: "RedHatAI/Qwen3.8-2.4T-A95B-NVFP4-REAP-50"
+    precision: nvfp4
+    label: "NVFP4-REAP-50 (RedHatAI)"
+    # Estimated from the existing NVFP4 footprint and 50% routed-expert pruning.
+    # Replace with ceil(total safetensors bytes x 1.2) after inspecting the index.
+    vram_minimum_gb: 1000
+    supported_hardware: [b200, b300, gb200, gb300]
+    description: "RedHatAI NVFP4 checkpoint with 50% routed-expert REAP pruning; VRAM minimum is an estimate pending exact shard-size inspection."
+  redhat_fp8:
+    model_id: "RedHatAI/Qwen3.8-2.4T-A95B-FP8"
+    precision: fp8
+    label: "FP8 (RedHatAI)"
+    # Sized from the corresponding 2.4T FP8 checkpoint; verify exact shard sizes.
+    vram_minimum_gb: 2996
+    description: "RedHatAI FP8 checkpoint; VRAM minimum is an estimate pending exact shard-size inspection."
 
 # Full MoE strategy set. Note the 3.4x spread between variants: NVFP4/MXFP4 fit 8 GPUs
 # while BF16 needs 24, so no per-STRATEGY floor is set — one sized for BF16 would block
@@ -428,6 +462,10 @@ guide: |
   ## References
 
   - Model card: https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B
+  - RedHatAI NVFP4 checkpoint: https://huggingface.co/RedHatAI/Qwen3.8-2.4T-A95B-NVFP4
+  - RedHatAI mixed NVFP4+FP8 checkpoint: https://huggingface.co/RedHatAI/Qwen3.8-2.4T-A95B-NVFP4-FP8
+  - RedHatAI NVFP4-REAP-50 checkpoint: https://huggingface.co/RedHatAI/Qwen3.8-2.4T-A95B-NVFP4-REAP-50
+  - RedHatAI FP8 checkpoint: https://huggingface.co/RedHatAI/Qwen3.8-2.4T-A95B-FP8
   - FP8 checkpoint: https://huggingface.co/Qwen/Qwen3.8-2.4T-A95B-FP8
   - MXFP4 build (AMD): https://huggingface.co/Inferact/Qwen3.8-2.4T-A95B-MXFP4
   - NVFP4 W4A4 build (NVIDIA): https://huggingface.co/Inferact/Qwen3.8-2.4T-A95B-NVFP4
