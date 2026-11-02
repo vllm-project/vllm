@@ -1,0 +1,531 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Load plan on tiny CPU models.
+
+Invariant: planning leaves the model unchanged, and a direct reload that copies
+each name's boxes into its ``get_dest`` tensors (and sends fallbacks in full
+through ``load_weights``) leaves every tensor byte for byte as a cold start on
+the same weights, at the same addresses.
+"""
+
+from types import SimpleNamespace
+
+import pytest
+import torch
+
+from vllm.distributed.weight_transfer.base import ParamMeta
+from vllm.model_executor.layers.linear import (
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.reload import (
+    finish_reload,
+    plan_loads,
+    start_reload,
+)
+from vllm.model_executor.model_loader.reload.plan import LoadPlan, Region
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.utils import replace_parameter
+
+_MODEL_CONFIG = SimpleNamespace(
+    word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
+)
+_CPU = torch.device("cpu")
+BF16 = torch.bfloat16
+
+
+@pytest.fixture(autouse=True)
+def _direct_mode(monkeypatch):
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "direct")
+
+
+def _param(*shape, dtype=BF16, loader=None) -> torch.nn.Parameter:
+    p = torch.nn.Parameter(torch.zeros(shape, dtype=dtype), requires_grad=False)
+    if loader is not None:
+        p.weight_loader = loader
+    return p
+
+
+class _Toy(torch.nn.Module):
+    """Loads ``name`` through its parameter's ``weight_loader`` (or
+    ``default_weight_loader``); ``stacked`` maps checkpoint names to a fused
+    parameter and shard id, as models' ``stacked_params_mapping`` does."""
+
+    stacked: dict[str, tuple[str, object]] = {}
+    skipped: frozenset[str] = frozenset()
+
+    def load_weights(self, weights):
+        params = dict(self.named_parameters(remove_duplicate=False))
+        for name, weight in weights:
+            if name in self.skipped:
+                continue
+            if name in self.stacked:
+                target, shard = self.stacked[name]
+                param = params[target]
+                param.weight_loader(param, weight, shard)
+                continue
+            param = params[name]
+            getattr(param, "weight_loader", default_weight_loader)(param, weight)
+
+
+def _checkpoint(shapes: dict, seed: int) -> dict[str, torch.Tensor]:
+    gen = torch.Generator().manual_seed(seed)
+    return {
+        name: torch.randn(shape, generator=gen).to(dtype)
+        for name, (shape, dtype) in shapes.items()
+    }
+
+
+def _metadata(shapes: dict) -> list[ParamMeta]:
+    return [ParamMeta(n, dtype, tuple(shape)) for n, (shape, dtype) in shapes.items()]
+
+
+def _cold_start(make, weights):
+    model = make()
+    model.load_weights(weights.items())
+    process_weights_after_loading(model, _MODEL_CONFIG, _CPU)
+    return model
+
+
+def _box_slice(box) -> tuple[slice, ...]:
+    return tuple(slice(a, b) for a, b in box)
+
+
+def _planned_reload(model, plan: LoadPlan, weights) -> None:
+    """What an engine does: boxes into their destinations, fallbacks in full."""
+    start_reload(model)
+    for name, full in weights.items():
+        dest = plan.get_dest(name)
+        if dest is None:
+            model.load_weights([(name, full)])
+            continue
+        for box, tensor in dest:
+            tensor.copy_(full[_box_slice(box)].reshape(tensor.shape))
+    finish_reload(model, _MODEL_CONFIG, _CPU)
+
+
+def _state(model):
+    return {
+        name: (t.dtype, tuple(t.shape), t.detach().clone(), t.data_ptr())
+        for name, t in [*model.named_parameters(), *model.named_buffers()]
+    }
+
+
+def _registrations(model):
+    """Every registered tensor object and every module attribute."""
+    return {
+        name: (
+            {k: id(v) for k, v in m._parameters.items()},
+            {k: id(v) for k, v in m._buffers.items()},
+            {k: id(v) for k, v in vars(m).items()},
+        )
+        for name, m in model.named_modules()
+    }
+
+
+def _plan(model, shapes) -> LoadPlan:
+    """``plan_loads``, checking that planning changed no tensor, address,
+    registration or module attribute."""
+    state, registrations = _state(model), _registrations(model)
+    plan = plan_loads(model, _metadata(shapes))
+    assert _registrations(model) == registrations
+    for name, (dtype, shape, data, ptr) in _state(model).items():
+        assert (dtype, shape, ptr) == (*state[name][:2], state[name][3]), name
+        assert torch.equal(data.view(torch.uint8), state[name][2].view(torch.uint8))
+    return plan
+
+
+def _check_plan_equals_cold_start(make, shapes):
+    """Plan at init, then a planned update with new random weights must equal
+    a cold start on them, byte for byte, and keep every address."""
+    model = _cold_start(make, _checkpoint(shapes, seed=0))
+    ptrs = {n: s[3] for n, s in _state(model).items()}
+    plan = _plan(model, shapes)
+    new = _checkpoint(shapes, seed=1)
+    _planned_reload(model, plan, new)
+    actual, expected = _state(model), _state(_cold_start(make, new))
+    assert actual.keys() == expected.keys()
+    for name, (dtype, shape, data, ptr) in actual.items():
+        assert (dtype, shape) == expected[name][:2], name
+        assert torch.equal(data.view(torch.uint8), expected[name][2].view(torch.uint8))
+        assert ptr == ptrs[name], f"{name} moved"
+    return model, plan
+
+
+def _offset(dest: torch.Tensor, param: torch.Tensor) -> int:
+    """Where ``dest`` starts in ``param``'s storage, relative to ``param``."""
+    return dest.storage_offset() - param.storage_offset()
+
+
+# ------------------------------------------------------------ linear under TP
+
+_LINEAR_SHAPES = {
+    "q_proj.weight": ((8, 8), BF16),  # 4 heads of 2
+    "k_proj.weight": ((4, 8), BF16),  # 2 kv heads
+    "v_proj.weight": ((4, 8), BF16),
+    "gate_proj.weight": ((6, 8), BF16),
+    "up_proj.weight": ((6, 8), BF16),
+    "down_proj.weight": ((8, 6), BF16),
+}
+
+
+def _linear_model():
+    def make():
+        model = _Toy()
+        kw = dict(bias=False, params_dtype=BF16)
+        model.qkv_proj = QKVParallelLinear(8, 2, 4, 2, **kw)
+        model.gate_up_proj = MergedColumnParallelLinear(8, [6, 6], **kw)
+        model.down_proj = RowParallelLinear(6, 8, **kw)
+        model.stacked = {
+            "q_proj.weight": ("qkv_proj.weight", "q"),
+            "k_proj.weight": ("qkv_proj.weight", "k"),
+            "v_proj.weight": ("qkv_proj.weight", "v"),
+            "gate_proj.weight": ("gate_up_proj.weight", 0),
+            "up_proj.weight": ("gate_up_proj.weight", 1),
+        }
+        return model
+
+    return make
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_qkv_and_merged_column_under_tp(default_vllm_config, monkeypatch, tp_rank):
+    from vllm.model_executor import parameter
+    from vllm.model_executor.layers import linear
+
+    for module in (linear, parameter):
+        monkeypatch.setattr(module, "get_tensor_model_parallel_rank", lambda: tp_rank)
+        monkeypatch.setattr(module, "get_tensor_model_parallel_world_size", lambda: 2)
+    model, plan = _check_plan_equals_cold_start(_linear_model(), _LINEAR_SHAPES)
+    assert all(plan.get_dest(name) for name in _LINEAR_SHAPES)
+    # k rows [K/2 * rank, ...) land after this rank's q rows of qkv_proj
+    ((box, k_dest),) = plan.get_dest("k_proj.weight")
+    assert box == ((2 * tp_rank, 2 * tp_rank + 2), (0, 8))
+    assert _offset(k_dest, model.qkv_proj.weight) == 4 * 8
+    assert (tuple(k_dest.shape), k_dest.stride()) == ((2, 8), (8, 1))
+    # row parallel: this rank's columns, strided over the rows
+    ((box, down_dest),) = plan.get_dest("down_proj.weight")
+    assert box == ((0, 8), (3 * tp_rank, 3 * tp_rank + 3))
+    assert down_dest.is_contiguous()
+
+
+# ------------------------------------------------------------ toy loaders
+
+
+def _transposing_loader(param, loaded):
+    param.copy_(loaded.t())
+
+
+def _step_loader(param, loaded):
+    param.copy_(loaded[::2])
+
+
+def _transpose_pwal(layer):
+    replace_parameter(layer, "weight", layer.weight.t().contiguous())
+
+
+class _PwalMethod(QuantizeMethodBase):
+    """Post-load processing given as a function of the layer."""
+
+    def __init__(self, fn):
+        self.fn = fn
+
+    def create_weights(self, *args, **kwargs):
+        pass
+
+    def apply(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def process_weights_after_loading(self, layer):
+        self.fn(layer)
+
+
+class _Layer(torch.nn.Module):
+    def __init__(self, pwal=None):
+        super().__init__()
+        if pwal is not None:
+            self.quant_method = _PwalMethod(pwal)
+
+
+_TOY_SHAPES = {
+    "embed.weight": ((10, 4), BF16),
+    "lm_head.weight": ((10, 4), BF16),  # tied: the loader skips it
+    "proj.weight": ((4, 6), BF16),  # transposing loader, transposing PWAL
+    "router.bias": ((5,), BF16),  # FP32 parameter: a cast
+    "strided.weight": ((8, 3), BF16),  # every other row
+}
+
+
+def _toy_model():
+    model = _Toy()
+    model.embed = _Layer()
+    model.embed.weight = _param(10, 4)
+    model.lm_head = _Layer()
+    model.lm_head.weight = model.embed.weight
+    model.proj = _Layer(_transpose_pwal)
+    model.proj.weight = _param(6, 4, loader=_transposing_loader)
+    model.router = _Layer()
+    model.router.bias = _param(5, dtype=torch.float32)
+    model.strided = _Layer()
+    model.strided.weight = _param(4, 3, loader=_step_loader)
+    model.skipped = frozenset({"lm_head.weight"})
+    return model
+
+
+def test_toy_loaders():
+    """One model for transpose, tied alias, cast and step slice, so that their
+    targets share a model (and, for the tied pair, a storage)."""
+    _, plan = _check_plan_equals_cold_start(_toy_model, _TOY_SHAPES)
+    entries = plan.entries
+
+    # P.copy_(W.t()): the transpose lives in the destination's strides
+    ((box, dest),) = plan.get_dest("proj.weight")
+    assert box == ((0, 4), (0, 6))
+    assert (tuple(dest.shape), dest.stride(), dest.dtype) == ((4, 6), (1, 4), BF16)
+
+    # the tied alias needs nothing; nothing to write
+    assert plan.get_boxes("lm_head.weight") is None
+    assert plan.get_dest("lm_head.weight") == []
+
+    assert plan.get_dest("router.bias") is None
+    assert "casts torch.bfloat16 to torch.float32" in entries["router.bias"].reason
+    assert plan.get_boxes("router.bias") == (((0, 5),),)
+
+    assert plan.get_dest("strided.weight") is None
+    assert "step" in entries["strided.weight"].reason
+
+
+# ------------------------------------------------------------ fused experts
+
+_E, _I, _H = 4, 4, 3
+
+
+def _experts_model(ep_rank: int, ep_size: int, tp_rank: int, tp_size: int):
+    """``experts.gate_up_proj`` [E, 2I, H] and ``experts.down_proj`` [E, H, I]
+    (transformers v5), loaded one expert at a time as RoutedExperts does."""
+    local = range(ep_rank * _E // ep_size, (ep_rank + 1) * _E // ep_size)
+    i_shard = _I // tp_size
+
+    def w13_loader(param, loaded, shard_id=None):
+        for j, e in enumerate(local):
+            for half in (0, 1):  # gate rows, then up rows
+                rows = loaded[e].narrow(0, half * _I + tp_rank * i_shard, i_shard)
+                param[j].narrow(0, half * i_shard, i_shard).copy_(rows)
+
+    def w2_loader(param, loaded, shard_id=None):
+        for j, e in enumerate(local):
+            param[j].copy_(loaded[e].narrow(1, tp_rank * i_shard, i_shard))
+
+    def make():
+        model = _Toy()
+        model.experts = _Layer()
+        model.experts.w13_weight = _param(
+            len(local), 2 * i_shard, _H, loader=w13_loader
+        )
+        model.experts.w2_weight = _param(len(local), _H, i_shard, loader=w2_loader)
+        model.stacked = {
+            "experts.gate_up_proj": ("experts.w13_weight", None),
+            "experts.down_proj": ("experts.w2_weight", None),
+        }
+        return model
+
+    return make
+
+
+_EXPERT_SHAPES = {
+    "experts.gate_up_proj": ((_E, 2 * _I, _H), BF16),
+    "experts.down_proj": ((_E, _H, _I), BF16),
+}
+
+
+@pytest.mark.parametrize("ep_rank", [0, 1])
+def test_fused_experts_under_ep(ep_rank):
+    _, plan = _check_plan_equals_cold_start(
+        _experts_model(ep_rank, 2, 0, 1), _EXPERT_SHAPES
+    )
+    # the per-expert loop merges into one write per half
+    experts = (2 * ep_rank, 2 * ep_rank + 2)
+    assert plan.get_boxes("experts.gate_up_proj") == ((experts, (0, 8), (0, 3)),)
+    ((_, dest),) = plan.get_dest("experts.gate_up_proj")
+    assert dest.is_contiguous() and tuple(dest.shape) == (2, 8, 3)
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_fused_experts_under_expert_tp(tp_rank):
+    """Also pins the internal ``Write``/``Region`` form (RFC §11), which CI
+    compares across ranks."""
+    _, plan = _check_plan_equals_cold_start(
+        _experts_model(0, 1, tp_rank, 2), _EXPERT_SHAPES
+    )
+    gate = ((0, _E), (2 * tp_rank, 2 * tp_rank + 2), (0, _H))
+    up = ((0, _E), (_I + 2 * tp_rank, _I + 2 * tp_rank + 2), (0, _H))
+    assert plan.get_boxes("experts.gate_up_proj") == (gate, up)
+    writes = plan.entries["experts.gate_up_proj"].writes
+    assert writes is not None
+    assert {(w.module, w.tensor) for w in writes} == {("experts", "w13_weight")}
+    assert [w.dst for w in writes] == [
+        Region(0, (_E, 2, _H), (2 * 2 * _H, _H, 1)),
+        Region(2 * _H, (_E, 2, _H), (2 * 2 * _H, _H, 1)),
+    ]
+
+
+# ------------------------------------------------------------ fallbacks
+
+
+def _single(loader, shape=(4,), dtype=BF16, param_shape=None):
+    def make():
+        model = _Toy()
+        model.layer = _Layer()
+        model.layer.weight = _param(*(param_shape or shape), dtype=dtype, loader=loader)
+        return model
+
+    return make, {"layer.weight": (shape, dtype)}
+
+
+@pytest.mark.parametrize(
+    "loader,reason",
+    [
+        (lambda p, w: p.copy_(w * 2), "applies"),
+        (lambda p, w: p.copy_(w.to(torch.float32).to(BF16)), "applies"),
+        (lambda p, w: p.copy_(w if bool(w.sum() > 0) else -w), "reads tensor values"),
+        (lambda p, w: p.__setitem__(slice(None), w), "without Tensor.copy_"),
+        (lambda p, w: p.copy_(w).mul_(2), "reads the destination"),  # composed
+        (lambda p, w: p.copy_(w.expand(2, 4)[0]), "applies"),
+    ],
+    ids=["arith", "cast-roundtrip", "value-read", "setitem", "composed", "expand"],
+)
+def test_fallbacks(loader, reason):
+    make, shapes = _single(loader)
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert plan.get_dest("layer.weight") is None
+    assert reason in (plan.entries["layer.weight"].reason or "")
+
+
+def test_noop_to_and_constant_fill_stay_direct():
+    def loader(param, loaded):
+        param.zero_()  # PWAL owns constants: ignored
+        param.copy_(loaded.to(param.device).to(BF16))
+
+    make, shapes = _single(loader)
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert plan.get_dest("layer.weight") is not None
+
+
+def _two_names(loader_a):
+    """``a`` through ``loader_a``, ``b`` a plain copy."""
+
+    def make():
+        model = _Toy()
+        model.a = _Layer()
+        model.a.weight = _param(4, loader=lambda p, w: loader_a(model, p, w))
+        model.b = _Layer()
+        model.b.weight = _param(4)
+        return model
+
+    return make, {"a.weight": ((4,), BF16), "b.weight": ((4,), BF16)}
+
+
+def test_value_read_reruns_without_the_name():
+    def loader(model, param, loaded):
+        param.copy_(loaded if bool(loaded.sum() > 0) else -loaded)
+
+    make, shapes = _two_names(loader)
+    _, plan = _check_plan_equals_cold_start(make, shapes)
+    assert "reads tensor values" in (plan.entries["a.weight"].reason or "")
+    assert plan.get_dest("b.weight") is not None
+
+
+def test_state_change_makes_only_its_name_a_fallback():
+    def loader(model, param, loaded):
+        param.copy_(loaded)
+        model.a.loads = getattr(model.a, "loads", 0) + 1
+
+    make, shapes = _two_names(loader)
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    del model.a.loads
+    plan = _plan(model, shapes)  # also checks the change was undone
+    assert "changes module state" in (plan.entries["a.weight"].reason or "")
+    assert plan.get_dest("b.weight") is not None
+
+
+class _Paired(_Toy):
+    """Stashes ``weight_a`` until ``weight_b`` arrives: a list that ends up
+    empty again, or an attribute that stays (``keep_stash``)."""
+
+    keep_stash = False
+
+    def __init__(self):
+        super().__init__()
+        self.layer = _Layer()
+        self.layer.weight = _param(4)
+        self.pending = []
+
+    def load_weights(self, weights):
+        for name, w in weights:
+            if name == "layer.weight_a" and self.keep_stash:
+                self.stash = w
+            elif name == "layer.weight_a":
+                self.pending.append(w)
+            elif self.keep_stash:
+                self.layer.weight.copy_(self.stash + w)
+            else:
+                self.layer.weight.copy_(self.pending.pop() + w)
+
+
+@pytest.mark.parametrize("keep_stash", [False, True])
+def test_paired_loader_is_refused(monkeypatch, keep_stash):
+    """With ``keep_stash`` the state bisect traces ``weight_b`` alone, whose
+    loader then fails: that is a refusal too, not an error."""
+    monkeypatch.setattr(_Paired, "keep_stash", keep_stash)
+    shapes = {"layer.weight_a": ((4,), BF16), "layer.weight_b": ((4,), BF16)}
+    model = _cold_start(_Paired, _checkpoint(shapes, 0))
+    model.__dict__.pop("stash", None)
+    with pytest.raises(RuntimeError, match="write nothing when loaded alone"):
+        plan_loads(model, _metadata(shapes))
+    assert model.pending == [] and not hasattr(model, "stash")
+
+
+def test_overlapping_writes_are_refused():
+    def make():
+        model = _toy_model()
+        model.skipped = frozenset()  # both tied names write the same storage
+        return model
+
+    model = _cold_start(make, _checkpoint(_TOY_SHAPES, 0))
+    with pytest.raises(RuntimeError, match="write the same bytes"):
+        plan_loads(model, _metadata(_TOY_SHAPES))
+
+
+def test_layerwise_mode_is_refused(monkeypatch):
+    make, shapes = _single(None)
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    monkeypatch.setenv("VLLM_RELOAD_MODE", "layerwise")
+    with pytest.raises(RuntimeError, match="VLLM_RELOAD_MODE=direct"):
+        plan_loads(model, _metadata(shapes))
+
+
+def test_duplicate_names_are_refused():
+    make, shapes = _single(None)
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    with pytest.raises(ValueError, match="declared twice"):
+        plan_loads(model, _metadata(shapes) * 2)
+
+
+def test_model_without_recorded_layout_is_refused():
+    make, shapes = _single(None)
+    model = make()
+    model.load_weights(_checkpoint(shapes, 0).items())  # no post-load step
+    with pytest.raises(RuntimeError, match="no checkpoint layout"):
+        plan_loads(model, _metadata(shapes))
+
+
+def test_eplb_is_refused():
+    make, shapes = _single(None)
+    model = _cold_start(make, _checkpoint(shapes, 0))
+    parallel = SimpleNamespace(enable_eplb=True)
+    model.layer.moe_config = SimpleNamespace(moe_parallel_config=parallel)
+    with pytest.raises(RuntimeError, match="EPLB"):
+        plan_loads(model, _metadata(shapes))

@@ -29,9 +29,13 @@ from vllm.model_executor.utils import (
 logger = init_logger(__name__)
 
 __all__ = [
+    "apply_checkpoint_attrs",
     "begin_direct_reload",
+    "check_direct_reload",
+    "checkpoint_layout",
     "direct_reload_enabled",
     "finish_direct_reload",
+    "loadable_slots",
     "record_checkpoint_layout",
 ]
 
@@ -61,20 +65,41 @@ def _layout(t: torch.Tensor) -> tuple:
     return tuple(t.shape), t.stride(), t.dtype, t.storage_offset()
 
 
+def checkpoint_layout(t: torch.Tensor) -> tuple:
+    """(shape, stride, dtype, storage_offset) a reload views ``t`` back to."""
+    ckpt = getattr(t, "_ckpt", None)
+    return ckpt[1] if ckpt is not None else _layout(t)
+
+
+def apply_checkpoint_attrs(t: torch.Tensor) -> None:
+    """Restore the loader metadata ``t`` had at cold start."""
+    for k in _LOADER_ATTRS:
+        t.__dict__.pop(k, None)
+    t.__dict__.update(t._ckpt[2])
+
+
+def loadable_slots(
+    model: torch.nn.Module,
+) -> Iterator[tuple[str, dict[str, torch.Tensor], str, torch.Tensor]]:
+    """(module name, ``_parameters`` or ``_buffers``, key, tensor) for every
+    parameter and persistent buffer slot; a tied tensor once per slot."""
+    for module_name, module in model.named_modules():
+        for key, t in module._parameters.items():
+            if t is not None:
+                yield module_name, module._parameters, key, t
+        for key, t in module._buffers.items():
+            if t is not None and key not in module._non_persistent_buffers_set:
+                yield module_name, module._buffers, key, t
+
+
 def _loadable_tensors(model: torch.nn.Module) -> Iterator[tuple[str, torch.Tensor]]:
     """Parameters and persistent buffers, each object once."""
     seen: set[int] = set()
-    for module_name, module in model.named_modules():
-        persistent = (
-            (n, b)
-            for n, b in module._buffers.items()
-            if n not in module._non_persistent_buffers_set
-        )
-        for name, tensor in [*module._parameters.items(), *persistent]:
-            if tensor is None or id(tensor) in seen:
-                continue
-            seen.add(id(tensor))
-            yield (f"{module_name}.{name}" if module_name else name), tensor
+    for module_name, _, key, tensor in loadable_slots(model):
+        if id(tensor) in seen:
+            continue
+        seen.add(id(tensor))
+        yield (f"{module_name}.{key}" if module_name else key), tensor
 
 
 def _check_supported_modules(model: torch.nn.Module) -> None:
@@ -184,6 +209,17 @@ def _checkpoint_views(
     return views
 
 
+def check_direct_reload(
+    model: torch.nn.Module,
+) -> list[tuple[torch.Tensor, torch.Tensor]]:
+    """Raise if a direct reload cannot start; else the views `begin` applies.
+    Does not modify the model."""
+    if not hasattr(model, "_ckpt_param_names"):
+        raise RuntimeError("direct reload: no checkpoint layout was recorded")
+    _check_params_kept(model)
+    return _checkpoint_views(model)
+
+
 @torch.no_grad()
 def begin_direct_reload(model: torch.nn.Module) -> None:
     """Make every tensor writable by its checkpoint weight loader.
@@ -191,21 +227,15 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
     Everything that can refuse the reload is checked first and raises with
     the model untouched. Once this returns, the model holds checkpoint-layout
     bytes until a finish succeeds."""
-    if not hasattr(model, "_ckpt_param_names"):
-        raise RuntimeError("direct reload: no checkpoint layout was recorded")
-    _check_params_kept(model)
-    views = _checkpoint_views(model)
+    views = check_direct_reload(model)
 
     # nothing above modified the model
     model._direct_reload_begun = True  # one finish per begin
     for t, view in views:
         t.data = view  # no zeroing: the full sync rewrites the checkpoint region
     for _, t in _loadable_tensors(model):
-        if not _owned(model, t):
-            continue
-        for k in _LOADER_ATTRS:
-            t.__dict__.pop(k, None)
-        t.__dict__.update(t._ckpt[2])
+        if _owned(model, t):
+            apply_checkpoint_attrs(t)
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )
