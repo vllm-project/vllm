@@ -22,12 +22,7 @@ def _token_request(query_start_loc, token, num_reqs):
 
 @triton.jit(do_not_specialize=["num_reqs", "num_mapped", "num_tokens"])
 def _token_request_mapping_kernel(
-    query_start_loc,
-    output,
-    num_reqs,
-    num_mapped,
-    num_tokens,
-    ITERS: tl.constexpr,
+    query_start_loc, output, num_reqs, num_mapped, num_tokens, ITERS: tl.constexpr
 ):
     token = tl.program_id(0) * 256 + tl.arange(0, 256)
     lo = tl.zeros((256,), tl.int32)
