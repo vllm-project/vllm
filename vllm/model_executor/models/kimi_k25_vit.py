@@ -765,9 +765,10 @@ class MoonViT3dPretrainedModel(nn.Module):
                 None,
                 encoder_metadata=encoder_metadata,
             )
-            merge_gather_idx = encoder_metadata["merge_gather_idx"]
-            assert merge_gather_idx is not None
-            return tpool_patch_merger_packed(hidden_states, merge_gather_idx)
+            merge_gather_idx = encoder_metadata.get("merge_gather_idx")
+            if merge_gather_idx is not None:
+                return tpool_patch_merger_packed(hidden_states, merge_gather_idx)
+            return hidden_states
 
         assert grid_thws is not None
         grid_thw_list = grid_thws if isinstance(grid_thws, list) else grid_thws.tolist()
