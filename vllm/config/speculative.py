@@ -532,11 +532,11 @@ class SpeculativeConfig:
     sharing a KV store and external consumers of KV cache events must use the
     same setting."""
     draft_lm_head_quantization: Literal["fp8", "nvfp4"] | None = None
-    """Quantize the drafter's copy of a target lm_head it shares (EAGLE and
-    MTP). "fp8" uses per-row weight and per-token activation scales on the
-    platform's FP8 linear kernel; "nvfp4" is weight-only on the platform's
-    W4A16 kernel. The target verifies with its own head, so only the
-    acceptance length can change. Model Runner V2 only."""
+    """Quantize the drafter's copy of a target lm_head it shares (EAGLE, MTP
+    and DeepSeek-V4/V4.1 DSpark). "fp8" uses per-row weight and per-token
+    activation scales on the platform's FP8 linear kernel; "nvfp4" is
+    weight-only on the platform's W4A16 kernel. The target verifies with its
+    own head, so only the acceptance length can change. Model Runner V2 only."""
     use_local_argmax_reduction: bool = False
     """Use vocab-parallel local argmax instead of all-gathering full logits
     for draft token generation. Reduces communication from O(vocab_size) to
@@ -1841,13 +1841,26 @@ class SpeculativeConfig:
     def use_ngram(self) -> bool:
         return self.method in ("ngram", "ngram_gpu")
 
+    def num_mtp_modules(self) -> int:
+        """Number of MTP modules the drafter selects among by draft step."""
+        assert self.draft_model_config is not None
+        return getattr(self.draft_model_config.hf_config, "n_predict", None) or 1
+
     def use_multi_module_mtp(self) -> bool:
         if self.method != "mtp" or self.draft_model_config is None:
             return False
-        num_mtp_layers = getattr(
-            self.draft_model_config.hf_config, "num_nextn_predict_layers", 1
-        )
-        return min(num_mtp_layers, self.num_speculative_tokens) > 1
+        hf_config = self.draft_model_config.hf_config
+        if min(self.num_mtp_modules(), self.num_speculative_tokens) <= 1:
+            return False
+        index_share = self.index_share_for_mtp_iteration
+        if index_share is None:
+            index_share = getattr(hf_config, "index_share_for_mtp_iteration", False)
+        if index_share:
+            # TODO: Support index_share_for_mtp_iteration in
+            # MultiModuleMTPSpeculator.
+            return False
+        # TODO: Verify MiniMax-M3 with MultiModuleMTPSpeculator.
+        return hf_config.model_type != "minimax_m3_mtp"
 
     def __repr__(self) -> str:
         method = self.custom_method or self.method
