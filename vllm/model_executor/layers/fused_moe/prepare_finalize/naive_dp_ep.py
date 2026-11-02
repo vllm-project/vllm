@@ -300,9 +300,6 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         self.is_sequence_parallel = is_sequence_parallel
         self._num_dispatchers = num_dispatchers
 
-    def routing_capture_is_gathered(self) -> bool:
-        return True
-
     @property
     def activation_format(self) -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard

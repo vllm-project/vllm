@@ -104,9 +104,6 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
 
 
 class MoEPrepareAndFinalizeNoDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
-    def routing_capture_is_gathered(self) -> bool:
-        return False
-
     def supports_deferred_moe_finalize(self) -> bool:
         return True
 

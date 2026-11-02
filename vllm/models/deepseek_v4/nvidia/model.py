@@ -381,7 +381,6 @@ class DeepseekV4MoE(nn.Module):
 
         self.experts = DeepGemmMegaMoEExperts(
             vllm_config,
-            input_sp_size=self.tp_size if self.use_sequence_parallel else 1,
             num_experts=self.n_physical_experts,
             num_local_experts=self.n_local_physical_experts,
             experts_start_idx=self.physical_expert_start,

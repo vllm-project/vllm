@@ -55,29 +55,18 @@ Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2
 
 ## Layer-owned row restoration
 
-Every `MoERunner` or `RoutedExpertsCaptureSource` used for capture implements
-`restore_routed_experts_rows(topk_ids) -> torch.Tensor`. Capture binding registers
-that module for its layer. The capturer calls it directly, then writes the result
-at the current microbatch offset. Router and capture signatures are unchanged.
+Capture sources implement `restore_routed_experts_rows(topk_ids) -> torch.Tensor`.
+Binding registers each MoE module; the capturer calls its restorer and writes
+at the current microbatch offset. `MoERunner` and native MegaMoE reuse the
+existing DP/TP row-count recovery algorithm through `collect_local_routing_rows()`.
+Backends can override the method without replacing the capturer.
 
-The built-in MoE runner uses its SP configuration and dispatch path to restore
-rows, delegating the gather/slice operations to `collect_local_routing_rows()`.
-Monolithic prepare/finalize implementations specify whether they gather rows
-before routing; native MegaMoE uses the input SP size supplied by its model.
-A `MoERunner` subclass can override restoration for a different communication
-layout, without replacing the capturer or using a Platform hook.
+Return this DP rank's rows in token order without padding: a 2-D integer tensor
+on the input device with the same top-k width. Do not modify the input or apply
+EPLB mapping. Empty tensors are valid; `None` is not a fallback. Only TP0 publishes.
+For zero/one-token SP batches, non-publishing TP ranks may retain padding.
 
-Return a 2-D integer tensor on the input device, with the same top-k width,
-containing this DP rank's token rows in local order, without padding. Do not
-modify the input or apply EPLB mapping. Empty tensors are valid; there is no
-`None` fallback. A direct capture source without this method fails at binding.
-
-Only TP0 publishes the restored rows. For local SP input with zero or one
-token, TP0 already owns every valid row, so the built-in restorer skips the
-collective. Non-publishing TP ranks may retain padding in this case.
-
-Read current forward/microbatch metadata at invocation. Any collective must
-include every peer, including ranks with no local output rows, and use
-rank-consistent communication decisions. Device work must use the current stream
-without host reads of device values. During graph replay, Python is not rerun:
-the recorded operations, addresses and row selection must remain valid.
+Read current forward/microbatch metadata at invocation. Collectives must include
+every peer, including empty ranks, with rank-consistent decisions. Use the current
+stream without host reads of device values. Graph replay does not rerun Python:
+recorded operations, addresses and row selection must remain valid.

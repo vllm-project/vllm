@@ -529,7 +529,6 @@ class KimiMoE(nn.Module):
                 max_num_tokens = cdiv(max_num_tokens, self.tp_size)
             self.experts = DeepGemmMegaMoEExperts(
                 vllm_config,
-                input_sp_size=self.tp_size if self.use_sequence_parallel else 1,
                 max_num_tokens=max_num_tokens,
                 num_experts=num_experts,
                 num_local_experts=num_local_experts,

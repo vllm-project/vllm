@@ -27,7 +27,7 @@ from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
     prepare_megamoe_nvfp4_inputs,
 )
-from vllm.model_executor.layers.fused_moe.routed_experts_capture_utils import (
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     collect_local_routing_rows,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -278,7 +278,6 @@ class DeepGemmMegaMoEExperts(nn.Module):
         num_logical_experts: int | None = None,
         fast_math: bool = True,
         max_num_tokens: int | None = None,
-        input_sp_size: int = 1,
         prefix: str = "",
     ):
         super().__init__()
@@ -295,8 +294,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         check_deep_gemm_mega_moe_supported(device, hidden_size, intermediate_size)
 
         self.prefix = prefix
-        self.input_sp_size = input_sp_size
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self._capture_parallel_config = vllm_config.parallel_config
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
@@ -345,9 +343,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
     def restore_routed_experts_rows(self, topk_ids: torch.Tensor) -> torch.Tensor:
         return collect_local_routing_rows(
             topk_ids,
-            dp_rank=self.dp_rank,
-            sp_size=self.input_sp_size,
-            is_gathered=False,
+            dp_rank=self._capture_parallel_config.data_parallel_rank,
+            tp_size=self._capture_parallel_config.tensor_parallel_size,
         )
 
     @property

@@ -442,12 +442,6 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
     described above for the monolithic case.
     """
 
-    def routing_capture_is_gathered(self) -> bool:
-        """Whether prepare gathers DP/SP rows before the kernel routes tokens."""
-        raise NotImplementedError(
-            f"{type(self).__name__} does not support routed-experts restoration"
-        )
-
     @abstractmethod
     def prepare(
         self,

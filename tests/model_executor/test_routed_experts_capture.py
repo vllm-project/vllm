@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import types
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -30,6 +29,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     RoutedExpertsSink,
     bind_routed_experts_capturer,
+    collect_local_routing_rows,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 from vllm.v1.kv_cache_interface import (
@@ -42,7 +42,6 @@ from vllm.v1.kv_cache_interface import (
 pytestmark = pytest.mark.cpu_test
 
 _REC_MODULE = "vllm.model_executor.layers.fused_moe.routed_experts_capturer"
-_RESTORE_MODULE = "vllm.model_executor.layers.fused_moe.routed_experts_capture_utils"
 
 
 def _forward_context(**kwargs):
@@ -73,12 +72,6 @@ def _make_router(eplb_state: EplbLayerState | None = None) -> DummyRouter:
         top_k=2,
         global_num_experts=16,
         eplb_state=eplb_state,
-    )
-
-
-def _make_modular_routed_experts():
-    return types.SimpleNamespace(
-        quant_method=types.SimpleNamespace(is_monolithic=False),
     )
 
 
@@ -127,60 +120,6 @@ def test_base_router_capture_pre_eplb_mapping(eplb_enabled):
     assert len(captured) == 1
     assert torch.equal(captured[0], torch.tensor([[1, 2], [3, 4]]))
     assert torch.equal(topk_ids, torch.tensor([[11, 12], [13, 14]]))
-
-
-def test_public_binding_binds_target_model_router(monkeypatch):
-    class DummyFusedMoE:
-        def restore_routed_experts_rows(self, ids):
-            return ids
-
-        def __init__(self, layer_id):
-            self.layer_id = layer_id
-            self.router = _make_router()
-            self._quant_method = _make_modular_routed_experts().quant_method
-
-    target_module = DummyFusedMoE(layer_id=7)
-
-    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
-
-    monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
-    calls = []
-    capturer = types.SimpleNamespace(
-        capture=lambda *args: calls.append(args), row_restorers={}
-    )
-
-    bind_routed_experts_capturer(
-        types.SimpleNamespace(modules=lambda: [target_module]), capturer
-    )
-
-    assert target_module.router.capture_fn is not None
-    topk_ids = torch.tensor([[5, 6]])
-    target_module.router.capture_fn(topk_ids)
-    assert calls == [(7, topk_ids)]
-
-
-def test_public_binding_supports_direct_capture_source():
-    class DirectCaptureSource(torch.nn.Module):
-        def restore_routed_experts_rows(self, ids):
-            return ids
-
-        def __init__(self):
-            super().__init__()
-            self.layer_id = 3
-            self.capture_fn = None
-
-    source = DirectCaptureSource()
-    calls = []
-    capturer = types.SimpleNamespace(
-        capture=lambda *args: calls.append(args), row_restorers={}
-    )
-
-    bind_routed_experts_capturer(source, capturer)
-
-    assert source.capture_fn is not None
-    topk_ids = torch.tensor([[1, 2]])
-    source.capture_fn(topk_ids)
-    assert calls == [(3, topk_ids)]
 
 
 _SINK_CONFIG = SimpleNamespace(
@@ -339,7 +278,7 @@ def test_single_dp_ep_capture_restores_tp_shards(
     tp_size, num_tokens, cg_mode, restore_capturer
 ):
     """Capture all current rows after model-level SP, including buffer reuse."""
-    capturer = _bind_standard_source(restore_capturer, sp_size=tp_size)
+    capturer = _bind_standard_source(restore_capturer, tp_size=tp_size)
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(
             data_parallel_size=1,
@@ -352,7 +291,7 @@ def test_single_dp_ep_capture_restores_tp_shards(
             fast_moe_cold_start=False, static_forward_context={}
         ),
     )
-    tp_group = Mock(world_size=tp_size)
+    tp_group = Mock()
     shard_n = (num_tokens + tp_size - 1) // tp_size
     with (
         set_forward_context(
@@ -361,7 +300,7 @@ def test_single_dp_ep_capture_restores_tp_shards(
             num_tokens=num_tokens,
             cudagraph_runtime_mode=cg_mode,
         ),
-        patch(f"{_RESTORE_MODULE}.get_tp_group", return_value=tp_group),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
     ):
         assert get_forward_context().dp_metadata is None
         for offset in (20, 1):
@@ -375,19 +314,22 @@ def test_single_dp_ep_capture_restores_tp_shards(
                 capturer.snapshot_routing_data(num_tokens)[:, 0].int(), expected
             )
             assert (capturer.device_buffer[num_tokens:, 0] == -1).all()
-    assert tp_group.all_gather.call_count == 2 * (num_tokens > 1)
+    if num_tokens == 1:
+        tp_group.all_gather.assert_not_called()
+    else:
+        assert tp_group.all_gather.call_count == 2
 
 
 @pytest.mark.parametrize("num_tokens, num_rows", [(6, 6), (3, 4), (0, 0)])
 def test_single_dp_tp_capture_does_not_regather_full_batch(
     num_tokens, num_rows, restore_capturer
 ):
-    capturer = _bind_standard_source(restore_capturer, sp_size=2, gathered=True)
+    capturer = _bind_standard_source(restore_capturer, tp_size=2)
     topk = torch.arange(num_rows * 2, dtype=torch.int32).reshape(-1, 2)
     ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=num_tokens))
     with (
         override_forward_context(ctx),
-        patch(f"{_RESTORE_MODULE}.get_tp_group") as get_tp_group,
+        patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
     ):
         capturer.capture(0, topk)
     get_tp_group.assert_not_called()
@@ -399,12 +341,12 @@ def test_single_dp_tp_capture_does_not_regather_full_batch(
 def test_single_dp_tp_capture_rejects_unexpected_batch_without_writing(
     num_tokens, num_rows, restore_capturer
 ):
-    capturer = _bind_standard_source(restore_capturer, sp_size=2)
+    capturer = _bind_standard_source(restore_capturer, tp_size=2)
     topk = torch.ones(num_rows, 2, dtype=torch.int32)
     ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=num_tokens))
     with (
         override_forward_context(ctx),
-        pytest.raises(ValueError, match="expected .* rows"),
+        pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
     ):
         capturer.capture(0, topk)
     assert (capturer.device_buffer == -1).all()
@@ -417,7 +359,7 @@ def test_capture_uses_pre_sp_size_after_model_shards_padding_mask(
     """Model-level SP shortens the mask; capture still needs all three rows."""
     from vllm.models.common.ops import sequence_parallel as sp
 
-    capturer = _bind_standard_source(restore_capturer, sp_size=2)
+    capturer = _bind_standard_source(restore_capturer, tp_size=2)
     expected = torch.arange(8, dtype=torch.int32).reshape(4, 2)
     ctx = _forward_context(
         is_padding=torch.zeros(3, dtype=torch.bool),
@@ -429,11 +371,11 @@ def test_capture_uses_pre_sp_size_after_model_shards_padding_mask(
     ):
         ctx.is_padding = sp.sp_padding_mask(ctx.is_padding, torch.empty(3, 1))
     assert len(ctx.is_padding) == 2
-    tp_group = Mock(world_size=2)
+    tp_group = Mock()
     tp_group.all_gather.return_value = expected
     with (
         override_forward_context(ctx),
-        patch(f"{_RESTORE_MODULE}.get_tp_group", return_value=tp_group),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
     ):
         capturer.capture(0, expected[2 * tp_rank : 2 * (tp_rank + 1)])
     tp_group.all_gather.assert_called_once()
@@ -487,8 +429,8 @@ def test_routed_experts_capturer_narrows_snapshot(output_dtype, restore_capturer
 
 
 def test_routed_experts_capturer_dp_naive_concatenated_all_ranks(restore_capturer):
-    """Naive dispatch routes gathered DP rows; capture selects this DP rank."""
-    capturer = _bind_standard_source(restore_capturer, dp_rank=1, gathered=True)
+    """N == sum(num_tokens_dp): slice this rank's segment from concatenated topk."""
+    capturer = _bind_standard_source(restore_capturer, dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = _forward_context(
         dp_metadata=DPMetadata(num_tokens_across_dp_cpu=num_tokens_dp)
@@ -504,7 +446,7 @@ def test_routed_experts_capturer_dp_naive_concatenated_all_ranks(restore_capture
 
 
 def test_routed_experts_capturer_dp_modular_local_tokens(restore_capturer):
-    """Modular routing precedes dispatch, so its rows are already DP-local."""
+    """N == token_num_per_dp: topk is already local to this DP rank."""
     capturer = _bind_standard_source(restore_capturer, dp_rank=1)
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = _forward_context(
@@ -517,9 +459,7 @@ def test_routed_experts_capturer_dp_modular_local_tokens(restore_capturer):
 
 
 def test_routed_experts_capturer_dp_ep_gathered_shards(restore_capturer):
-    capturer = _bind_standard_source(
-        restore_capturer, dp_rank=1, sp_size=2, gathered=True
-    )
+    capturer = _bind_standard_source(restore_capturer, dp_rank=1, tp_size=2)
     num_tokens_dp = torch.tensor([3, 2], dtype=torch.int32)
     ctx = _forward_context(
         dp_metadata=DPMetadata(
@@ -543,7 +483,7 @@ def test_routed_experts_capturer_sp_modular_gathers_tp_shards(
     single_dp, restore_capturer
 ):
     capturer = _bind_standard_source(
-        restore_capturer, dp_rank=0 if single_dp else 1, sp_size=2
+        restore_capturer, dp_rank=0 if single_dp else 1, tp_size=2
     )
     num_tokens_dp = torch.tensor([2, 3], dtype=torch.int32)
     ctx = _forward_context(
@@ -554,12 +494,12 @@ def test_routed_experts_capturer_sp_modular_gathers_tp_shards(
     )
     local_shard = torch.tensor([[10, 12], [11, 13]], dtype=torch.int32).t()
     gathered = torch.tensor([[10, 11], [12, 13], [14, 15], [-1, -1]], dtype=torch.int32)
-    tp_group = Mock(world_size=2)
+    tp_group = Mock()
     tp_group.all_gather.return_value = gathered
 
     with (
         override_forward_context(ctx),
-        patch(f"{_RESTORE_MODULE}.get_tp_group", return_value=tp_group),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=tp_group),
     ):
         capturer.capture(layer_id=0, topk_ids=local_shard)
 
@@ -571,21 +511,20 @@ def test_routed_experts_capturer_sp_modular_gathers_tp_shards(
     assert torch.equal(capturer.device_buffer[:3, 0], gathered[:3])
 
 
-def test_routed_experts_capturer_rejects_incomplete_gathered_rows(restore_capturer):
-    """An incomplete gathered tensor must not silently truncate local rows."""
-    capturer = _bind_standard_source(
-        restore_capturer, dp_rank=1, sp_size=2, gathered=True
-    )
+def test_routed_experts_capturer_rejects_incomplete_dp_shard_groups(restore_capturer):
+    """Invalid gather metadata must not silently select another rank's rows."""
+    capturer = _bind_standard_source(restore_capturer, dp_rank=1, tp_size=2)
     ctx = _forward_context(
         dp_metadata=DPMetadata(
             num_tokens_across_dp_cpu=torch.tensor([3, 2]),
+            local_sizes=[2, 2, 2],
         )
     )
     with (
         override_forward_context(ctx),
-        pytest.raises(ValueError, match="expected 6 rows"),
+        pytest.raises(ValueError, match="not divisible by DP rank count"),
     ):
-        capturer.capture(0, torch.ones(5, 2, dtype=torch.int32))
+        capturer.capture(0, torch.ones(6, 2, dtype=torch.int32))
     assert (capturer.device_buffer == -1).all()
 
 
@@ -593,11 +532,11 @@ def test_routed_experts_capturer_rejects_incomplete_gathered_rows(restore_captur
 def test_routed_experts_capturer_rejects_layer_before_restoring_rows(
     layer_id, restore_capturer
 ):
-    capturer = _bind_standard_source(restore_capturer, sp_size=2)
+    capturer = _bind_standard_source(restore_capturer, tp_size=2)
     ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=3))
     with (
         override_forward_context(ctx),
-        patch(f"{_RESTORE_MODULE}.get_tp_group") as get_tp_group,
+        patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
         pytest.raises(IndexError, match="exceeds capture buffer"),
     ):
         capturer.capture(layer_id, torch.ones(2, 2, dtype=torch.int32))
@@ -608,7 +547,7 @@ def test_routed_experts_capturer_rejects_layer_before_restoring_rows(
 @pytest.mark.parametrize(
     ("counts", "local_sizes", "start", "stop"),
     [
-        ([3, 0], [2, 2, 0, 0], 4, 4),
+        ([3, 0], [2, 2, 0, 0], 3, 3),
         ([0, 3], None, 0, 3),
         ([0, 0], [0, 0, 0, 0], 0, 0),
         ([2, 2], [1, 1, 1, 1], 2, 4),
@@ -618,11 +557,8 @@ def test_routed_experts_capturer_rejects_layer_before_restoring_rows(
 def test_routed_experts_capturer_dp_preserves_empty_and_unpadded_spans(
     counts, local_sizes, start, stop, restore_capturer
 ):
-    capturer = _bind_standard_source(
-        restore_capturer, dp_rank=1, sp_size=2 if local_sizes else 1, gathered=True
-    )
-    physical_rows = sum(local_sizes) if local_sizes else sum(counts)
-    topk = torch.arange(physical_rows * 2, dtype=torch.int32).reshape(-1, 2)
+    capturer = _bind_standard_source(restore_capturer, dp_rank=1, tp_size=2)
+    topk = torch.arange(sum(counts) * 2, dtype=torch.int32).reshape(-1, 2)
     ctx = _forward_context(
         dp_metadata=DPMetadata(
             num_tokens_across_dp_cpu=torch.tensor(counts), local_sizes=local_sizes
@@ -630,7 +566,7 @@ def test_routed_experts_capturer_dp_preserves_empty_and_unpadded_spans(
     )
     with (
         override_forward_context(ctx),
-        patch(f"{_RESTORE_MODULE}.get_tp_group") as get_tp_group,
+        patch(f"{_REC_MODULE}.get_tp_group") as get_tp_group,
     ):
         capturer.capture(0, topk)
     get_tp_group.assert_not_called()
@@ -647,11 +583,11 @@ def test_routed_experts_capturer_dp_unexpected_batch_raises(restore_capturer):
     ctx = _forward_context(
         dp_metadata=DPMetadata(num_tokens_across_dp_cpu=num_tokens_dp)
     )
-    # Modular routing promises two local rows; one row is incomplete.
+    # total=5, local=2: n=1 matches neither naive (5) nor modular (2).
     topk = torch.tensor([[1, 2]], dtype=torch.int32)
     with (
         override_forward_context(ctx),
-        pytest.raises(ValueError, match="expected .* rows"),
+        pytest.raises(AssertionError, match="unexpected topk_ids batch dim"),
     ):
         capturer.capture(layer_id=0, topk_ids=topk)
     assert capturer.device_buffer[0, 0, 0].item() == -1
@@ -803,7 +739,7 @@ def capture_config(tmp_path):
         num_local_experts=16,
         num_experts_per_tok=2,
     ).save_pretrained(tmp_path)
-    config = VllmConfig(
+    return VllmConfig(
         model_config=ModelConfig(
             model=str(tmp_path),
             dtype="float32",
@@ -813,7 +749,6 @@ def capture_config(tmp_path):
         ),
         device_config=DeviceConfig(device="cpu"),
     )
-    return config
 
 
 @pytest.fixture
@@ -827,29 +762,28 @@ def restore_capturer(capture_config, monkeypatch):
 
 
 class _CaptureSource(torch.nn.Module):
-    def __init__(self, layer_id):
+    def __init__(self, layer_id=0, *, dp_rank=0, tp_size=1):
         super().__init__()
         self.layer_id = layer_id
         self.capture_fn = None
+        self.dp_rank = dp_rank
+        self.tp_size = tp_size
 
     def restore_routed_experts_rows(self, ids):
-        return ids
+        return collect_local_routing_rows(
+            ids, dp_rank=self.dp_rank, tp_size=self.tp_size
+        )
 
     def forward(self, ids):
         if self.capture_fn is not None:
             self.capture_fn(ids)
-        return ids
 
 
 class _RestoringCaptureSource(_CaptureSource):
     def restore_routed_experts_rows(self, ids):
         ctx = get_forward_context()
         assert ctx.batch_descriptor is not None
-        ctx.additional_kwargs["restored_layers"].append(self.layer_id)
-        start = ctx.additional_kwargs["start"]
-        if start is None:
-            return ids
-        start += self.layer_id
+        start = ctx.additional_kwargs["start"] + self.layer_id
         return ids[start : start + ctx.batch_descriptor.num_tokens]
 
 
@@ -857,30 +791,23 @@ class _RestoringCaptureSource(_CaptureSource):
 def test_capture_restorers_are_layer_local_and_use_current_context(
     rows, restore_capturer
 ):
-    capturer = restore_capturer
-    model = torch.nn.ModuleList(
-        [_RestoringCaptureSource(0), _RestoringCaptureSource(1), _CaptureSource(2)]
-    )
-    bind_routed_experts_capturer(model, capturer)
-    for step, start in enumerate((1, None, 2)):
-        ids = torch.arange(14, dtype=torch.int32).reshape(7, 2) + step
-        input_ids = ids if start is not None else ids[:rows]
-        original = input_ids.clone()
+    model = torch.nn.ModuleList([_RestoringCaptureSource(i) for i in range(2)])
+    bind_routed_experts_capturer(model, restore_capturer)
+    for start in (1, 2):
+        ids = torch.arange(14, dtype=torch.int32).reshape(7, 2) + start
+        original = ids.clone()
         ctx = _forward_context(
             batch_descriptor=BatchDescriptor(num_tokens=rows),
-            additional_kwargs={"start": start, "restored_layers": []},
+            additional_kwargs={"start": start},
         )
         with override_forward_context(ctx):
-            for source in model[:2]:
-                torch.testing.assert_close(source(input_ids), original)
-            model[2](ids[:rows])
-        assert ctx.additional_kwargs["restored_layers"] == [0, 1]
-        expected = torch.full_like(capturer.device_buffer, -1)
-        for layer_id in (0, 1):
-            first = start + layer_id if start is not None else 0
-            expected[:rows, layer_id] = ids[first : first + rows]
-        expected[:rows, 2] = ids[:rows]
-        torch.testing.assert_close(capturer.device_buffer, expected)
+            for source in model:
+                source(ids)
+        torch.testing.assert_close(ids, original)
+        expected = torch.full_like(restore_capturer.device_buffer, -1)
+        for layer_id in range(2):
+            expected[:rows, layer_id] = ids[start + layer_id : start + layer_id + rows]
+        torch.testing.assert_close(restore_capturer.device_buffer, expected)
 
 
 def test_capture_rejects_duplicate_restorers(restore_capturer):
@@ -891,35 +818,16 @@ def test_capture_rejects_duplicate_restorers(restore_capturer):
         bind_routed_experts_capturer(model, restore_capturer)
 
 
-class _StandardCaptureSource(_CaptureSource):
-    def __init__(self, *, dp_rank=0, sp_size=1, gathered=False):
-        super().__init__(0)
-        self.dp_rank = dp_rank
-        self.sp_size = sp_size
-        self.gathered = gathered
-
-    def restore_routed_experts_rows(self, ids):
-        from vllm.model_executor.layers.fused_moe.routed_experts_capture_utils import (
-            collect_local_routing_rows,
-        )
-
-        return collect_local_routing_rows(
-            ids, dp_rank=self.dp_rank, sp_size=self.sp_size, is_gathered=self.gathered
-        )
-
-
 def _bind_standard_source(capturer, **kwargs):
-    bind_routed_experts_capturer(_StandardCaptureSource(**kwargs), capturer)
+    bind_routed_experts_capturer(_CaptureSource(**kwargs), capturer)
     return capturer
 
 
-@pytest.mark.parametrize("sp_size, rank", [(1, 0), (2, 0), (2, 1)])
-def test_native_mega_moe_restores_input_sp_rows(
-    sp_size, rank, restore_capturer, capture_config
-):
+def test_native_mega_moe_restores_input_sp_rows(restore_capturer, capture_config):
     from vllm.model_executor.layers.fused_moe import deep_gemm_mega_moe as mega
     from vllm.platforms.cpu import CpuPlatform
 
+    capture_config.parallel_config.tensor_parallel_size = 2
     with (
         patch.object(mega, "current_platform", CpuPlatform()),
         patch.object(mega, "check_deep_gemm_mega_moe_supported"),
@@ -928,28 +836,27 @@ def test_native_mega_moe_restores_input_sp_rows(
             capture_config,
             num_experts=8,
             num_local_experts=4,
-            experts_start_idx=rank * 4,
+            experts_start_idx=4,
             top_k=2,
             hidden_size=128,
             intermediate_size=128,
             activation=mega.MegaMoEActivation(),
             weight_format=mega.MEGA_MOE_MXFP4,
             prefix="model.layers.1.experts",
-            input_sp_size=sp_size,
         )
     bind_routed_experts_capturer(experts, restore_capturer)
     ids = torch.arange(6, dtype=torch.int32).reshape(3, 2)
     padded = torch.cat((ids, torch.full((1, 2), 99, dtype=torch.int32)))
-    group = Mock(world_size=sp_size)
+    group = Mock()
     group.all_gather.return_value = padded
     ctx = _forward_context(batch_descriptor=BatchDescriptor(num_tokens=3))
     with (
         override_forward_context(ctx),
-        patch(f"{_RESTORE_MODULE}.get_tp_group", return_value=group),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=group),
     ):
         assert experts.capture_fn is not None
-        experts.capture_fn(padded[rank * 2 : (rank + 1) * 2] if sp_size > 1 else ids)
-    assert group.all_gather.call_count == int(sp_size > 1)
+        experts.capture_fn(padded[2:])
+    group.all_gather.assert_called_once()
     expected = torch.full_like(restore_capturer.device_buffer, -1)
     expected[:3, 1] = ids
     torch.testing.assert_close(restore_capturer.device_buffer, expected)
@@ -964,32 +871,12 @@ def test_capture_requires_source_to_define_restoration(restore_capturer):
         bind_routed_experts_capturer(Source(), restore_capturer)
 
 
-@pytest.mark.parametrize(
-    "path", ["naive", "modular", "monolithic-local", "monolithic-gathered", "custom"]
-)
-@pytest.mark.parametrize("sp_size", [1, 2])
-def test_moe_runner_restores_rows_for_its_execution_path(
-    path, sp_size, capture_config, restore_capturer, monkeypatch
+@pytest.mark.parametrize("custom", [False, True])
+def test_moe_runner_capture_uses_layer_restorer(
+    custom, capture_config, restore_capturer, monkeypatch
 ):
     from vllm.config import set_current_vllm_config
-    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-    from vllm.model_executor.layers.fused_moe.config import (
-        FUSED_MOE_UNQUANTIZED_CONFIG,
-        FusedMoEConfig,
-        FusedMoEParallelConfig,
-    )
-    from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
-    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
-        CPUUnquantizedExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
-    from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
-        MoEPrepareAndFinalizeNaiveDPEPMonolithic,
-    )
-    from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
-        MoEPrepareAndFinalizeNoDPEPModular,
-    )
-    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoEFactory
     from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
     from vllm.platforms.cpu import CpuPlatform
 
@@ -1009,121 +896,67 @@ def test_moe_runner_restores_rows_for_its_execution_path(
         def restore_routed_experts_rows(self, ids):
             from vllm.distributed.parallel_state import get_tp_group
 
-            ctx = get_forward_context()
-            assert ctx.dp_metadata is not None
-            rows = int(
-                ctx.dp_metadata.num_tokens_across_dp_cpu[self.moe_config.dp_rank]
-            )
-            # A backend may split padded rows unevenly even when SP is off.
-            return get_tp_group().all_gatherv(ids, dim=0, sizes=[2, 1])[:rows]
+            return get_tp_group().all_gatherv(ids, dim=0, sizes=[2, 1])
 
-    parallel = FusedMoEParallelConfig(
-        tp_size=2,
-        pcp_size=1,
-        dp_size=2,
-        ep_size=1,
-        tp_rank=0,
-        pcp_rank=0,
-        dp_rank=1,
-        ep_rank=0,
-        sp_size=sp_size,
-        use_ep=False,
-        all2all_backend="allgather_reducescatter",
-        enable_eplb=False,
-    )
-    config = FusedMoEConfig(
-        num_experts=16,
-        experts_per_token=2,
-        hidden_dim=128,
-        intermediate_size=256,
-        num_local_experts=16,
-        num_logical_experts=16,
-        activation=MoEActivation.SILU,
-        device="cpu",
-        routing_method=RoutingMethodType.TopK,
-        moe_parallel_config=parallel,
-        in_dtype=torch.float32,
-    )
-    manager = ExpertMapManager(
-        max_num_batched_tokens=8,
-        top_k=2,
-        global_num_experts=16,
-        num_redundant_experts=0,
-        num_expert_group=None,
-        moe_parallel_config=parallel,
-        placement_strategy="linear",
-        enable_eplb=False,
-    )
-    with set_current_vllm_config(capture_config):
-        experts = RoutedExperts(
-            "model.layers.0.experts", torch.float32, config, None, manager
+    parallel = capture_config.parallel_config
+    parallel.tensor_parallel_size = 2
+    parallel.data_parallel_size = 2
+    parallel.data_parallel_rank = 1
+    with (
+        set_current_vllm_config(capture_config),
+        patch(
+            "vllm.model_executor.layers.fused_moe.config.get_dp_group",
+            return_value=Mock(rank_in_group=1),
+        ),
+        patch(
+            "vllm.model_executor.layers.fused_moe.config.get_tensor_model_parallel_rank",
+            return_value=0,
+        ),
+    ):
+        runner = FusedMoEFactory(
+            num_experts=16,
+            top_k=2,
+            hidden_size=128,
+            intermediate_size=256,
+            params_dtype=torch.float32,
+            tp_size=2,
+            dp_size=2,
+            pcp_size=1,
+            router=_make_router(),
+            runner_cls=BackendMoERunner if custom else MoERunner,
+            prefix="model.layers.2.experts",
         )
-        if path == "modular":
-            experts.quant_method.moe_kernel = FusedMoEKernel(
-                MoEPrepareAndFinalizeNoDPEPModular(),
-                CPUUnquantizedExperts(config, FUSED_MOE_UNQUANTIZED_CONFIG),
-            )
-        elif path.startswith("monolithic"):
-            prepare = (
-                MoEPrepareAndFinalizeNaiveDPEPMonolithic(sp_size > 1)
-                if path == "monolithic-gathered"
-                else MoEPrepareAndFinalizeNoDPEPMonolithic()
-            )
-            experts.quant_method.moe_kernel = FusedMoEKernel(
-                prepare, CPUExpertsInt4(config, FUSED_MOE_UNQUANTIZED_CONFIG)
-            )
-        runner_cls = BackendMoERunner if path == "custom" else MoERunner
-        runner = runner_cls("model.layers.0.experts", config, _make_router(), experts)
-
-    # DP0 owns 3 rows, DP1 owns 2. Gathered SP inputs include DP0's padding.
-    ids = torch.tensor([[10, 11], [12, 13]], dtype=torch.int32)
-    gathered = path in ("naive", "monolithic-gathered")
-    if gathered:
-        prefix_rows = 4 if sp_size == 2 else 3
-        physical_ids = torch.cat(
-            (torch.full((prefix_rows, 2), 99, dtype=torch.int32), ids)
-        )
-    else:
-        physical_ids = ids[:1] if sp_size == 2 and path != "custom" else ids
-    group = Mock(world_size=2)
-    group.all_gather.return_value = ids
-    group.all_gatherv.return_value = torch.cat(
-        (ids, torch.full((1, 2), 99, dtype=torch.int32))
-    )
-    ctx = _forward_context(dp_metadata=DPMetadata(torch.tensor([3, 2])))
+    # MoE flattens DP into TP; capture must still use the global TP size.
+    assert runner.moe_config.tp_size == 4
+    bind_routed_experts_capturer(runner, restore_capturer)
+    ids = torch.arange(6, dtype=torch.int32).reshape(3, 2)
+    group = Mock()
+    group.all_gather.return_value = torch.cat((ids, torch.full_like(ids[:1], -1)))
+    group.all_gatherv.return_value = ids
+    ctx = _forward_context(dp_metadata=DPMetadata(torch.tensor([2, 3])))
     with (
         override_forward_context(ctx),
-        patch(f"{_RESTORE_MODULE}.get_tp_group", return_value=group),
+        patch(f"{_REC_MODULE}.get_tp_group", return_value=group),
         patch("vllm.distributed.parallel_state.get_tp_group", return_value=group),
     ):
-        actual = runner.restore_routed_experts_rows(physical_ids)
-        if not path.startswith("monolithic"):
-            bind_routed_experts_capturer(runner, restore_capturer)
-            assert isinstance(runner.router, BaseRouter)
-            assert runner.router.capture_fn is not None
-            runner.router.capture_fn(physical_ids)
-            expected = torch.full_like(restore_capturer.device_buffer, -1)
-            expected[:2, 0] = ids
-            torch.testing.assert_close(restore_capturer.device_buffer, expected)
-    torch.testing.assert_close(actual, ids)
-    calls = 1 if path.startswith("monolithic") else 2
-    assert group.all_gather.call_count == calls * int(
-        sp_size > 1 and not gathered and path != "custom"
-    )
-    assert group.all_gatherv.call_count == calls * int(path == "custom")
+        assert isinstance(runner.router, BaseRouter)
+        assert runner.router.capture_fn is not None
+        runner.router.capture_fn(ids[:2])
+    expected = torch.full_like(restore_capturer.device_buffer, -1)
+    expected[:3, 2] = ids
+    torch.testing.assert_close(restore_capturer.device_buffer, expected)
+    assert group.all_gather.call_count == int(not custom)
+    assert group.all_gatherv.call_count == int(custom)
 
 
 @pytest.mark.parametrize("num_tokens", [0, 1])
-@pytest.mark.parametrize("dp_rank", [None, 0, 1])
 def test_publishing_rank_captures_complete_sp_shard_without_collective(
-    num_tokens, dp_rank, restore_capturer
+    num_tokens, restore_capturer
 ):
     """TP0 already owns every real row of an empty or singleton SP batch."""
-    capturer = _bind_standard_source(restore_capturer, dp_rank=dp_rank or 0, sp_size=2)
-    counts = [num_tokens, num_tokens]
+    capturer = _bind_standard_source(restore_capturer, dp_rank=1, tp_size=2)
     ctx = _forward_context(
-        dp_metadata=DPMetadata(torch.tensor(counts)) if dp_rank is not None else None,
-        batch_descriptor=BatchDescriptor(num_tokens=num_tokens),
+        dp_metadata=DPMetadata(torch.tensor([3, num_tokens])),
     )
     ids = torch.tensor([[5, 6]], dtype=torch.int32)[:num_tokens]
     # There is no initialized TP group: this valid fast path needs no collective.
