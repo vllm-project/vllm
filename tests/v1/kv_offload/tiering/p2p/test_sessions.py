@@ -3685,6 +3685,9 @@ def _fetch(conn: FakeConnection, kv_request_id: str, keys, idxs) -> None:
     )
 
 
+_STALL_S = 20.0
+
+
 class TestPeerFaultEscalation:
     """A transport peer fault ends the session through the normal reap
     path (see "Failure model" in data/base.py): no new WRITE is submitted,
@@ -3745,6 +3748,73 @@ class TestPeerFaultEscalation:
         session._peer_fault_at = time.monotonic() - _PEER_FAULT_DRAIN_S - 1.0
         session.poll()
         assert not session.alive
+
+    def _stalled_session(self):
+        session, conn, transport = _make_session()
+        session._server._stall_timeout_s = _STALL_S
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        _fetch(conn, "req-1", [b"k1"], [5])
+        session.poll()
+        (tid,) = transport._transfers
+        transport._cancel_still_inflight.add(tid)
+        return session, conn, transport, tid
+
+    def test_transfer_under_stall_timeout_keeps_session(self):
+        session, _, _, tid = self._stalled_session()
+        xfer = session._server._inflight[tid]
+        xfer.submitted_at = time.monotonic() - _STALL_S + 1.0
+        session.poll()
+        assert session.alive
+        assert session._server.peer_fault is None
+
+    def test_transfer_done_in_same_poll_is_not_stalled(self):
+        """A WRITE past the stall timeout that the transport reports done in
+        this very poll completes; it does not fault the peer."""
+        session, _, transport, tid = self._stalled_session()
+        session._server._inflight[tid].submitted_at = 0.0
+        transport._poll_done.append(tid)
+        stores = session.poll().stores
+        assert session.alive
+        assert session._server.peer_fault is None
+        assert StoreResult(job_id=1, success=True) in stores
+
+    def test_stalled_transfer_faults_peer_without_releasing(self):
+        """A WRITE past the stall timeout faults the peer at once (no drain
+        wait), and close() retains it with its store job still pinned."""
+        session, conn, transport, tid = self._stalled_session()
+        xfer = session._server._inflight[tid]
+        xfer.submitted_at = time.monotonic() - _STALL_S - 1.0
+
+        stores = session.poll().stores
+        assert not session.alive
+        assert session.data_plane_fault.startswith("transfer stalled for")
+        assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
+        assert StoreResult(job_id=1, success=False) not in stores
+
+        result = session.close()
+        assert result.retained == {tid: frozenset({1})}
+        assert 1 not in result.failed_stores
+        assert tid in transport._transfers
+        assert all(mode == "wait" for _, mode in transport._cancel_calls)
+
+    def test_stalled_peer_gets_no_new_writes(self):
+        """The fault lands in the same poll that would serve a new fetch."""
+        session, conn, transport, tid = self._stalled_session()
+        session._server._inflight[tid].submitted_at = 0.0
+        session._server.collect_results()
+        assert session._server.peer_fault is not None
+        session.add_stored_blocks("req-2", [OffloadKey(b"k2")], [1], job_id=2)
+        _fetch(conn, "req-2", [b"k2"], [6])
+        session.poll()
+        assert list(transport._transfers) == [tid]
+
+    def test_stall_timeout_zero_disables(self):
+        session, _, _, tid = self._stalled_session()
+        session._server._stall_timeout_s = 0
+        session._server._inflight[tid].submitted_at = 0.0
+        session.poll()
+        assert session.alive
 
     def test_death_reasons(self):
         session, conn, _ = _make_session()

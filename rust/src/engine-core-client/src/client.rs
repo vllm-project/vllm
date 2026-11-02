@@ -18,6 +18,7 @@ use crate::client::imp::{ClientInner, run_abort_loop, run_output_dispatcher_loop
 use crate::coordinator::CoordinatorHandle;
 use crate::error::{Error, Result, bail_invalid_client_config};
 use crate::metrics::EngineSleepState;
+use crate::prompt_block_hasher::PromptBlockHasher;
 use crate::protocol::dtype::ModelDtype;
 use crate::protocol::handshake::EngineCoreReadyResponse;
 use crate::protocol::lora::LoraRequest;
@@ -46,8 +47,18 @@ pub enum TransportMode {
         /// Host/IP that engines should use to connect back to the frontend
         /// transport sockets.
         advertised_host: String,
-        /// Total number of engines expected to join this transport.
+        /// First data-parallel engine rank that this frontend connects to.
+        ///
+        /// The frontend whose range starts at rank 0 handshakes with every
+        /// rank of the deployment; other frontends handshake only with their
+        /// own engines.
+        engine_start_index: u32,
+        /// Total number of engines this frontend connects to.
         engine_count: usize,
+        /// Deployment-wide data-parallel size. This is larger than
+        /// `engine_count` when frontends partition ranks across nodes (hybrid
+        /// or external DP LB).
+        data_parallel_size: usize,
         /// Maximum time to wait for each startup phase to complete.
         ready_timeout: Duration,
         /// Optional explicit bind address for the input ROUTER socket.
@@ -82,10 +93,24 @@ impl TransportMode {
     /// Return the deployment-wide data-parallel size for this transport.
     pub fn data_parallel_size(&self) -> usize {
         match self {
-            Self::HandshakeOwner { engine_count, .. } => *engine_count,
-            Self::Bootstrapped {
+            Self::HandshakeOwner {
+                data_parallel_size, ..
+            }
+            | Self::Bootstrapped {
                 data_parallel_size, ..
             } => *data_parallel_size,
+        }
+    }
+
+    /// Return the first data-parallel engine rank this frontend connects to.
+    pub fn engine_start_index(&self) -> u32 {
+        match self {
+            Self::HandshakeOwner {
+                engine_start_index, ..
+            }
+            | Self::Bootstrapped {
+                engine_start_index, ..
+            } => *engine_start_index,
         }
     }
 
@@ -102,8 +127,12 @@ impl TransportMode {
         }
 
         match self {
-            Self::HandshakeOwner { .. } => {}
-            Self::Bootstrapped {
+            Self::HandshakeOwner {
+                engine_start_index,
+                engine_count,
+                ..
+            }
+            | Self::Bootstrapped {
                 engine_start_index,
                 engine_count,
                 ..
@@ -172,7 +201,9 @@ impl EngineCoreClientConfig {
             transport_mode: TransportMode::HandshakeOwner {
                 handshake_address: handshake_address.into(),
                 advertised_host: "127.0.0.1".to_string(),
+                engine_start_index: 0,
                 engine_count: 1,
+                data_parallel_size: 1,
                 ready_timeout: Duration::from_secs(30),
                 local_input_address: None,
                 local_output_address: None,
@@ -285,6 +316,8 @@ pub struct EngineCoreClient {
     inner: Arc<ClientInner>,
     coordinator: Option<CoordinatorHandle>,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
+    /// Hashes prompt blocks for the engines, if they all accept the same hashes.
+    prompt_block_hasher: Option<PromptBlockHasher>,
     /// Whether a profiling session is awaiting an explicit stop. Held across each
     /// start/stop utility call so a stale stop reply cannot clear a newer session.
     profile_active: Mutex<bool>,
@@ -312,7 +345,9 @@ impl EngineCoreClient {
             TransportMode::HandshakeOwner {
                 handshake_address,
                 advertised_host,
+                engine_start_index,
                 engine_count,
+                data_parallel_size,
                 ready_timeout,
                 local_input_address,
                 local_output_address,
@@ -327,7 +362,9 @@ impl EngineCoreClient {
 
                 transport::connect_handshake(
                     handshake_address,
+                    *engine_start_index,
                     *engine_count,
+                    *data_parallel_size,
                     advertised_host,
                     local_input_address.as_deref(),
                     local_output_address.as_deref(),
@@ -370,6 +407,7 @@ impl EngineCoreClient {
         connected: transport::ConnectedTransport,
     ) -> Result<Self> {
         validate_lora_capabilities(&connected.engines)?;
+        let prompt_block_hasher = prompt_block_hasher(&connected.engines);
         let (output_tx, output_rx) = mpsc::channel(64);
         let (abort_tx, abort_rx) = mpsc::unbounded_channel();
         let engines = connected.engines;
@@ -398,8 +436,10 @@ impl EngineCoreClient {
 
         let (coordinator, coordinator_output_task, coordinator_task) =
             if let Some(coordinator_transport) = connected.coordinator {
-                let (handle, runner) =
-                    CoordinatorHandle::new_inproc(coordinator_transport.input_socket);
+                let (handle, runner) = CoordinatorHandle::new_inproc(
+                    coordinator_transport.input_socket,
+                    coordinator_transport.frontend_publish_socket,
+                );
                 let (coordinator_output_tx, coordinator_output_rx) = mpsc::channel(64);
                 let coordinator_output_task =
                     AbortOnDropHandle::new(runtime.spawn(transport::run_output_loop(
@@ -436,6 +476,7 @@ impl EngineCoreClient {
             inner,
             coordinator,
             abort_tx,
+            prompt_block_hasher,
             profile_active: Mutex::new(false),
             runtime,
             output_task,
@@ -589,6 +630,24 @@ impl EngineCoreClient {
     }
 }
 
+/// Build the prompt block hasher if every engine reports the same supported
+/// prefix hash config. Requests can go to any engine, and an engine that
+/// doesn't hash blocks has no use for the hashes.
+fn prompt_block_hasher(engines: &[ConnectedEngine]) -> Option<PromptBlockHasher> {
+    let config = (engines.iter())
+        .map(|engine| engine.ready_response.prefix_hash_config.as_ref())
+        .all_equal_value()
+        .ok()??;
+    let hasher = PromptBlockHasher::new(config);
+    if hasher.is_none() {
+        debug!(
+            ?config,
+            "engine prefix hash config not supported; engine hashes prompts"
+        );
+    }
+    hasher
+}
+
 fn validate_lora_capabilities(engines: &[ConnectedEngine]) -> Result<()> {
     let first = engines.first().expect("engine core client requires at least one engine");
     for engine in engines {
@@ -628,6 +687,11 @@ impl EngineCoreClient {
     pub async fn call(&self, mut req: EngineCoreRequest) -> Result<EngineCoreOutputStream> {
         req.client_index = self.config.client_index;
         req.validate()?;
+        if req.block_hashes.is_none()
+            && let Some(hasher) = &self.prompt_block_hasher
+        {
+            req.block_hashes = hasher.hash_request(&req);
+        }
         trace!(
             request_id = %req.request_id,
             client_index = req.client_index,
