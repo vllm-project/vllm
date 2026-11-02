@@ -65,3 +65,14 @@ A variety of EAGLE draft models are available on the Hugging Face hub:
 
 !!! warning
     If you are using `vllm<0.7.0`, please use [this script](https://gist.github.com/abhigoyal1997/1e7a4109ccb7704fbc67f625e86b2d6d) to convert the speculative model and specify `"model": "path/to/modified/eagle/model"` in `speculative_config`.
+
+## Draft Rotary Embeddings (RoPE)
+
+An EAGLE draft head builds its rotary embedding from the **draft checkpoint's
+config only** — vLLM does not copy rope settings from the target model. If the
+draft `config.json` carries no rope keys (`rope_theta` / `rope_scaling` /
+`rope_parameters`), transformers silently defaults to base 10000, even when the
+target runs at a different base. vLLM logs the resolved draft rope base at
+startup and warns when it looks like the silent default while the target uses
+a different base. Checkpoint authors: pin the target's rope keys in the draft
+config so the drafter and target share positional encodings.
