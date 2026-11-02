@@ -667,6 +667,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 "FLASHINFER_MLA_SPARSE_SM120",
                 "FLASH_ATTN_MLA_SPARSE_FA4",
                 "DEEPSEEK_V32_INDEXER",
+                "ROCM_AITER_MLA_SPARSE",
             ):
                 from vllm.v1.attention.backends.mla.compressor_utils import (
                     _COMPRESSED_SLOT_MAPPING_KERNEL,
