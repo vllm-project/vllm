@@ -77,10 +77,9 @@ class LoadConfig:
       on-demand loading and is highly efficient for models on local storage.
       Unlike the default (None), automatic prefetching is not performed.
     - "eager": The entire file is read into CPU memory upfront before loading.
-      This is recommended for models on network or shared filesystems (e.g.,
-      NFS, Lustre, VirtioFS) as it avoids inefficient random reads,
-      significantly speeding up model initialization. However, it uses more
-      CPU RAM.
+      This is recommended for models on network filesystems (e.g., Lustre, NFS)
+      as it avoids inefficient random reads, significantly speeding up model
+      initialization. However, it uses more CPU RAM.
     - "prefetch": Checkpoint files are read into the OS page cache before
       workers load them, speeding up the model loading phase. Useful on
       network or high-latency storage.

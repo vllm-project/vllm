@@ -73,8 +73,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_AUTO_PREFETCH_FS_TYPES = frozenset({"nfs", "nfs4", "lustre", "virtiofs"})
-
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
 # lock files in the temp directory will be automatically deleted when the
@@ -1117,7 +1115,7 @@ def safetensors_weights_iterator(
     sorted_files = sorted(hf_weights_files, key=_natural_sort_key)
 
     fs_type = _get_fs_type(sorted_files)
-    is_auto_prefetch_fs = fs_type in _AUTO_PREFETCH_FS_TYPES
+    is_auto_prefetch_fs = fs_type in ("nfs", "nfs4", "lustre", "virtiofs")
     total_bytes = _get_checkpoints_size_bytes(sorted_files)
     avail_bytes = get_available_memory()
     ram_threshold_pct = 90
