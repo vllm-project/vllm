@@ -250,6 +250,10 @@ Additional configuration options in `kv_connector_extra_config`:
 | `kv_recompute_threshold` | `64` | Minimum number of remote tokens required to trigger a D→P pull. Below this threshold, P recomputes locally instead of pulling (to amortize transfer latency). |
 | `decoder_kv_blocks_ttl` | `480` | TTL (seconds) for KV blocks cached on D for bidirectional reuse. Blocks are released after this duration. Not renewed via heartbeats. |
 
+When `bidirectional_kv_xfer` is disabled, remote block metadata on
+`do_remote_decode` requests does not trigger a D→P pull. The prefill instance
+computes the prompt locally instead.
+
 ### Multi-turn proxy setup
 
 Use the provided multi-turn proxy to manage `kv_transfer_params` caching across conversation turns:
