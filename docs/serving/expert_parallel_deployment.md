@@ -31,6 +31,16 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | `flashinfer_nvlink_two_sided` | MNNVL systems | FlashInfer's two-sided A2A strategy for multi-node NVLink | Systems with NVLink across nodes |
 | `mori` | ROCm | MoRI EP: EPv2 (dispatch/combine over a CCO symmetric-memory window) where supported, otherwise EPv1 | AMD Instinct; see [MoRI EP](#mori-ep-rocm) |
 
+### FlashInfer MegaMoE live-token profiles
+
+When FlashInfer autotuning is enabled, vLLM prepares decode and prefill
+workspaces for the live-token buckets exposed by FlashInfer before CUDA graph
+capture. This requires a FlashInfer version whose `MoEEpMegaLayer` implements
+`live_token_buckets` and `create_workspace(..., live_tokens=...)`. Older
+versions use the default workspace. Use `--disable-flashinfer-autotune` to
+disable these profiles. Live-token profiles are currently disabled with
+prefill context parallelism and sleep mode.
+
 ## Single Node Deployment
 
 ### Configuration

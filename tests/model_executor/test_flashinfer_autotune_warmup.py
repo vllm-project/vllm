@@ -5,6 +5,7 @@ import json
 import sys
 from collections import defaultdict
 from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from inspect import signature
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -88,6 +89,120 @@ def test_flashinfer_autotune_token_counts_are_bounded_and_deduplicated():
         token_counts = _flashinfer_autotune_token_counts(runner)
 
     assert token_counts == (32,)
+
+
+def test_flashinfer_moe_ep_profiles_select_smallest_fitting_workspace(monkeypatch):
+    from vllm.forward_context import (
+        DPMetadata,
+        ForwardContext,
+        override_forward_context,
+    )
+    from vllm.model_executor.layers.fused_moe.flashinfer_moe_ep_profiles import (
+        FlashInferMoeEpProfiles,
+        flashinfer_moe_ep_profile_token_context,
+    )
+
+    @dataclass(frozen=True)
+    class ProfileInputs:
+        hidden_states: torch.Tensor
+        topk_ids: torch.Tensor
+        topk_weights: torch.Tensor
+        scales: torch.Tensor | None = None
+        output: torch.Tensor | None = None
+
+        @property
+        def num_tokens(self) -> int:
+            return self.hidden_states.shape[0]
+
+    @dataclass(frozen=True)
+    class Bootstrap:
+        world_size: int = 2
+        process_group: object = object()
+
+    @dataclass(frozen=True)
+    class Fleet:
+        num_experts: int = 8
+        token_hidden_size: int = 4
+
+    class RecordingLayer:
+        def __init__(self) -> None:
+            self.warmed_workspaces: list[tuple[int, int]] = []
+            self.selected_workspaces: list[tuple[int, int]] = []
+
+        @staticmethod
+        def live_token_buckets(capacity: int) -> tuple[int, ...]:
+            return {4: (1, 4), 128: (16, 64, 128)}[capacity]
+
+        @staticmethod
+        def create_workspace(capacity: int, *, live_tokens: int) -> tuple[int, int]:
+            return capacity, live_tokens
+
+        def warmup(self, inputs: ProfileInputs, *, workspace: tuple[int, int]) -> None:
+            assert inputs.num_tokens == workspace[1]
+            self.warmed_workspaces.append(workspace)
+
+        def forward(
+            self,
+            inputs: ProfileInputs,
+            *,
+            workspace: tuple[int, int],
+            return_workspace_view: bool,
+        ) -> torch.Tensor:
+            assert not return_workspace_view
+            assert workspace in self.warmed_workspaces
+            self.selected_workspaces.append(workspace)
+            return inputs.hidden_states
+
+    def inputs(num_tokens: int) -> ProfileInputs:
+        return ProfileInputs(
+            hidden_states=torch.zeros(num_tokens, 4),
+            topk_ids=torch.zeros(num_tokens, 2, dtype=torch.int32),
+            topk_weights=torch.full((num_tokens, 2), 0.5),
+        )
+
+    def agree(values, value, *, group):
+        assert group is bootstrap.process_group
+        values[:] = [value] * bootstrap.world_size
+
+    monkeypatch.setattr(torch.distributed, "all_gather_object", agree)
+    layer = RecordingLayer()
+    bootstrap = Bootstrap()
+    profiles = FlashInferMoeEpProfiles(layer, bootstrap, Fleet())
+    try:
+        with flashinfer_moe_ep_profile_token_context(
+            decode_tokens=4,
+            prefill_tokens=128,
+        ):
+            profiles.forward(inputs(1), return_workspace_view=False)
+
+        profiles.forward(inputs(4), return_workspace_view=False)
+        dp_context = ForwardContext(
+            no_compile_layers={},
+            attn_metadata={},
+            slot_mapping={},
+            dp_metadata=DPMetadata(torch.tensor([5, 64])),
+        )
+        with override_forward_context(dp_context):
+            profiles.forward(inputs(5), return_workspace_view=False)
+        for num_tokens in (5, 65):
+            profiles.forward(inputs(num_tokens), return_workspace_view=False)
+
+        assert layer.warmed_workspaces == [
+            (4, 1),
+            (4, 4),
+            (128, 16),
+            (128, 64),
+            (128, 128),
+        ]
+        assert layer.selected_workspaces == [
+            (4, 1),
+            (4, 4),
+            (128, 64),
+            (128, 16),
+            (128, 128),
+        ]
+    finally:
+        profiles.destroy()
 
 
 @pytest.mark.parametrize("skip_attn", [False, True])
