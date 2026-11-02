@@ -8,6 +8,9 @@ Currently the CPU implementation for macOS supports FP32 and FP16 datatypes.
 !!! tip "GPU-Accelerated Inference with vLLM-Metal"
     For GPU-accelerated inference on Apple Silicon using Metal, check out [vllm-metal](https://github.com/vllm-project/vllm-metal), a community-maintained hardware plugin that uses MLX as the compute backend.
 
+!!! note "Apple Silicon (Metal) users"
+    vLLM-Metal loads weights through MLX, which requires `.safetensors` checkpoints. Some models, such as `facebook/opt-125m`, only ship legacy `.bin` weights and fail to load with `FileNotFoundError: No safetensors found in ...`. Use a model that ships safetensors, for example `Qwen/Qwen3-0.6B`, or an MLX-optimized model from [mlx-community](https://huggingface.co/mlx-community) such as `mlx-community/Qwen2.5-0.5B-Instruct-4bit`.
+
 --8<-- [end:installation]
 --8<-- [start:requirements]
 
