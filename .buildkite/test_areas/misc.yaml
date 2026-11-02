@@ -334,7 +334,6 @@ steps:
   source_file_dependencies:
     - vllm/config/
     - vllm/distributed/
-    - "!vllm/distributed/kv_transfer/"
     - vllm/engine/
     - vllm/inputs/
     - vllm/lora/
