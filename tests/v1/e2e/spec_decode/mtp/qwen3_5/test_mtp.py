@@ -132,8 +132,6 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
     connector,
 ):
     """Enabling a connector preserves MTP local-cache hits and model outputs."""
-    aligned_page_size = 544
-    prompt_len = 2 * aligned_page_size + 1
     sampling_params = SamplingParams(
         temperature=0,
         max_tokens=32,
@@ -163,6 +161,11 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
     ) as runner:
         llm = runner.get_llm()
         assert llm.llm_engine.vllm_config.cache_config.prefix_match_unit is None
+        block_size = (
+            llm.llm_engine.vllm_config.cache_config.effective_attention_block_size
+        )
+        assert block_size is not None
+        prompt_len = 2 * block_size + 1
 
         tokenizer = llm.get_tokenizer()
         source = (
@@ -177,8 +180,8 @@ def test_qwen3_5_mtp_prefix_cache_reuses_last_safe_block(
         warm_output = llm.generate([prompt], sampling_params)[0]
 
         assert cold_output.num_cached_tokens == 0
-        max_safe_hit = 2 * aligned_page_size
-        # An unconditional one-page EAGLE drop would report only 544 tokens.
+        max_safe_hit = 2 * block_size
+        # An unconditional EAGLE drop would report only one block.
         assert warm_output.num_cached_tokens == max_safe_hit
 
         cold_completion = cold_output.outputs[0]

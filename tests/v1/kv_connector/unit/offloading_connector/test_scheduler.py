@@ -5657,7 +5657,7 @@ class TestEagle:
         spec = SpeculativeConfig(model="ngram", num_speculative_tokens=num_lookahead)
         spec.method = "mtp"
         spec.draft_model_config = create_vllm_config(
-            hf_overrides={"num_nextn_predict_layers": num_lookahead}
+            hf_overrides={"n_predict": num_lookahead}
         ).model_config
         runner = request_runner(
             block_size=block_size,
