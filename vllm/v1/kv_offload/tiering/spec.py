@@ -329,6 +329,10 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
         return metrics
 
     def __init__(self, config: OffloadingConfig):
+        self.SHARED_REGION_PER_RANK = (
+            not config.extra_config.get("secondary_tiers")
+            and not config.canonical_layout
+        )
         super().__init__(config)
         # Redeclare for mypy: parent sets this but `--follow-imports skip` hides it
         self._manager: OffloadingManager | None = None
@@ -401,6 +405,22 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 raise ValueError(
                     "store_threshold is not supported for TieringOffloadingSpec"
                 )
+
+            if self.SHARED_REGION_PER_RANK:
+                worker_primary_tier = CPUPrimaryTierOffloadingManager(
+                    num_chunks=self.num_chunks,
+                    mmap_region=None,
+                    chunk_size_bytes=self.kv_bytes_per_chunk,
+                    cache_policy=self.eviction_policy,
+                    cache_policy_module_path=self.cache_policy_module_path,
+                    enable_events=self.kv_events_config.enable_kv_cache_events,
+                    info=self.cpu_info,
+                )
+                self._manager = TieringOffloadingManager(
+                    primary_tier=worker_primary_tier,
+                    tier_poll_interval_s=self.tier_poll_interval_s,
+                )
+                return self._manager
 
             scheduler_mmap: SharedOffloadRegion | None = None
             primary_tier: CPUPrimaryTierOffloadingManager | None = None
@@ -540,6 +560,8 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
 
     @override
     def create_worker(self, kv_caches: CanonicalKVCaches) -> CPUOffloadingWorker:
+        if self.SHARED_REGION_PER_RANK:
+            return super().create_worker(kv_caches)
         if self.secondary_tier_configs and self.config.parallel.world_size > 1:
             _reject_workers_across_nodes()
         rank = 0 if self.replicated_layout else self.config.parallel.rank

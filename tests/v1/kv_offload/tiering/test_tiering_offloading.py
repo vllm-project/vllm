@@ -193,6 +193,38 @@ def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
         assert metrics[metric_name].labelnames == ("tier",)
 
 
+def test_worker_only_primary_preserves_store_load_events_and_metrics():
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=5,
+        mmap_region=None,
+        chunk_size_bytes=16,
+        enable_events=True,
+    )
+    manager = TieringOffloadingManager(primary_tier=primary)
+    keys = to_keys([1, 2])
+    manager.on_new_request(_CTX)
+    try:
+        assert manager.lookup(keys[0], _CTX) is LookupResult.MISS
+        store = manager.prepare_store(keys, _CTX)
+        assert store is not None and store.keys_to_store == keys
+        assert manager.lookup(keys[0], _CTX) is LookupResult.HIT_PENDING
+        manager.complete_store(keys, _CTX)
+        assert count_hits(manager, keys) == 2
+        load = manager.prepare_load(keys, _CTX)
+        assert isinstance(load, CPULoadStoreSpec)
+        assert isinstance(store.store_spec, CPULoadStoreSpec)
+        np.testing.assert_array_equal(load.chunk_ids, store.store_spec.chunk_ids)
+        manager.complete_load(keys, _CTX)
+        events = list(manager.take_events())
+        assert len(events) == 1 and events[0].keys == keys
+        assert events[0].medium is Medium.CPU and not events[0].removed
+        assert manager.get_stats() is not None
+        manager.reset_cache()
+        assert manager.lookup(keys[0], _CTX) is LookupResult.MISS
+    finally:
+        manager.shutdown()
+
+
 def test_tiering_manager_aggregates_secondary_stats():
     mock_region = _mock_mmap_region(5)
     primary_tier = CPUPrimaryTierOffloadingManager(

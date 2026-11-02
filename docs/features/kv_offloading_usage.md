@@ -10,7 +10,7 @@ This guide covers configuration of the [`OffloadingConnector`](disagg_prefill.md
 Two specs are available, selected by the `spec_name` key in `kv_connector_extra_config`:
 
 - `CPUOffloadingSpec` (default): single CPU tier. Completed GPU blocks are copied into pinned host memory.
-- `TieringOffloadingSpec`: multi-tier. A CPU primary tier plus one or more secondary tiers.
+- `TieringOffloadingSpec`: a CPU primary tier plus optional secondary tiers.
 
 Only the CPU primary tier has direct GPU access. Secondary tiers cannot read from or write to GPU memory; all GPU↔secondary transfers are staged through the CPU primary tier.
 
@@ -72,6 +72,8 @@ vllm serve <model> \
 ## Multi-Tier Setup
 
 Set `spec_name` to `"TieringOffloadingSpec"` and supply a `secondary_tiers` list. Each entry is a dict with a required `type` key plus tier-specific fields (and an optional `module_path` for out-of-tree tiers). The list is ordered: tier 0 is consulted before tier 1, and so on. See [Secondary Tiers](#secondary-tiers) for tier-specific keys.
+
+When `secondary_tiers` is omitted or empty and `canonical_layout` is false, `TieringOffloadingSpec` uses the same worker buffers as `CPUOffloadingSpec` and avoids a scheduler-side CPU mapping. Secondary tiers and canonical layouts use shared regions.
 
 ```bash
 vllm serve <model> \
