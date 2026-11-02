@@ -79,6 +79,7 @@ steps:
   - tests/models/test_deepseek_v41_replay_start.py
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_logits_local.py
+  - tests/models/test_muse_spark_qkvo_reload.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
   commands:
     - >-
@@ -96,6 +97,7 @@ steps:
       models/test_deepseek_v41_pipeline.py
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_logits_local.py
+      models/test_muse_spark_qkvo_reload.py
       models/test_muse_spark_rocm_shared_rope.py
   mirror:
     amd:
@@ -175,6 +177,7 @@ steps:
   device: b200-k8s
   source_file_dependencies:
   - vllm/models/inkling/
+  - vllm/model_executor/model_loader/reload/
   - vllm/cute_utils/
   - cmake/external_projects/tml_fa4.cmake
   - tests/models/inkling/

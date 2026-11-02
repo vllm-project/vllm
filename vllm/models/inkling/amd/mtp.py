@@ -384,10 +384,7 @@ def _load_inkling_mtp_weights(
             return False
         loader = getattr(param, "weight_loader", default_weight_loader)
         if shard_id is None:
-            if loader is default_weight_loader or param.shape == weight.shape:
-                default_weight_loader(param, weight)
-            else:
-                loader(param, weight)
+            loader(param, weight)
         else:
             loader(param, weight, shard_id)  # type: ignore[call-arg]
         loaded.add(name)

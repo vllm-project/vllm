@@ -8,6 +8,7 @@ import torch
 from torch import nn
 
 from vllm.models.inkling.amd.moe import InklingMoE
+from vllm.models.inkling.common.weights import write_loader
 
 
 def _fake_moe() -> tuple[InklingMoE, SimpleNamespace]:
@@ -24,6 +25,9 @@ def _fake_moe() -> tuple[InklingMoE, SimpleNamespace]:
         w13_weight_scale=nn.Parameter(torch.ones(4, 8, 2, dtype=torch.uint8), False),
         w2_weight_scale=nn.Parameter(torch.ones(4, 5, 3, dtype=torch.uint8), False),
     )
+    for param in vars(routed).values():
+        if isinstance(param, nn.Parameter):
+            param.weight_loader = write_loader  # as InklingMoE.__init__ sets up
     moe.experts = SimpleNamespace(routed_experts=routed)
     moe._local_expert_slots = (  # type: ignore[method-assign]
         lambda: dict(enumerate(range(4)))
