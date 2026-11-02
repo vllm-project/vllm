@@ -19,6 +19,7 @@ Constraints (matching the PR support matrix; final gating lives in the oracle):
 
 """
 
+import contextlib
 import functools
 from abc import abstractmethod
 
@@ -736,6 +737,23 @@ class TrtLlmMxfp4LoRAExperts(_TrtLlmLoRAExpertsBase, TrtLlmMxfp4ExpertsBase):
         return [output] if do_finalize else list(ret)
 
 
+_LORA_DELTA_MAX_TOKENS_PER_EXPERT = 192
+
+
+def _concat_unfinalized_launches(
+    launches: list[list[torch.Tensor]],
+) -> list[torch.Tensor]:
+    gemm2, weights, idx_maps, act = (list(parts) for parts in zip(*launches))
+    offset = 0
+    for i, idx_map in enumerate(idx_maps):
+        rows = max(gemm2[i].size(0), act[i].size(0))
+        gemm2[i] = torch.nn.functional.pad(gemm2[i], (0, 0, 0, rows - gemm2[i].size(0)))
+        act[i] = torch.nn.functional.pad(act[i], (0, 0, 0, rows - act[i].size(0)))
+        idx_maps[i] = torch.where(idx_map >= 0, idx_map + offset, idx_map)
+        offset += rows
+    return [torch.cat(gemm2), torch.cat(weights), torch.cat(idx_maps), torch.cat(act)]
+
+
 class TrtLlmNvFp4LoRAExperts(TrtLlmNvFp4ExpertsBase, _TrtLlmLoRAExpertsBase):
     def __init__(
         self,
@@ -797,24 +815,40 @@ class TrtLlmNvFp4LoRAExperts(TrtLlmNvFp4ExpertsBase, _TrtLlmLoRAExpertsBase):
         output: torch.Tensor,
     ) -> list[torch.Tensor]:
         import flashinfer
+        from flashinfer.autotuner import autotune
 
-        if hidden_states.size(0) > self._get_chunk_size():
-            raise ValueError(
-                f"{hidden_states.size(0)} tokens exceed the TRTLLM NVFP4 MoE "
-                f"launch limit {self._get_chunk_size()}; lower max_num_batched_tokens."
-            )
         topk_ids, topk_weights = topk_ids_and_weights
         do_finalize = gemm1_lora_delta is None
-        ret = flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
-            topk_ids=(topk_ids.to(torch.int32), topk_weights),
-            gemm1_weights=w1,
-            gemm2_weights=w2,
-            num_experts=global_num_experts,
-            do_finalize=do_finalize,
-            output=output if do_finalize else None,
-            gemm1_lora_delta=gemm1_lora_delta,
-            **self._routed_moe_kwargs(
-                hidden_states, a1q_scale, self.moe_config.activation
-            ),
-        )
-        return [output] if do_finalize else list(ret)
+        chunk_size = self._get_chunk_size()
+        tuning: contextlib.AbstractContextManager = contextlib.nullcontext()
+        if not do_finalize:
+            lora_tokens = _LORA_DELTA_MAX_TOKENS_PER_EXPERT * self.local_num_experts
+            chunk_size = min(chunk_size, max(1, lora_tokens // self.topk))
+            tuning = autotune(
+                False, skip_ops={"flashinfer::trtllm_fp4_block_scale_moe"}
+            )
+        launches: list[list[torch.Tensor]] = []
+        with tuning:
+            for start in range(0, max(hidden_states.size(0), 1), chunk_size):
+                rows = slice(start, start + chunk_size)
+                launches.append(
+                    flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
+                        topk_ids=(topk_ids[rows].to(torch.int32), topk_weights[rows]),
+                        gemm1_weights=w1,
+                        gemm2_weights=w2,
+                        num_experts=global_num_experts,
+                        do_finalize=do_finalize,
+                        output=output[rows] if do_finalize else None,
+                        gemm1_lora_delta=(
+                            None if gemm1_lora_delta is None else gemm1_lora_delta[rows]
+                        ),
+                        **self._routed_moe_kwargs(
+                            hidden_states[rows], a1q_scale, self.moe_config.activation
+                        ),
+                    )
+                )
+        if do_finalize:
+            return [output]
+        if len(launches) == 1:
+            return list(launches[0])
+        return _concat_unfinalized_launches(launches)

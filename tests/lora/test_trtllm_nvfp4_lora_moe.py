@@ -393,8 +393,19 @@ def _slots(pattern: str, T: int) -> list[int]:
         (33, 16, "none", None, False),
         (64, 16, "mixed", 1.0, False),
         (64, 16, "mixed", None, True),
+        (800, 16, "mixed", None, False),
+        (400, 16, "mixed", None, True),
     ],
-    ids=["1tok-r8", "mixed-r16", "4-adapters-r64", "no-lora", "clamp", "ep2"],
+    ids=[
+        "1tok-r8",
+        "mixed-r16",
+        "4-adapters-r64",
+        "no-lora",
+        "clamp",
+        "ep2",
+        "above-192-per-expert",
+        "ep2-above-192-per-expert",
+    ],
 )
 @torch.inference_mode()
 def test_apply_with_lora_matches_reference(T, rank, pattern, clamp, ep):
@@ -462,16 +473,40 @@ def test_apply_with_lora_cuda_graph_matches_eager():
     assert torch.equal(captured, eager)
 
 
+@pytest.mark.parametrize(
+    "T", [300, 800], ids=["tile-192-candidate", "tile-192-default"]
+)
 @torch.inference_mode()
-def test_apply_rejects_batches_above_the_launch_limit(monkeypatch):
+def test_apply_with_lora_under_flashinfer_autotune(T):
+    from flashinfer.autotuner import autotune
+
+    set_random_seed(0)
+    experts, kernel_weights, reference = _make_experts()
+    x = torch.randn(T, K, device="cuda").to(torch.bfloat16)
+    ids = torch.stack([torch.randperm(E, device="cuda")[:TOPK] for _ in range(T)])
+    ids = ids.to(torch.int32)
+    weights = torch.rand(T, TOPK, device="cuda", dtype=torch.float32) + 0.1
+    slots = _slots("mixed", T)
+    context = _make_lora(16, slots)
+    with autotune(True):
+        out = _apply(experts, kernel_weights, context, x, ids, weights, None)
+    ref = _lora_reference(reference, context, x, ids, weights, slots, 0, None)
+    assert _rel_err(out, ref) < 0.05
+
+
+@pytest.mark.parametrize("pattern", ["none", "mixed"])
+@torch.inference_mode()
+def test_apply_splits_batches_above_the_launch_limit(pattern, monkeypatch):
     set_random_seed(0)
     T = 8
-    experts, kernel_weights, _ = _make_experts()
-    monkeypatch.setattr(experts, "_get_chunk_size", lambda: T - 1)
-    x, ids, weights = _make_inputs()
-    context = _make_lora(16, _slots("one", T))
-    with pytest.raises(ValueError, match="launch limit"):
-        _apply(experts, kernel_weights, context, x[:T], ids[:T], weights[:T], None)
+    experts, kernel_weights, reference = _make_experts()
+    monkeypatch.setattr(experts, "_get_chunk_size", lambda: 3)
+    x, ids, weights = (t[:T] for t in _make_inputs())
+    slots = _slots(pattern, T)
+    context = _make_lora(16, slots)
+    out = _apply(experts, kernel_weights, context, x, ids, weights, None)
+    ref = _lora_reference(reference, context, x, ids, weights, slots, 0, None)
+    assert _rel_err(out, ref) < 0.05
 
 
 @pytest.mark.parametrize(
