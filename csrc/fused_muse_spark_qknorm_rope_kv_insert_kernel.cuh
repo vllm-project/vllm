@@ -24,6 +24,8 @@
  * ``reshape_and_cache_flash`` and ``scaled_fp8_quant`` use.
  */
 
+#pragma once
+
 #include <algorithm>
 #include <cmath>
 #include <cuda_runtime.h>
@@ -32,6 +34,7 @@
 #include "torch_utils.h"
 
 #include "core/cuda_compat.h"
+#include "fused_muse_spark_qknorm_rope_kv_insert_entry.h"
 #include "type_convert.cuh"
 #include "core/vec_dtypes/dtype_fp8.cuh"
 #include "dispatch_utils.h"
@@ -51,17 +54,6 @@
     #define FINAL_MASK 0xffffffffu
   #endif
 #endif
-
-// This file is include-only: it is instantiated once per head_dim by
-// fused_muse_spark_qknorm_rope_kv_insert_hd<n>.cu, which define this first.
-// Guarding it here keeps a TU that was added back to a source list from
-// compiling a copy that would reject every head_dim at runtime.
-#ifndef FUSED_MUSE_SPARK_LANE
-  #error "define FUSED_MUSE_SPARK_LANE (64/128/256) before including this file"
-#endif
-static_assert(FUSED_MUSE_SPARK_LANE == 64 || FUSED_MUSE_SPARK_LANE == 128 ||
-                  FUSED_MUSE_SPARK_LANE == 256,
-              "FUSED_MUSE_SPARK_LANE must be 64, 128 or 256");
 
 namespace vllm {
 namespace muse_spark_fused_ops {
@@ -427,14 +419,9 @@ __launch_bounds__(256, 6) void fusedMuseSparkQKNormRopeKVInsertKernel(
 #endif
 }
 
-// static: launchFusedMuseSpark's body depends on FUSED_MUSE_SPARK_LANE, so the
-// per-head_dim units must not share one weak definition - otherwise the linker
-// keeps one unit's copy and the other head_dims fail the "not compiled" check
-// in the dispatch below. launchFusedMuseSparkTyped is static for consistency;
-// its instantiations are already unique per unit through HEAD_DIM.
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
           typename rope_t, int HEAD_DIM, int HEADS_PER_GROUP>
-static void launchFusedMuseSparkTyped(
+void launchFusedMuseSparkTyped(
     scalar_t* qkv, rope_t const* cos_sin_cache, int64_t const* positions,
     int64_t const* slot_mapping, cache_t* kv_cache, float const* k_scale,
     float const* v_scale, uint8_t* q_fp8_out, float const* q_scale,
@@ -508,22 +495,26 @@ static void launchFusedMuseSparkTyped(
 #undef LAUNCH_MUSE
 }
 
-template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
-static void launchFusedMuseSpark(
-    scalar_t* qkv, void const* cos_sin_cache, bool const rope_is_fp32,
-    int64_t const* positions, int64_t const* slot_mapping, cache_t* kv_cache,
-    float const* k_scale, float const* v_scale, uint8_t* q_fp8_out,
-    float const* q_scale, float const eps, int const rotary_dim,
-    int const num_tokens, int const nq, int const nkv, int const head_dim,
-    int64_t const qkv_stride, int const block_size, int64_t const kv_s_block,
-    int64_t const kv_s_head, int64_t const kv_s_token, bool const do_rope,
-    bool const insert_kv, cudaStream_t stream) {
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt,
+          int HEAD_DIM>
+void launchFusedMuseSpark(scalar_t* qkv, void const* cos_sin_cache,
+                          bool const rope_is_fp32, int64_t const* positions,
+                          int64_t const* slot_mapping, cache_t* kv_cache,
+                          float const* k_scale, float const* v_scale,
+                          uint8_t* q_fp8_out, float const* q_scale,
+                          float const eps, int const rotary_dim,
+                          int const num_tokens, int const nq, int const nkv,
+                          int64_t const qkv_stride, int const block_size,
+                          int64_t const kv_s_block, int64_t const kv_s_head,
+                          int64_t const kv_s_token, bool const do_rope,
+                          bool const insert_kv, cudaStream_t stream) {
   // The group width must divide the slot count. Widen only while the grid
   // still covers a full wave; decode-sized batches keep the narrow schedule.
   int const slots_per_token = nq + nkv + (insert_kv ? nkv : 0);
   constexpr int kElemsSel = kBytesPerLane / sizeof(scalar_t);
   constexpr int kBlockSel = 256;
-  int const lanes_per_head = head_dim / kElemsSel;
+  constexpr int lanes_per_head = HEAD_DIM / kElemsSel;
+  static_assert(HEAD_DIM % kElemsSel == 0, "head_dim must divide into lanes");
   int64_t const full_wave =
       static_cast<int64_t>(getSMCount()) * (2048 / kBlockSel);
   int heads_per_group = 1;
@@ -541,7 +532,7 @@ static void launchFusedMuseSpark(
 
   // TP4/TP8 amortize head addressing before filling a full CTA wave. RoPE
   // benefits earlier; FP8 conversion keeps wider groups expensive for longer.
-  if (insert_kv && head_dim == 64 &&
+  if (insert_kv && HEAD_DIM == 64 &&
       ((nq == 16 && nkv == 2) || (nq == 32 && nkv == 4))) {
     int64_t const query_heads = static_cast<int64_t>(num_tokens) * nq;
     if (do_rope && query_heads >= 24576) {
@@ -584,31 +575,7 @@ static void launchFusedMuseSpark(
     DISPATCH_HPG(scalar_t, HD);   \
   }
 
-  switch (head_dim) {
-    case 64:
-      if constexpr (FUSED_MUSE_SPARK_LANE == 64) {
-        DISPATCH_ROPE_T(64);
-      } else {
-        STD_TORCH_CHECK(false, "head_dim 64 not compiled");
-      }
-      break;
-    case 128:
-      if constexpr (FUSED_MUSE_SPARK_LANE == 128) {
-        DISPATCH_ROPE_T(128);
-      } else {
-        STD_TORCH_CHECK(false, "head_dim 128 not compiled");
-      }
-      break;
-    case 256:
-      if constexpr (FUSED_MUSE_SPARK_LANE == 256) {
-        DISPATCH_ROPE_T(256);
-      } else {
-        STD_TORCH_CHECK(false, "head_dim 256 not compiled");
-      }
-      break;
-    default:
-      STD_TORCH_CHECK(false, "unsupported head_dim: ", head_dim);
-  }
+  DISPATCH_ROPE_T(HEAD_DIM);
 #undef DISPATCH_ROPE_T
 #undef DISPATCH_HPG
 #undef DISPATCH_ARGS
@@ -619,7 +586,8 @@ static void launchFusedMuseSpark(
 
 // clang-format off
 #define CALL_FUSED_MUSE_SPARK(_RAW_T, CACHE_T, KV_DTYPE)                       \
-  vllm::muse_spark_fused_ops::launchFusedMuseSpark<st, CACHE_T, KV_DTYPE>(     \
+  vllm::muse_spark_fused_ops::launchFusedMuseSpark<st, CACHE_T, KV_DTYPE,      \
+                                                  HEAD_DIM>(                   \
       reinterpret_cast<st*>(qkv.data_ptr()),                                   \
       do_rope ? cos_sin_cache->data_ptr() : nullptr, rope_is_fp32,             \
       reinterpret_cast<int64_t const*>(positions.data_ptr()),                  \
@@ -633,23 +601,14 @@ static void launchFusedMuseSpark(
       q_fp8_out ? reinterpret_cast<uint8_t*>(q_fp8_out->data_ptr()) : nullptr, \
       q_scale ? reinterpret_cast<float const*>(q_scale->data_ptr()) : nullptr, \
       static_cast<float>(eps), static_cast<int>(rotary_dim), num_tokens, nq,   \
-      nkv, hd, qkv_stride, static_cast<int>(block_size), kv_s_block,           \
+      nkv, qkv_stride, static_cast<int>(block_size), kv_s_block,               \
       kv_s_head, kv_s_token, do_rope, insert_kv, stream)
 // clang-format on
 
-void fused_muse_spark_qknorm_rope_kv_insert(
-    torch::stable::Tensor& qkv,              // [N, (nq + 2*nkv + gate)*hd]
-    torch::stable::Tensor const& positions,  // [N] i64
-    int64_t num_heads, int64_t num_kv_heads, int64_t head_dim, double eps,
-    std::optional<torch::stable::Tensor> cos_sin_cache,  // None => NoPE layer
-    int64_t rotary_dim,
-    std::optional<torch::stable::Tensor> slot_mapping,  // [N] i64
-    std::optional<torch::stable::Tensor> kv_cache,      // [nb, nkv, bs, 2*hd]
-    int64_t block_size, const std::string& kv_cache_dtype,
-    std::optional<torch::stable::Tensor> k_scale,  // [1] fp32, fp8 cache only
-    std::optional<torch::stable::Tensor> v_scale,
-    std::optional<torch::stable::Tensor> q_fp8_out,
-    std::optional<torch::stable::Tensor> q_scale) {
+template <int HEAD_DIM>
+void fused_muse_spark_qknorm_rope_kv_insert_typed(VLLM_MUSE_SPARK_ENTRY_SIG) {
+  static_assert(HEAD_DIM == 64 || HEAD_DIM == 128 || HEAD_DIM == 256,
+                "HEAD_DIM must be 64, 128 or 256");
   STD_TORCH_CHECK(qkv.is_cuda() && qkv.dim() == 2 && qkv.stride(1) == 1,
                   "qkv must be a 2-D CUDA tensor with a contiguous row");
   STD_TORCH_CHECK(
@@ -665,6 +624,10 @@ void fused_muse_spark_qknorm_rope_kv_insert(
   int const nq = static_cast<int>(num_heads);
   int const nkv = static_cast<int>(num_kv_heads);
   int const hd = static_cast<int>(head_dim);
+  // The API unit forwards on head_dim, so this instantiation only ever serves
+  // its own.
+  STD_TORCH_CHECK(hd == HEAD_DIM, "head_dim ", hd, " reached the ", HEAD_DIM,
+                  " instantiation");
   int64_t const qkv_stride = qkv.stride(0);
 
   STD_TORCH_CHECK(q_fp8_out.has_value() == q_scale.has_value(),
