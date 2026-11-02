@@ -104,6 +104,19 @@ def test_load_audio_max_duration_rejected(dummy_audio_bytes):
         load_audio(BytesIO(dummy_audio_bytes), sr=None, max_duration_s=0.0001)
 
 
+def test_audio_media_io_rejects_truncated_wav_as_value_error():
+    """A recognised but corrupt file (a WAV cut inside its header) must raise
+    ValueError so the server answers 400. libsndfile reports it with an error
+    code outside the format-detection ones; that used to re-raise as a
+    RuntimeError and surface as HTTP 500."""
+    buf = BytesIO()
+    sf.write(buf, np.zeros(1600, dtype=np.int16), 16000, format="WAV")
+    truncated = buf.getvalue()[:30]
+
+    with pytest.raises(ValueError):
+        AudioMediaIO().load_bytes(truncated)
+
+
 def test_audio_media_io_from_video(video_assets):
     audio_io = AudioMediaIO()
     video_path = video_assets[0].video_path
