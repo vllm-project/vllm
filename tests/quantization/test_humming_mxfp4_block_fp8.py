@@ -242,6 +242,96 @@ def test_moe_path_keeps_fp8_gate_on_sm100(monkeypatch):
 
 
 @pytest.mark.skipif(not has_humming(), reason="humming is not installed")
+@pytest.mark.parametrize(
+    "capability,expect_fp8_key",
+    [(100, None), (120, kMxfp8Dynamic)],
+)
+def test_moe_expert_selection_keeps_fp8_gate_on_sm100(
+    monkeypatch, capability, expect_fp8_key
+):
+    """HummingMoEMethod must resolve the activation key for expert selection
+    with the same SM100 FP8 gate as weight processing: on SM100-SM119 an MXFP8
+    activation request falls back to BF16 (key None), keeping expert selection
+    consistent with the BF16 input schema the weights are prepared for;
+    SM120+ honors FP8."""
+    from unittest.mock import patch
+
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEConfig,
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+    )
+    from vllm.model_executor.layers.quantization import humming as humming_module
+    from vllm.model_executor.layers.quantization.humming import (
+        HummingLayerQuantizationConfig,
+        HummingMoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.humming import (
+        quant_key_to_input_schema,
+    )
+    from vllm.platforms.interface import DeviceCapability
+
+    class _Device:
+        sm_version = capability
+
+    moe_config = FusedMoEConfig(
+        num_experts=8,
+        experts_per_token=2,
+        hidden_dim=128,
+        intermediate_size=256,
+        num_local_experts=8,
+        num_logical_experts=8,
+        activation=MoEActivation.SILU,
+        device="cpu",
+        routing_method=RoutingMethodType.DeepSeekV3,
+        moe_parallel_config=FusedMoEParallelConfig(
+            tp_size=1,
+            pcp_size=1,
+            dp_size=1,
+            ep_size=1,
+            tp_rank=0,
+            pcp_rank=0,
+            dp_rank=0,
+            ep_rank=0,
+            sp_size=1,
+            use_ep=False,
+            all2all_backend="allgather_reducescatter",
+            enable_eplb=False,
+        ),
+        in_dtype=torch.bfloat16,
+    )
+    quant_config = HummingLayerQuantizationConfig(
+        weight_schema=_mxfp6_weight_schema(),
+        input_schema=quant_key_to_input_schema(kMxfp8Dynamic),
+    )
+
+    captured = {}
+    real_select = humming_module.select_humming_moe_experts
+
+    def _spy(config, weight_key, activation_key):
+        captured["activation_key"] = activation_key
+        return real_select(
+            config=config, weight_key=weight_key, activation_key=activation_key
+        )
+
+    monkeypatch.setattr(humming_module, "select_humming_moe_experts", _spy)
+    with (
+        patch(
+            "vllm.model_executor.layers.quantization.utils.humming.schema"
+            ".current_platform"
+        ) as platform_mock,
+        patch("humming.schema.humming.current_device", _Device()),
+    ):
+        platform_mock.get_device_capability.return_value = DeviceCapability(
+            capability // 10, capability % 10
+        )
+        HummingMoEMethod(quant_config, moe_config)
+
+    assert captured["activation_key"] == expect_fp8_key
+
+
+@pytest.mark.skipif(not has_humming(), reason="humming is not installed")
 def test_fp4_activation_still_deprecated_on_sm100(monkeypatch):
     """Only FP8 is ungated: FP4 activations keep falling back on SM100."""
     from vllm.model_executor.layers.quantization.utils.quant_utils import (
