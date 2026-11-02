@@ -73,14 +73,21 @@ def _capturer_with_buffer(
     return c
 
 
-def _bindable_capturer(capture):
+class _BindableCapturer(RoutedExpertsCapturer):
     """A capturer that carries the lifecycle state the binder expects."""
-    capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
-    capturer._bindings = []
-    capturer._closed = False
-    capturer.device_buffer = torch.empty(0, dtype=torch.int32)
-    capturer.capture = capture
-    return capturer
+
+    def __init__(self, capture):
+        self._bindings = []
+        self._closed = False
+        self.device_buffer = torch.empty(0, dtype=torch.int32)
+        self._capture = capture
+
+    def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
+        self._capture(layer_id, topk_ids)
+
+
+def _bindable_capturer(capture):
+    return _BindableCapturer(capture)
 
 
 class DummyRouter(BaseRouter):

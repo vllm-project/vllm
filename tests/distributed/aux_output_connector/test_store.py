@@ -5,6 +5,7 @@ import threading
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import Mock, patch
 
 import numpy as np
@@ -327,6 +328,7 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
     result = output.get_output()
 
     assert result.sampled_token_ids == [[7]]
+    assert result.aux_output_connector_output is not None
     np.testing.assert_array_equal(
         result.aux_output_connector_output["request"].routed_rows, rows.numpy()
     )
@@ -359,15 +361,18 @@ def test_finished_request_teardown_waits_for_pending_output(num_pending):
     worker.begin_step(_metadata(0, [], {"request": []}).metadata)
     assert "request" in worker._requests
 
+    store = worker._store
+    assert store is not None
+    references = cast(Any, store)._references
     for i, pending in enumerate(pending_outputs):
         output = worker.process_output(pending)
         np.testing.assert_array_equal(output["request"].routed_rows, rows)
         if i + 1 < num_pending:
             assert "request" in worker._requests
-            assert worker._store._references
+            assert references
     assert "request" not in worker._requests
     # The finished request's store keys must be released after commit.
-    assert not worker._store._references
+    assert not references
     worker.close()
 
 
@@ -1096,7 +1101,9 @@ def test_worker_does_not_rematerialize_emitted_rows():
     assert output is not None
 
     assert worker._store is not None
-    worker._store.get_concatenated = Mock(wraps=worker._store.get_concatenated)
+    store = worker._store
+    assert store is not None
+    cast(Any, store).get_concatenated = Mock(wraps=store.get_concatenated)
     second = _metadata(
         0,
         # Async scheduling may build this before the scheduler consumes first.
@@ -1107,7 +1114,7 @@ def test_worker_does_not_rematerialize_emitted_rows():
 
     assert output is not None
     np.testing.assert_array_equal(output["request"].routed_rows, logical[4:])
-    worker._store.get_concatenated.assert_not_called()
+    cast(Any, worker._store).get_concatenated.assert_not_called()
     worker.close()
 
 
@@ -2150,7 +2157,7 @@ def test_fixed_store_rejects_payload_size_before_retaining_keys():
     store = BlockObjectStore(max_bytes=16, object_nbytes=8)
     with pytest.raises(ValueError, match="fixed slot size"):
         store.put([BlockObject("bad", b"short")], retain_keys=["bad"])
-    assert not store._references
+    assert not cast(Any, store)._references
     store.close()
 
 
@@ -2212,21 +2219,23 @@ def test_connector_keeps_pending_load_blocks_retained():
 def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
     worker = _make_worker(1)
     store = worker._store
+    assert store is not None
+    references = cast(Any, store)._references
     keys = aux_output_keys(_HASHES[:2], "0")
     step = _metadata(0, [], {})
     step.metadata.retained_block_hashes = PackedBlockHashes(b"".join(_HASHES[:2]), 32)
     _begin_step(worker, step)
-    assert all(store._references[key] == 1 for key in keys)
+    assert all(references[key] == 1 for key in keys)
 
     step = _metadata(0, [], {})
     step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[0], 32)
     _begin_step(worker, step)
-    assert keys[0] not in store._references
+    assert keys[0] not in references
 
     step = _metadata(1, [], {})
     step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
     _begin_step(worker, step)
-    assert not store._references
+    assert not references
 
 
 class _SnapshotIndexer:
@@ -2262,10 +2271,13 @@ def test_two_pending_steps_keep_independent_indexer_snapshots():
         _input_batch(["request"], np.array([2]), np.array([0, 3]))
     )
 
-    assert first.indexer_snapshot is not None and second.indexer_snapshot is not None
-    assert first.indexer_snapshot.data_ptr() != second.indexer_snapshot.data_ptr()
-    assert first.indexer_snapshot[0, 0, 0].item() == 2
-    assert second.indexer_snapshot[0, 0, 0].item() == 3
+    assert first is not None and second is not None
+    first_snapshot = first.indexer_snapshot
+    second_snapshot = second.indexer_snapshot
+    assert first_snapshot is not None and second_snapshot is not None
+    assert first_snapshot.data_ptr() != second_snapshot.data_ptr()
+    assert first_snapshot[0, 0, 0].item() == 2
+    assert second_snapshot[0, 0, 0].item() == 3
     worker.close()
 
 
@@ -2277,10 +2289,12 @@ def test_indexer_only_output_is_a_typed_view_of_the_host_rows():
     output = worker._make_output(0, typed.view(np.uint8).reshape(2, -1))
 
     assert output.routed_rows is None
-    assert output.indexer_rows.dtype == np.int32
-    assert output.indexer_rows.shape == (2, *indexer_shape)
-    assert not output.indexer_rows.flags.owndata
-    np.testing.assert_array_equal(output.indexer_rows, typed)
+    indexer_rows = output.indexer_rows
+    assert indexer_rows is not None
+    assert indexer_rows.dtype == np.int32
+    assert indexer_rows.shape == (2, *indexer_shape)
+    assert not indexer_rows.flags.owndata
+    np.testing.assert_array_equal(indexer_rows, typed)
 
 
 def test_indexer_only_output_copies_read_only_store_rows():
@@ -2292,8 +2306,9 @@ def test_indexer_only_output_copies_read_only_store_rows():
 
     output = worker._make_output(0, packed)
 
-    assert output.indexer_rows.flags.writeable
-    np.testing.assert_array_equal(output.indexer_rows, typed)
+    indexer_rows = output.indexer_rows
+    assert indexer_rows is not None and indexer_rows.flags.writeable
+    np.testing.assert_array_equal(indexer_rows, typed)
 
 
 def test_combined_output_artifacts_are_independent_copies():
@@ -2307,13 +2322,16 @@ def test_combined_output_artifacts_are_independent_copies():
 
     output = worker._make_output(0, packed)
 
-    np.testing.assert_array_equal(output.routed_rows, routed)
-    np.testing.assert_array_equal(output.indexer_rows, indexer)
-    assert not np.shares_memory(output.routed_rows, output.indexer_rows)
-    assert not np.shares_memory(output.routed_rows, packed)
-    assert not np.shares_memory(output.indexer_rows, packed)
-    output.indexer_rows[:] = -1
-    np.testing.assert_array_equal(output.routed_rows, routed)
+    routed_rows = output.routed_rows
+    indexer_rows = output.indexer_rows
+    assert routed_rows is not None and indexer_rows is not None
+    np.testing.assert_array_equal(routed_rows, routed)
+    np.testing.assert_array_equal(indexer_rows, indexer)
+    assert not np.shares_memory(routed_rows, indexer_rows)
+    assert not np.shares_memory(routed_rows, packed)
+    assert not np.shares_memory(indexer_rows, packed)
+    indexer_rows[:] = -1
+    np.testing.assert_array_equal(routed_rows, routed)
 
 
 def test_connector_close_is_idempotent():
