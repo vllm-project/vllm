@@ -58,6 +58,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.models.deepseek_v4.amd.model import (
     DeepseekV4MoE as DeepseekV4MoEBase,
 )
+from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -67,7 +68,13 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-from ..common.engram import Engram, EngramLayout, NgramHashState
+from ..common.engram import (
+    Engram,
+    EngramLayout,
+    NgramHashState,
+    can_share_engram_tables,
+    gather_engram_hashes,
+)
 from ..common.mm_preprocess import IMAGE_SENTINEL_BASE_ID, image_sentinel_mask
 
 if typing.TYPE_CHECKING:
@@ -546,6 +553,14 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             self.embed_tokens = PPMissingLayer()
 
         self.engram_layout = EngramLayout.from_config(config)
+        self.engram_dp_shared_memory = False
+        if self.engram_layout is not None:
+            engram_config = vllm_config.engram_config
+            if engram_config is not None and engram_config.dp_shared_memory:
+                engram_config.dp_shared_memory = can_share_engram_tables(
+                    self.engram_layout
+                )
+                self.engram_dp_shared_memory = engram_config.dp_shared_memory
 
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
@@ -560,7 +575,9 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             prefix=f"{prefix}.layers",
         )
 
-        # Config flag is the switch: ROCm forces swa_cache_layer.bounded_replay off.
+        # Config flag is the switch. On ROCm, attention forces
+        # swa_cache_layer.bounded_replay off only when the CDNA version is
+        # not 4. CDNA4 keeps the window in bounded replay.
         self.decoder_replay_layers: DecoderReplayLayers | None = None
         self.decoder_replay_start = self.end_layer
         cut = max(config.kv_source_layer_ids)
@@ -588,6 +605,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 self.layers[cut].write_kv,
                 metadata_prefixes,
                 self.layers[cut].attn.swa_cache_layer.prefix,
+                lambda: any(i < cut for i in self.aux_hidden_state_layers),
             )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layer %d "
@@ -628,10 +646,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.mhc_post = MHCPostOp()
 
         spec_config = vllm_config.speculative_config
-        needs_mtp_hidden_states = spec_config is not None and (
-            spec_config.use_eagle() or spec_config.uses_draft_model()
-        )
-        if get_pp_group().is_last_rank and needs_mtp_hidden_states:
+        if get_pp_group().is_last_rank and needs_mtp_hidden_buffer(spec_config):
             self._mtp_hidden_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
                 self.hc_dim,
@@ -692,9 +707,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
 
         # Engram n-gram hashes for the whole (flattened) batch, computed once
         # on the full token stream — before any sequence-parallel sharding —
-        # and consumed by the engram layers (1 and 14) below. Skipped on
-        # profile runs (KV cache unbound -> no slot space to key the rolling
-        # compressed-id cache into).
+        # and consumed by the engram layers (1 and 14) below. Profile runs
+        # (KV cache unbound) look up dead rows instead.
         engram_hashes: torch.Tensor | None = None
         engram_mask: torch.Tensor | None = None
         if (
@@ -735,12 +749,22 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     swa_metadata.slot_mapping,
                     swa_metadata.block_table,
                 )
+            else:
+                # DP-sharded lookups are collective, so a replica skipping the
+                # hash still has to reach them; the memory profile also has to
+                # see the Engram activations.
+                engram_hashes, engram_mask = self.engram_hash.dummy_hashes(input_ids)
+            if engram_hashes is not None:
                 # Gather all Engram rows before entering the decoder layers.
+                # One gather feeds every layer sharing the DP-split table.
+                gathered_hashes = gather_engram_hashes(
+                    engram_hashes, dp_shared_memory=self.engram_dp_shared_memory
+                )
                 for layer in islice(self.layers, self.start_layer, self.end_layer):
                     engram = getattr(layer, "engram", None)
                     if engram is not None:
                         engram.prepare_embeddings(
-                            engram_hashes[:, engram.layer_hash_index]
+                            gathered_hashes[:, engram.layer_hash_index]
                         )
 
         full_num_tokens = positions.shape[0]
@@ -1321,6 +1345,18 @@ class DeepseekV41LLMForCausalLM(
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
+        if any(
+            getattr(
+                getattr(layer, "ffn", None),
+                "is_fused_shared_expert_enabled",
+                False,
+            )
+            for layer in self.model.layers
+        ):
+            raise NotImplementedError(
+                "DeepSeek-V4.1 AMD fused shared experts are not supported yet; "
+                "please open an issue."
+            )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
                 config.vocab_size,
@@ -1413,9 +1449,7 @@ class DeepseekV41LLMForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
-        self.process_weights_after_loading()
-        return loaded_params
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
         self.model.finalize_mega_moe_weights()

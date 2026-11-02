@@ -7,9 +7,9 @@ import pytest
 import torch
 
 from vllm.config import DeviceConfig, ModelConfig, VllmConfig
-from vllm.models.qwen4_exp.common.qsa_cache import (
+from vllm.models.qwen4_exp.common.qsa_indexer import (
     QSACompressedKeyCache,
-    QSAStateBackend,
+    QSAIndexerBackend,
     _build_qsa_metadata_torch,
     compressed_qsa_slot_mapping,
 )
@@ -250,7 +250,7 @@ def _packed_qsa_views(dcp_world_size: int):
     attn_groups = [
         [
             AttentionGroup(
-                QSAStateBackend if name == "selector" else _QSAMainBackend,
+                QSAIndexerBackend if name == "selector" else _QSAMainBackend,
                 [name],
                 specs[name],
                 group_id,
@@ -530,7 +530,7 @@ def test_mixed_group_copy_preserves_runner_width(
 def test_qsa_side_cache_builder_keeps_spec_rows_as_decodes(dcp_world_size):
     """The QSA side caches are replicated on every DCP rank, so MTP verify
     rows keep the reorder threshold 1 + num_spec under DCP too."""
-    from vllm.models.qwen4_exp.common.qsa_cache import QSAMetadataBuilder
+    from vllm.models.qwen4_exp.common.qsa_indexer import QSAIndexerMetadataBuilder
 
     config = SimpleNamespace(
         parallel_config=SimpleNamespace(decode_context_parallel_size=dcp_world_size),
@@ -540,7 +540,7 @@ def test_qsa_side_cache_builder_keeps_spec_rows_as_decodes(dcp_world_size):
         use_v2_model_runner=True,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64, max_num_seqs=4),
     )
-    builder = QSAMetadataBuilder(
+    builder = QSAIndexerMetadataBuilder(
         _qsa_selector(dcp_world_size), ["layer.0"], config, torch.device("cpu")
     )
 
