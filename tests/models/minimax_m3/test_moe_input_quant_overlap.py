@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""MiniMax-M3.1 MoE block on TRTLLM-Gen NVFP4 experts: the routed input is
-quantized on the aux stream while the router GEMM runs, and the block's output
-is bitwise the one of the router and the MoE call run one after the other."""
+"""MiniMax-M3.1 MoE block on TRTLLM-Gen NVFP4 experts: when captured into a
+CUDA graph, the routed input is quantized on the aux stream while the router
+GEMM runs; run eagerly, the experts quantize it on the current stream. Either
+way the block's output is bitwise the one of the router and the MoE call run
+one after the other."""
 
+import contextlib
 from types import SimpleNamespace
 
 import pytest
@@ -80,6 +83,22 @@ def _trtllm_moe_block(hidden_size=1024, intermediate_size=512):
     return moe, vllm_config
 
 
+def _count_provides(handoff) -> list[int]:
+    """Count ``handoff.provide`` calls, i.e. MoE calls given an input
+    quantization made on the aux stream."""
+    calls = [0]
+    provide = handoff.provide
+
+    @contextlib.contextmanager
+    def counting_provide(*args, **kwargs):
+        calls[0] += 1
+        with provide(*args, **kwargs):
+            yield
+
+    handoff.provide = counting_provide
+    return calls
+
+
 @pytest.mark.parametrize("num_tokens", [1, 16, 200])
 @torch.inference_mode()
 def test_routed_input_quantized_during_the_router_gemm(dist_init, num_tokens):
@@ -96,12 +115,42 @@ def test_routed_input_quantized_during_the_router_gemm(dist_init, num_tokens):
         assert isinstance(fused_experts, TrtLlmNvFp4ExpertsBase)
         assert fused_experts.expects_unquantized_inputs
         x = torch.randn(num_tokens, 1024, device="cuda", dtype=torch.bfloat16)
+        y = torch.randn(num_tokens, 1024, device="cuda", dtype=torch.bfloat16)
         assert moe._routed_input_handoff(x) is fused_experts.input_handoff
         # Not for an input of another dtype.
         assert moe._routed_input_handoff(x.half()) is None
+        provides = _count_provides(fused_experts.input_handoff)
 
         # Reference: route, then let the experts quantize their input.
-        expected = moe.experts(hidden_states=x, router_logits=moe.gate(x)[0])
-        assert torch.isfinite(expected).all()
+        def reference(h):
+            return moe.experts(hidden_states=h, router_logits=moe.gate(h)[0])
+
+        expected_x, expected_y = reference(x), reference(y)
+        assert torch.isfinite(expected_x).all()
+        assert not torch.equal(expected_x, expected_y)
+
+        # Eager: the experts quantize on the current stream, no aux stream.
         for _ in range(3):
-            assert torch.equal(moe(x), expected)
+            assert torch.equal(moe(x), expected_x)
+        assert provides[0] == 0
+
+        # Captured: the quantization moves to the aux stream, recorded in the
+        # graph, and each replay quantizes the input it is given.
+        static_x = x.clone()
+        capture_stream = torch.cuda.Stream()
+        capture_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(capture_stream):
+            moe(static_x)  # warm up on the capture stream
+        torch.cuda.current_stream().wait_stream(capture_stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=capture_stream):
+            static_out = moe(static_x)
+        assert provides[0] == 1
+        for h, expected in ((x, expected_x), (y, expected_y), (x, expected_x)):
+            static_x.copy_(h)
+            graph.replay()
+            torch.accelerator.synchronize()
+            assert torch.equal(static_out, expected)
+        assert provides[0] == 1
+        assert torch.equal(moe(y), expected_y)
+        assert provides[0] == 1
