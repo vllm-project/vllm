@@ -217,7 +217,7 @@ The above example just uses Inductor to compile for a general shape (i.e. symbol
 
 ```bash
 vllm serve meta-llama/Llama-3.2-1B \
-  --compilation_config '{"compile_sizes": [1, 2, 4, 8]}'
+  --compilation-config '{"compile_sizes": [1, 2, 4, 8]}'
 ```
 
 Then it will also compile a specific kernel just for batch size `1, 2, 4, 8`. At this time, all of the shapes in the computation graph are static and known, and we will turn on auto-tuning to tune for max performance. This can be slow when you run it for the first time, but the next time you run it, we can directly bypass the tuning and run the tuned kernel.

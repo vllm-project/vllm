@@ -94,7 +94,7 @@ LLM(model, enforce_eager=True)
 ```
 
 To turn off just torch.compile, pass `mode = NONE` to the compilation config.
-(`-cc` is short for `--compilation_config`):
+(`-cc` is short for `--compilation-config`):
 
 ```sh
 # Online
