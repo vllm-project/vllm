@@ -1114,11 +1114,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         )
         if segment_tokens is not None:
             per_segment = segment_tokens // block_size
-            if need >= per_segment:
+            # Under EAGLE, a sibling diverging right after a segment boundary
+            # cannot use the boundary's peek block, so its hit lands one block
+            # lower. Widen each periodic tail by one block, mirroring the
+            # shared-prefix junction path (see #64808).
+            tail_need = need + 1 if use_eagle else need
+            if tail_need >= per_segment:
                 # Every block is reachable; cache them all.
                 return None
             for i in range(start_block, end_block):
-                if i >= shift and (i - shift) % per_segment >= per_segment - need:
+                if (
+                    i >= shift
+                    and (i - shift) % per_segment >= per_segment - tail_need
+                ):
                     mask[i - start_block] = True
 
             if final_segment_end_block is not None and not use_eagle:
