@@ -769,8 +769,15 @@ class VllmConfig:
         )
 
     def _verify_dflash2_dtype(self) -> None:
+        spec = self.speculative_config
+        if spec is None or spec.method != "dflash":
+            return
+        draft_config = spec.draft_model_config
         if (
-            VllmConfig._is_dflash2_draft(self)
+            draft_config is not None
+            and {"DFlash2DraftModel", "DFlash2BeamDraftModel"}.intersection(
+                draft_config.architectures or []
+            )
             and self.model_config is not None
             and self.model_config.dtype == torch.float16
         ):
