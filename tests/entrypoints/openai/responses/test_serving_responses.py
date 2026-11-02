@@ -2530,17 +2530,26 @@ async def test_harmony_stream_unstreamed_item_keeps_own_id():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("parallel_tool_calls", "num_calls"), [(False, 1), (None, 3)])
+@pytest.mark.parametrize(
+    ("parallel_tool_calls", "tool_choice", "num_calls"),
+    [
+        (False, "auto", 1),
+        (None, "auto", 3),
+        (None, {"type": "function", "name": "get_weather"}, 1),
+    ],
+)
 async def test_streaming_parallel_tool_calls(
-    monkeypatch, parallel_tool_calls, num_calls
+    monkeypatch, parallel_tool_calls, tool_choice, num_calls
 ):
-    """parallel_tool_calls=False keeps only the first call even when the grammar
-    does not limit the model; None keeps every call."""
+    """parallel_tool_calls=False and a named tool_choice keep only the first
+    call even when the grammar does not limit the model; otherwise every call
+    is kept."""
     monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
     serving = _make_serving_instance(tool_parser="hermes")
     request = ResponsesRequest(
         input="hi",
         tools=[{"type": "function", "name": "get_weather", "parameters": {}}],
+        tool_choice=tool_choice,
         parallel_tool_calls=parallel_tool_calls,
         stream=True,
     )

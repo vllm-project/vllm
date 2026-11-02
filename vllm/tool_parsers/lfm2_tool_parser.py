@@ -3,6 +3,7 @@
 
 import ast
 import json
+import keyword
 from collections.abc import Sequence
 
 import regex as re
@@ -114,23 +115,26 @@ class Lfm2ToolParser(ToolParser):
         return tool_call
 
     @staticmethod
-    def _alias_hyphenated_names(
+    def _alias_unparsable_names(
         tool_text: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str, dict[str, str]]:
-        """Swap hyphenated tool names for parseable placeholders.
+        """Swap tool names Python cannot parse as a call for placeholders.
 
-        OpenAI tool names may contain hyphens, and LFM2 emits them verbatim
-        (``sub-task-ending(status='Completed')``), but Python parses that as
-        a subtraction, not a call. Each requested tool name that is not a
-        dotted identifier is replaced at call positions (after ``[`` or
-        ``,``); ``_unalias`` restores it in the name and arguments, so the
-        round trip is exact.
+        OpenAI tool names may contain hyphens or be keywords, and LFM2 emits
+        them verbatim, but Python parses ``sub-task-ending(status='Completed')``
+        as a subtraction and rejects ``import(path='x')``. Each requested tool
+        name that is not a dotted non-keyword identifier is replaced at call
+        positions (after ``[`` or ``,``); ``_unalias`` restores it in the name
+        and arguments, so the round trip is exact.
         """
         aliases: dict[str, str] = {}
         for tool in getattr(request, "tools", None) or []:
             function = getattr(tool, "function", None)
             name = getattr(function, "name", None) or getattr(tool, "name", None)
-            if not name or all(part.isidentifier() for part in name.split(".")):
+            if not name or all(
+                part.isidentifier() and not keyword.iskeyword(part)
+                for part in name.split(".")
+            ):
                 continue
             # Terminated so that no alias is a prefix of another (_1_, _10_).
             alias = f"_lfm2_tool_alias_{len(aliases)}_"
@@ -146,7 +150,7 @@ class Lfm2ToolParser(ToolParser):
 
     @staticmethod
     def _unalias(tool_call, aliases: dict[str, str]):
-        """Undo ``_alias_hyphenated_names`` on a parsed tool call."""
+        """Undo ``_alias_unparsable_names`` on a parsed tool call."""
         for alias, name in aliases.items():
             if tool_call.function.name == alias:
                 tool_call.function.name = name
@@ -213,7 +217,7 @@ class Lfm2ToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
-        tool_text, aliases = self._alias_hyphenated_names(tool_text.strip(), request)
+        tool_text, aliases = self._alias_unparsable_names(tool_text.strip(), request)
 
         is_tool_call_pattern = False
         try:
@@ -363,7 +367,7 @@ class Lfm2ToolParser(ToolParser):
             tool_text = tool_text.split(TOOL_CALL_END, 1)[0]
         # Leading whitespace after the start token would make every completion
         # candidate an IndentationError (the non-streaming path strips it too).
-        tool_text, aliases = self._alias_hyphenated_names(tool_text.lstrip(), request)
+        tool_text, aliases = self._alias_unparsable_names(tool_text.lstrip(), request)
 
         def _content_only_or_none() -> DeltaMessage | None:
             """Return a content-only delta if any content arrived in this

@@ -107,3 +107,37 @@ async def test_forced_tool_choice_emits_native_tool_call(server, tool_choice):
     assert (
         "Paris" in json.loads(choice.message.tool_calls[0].function.arguments)["city"]
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_named_tool_choice_returns_one_call(server, stream: bool):
+    """The forced block may hold several calls, but a named tool choice calls
+    exactly that tool once."""
+    async with server.get_async_client() as client:
+        response = await client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "What is the weather in Paris, London and Tokyo?",
+                }
+            ],
+            tools=[WEATHER_TOOL],
+            tool_choice={"type": "function", "function": {"name": "get-weather"}},
+            temperature=0,
+            stream=stream,
+        )
+        if stream:
+            indices = {
+                call.index
+                async for chunk in response
+                if chunk.choices
+                for call in chunk.choices[0].delta.tool_calls or []
+            }
+        else:
+            calls = response.choices[0].message.tool_calls
+            assert [call.function.name for call in calls] == ["get-weather"]
+            indices = set(range(len(calls)))
+
+    assert indices == {0}
