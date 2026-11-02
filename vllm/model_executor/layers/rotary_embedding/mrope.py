@@ -344,6 +344,7 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
         else:
             self.mscale = 1.0
 
+        self.original_max_position_embeddings = max_position_embeddings
         # In Qwen2.5-VL, the maximum index value is related to the duration of
         # the input video. We enlarge max_position_embeddings to 4 times to get
         # a larger the cos and sin cache. Models whose positions never exceed
