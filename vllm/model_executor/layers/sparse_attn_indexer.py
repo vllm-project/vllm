@@ -152,9 +152,14 @@ def _merge_dcp_topk_global(
         cp_interleave,
         row_starts,
     )
-    gathered = get_dcp_group().all_gather(packed, dim=1)
+    # Gather along dim 0 and let the selector read the rank-major
+    # [world_size, rows, topk, 2] result: a dim-1 gather would reorder it into
+    # [rows, world_size * topk, 2] with a full extra copy.
+    gathered = get_dcp_group().all_gather(packed, dim=0)
     stable_topk_from_gathered_candidates_cutedsl(
-        gathered, topk_tokens, out=topk_indices
+        gathered.view(dcp_world_size, *packed.shape),
+        topk_tokens,
+        out=topk_indices,
     )
 
 
