@@ -261,13 +261,7 @@ def fill_remote_pod_from_config(
     extra_config: dict,
     is_producer: bool,
 ) -> None:
-    """Copy Wide-EP peer hosts from the serve config when the router omitted them.
-
-    ``remote_hosts`` / ``remote_dp_size_local`` on ``kv_connector_extra_config``
-    name the other role's nodes, master first. Rank ``r`` is on
-    ``remote_hosts[r // remote_dp_size_local]``. Router-supplied values win.
-    On decode, the engine that holds the request sends the notify.
-    """
+    """Use serve-config peer hosts when the router did not send them."""
     hosts = extra_config.get("remote_hosts")
     if isinstance(hosts, str):
         hosts = hosts.split(",")
@@ -278,8 +272,6 @@ def fill_remote_pod_from_config(
         dp_local = int(extra_config.get("remote_dp_size_local") or 0)
     except (TypeError, ValueError):
         return
-    # Our per-pod size only pairs with hosts we supplied: a router host list
-    # combined with our dp_local would map rank 12 onto the master's rank 4.
     if not hosts or dp_local <= 0 or kv_transfer_params.get("remote_hosts"):
         return
     kv_transfer_params["remote_hosts"] = hosts
