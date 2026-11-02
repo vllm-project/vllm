@@ -21,6 +21,8 @@ albucore==0.0.24
     # via albumentations
 albumentations==2.0.8
     # via -r requirements/test/xpu.in
+alembic==1.20.1
+    # via optuna
 annotated-doc==0.0.5
     # via
     #   fastapi
@@ -105,6 +107,8 @@ chardet==6.0.0.post1
     # via mbstrdecoder
 charset-normalizer==3.5.1
     # via requests
+choreographer==1.4.0
+    # via kaleido
 chz==0.4.0
     # via gpt-oss
 click==8.4.2
@@ -123,6 +127,8 @@ cohere-melody==0.13.4
     # via -r requirements/test/xpu.in
 colorama==0.4.6
     # via sacrebleu
+colorlog==6.12.0
+    # via optuna
 compressed-tensors==0.17.0
     # via
     #   -c requirements/common.txt
@@ -131,6 +137,8 @@ contourpy==1.3.3
     # via matplotlib
 coverage==7.15.4
     # via pytest-cov
+cramjam==2.14.0
+    # via fastparquet
 cryptography==50.0.0
     # via
     #   -r requirements/test/xpu.in
@@ -213,6 +221,8 @@ fastar==0.11.0
     #   fastapi-cloud-cli
 fastavro==1.12.2
     # via cohere
+fastparquet==2026.9.0
+    # via genai-perf
 filelock==3.32.3
     # via
     #   -c requirements/common.txt
@@ -226,6 +236,8 @@ fonttools==4.64.0
     # via
     #   -r requirements/test/xpu.in
     #   matplotlib
+formulaic==1.2.2
+    # via statsmodels
 frozenlist==1.8.0
     # via
     #   aiohttp
@@ -234,12 +246,15 @@ fsspec==2026.6.0
     # via
     #   datasets
     #   evaluate
+    #   fastparquet
     #   huggingface-hub
     #   torch
 ftfy==6.3.1
     # via
     #   -r requirements/test/xpu.in
     #   open-clip-torch
+genai-perf==0.0.16
+    # via -r requirements/test/xpu.in
 google-api-core==2.34.0
     # via
     #   google-cloud-core
@@ -388,12 +403,15 @@ intel-sycl-rt==2026.1.0
     #   torch
 interegular==0.3.3
     # via lm-format-enforcer
+interface-meta==2.0.1
+    # via formulaic
 isodate==0.7.2
     # via azure-storage-blob
 jinja2==3.1.6
     # via
     #   -c requirements/xpu.txt
     #   fastapi
+    #   genai-perf
     #   gpt-oss
     #   lm-eval
     #   torch
@@ -430,6 +448,8 @@ jupyter-core==5.9.1
     # via jupyter-client
 kaldi-native-fbank==1.22.3
     # via -r requirements/test/xpu.in
+kaleido==1.5.0
+    # via genai-perf
 kiwisolver==1.5.1
     # via matplotlib
 lark==1.2.2
@@ -454,6 +474,10 @@ lm-format-enforcer==0.11.3
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+logistro==2.0.1
+    # via
+    #   choreographer
+    #   kaleido
 loguru==0.7.3
     # via compressed-tensors
 lxml==6.1.1
@@ -463,7 +487,9 @@ lxml==6.1.1
     #   gpt-oss
     #   sacrebleu
 mako==1.4.3
-    # via -r requirements/test/xpu.in
+    # via
+    #   -r requirements/test/xpu.in
+    #   alembic
 markdown-it-py==4.2.0
     # via rich
 markupsafe==3.0.3
@@ -534,7 +560,10 @@ multiprocess==0.70.19
     #   datasets
     #   evaluate
 narwhals==2.24.0
-    # via scikit-learn
+    # via
+    #   formulaic
+    #   plotly
+    #   scikit-learn
 networkx==3.6.1
     # via torch
 ninja==1.13.0
@@ -560,6 +589,9 @@ numpy==2.2.6
     #   datasets
     #   decord
     #   evaluate
+    #   fastparquet
+    #   formulaic
+    #   genai-perf
     #   gpt-oss
     #   librosa
     #   lm-eval
@@ -568,7 +600,9 @@ numpy==2.2.6
     #   mteb
     #   numba
     #   opencv-python-headless
+    #   optuna
     #   pandas
+    #   patsy
     #   pytrec-eval-terrier
     #   rouge-score
     #   runai-model-streamer
@@ -578,6 +612,7 @@ numpy==2.2.6
     #   sentence-transformers
     #   soundfile
     #   soxr
+    #   statsmodels
     #   tensorizer
     #   torchvision
     #   transformers
@@ -664,11 +699,14 @@ opentelemetry-semantic-conventions-ai==0.5.1
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
+optuna==3.6.1
+    # via genai-perf
 orjson==3.12.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
+    #   genai-perf
 oss-harmony==0.0.11
     # via
     #   -c requirements/common.txt
@@ -683,36 +721,54 @@ packaging==26.3
     #   accelerate
     #   datasets
     #   evaluate
+    #   fastparquet
     #   huggingface-hub
+    #   kaleido
     #   lazy-loader
     #   lm-format-enforcer
     #   matplotlib
     #   modelscope
+    #   optuna
+    #   patsy
+    #   plotly
     #   pooch
     #   pytest
     #   pytest-rerunfailures
+    #   statsmodels
     #   transformers
     #   typepy
 pandas==3.0.5
     # via
     #   datasets
     #   evaluate
+    #   fastparquet
+    #   formulaic
+    #   genai-perf
     #   gpt-oss
+    #   statsmodels
 partial-json-parser==0.2.1.1.post7
     # via -r requirements/test/../common.txt
 pathvalidate==3.3.1
     # via pytablewriter
+patsy==1.0.3
+    # via statsmodels
+perf-analyzer==2.60.0
+    # via genai-perf
 pillow==13.0.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
+    #   genai-perf
     #   matplotlib
     #   mistral-common
     #   torchvision
 platformdirs==4.11.3
     # via
+    #   choreographer
     #   jupyter-core
     #   pooch
+plotly==7.1.0
+    # via genai-perf
 pluggy==1.6.0
     # via
     #   pytest
@@ -764,6 +820,7 @@ pyarrow==25.0.1
     # via
     #   -r requirements/test/xpu.in
     #   datasets
+    #   genai-perf
 pyasn1==0.6.4
     # via
     #   -r requirements/test/xpu.in
@@ -837,6 +894,7 @@ pytablewriter==1.2.1
 pytest==9.1.1
     # via
     #   -r requirements/test/xpu.in
+    #   genai-perf
     #   pytest-asyncio
     #   pytest-cov
     #   pytest-forked
@@ -851,8 +909,8 @@ pytest-cov==7.1.0
     # via -r requirements/test/xpu.in
 pytest-forked==1.7.5
     # via -r requirements/test/xpu.in
-pytest-mock==3.14.0
-    # via -r requirements/test/xpu.in
+pytest-mock==3.17.0
+    # via genai-perf
 pytest-rerunfailures==16.6
     # via -r requirements/test/xpu.in
 pytest-shard==0.1.2
@@ -887,8 +945,11 @@ pyyaml==6.0.3
     #   accelerate
     #   albumentations
     #   datasets
+    #   genai-perf
     #   huggingface-hub
     #   lm-format-enforcer
+    #   optuna
+    #   responses
     #   schemathesis
     #   timm
     #   transformers
@@ -937,11 +998,15 @@ requests==2.34.2
     #   mteb
     #   opentelemetry-exporter-otlp-proto-http
     #   pooch
+    #   responses
     #   schemathesis
     #   starlette-testclient
     #   tiktoken
+responses==0.26.3
+    # via genai-perf
 rich==15.0.0
     # via
+    #   genai-perf
     #   mteb
     #   rich-toolkit
     #   schemathesis
@@ -989,11 +1054,13 @@ scikit-learn==1.9.0
 scipy==1.18.0
     # via
     #   albumentations
+    #   formulaic
     #   librosa
     #   mteb
     #   pytrec-eval-terrier
     #   scikit-learn
     #   sentence-transformers
+    #   statsmodels
 sentence-transformers==5.6.0
     # via
     #   -r requirements/test/xpu.in
@@ -1015,6 +1082,8 @@ setuptools==80.10.2
     #   torch
 shellingham==1.5.4
     # via typer
+simplejson==4.2.0
+    # via choreographer
 simsimd==6.5.16
     # via albucore
 six==1.17.0
@@ -1032,6 +1101,7 @@ sortedcontainers==2.4.0
 soundfile==0.14.0
     # via
     #   -r requirements/test/xpu.in
+    #   genai-perf
     #   librosa
     #   mistral-common
 soxr==1.1.0
@@ -1039,6 +1109,10 @@ soxr==1.1.0
     #   -r requirements/test/xpu.in
     #   librosa
     #   mistral-common
+sqlalchemy==2.1.6
+    # via
+    #   alembic
+    #   optuna
 sqlitedict==2.1.0
     # via lm-eval
 sse-starlette==3.4.8
@@ -1055,6 +1129,8 @@ starlette==1.6.0
     #   starlette-testclient
 starlette-testclient==0.4.1
     # via schemathesis
+statsmodels==0.15.0
+    # via genai-perf
 stringzilla==5.1.2
     # via albucore
 structlog==26.1.0
@@ -1140,6 +1216,7 @@ tqdm==4.70.0
     #   nltk
     #   open-clip-torch
     #   openai
+    #   optuna
     #   pqdm
     #   sentence-transformers
     #   transformers
@@ -1153,6 +1230,7 @@ transformers==5.20.2
     #   -r requirements/test/../common.txt
     #   -r requirements/test/xpu.in
     #   compressed-tensors
+    #   genai-perf
     #   mteb
     #   sentence-transformers
     #   xgrammar
@@ -1186,6 +1264,7 @@ typing-extensions==4.16.0
     #   -r requirements/test/../common.txt
     #   aiohttp
     #   aiosignal
+    #   alembic
     #   anthropic
     #   anyio
     #   apache-tvm-ffi
@@ -1195,6 +1274,7 @@ typing-extensions==4.16.0
     #   chz
     #   cohere
     #   fastapi
+    #   formulaic
     #   grpcio
     #   httpx2
     #   huggingface-hub
@@ -1220,6 +1300,7 @@ typing-extensions==4.16.0
     #   schemathesis
     #   sentence-transformers
     #   soundfile
+    #   sqlalchemy
     #   starlette
     #   torch
     #   typing-inspection
@@ -1242,6 +1323,7 @@ urllib3==2.8.0
     #   docker
     #   modelscope
     #   requests
+    #   responses
     #   sentry-sdk
     #   types-requests
 uvicorn==0.52.3
@@ -1267,6 +1349,8 @@ werkzeug==3.1.9
     #   schemathesis
 word2number==1.1
     # via lm-eval
+wrapt==2.5.2
+    # via formulaic
 xgrammar==0.2.8
     # via
     #   -c requirements/common.txt

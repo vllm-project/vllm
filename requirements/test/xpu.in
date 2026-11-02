@@ -7,9 +7,9 @@ pytest_asyncio
 pytest-timeout
 pytest-cov
 pytest-forked
-pytest-mock
 pytest-rerunfailures
 pytest-shard
+genai_perf>=0.0.8
 
 # --- Core Tools & Bindings ---
 
