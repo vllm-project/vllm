@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
-from collections.abc import Set
+from collections.abc import Callable, Set
 from typing import TypeAlias
 
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.model_executor.layers.pooler import ActivationFn, ClassifierFn, ProjectorFn
 from vllm.pooling_params import PoolingParams
 from vllm.tasks import PoolingTask
@@ -88,6 +89,57 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
     def get_supported_tasks(self) -> Set[PoolingTask]:
         return {"token_embed"}
 
+    def forward_batched(
+        self,
+        hidden_states: torch.Tensor,
+        pooling_params: list[PoolingParams],
+        split: Callable[[torch.Tensor], list[TokenPoolingMethodOutputItem]],
+    ) -> list[TokenPoolerHeadOutputItem] | None:
+        """Batch projection, splitting only when finishing needs per-request options.
+
+        Keep eligibility checks in sync with PoolingParams fields read by forward_chunk.
+        """
+        if envs.VLLM_BATCH_INVARIANT or any(
+            p.late_chunking_params is not None for p in pooling_params
+        ):
+            return None
+        # [total_tokens, hidden_size] -> [total_tokens, embedding_size]
+        embeddings = self._project(hidden_states)
+        first = pooling_params[0]
+        if all(
+            p.dimensions == first.dimensions
+            and p.use_activation == first.use_activation
+            for p in pooling_params
+        ):
+            embeddings = self._finish(embeddings, first)
+            # Each output has shape [request_tokens, output_size].
+            return split(embeddings)
+        # Each part has shape [request_tokens, embedding_size].
+        pooled_data = split(embeddings)
+        del embeddings
+        return [
+            self._finish(part, param) if part is not None else None
+            for part, param in zip(pooled_data, pooling_params, strict=True)
+        ]
+
+    def _project(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Project [num_rows, hidden_size] to [num_rows, embedding_size]."""
+        if self.head_dtype is not None:
+            hidden_states = hidden_states.to(self.head_dtype)
+        if self.projector is not None:
+            return self.projector(hidden_states)
+        return hidden_states
+
+    def _finish(
+        self, embeddings: torch.Tensor, pooling_param: PoolingParams
+    ) -> torch.Tensor:
+        """Slice/normalize [num_rows, embedding_size] to [num_rows, output_size]."""
+        if pooling_param.dimensions is not None:
+            embeddings = embeddings[..., : pooling_param.dimensions]
+        if self.activation is not None and pooling_param.use_activation:
+            embeddings = self.activation(embeddings)
+        return embeddings
+
     def forward_chunk(
         self,
         pooled_data: TokenPoolingMethodOutputItem,
@@ -97,33 +149,16 @@ class TokenEmbeddingPoolerHead(TokenPoolerHead):
         if pooled_data is None:
             return None
 
+        # pooled_data: [num_tokens, hidden_size]
         if (late_chunking := pooling_param.late_chunking_params) is not None:
             means = _mean_pool_chunks(pooled_data, late_chunking.chunk_size)
             pooled_data = (
                 means.to(pooled_data.dtype) if self.head_dtype is None else means
             )
+            # pooled_data: [num_chunks, hidden_size]
 
-        if self.head_dtype is not None:
-            pooled_data = pooled_data.to(self.head_dtype)
-        # pooled_data shape: [n_tokens, hidden_size]
-
-        # Apply ST projector
-        if self.projector is not None:
-            embeddings = self.projector(pooled_data)
-        else:
-            embeddings = pooled_data
-        # embeddings shape: [n_tokens, embedding_size]
-
-        # for matryoshka representation
-        if pooling_param.dimensions is not None:
-            embeddings = embeddings[..., : pooling_param.dimensions]
-
-        # for normalize
-        if self.activation is not None and pooling_param.use_activation:
-            embeddings = self.activation(embeddings)
-
-        # embeddings shape: [n_tokens, embedding_size]
-        return embeddings
+        # Output: [num_rows, output_size], one row per token or late chunk.
+        return self._finish(self._project(pooled_data), pooling_param)
 
 
 class TokenClassifierPoolerHead(TokenPoolerHead):

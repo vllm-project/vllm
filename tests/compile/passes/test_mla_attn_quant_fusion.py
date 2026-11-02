@@ -114,7 +114,7 @@ class MLAAttentionQuantPatternModel(torch.nn.Module):
         self.mla_attn._v_scale = self.mla_attn._v_scale.to(device)
 
         # Initialize W_UK_T and W_UV from kv_b_proj weights
-        self.mla_attn.process_weights_after_loading(torch.get_default_dtype())
+        self.mla_attn.process_weights_after_loading()
         self.kv_b_proj_weight = kv_b_proj.weight.data.clone()
 
         self.block_size = 16
