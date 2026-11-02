@@ -61,7 +61,7 @@ class B12xFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "B12X FP8 kernels require a Blackwell 12x device"
         blockscaled = _import_b12x_blockscaled()
         if blockscaled is None:
-            return False, "Install the B12X backend with `pip install vllm[b12x]`"
+            return False, "The b12x backend requires flashinfer-python>=0.7.2"
         if not blockscaled.is_supported():
             return False, "B12X regular block-FP8 GEMM is not supported"
         return True, None
@@ -211,7 +211,7 @@ class B12xTensorFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
             return False, "b12x tensor FP8 kernels require a Blackwell 12x device"
         tensor_fp8 = _import_b12x_tensor_fp8()
         if tensor_fp8 is None:
-            return False, "Install the B12X backend with `pip install vllm[b12x]`"
+            return False, "The b12x backend requires flashinfer-python>=0.7.2"
         if not tensor_fp8.is_supported():
             return False, "b12x.gemm.tensor_fp8_linear is not supported"
         return True, None

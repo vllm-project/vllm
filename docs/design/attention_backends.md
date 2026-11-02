@@ -187,11 +187,10 @@ Priority is **1 = highest** (tried first).
 
 ### b12x
 
-The optional [b12x](https://pypi.org/project/b12x/) backend supports causal
-decoder attention on NVIDIA SM120 and SM121 GPUs. Install and select it with:
+The b12x backend supports causal decoder attention on NVIDIA SM120 and SM121
+GPUs. b12x ships with FlashInfer (`flashinfer-python>=0.7.2`). Select it with:
 
 ```bash
-uv pip install "vllm[b12x]"
 vllm serve <model> --attention-backend b12x
 ```
 

@@ -243,7 +243,7 @@ class B12xPagedAttentionBackend(AttentionBackend):
             return "b12x currently supports only fp8/fp8_e4m3 quantized KV cache dtypes"
         paged_attention = get_b12x_paged_attention()
         if paged_attention is None:
-            return "Install the b12x backend with `pip install vllm[b12x]`"
+            return "The b12x backend requires flashinfer-python>=0.7.2"
         if not paged_attention.is_supported():
             return "b12x paged attention is not supported on the current device"
         return None
