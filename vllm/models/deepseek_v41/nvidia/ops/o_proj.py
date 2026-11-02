@@ -10,6 +10,7 @@ from torch import nn
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
     FlashInferCutedslMxfp8LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp8.pytorch import TorchMxFp8LinearKernel
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -38,7 +39,8 @@ def _can_fuse_wo_a(layer: nn.Module) -> bool:
         and layer._einsum_recipe == (1, 1, 32)
         and get_input_quant_key(layer.wo_b) == kMxfp8Dynamic
         and isinstance(
-            getattr(method, "kernel", None), FlashInferCutedslMxfp8LinearKernel
+            getattr(method, "kernel", None),
+            (FlashInferCutedslMxfp8LinearKernel, TorchMxFp8LinearKernel),
         )
         # A group's heads form one portable (<= 8 CTA) cluster.
         and layer.n_local_heads // layer.n_local_groups <= 8
