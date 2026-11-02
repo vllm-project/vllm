@@ -1988,6 +1988,27 @@ def test_deepseek_engram_rejects_microbatching(explicit, enable_dbo, ubatch_size
         VllmConfig._resolve_and_verify_engram_config(config)
 
 
+@pytest.mark.parametrize(
+    "backend", ["flashinfer_nvlink_two_sided", "flashinfer_all2allv"]
+)
+def test_dbo_accepts_flashinfer_nvlink_two_sided(backend):
+    config = VllmConfig(
+        parallel_config=ParallelConfig(enable_dbo=True, all2all_backend=backend)
+    )
+    assert config.parallel_config.all2all_backend == backend
+
+
+def test_dbo_rejects_flashinfer_nvlink_one_sided():
+    with pytest.raises(
+        ValueError, match="flashinfer_nvlink_one_sided is not supported"
+    ):
+        VllmConfig(
+            parallel_config=ParallelConfig(
+                enable_dbo=True, all2all_backend="flashinfer_nvlink_one_sided"
+            )
+        )
+
+
 @pytest.mark.parametrize("threshold,expected", [(7, 8), (8, 8), (16, 16)])
 def test_dbo_thresholds_cover_a_request_per_microbatch(threshold, expected):
     # Verifying 3 drafts: 4 tokens per request, so 2 microbatches need 8.

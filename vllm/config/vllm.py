@@ -2238,6 +2238,9 @@ class VllmConfig:
                     "deepep_low_latency",
                     "deepep_high_throughput",
                     "nixl_ep",
+                    # Runs its all2all on the comm stream under DBO.
+                    "flashinfer_nvlink_two_sided",
+                    "flashinfer_all2allv",
                 ]
             assert a2a_backend in supported_backends, (
                 "Microbatching currently only supports the "
