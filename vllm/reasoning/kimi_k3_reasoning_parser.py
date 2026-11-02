@@ -46,13 +46,15 @@ def _match_at(haystack: Sequence[int], i: int, needle: Sequence[int]) -> bool:
     return all(haystack[i + k] == needle[k] for k in range(len(needle)))
 
 
-def _subseq_index(haystack: Sequence[int], needle: Sequence[int]) -> int:
-    """Return start index of the last occurrence of needle in haystack, or -1."""
+def _subseq_index(
+    haystack: Sequence[int], needle: Sequence[int], start: int = 0
+) -> int:
+    """Return the first occurrence of needle at or after start, or -1."""
     n = len(needle)
     if n == 0:
         return -1
     first = needle[0]
-    for i in range(len(haystack) - n, -1, -1):
+    for i in range(start, len(haystack) - n + 1):
         if haystack[i] == first and _match_at(haystack, i, needle):
             return i
     return -1
@@ -62,8 +64,8 @@ def _newest_marker(haystack: Sequence[int], a: Sequence[int], b: Sequence[int]) 
     """Report which of *a* / *b* occurs last in *haystack*.
 
     Returns 0 if *a* is the newest marker, 1 if *b* is, -1 if neither occurs.
-    Equivalent to comparing two ``_subseq_index`` results, but a single backward
-    pass that stops at the first hit instead of walking to index 0 twice.
+    A single backward pass stops at the newest marker instead of scanning
+    the whole sequence separately for each marker.
     """
     if not a or not b:
         return -1
@@ -137,6 +139,8 @@ class KimiK3ReasoningParser(ReasoningParser):
         self._response_open_ids = tokenizer.encode(
             self._response_open, add_special_tokens=False
         )
+        self._streaming_reasoning_bounds: tuple[int, int] | None = None
+        self._streaming_boundary_text: str | None = None
         self._last_streaming_delta_token_ids: tuple[int, ...] | None = None
         self._last_streaming_content_token_ids: list[int] | None = None
 
@@ -174,7 +178,11 @@ class KimiK3ReasoningParser(ReasoningParser):
         )
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Iterable[int]
+        self,
+        input_ids: Sequence[int],
+        delta_ids: Iterable[int],
+        *,
+        prompt_len: int = 0,
     ) -> bool:
         """Reasoning-end check for a single decode step.
 
@@ -192,18 +200,40 @@ class KimiK3ReasoningParser(ReasoningParser):
         delta = list(delta_ids)
         if not delta:
             return False
-        carry = max(len(self._think_close_ids), len(self._think_open_ids)) - 1
+        carry = (
+            max(
+                len(self._think_close_ids),
+                len(self._think_open_ids),
+                len(self._response_open_ids),
+            )
+            - 1
+        )
         head = len(input_ids) - len(delta)
-        window = list(input_ids[max(0, head - carry) : head]) + delta
+        window_start = max(0, head - carry)
+        window = list(input_ids[window_start:head]) + delta
+        response_start = self.first_response_start(
+            window, max(0, prompt_len - window_start)
+        )
+        if (
+            response_start != -1
+            and window_start + response_start + len(self._response_open_ids) > head
+        ):
+            return True
         return _newest_marker(window, self._think_close_ids, self._think_open_ids) == 0
 
     def _extract_content_ids(self, input_ids: list[int]) -> list[int]:
         if not self._thinking_enabled:
             return input_ids
-        idx = _subseq_index(input_ids, self._think_close_ids)
-        if idx == -1:
-            return []  # still reasoning
-        return input_ids[idx + len(self._think_close_ids) :]
+        bounds = self._reasoning_bounds(input_ids)
+        return input_ids[bounds[1] :] if bounds is not None else []
+
+    def is_streaming_transition_ready(self, token_ids: list[int]) -> bool:
+        """The frontend may hand off only after the delimiter text is visible."""
+        if not self._thinking_enabled:
+            return True
+        return self._last_streaming_content_token_ids is not None and (
+            self.is_reasoning_end_streaming(token_ids, token_ids)
+        )
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         cached_delta_ids = self._last_streaming_delta_token_ids
@@ -217,34 +247,26 @@ class KimiK3ReasoningParser(ReasoningParser):
     def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
         if not self._thinking_enabled:
             return 0
+        response_start = self.first_response_start(token_ids)
+        if response_start != -1:
+            token_ids = token_ids[:response_start]
         think_open = self._think_open_ids
         think_close = self._think_close_ids
-        response_open = self._response_open_ids
-        first_ids = {m[0] for m in (think_open, think_close, response_open) if m}
+        first_ids = {m[0] for m in (think_open, think_close) if m}
         n = len(token_ids)
         count = 0
         in_reasoning = True
-        seen_open = False
         i = 0
         while i < n:
             head = token_ids[i]
             if head in first_ids:
                 if i + len(think_open) <= n and _match_at(token_ids, i, think_open):
                     in_reasoning = True
-                    seen_open = True
                     i += len(think_open)
                     continue
                 if i + len(think_close) <= n and _match_at(token_ids, i, think_close):
                     in_reasoning = False
                     i += len(think_close)
-                    continue
-                if (
-                    not seen_open
-                    and i + len(response_open) <= n
-                    and _match_at(token_ids, i, response_open)
-                ):
-                    in_reasoning = False
-                    i += len(response_open)
                     continue
             if in_reasoning:
                 count += 1
@@ -291,24 +313,69 @@ class KimiK3ReasoningParser(ReasoningParser):
             return text or None
         return self._strip_content_wrapper(text) or None
 
-    def extract_reasoning(
-        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
-    ) -> tuple[str | None, str | None]:
-        """Split full text into ``(reasoning, rest)`` for the non-streaming path.
+    def first_response_start(self, token_ids: Sequence[int], start: int = 0) -> int:
+        """Find the first genuine response opener at or after the output boundary."""
+        return _subseq_index(token_ids, self._response_open_ids, start)
 
-        Handles four shapes:
-          * response opener without think markers -> no think channel; all content
-          * open marker present       -> reasoning starts after ``<|open|>think<|sep|>``
-          * open marker absent but a   close marker exists (gen-prefix consumed
-            the open) -> reasoning starts at offset 0
-          * neither marker present     -> truncated reasoning after a consumed
-            generation prefix
-        ``rest`` is whatever follows the close marker, fed on to the tool parser.
+    def _reasoning_bounds(self, token_ids: Sequence[int]) -> tuple[int, int] | None:
+        response_start = self.first_response_start(token_ids)
+        prefix = token_ids[:response_start] if response_start != -1 else token_ids
+        close = _subseq_index(prefix, self._think_close_ids)
+        if close != -1:
+            return close, close + len(self._think_close_ids)
+        if response_start != -1:
+            return response_start, response_start
+        return None
+
+    def _split_reasoning(
+        self,
+        text: str,
+        token_ids: Sequence[int],
+        reasoning_end: int,
+        content_start: int,
+    ) -> tuple[str | None, str] | None:
+        """Locate boundaries with IDs, retaining the engine's truncated text."""
+        reasoning_start = 0
+        if len(token_ids) >= len(self._think_open_ids) and _match_at(
+            token_ids, 0, self._think_open_ids
+        ):
+            reasoning_start = len(self._think_open_ids)
+        offsets = []
+        for token_offset in (reasoning_start, reasoning_end, content_start):
+            prefix = self.model_tokenizer.decode(
+                token_ids[:token_offset], skip_special_tokens=False
+            )
+            visible = min(len(prefix), len(text))
+            if text[:visible] != prefix[:visible]:
+                return None
+            offsets.append(visible)
+        start, end, content = offsets
+        return text[start:end] or None, text[content:]
+
+    def extract_reasoning(
+        self,
+        model_output: str,
+        request: "ChatCompletionRequest | ResponsesRequest",
+        model_output_token_ids: Sequence[int] = (),
+    ) -> tuple[str | None, str | None]:
+        """Split at a genuine channel boundary, retaining the engine's text.
+
+        Without token IDs, preserve the existing text-based extraction.
         """
         if not self._thinking_enabled:
             return None, self._content_after_reasoning(model_output, request)
+        if model_output_token_ids:
+            bounds = self._reasoning_bounds(model_output_token_ids)
+            if bounds is None:
+                bounds = (len(model_output_token_ids), len(model_output_token_ids))
+            parsed = self._split_reasoning(
+                model_output, model_output_token_ids, *bounds
+            )
+            if parsed is not None:
+                reasoning, content = parsed
+                return reasoning, self._content_after_reasoning(content, request)
 
-        m_open = self._think_open_re.search(model_output)
+        m_open = self._think_open_re.match(model_output)
         # reasoning content begins right after think-open (or at start if the
         # open marker was already consumed as a generation prefix)
         content_start = m_open.end() if m_open is not None else 0
@@ -317,6 +384,7 @@ class KimiK3ReasoningParser(ReasoningParser):
         if (
             m_open is None
             and m_close is None
+            and not model_output_token_ids
             and self._response_open_re.search(model_output) is not None
         ):
             return None, self._content_after_reasoning(model_output, request)
@@ -327,7 +395,9 @@ class KimiK3ReasoningParser(ReasoningParser):
         # think not closed -> still reasoning, no content yet
         return (model_output[content_start:] or None, None)
 
-    def _reasoning_text_ready_to_emit(self, text: str) -> str:
+    def _reasoning_text_ready_to_emit(
+        self, text: str, token_ids: Sequence[int] = ()
+    ) -> str:
         """Return the reasoning prefix that is safe to stream now.
 
         Work from accumulated text, not from the current delta alone. That turns
@@ -347,11 +417,21 @@ class KimiK3ReasoningParser(ReasoningParser):
           ``think<|sep|>`` arrives, the close branch hands the following response
           or tools text to the downstream parser.
         """
-        m_open = self._think_open_re.search(text)
-        if m_open is not None:
+        m_open = self._think_open_re.match(text)
+        if m_open is not None and (
+            not token_ids
+            or len(token_ids) >= len(self._think_open_ids)
+            and _match_at(token_ids, 0, self._think_open_ids)
+        ):
             text = text[m_open.end() :]
         overlap = 0
-        for marker in (self._think_open, self._think_close):
+        markers = [self._think_open, self._think_close]
+        if any(
+            list(token_ids[-n:]) == self._response_open_ids[:n]
+            for n in range(1, min(len(self._response_open_ids), len(token_ids) + 1))
+        ):
+            markers.append(self._response_open)
+        for marker in markers:
             max_check = min(len(marker) - 1, len(text))
             for n in range(max_check, 0, -1):
                 if text.endswith(marker[:n]):
@@ -426,22 +506,68 @@ class KimiK3ReasoningParser(ReasoningParser):
         if not self._thinking_enabled:
             return DeltaMessage(content=delta_text)
 
+        bounds = self._streaming_reasoning_bounds
+        first_boundary = bounds is None
+        if first_boundary:
+            carry = max(len(self._think_close_ids), len(self._response_open_ids)) - 1
+            window_start = max(0, len(current_token_ids) - len(delta_token_ids) - carry)
+            local = self._reasoning_bounds(current_token_ids[window_start:])
+            if local is not None:
+                bounds = (window_start + local[0], window_start + local[1])
+                self._streaming_reasoning_bounds = bounds
+                transition_end = bounds[1]
+                if bounds[0] == bounds[1]:
+                    transition_end += len(self._response_open_ids)
+                self._streaming_boundary_text = self.model_tokenizer.decode(
+                    current_token_ids[:transition_end], skip_special_tokens=False
+                )
+        if bounds is not None:
+            boundary_text = self._streaming_boundary_text
+            assert boundary_text is not None
+            if previous_text.startswith(boundary_text):
+                return DeltaMessage(content=delta_text)
+            parsed = self._split_reasoning(current_text, current_token_ids, *bounds)
+            previous = self._split_reasoning(previous_text, current_token_ids, *bounds)
+            if parsed is not None and previous is not None:
+                reasoning, content = parsed
+                already_sent = (
+                    self._reasoning_text_ready_to_emit(
+                        previous_text, previous_token_ids
+                    )
+                    if first_boundary
+                    else previous[0] or ""
+                )
+                reasoning_delta = (reasoning or "")[len(already_sent) :]
+                # Stop-string buffering can expose IDs before their visible text.
+                if current_text.startswith(boundary_text):
+                    self._last_streaming_delta_token_ids = tuple(delta_token_ids)
+                    self._last_streaming_content_token_ids = list(
+                        current_token_ids[bounds[1] :]
+                    )
+                else:
+                    content = ""
+                return DeltaMessage(
+                    reasoning=reasoning_delta or None, content=content or None
+                )
+
         # reasoning already ended -> downstream content
-        if self._think_close_re.search(previous_text):
+        if not current_token_ids and self._think_close_re.search(previous_text):
             return DeltaMessage(content=delta_text)
 
         # the close marker completes within this delta's accumulated text:
         # split the buffer at the close marker into reasoning vs trailing content.
-        m_close = self._think_close_re.search(current_text)
+        m_close = (
+            self._think_close_re.search(current_text) if not current_token_ids else None
+        )
         if m_close is not None:
             self._last_streaming_delta_token_ids = tuple(delta_token_ids)
-            self._last_streaming_content_token_ids = self._extract_content_ids(
-                list(current_token_ids)
-            )
-            m_open = self._think_open_re.search(current_text)
+            self._last_streaming_content_token_ids = []
+            m_open = self._think_open_re.match(current_text)
             r_start = m_open.end() if m_open is not None else 0
             reasoning = current_text[r_start : m_close.start()]
-            already_sent = self._reasoning_text_ready_to_emit(previous_text)
+            already_sent = self._reasoning_text_ready_to_emit(
+                previous_text, previous_token_ids
+            )
             if reasoning.startswith(already_sent):
                 reasoning_delta = reasoning[len(already_sent) :]
             else:
@@ -452,8 +578,12 @@ class KimiK3ReasoningParser(ReasoningParser):
                 content=content or None,
             )
 
-        current_reasoning = self._reasoning_text_ready_to_emit(current_text)
-        previous_reasoning = self._reasoning_text_ready_to_emit(previous_text)
+        current_reasoning = self._reasoning_text_ready_to_emit(
+            current_text, current_token_ids
+        )
+        previous_reasoning = self._reasoning_text_ready_to_emit(
+            previous_text, previous_token_ids
+        )
         if current_reasoning.startswith(previous_reasoning):
             reasoning_delta = current_reasoning[len(previous_reasoning) :]
         else:
