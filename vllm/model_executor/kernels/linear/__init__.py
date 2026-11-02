@@ -836,6 +836,9 @@ def fp8_scaled_mm_is_batch_invariant(
     kernel: FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel,
 ) -> bool:
     """Whether a row's output from the kernel is independent of the other rows."""
+    # Weight-only here, and Humming honors VLLM_BATCH_INVARIANT itself.
+    if isinstance(kernel, HummingFP8ScaledMMLinearKernel):
+        return True
     if not isinstance(
         kernel, (CutlassFP8ScaledMMLinearKernel, TritonFP8ScaledMMLinearKernel)
     ):
@@ -1199,41 +1202,34 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         HummingNvFp4LinearKernel,
     )
 
-    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
-    # batch-invariant CUTLASS implementation when available, otherwise fall
-    # back to emulation. It overrides --linear-backend.
+    # VLLM_BATCH_INVARIANT forces deterministic execution: Humming for W4A16,
+    # otherwise CUTLASS, or emulation where CUTLASS is unsupported. It
+    # overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
     quantization = "nvfp4_w4a16" if use_a16 else "nvfp4_w4a4"
     linear_backend = _get_linear_backend(quantization=quantization)
     if envs.VLLM_BATCH_INVARIANT:
-        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
-        if bi_supported:
-            if linear_backend not in ("auto", "cutlass"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the CUTLASS backend for deterministic execution.",
-                    linear_backend,
-                )
+        if use_a16:
+            force_kernel, bi_backend = HummingNvFp4LinearKernel, "humming"
+        else:
+            cutlass_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+            if cutlass_supported:
+                force_kernel, bi_backend = CutlassNvFp4LinearKernel, "cutlass"
             else:
                 logger.info_once(
-                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
-                    "CUTLASS backend for deterministic execution."
+                    "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                    "kernel is not supported on this platform; falling back to "
+                    "emulation for deterministic execution. Reason: %s",
+                    reason,
                 )
-            force_kernel = CutlassNvFp4LinearKernel
-        else:
-            if linear_backend not in ("auto", "emulation"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the emulation backend for deterministic execution.",
-                    linear_backend,
-                )
-            logger.info_once(
-                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
-                "kernel is not supported on this platform; falling back to "
-                "emulation for deterministic execution. Reason: %s",
-                reason,
+                force_kernel, bi_backend = EmulationNvFp4LinearKernel, "emulation"
+        if linear_backend not in ("auto", bi_backend):
+            logger.warning_once(
+                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using the "
+                "%s backend for deterministic execution.",
+                linear_backend,
+                bi_backend,
             )
-            force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto" and use_a16:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
@@ -1319,8 +1315,8 @@ def register_linear_kernel(
     Args:
         kernel_class (type): The kernel class to register.
         platform (PlatformEnum): The platform for which this kernel is applicable.
-        kernel_type (str): The type of the kernel, either "mp", "int8", or "fp8".
-            Defaults to "mp".
+        kernel_type (str): The type of the kernel, either "mp", "int8", "fp8",
+            "fp8_block", "mxfp8", "nvfp4", "mxfp4" or "mxfp6". Defaults to "mp".
 
     Raises:
         ValueError: If the kernel_type is not recognized.
@@ -1338,6 +1334,10 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_FP8_KERNELS:
             _POSSIBLE_FP8_KERNELS[platform] = []
         _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "fp8_block":
+        if platform not in _POSSIBLE_FP8_BLOCK_KERNELS:
+            _POSSIBLE_FP8_BLOCK_KERNELS[platform] = []
+        _POSSIBLE_FP8_BLOCK_KERNELS[platform].append(kernel_class)
     elif kernel_type == "mxfp8":
         if platform not in _POSSIBLE_MXFP8_KERNELS:
             _POSSIBLE_MXFP8_KERNELS[platform] = []

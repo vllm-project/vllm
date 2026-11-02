@@ -36,8 +36,9 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.client import (
     _ABORT_ACK_TIMEOUT_S,
-    _LOAD_TIMEOUT_S,
     _LOOKUP_TIMEOUT_S,
+    _P2P_LOAD_TIMEOUT_S,
+    _PD_LOAD_TIMEOUT_S,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     TYPE_KEY,
@@ -323,6 +324,11 @@ class FakeParent:
 
     def on_request_finished(self, ctx: ReqContext) -> None:
         self.calls.append(("on_request_finished", ctx.req_id))
+
+
+def _released(result: LoadResult) -> bool:
+    assert result.deferred_release is not None
+    return result.deferred_release.is_set()
 
 
 def _make_session(
@@ -683,12 +689,17 @@ class TestClientFlows:
         assert aborts[0][AbortFetchMsg.ROUND_SEQ] == 0
 
     def test_finish_abort_ack_emits_one_failure(self):
+        """finish() fails the load at once; the AbortAck only releases it."""
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
             job_id=8, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         session.finish_request("req-1")
+        (failure,) = session.poll().loads
+        assert (failure.job_id, failure.success) == (8, False)
+        assert not _released(failure)
+        assert session._client.has_active_loads is True
 
         conn.enqueue(
             {
@@ -697,28 +708,30 @@ class TestClientFlows:
                 AbortAckMsg.KV_REQUEST_ID: "req-1",
             }
         )
-        loads = session.poll().loads
-        assert loads == [LoadResult(job_id=8, kv_request_id="req-1", success=False)]
+        assert session.poll().loads == []
+        assert _released(failure)
         assert session._client.has_active_loads is False
         assert "req-1" not in session._client._requests
-        assert session.poll().loads == []
 
     def test_finish_abort_timeout_emits_one_failure(self):
+        """A missed AbortAck after finish() emits no second result: it ends
+        the session, and close() releases the held blocks."""
         session, conn, _ = _make_session()
         _activate(session, conn)
         session.request_blocks(
             job_id=9, kv_request_id="req-1", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         session.finish_request("req-1")
+        (failure,) = session.poll().loads
         _client_load(session, "req-1").aborted_at = (
             time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
         )
 
-        loads = session.poll().loads
-        assert loads == [LoadResult(job_id=9, kv_request_id="req-1", success=False)]
-        assert session._client.has_active_loads is False
-        assert "req-1" not in session._client._requests
         assert session.poll().loads == []
+        assert not session.alive
+        assert not _released(failure)
+        assert session.close().failed_jobs == []
+        assert _released(failure)
 
     def test_late_transfer_done_after_abort_ack_is_ignored(self):
         session, conn, _ = _make_session()
@@ -735,9 +748,9 @@ class TestClientFlows:
                 AbortAckMsg.KV_REQUEST_ID: "req-1",
             }
         )
-        assert session.poll().loads == [
-            LoadResult(job_id=10, kv_request_id="req-1", success=False)
-        ]
+        (failure,) = session.poll().loads
+        assert (failure.job_id, failure.success) == (10, False)
+        assert _released(failure)
 
         conn.enqueue(
             {
@@ -795,11 +808,36 @@ class TestClientFlows:
         abort = conn._sent[-1]
         assert abort[TYPE_KEY] == AbortFetchMsg.TYPE
 
+    def test_load_timeout_depends_on_mode(self):
+        """A symmetric-P2P fetch (probed first) aborts after the short P2P
+        load timeout; a PD fetch (no probe) still gets the full PD one."""
+        assert _P2P_LOAD_TIMEOUT_S < _PD_LOAD_TIMEOUT_S
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+
+        session.register_lookup("req-p2p", b"k")
+        session._client.on_lookup_resp("req-p2p", [b"k"], [True])
+        session.request_blocks(
+            job_id=1, kv_request_id="req-p2p", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        session.request_blocks(
+            job_id=2, kv_request_id="req-pd", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        assert _client_load(session, "req-p2p").timeout_s == _P2P_LOAD_TIMEOUT_S
+        assert _client_load(session, "req-pd").timeout_s == _PD_LOAD_TIMEOUT_S
+
+        # Past the P2P timeout but short of the PD one: only P2P aborts.
+        backdated = time.monotonic() - _P2P_LOAD_TIMEOUT_S - 1.0
+        _client_load(session, "req-p2p").submitted_at = backdated
+        _client_load(session, "req-pd").submitted_at = backdated
+        session.poll()
+        assert _client_load(session, "req-p2p").aborted_at is not None
+        assert _client_load(session, "req-pd").aborted_at is None
+
     def test_load_abort_ack_timeout_surfaces_failure(self):
-        """After load timeout sends AbortFetch, if no AbortAck arrives within
-        _ABORT_ACK_TIMEOUT_S the request is surfaced as failed and removed
-        from _requests — the engine cannot wait forever on a peer that won't
-        ack.
+        """A load timeout fails the load at once, with its blocks held: the
+        peer may still be writing them. If no AbortAck arrives within
+        _ABORT_ACK_TIMEOUT_S, no second result is emitted; close() releases.
         """
         session, conn, _ = _make_session()
         _activate(session, conn)
@@ -808,10 +846,11 @@ class TestClientFlows:
         )
         # 1) Trip the load timeout to send AbortFetch and stamp aborted_at.
         _client_load(session, "req-7").submitted_at = (
-            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+            time.monotonic() - _PD_LOAD_TIMEOUT_S - 1.0
         )
-        loads = session.poll().loads
-        assert loads == []
+        (failure,) = session.poll().loads
+        assert (failure.job_id, failure.success) == (7, False)
+        assert not _released(failure)
         assert any(
             m.get(TYPE_KEY) == AbortFetchMsg.TYPE
             and m[AbortFetchMsg.KV_REQUEST_ID] == "req-7"
@@ -824,9 +863,46 @@ class TestClientFlows:
         _client_load(session, "req-7").aborted_at = (
             time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
         )
-        loads = session.poll().loads
-        assert loads == [LoadResult(job_id=7, kv_request_id="req-7", success=False)]
-        assert "req-7" not in session._client._requests
+        assert session.poll().loads == []
+        assert not _released(failure)
+        session.close()
+        assert _released(failure)
+
+    def test_load_abort_ack_timeout_disconnects_peer(self):
+        """A missed AbortAck faults the peer, so later fetches skip it.
+
+        The peer has stopped confirming that its WRITEs ended; keeping the
+        session would make every later load wait out both timeouts again.
+        Loads still in flight on the session fail through close().
+        """
+        session, conn, _ = _make_session()
+        _activate(session, conn)
+        session.request_blocks(
+            job_id=7, kv_request_id="req-7", keys=[OffloadKey(b"k")], block_ids=[0]
+        )
+        session.request_blocks(
+            job_id=8, kv_request_id="req-8", keys=[OffloadKey(b"j")], block_ids=[1]
+        )
+        _client_load(session, "req-7").submitted_at = (
+            time.monotonic() - _PD_LOAD_TIMEOUT_S - 1.0
+        )
+        (failure,) = session.poll().loads
+        assert (failure.job_id, failure.success) == (7, False)
+        assert session.alive
+
+        _client_load(session, "req-7").aborted_at = (
+            time.monotonic() - _ABORT_ACK_TIMEOUT_S - 1.0
+        )
+        assert session.poll().loads == []
+        assert not session.alive
+        assert session.death_reason == "abort ack timed out"
+        assert session.data_plane_fault == "abort ack timed out"
+        assert conn._sent[-1][TYPE_KEY] == DisconnectMsg.TYPE
+
+        result = session.close()
+        assert result.failed_jobs == [8]
+        assert sorted(result.failed_req_ids) == ["req-7", "req-8"]
+        assert _released(failure)
 
     def test_load_abort_ack_clears_request(self):
         """After load timeout sends AbortFetch, an arriving AbortAckMsg from
@@ -838,10 +914,11 @@ class TestClientFlows:
             job_id=8, kv_request_id="req-8", keys=[OffloadKey(b"k")], block_ids=[0]
         )
         _client_load(session, "req-8").submitted_at = (
-            time.monotonic() - _LOAD_TIMEOUT_S - 1.0
+            time.monotonic() - _PD_LOAD_TIMEOUT_S - 1.0
         )
-        # First poll: AbortFetch goes out.
-        session.poll()
+        # First poll: AbortFetch goes out and the load is failed at once.
+        (failure,) = session.poll().loads
+        assert (failure.job_id, failure.success) == (8, False)
         assert _client_load(session, "req-8").aborted_at is not None
 
         # Peer acks the abort.
@@ -852,9 +929,11 @@ class TestClientFlows:
                 AbortAckMsg.KV_REQUEST_ID: "req-8",
             }
         )
-        loads = session.poll().loads
-        assert loads == [LoadResult(job_id=8, kv_request_id="req-8", success=False)]
+        assert session.poll().loads == []
+        assert _released(failure)
         assert "req-8" not in session._client._requests
+        assert session.alive
+        assert session.data_plane_fault is None
 
 
 # ---------------------------------------------------------------------------
@@ -2957,6 +3036,43 @@ class TestDisconnect:
         assert set(result.failed_stores) == {10}
         assert result.failed_serves == []
 
+    def test_close_retains_running_transfer(self):
+        """close() must not release a WRITE that may still be landing.
+
+        It cancels in wait mode; a transfer still running is reported as
+        retained with its store job, which stays pinned, and only the jobs
+        no transfer reads are returned as failed.
+        """
+        session, conn, data = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req", [OffloadKey(b"key")], [0], job_id=1)
+        session.add_stored_blocks("idle", [OffloadKey(b"other")], [1], job_id=2)
+        _fetch(conn, "req", [b"key"], [5])
+        session.poll()
+        (tid,) = data._transfers
+        data._cancel_still_inflight.add(tid)
+
+        result = session.close()
+
+        assert data._cancel_calls == [([tid], "wait")]
+        assert tid in data._transfers
+        assert result.retained == {tid: frozenset({1})}
+        assert result.failed_stores == [2]
+
+    def test_close_releases_stopped_transfer(self):
+        """A transfer that has already stopped is released, not retained."""
+        session, conn, data = _make_session()
+        _activate(session, conn)
+        session.add_stored_blocks("req", [OffloadKey(b"key")], [0], job_id=1)
+        _fetch(conn, "req", [b"key"], [5])
+        session.poll()
+
+        result = session.close()
+
+        assert data._transfers == {}
+        assert result.retained == {}
+        assert result.failed_stores == [1]
+
     def test_send_failure_marks_connection_dead(self):
         """A raising send must mark the connection dead, not silently drop
         the message — otherwise the session lingers alive, is never reaped,
@@ -3569,6 +3685,9 @@ def _fetch(conn: FakeConnection, kv_request_id: str, keys, idxs) -> None:
     )
 
 
+_STALL_S = 20.0
+
+
 class TestPeerFaultEscalation:
     """A transport peer fault ends the session through the normal reap
     path (see "Failure model" in data/base.py): no new WRITE is submitted,
@@ -3629,6 +3748,73 @@ class TestPeerFaultEscalation:
         session._peer_fault_at = time.monotonic() - _PEER_FAULT_DRAIN_S - 1.0
         session.poll()
         assert not session.alive
+
+    def _stalled_session(self):
+        session, conn, transport = _make_session()
+        session._server._stall_timeout_s = _STALL_S
+        _activate(session, conn)
+        session.add_stored_blocks("req-1", [OffloadKey(b"k1")], [0], job_id=1)
+        _fetch(conn, "req-1", [b"k1"], [5])
+        session.poll()
+        (tid,) = transport._transfers
+        transport._cancel_still_inflight.add(tid)
+        return session, conn, transport, tid
+
+    def test_transfer_under_stall_timeout_keeps_session(self):
+        session, _, _, tid = self._stalled_session()
+        xfer = session._server._inflight[tid]
+        xfer.submitted_at = time.monotonic() - _STALL_S + 1.0
+        session.poll()
+        assert session.alive
+        assert session._server.peer_fault is None
+
+    def test_transfer_done_in_same_poll_is_not_stalled(self):
+        """A WRITE past the stall timeout that the transport reports done in
+        this very poll completes; it does not fault the peer."""
+        session, _, transport, tid = self._stalled_session()
+        session._server._inflight[tid].submitted_at = 0.0
+        transport._poll_done.append(tid)
+        stores = session.poll().stores
+        assert session.alive
+        assert session._server.peer_fault is None
+        assert StoreResult(job_id=1, success=True) in stores
+
+    def test_stalled_transfer_faults_peer_without_releasing(self):
+        """A WRITE past the stall timeout faults the peer at once (no drain
+        wait), and close() retains it with its store job still pinned."""
+        session, conn, transport, tid = self._stalled_session()
+        xfer = session._server._inflight[tid]
+        xfer.submitted_at = time.monotonic() - _STALL_S - 1.0
+
+        stores = session.poll().stores
+        assert not session.alive
+        assert session.data_plane_fault.startswith("transfer stalled for")
+        assert conn._sent[-1] == {TYPE_KEY: DisconnectMsg.TYPE}
+        assert StoreResult(job_id=1, success=False) not in stores
+
+        result = session.close()
+        assert result.retained == {tid: frozenset({1})}
+        assert 1 not in result.failed_stores
+        assert tid in transport._transfers
+        assert all(mode == "wait" for _, mode in transport._cancel_calls)
+
+    def test_stalled_peer_gets_no_new_writes(self):
+        """The fault lands in the same poll that would serve a new fetch."""
+        session, conn, transport, tid = self._stalled_session()
+        session._server._inflight[tid].submitted_at = 0.0
+        session._server.collect_results()
+        assert session._server.peer_fault is not None
+        session.add_stored_blocks("req-2", [OffloadKey(b"k2")], [1], job_id=2)
+        _fetch(conn, "req-2", [b"k2"], [6])
+        session.poll()
+        assert list(transport._transfers) == [tid]
+
+    def test_stall_timeout_zero_disables(self):
+        session, _, _, tid = self._stalled_session()
+        session._server._stall_timeout_s = 0
+        session._server._inflight[tid].submitted_at = 0.0
+        session.poll()
+        assert session.alive
 
     def test_death_reasons(self):
         session, conn, _ = _make_session()
