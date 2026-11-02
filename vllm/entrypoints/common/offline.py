@@ -1,7 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import hashlib
+import struct
 from collections.abc import Callable, Iterable, Sequence
+from copy import copy
+from hashlib import sha256
 from typing import Any
 
 from tqdm import tqdm
@@ -19,6 +23,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
+from vllm.multimodal.hasher import MultiModalHasher
 from vllm.renderers import BaseRenderer, ChatParams, merge_kwargs
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -37,7 +42,6 @@ from vllm.v1.engine.llm_engine import LLMEngine
 
 logger = init_logger(__name__)
 
-
 _P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _O = TypeVar(
     "_O",
@@ -45,6 +49,100 @@ _O = TypeVar(
     default=RequestOutput | PoolingRequestOutput,
 )
 _R = TypeVar("_R", default=Any)
+
+
+# Leaves headroom below int64 for the `seed + index` child seeds of `n>1`.
+_SEED_SPACE = 2**62
+
+
+def _hash_content(hasher: "hashlib._Hash", value: object) -> None:
+    # Reuse the multi-modal cache-key serialization so nested containers,
+    # text, images, arrays, tensors and audio tuples all hash by content.
+    try:
+        for chunk in MultiModalHasher.iter_value_to_bytes(value):
+            hasher.update(chunk)
+    except Exception:
+        hasher.update(type(value).__name__.encode("utf-8"))
+
+
+def _prompt_digest(prompt: object) -> bytes:
+    """Deterministic, process-independent digest of a prompt's content.
+
+    Text and explicit token IDs are hashed with distinct type tags so they
+    cannot collide. Everything else (multi-modal items, chat conversations,
+    prompt embeddings) is hashed by content.
+    """
+    hasher = sha256()
+    if isinstance(prompt, str):
+        hasher.update(b"T")
+        hasher.update(prompt.encode("utf-8"))
+        return hasher.digest()
+
+    if isinstance(prompt, dict):
+        token_ids = prompt.get("prompt_token_ids")
+        text = prompt.get("prompt")
+        if token_ids is not None:
+            hasher.update(b"I")
+            for token_id in token_ids:
+                hasher.update(struct.pack(">Q", token_id))
+        elif isinstance(text, str):
+            hasher.update(b"T")
+            hasher.update(text.encode("utf-8"))
+        else:
+            _hash_content(hasher, prompt)
+            return hasher.digest()
+
+        multi_modal_data = prompt.get("multi_modal_data")
+        if multi_modal_data:
+            for modality in sorted(multi_modal_data):
+                items = multi_modal_data[modality]
+                if not isinstance(items, list):
+                    items = [items]
+                hasher.update(b"M")
+                hasher.update(str(modality).encode("utf-8"))
+                for item in items:
+                    _hash_content(hasher, item)
+        mm_processor_kwargs = prompt.get("mm_processor_kwargs")
+        if mm_processor_kwargs:
+            hasher.update(b"K")
+            _hash_content(hasher, mm_processor_kwargs)
+        return hasher.digest()
+
+    _hash_content(hasher, prompt)
+    return hasher.digest()
+
+
+def _mix_prompt_seeds(
+    seq_params: Sequence[_P],
+    seq_prompts: Sequence[object],
+) -> Sequence[_P]:
+    """Mix each seeded request's seed with its prompt content.
+
+    Sharing one seed across a batch would make every request draw an
+    identical sampling noise vector, correlating tokens across the batch
+    and biasing the marginal token distribution.
+
+    Mixing applies uniformly after params are expanded to one per prompt,
+    so `generate([a], SamplingParams(seed=42))` and
+    `generate([a], [SamplingParams(seed=42)])` give identical results.
+    Deriving from the prompt content rather than the batch index keeps a
+    prompt's result independent of batch composition and order: the same
+    (seed, prompt) pair always produces the same result, so repeated
+    identical prompts share their noise by construction. Use `n>1` to draw
+    multiple distinct samples of one prompt; its per-child seeds derived in
+    `ParentRequest` stay distinct within each request.
+    """
+    mixed = []
+    for request_params, prompt in zip(seq_params, seq_prompts, strict=True):
+        if (
+            isinstance(request_params, SamplingParams)
+            and (seed := request_params.seed) is not None
+        ):
+            digest = int.from_bytes(_prompt_digest(prompt)[:8], "little")
+            request_params = copy(request_params)
+            request_params.seed = (seed + digest) % _SEED_SPACE
+        mixed.append(request_params)
+    return mixed
 
 
 class OfflineInferenceMixin:
@@ -315,7 +413,9 @@ class OfflineInferenceMixin:
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         seq_prompts = prompt_to_seq(prompts)
-        seq_params = self._params_to_seq(params, len(seq_prompts))
+        seq_params = _mix_prompt_seeds(
+            self._params_to_seq(params, len(seq_prompts)), seq_prompts
+        )
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
         seq_priority = self._priority_to_seq(priority, len(seq_prompts))
 
@@ -421,7 +521,9 @@ class OfflineInferenceMixin:
         mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> list[str]:
         seq_convs = conversation_to_seq(messages)
-        seq_params = self._params_to_seq(params, len(seq_convs))
+        seq_params = _mix_prompt_seeds(
+            self._params_to_seq(params, len(seq_convs)), seq_convs
+        )
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_convs))
         seq_priority = self._priority_to_seq(priority, len(seq_convs))
 
