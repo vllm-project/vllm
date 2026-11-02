@@ -466,5 +466,104 @@ def test_dummy_norm_weights_are_neutral(default_vllm_config):
             assert torch.all(param == values[name]), (type(norm).__name__, name)
 
 
+def test_np_cache_weights_iterator_rebuilds_on_update(tmp_path):
+    """Updating a .bin checkpoint must invalidate and rebuild npcache."""
+    import json
+    import time
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        np_cache_weights_iterator,
+    )
+
+    bin_file = tmp_path / "pytorch_model.bin"
+    torch.save({"embed.weight": torch.ones(4)}, bin_file)
+
+    # First load builds the cache
+    weights1 = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights1["embed.weight"], torch.ones(4))
+
+    # Update the source checkpoint
+    time.sleep(1.1)  # ensure mtime delta > 1.0s
+    torch.save({"embed.weight": torch.ones(4) * 5.0}, bin_file)
+
+    # Second load must detect source change and rebuild, returning new tensor
+    weights2 = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights2["embed.weight"], torch.ones(4) * 5.0)
+
+    # Verify manifest exists and is updated
+    manifest_file = tmp_path / "np" / "weight_names.json"
+    cache_meta = json.loads(manifest_file.read_text())
+    assert isinstance(cache_meta, dict)
+    assert "source_manifest" in cache_meta
+    assert cache_meta["weight_names"] == ["embed.weight"]
+
+
+def test_np_cache_weights_iterator_legacy_format_upgrade(tmp_path):
+    """Legacy caches stored as plain list[str] are gracefully upgraded."""
+    import json
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        np_cache_weights_iterator,
+    )
+
+    bin_file = tmp_path / "pytorch_model.bin"
+    torch.save({"embed.weight": torch.ones(4)}, bin_file)
+
+    np_folder = tmp_path / "np"
+    np_folder.mkdir()
+    (np_folder / "weight_names.json").write_text(json.dumps(["embed.weight"]))
+
+    weights = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights["embed.weight"], torch.ones(4))
+
+    cache_meta = json.loads((np_folder / "weight_names.json").read_text())
+    assert isinstance(cache_meta, dict)
+    assert "source_manifest" in cache_meta
+
+
+def test_np_cache_weights_iterator_subsecond_update(tmp_path):
+    """Sub-second mtime changes with identical size trigger cache rebuild."""
+    import os
+
+    from vllm.model_executor.model_loader.weight_utils import (
+        np_cache_weights_iterator,
+    )
+
+    bin_file = tmp_path / "pytorch_model.bin"
+    torch.save({"embed.weight": torch.ones(4)}, bin_file)
+    t = 1_790_000_000_000_000_000
+    os.utime(bin_file, ns=(t, t))
+
+    weights1 = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights1["embed.weight"], torch.ones(4))
+
+    # Same size, 0.5s subsecond change
+    torch.save({"embed.weight": torch.full((4,), 5.0)}, bin_file)
+    os.utime(bin_file, ns=(t + 500_000_000, t + 500_000_000))
+
+    weights2 = dict(
+        np_cache_weights_iterator(
+            str(tmp_path), None, str(tmp_path), [str(bin_file)], False
+        )
+    )
+    assert torch.equal(weights2["embed.weight"], torch.full((4,), 5.0))
+
+
 if __name__ == "__main__":
     test_download_weights_from_hf()

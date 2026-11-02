@@ -850,6 +850,45 @@ def enable_tqdm(use_tqdm_on_load: bool):
     )
 
 
+def _npcache_source_manifest(hf_weights_files: list[str]) -> list[dict]:
+    """Return a list of {path, size, mtime_ns} dicts for each source shard.
+
+    Used to detect whether the on-disk checkpoint has changed since the NumPy
+    cache was written. mtime_ns is stored as an int (os.stat st_mtime_ns) to
+    capture sub-second modifications; size is stored as an int.
+    """
+    manifest = []
+    for p in sorted(hf_weights_files):
+        stat = os.stat(p)
+        manifest.append(
+            {
+                "path": p,
+                "size": stat.st_size,
+                "mtime_ns": stat.st_mtime_ns,
+            }
+        )
+    return manifest
+
+
+def _npcache_is_stale(
+    cached: list[dict],
+    current: list[dict],
+) -> bool:
+    """Return True when *current* differs from *cached* in any shard."""
+    if len(cached) != len(current):
+        return True
+    for c, d in zip(cached, current):
+        if c.get("path") != d.get("path") or c.get("size") != d.get("size"):
+            return True
+        # Compare nanosecond mtimes when available, falling back to legacy float mtime.
+        if "mtime_ns" in c and "mtime_ns" in d:
+            if c["mtime_ns"] != d["mtime_ns"]:
+                return True
+        elif abs(c.get("mtime", 0.0) - d.get("mtime", 0.0)) > 1e-6:
+            return True
+    return False
+
+
 def np_cache_weights_iterator(
     model_name_or_path: str,
     cache_dir: str | None,
@@ -860,6 +899,9 @@ def np_cache_weights_iterator(
     """Iterate over the weights in the model np files.
 
     Will dump the model weights to numpy files if they are not already dumped.
+    The cache is invalidated and rebuilt whenever any source shard's size or
+    modification time changes, preventing a stale-cache correctness failure
+    after an in-place checkpoint update.
     """
     # Convert the model weights from torch tensors to numpy arrays for
     # faster loading.
@@ -869,7 +911,32 @@ def np_cache_weights_iterator(
     # Use file lock to prevent multiple processes from
     # dumping the same model weights to numpy at the same time.
     with get_lock(model_name_or_path, cache_dir):
-        if not os.path.exists(weight_names_file):
+        current_manifest = _npcache_source_manifest(hf_weights_files)
+        rebuild = True
+        if os.path.exists(weight_names_file):
+            try:
+                with open(weight_names_file) as f:
+                    cached_data = json.load(f)
+                # Legacy caches stored a plain list[str]; new caches store a
+                # dict with "weight_names" and "source_manifest" keys.
+                if isinstance(cached_data, dict):
+                    cached_manifest = cached_data.get("source_manifest", [])
+                    rebuild = _npcache_is_stale(cached_manifest, current_manifest)
+                    if rebuild:
+                        logger.warning(
+                            "npcache: source checkpoint has changed "
+                            "(size or mtime mismatch); rebuilding cache in %s",
+                            np_folder,
+                        )
+                else:
+                    # Old format: no manifest stored — treat as stale so that
+                    # the cache is upgraded to the new format.
+                    rebuild = True
+                    logger.info("npcache: upgrading cache format in %s", np_folder)
+            except Exception:
+                rebuild = True
+
+        if rebuild:
             weight_names: list[str] = []
             for bin_file in tqdm(
                 hf_weights_files,
@@ -884,10 +951,21 @@ def np_cache_weights_iterator(
                         np.save(f, param.cpu().detach().numpy())
                     weight_names.append(name)
             with open(weight_names_file, "w") as f:
-                json.dump(weight_names, f)
+                json.dump(
+                    {
+                        "weight_names": weight_names,
+                        "source_manifest": current_manifest,
+                    },
+                    f,
+                )
 
     with open(weight_names_file) as f:
-        weight_names = json.load(f)
+        cached_data = json.load(f)
+    # Support both the legacy plain-list format and the new dict format.
+    if isinstance(cached_data, dict):
+        weight_names = cached_data["weight_names"]
+    else:
+        weight_names = cached_data
 
     for name in weight_names:
         param_path = os.path.join(np_folder, name)
