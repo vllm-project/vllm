@@ -18,19 +18,19 @@ vLLM supports basic model inferencing and serving on x86 CPU platform, with data
 --8<-- [end:set-up-using-python]
 --8<-- [start:pre-built-wheels]
 
-Pre-built vLLM wheels for x86 with AVX512/AVX2 are available since version 0.17.0. To install release wheels:
+Pre-built vLLM wheels for x86 with AVX512/AVX2 are available since version 0.17.0. Since version 0.30.0 they are `manylinux_2_39` builds, which need glibc 2.39 or newer (e.g. Ubuntu 24.04); for 0.29.0 and earlier, replace `manylinux_2_39` with `manylinux_2_34` below. To install release wheels:
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
 
 # use uv
-uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" --torch-backend cpu
+uv pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_39_x86_64.whl" --torch-backend cpu
 ```
 
 ??? console "pip"
     ```bash
     # use pip
-    pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_34_x86_64.whl" --extra-index-url https://download.pytorch.org/whl/cpu
+    pip install "https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_39_x86_64.whl" --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 !!! warning "set `LD_PRELOAD`"
     Before use vLLM CPU installed via wheels, make sure Intel OpenMP is added to `LD_PRELOAD`:
