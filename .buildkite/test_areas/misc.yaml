@@ -225,6 +225,7 @@ steps:
 
 - label: ":amd: (MI355 DPX) UMBP Connector Integration"
   key: amd-umbp-connector-integration-mi355
+  automatic_shard: true
   dind: false
   device: mi355_dpx
   num_devices: 1
