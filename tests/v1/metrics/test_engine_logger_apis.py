@@ -9,7 +9,7 @@ from tests.plugins.vllm_add_dummy_stat_logger.dummy_stat_logger.dummy_stat_logge
     DummyStatLogger,
 )
 from tests.utils import wait_for_memory_to_settle
-from vllm.config import DeviceConfig, ObservabilityConfig, VllmConfig
+from vllm.config import CacheConfig, DeviceConfig, ObservabilityConfig, VllmConfig
 from vllm.v1.engine.async_llm import AsyncEngineArgs, AsyncLLM
 from vllm.v1.metrics.loggers import LoggingStatLogger, PerEngineStatLoggerAdapter
 from vllm.v1.metrics.ray_wrappers import RayPrometheusStatLogger
@@ -70,6 +70,14 @@ def test_iteration_logging_preserves_records_without_inventing_timing(
         assert "iteration elapsed time: 1.25 ms (dummy)" in messages[1]
 
 
+def _required_utilization(engine_args: AsyncEngineArgs) -> float:
+    # Unset resolves to 1.0 under the extensible KV cache, which does not need
+    # that memory free up front; wait for the standard fraction instead.
+    return (
+        engine_args.gpu_memory_utilization or CacheConfig.DEFAULT_GPU_MEMORY_UTILIZATION
+    )
+
+
 @pytest.fixture
 def log_stats_enabled_engine_args():
     """Shared fixture providing common AsyncEngineArgs configuration
@@ -97,7 +105,7 @@ async def test_async_llm_replace_default_loggers(log_stats_enabled_engine_args):
     finally:
         engine.shutdown()
         wait_for_memory_to_settle(
-            threshold_ratio=1.0 - log_stats_enabled_engine_args.gpu_memory_utilization
+            threshold_ratio=1.0 - _required_utilization(log_stats_enabled_engine_args)
         )
 
 
@@ -132,5 +140,5 @@ async def test_async_llm_add_to_default_loggers(log_stats_enabled_engine_args):
     finally:
         engine.shutdown()
         wait_for_memory_to_settle(
-            threshold_ratio=1.0 - disabled_log_engine_args.gpu_memory_utilization
+            threshold_ratio=1.0 - _required_utilization(disabled_log_engine_args)
         )
