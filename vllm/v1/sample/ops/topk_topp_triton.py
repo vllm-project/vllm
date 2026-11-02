@@ -27,6 +27,15 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.platform_utils import num_compute_units
+from vllm.v1.sample.ops.topp_histogram_triton import (
+    MIN_BATCH_SIZE as _HIST_MIN_BATCH,
+)
+from vllm.v1.sample.ops.topp_histogram_triton import (
+    apply_top_p_histogram,
+)
+from vllm.v1.sample.ops.topp_histogram_triton import (
+    reset_workspace as reset_topp_histogram_workspace,
+)
 
 _TRITON_TABLE_CACHE: dict[tuple[torch.device], tuple[torch.Tensor, torch.Tensor]] = {}
 _TRITON_BUFFER_CACHE: dict[tuple[torch.device, torch.dtype, int], torch.Tensor] = {}
@@ -892,7 +901,16 @@ def _topk_topp_warmup_inputs(vllm_config: Any) -> dict[str, Any]:
     batch_size: Any = WarmupIntRange(1, _max_sampler_batch_size(vllm_config) + 1)
     topk_enabled = mode[0]
     topp_enabled = mode[1]
-    _when(topk_enabled or not (split_enabled and batch_size <= _SPLIT_MAX_BATCH))
+    hist_enabled = current_platform.is_cuda()
+    # p-only rows go to the split (small batches) or, on CUDA, the histogram
+    # (large batches) pipeline instead of this kernel.
+    _when(
+        topk_enabled
+        or not (
+            (split_enabled and batch_size <= _SPLIT_MAX_BATCH)
+            or (hist_enabled and batch_size >= _HIST_MIN_BATCH)
+        )
+    )
     logits = TritonWarmupTensor(
         torch.float32,
         shape=(batch_size, vocab_size),
@@ -1678,6 +1696,19 @@ def apply_top_k_top_p_triton(
     # path is already fast). The monolithic's standalone top-p branch then
     # covers only rows whose top-k is a no-op (k < vocab but <= k finite
     # logits, e.g. grammar masks), which the split pipeline skips.
+    if (
+        topp_enabled
+        and not topk_enabled
+        and batch_size >= _HIST_MIN_BATCH
+        and logits.device.type == "cuda"
+        and current_platform.is_cuda()
+    ):
+        # Large p-only batches (e.g. speculative-decoding verification rows):
+        # the histogram pipeline finds the exact boundary in four streaming
+        # passes, where the monolithic kernel's pivot search sweeps each row
+        # many times with one program per row.
+        return apply_top_p_histogram(logits, p_ptr, mask_value, num_sm)
+
     use_split = (
         topp_enabled and batch_size <= _SPLIT_MAX_BATCH and logits.device.type == "cuda"
     )
@@ -1730,4 +1761,5 @@ def reset_buffer_cache():
     _TRITON_BUFFER_CACHE.clear()
     _TRITON_TABLE_CACHE.clear()
     _TRITON_SPLIT_CACHE.clear()
+    reset_topp_histogram_workspace()
     torch.accelerator.empty_cache()
