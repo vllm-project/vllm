@@ -166,6 +166,7 @@ def compute_tile_loop_bounds(
     MAX_MM_RANGES: tl.constexpr = 0,
     mm_prefix_range_ptr=None,
     seq_idx=0,
+    start_tile_idx=0,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -182,8 +183,8 @@ def compute_tile_loop_bounds(
        window-clamped multimodal prefix mask, the bounds include the union of
        the base mask and each image range intersecting the query block.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
-       segment's slice via ``(segm_idx * tiles_per_segment,
-       (segm_idx + 1) * tiles_per_segment)``.
+       segment's slice via ``(start_tile_idx + segm_idx * tiles_per_segment,
+       start_tile_idx + (segm_idx + 1) * tiles_per_segment)``.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -273,8 +274,10 @@ def compute_tile_loop_bounds(
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
     if IS_3D:
-        loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
-        loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
+        segm_lo = start_tile_idx + segm_idx_or_0 * tiles_per_segment_or_0
+        segm_hi = start_tile_idx + (segm_idx_or_0 + 1) * tiles_per_segment_or_0
+        loop_lo = max(segm_lo, tile_start)
+        loop_hi = min(segm_hi, tile_end)
     else:
         loop_lo = tile_start
         loop_hi = tile_end
