@@ -815,8 +815,17 @@ def _unsupported_reason(
         return f"needs indexer_kv_dtype='fp8' (got {indexer_kv_dtype!r})"
     if total_index_heads % tp:
         return f"{total_index_heads} index heads do not split over TP{tp}"
-    if vllm_config.kv_transfer_config is not None:
-        return "KV transfer with sharded index caches is not supported"
+    transfer = vllm_config.kv_transfer_config
+    if (
+        transfer is not None
+        and transfer.is_kv_transfer_instance
+        and (
+            transfer.kv_connector != "SimpleCPUOffloadConnector"
+            or transfer.kv_connector_module_path is not None
+            or transfer.get_from_extra_config("kv_offload_backend", "cpu") != "cpu"
+        )
+    ):
+        return "sharded index caches only support rank-local SimpleCPUOffloadConnector"
     parallel = vllm_config.parallel_config
     if parallel.use_ubatching:
         return "microbatching needs separate indexer scratch and communication state"

@@ -521,6 +521,8 @@ For detailed information on available backends, their feature support, and how t
 
 With `--attention-config '{"indexer_kv_dtype":"fp8","indexer_cache_sharding":"on"}'`, the MSA backend
 can shard FP8 index K over single-node NVLink TP2 or TP4 with 128-token pages.
+Rank-local CPU offload with the built-in `SimpleCPUOffloadConnector` preserves
+sharding. Other KV transfer connectors retain replicated index K.
 Prefill defaults to gathering index K and scoring the local query heads.
 To score local K and exchange Top16 candidates instead, use
 `--attention-config '{"indexer_kv_dtype":"fp8","indexer_cache_sharding":"on","indexer_prefill_cp":"local_score"}'`.

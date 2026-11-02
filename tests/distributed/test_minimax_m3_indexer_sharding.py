@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import faulthandler
+import time
 from copy import copy
 
 import pytest
@@ -59,6 +60,9 @@ def _indexer_sharding(monkeypatch, tp_size, pp_size, rank, distributed_init_port
             method="ngram", num_speculative_tokens=7
         )
         config.attention_config.indexer_cache_sharding = "on"
+        config.kv_transfer_config = KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both"
+        )
         with set_current_vllm_config(config):
             init_test_distributed_environment(
                 tp_size, pp_size, rank, distributed_init_port
@@ -121,6 +125,72 @@ def _check_initialization_fallback(config, device, rank):
                 assert msa._COMM_FAILED
             finally:
                 faulthandler.cancel_dump_traceback_later()
+
+
+def _roundtrip_index_caches(config, impls):
+    from vllm.v1.kv_cache_interface import KVCacheConfig, KVCacheTensor
+    from vllm.v1.simple_kv_offload.metadata import SimpleCPUOffloadMetadata
+    from vllm.v1.simple_kv_offload.worker import SimpleCPUOffloadWorker
+
+    caches = {impl.index_cache.prefix: impl.index_cache.kv_cache for impl in impls}
+    num_pages = next(iter(caches.values())).shape[0]
+    placements = [
+        KVCacheTensor(
+            size=cache.nbytes,
+            layers=[name],
+            layer_stride=cache.nbytes,
+            block_stride=impl.index_cache.get_kv_cache_spec(config).page_size_bytes,
+        )
+        for impl, (name, cache) in zip(impls, caches.items())
+    ]
+    worker = SimpleCPUOffloadWorker(
+        config,
+        KVCacheConfig(num_pages, placements, []),
+        sum(cache.nbytes for cache in caches.values()),
+    )
+    gpu_pages = list(range(num_pages))
+    cpu_pages = gpu_pages[::-1]
+    try:
+        worker.register_kv_caches(caches)
+        expected = [cache.view(torch.uint8).clone() for cache in caches.values()]
+        worker.bind_connector_metadata(
+            SimpleCPUOffloadMetadata(
+                store_event=0, store_gpu_blocks=gpu_pages, store_cpu_blocks=cpu_pages
+            )
+        )
+        worker.wait_for_save()
+        deadline = time.monotonic() + 30
+        while True:
+            worker.get_finished(set())
+            completed = worker.build_connector_worker_meta()
+            if completed is not None:
+                assert completed.completed_store_events == {0: 1}
+                break
+            assert time.monotonic() < deadline, "Index-cache CPU store did not finish"
+        for cache in caches.values():
+            cache.view(torch.uint8).zero_()
+        torch.accelerator.current_stream().synchronize()
+        worker.bind_connector_metadata(
+            SimpleCPUOffloadMetadata(
+                load_event=0,
+                load_gpu_blocks=gpu_pages,
+                load_cpu_blocks=cpu_pages,
+                load_event_to_reqs={0: ["restored"]},
+            )
+        )
+        worker.start_load_kv()
+        deadline = time.monotonic() + 30
+        while worker.get_finished(set())[1] != {"restored"}:
+            assert time.monotonic() < deadline, "Index-cache CPU load did not finish"
+        for cache, original in zip(caches.values(), expected):
+            assert torch.equal(cache.view(torch.uint8), original)
+    finally:
+        if worker._backend is not None:
+            worker._backend.shutdown()
+        torch.accelerator.synchronize()
+        for cache in (worker.cpu_kv_caches or {}).values():
+            if cache.is_pinned():
+                torch.cuda.cudart().cudaHostUnregister(cache.data_ptr())
 
 
 def _check_indexer_forwards(config, device, rank, comm):
@@ -309,6 +379,7 @@ def _check_indexer_forwards(config, device, rank, comm):
             )
             query[PREFILL_CHUNK_SIZE:] *= -1
             queries.append(query.to(torch.float8_e4m3fn))
+        _roundtrip_index_caches(config, layers[1])
         metadata = [builder.build(0, common) for builder in builders]
         for md, storage in zip(metadata[2:], prefill_storage, strict=True):
             assert md.unified_scores is None
@@ -497,4 +568,15 @@ def _check_sharding_policy(config, original_comm):
         )
         before = msa.get_comm()
         assert msa.resolve_index_k_shard(policy, 4, dtype, topk) == 1
+        assert msa.get_comm() is before
+
+    for options in (
+        {"kv_connector_module_path": "custom_connector"},
+        {"kv_connector_extra_config": {"kv_offload_backend": "disk"}},
+    ):
+        policy.kv_transfer_config = KVTransferConfig(
+            kv_connector="SimpleCPUOffloadConnector", kv_role="kv_both", **options
+        )
+        before = msa.get_comm()
+        assert msa.resolve_index_k_shard(policy, 4, "fp8", 16) == 1
         assert msa.get_comm() is before
