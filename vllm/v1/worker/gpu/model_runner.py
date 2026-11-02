@@ -843,6 +843,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
         ]
+        pool_of_layer = {
+            layer_name: group.pool_id
+            for group in kv_cache_config.kv_cache_groups
+            for layer_name in group.layer_names
+        }
+        self.kv_caches_by_pool: dict[int, list[torch.Tensor]] = {}
+        for layer_name, cache in kv_caches_dict.items():
+            if cache.device == self.device:
+                pool_id = pool_of_layer.get(layer_name, 0)
+                self.kv_caches_by_pool.setdefault(pool_id, []).append(cache)
         self.model_state.initialize_kv_cache(self.kv_cache_config, self.block_tables)
         if is_profiling:
             self.kv_connector = NO_OP_KV_CONNECTOR
@@ -859,9 +869,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
+        kv_cache_groups = self.kv_cache_config.kv_cache_groups
         self.kv_block_zeroer = KVBlockZeroer(
             self.device,
-            attn_groups_iter=(g for groups in self.attn_groups for g in groups),
+            # Private pools hold one precision and no Mamba state.
+            attn_groups_iter=(
+                g
+                for groups in self.attn_groups
+                for g in groups
+                if not kv_cache_groups[g.kv_cache_group_id].pool_id
+            ),
             kernel_block_sizes=self.kernel_block_sizes,
             static_forward_context=self.compilation_config.static_forward_context,
             num_blocks=self.kv_cache_config.num_blocks,
@@ -1344,11 +1361,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Apply copy-on-write block copies for partial prefix-cache hits, after
         # zeroing new blocks and before the forward pass reads them.
         if scheduler_output.kv_cache_block_copies:
-            copy_kv_cache_blocks_inplace(
-                self.kv_caches,
-                self.kv_cache_config.num_blocks,
-                scheduler_output.kv_cache_block_copies,
-            )
+            for pool_id, kv_caches in self.kv_caches_by_pool.items():
+                copy_kv_cache_blocks_inplace(
+                    kv_caches,
+                    self.kv_cache_config.num_blocks_of_pool(pool_id),
+                    scheduler_output.kv_cache_block_copies,
+                    pool_id,
+                )
 
     def gather_batch_req_state(
         self, scheduler_output: SchedulerOutput, dummy_run: bool
@@ -1953,10 +1972,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch, valid_dummy_state_slots
                 )
                 if context_len:
+                    num_groups = len(self.kv_cache_config.kv_cache_groups)
                     if self.extensible_kv_cache is not None:
-                        num_blocks = self.extensible_kv_cache.num_committed_blocks
+                        num_blocks = [
+                            self.extensible_kv_cache.num_committed_blocks
+                        ] * num_groups
                     else:
-                        num_blocks = self.kv_cache_config.num_blocks
+                        num_blocks = [
+                            self.kv_cache_config.num_blocks_of_group(group_id)
+                            for group_id in range(num_groups)
+                        ]
                     set_dummy_context(
                         input_batch,
                         self.block_tables,
@@ -2464,6 +2489,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner = None
         if hasattr(self, "kv_caches"):
             self.kv_caches.clear()
+        if hasattr(self, "kv_caches_by_pool"):
+            self.kv_caches_by_pool.clear()
         if hasattr(self, "attn_groups"):
             self.attn_groups.clear()
         if hasattr(self, "kv_cache_config"):

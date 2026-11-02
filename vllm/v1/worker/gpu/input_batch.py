@@ -232,12 +232,15 @@ def set_dummy_context(
     input_batch: InputBatch,
     block_tables: "BlockTables",
     context_len: int,
-    num_kv_blocks: int,
+    num_kv_blocks: Sequence[int],
     max_model_len: int,
     input_block_tables: Sequence[torch.Tensor] | None = None,
 ) -> None:
     """Give each dummy request context_len of context, for profiling step cost
-    and for DCP FULL cudagraph capture."""
+    and for DCP FULL cudagraph capture.
+
+    ``num_kv_blocks`` is the block count of each KV cache group's pool.
+    """
     if input_block_tables is None:
         input_block_tables = block_tables.input_block_tables
     if not input_block_tables:
@@ -261,7 +264,9 @@ def set_dummy_context(
     input_batch.positions.copy_(torch.from_numpy(local_pos + context_len))
 
     seq_len = context_len + query_len
-    for block_table, block_size in zip(input_block_tables, block_tables.block_sizes):
+    for block_table, block_size, num_group_kv_blocks in zip(
+        input_block_tables, block_tables.block_sizes, num_kv_blocks
+    ):
         num_blocks = min(cdiv(seq_len, block_size), block_table.shape[1])
         # Spans are disjoint until the pool runs out, then they wrap and share
         # blocks: profiling only needs the reads to be realistic, not distinct.
@@ -271,7 +276,7 @@ def set_dummy_context(
                 dtype=block_table.dtype,
                 device=block_table.device,
             )
-            % num_kv_blocks
+            % num_group_kv_blocks
         )
         block_table[:num_reqs, :num_blocks] = block_ids.view(num_reqs, num_blocks)
 

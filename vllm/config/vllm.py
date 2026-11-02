@@ -3204,6 +3204,11 @@ class VllmConfig:
             unsupported = "it requires the V2 model runner"
         elif self.attention_config.hisparse_config is not None:
             unsupported = "HiSparse allocates its KV cache itself"
+        elif cache_config.draft_kv_pool:
+            unsupported = (
+                "--draft-kv-pool lays its pool out after the shared pool, at an "
+                "offset fixed when the KV cache is planned"
+            )
         elif self.parallel_config.enable_elastic_ep:
             unsupported = (
                 "elastic EP scale-up skips warmup and reuses the profiled KV "

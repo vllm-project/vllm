@@ -401,6 +401,7 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
             enable_extensible_kv_cache=requested,
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
+            draft_kv_pool=False,
         ),
         use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
@@ -409,6 +410,40 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
     )
     if requested:
         with pytest.raises(ValueError, match="elastic EP"):
+            VllmConfig._resolve_extensible_kv_cache(config)
+    else:
+        VllmConfig._resolve_extensible_kv_cache(config)
+        assert config.cache_config.enable_extensible_kv_cache is False
+
+
+@pytest.mark.parametrize("requested", [None, True])
+def test_extensible_kv_cache_off_with_draft_kv_pool(monkeypatch, requested):
+    """--draft-kv-pool places its pool after the shared pool at a planned
+    offset, which an extensible cache would move: it stays off by default and
+    an explicit request is an error."""
+    from types import SimpleNamespace
+
+    import vllm.platforms
+    from vllm.config.vllm import VllmConfig
+
+    monkeypatch.setattr(
+        vllm.platforms, "current_platform", SimpleNamespace(is_cuda_alike=lambda: True)
+    )
+    config = SimpleNamespace(
+        cache_config=SimpleNamespace(
+            _extensible_kv_cache_resolved=False,
+            enable_extensible_kv_cache=requested,
+            kv_cache_memory_bytes=None,
+            num_gpu_blocks_override=None,
+            draft_kv_pool=True,
+        ),
+        use_v2_model_runner=True,
+        attention_config=SimpleNamespace(hisparse_config=None),
+        parallel_config=SimpleNamespace(enable_elastic_ep=False),
+        kv_transfer_config=None,
+    )
+    if requested:
+        with pytest.raises(ValueError, match="draft-kv-pool"):
             VllmConfig._resolve_extensible_kv_cache(config)
     else:
         VllmConfig._resolve_extensible_kv_cache(config)
@@ -480,6 +515,7 @@ def test_extensible_kv_cache_off_for_rocm_registering_connector(
             enable_extensible_kv_cache=requested,
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
+            draft_kv_pool=False,
         ),
         use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
@@ -528,6 +564,7 @@ def test_extensible_kv_cache_off_with_lmcache_mp(monkeypatch, multi, requested):
             enable_extensible_kv_cache=requested,
             kv_cache_memory_bytes=None,
             num_gpu_blocks_override=None,
+            draft_kv_pool=False,
         ),
         use_v2_model_runner=True,
         attention_config=SimpleNamespace(hisparse_config=None),
