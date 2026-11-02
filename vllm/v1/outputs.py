@@ -305,6 +305,14 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Draft tokens per request that came out of the drafter, in req_ids order.
+    # None in steps without draft tokens.
+    num_drafted_tokens_per_req: list[int] | None = None
+
+    # Drafted tokens per request that went into the target forward pass, in
+    # req_ids order.
+    num_verified_tokens_per_req: list[int] | None = None
+
     aux_output_connector_output: dict[str, AuxRequestOutput] | None = None
 
     # ``None`` when ``return_sampling_mask`` is off.

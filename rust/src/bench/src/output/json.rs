@@ -603,6 +603,10 @@ fn insert_spec_decode_stats(result: &mut serde_json::Map<String, Value>, stats: 
         serde_json::json!(stats.accepted_tokens),
     );
     result.insert(
+        "spec_decode_verified_tokens".into(),
+        serde_json::json!(stats.verified_tokens),
+    );
+    result.insert(
         "spec_decode_per_position_acceptance_rates".into(),
         serde_json::json!(stats.per_position_acceptance_rates),
     );
@@ -696,6 +700,7 @@ mod tests {
             num_drafts: 1000,
             draft_tokens: 3000,
             accepted_tokens: 2400,
+            verified_tokens: 2700,
             acceptance_rate: 80.0,
             acceptance_length: 3.4,
             per_position_acceptance_rates: vec![0.9, 0.8, 0.7],
@@ -709,6 +714,7 @@ mod tests {
         assert_eq!(result["spec_decode_num_drafts"], 1000);
         assert_eq!(result["spec_decode_draft_tokens"], 3000);
         assert_eq!(result["spec_decode_accepted_tokens"], 2400);
+        assert_eq!(result["spec_decode_verified_tokens"], 2700);
         assert_eq!(
             result["spec_decode_per_position_acceptance_rates"],
             serde_json::json!([0.9, 0.8, 0.7])
@@ -721,6 +727,7 @@ mod tests {
             num_drafts: 500,
             draft_tokens: 1500,
             accepted_tokens: 1200,
+            verified_tokens: 1400,
             acceptance_rate: 80.0,
             acceptance_length: 3.4,
             per_position_acceptance_rates: vec![],
@@ -733,7 +740,7 @@ mod tests {
             result["spec_decode_per_position_acceptance_rates"],
             serde_json::json!([])
         );
-        assert_eq!(result.len(), 6);
+        assert_eq!(result.len(), 7);
     }
 
     #[test]

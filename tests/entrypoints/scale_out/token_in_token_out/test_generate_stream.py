@@ -452,7 +452,7 @@ async def test_stream_reports_engine_stop_reason_on_final_chunk():
 async def test_serve_tokens_returns_spec_decode_metrics(stream: bool):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output(
@@ -499,7 +499,7 @@ async def test_stream_returns_spec_decode_metrics_on_empty_terminal_output(
 ):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
 
     async def mock_generate(*args, **kwargs):
         yield _make_request_output("req-1", token_ids=[10])
@@ -542,7 +542,7 @@ async def test_serve_tokens_omits_spec_decode_metrics_for_parallel_sampling(
 ):
     engine = _mock_engine()
     metrics = RequestSpecDecodeMetrics.new(num_spec_tokens=3)
-    metrics.observe(num_draft_tokens=3, num_accepted=2)
+    metrics.observe(num_draft_tokens=3, num_accepted=2, num_verified_tokens=3)
     result = _make_request_output(
         "req-1",
         token_ids=[10],
