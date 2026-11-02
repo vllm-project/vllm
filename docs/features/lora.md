@@ -499,10 +499,10 @@ from vllm.lora.request import LoRARequest, LoRARoutingRequest
 llm = LLM(
     model="Qwen/Qwen3-0.6B",
     enable_lora=True,
-    enforce_eager=True,
     max_loras=4,
     max_loras_per_request=2,
     max_lora_rank=64,
+    lora_target_modules=["q_proj", "v_proj"],
 )
 mixture = LoRARoutingRequest(
     routing_name="composition",
@@ -525,11 +525,24 @@ batch-wide distinct-adapter capacity. The equivalent engine argument is
 `--max-loras-per-request`. Every referenced adapter counts, including adapters
 with a zero coefficient. Requests over the limit are rejected before scheduling.
 
-Composition currently requires eager execution and text-only generation with
-supported linear-layer targets. Routed embeddings, LM-head adapters, pooling,
-multimodal inputs, learned gates, compiled execution, and the OpenAI-compatible
-server API are not supported. Prefix-cache identity includes the ordered
+Composition supports text-only generation with supported linear-layer targets.
+Set `lora_target_modules` to the adapters' linear targets; this also avoids
+wrapping embeddings and LM heads on models that expose them as LoRA targets.
+Routed embeddings, LM-head adapters, pooling, multimodal inputs, learned gates,
+and the OpenAI-compatible server API are not supported. Prefix-cache identity includes the ordered
 component adapter names, paths, and coefficients, not the mixture's display name.
+
+On NVIDIA GPUs, supported FP16/BF16 linear projections use a fused cooperative
+kernel for ranks up to 128. With `max_loras_per_request >= 2`, non-fully-sharded
+LoRA supports CUDA graphs and compiled execution. Routing buffers are reserved
+at engine initialization and updated in place, including for ordinary-adapter
+and no-adapter batches. The default capacity of 1 retains ordinary LoRA execution.
+
+For other backends, fully sharded LoRA, higher ranks, or configurations exceeding
+the fused kernel's resource limits, set `enforce_eager=True`. Eager execution uses
+the reference implementation when the fused kernel is unsupported. Unsupported
+graph configurations raise an error rather than replaying an incompatible graph.
+Composition does not support microbatching or prefill context parallelism.
 
 For a runnable example, see
 [Composition Offline](../examples/features/lora.md#composition-offline)
