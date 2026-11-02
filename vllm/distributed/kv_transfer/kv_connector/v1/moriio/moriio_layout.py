@@ -300,7 +300,8 @@ def get_layer_transfer_geometry(
         # Standardized per-layer [B, H, N, C] view (MLA is just H == 1).
         num_blocks, num_heads, num_states, content_dim = shape
         slot_size_bytes = num_heads * content_dim * element_size
-        block_len = num_states * slot_size_bytes
+        block_len = 1 + sum((s - 1) * st for s, st in zip(shape[1:], stride[1:]))
+        block_len *= element_size
         return LayerTransferGeometry(
             num_blocks=num_blocks,
             block_size=spec.block_size,
@@ -418,6 +419,31 @@ def merge_contiguous_offsets(
     )
 
 
+def validate_transfer_block_ids(
+    local_block_ids: list[int],
+    remote_block_ids: list[int],
+    local_num_blocks: int,
+    remote_num_blocks: int,
+) -> None:
+    """Check that a block transfer stays inside both sides' caches.
+
+    A shorter or empty local list transfers only what decode allocated (a READ
+    after a partial or full prefix hit); a longer local list is a bug.
+    """
+    if len(local_block_ids) > len(remote_block_ids):
+        raise ValueError(
+            "local_block_ids longer than remote_block_ids: "
+            f"{len(local_block_ids)} > {len(remote_block_ids)}"
+        )
+    for side, block_ids, num_blocks in (
+        ("local", local_block_ids, local_num_blocks),
+        ("remote", remote_block_ids, remote_num_blocks),
+    ):
+        invalid = next((b for b in block_ids if not 0 <= b < num_blocks), None)
+        if invalid is not None:
+            raise ValueError(f"{side} block id {invalid} is outside [0, {num_blocks})")
+
+
 def compute_block_transfer_offsets(
     layer_name: str,
     kv_cache: torch.Tensor,
@@ -429,43 +455,15 @@ def compute_block_transfer_offsets(
         [list[int], list[int], list[int]], tuple[list[int], list[int], list[int]]
     ] = merge_contiguous_offsets,
 ) -> tuple[list[int], list[int], list[int]]:
-    # A shorter/empty local list transfers only what decode allocated (READ-mode
-    # partial or full-prefix-hit); a longer local list is a genuine bug.
-    if len(local_block_ids) > len(remote_block_ids):
-        raise ValueError(
-            "local_block_ids longer than remote_block_ids: "
-            f"{len(local_block_ids)} > {len(remote_block_ids)}"
-        )
     geometry = cast(
         LayerTransferGeometry,
         get_layer_transfer_geometry(
             layer_name, kv_cache, layer_to_spec, remote_num_blocks
         ),
     )
-    invalid_local = next(
-        (
-            block_id
-            for block_id in local_block_ids
-            if not 0 <= block_id < geometry.num_blocks
-        ),
-        None,
+    validate_transfer_block_ids(
+        local_block_ids, remote_block_ids, geometry.num_blocks, remote_num_blocks
     )
-    if invalid_local is not None:
-        raise ValueError(
-            f"local block id {invalid_local} is outside [0, {geometry.num_blocks})"
-        )
-    invalid_remote = next(
-        (
-            block_id
-            for block_id in remote_block_ids
-            if not 0 <= block_id < remote_num_blocks
-        ),
-        None,
-    )
-    if invalid_remote is not None:
-        raise ValueError(
-            f"remote block id {invalid_remote} is outside [0, {remote_num_blocks})"
-        )
     element_size = kv_cache.element_size()
     transfer_size_byte = geometry.block_len
     per_block = geometry.transfers_per_block

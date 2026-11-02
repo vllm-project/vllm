@@ -38,7 +38,7 @@ namespace vllm {
 template <class Type, bool UE8M0_SF = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     silu_mul_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols,
-                             int32_t num_packed_cols,
+                             int32_t num_packed_cols, int32_t num_padded_cols,
                              Type const* __restrict__ in,
                              float const* __restrict__ SFScale,
                              uint32_t* __restrict__ out,
@@ -49,8 +49,15 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  cudaGridDependencySynchronize();
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
+
   // Precompute SF layout parameter (constant for entire kernel).
   int32_t const numKTiles = (numCols + 63) / 64;
+
+  int const sf_m = round_up<int>(numRows, 128);
 
   // Get the global scaling factor, which will be applied to the SF.
   // Note SFScale is the same as next GEMM's alpha, which is
@@ -60,9 +67,10 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   int32_t const colIdx = blockDim.x * blockIdx.y + threadIdx.x;
   int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
 
-  // Input tensor row/col loops.
-  for (int rowIdx = blockIdx.x; rowIdx < numRows; rowIdx += gridDim.x) {
-    if (colIdx < num_packed_cols) {
+  // Iterate over all rows and cols including padded ones -
+  //  ensures we visit every single scale factor address to initialize it.
+  for (int rowIdx = blockIdx.x; rowIdx < sf_m; rowIdx += gridDim.x) {
+    if (colIdx < num_padded_cols) {
       PackedVec in_vec;
       PackedVec in_vec2;
       int64_t inOffset =
@@ -70,7 +78,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       int64_t inOffset2 = rowIdx * (numCols * 2 / CVT_FP4_ELTS_PER_THREAD) +
                           numCols / CVT_FP4_ELTS_PER_THREAD + colIdx;
 
-      bool valid = (rowIdx < numRows) && (elem_idx < numCols);
+      // If we are outside valid rows/columns, feed zeros
+      bool valid = (rowIdx < numRows) && (colIdx < num_packed_cols);
       if constexpr (CVT_FP4_PACK16) {
         ld256_cg_or_zero(reinterpret_cast<u32x8_t&>(in_vec),
                          &reinterpret_cast<const uint32_t*>(in)[inOffset * 8],
@@ -95,9 +104,17 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                                              CVT_FP4_NUM_THREADS_PER_SF>(
               rowIdx, colIdx, numKTiles, SFout);
 
-      auto out_val =
-          cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
-              out_silu_mul, SFScaleVal, sf_out);
+      fp4_packed_t out_val{};
+      if (valid) {
+        out_val =
+            cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+                out_silu_mul, SFScaleVal, sf_out);
+      } else if (sf_out != nullptr) {
+        // The swizzled scale tensor may be allocated with torch.empty.
+        // Explicitly initialize padded rows and columns in this kernel so
+        // downstream NVFP4 GEMMs never observe stale scale factors.
+        *sf_out = 0;
+      }
 
       if (valid) {
         if constexpr (CVT_FP4_PACK16) {
@@ -108,7 +125,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
         } else {
           int64_t outOffset =
               rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
-          out[outOffset] = out_val;
+          reinterpret_cast<fp4_packed_t*>(out)[outOffset] = out_val;
         }
       }
     }
@@ -146,18 +163,41 @@ void silu_and_mul_nvfp4_quant_sm1xxa(
 
   int num_packed_cols = int(n / CVT_FP4_ELTS_PER_THREAD);
 
-  int grid_y = vllm::div_round_up(num_packed_cols, static_cast<int>(block.x));
-  int grid_x = std::min(
-      int(m), std::max(1, (multiProcessorCount * numBlocksPerSM) / grid_y));
+  // The swizzled scale tensor is padded to 128 rows x 4 scale columns; the
+  // grid covers the padding so the kernel can initialize it.
+  int sf_n_int = int(vllm::round_up(n / CVT_FP4_SF_VEC_SIZE, 4) / 4);
+  int num_padded_cols =
+      sf_n_int * 4 * CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD;
+
+  int grid_y = vllm::div_round_up(num_padded_cols, static_cast<int>(block.x));
+  int grid_x =
+      std::min(vllm::computeEffectiveRows(m),
+               std::max(1, (multiProcessorCount * numBlocksPerSM) / grid_y));
   dim3 grid(grid_x, grid_y);
+
+  // PDL launch pays off at small M; at large M the early-launched blocks
+  // slow the chain down, so keep the serialized launch there.
+  bool const use_pdl =
+      int64_t(m) * num_packed_cols <= int64_t(multiProcessorCount) * 4096;
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       input.scalar_type(), "silu_and_mul_nvfp4_quant_kernel", [&] {
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-        vllm::silu_mul_cvt_fp16_to_fp4<cuda_type><<<grid, block, 0, stream>>>(
-            m, n, num_packed_cols, input_ptr, input_sf_ptr,
-            reinterpret_cast<uint32_t*>(output_ptr),
-            reinterpret_cast<uint32_t*>(sf_out));
+        cudaLaunchConfig_t config = {};
+        config.gridDim = grid;
+        config.blockDim = block;
+        config.dynamicSmemBytes = 0;
+        config.stream = stream;
+        cudaLaunchAttribute attrs[1];
+        attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+        attrs[0].val.programmaticStreamSerializationAllowed = 1;
+        config.numAttrs = use_pdl ? 1 : 0;
+        config.attrs = attrs;
+        cudaLaunchKernelEx(&config, vllm::silu_mul_cvt_fp16_to_fp4<cuda_type>,
+                           m, n, num_packed_cols, num_padded_cols, input_ptr,
+                           input_sf_ptr,
+                           reinterpret_cast<uint32_t*>(output_ptr),
+                           reinterpret_cast<uint32_t*>(sf_out));
       });
 }

@@ -35,6 +35,14 @@ from ..token_in_token_out.protocol import (
 
 logger = init_logger(__name__)
 
+# A stop string can span chunks, so cutting it needs text held back across
+# calls. The engine already does that for output_mode=text.
+_STREAM_STOP_STRINGS_ERROR = (
+    "stop strings are not supported by streaming derender because text "
+    "already sent cannot be cut. Use non-streaming derender or "
+    "output_mode=text on /inference/v1/generate which holds stop strings back."
+)
+
 
 class ServingDerender(BaseServing):
     def __init__(
@@ -164,7 +172,7 @@ class ServingDerender(BaseServing):
             )
 
         try:
-            choices = await self.online_derenderer.derender_chat(
+            choices, prompt_logprobs = await self.online_derenderer.derender_chat(
                 request.generate_response,
                 request.chat_request,
                 request.prompt_token_ids,
@@ -197,7 +205,7 @@ class ServingDerender(BaseServing):
             created=int(time.time()),
             choices=choices,
             usage=usage,
-            prompt_logprobs=gen.prompt_logprobs,
+            prompt_logprobs=prompt_logprobs,
             prompt_token_ids=(
                 gen.prompt_token_ids
                 if request.chat_request is not None
@@ -295,6 +303,9 @@ class ServingDerender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.chat_request is not None and request.chat_request.stop:
+            return self.create_error_response(_STREAM_STOP_STRINGS_ERROR)
 
         if self.online_derenderer.parser is not None and request.chat_request is None:
             return self.create_error_response(
@@ -401,6 +412,9 @@ class ServingDerender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        if request.completion_request is not None and request.completion_request.stop:
+            return self.create_error_response(_STREAM_STOP_STRINGS_ERROR)
 
         prompt_ids_error = self._validate_prompt_token_ids([request.prompt_token_ids])
         if prompt_ids_error is not None:
