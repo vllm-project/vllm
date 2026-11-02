@@ -369,6 +369,43 @@ export TRITON_PTXAS_PATH="${CUDA_HOME}/bin/ptxas"
 export PATH="${CUDA_HOME}/bin:$PATH"
 ```
 
+## FlashInfer JIT build fails on a GPU newer than the local CUDA toolkit supports
+
+On a GPU whose compute capability is newer than the locally installed CUDA
+toolkit can compile for, FlashInfer's just-in-time (JIT) compilation cannot
+target the architecture. FlashInfer detects this and logs a warning such as:
+
+```text
+Failed to get device capability: SM 12.x requires CUDA >= 12.9.
+```
+
+Any code path that subsequently triggers a FlashInfer JIT build then fails with
+a message that names the wrong cause:
+
+```text
+RuntimeError: FlashInfer requires GPUs with sm75 or higher
+```
+
+The GPU is not too old; the *local CUDA toolkit* is too old to compile for it.
+For example, `sm_120` (RTX PRO 6000 Blackwell, RTX 5090) requires CUDA >= 12.9,
+so a system whose `nvcc` is 12.8 hits this even when the installed PyTorch wheel
+reports a newer CUDA runtime -- JIT compilation uses the local toolkit, not the
+wheel's runtime. Because FlashInfer is selected by default in several places,
+this can abort engine startup in any of:
+
+- the FlashInfer top-p/top-k sampler (on by default),
+- the auto-selected FlashInfer CUTLASS fused-MoE backend (for MoE models),
+- the FlashInfer attention backend used for an FP8 KV cache.
+
+Workarounds:
+
+- Install a CUDA toolkit new enough for your GPU (for `sm_120`, CUDA >= 12.9).
+- Disable the FlashInfer sampler: `export VLLM_USE_FLASHINFER_SAMPLER=0`.
+- For MoE models, use the Triton backend instead of FlashInfer CUTLASS by
+  passing `moe_backend="triton"`.
+
+See <https://github.com/vllm-project/vllm/issues/50705> for a fuller writeup.
+
 ## Known Issues
 
 - In `v0.5.2`, `v0.5.3`, and `v0.5.3.post1`, there is a bug caused by [zmq](https://github.com/zeromq/pyzmq/issues/2000) , which can occasionally cause vLLM to hang depending on the machine configuration. The solution is to upgrade to the latest version of `vllm` to include the [fix](https://github.com/vllm-project/vllm/pull/6759).
