@@ -761,6 +761,39 @@ async def test_stop_cancels_running_drain_first():
 
 
 @pytest.mark.asyncio
+async def test_cancelled_stop_still_stops_plugins():
+    """Cancelling `stop` while it waits for a drain to unwind defers the
+    cancellation until every plugin has stopped."""
+
+    class _SlowUnwind(_HangingDrain):
+        unwinding = asyncio.Event()
+        release = asyncio.Event()
+
+        async def drain(self, state, timeout):
+            try:
+                await super().drain(state, timeout)
+            finally:
+                self.unwinding.set()
+                await self.release.wait()
+
+    state = State()
+    state.started_endpoint_plugins = [plugin := _SlowUnwind([])]
+    state.shutdown_task = asyncio.create_task(
+        drain_endpoint_plugins(state, time.monotonic() + 30)
+    )
+    await plugin.entered.wait()
+    stop = asyncio.create_task(stop_endpoint_plugins(state))
+    await plugin.unwinding.wait()
+
+    stop.cancel()
+    await asyncio.sleep(0)
+    plugin.release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await stop
+    assert plugin.events == ["drain:cancelled", f"stop:{plugin.name}"]
+
+
+@pytest.mark.asyncio
 async def test_non_http_listener_requires_single_api_server(
     monkeypatch: pytest.MonkeyPatch,
 ):

@@ -278,11 +278,14 @@ async def stop_endpoint_plugins(state: State) -> None:
     A graceful shutdown still in progress (`state.shutdown_task`, e.g. when
     the watchdog stops HTTP or a later `start` fails while plugins drain) is
     cancelled and awaited first, so no drain overlaps a `stop`. In the normal
-    path it has already finished and nothing is awaited.
+    path it has already finished and nothing is awaited. Cancellation of
+    the caller is deferred until every plugin has stopped.
     """
     shutdown = getattr(state, "shutdown_task", None)
     if shutdown is not None and shutdown.cancel():
-        await asyncio.wait([shutdown])
+        while not shutdown.done():  # defer our own cancellation, as below
+            with contextlib.suppress(asyncio.CancelledError):
+                await asyncio.wait([shutdown])
     started = getattr(state, "started_endpoint_plugins", [])
     while started:
         plugin = started.pop()
