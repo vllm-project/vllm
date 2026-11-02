@@ -8,6 +8,7 @@ using fake transport and session objects.
 
 from __future__ import annotations
 
+import mmap
 import threading
 import time
 import uuid
@@ -17,6 +18,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from tests.v1.kv_offload.conftest import make_offloading_config
 from tests.v1.kv_offload.tiering.test_tiering_offloading import _mock_mmap_region
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_utils import DEFAULT_NONE_HASH_SEED, init_none_hash
@@ -27,6 +29,8 @@ from vllm.v1.kv_offload.base import (
     ReqContext,
     ScheduleEndContext,
 )
+from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     TieringOffloadingMetrics,
@@ -57,6 +61,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
     ConnectMsg,
     DisconnectMsg,
 )
+from vllm.v1.kv_offload.tiering.p2p.session.server import StoreDrainResult
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -883,6 +888,9 @@ class _FakeSession:
         self._stores = []
         self._new_fetch_ids = []
         return result
+
+    def drain_stores(self, kv_request_ids=None):
+        return StoreDrainResult([], set())
 
     def request_blocks(self, job_id, kv_request_id, keys, block_ids):
         self.requests.append((job_id, kv_request_id))
@@ -3084,3 +3092,234 @@ class TestIdleWhileServingPeers:
             assert tiering.has_pending_work() is True
         finally:
             tiering.shutdown()
+
+
+class _ControlledDrainData(_FakeData):
+    """Hold external transfers and inject peer traffic at an exact poll."""
+
+    def __init__(self, local_id):
+        super().__init__(local_id)
+        self.hold = False
+        self.on_poll = None
+
+    def poll(self, peer_id=None):
+        from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
+
+        if self.on_poll is not None:
+            self.on_poll()
+        if self.hold:
+            return PollResult(done=[], failed=[])
+        return super().poll(peer_id)
+
+
+@pytest.fixture
+def drain_transports():
+    return [_ControlledDrainData("A:1"), _ControlledDrainData("B:2")]
+
+
+@pytest.fixture
+def drain_peers(monkeypatch, drain_transports):
+    """Real managers and sessions; only the wire transports are in memory."""
+    init_none_hash(sha256)
+    a = _LoopbackControl("A:1")
+    b = _LoopbackControl("B:2")
+    a.pair(b)
+    controls = {"A:1": a, "B:2": b}
+    monkeypatch.setattr(
+        manager_module, "ZmqTransport", lambda local_id, *_: controls[local_id]
+    )
+    transports = iter(drain_transports)
+    monkeypatch.setattr(
+        manager_module, "NixlTransport", lambda *_, **__: next(transports)
+    )
+    spec = CPUOffloadingSpec(make_offloading_config())
+    peers = [
+        P2PSecondaryTierManager(
+            spec, memoryview(bytearray(65536)), host=host, port=port
+        )
+        for host, port in [("A", 1), ("B", 2)]
+    ]
+    try:
+        yield peers
+    finally:
+        for peer in peers:
+            peer.shutdown()
+
+
+@pytest.mark.parametrize("bound", [False, True])
+def test_drain_fails_unfetched_stores_and_rejects_late_fetch(drain_peers, bound):
+    """Reset must release every queued pin without offering stale chunk ids."""
+    consumer, producer = drain_peers
+    ctx = _req_context(_remote_prefiller_kv_params("B", 2))
+    consumer.on_new_request(ctx)
+    for _ in range(3):
+        list(consumer.get_finished_jobs())
+        list(producer.get_finished_jobs())
+
+    key = OffloadKey(b"unfetched")
+    if bound:
+        first = OffloadKey(b"first")
+        consumer.submit_load(_job_metadata(10, [first], [0], ctx.kv_transfer_params))
+        list(producer.get_finished_jobs())
+        producer.submit_store(
+            _job_metadata(11, [first], [0], _remote_decoder_kv_params())
+        )
+        assert list(producer.get_finished_jobs()) == [JobResult(11, True)]
+        assert list(consumer.get_finished_jobs()) == [JobResult(10, True)]
+
+    for job_id in (20, 21):
+        producer.submit_store(
+            _job_metadata(job_id, [key], [job_id - 20], _remote_decoder_kv_params())
+        )
+    producer.drain_jobs()
+    assert sorted(producer.get_finished_jobs(), key=lambda result: result.job_id) == [
+        JobResult(20, False),
+        JobResult(21, False),
+    ]
+    producer.drain_jobs()
+    assert list(producer.get_finished_jobs()) == []
+
+    consumer.submit_load(_job_metadata(30, [key], [1], ctx.kv_transfer_params))
+    list(producer.get_finished_jobs())
+    assert list(consumer.get_finished_jobs()) == [JobResult(30, False)]
+    producer.submit_store(_job_metadata(31, [key], [0], _remote_decoder_kv_params()))
+    assert list(producer.get_finished_jobs()) == [JobResult(31, False)]
+
+
+def test_reset_cache_releases_parked_p2p_slots(drain_peers):
+    """The real tiering reset can reclaim every slot held for an absent decoder."""
+    _, producer = drain_peers
+    region = SharedOffloadRegion(
+        engine_id=str(uuid.uuid4()),
+        num_chunks=8,
+        rank=0,
+        kv_bytes_per_chunk=mmap.PAGESIZE,
+        cpu_page_size=mmap.PAGESIZE,
+    )
+    tiering = TieringOffloadingManager(
+        CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
+        [producer],
+        tier_poll_interval_s=0,
+    )
+    ctx = _req_context(_remote_decoder_kv_params())
+    keys = [OffloadKey(b"one"), OffloadKey(b"two")]
+    try:
+        tiering.on_new_request(ctx)
+        store = tiering.prepare_store(keys, ctx)
+        assert store is not None
+        tiering.complete_store(store.keys_to_store, ctx)
+        tiering.on_schedule_end(ScheduleEndContext([], ()))
+        tiering.reset_cache()
+        tiering.on_reset_flushed()
+        assert all(tiering.lookup(key, ctx) is LookupResult.MISS for key in keys)
+        replacement = tiering.prepare_store(
+            [OffloadKey(str(i).encode()) for i in range(8)], ctx
+        )
+        assert replacement is not None
+        assert len(replacement.keys_to_store) == 8
+    finally:
+        tiering.shutdown()
+        region.cleanup()
+
+
+def test_drain_rejects_fetch_arriving_mid_poll(drain_peers, drain_transports):
+    """A fetch arriving during drain must not leave a live producer binding."""
+    consumer, producer = drain_peers
+    ctx = _req_context(_remote_prefiller_kv_params("B", 2, "active"))
+    consumer.on_new_request(ctx)
+    for _ in range(3):
+        list(consumer.get_finished_jobs())
+        list(producer.get_finished_jobs())
+    key = OffloadKey(b"active")
+    consumer.submit_load(_job_metadata(1, [key], [0], ctx.kv_transfer_params))
+    list(producer.get_finished_jobs())
+    producer.submit_store(
+        _job_metadata(2, [key], [0], _remote_decoder_kv_params("active"))
+    )
+    data = drain_transports[1]
+    data.hold = True
+    late_ctx = _req_context(_remote_prefiller_kv_params("B", 2, "late"))
+    consumer.on_new_request(late_ctx)
+    polls = 0
+
+    def peer_traffic():
+        nonlocal polls
+        polls += 1
+        if polls == 1:
+            consumer.submit_load(
+                _job_metadata(3, [key], [1], late_ctx.kv_transfer_params)
+            )
+        elif polls == 3:
+            data.hold = False
+
+    data.on_poll = peer_traffic
+    producer.drain_jobs()
+    assert list(producer.get_finished_jobs()) == [JobResult(2, True)]
+    assert sorted(consumer.get_finished_jobs(), key=lambda result: result.job_id) == [
+        JobResult(1, True),
+        JobResult(3, False),
+    ]
+    producer.submit_store(
+        _job_metadata(4, [key], [1], _remote_decoder_kv_params("late"))
+    )
+    assert list(producer.get_finished_jobs()) == [JobResult(4, False)]
+
+
+@pytest.mark.parametrize("fetch_before_reset", [False, True])
+def test_reset_symmetric_lookup_rounds(drain_peers, fetch_before_reset):
+    """Old HITs fail promptly after reset; fresh lookups can reuse a completed id."""
+    consumer, producer = drain_peers
+    region = SharedOffloadRegion(
+        engine_id=str(uuid.uuid4()),
+        num_chunks=8,
+        rank=0,
+        kv_bytes_per_chunk=mmap.PAGESIZE,
+        cpu_page_size=mmap.PAGESIZE,
+    )
+    tiering = TieringOffloadingManager(
+        CPUPrimaryTierOffloadingManager(num_chunks=8, mmap_region=region),
+        [producer],
+        tier_poll_interval_s=0,
+    )
+    key = OffloadKey(b"symmetric")
+    local_ctx = ReqContext(req_id="local")
+    ctx = _req_context(_remote_kv_source_kv_params("B", 2, "symmetric"))
+    step = ScheduleEndContext([], ())
+
+    def store():
+        output = tiering.prepare_store([key], local_ctx)
+        assert output is not None
+        tiering.complete_store(output.keys_to_store, local_ctx)
+        tiering.on_schedule_end(step)
+
+    def lookup():
+        assert consumer.lookup(key, ctx) is LookupResult.RETRY
+        consumer.on_schedule_end(step)
+        tiering.on_schedule_end(step)
+        list(consumer.get_finished_jobs())
+        assert consumer.lookup(key, ctx) is LookupResult.HIT
+
+    try:
+        tiering.on_new_request(local_ctx)
+        consumer.on_new_request(ctx)
+        for _ in range(3):
+            list(consumer.get_finished_jobs())
+            tiering.on_schedule_end(step)
+        store()
+        lookup()
+        if fetch_before_reset:
+            consumer.submit_load(_job_metadata(1, [key], [0], ctx.kv_transfer_params))
+            tiering.on_schedule_end(step)
+            assert list(consumer.get_finished_jobs()) == [JobResult(1, True)]
+
+        tiering.reset_cache()
+        tiering.on_reset_flushed()
+        if fetch_before_reset:
+            store()
+            lookup()
+        consumer.submit_load(_job_metadata(2, [key], [0], ctx.kv_transfer_params))
+        tiering.on_schedule_end(step)
+        assert list(consumer.get_finished_jobs()) == [JobResult(2, fetch_before_reset)]
+    finally:
+        tiering.shutdown()
+        region.cleanup()

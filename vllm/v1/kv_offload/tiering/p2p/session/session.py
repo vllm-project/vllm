@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -45,6 +45,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
     ServerRole,
+    StoreDrainResult,
     StoreResult,
 )
 
@@ -274,6 +275,12 @@ class P2PSession:
     ) -> None:
         """New blocks stored locally — match against pending fetch demand."""
         self._server.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
+
+    def drain_stores(
+        self, kv_request_ids: Iterable[str] | None = None
+    ) -> StoreDrainResult:
+        """Withdraw queued stores, optionally for fetches arriving during drain."""
+        return self._server.drain_stores(kv_request_ids)
 
     def finish_request(self, kv_request_id: str) -> None:
         """Called when the request is finishing locally.
