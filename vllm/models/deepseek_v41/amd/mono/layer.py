@@ -631,6 +631,7 @@ def run_ffn(
         s, rs, lds.moe.peek(), amb, bases, mlayout, scratch, margs, rank, own
     )
     cb["x_cm"], cb["x_ready"] = CM_DEV, True
+    cb["push_bases"] = a.get("push_bases") if tp == 4 else None
     cb["tag"] = ep & 255
     for i, region in enumerate(COUNTERS):
         cb[region] = sreg(a["epoch"], 4 * (EPOCH_COUNTERS + i * moe.TAGS), region)
@@ -859,6 +860,7 @@ def build_mono_k2(key: MonoBuild):
             out=out,
             scratch=scratch,
             epoch=epoch,
+            push_bases=lambda: [b + par for b in peer_bases(peers, tp)],
         )
         run_ffn(
             key, lds, ffn, amb, bases, own, rank, ep, tl=tl if key.timeline else None
