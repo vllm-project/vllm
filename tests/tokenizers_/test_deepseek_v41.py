@@ -263,6 +263,24 @@ def test_unsupported_media_is_a_request_error():
         render([{"role": "user", "content": [{"type": "input_audio"}]}])
 
 
+def test_tool_references_render_as_tool_names():
+    messages = [
+        {"role": "assistant", "tool_calls": [tool_call("tool_search")]},
+        {
+            "role": "tool",
+            "tool_call_id": "tool_search",
+            "content": [
+                {"type": "tool_reference", "name": "get_weather"},
+                {"type": "tool_reference", "name": "get_time"},
+            ],
+        },
+    ]
+    assert render(messages, thinking=False).endswith(
+        "<｜User｜><tool_result>get_weather\n\nget_time</tool_result>"
+        "<｜Assistant｜></think>"
+    )
+
+
 @pytest.fixture(params=[False, True], ids=["sync", "async"])
 def render_with_media(request, monkeypatch):
     # Keep real message parsing and image tracking; no model download is needed.
