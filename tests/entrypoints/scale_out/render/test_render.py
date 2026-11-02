@@ -1081,3 +1081,19 @@ async def test_tokenize_matches_chat_render_for_gpt_oss(gpt_oss_server):
 
     assert render.status_code == tokenize.status_code == 200
     assert tokenize.json()["tokens"] == render.json()["token_ids"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("override", ["omitted", None, False, True])
+async def test_render_omits_null_token_id_override(client, override):
+    """Default requests must not send a new field to older generate nodes."""
+    body = {"model": MODEL_NAME, "messages": [{"role": "user", "content": "Hi"}]}
+    if override != "omitted":
+        body["return_tokens_as_token_ids"] = override
+    response = await client.post("/v1/chat/completions/render", json=body)
+    response.raise_for_status()
+    context = response.json()["parse_context"]
+    if override is None or override == "omitted":
+        assert "return_tokens_as_token_ids" not in context
+    else:
+        assert context["return_tokens_as_token_ids"] is override
