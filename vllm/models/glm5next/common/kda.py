@@ -8,10 +8,12 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -43,6 +45,7 @@ from vllm.model_executor.layers.mamba.ops.gather_initial_states import (
 from vllm.model_executor.layers.mamba.ops.scatter_states import scatter_states
 from vllm.model_executor.model_loader.weight_utils import sharded_weight_loader
 from vllm.model_executor.utils import (
+    is_weights_pre_processed,
     maybe_disable_graph_partition,
     set_weight_attrs,
 )
@@ -62,6 +65,8 @@ else:
         chunk_kda_with_fused_gate,
         fused_recurrent_kda,
     )
+
+logger = init_logger(__name__)
 
 
 class _Glm5NextMergedColumnParallelLinear(MergedColumnParallelLinear):
@@ -306,6 +311,30 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.tp_rank,
             prefix=f"{prefix}.conv1d",
         )
+        additional_config = vllm_config.additional_config
+        decode_backend = (
+            additional_config.get("kda_decode_backend", "auto")
+            if isinstance(additional_config, dict)
+            else "auto"
+        )
+        if decode_backend not in ("auto", "native", "flashinfer", "triton"):
+            raise ValueError(f"Unsupported KDA decode backend: {decode_backend}")
+        # AITER's single-launch decode needs an fp32 state, head_dim 128 and a
+        # width-4 conv. Without a lower bound the stock kernel falls back to -5.0
+        # while AITER switches to the unbounded gate, so that config keeps the
+        # stock chain, as do spec decode and any explicit --kda-decode-backend.
+        self._use_aiter_decode = (
+            decode_backend == "auto"
+            and recurrent_state_dtype == torch.float32
+            and self.head_dim == 128
+            and self.conv_size == 4
+            and config.linear_lower_bound is not None
+            and self.num_spec == 0
+            and bool(rocm_aiter_ops.is_kda_gluon_decode_available())
+        )
+        if self._use_aiter_decode:
+            logger.info_once("GLM-5.3-Flash KDA decode: AITER single-launch kernel.")
+        self._register_decode_conv1d_weight()
 
         self.A_log = nn.Parameter(
             torch.empty(1, 1, self.local_num_heads, 1, dtype=torch.float32)
@@ -349,7 +378,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         # every _forward call (it reads an env-derived flag each time).
         self._conv_state_dim_first = is_conv_state_dim_first()
 
-        additional_config = vllm_config.additional_config
         self.kda_prefill_backend = _resolve_kda_prefill_backend(
             additional_config.get("kda_prefill_backend", "auto")
             if isinstance(additional_config, dict)
@@ -390,6 +418,60 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self._checkpoint_exporter = FlashKDAPrefillCheckpointExporter(
                 state_len=self.conv_size - 1
             )
+
+    def _register_decode_conv1d_weight(self) -> None:
+        """Register ``decode_conv1d_weight``, the q|k|v conv weight in the
+        ``[3, conv_size, dim]`` layout AITER's decode kernel reads (None when
+        that kernel is not used).
+
+        It is allocated once, so cudagraphs keep its address, and refreshed
+        from ``conv1d.weight`` after every load and layerwise reload
+        (``process_weights_after_loading``) and after every ``conv1d.weight``
+        shard load, which covers refits through ``load_weights`` outside the
+        reload lifecycle.
+        """
+        decode_conv1d_weight = None
+        if self._use_aiter_decode:
+            weight = self.conv1d.weight
+            decode_conv1d_weight = torch.empty(
+                3,
+                self.conv_size,
+                self.local_projection_size,
+                dtype=weight.dtype,
+                device=weight.device,
+            )
+            load_shard = weight.weight_loader
+
+            def weight_loader(
+                param: torch.Tensor,
+                loaded_weight: torch.Tensor,
+                loaded_shard_id: int,
+            ) -> None:
+                load_shard(param, loaded_weight, loaded_shard_id)
+                self._copy_decode_conv1d_weight()
+
+            delattr(weight, "weight_loader")
+            set_weight_attrs(weight, {"weight_loader": weight_loader})
+        self.register_buffer(
+            "decode_conv1d_weight", decode_conv1d_weight, persistent=False
+        )
+
+    @torch.no_grad()
+    def _copy_decode_conv1d_weight(self) -> None:
+        decode_weight, weight = self.decode_conv1d_weight, self.conv1d.weight
+        # Meta while a layerwise reload counts and buffers the loads (a copy
+        # here would be counted as loaded elements); its finalize calls
+        # process_weights_after_loading.
+        if decode_weight is None or decode_weight.is_meta or weight.is_meta:
+            return
+        decode_weight.copy_(
+            weight.view(3, self.local_projection_size, self.conv_size).transpose(1, 2)
+        )
+
+    def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
+        # The weight cache IPC loader maps the buffer the daemon already filled.
+        if not is_weights_pre_processed():
+            self._copy_decode_conv1d_weight()
 
     def _flashkda_prefill(
         self,
@@ -496,6 +578,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
+        # AITER's single-launch decode applies the gated RMSNorm in-kernel, so an
+        # eligible layer hands the norm to _forward. The route is chosen there
+        # per step: breakable PIECEWISE graphs replay _forward, not this function.
+        out_gate = g2 if self._use_aiter_decode else None
         # Call the decorated eager break directly so host-side prefill branches
         # are not captured by PIECEWISE CUDA graphs.
         self._forward(
@@ -503,8 +589,10 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             g1=g1,
             beta=beta,
             core_attn_out=core_attn_out,
+            out_gate=out_gate,
         )
-        core_attn_out = self.o_norm(core_attn_out, g2)
+        if out_gate is None:
+            core_attn_out = self.o_norm(core_attn_out, g2)
         core_attn_out = core_attn_out.reshape(core_attn_out.size(1), -1)
         return self.o_proj(core_attn_out)[0]
 
@@ -515,17 +603,22 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         g1: torch.Tensor,
         beta: torch.Tensor,
         core_attn_out: torch.Tensor,
+        out_gate: torch.Tensor | None = None,
     ) -> None:
+        """With ``out_gate``, also apply the gated RMSNorm that ``forward`` skips."""
         forward_context = get_forward_context()
         attn_metadata_raw = forward_context.attn_metadata
 
-        if attn_metadata_raw is None:
-            return
-
-        assert isinstance(attn_metadata_raw, dict)
-        attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
+        attn_metadata_narrowed = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata_narrowed = attn_metadata_raw.get(self.prefix)
         if attn_metadata_narrowed is None:
-            # Profile/warmup dummy runs may omit mamba-family metadata.
+            # Profile/warmup dummy runs may omit mamba-family metadata. They
+            # still norm, as forward does for other layers, so the profiled
+            # memory matches a real step.
+            if out_gate is not None:
+                core_attn_out.copy_(self.o_norm(core_attn_out, out_gate))
             return
         assert isinstance(attn_metadata_narrowed, GDNAttentionMetadata)
         has_initial_state = attn_metadata_narrowed.has_initial_state
@@ -567,6 +660,36 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
             self.conv1d.weight.size(0), self.conv1d.weight.size(-1)
         )
         conv_bias = self.conv1d.bias
+
+        num_decodes = attn_metadata_narrowed.num_decodes
+        if (
+            out_gate is not None
+            and attn_metadata_narrowed.num_prefills == 0
+            and num_decodes > 0
+        ):
+            # One launch for the conv update, recurrence and gated RMSNorm
+            # (out_gate implies no spec decode). The [N, 1] indices: the
+            # block-table column can be strided, which the flat form rejects.
+            assert non_spec_state_indices_tensor is not None
+            assert self.decode_conv1d_weight is not None
+            state_indices = non_spec_state_indices_tensor[:num_decodes].unsqueeze(1)
+            rocm_aiter_ops.kda_fused_recurrent_packed_decode(
+                mixed_qkv=qkv_proj_states[:num_decodes],
+                g=g1[0, :num_decodes],
+                beta=beta[0, :num_decodes],
+                A_log=self.A_log,
+                dt_bias=self.dt_bias,
+                lower_bound=lower_bound,
+                initial_state=recurrent_state,
+                ssm_state_indices=state_indices,
+                conv_state=conv_state,
+                conv_weight=self.decode_conv1d_weight,
+                out_gate=out_gate[:num_decodes],
+                norm_weight=self.o_norm.weight,
+                norm_eps=self.o_norm.eps,
+                out=core_attn_out[0, :num_decodes],
+            )
+            return
 
         # Split projections / gating into spec (draft-verify) and non-spec token
         # groups when speculative decoding is active. Spec tokens carry
@@ -793,3 +916,6 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
                 core_attn_out[0, :num_actual_tokens] = core_attn_out_non_spec[
                     0, :num_actual_tokens
                 ]
+
+        if out_gate is not None:
+            core_attn_out.copy_(self.o_norm(core_attn_out, out_gate))
