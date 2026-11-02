@@ -1678,7 +1678,7 @@ def test_aiter_moe_alignment_rule_holds_across_block_m(intermediate, num_tokens)
 
 
 class _MoriMoEConfig:
-    """FusedMoEConfig stand-in for a MoRI EP layer: unset backend flags are off."""
+    """FusedMoEConfig stand-in for a MoRI EPv1 layer: unset backend flags are off."""
 
     def __init__(self, use_mxfp4_w4a4_dsv4: bool):
         import types
@@ -1686,7 +1686,7 @@ class _MoriMoEConfig:
         self.moe_parallel_config = types.SimpleNamespace(
             use_passthrough_all2all=False, use_all2all_kernels=True
         )
-        self.use_mori_kernels = True
+        self.use_mori_epv1_kernels = True
         self.use_mxfp4_w4a4_dsv4 = use_mxfp4_w4a4_dsv4
         self.hidden_dim = 256
         self.max_num_tokens = 8
@@ -1766,7 +1766,7 @@ def test_aiter_experts_output_width_with_packed_fp4_input(
 
     experts = object.__new__(AiterMxfp4Experts)
     experts.moe_config = types.SimpleNamespace(
-        use_mori_kernels=True, use_mxfp4_w4a4_dsv4=dsv4
+        use_mori_epv1_kernels=True, use_mxfp4_w4a4_dsv4=dsv4
     )
     experts.quant_config = types.SimpleNamespace(use_mxfp4_w4a4=False)
     monkeypatch.setenv("VLLM_MORI_A4W4_FP4_DISPATCH", env_value)
