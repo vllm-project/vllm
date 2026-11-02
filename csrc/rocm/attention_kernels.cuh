@@ -3774,11 +3774,10 @@ void paged_attention_custom_launcher_navi(
 // TODO: implement interleaved V-cache support in the NAVI (GFX11/GFX12)
 // kernels if shuffle KV cache layout is needed on RDNA GPUs.
 //
-// BLK_SIZE, HEAD_SIZE, OUTT and ALIBI_ENABLED are the remaining template
-// parameters of the launchers. BLK_SIZE/HEAD_SIZE/ALIBI_ENABLED/OUTT are baked
-// into the generated entry points (see generate_paged_attn.py) so that each
-// translation unit only instantiates one slice of the kernel set;
-// use_interleaved_v_cache and is_navi remain runtime branches.
+// BLK_SIZE/HEAD_SIZE are baked into the generated entry points (see
+// generate_paged_attn.py); ALIBI_ENABLED, the out dtype,
+// use_interleaved_v_cache and is_navi stay runtime branches, see the NOTE
+// below.
 #define CALL_CUSTOM_LAUNCHER(T, KVT, KV_DTYPE, BLK_SIZE, HEAD_SIZE, OUTT,  \
                              PSIZE, ALIBI_ENABLED, MFMA_TYPE)              \
   if (use_interleaved_v_cache) {                                           \

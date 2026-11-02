@@ -196,7 +196,8 @@ OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
 # CMake passes the key it compares against so the format is defined in one place;
 # a manual run falls back to the hash above.
 with open(__file__, "rb") as _self:
-    SCRIPT_HASH = hashlib.md5(_self.read()).hexdigest()
+    # A cache key only: a FIPS-enforcing host rejects md5 without this flag.
+    SCRIPT_HASH = hashlib.md5(_self.read(), usedforsecurity=False).hexdigest()
 KEY = sys.argv[1] if len(sys.argv) > 1 else SCRIPT_HASH
 STAMP_NAME = ".paged_attn_generated"
 
@@ -316,8 +317,11 @@ def generate_dispatch():
             )
 
             mfma_types = list(by_mfma)
-            if len(mfma_types) == 1 and mfma_types[0] is None:
-                lines.extend(block_size_switch(by_mfma[None], 6))
+            # A lone arm is the catch-all and takes the no-split path: None when
+            # mfma_type is not a dimension here, "f16" when it is the only arm left
+            # (a bare `else {` would otherwise open a block with no `if`).
+            if mfma_types in ([None], ["f16"]):
+                lines.extend(block_size_switch(by_mfma[mfma_types[0]], 6))
             else:
                 # ``mfma_type`` is matched with a plain ``else`` on the last arm,
                 # as the hand-written dispatch used to: any value other than the
@@ -420,9 +424,9 @@ def main():
     ):
         write(name, content)
         outputs.append(name)
-    # Record what is on disk next to the outputs: CMake checks this list instead
-    # of trusting a glob, and compares the key (script hash + arch list) so that
-    # a build directory with a different arch list cannot reuse these units.
+    # Record what is on disk next to the outputs: CMake takes this list as its
+    # source list and compares the key (this script's hash) so that units left by
+    # another version of the script are regenerated. The key is arch-independent.
     write(STAMP_NAME, KEY + "\n" + "\n".join(outputs) + "\n")
     print(f"Generated {len(outputs)} paged attention files.")
 

@@ -1666,6 +1666,14 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     message(STATUS "Paged attention generation is up to date.")
   endif()
 
+  # Configure deps too, so a plain `ninja` on an out-of-tree build dir regenerates
+  # a missing unit (e.g. after `git clean -X`) instead of failing on a missing
+  # source; see docs/contributing/incremental_build.md. pip install reruns anyway.
+  list(TRANSFORM VLLM_ATTENTION_PAGED_ATTN_SRC
+    PREPEND ${CMAKE_CURRENT_SOURCE_DIR}/ OUTPUT_VARIABLE _attn_generated_abs)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${ROCM_ATTN_GEN_STAMP} ${_attn_generated_abs})
+
   set(VLLM_ROCM_EXT_SRC
     "csrc/rocm/torch_bindings.cpp"
     "csrc/rocm/skinny_gemms.cu"
