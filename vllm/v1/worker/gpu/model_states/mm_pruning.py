@@ -70,11 +70,11 @@ class MultiModalPruner:
         for batch_idx, req_id in enumerate(input_batch.req_ids):
             num_computed = num_computed_list[batch_idx]
             query_end = num_computed + num_scheduled_list[batch_idx]
-            num_req_embeds = self._num_window_embeds(req_id, num_computed, query_end)
-            if num_req_embeds == 0:
+            mm_offsets = self._window_offsets(req_id, num_computed, query_end)
+            if not mm_offsets:
                 continue
-            req_embeds = mm_embeds[pos : pos + num_req_embeds]
-            pos += num_req_embeds
+            req_embeds = mm_embeds[pos : pos + len(mm_offsets)]
+            pos += len(mm_offsets)
 
             req_idx = req_idx_list[batch_idx]
             prefill_len = prefill_lens_list[batch_idx]
@@ -87,6 +87,7 @@ class MultiModalPruner:
                 multimodal_embeddings=req_embeds,
                 mrope_positions=mrope_positions,
                 num_computed_tokens=num_computed,
+                multimodal_offsets=mm_offsets,
             )
             self.rope_state.update_prefill_positions(req_idx, new_positions, delta)
             cleaned.extend(
@@ -97,10 +98,13 @@ class MultiModalPruner:
         assert pos == len(mm_embeds)
         return cleaned
 
-    def _num_window_embeds(self, req_id: str, query_start: int, query_end: int) -> int:
-        """Count the media items contributing embeddings to [query_start,
-        query_end), mirroring EncoderRunner.gather_mm_embeddings' per-request
-        windowing so the flat mm_embeds list can be re-segmented per request.
+    def _window_offsets(
+        self, req_id: str, query_start: int, query_end: int
+    ) -> list[int]:
+        """Placeholder offsets of the media items contributing embeddings to
+        [query_start, query_end), mirroring EncoderRunner.gather_mm_embeddings'
+        per-request windowing so the flat mm_embeds list can be re-segmented
+        per request.
 
         Note: This logic is intentionally duplicated here rather than being emitted
         from gather_mm_embeddings, to keep the main path cleaner, since this is a niche
@@ -110,7 +114,7 @@ class MultiModalPruner:
         lo, hi = get_mm_features_in_window(
             mm_features, start=query_start, end=query_end
         )
-        count = 0
+        offsets = []
         for mm_feature in mm_features[lo:hi]:
             pos_info = mm_feature.mm_position
             start_idx = max(query_start - pos_info.offset, 0)
@@ -119,8 +123,8 @@ class MultiModalPruner:
                 start_idx, end_idx
             )
             if embeds_start != embeds_end:
-                count += 1
-        return count
+                offsets.append(pos_info.offset)
+        return offsets
 
 
 def maybe_create_mm_pruner(
