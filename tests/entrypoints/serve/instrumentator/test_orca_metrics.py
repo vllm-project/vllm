@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import openai
+import prometheus_client
 import pytest
 import pytest_asyncio
 
 from tests.utils import RemoteOpenAIServer
+from vllm.entrypoints.serve.utils import orca_metrics
 
 # any model with a chat template should work here
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -124,3 +126,39 @@ async def test_single_completion(client: openai.AsyncOpenAI):
     )
     assert len(completion.choices[0].text) >= 1
     assert completion.choices[0].prompt_logprobs is None
+
+
+@pytest.mark.parametrize(
+    ("metrics_format", "expected"),
+    [
+        (
+            "TEXT",
+            "TEXT named_metrics.kv_cache_usage_perc=0.5, "
+            "named_metrics.num_requests_waiting=40.0",
+        ),
+        (
+            "JSON",
+            'JSON {"named_metrics": {"kv_cache_usage_perc": 0.5, '
+            '"num_requests_waiting": 40.0}}',
+        ),
+    ],
+    ids=["text", "json"],
+)
+def test_orca_header_aggregates_dp_engines(monkeypatch, metrics_format, expected):
+    """With DP, the API server holds one sample per engine. The header must
+    report the whole endpoint's load, not the last engine's."""
+    registry = prometheus_client.CollectorRegistry()
+    monkeypatch.setattr("vllm.v1.metrics.reader.REGISTRY", registry)
+    for name, values in [
+        ("vllm:kv_cache_usage_perc", (0.95, 0.05)),
+        ("vllm:num_requests_waiting", (40.0, 0.0)),
+    ]:
+        gauge = prometheus_client.Gauge(
+            name, name, labelnames=["model_name", "engine"], registry=registry
+        )
+        for engine, value in enumerate(values):
+            gauge.labels(model_name="m", engine=str(engine)).set(value)
+
+    assert orca_metrics.metrics_header(metrics_format) == {
+        "endpoint-load-metrics": expected
+    }
