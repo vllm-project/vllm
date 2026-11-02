@@ -5,18 +5,14 @@ import shutil
 import tempfile
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 import torch
 
-from tests.v1.kv_connector.unit.utils import (
-    create_scheduler,
-    create_vllm_config,
-    maybe_update_block_size,
-)
+from tests.v1.kv_connector.unit.utils import create_vllm_config, maybe_update_block_size
 from vllm import LLM, SamplingParams
-from vllm.config import KVTransferConfig, VllmConfig
+from vllm.config import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -1238,43 +1234,33 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
 
 @pytest.mark.cpu_test
 @pytest.mark.parametrize(
-    ("child_roles", "defer_block_free"),
+    ("top_role", "child_roles", "consumer", "producer"),
     [
-        (["kv_producer", "kv_both"], True),
-        (["kv_producer", "kv_producer"], False),
+        ("kv_producer", ["kv_producer", "kv_both"], True, True),
+        ("kv_producer", ["kv_producer", "kv_producer"], False, True),
+        ("kv_consumer", ["kv_consumer", "kv_both"], True, True),
+        ("kv_both", ["kv_producer"], False, True),
     ],
-    ids=["loading-child", "pure-producers"],
+    ids=["loading-child", "pure-producers", "saving-child", "no-loading-child"],
 )
-def test_defer_block_free_follows_child_roles(
-    tmp_path: Path, child_roles: list[str], defer_block_free: bool
+def test_multi_connector_role_follows_children(
+    top_role, child_roles, consumer, producer
 ):
-    """A kv_producer MultiConnector whose child loads KV (e.g. a P/D prefiller
-    that also reads a shared KV store) must still defer freeing blocks under
-    overlapping batches, or an in-flight step can overwrite blocks reused by a
-    load. Pure producers never load, so they keep freeing blocks immediately.
-    """
-    connectors = [
-        {
-            "kv_connector": "ExampleConnector",
-            "kv_role": role,
-            "kv_connector_extra_config": {"shared_storage_path": str(tmp_path)},
-        }
-        for role in child_roles
-    ]
-    vllm_config = create_vllm_config(
+    """MultiConnector does not pass its own kv_role to its connectors, so their
+    roles decide whether it loads KV (e.g. whether the scheduler defers freeing
+    blocks) and whether it saves KV."""
+    config = KVTransferConfig(
         kv_connector="MultiConnector",
-        kv_role="kv_producer",
-        kv_connector_extra_config={"connectors": connectors},
+        kv_role=top_role,
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "ExampleConnector", "kv_role": role}
+                for role in child_roles
+            ]
+        },
     )
-    # Async scheduling is disabled on CPU, so force overlapping batches.
-    with patch.object(
-        VllmConfig,
-        "max_concurrent_batches",
-        new_callable=PropertyMock,
-        return_value=2,
-    ):
-        scheduler = create_scheduler(vllm_config)
-    assert scheduler.defer_block_free is defer_block_free
+    assert config.is_kv_consumer is consumer
+    assert config.is_kv_producer is producer
 
 
 @pytest.mark.skipif(
