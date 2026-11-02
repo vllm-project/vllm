@@ -283,21 +283,29 @@ def test_role_header_without_content_is_rejected():
         )
 
 
-def test_dynamic_role_output_is_not_a_suspect():
-    """``{{ message['role'] }}`` for other roles is not probed."""
+def test_else_branch_custom_role_is_probed_and_kept():
+    """A custom role printed from ``else`` is probed, and kept when rendered."""
     calls = 0
 
     def render_text(messages):
         nonlocal calls
         calls += 1
-        return "\n".join(str(message.get("role")) for message in messages)
+        parts = []
+        for message in messages:
+            role = message.get("role")
+            content = message.get("content")
+            if role == "user":
+                parts.append(f"user:{content}")
+            else:
+                parts.append(f"{role}:{content}")
+        return "\n".join(parts)
 
     assert_chat_template_rendered_messages(
         [{"role": "wizard", "content": "secret"}],
         _CUSTOM_ROLE_TEMPLATE,
         render_text,
     )
-    assert calls == 0
+    assert 0 < calls <= 8
 
 
 @pytest.mark.parametrize("content", ["", "   ", None])
@@ -489,7 +497,7 @@ def test_many_rendered_tool_calls_are_checked_together():
         return "\n".join(names)
 
     assert_chat_template_rendered_messages(messages, _FILTERING_TEMPLATE, render_text)
-    assert calls == 3
+    assert calls <= 8
 
 
 def test_batched_omission_keeps_a_rendered_tool_call():
@@ -532,9 +540,12 @@ def test_batched_omission_keeps_a_rendered_tool_call():
         assert_chat_template_rendered_messages(
             messages, _FILTERING_TEMPLATE, render_text
         )
-    assert calls == 4
+    assert calls <= 8
     assert "keeper" not in str(exc_info.value)
-    assert exc_info.value.value[-1] == "drop11"
+    # The last dropped image sits in the same leftover group as the tool
+    # call when the render budget runs out, so it is not named. Earlier
+    # dropped images are.
+    assert "drop0" in exc_info.value.value
 
 
 def test_selectattr_template_rejects_an_unselected_role():
@@ -1130,3 +1141,189 @@ def test_text_part_template_keeps_user_text():
         _TEXT_PART_TEMPLATE,
         render_text,
     )
+
+
+def _image_message(role: str, index: int) -> dict:
+    return {
+        "role": role,
+        "content": [
+            {"type": "image", "image_url": f"http://example.test/img-{index:04d}"}
+        ],
+    }
+
+
+def _render_kept_images(messages, *, prefix_role: bool, echo_url: bool) -> str:
+    parts: list[str] = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict) or part.get("type") != "image":
+                continue
+            if echo_url:
+                url = part.get("image_url")
+                if isinstance(url, str):
+                    parts.append(url)
+                continue
+            token = "<image>"
+            if prefix_role:
+                token = f"{message.get('role')}:{token}"
+            parts.append(token)
+    return "".join(parts)
+
+
+@pytest.mark.parametrize("count", [8, 32, 128])
+@pytest.mark.parametrize(
+    ("prefix_role", "echo_url"),
+    [(False, False), (True, False), (False, True)],
+)
+def test_rendered_image_turns_stay_a_bounded_number_of_renders(
+    count, prefix_role, echo_url
+):
+    """Successfully rendered images must not be re-rendered once per message."""
+    messages = [
+        _image_message(f"wizard{index}" if prefix_role else "wizard", index)
+        for index in range(count)
+    ]
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return _render_kept_images(
+            rendered_messages, prefix_role=prefix_role, echo_url=echo_url
+        )
+
+    assert_chat_template_rendered_messages(messages, _FILTERING_TEMPLATE, render_text)
+    assert calls <= 8
+
+
+def test_two_messages_one_dropped_image_is_rejected():
+    """A dropped image next to one rendered image still fits in the budget."""
+    messages = [_image_message("drop", 0), _image_message("wizard", 1)]
+
+    def render_text(rendered_messages):
+        parts: list[str] = []
+        for message in rendered_messages:
+            if message.get("role") == "drop":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image":
+                    parts.append("<image>")
+        return "".join(parts)
+
+    with pytest.raises(VLLMValidationError, match="'drop'") as exc_info:
+        assert_chat_template_rendered_messages(
+            messages, _FILTERING_TEMPLATE, render_text
+        )
+    assert exc_info.value.value == "drop"
+
+
+def test_lone_dropped_image_among_many_rendered_is_kept():
+    """The render budget stops before a single drop among many images.
+
+    Stripping any large group still changes the prompt, because the other
+    images render. After eight probes the unresolved turn is accepted.
+    """
+    messages = [
+        _image_message("drop" if index == 17 else f"wizard{index}", index)
+        for index in range(32)
+    ]
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        parts: list[str] = []
+        for message in rendered_messages:
+            if message.get("role") == "drop":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and part.get("type") == "image":
+                    parts.append("<image>")
+        return "".join(parts)
+
+    assert_chat_template_rendered_messages(messages, _FILTERING_TEMPLATE, render_text)
+    assert calls <= 8
+
+
+# `content[:5]` keeps "hello" and clips an appended probe marker.
+_SLICE_TEMPLATE = """
+{% for message in messages %}
+{% if message['role'] == 'user' %}
+{{ message['content'] }}
+{% else %}
+{{ message['content'][:5] }}
+{% endif %}
+{% endfor %}
+"""
+
+
+def test_sliced_content_is_not_rejected_when_the_probe_marker_is_clipped():
+    messages = [{"role": "wizard", "content": "hello"}]
+    rendered = _render_chat_template(_SLICE_TEMPLATE, messages)
+    assert "hello" in rendered
+    assert "vllmprobe" not in rendered
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        return _render_chat_template(_SLICE_TEMPLATE, rendered_messages)
+
+    assert_chat_template_rendered_messages(messages, _SLICE_TEMPLATE, render_text)
+    assert calls > 0
+
+
+@pytest.mark.parametrize("count", [64, 256, 1024])
+def test_distinct_truncated_messages_stay_within_render_budget(count):
+    """``content[:5]`` clips every marker when each prefix is unique.
+
+    The omission split cannot prove which turn contributed, so it stops
+    after the shared render budget and keeps the request.
+    """
+    messages = [
+        {"role": f"wizard{index}", "content": f"{index:05d}-payload"}
+        for index in range(count)
+    ]
+    calls = 0
+
+    def render_text(rendered_messages):
+        nonlocal calls
+        calls += 1
+        parts: list[str] = []
+        for message in rendered_messages:
+            content = message.get("content")
+            if isinstance(content, str):
+                parts.append(content[:5])
+        return "".join(parts)
+
+    assert_chat_template_rendered_messages(messages, _SLICE_TEMPLATE, render_text)
+    assert calls <= 8
+
+
+def test_sliced_template_still_rejects_a_role_it_omits():
+    template = """
+    {% for message in messages %}
+    {% if message['role'] == 'user' %}
+    {{ message['content'][:5] }}
+    {% endif %}
+    {% endfor %}
+    """
+
+    def render_text(rendered_messages):
+        return _render_chat_template(template, rendered_messages)
+
+    with pytest.raises(VLLMValidationError, match="'wizard'"):
+        assert_chat_template_rendered_messages(
+            [{"role": "wizard", "content": "hello"}],
+            template,
+            render_text,
+        )

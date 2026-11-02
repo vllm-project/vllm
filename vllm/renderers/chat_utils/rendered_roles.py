@@ -124,21 +124,44 @@ def _literal_role_names(node: jinja2.nodes.Node) -> list[str] | None:
 _ROLE_INCLUDE_TESTS = frozenset({"equalto", "eq", "==", "sameas", "in"})
 
 
+# Extra conversation renders spent proving a drop. Past this, unresolved
+# turns are kept: a clipped marker or a rendered image must not walk the
+# whole conversation again.
+_MAX_EXTRA_RENDERS = 8
+
+_RoleFinding = Literal["ignore", "literal", "dynamic", "exclude"]
+
+
+class _TemplateRoles(NamedTuple):
+    """Literal roles named by one parsed template.
+
+    ``handled is None`` means the template does not filter on role.
+    ``excluded`` is roles a ``rejectattr`` test drops by name. Standard
+    roles in that set, or outside a non-empty ``handled`` set, are warned
+    and not probed.
+    """
+
+    handled: frozenset[str] | None
+    excluded: frozenset[str]
+
+
 def _roles_from_attr_filter(
     node: jinja2.nodes.Filter,
-) -> tuple[Literal["ignore", "literal", "dynamic"], set[str]]:
+) -> tuple[_RoleFinding, set[str]]:
     """Classify a ``selectattr`` / ``rejectattr`` call on ``role``.
 
     ``selectattr('role', 'equalto', 'user')`` keeps that literal role.
-    ``rejectattr``, a non-literal target, or a test that is not an
-    inclusion (``ne``) still means the template filters by role, but the
-    kept names are not a literal allow-list.
+    ``rejectattr('role', 'equalto', 'tool')`` names a role the template
+    drops. A non-literal target, or a test that is not an inclusion
+    (``ne``), still means the template filters by role, but the kept
+    names are not a literal allow-list.
 
     Returns:
         ``("ignore", empty)`` when the filter does not test ``role``,
-        ``("literal", names)`` when ``selectattr`` names kept roles, or
-        ``("dynamic", empty)`` when the filter is real but the kept
-        roles are not literals.
+        ``("literal", names)`` when ``selectattr`` names kept roles,
+        ``("exclude", names)`` when ``rejectattr`` names dropped roles,
+        or ``("dynamic", empty)`` when the filter is real but the names
+        are not literals.
 
     """
     if node.name not in {"selectattr", "rejectattr"} or not node.args:
@@ -146,7 +169,7 @@ def _roles_from_attr_filter(
     attr = node.args[0]
     if not isinstance(attr, jinja2.nodes.Const) or attr.value != "role":
         return "ignore", set()
-    if node.name != "selectattr" or len(node.args) < 3:
+    if len(node.args) < 3:
         return "dynamic", set()
     test = node.args[1]
     if (
@@ -157,12 +180,14 @@ def _roles_from_attr_filter(
     names = _literal_role_names(node.args[2])
     if names is None:
         return "dynamic", set()
+    if node.name == "rejectattr":
+        return "exclude", set(names)
     return "literal", set(names)
 
 
 def _roles_from_compare(
     node: jinja2.nodes.Compare,
-) -> tuple[Literal["ignore", "literal", "dynamic"], set[str]]:
+) -> tuple[_RoleFinding, set[str]]:
     """Classify one comparison that might select rendered roles.
 
     Only ``==`` and ``in`` count. ``!=`` and ``not in`` are generation-prompt
@@ -210,10 +235,43 @@ def _roles_from_compare(
 
 
 @lru_cache(maxsize=32)
+def _template_roles(chat_template: str) -> _TemplateRoles:
+    """Parse ``chat_template`` once for literal role names and exclusions."""
+    try:
+        parsed = _parse_chat_template(chat_template)
+    except Exception:
+        logger.warning(
+            "Could not parse the chat template while checking message roles.",
+            exc_info=True,
+        )
+        return _TemplateRoles(None, frozenset())
+
+    included: set[str] = set()
+    excluded: set[str] = set()
+    saw_role_filter = False
+    findings = [
+        _roles_from_compare(node) for node in parsed.find_all(jinja2.nodes.Compare)
+    ]
+    findings.extend(
+        _roles_from_attr_filter(node) for node in parsed.find_all(jinja2.nodes.Filter)
+    )
+    for kind, found in findings:
+        if kind == "ignore":
+            continue
+        saw_role_filter = True
+        if kind == "literal":
+            included.update(found)
+        elif kind == "exclude":
+            excluded.update(found)
+    if not saw_role_filter:
+        return _TemplateRoles(None, frozenset())
+    return _TemplateRoles(frozenset(included), frozenset(excluded))
+
+
 def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None:
     """Return roles a template explicitly dispatches on.
 
-    The Jinja AST is walked for comparisons that read ``.role`` or
+    The Jinja AST is walked once for comparisons that read ``.role`` or
     ``['role']``, and for ``selectattr`` / ``rejectattr`` on ``role``.
     ``None`` means the template does not filter by role, so every role is
     emitted (ChatML-style ``{{ message['role'] }}``). A frozenset, possibly
@@ -231,407 +289,7 @@ def roles_rendered_by_chat_template(chat_template: str) -> frozenset[str] | None
         there is no role filter.
 
     """
-    try:
-        parsed = _parse_chat_template(chat_template)
-    except Exception:
-        logger.warning(
-            "Could not parse the chat template while checking message roles.",
-            exc_info=True,
-        )
-        return None
-
-    roles: set[str] = set()
-    saw_role_filter = False
-    findings = [
-        _roles_from_compare(node) for node in parsed.find_all(jinja2.nodes.Compare)
-    ]
-    findings.extend(
-        _roles_from_attr_filter(node) for node in parsed.find_all(jinja2.nodes.Filter)
-    )
-    for kind, found in findings:
-        if kind == "ignore":
-            continue
-        saw_role_filter = True
-        if kind == "literal":
-            roles.update(found)
-    if not saw_role_filter:
-        return None
-    return frozenset(roles)
-
-
-class _RoleConstraint(NamedTuple):
-    """How one template path limits ``message.role``.
-
-    ``roles is None`` means the path does not pin the role to literals.
-    ``excludes`` means the role must fall outside ``roles``.
-    """
-
-    roles: frozenset[str] | None
-    excludes: bool
-
-
-def _any_role() -> _RoleConstraint:
-    return _RoleConstraint(None, False)
-
-
-def _fixed_roles(names: Iterable[str]) -> _RoleConstraint:
-    return _RoleConstraint(frozenset(names), False)
-
-
-def _excluded_roles(names: Iterable[str]) -> _RoleConstraint:
-    return _RoleConstraint(frozenset(names), True)
-
-
-def _and_role_constraints(
-    left: _RoleConstraint, right: _RoleConstraint
-) -> _RoleConstraint:
-    if left.roles is None and not left.excludes:
-        return right
-    if right.roles is None and not right.excludes:
-        return left
-    left_roles = left.roles or frozenset()
-    right_roles = right.roles or frozenset()
-    if not left.excludes and not right.excludes:
-        return _fixed_roles(left_roles & right_roles)
-    if left.excludes and right.excludes:
-        return _excluded_roles(left_roles | right_roles)
-    fixed = left_roles if not left.excludes else right_roles
-    excluded = right_roles if not left.excludes else left_roles
-    return _fixed_roles(fixed - excluded)
-
-
-def _or_role_constraints(
-    left: _RoleConstraint, right: _RoleConstraint
-) -> _RoleConstraint:
-    if (left.roles is None and not left.excludes) or (
-        right.roles is None and not right.excludes
-    ):
-        return _any_role()
-    left_roles = left.roles or frozenset()
-    right_roles = right.roles or frozenset()
-    if not left.excludes and not right.excludes:
-        return _fixed_roles(left_roles | right_roles)
-    if left.excludes and right.excludes:
-        return _excluded_roles(left_roles & right_roles)
-    fixed = left_roles if not left.excludes else right_roles
-    excluded = right_roles if not left.excludes else left_roles
-    return _excluded_roles(excluded - fixed)
-
-
-def _not_role_constraint(constraint: _RoleConstraint) -> _RoleConstraint:
-    if constraint.roles is None:
-        return _any_role()
-    if not constraint.excludes:
-        return _excluded_roles(constraint.roles)
-    return _fixed_roles(constraint.roles)
-
-
-def _is_field_access(node: jinja2.nodes.Node, field: str) -> bool:
-    if isinstance(node, jinja2.nodes.Getattr):
-        return node.attr == field
-    if isinstance(node, jinja2.nodes.Getitem):
-        return isinstance(node.arg, jinja2.nodes.Const) and node.arg.value == field
-    return False
-
-
-def _field_base_name(node: jinja2.nodes.Node) -> str | None:
-    base = node.node  # type: ignore[attr-defined]
-    if isinstance(base, jinja2.nodes.Name):
-        return base.name
-    return None
-
-
-def _role_vars_in(expr: jinja2.nodes.Node) -> set[str]:
-    found: set[str] = set()
-
-    def walk(node: jinja2.nodes.Node) -> None:
-        if _is_field_access(node, "role"):
-            base = _field_base_name(node)
-            if base:
-                found.add(base)
-        for child in node.iter_child_nodes():
-            walk(child)
-
-    walk(expr)
-    return found
-
-
-def _compare_role_constraint(node: jinja2.nodes.Compare, var: str) -> _RoleConstraint:
-    if not node.ops:
-        return _any_role()
-    operand = node.ops[0]
-
-    def role_var(expr: jinja2.nodes.Node) -> str | None:
-        if _is_field_access(expr, "role"):
-            return _field_base_name(expr)
-        return None
-
-    left = role_var(node.expr)
-    right = role_var(operand.expr)
-    op = operand.op
-    if op in {"eq", "ne"}:
-        if left != var and right != var:
-            return _any_role()
-        literal = operand.expr if left == var else node.expr
-        names = _literal_role_names(literal)
-        if names is None:
-            return _any_role()
-        if op == "eq":
-            return _fixed_roles(names)
-        return _excluded_roles(names)
-    if op in {"in", "notin"} and left == var:
-        names = _literal_role_names(operand.expr)
-        if names is None:
-            return _any_role()
-        if op == "in":
-            return _fixed_roles(names)
-        return _excluded_roles(names)
-    return _any_role()
-
-
-def _constraint_on_var(expr: jinja2.nodes.Node, var: str) -> _RoleConstraint:
-    if isinstance(expr, jinja2.nodes.And):
-        return _and_role_constraints(
-            _constraint_on_var(expr.left, var),
-            _constraint_on_var(expr.right, var),
-        )
-    if isinstance(expr, jinja2.nodes.Or):
-        return _or_role_constraints(
-            _constraint_on_var(expr.left, var),
-            _constraint_on_var(expr.right, var),
-        )
-    if isinstance(expr, jinja2.nodes.Not):
-        return _not_role_constraint(_constraint_on_var(expr.node, var))
-    if isinstance(expr, jinja2.nodes.Compare):
-        return _compare_role_constraint(expr, var)
-    return _any_role()
-
-
-def _filter_role_constraint(node: jinja2.nodes.Filter) -> _RoleConstraint:
-    if node.name not in {"selectattr", "rejectattr"} or not node.args:
-        return _any_role()
-    attr = node.args[0]
-    if not isinstance(attr, jinja2.nodes.Const) or attr.value != "role":
-        return _any_role()
-    if len(node.args) < 3:
-        return _any_role()
-    test = node.args[1]
-    if (
-        not isinstance(test, jinja2.nodes.Const)
-        or test.value not in _ROLE_INCLUDE_TESTS
-    ):
-        return _any_role()
-    names = _literal_role_names(node.args[2])
-    if names is None:
-        return _any_role()
-    if node.name == "rejectattr":
-        return _excluded_roles(names)
-    return _fixed_roles(names)
-
-
-def _iterator_role_constraint(node: jinja2.nodes.Node) -> _RoleConstraint:
-    if isinstance(node, jinja2.nodes.Filter):
-        return _and_role_constraints(
-            _iterator_role_constraint(node.node),
-            _filter_role_constraint(node),
-        )
-    return _any_role()
-
-
-def _merged_role_constraint(
-    var: str,
-    bindings: Mapping[str, _RoleConstraint],
-    guards: Sequence[tuple[str, _RoleConstraint]],
-) -> _RoleConstraint:
-    constraint = bindings.get(var, _any_role())
-    for guard_var, guard in guards:
-        if guard_var == var:
-            constraint = _and_role_constraints(constraint, guard)
-    return constraint
-
-
-def _collect_output_fields(
-    expr: jinja2.nodes.Node,
-    bindings: Mapping[str, _RoleConstraint],
-    guards: Sequence[tuple[str, _RoleConstraint]],
-    role_paths: list[_RoleConstraint],
-    content_paths: list[_RoleConstraint],
-) -> None:
-    if isinstance(expr, jinja2.nodes.CondExpr):
-        mentioned = _role_vars_in(expr.test)
-        true_guards = [
-            *guards,
-            *[(var, _constraint_on_var(expr.test, var)) for var in mentioned],
-        ]
-        false_guards = [
-            *guards,
-            *[
-                (var, _not_role_constraint(_constraint_on_var(expr.test, var)))
-                for var in mentioned
-            ],
-        ]
-        _collect_output_fields(
-            expr.expr1, bindings, true_guards, role_paths, content_paths
-        )
-        if expr.expr2 is not None:
-            _collect_output_fields(
-                expr.expr2, bindings, false_guards, role_paths, content_paths
-            )
-        return
-    if _is_field_access(expr, "role"):
-        base = _field_base_name(expr)
-        if base:
-            role_paths.append(_merged_role_constraint(base, bindings, guards))
-    if _is_field_access(expr, "content"):
-        base = _field_base_name(expr)
-        if base:
-            content_paths.append(_merged_role_constraint(base, bindings, guards))
-    for child in expr.iter_child_nodes():
-        _collect_output_fields(child, bindings, guards, role_paths, content_paths)
-
-
-def _walk_guarded_stmts(
-    nodes: Iterable[jinja2.nodes.Node],
-    bindings: Mapping[str, _RoleConstraint],
-    guards: Sequence[tuple[str, _RoleConstraint]],
-    role_paths: list[_RoleConstraint],
-    content_paths: list[_RoleConstraint],
-) -> None:
-    for node in nodes:
-        _walk_template_node(node, bindings, role_paths, content_paths, guards)
-
-
-def _walk_template_node(
-    node: jinja2.nodes.Node,
-    bindings: Mapping[str, _RoleConstraint],
-    role_paths: list[_RoleConstraint],
-    content_paths: list[_RoleConstraint],
-    guards: Sequence[tuple[str, _RoleConstraint]] = (),
-) -> None:
-    if isinstance(node, jinja2.nodes.If):
-        _walk_if_chain(node, bindings, role_paths, content_paths, guards)
-        return
-    if isinstance(node, jinja2.nodes.For):
-        new_bindings = bindings
-        if isinstance(node.target, jinja2.nodes.Name):
-            var = node.target.name
-            constraint = _iterator_role_constraint(node.iter)
-            if node.test is not None:
-                constraint = _and_role_constraints(
-                    constraint, _constraint_on_var(node.test, var)
-                )
-            constraint = _and_role_constraints(
-                bindings.get(var, _any_role()), constraint
-            )
-            new_bindings = {**bindings, var: constraint}
-        _walk_guarded_stmts(node.body, new_bindings, guards, role_paths, content_paths)
-        _walk_guarded_stmts(node.else_, bindings, guards, role_paths, content_paths)
-        return
-    if isinstance(node, jinja2.nodes.Output):
-        for expr in node.nodes:
-            _collect_output_fields(expr, bindings, guards, role_paths, content_paths)
-        return
-    for child in node.iter_child_nodes():
-        if isinstance(child, jinja2.nodes.Stmt):
-            _walk_template_node(child, bindings, role_paths, content_paths, guards)
-
-
-def _walk_if_chain(
-    node: jinja2.nodes.If,
-    bindings: Mapping[str, _RoleConstraint],
-    role_paths: list[_RoleConstraint],
-    content_paths: list[_RoleConstraint],
-    outer_guards: Sequence[tuple[str, _RoleConstraint]] = (),
-) -> None:
-    """Walk an if/elif/else chain, keeping earlier failed tests."""
-    pending: list[tuple[str, _RoleConstraint]] = list(outer_guards)
-    for branch in (node, *node.elif_):
-        mentioned = _role_vars_in(branch.test)
-        passed = pending + [
-            (var, _constraint_on_var(branch.test, var)) for var in mentioned
-        ]
-        _walk_guarded_stmts(branch.body, bindings, passed, role_paths, content_paths)
-        pending = pending + [
-            (var, _not_role_constraint(_constraint_on_var(branch.test, var)))
-            for var in mentioned
-        ]
-    _walk_guarded_stmts(node.else_, bindings, pending, role_paths, content_paths)
-
-
-def _constraint_passes_unlisted(constraint: _RoleConstraint) -> bool:
-    return constraint.roles is None or constraint.excludes
-
-
-def _constraint_allows_role(constraint: _RoleConstraint, role: str) -> bool:
-    if constraint.roles is None:
-        return True
-    if constraint.excludes:
-        return role not in constraint.roles
-    return role in constraint.roles
-
-
-def _role_output_is_trusted(
-    passes_unlisted: bool,
-    excluded: frozenset[str],
-    content_paths: Sequence[_RoleConstraint],
-    role: str,
-) -> bool:
-    """Whether a dynamically printed role does not need a probe.
-
-    The role header has to be reachable, and so does the message content.
-    A template can print ``message['role']`` for every turn and still emit
-    content only inside named-role branches. That header alone is not
-    enough. When the walker saw no content output, there is no content
-    constraint to apply, so the header path stays trusted.
-    """
-    if not (passes_unlisted and role not in excluded):
-        return False
-    if not content_paths:
-        return True
-    return any(_constraint_allows_role(path, role) for path in content_paths)
-
-
-@lru_cache(maxsize=32)
-def _template_role_emission(
-    chat_template: str,
-) -> tuple[bool, frozenset[str], tuple[_RoleConstraint, ...]]:
-    """How a template prints roles, and which content paths exist.
-
-    Returns:
-        ``passes_unlisted`` is true when some output prints
-        ``message['role']`` on a path that is not limited to the literal
-        roles the template compares. ``excluded`` is the roles that cannot
-        reach any such output. ``content_paths`` are the role constraints
-        on outputs that read message content.
-
-    """
-    try:
-        parsed = _parse_chat_template(chat_template)
-    except Exception:
-        logger.warning(
-            "Could not parse the chat template while checking message roles.",
-            exc_info=True,
-        )
-        return False, frozenset(), ()
-
-    role_paths: list[_RoleConstraint] = []
-    content_paths: list[_RoleConstraint] = []
-    _walk_guarded_stmts(parsed.body, {}, (), role_paths, content_paths)
-
-    exclusions: list[frozenset[str]] = []
-    for constraint in role_paths:
-        if not _constraint_passes_unlisted(constraint):
-            continue
-        if constraint.excludes and constraint.roles is not None:
-            exclusions.append(constraint.roles)
-        else:
-            exclusions.append(frozenset())
-    if not exclusions:
-        return False, frozenset(), tuple(content_paths)
-    excluded = exclusions[0]
-    for item in exclusions[1:]:
-        excluded &= item
-    return True, excluded, tuple(content_paths)
+    return _template_roles(chat_template).handled
 
 
 def _has_nonempty_text(value: Any) -> bool:
@@ -697,6 +355,37 @@ def _strip_structural_payload(message: Mapping[str, Any]) -> dict[str, Any]:
                     continue
             kept.append(part)
         updated["content"] = kept
+    return updated
+
+
+def _is_text_part(part: Mapping[str, Any]) -> bool:
+    part_type = part.get("type")
+    return part_type in _TEXT_PART_TYPES or (
+        part_type is None and isinstance(part.get("text"), str)
+    )
+
+
+def _blank_text_payload(message: Mapping[str, Any]) -> dict[str, Any]:
+    """Copy ``message`` with content text cleared and everything else kept."""
+    updated = dict(message)
+    content = updated.get("content")
+    if isinstance(content, str):
+        updated["content"] = ""
+        return updated
+    if isinstance(content, list):
+        parts: list[Any] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append("")
+                continue
+            if isinstance(part, dict) and _is_text_part(part):
+                blank = dict(part)
+                if isinstance(blank.get("text"), str):
+                    blank["text"] = ""
+                parts.append(blank)
+                continue
+            parts.append(part)
+        updated["content"] = parts
     return updated
 
 
@@ -770,73 +459,88 @@ def _role_probe_token(prefix: str, index: int) -> str:
     return f"{prefix}_{index:06d}_"
 
 
-def _render_probe_text(
-    render_text: Callable[[Sequence[Mapping[str, Any]]], str],
-    messages: Sequence[Mapping[str, Any]],
-) -> str | None:
-    try:
-        rendered = render_text(messages)
-    except Exception:
-        return None
-    if not isinstance(rendered, str):
-        return None
-    return rendered
+class _RenderBudget:
+    """At most ``_MAX_EXTRA_RENDERS`` calls. Further probes are unresolved."""
+
+    def __init__(self) -> None:
+        self.remaining = _MAX_EXTRA_RENDERS
+
+    def render(
+        self,
+        render_text: Callable[[Sequence[Mapping[str, Any]]], str],
+        messages: Sequence[Mapping[str, Any]],
+    ) -> str | None:
+        if self.remaining <= 0:
+            return None
+        self.remaining -= 1
+        try:
+            rendered = render_text(messages)
+        except Exception:
+            return None
+        if not isinstance(rendered, str):
+            return None
+        return rendered
 
 
-def _messages_without(
+def _replace_messages(
     conversation: Sequence[Mapping[str, Any]],
     indexes: set[int],
+    transform: Callable[[Mapping[str, Any]], Mapping[str, Any]],
 ) -> list[Mapping[str, Any]]:
     return [
-        message for index, message in enumerate(conversation) if index not in indexes
-    ]
-
-
-def _messages_without_structural_payload(
-    conversation: Sequence[Mapping[str, Any]],
-    indexes: set[int],
-) -> list[Mapping[str, Any]]:
-    return [
-        _strip_structural_payload(message) if index in indexes else message
+        transform(message) if index in indexes else message
         for index, message in enumerate(conversation)
     ]
 
 
-def _stamp_tool_call_probe(message: dict[str, Any], token: str) -> bool:
-    """Append ``token`` to tool-call names this message already has.
-
-    A new text part is not added. A template can echo that part while still
-    dropping the tool call or image that made the message a suspect.
-    """
-    tool_calls = message.get("tool_calls")
-    if not isinstance(tool_calls, list):
-        return False
-    stamped: list[Any] = []
-    wrote = False
-    for call in tool_calls:
-        if not isinstance(call, dict):
-            stamped.append(call)
-            continue
-        call = copy.deepcopy(call)
-        function = call.get("function")
-        if isinstance(function, dict) and isinstance(function.get("name"), str):
-            function["name"] = function["name"] + token
-            wrote = True
-        stamped.append(call)
-    if wrote:
-        message["tool_calls"] = stamped
-    return wrote
-
-
-def _tool_call_indexes_echoed(
+def _dropped_by_omission(
     conversation: Sequence[Mapping[str, Any]],
     suspects: Sequence[tuple[int, str]],
+    baseline: str,
     render_text: Callable[[Sequence[Mapping[str, Any]]], str],
-) -> set[int] | None:
-    """Suspects whose tool-call name is still present after one probe render.
+    budget: _RenderBudget,
+    transform: Callable[[Mapping[str, Any]], Mapping[str, Any]],
+) -> set[int]:
+    """Indexes whose transformed copy leaves ``baseline`` unchanged.
 
-    ``None`` means the probe did not return text. An empty set means no
-    stamped name showed up; that is not proof the message was dropped.
+    A group that still changes the prompt is split only while ``budget``
+    has renders left. When the budget is spent, the rest are kept.
+    """
+
+    def dropped_in(subgroup: Sequence[tuple[int, str]]) -> set[int]:
+        if not subgroup:
+            return set()
+        indexes = {index for index, _role in subgroup}
+        alternate = budget.render(
+            render_text,
+            _replace_messages(conversation, indexes, transform),
+        )
+        if alternate is None:
+            return set()
+        if alternate == baseline:
+            return indexes
+        if len(subgroup) == 1:
+            return set()
+        mid = len(subgroup) // 2
+        return dropped_in(subgroup[:mid]) | dropped_in(subgroup[mid:])
+
+    return dropped_in(list(suspects))
+
+
+def _indexes_missing_text_marker(
+    conversation: Sequence[Mapping[str, Any]],
+    suspects: Sequence[tuple[int, str]],
+    baseline: str,
+    render_text: Callable[[Sequence[Mapping[str, Any]]], str],
+    budget: _RenderBudget,
+) -> set[int]:
+    """Suspects whose text is absent, confirmed by clearing that text.
+
+    One render appends a marker to every suspect. A marker in the prompt
+    means that content was rendered. A missing marker is not enough: the
+    template may keep the original text and clip the suffix. Those indexes
+    are dropped only when clearing the original text leaves the prompt
+    unchanged.
     """
     try:
         probed = copy.deepcopy(list(conversation))
@@ -845,7 +549,14 @@ def _tool_call_indexes_echoed(
             "Could not copy the conversation to check dropped roles.",
             exc_info=True,
         )
-        return None
+        return _dropped_by_omission(
+            conversation,
+            suspects,
+            baseline,
+            render_text,
+            budget,
+            _blank_text_payload,
+        )
 
     prefix = "vllmprobe" + random_uuid().replace("-", "")[:12]
     tokens: list[tuple[int, str]] = []
@@ -854,152 +565,77 @@ def _tool_call_indexes_echoed(
         if not isinstance(message, dict):
             continue
         token = _role_probe_token(prefix, index)
-        if _stamp_tool_call_probe(message, token):
+        if _inject_probe_token(message, token):
             tokens.append((index, token))
     if not tokens:
-        return set()
+        return _dropped_by_omission(
+            conversation,
+            suspects,
+            baseline,
+            render_text,
+            budget,
+            _blank_text_payload,
+        )
 
-    rendered = _render_probe_text(render_text, probed)
+    rendered = budget.render(render_text, probed)
     if rendered is None:
-        return None
+        return set()
     folded = rendered.lower()
-    return {index for index, token in tokens if token.lower() in folded}
-
-
-def _indexes_dropped_by_omission(
-    conversation: Sequence[Mapping[str, Any]],
-    suspects: Sequence[tuple[int, str]],
-    render_text: Callable[[Sequence[Mapping[str, Any]]], str],
-    *,
-    strip_payload: bool = False,
-) -> set[int]:
-    """Indexes whose structural payload leaves the rendered prompt unchanged.
-
-    Every suspect is covered by one render. An unchanged prompt means each
-    of them was omitted. If the prompt changes, tool-call names are stamped
-    and checked in a second render so messages the template actually prints
-    are cleared together. Only a mixed remainder is split, and a fully
-    omitted subgroup is still decided by one render.
-
-    When ``strip_payload`` is true, tool calls and multimodal parts are
-    removed but the message stays at the same index. That catches a tool
-    call dropped beside echoed text, and keeps neighbor lookups stable.
-    When false, the whole message is removed. The text-probe fallback uses
-    that to see whether the turn itself was omitted.
-    """
-    try:
-        baseline = render_text(conversation)
-    except Exception:
-        logger.warning(
-            "Could not re-render the conversation to check dropped roles.",
-            exc_info=True,
-        )
+    missing_ids = {index for index, token in tokens if token.lower() not in folded}
+    if not missing_ids:
         return set()
-    if not isinstance(baseline, str):
-        logger.warning_once(
-            "Chat template probe did not return text; skipping the dropped-role check."
-        )
-        return set()
-
-    group = list(suspects)
-    if not group:
-        return set()
-
-    def without(indexes: set[int]) -> list[Mapping[str, Any]]:
-        if strip_payload:
-            return _messages_without_structural_payload(conversation, indexes)
-        return _messages_without(conversation, indexes)
-
-    def dropped_in(
-        subgroup: Sequence[tuple[int, str]],
-        known_alternate: str | None = None,
-        *,
-        have_known: bool = False,
-    ) -> set[int]:
-        if not subgroup:
-            return set()
-        if have_known:
-            alternate = known_alternate
-        else:
-            alternate = _render_probe_text(
-                render_text,
-                without({index for index, _role in subgroup}),
-            )
-        if isinstance(alternate, str) and alternate == baseline:
-            return {index for index, _role in subgroup}
-        # One comparison cannot tell which member of a changed group was
-        # the one that contributed. A single message that changes the
-        # prompt, or whose removal fails to render, is not a silent drop.
-        if len(subgroup) == 1:
-            return set()
-        mid = len(subgroup) // 2
-        return dropped_in(subgroup[:mid]) | dropped_in(subgroup[mid:])
-
-    alternate = _render_probe_text(
+    missing = [(index, role) for index, role in suspects if index in missing_ids]
+    return _dropped_by_omission(
+        conversation,
+        missing,
+        baseline,
         render_text,
-        without({index for index, _role in group}),
+        budget,
+        _blank_text_payload,
     )
-    if isinstance(alternate, str) and alternate == baseline:
-        return {index for index, _role in group}
-
-    has_tool_calls = False
-    for index, _role in group:
-        message = conversation[index]
-        tool_calls = message.get("tool_calls") if isinstance(message, Mapping) else None
-        if isinstance(tool_calls, list) and tool_calls:
-            has_tool_calls = True
-            break
-    if has_tool_calls:
-        echoed = _tool_call_indexes_echoed(conversation, group, render_text)
-        if echoed:
-            group = [(index, role) for index, role in group if index not in echoed]
-            if not group:
-                return set()
-            # ``alternate`` also removed the echoed messages, so it does
-            # not describe this smaller group.
-            return dropped_in(group)
-
-    return dropped_in(group, alternate, have_known=True)
 
 
 def _ignored_standard_roles(
     roles: Sequence[str],
-    content_paths: Sequence[_RoleConstraint],
-    handled: frozenset[str],
+    info: _TemplateRoles,
 ) -> list[str]:
-    """Standard roles the template can be shown to skip, without re-rendering."""
+    """Standard roles the literal role set shows the template skips."""
     ignored: list[str] = []
     for role in _unique_roles(roles):
-        if content_paths:
-            if any(_constraint_allows_role(path, role) for path in content_paths):
-                continue
-            ignored.append(role)
-        elif handled and role not in handled:
+        if role in info.excluded or (info.handled and role not in info.handled):
             ignored.append(role)
     return ignored
+
+
+def _named_by_template(info: _TemplateRoles, role: str) -> bool:
+    handled = info.handled
+    if not handled or role in info.excluded:
+        return False
+    return role in handled
 
 
 def assert_chat_template_rendered_messages(
     conversation: Sequence[Mapping[str, Any]],
     chat_template: str,
     render_text: Callable[[Sequence[Mapping[str, Any]]], str],
+    rendered: str | None = None,
 ) -> None:
     """Raise if a non-empty message contributed no prompt content.
 
-    This is a post-condition on chat-template rendering. Roles the template
-    names are trusted. So is a role printed with ``message['role']`` when
-    that role can also reach an output of message content. A header with
-    no such content path is still probed. Any other non-standard role is
-    probed: a unique token is appended to its content and the conversation
-    is rendered again. The turn is rejected only when it adds nothing to
-    the prompt. A rendered tool call or image keeps the turn, and echoed
-    text does not hide a dropped tool call or image.
+    Roles named by the template are trusted. Any other non-standard role
+    with content is probed: one render appends a marker to each suspect.
+    A missing marker is checked by clearing the original text. Tool calls
+    and multimodal parts are checked by stripping them in place, so a
+    neighbor lookup by index stays put. Each check stops after
+    ``_MAX_EXTRA_RENDERS`` extra renders and keeps whatever is still
+    unresolved.
 
     Standard roles from the OpenAI message schema (``system``, ``user``,
     ``assistant``, ``tool``, ``developer``, and legacy ``function``) are
-    not rejected. When the template ignores one, a warning is logged and
-    the request continues. That path does not copy the conversation or
-    render it again. Empty and whitespace-only messages are not an error.
+    not rejected. When the literal role set shows the template ignores
+    one, a warning is logged and the request continues. That path does
+    not copy the conversation or render it again. Empty and
+    whitespace-only messages are not an error.
 
     Args:
         conversation: Messages passed to the template, after rewrites such
@@ -1007,6 +643,9 @@ def assert_chat_template_rendered_messages(
         chat_template: Resolved Jinja source.
         render_text: Renders a conversation to prompt text with the same
             template options as the request.
+        rendered: Prompt text already produced for ``conversation``, when
+            the caller has it. Tokenized calls leave this empty and one
+            text baseline is rendered only if a probe is needed.
 
     Raises:
         VLLMValidationError: A non-empty non-standard message produced no
@@ -1014,35 +653,40 @@ def assert_chat_template_rendered_messages(
             HTTP 400.
 
     """
-    handled = roles_rendered_by_chat_template(chat_template)
-    if handled is None:
+    info = _template_roles(chat_template)
+    if info.handled is None:
         return
 
-    passes_unlisted, excluded, content_paths = _template_role_emission(chat_template)
-    suspects = [
-        (index, role)
-        for index, message in enumerate(conversation)
-        if isinstance((role := message.get("role")), str)
-        and role not in handled
-        and not _role_output_is_trusted(passes_unlisted, excluded, content_paths, role)
-        and message_has_nonempty_payload(message)
-    ]
-    if not suspects:
-        return
-
-    # A standard role cannot be a 400. Skip the copy and the extra render
-    # unless some other role still has to be checked.
-    hard = [
-        (index, role) for index, role in suspects if role not in _STANDARD_CHAT_ROLES
-    ]
-    soft = [role for _index, role in suspects if role in _STANDARD_CHAT_ROLES]
-    ignored = _ignored_standard_roles(soft, content_paths, handled)
+    hard: list[tuple[int, str]] = []
+    soft: list[str] = []
+    for index, message in enumerate(conversation):
+        role = message.get("role")
+        if not isinstance(role, str) or _named_by_template(info, role):
+            continue
+        if not message_has_nonempty_payload(message):
+            continue
+        if role in _STANDARD_CHAT_ROLES:
+            soft.append(role)
+        else:
+            hard.append((index, role))
+    ignored = _ignored_standard_roles(soft, info)
     if ignored:
         _warn_ignored_standard_roles(ignored)
     if not hard:
         return
 
-    dropped = _roles_with_no_prompt_contribution(conversation, hard, render_text)
+    budget = _RenderBudget()
+    baseline = (
+        rendered
+        if isinstance(rendered, str)
+        else budget.render(render_text, conversation)
+    )
+    if baseline is None:
+        return
+
+    dropped = _roles_with_no_prompt_contribution(
+        conversation, hard, baseline, render_text, budget
+    )
     if dropped:
         raise _unrendered_role_error(dropped)
 
@@ -1050,12 +694,15 @@ def assert_chat_template_rendered_messages(
 def _roles_with_no_prompt_contribution(
     conversation: Sequence[Mapping[str, Any]],
     suspects: Sequence[tuple[int, str]],
+    baseline: str,
     render_text: Callable[[Sequence[Mapping[str, Any]]], str],
+    budget: _RenderBudget,
 ) -> list[str]:
     """Roles that added neither content text nor a structural payload.
 
     A missing content token is not a drop when the same turn's tool call
-    or multimodal part still shows up in the prompt.
+    or image still shows up in the prompt. Turns the budget cannot settle
+    are kept.
     """
     text_suspects = [
         (index, role)
@@ -1071,16 +718,20 @@ def _roles_with_no_prompt_contribution(
         return []
 
     text_missing = (
-        _indexes_dropped_by_text_probe(conversation, text_suspects, render_text)
+        _indexes_missing_text_marker(
+            conversation, text_suspects, baseline, render_text, budget
+        )
         if text_suspects
         else set()
     )
     struct_missing = (
-        _indexes_dropped_by_omission(
+        _dropped_by_omission(
             conversation,
             structural_suspects,
+            baseline,
             render_text,
-            strip_payload=True,
+            budget,
+            _strip_structural_payload,
         )
         if structural_suspects
         else set()
@@ -1091,49 +742,7 @@ def _roles_with_no_prompt_contribution(
         if index in struct_ids and index in struct_missing:
             dropped.append(role)
             continue
-        # Text that the template omitted is still a drop, unless this turn
-        # contributed a tool call or image.
         contributed = index in struct_ids and index not in struct_missing
         if index in text_missing and not contributed:
             dropped.append(role)
     return _unique_roles(dropped)
-
-
-def _indexes_dropped_by_text_probe(
-    conversation: Sequence[Mapping[str, Any]],
-    suspects: Sequence[tuple[int, str]],
-    render_text: Callable[[Sequence[Mapping[str, Any]]], str],
-) -> set[int]:
-    try:
-        probed = copy.deepcopy(list(conversation))
-    except Exception:
-        logger.warning(
-            "Could not copy the conversation to check dropped roles.",
-            exc_info=True,
-        )
-        return _indexes_dropped_by_omission(conversation, suspects, render_text)
-
-    prefix = "vllmprobe" + random_uuid().replace("-", "")[:12]
-    tokens: list[tuple[int, str]] = []
-    for index, _role in suspects:
-        token = _role_probe_token(prefix, index)
-        message = probed[index]
-        if isinstance(message, dict) and _inject_probe_token(message, token):
-            tokens.append((index, token))
-    if not tokens:
-        return _indexes_dropped_by_omission(conversation, suspects, render_text)
-
-    try:
-        rendered = render_text(probed)
-    except Exception:
-        logger.warning(
-            "Chat template probe failed while checking role(s) %s.",
-            [role for _, role in suspects],
-            exc_info=True,
-        )
-        return _indexes_dropped_by_omission(conversation, suspects, render_text)
-    if not isinstance(rendered, str):
-        return _indexes_dropped_by_omission(conversation, suspects, render_text)
-
-    folded = rendered.lower()
-    return {index for index, token in tokens if token.lower() not in folded}
