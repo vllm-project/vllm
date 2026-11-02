@@ -758,9 +758,10 @@ class AiterFlashAttentionMetadataBuilder(
                     swa_workspace=swa_workspace,
                 )
 
-            # allocate the equal amount of workspace for
-            # each chunk prefill request
-            max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends
+            # allocate the equal amount of workspace for each extend request
+            # with context; requests without context use no workspace
+            num_extends_with_context = max(int((computed_kv_lens > 0).sum()), 1)
+            max_context_chunk = _CP_TOKENS_PER_ITER_ROCM // num_extends_with_context
             num_chunks = cdiv(computed_kv_lens.max().item(), max_context_chunk)
 
             chunk_starts = (
