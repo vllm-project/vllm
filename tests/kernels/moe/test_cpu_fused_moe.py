@@ -29,7 +29,10 @@ from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
     PowerCPUUnquantizedExperts,
     X86CPUUnquantizedExperts,
 )
-from vllm.model_executor.layers.fused_moe.router.cpu_router import _softmax_topk
+from vllm.model_executor.layers.fused_moe.router.cpu_router import (
+    _softmax_topk,
+    select_experts,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
@@ -704,3 +707,40 @@ def test_cpu_experts_int8_unaligned_intermediate_size(
     )
 
     torch.testing.assert_close(output, ref_output, atol=2e-2, rtol=2e-2)
+
+
+@pytest.mark.parametrize("with_bias", [False, True])
+def test_select_experts_sigmoid_scoring(with_bias):
+    """Ungrouped sigmoid routing, as MiniMax2 uses. A correction bias orders
+    the selection only; the weights come from the unbiased scores."""
+    set_random_seed(0)
+    num_tokens, expert_num, topk = 7, 16, 4
+    router_logits = torch.randn(num_tokens, expert_num)
+    bias = torch.randn(expert_num) if with_bias else None
+
+    topk_weights, topk_ids = select_experts(
+        hidden_states=torch.empty(num_tokens, 0),
+        router_logits=router_logits,
+        top_k=topk,
+        use_grouped_topk=False,
+        renormalize=True,
+        scoring_func="sigmoid",
+        e_score_correction_bias=bias,
+    )
+
+    scores = router_logits.float().sigmoid()
+    selection_scores = scores if bias is None else scores + bias
+    expected_ids = torch.topk(selection_scores, k=topk, dim=-1, sorted=False)[1]
+    expected_weights = scores.gather(1, expected_ids)
+    expected_weights = expected_weights / expected_weights.sum(dim=-1, keepdim=True)
+
+    assert topk_ids.dtype == torch.int32
+    order = topk_ids.argsort(dim=-1)
+    expected_order = expected_ids.argsort(dim=-1)
+    torch.testing.assert_close(
+        topk_ids.gather(1, order).to(torch.int64),
+        expected_ids.gather(1, expected_order),
+    )
+    torch.testing.assert_close(
+        topk_weights.gather(1, order), expected_weights.gather(1, expected_order)
+    )
