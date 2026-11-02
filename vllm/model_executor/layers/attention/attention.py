@@ -352,6 +352,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # During model initialization, the default dtype is set as the model
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
+        self.act_dtype = dtype
         if attn_backend is None:
             self.attn_backend = get_attn_backend(
                 head_size,
@@ -601,8 +602,8 @@ class Attention(nn.Module, AttentionLayerBase):
         s += f", backend={self.impl.__class__.__name__}"
         return s
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
-        self.impl.process_weights_after_loading(act_dtype)
+    def process_weights_after_loading(self) -> None:
+        self.impl.process_weights_after_loading(self.act_dtype)
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
