@@ -1586,10 +1586,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _rocm_C extension
   #
-  # The int4 skinny GEMM is instantiated one unit per N_in (see
-  # WVSPLITK_INT4_LANE in skinny_gemms_int4.cu): with the whole op in one unit
-  # the 9-arch build spends its entire length compiling that single file.
-  # skinny_gemms_int4_api.cu keeps the public entry point and forwards on N_in.
+  # The int4 skinny GEMM is instantiated one unit per N_in (a template over
+  # N_in, see skinny_gemms_int4.h): with the whole op in one unit the 9-arch
+  # build spends its entire length compiling that single file.
+  # skinny_gemms_int4_api.cu keeps the public entry point and dispatches on N_in,
+  # with extern template keeping the device code in the five units.
   set(VLLM_SKINNY_INT4_SRC
     "csrc/rocm/skinny_gemms_int4_api.cu"
     "csrc/rocm/skinny_gemms_int4_n1.cu"

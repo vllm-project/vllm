@@ -1,3 +1,5 @@
+#pragma once
+
 #include <torch/all.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -12,6 +14,7 @@
 #include <utility>  // std::in_range
 
 #include "core/cuda_compat.h"
+#include "skinny_gemms_int4.h"
 
 // Combined RDNA macro (gfx11 + gfx12) - both use 32-wide wavefronts
 #if defined(__GFX11__) || defined(__GFX12__)
@@ -894,14 +897,13 @@ static int mindiv_int4(int N, int div1, int div2) {
 //   If absent, kernel dequants as (nibble - 8) * scale (symmetric uint4b8).
 // group_size: 32, 64, or 128
 
-torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
-                              const at::Tensor& in_scale,
-                              const std::optional<at::Tensor>& in_zero_points,
-                              const std::optional<at::Tensor>& in_bias,
-                              const int64_t CuCount, const int64_t group_size) {
+template <int N>
+torch::Tensor wvSplitK_int4_g_impl(VLLM_SKINNY_INT4_SIG) {
   auto M_in = in_a.size(0);
   auto K_in = in_b.size(1);
   auto N_in = in_b.size(0);
+  TORCH_CHECK(N_in == N, "wvSplitK_int4_g: N_in ", N_in, " reached the ", N,
+              " instantiation");
   auto Bx_in =
       (in_bias.has_value() && in_bias->numel() > 0)
           ? (in_bias->sizes().size() == 2) ? in_bias->size(1) : in_bias->size(0)
@@ -1129,53 +1131,12 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
       WVSPLIT_INT4G_GS(1, 4, __N, _HAS_ZP)                                    \
   }
 
-// Which N_in case this translation unit instantiates. 0 (the default) keeps
-// every case; the build compiles this file once per lane instead, each with
-// WVSPLITK_INT4_LANE = 1..5, so the device code of one N is generated per unit
-// instead of all five landing on one core.
-#ifndef WVSPLITK_INT4_LANE
-  #define WVSPLITK_INT4_LANE 0
-#endif
-
-// Inner dispatch: shared by both symmetric and asymmetric paths
-#define WVSPLIT_INT4G_DISPATCH(_HAS_ZP)                                   \
-  {                                                                       \
-    int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4);                   \
-    switch (N_in) {                                                       \
-      case 1:                                                             \
-        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 1) \
-          WVSPLIT_INT4G_TILE(sYT, 1, _HAS_ZP)                             \
-        else                                                              \
-          throw std::runtime_error("int4 lane 1 not compiled");           \
-        break;                                                            \
-      case 2:                                                             \
-        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 2) \
-          WVSPLIT_INT4G_TILE(sYT, 2, _HAS_ZP)                             \
-        else                                                              \
-          throw std::runtime_error("int4 lane 2 not compiled");           \
-        break;                                                            \
-      case 3:                                                             \
-        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 3) \
-          WVSPLIT_INT4G_TILE(sYT, 3, _HAS_ZP)                             \
-        else                                                              \
-          throw std::runtime_error("int4 lane 3 not compiled");           \
-        break;                                                            \
-      case 4:                                                             \
-        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 4) \
-          WVSPLIT_INT4G_TILE(sYT, 4, _HAS_ZP)                             \
-        else                                                              \
-          throw std::runtime_error("int4 lane 4 not compiled");           \
-        break;                                                            \
-      case 5:                                                             \
-        if constexpr (WVSPLITK_INT4_LANE == 0 || WVSPLITK_INT4_LANE == 5) \
-          WVSPLIT_INT4G_TILE(sYT, 5, _HAS_ZP)                             \
-        else                                                              \
-          throw std::runtime_error("int4 lane 5 not compiled");           \
-        break;                                                            \
-      default:                                                            \
-        throw std::runtime_error("Unsupported N value: " +                \
-                                 std::to_string(N_in));                   \
-    }                                                                     \
+// Inner dispatch: shared by both symmetric and asymmetric paths. N is the
+// template parameter of this unit, so the tower instantiates one width only.
+#define WVSPLIT_INT4G_DISPATCH(_HAS_ZP)                 \
+  {                                                     \
+    int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4); \
+    WVSPLIT_INT4G_TILE(sYT, N, _HAS_ZP)                 \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(

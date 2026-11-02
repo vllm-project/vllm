@@ -1,5 +1,4 @@
 // Instantiates the int4 skinny GEMM kernels for N_in == 3 only; see
-// WVSPLITK_INT4_LANE in skinny_gemms_int4.cu.
-#define WVSPLITK_INT4_LANE 3
-#define wvSplitK_int4_g wvSplitK_int4_g_n3
-#include "skinny_gemms_int4.cu"
+// skinny_gemms_int4.h.
+#include "skinny_gemms_int4.cuh"
+VLLM_SKINNY_INT4_INSTANTIATE(3)
