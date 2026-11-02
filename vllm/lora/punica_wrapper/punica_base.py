@@ -9,9 +9,10 @@ https://arxiv.org/abs/2310.18547
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 
-from .utils import compute_meta, convert_mapping
+from .utils import compute_meta, convert_mapping, convert_mapping_cpu
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -159,6 +160,8 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
+        self._token_lora_indices_cpu = np.empty(0, dtype=np.int64)
+        self._sampler_indices_cpu = np.empty(0, dtype=np.int64)
 
     def _update_base_metadata(
         self,
@@ -167,6 +170,11 @@ class PunicaWrapperBase(PunicaWrapperABC):
         max_loras: int,
         vocab_size: int,
     ):
+        # Host copies of the slot indices, reused to build kernel metadata
+        # without a device round trip.
+        cpu_indices = convert_mapping_cpu(mapping, lora_index_to_id)
+        self._token_lora_indices_cpu = cpu_indices[1]
+        self._sampler_indices_cpu = cpu_indices[3]
         (
             base_indices,
             sampler_indices,
@@ -179,6 +187,7 @@ class PunicaWrapperBase(PunicaWrapperABC):
             max_loras,
             vocab_size,
             self.device,
+            cpu_indices=cpu_indices,
         )
         self._token_lora_indices[: base_indices.shape[0]].copy_(base_indices)
         self._sampler_indices[: sampler_indices.shape[0]].copy_(sampler_indices)
