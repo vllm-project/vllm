@@ -1118,12 +1118,88 @@ class RocmPlatform(Platform):
         os.environ.setdefault("GPU_PINNED_MIN_XFER_SIZE", str(4 * 1024 * 1024))
 
     @classmethod
+    def _maybe_default_fused_shared_experts(
+        cls, vllm_config: "VllmConfig", use_aiter_fused_moe: bool
+    ) -> None:
+        """Default the fused-shared-experts opt-in ON for the DeepSeek
+        native FP8-block-32 combo. The env var itself is defaulted — before
+        any worker is spawned — so every reader (model gate, router, AITER
+        ops) observes one consistent state. Scoped narrowly: only the
+        native combo on the DeepSeek family, only with AITER fused MoE,
+        only TP-only, and never when an explicit opt-in/out or the kill
+        switch is set."""
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS" in os.environ:
+            return
+        if os.environ.get("VLLM_DISABLE_FUSED_SHARED_EXPERTS", "0") == "1":
+            return
+        if (
+            vllm_config.kernel_config.monokernel
+            and os.environ.get("VLLM_DISABLE_PREFILL_FUSION_ABOVE_MONO", "0") == "1"
+        ):
+            # Killed under mono: keep the stock behavior.
+            return
+        # Under mono the env default enables the HETEROGENEOUS (native-FP8)
+        # fused shared experts for prefill-shaped batches above mono decode;
+        # the FP8->MXFP4 requant fusion itself stays refused under mono.
+        if not use_aiter_fused_moe:
+            return
+        parallel_config = vllm_config.parallel_config
+        if (
+            parallel_config.enable_expert_parallel
+            or parallel_config.data_parallel_size > 1
+        ):
+            return
+        model_config = vllm_config.model_config
+        if model_config is None:
+            return
+        hf_config = model_config.hf_config
+        if getattr(hf_config, "model_type", None) not in (
+            "deepseek_v4",
+            "deepseek_v4_text",
+            "deepseek_v41",
+            "deepseek_v41_text",
+        ):
+            return
+        if not getattr(hf_config, "n_shared_experts", None):
+            return
+        from vllm.models.deepseek_v41.quant_config import DeepseekV4FP8Config
+
+        if not DeepseekV4FP8Config._is_native_fp8_block32_mxfp4_shared(
+            getattr(hf_config, "quantization_config", None)
+        ):
+            return
+        if vllm_config.kernel_config.monokernel:
+            logger.warning_once(
+                "prefill fusion above mono: defaulting "
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 for the "
+                "heterogeneous native-FP8 fused shared experts (the AITER "
+                "router/kernel coordination flag); the FP8->MXFP4 requant "
+                "fusion stays refused under --monokernel. Set "
+                "VLLM_DISABLE_PREFILL_FUSION_ABOVE_MONO=1 to keep the "
+                "stock behavior."
+            )
+        else:
+            logger.warning_once(
+                "Fused shared experts (FP8->MXFP4) defaults to ENABLED for this "
+                "DeepSeek native FP8-block-32 checkpoint "
+                "(VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS was unset); set it "
+                "to 0, or VLLM_DISABLE_FUSED_SHARED_EXPERTS=1, to opt out."
+            )
+        os.environ["VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS"] = "1"
+        # rocm_aiter_ops caches the env-driven flags at import time; re-read
+        # them so this process (and any forked worker) observes the default.
+        rocm_aiter_ops.refresh_env_variables()
+
+    @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 
         compilation_config = vllm_config.compilation_config
         use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
+        cls._maybe_default_fused_shared_experts(vllm_config, use_aiter_fused_moe)
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
 
         if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:

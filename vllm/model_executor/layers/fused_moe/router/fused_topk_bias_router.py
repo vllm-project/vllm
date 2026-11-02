@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
+from typing import Any
 
 import torch
 
@@ -8,6 +9,10 @@ import vllm._custom_ops as ops
 import vllm.envs as envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import (
+    get_forward_context,
+    is_forward_context_available,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     get_routing_method_type,
@@ -25,6 +30,33 @@ from vllm.model_executor.layers.fused_moe.router.dsv4_topk import (
 # most this many experts per group.
 AITER_SUPPORTED_NUM_GRP = (1, 2, 4, 8)
 AITER_MAX_EXPERTS_PER_GROUP = 32
+
+# A forward whose longest request query fits within this many tokens is
+# treated as a decode step (plain decode = 1; speculative decode =
+# 1 + num_spec_tokens; prefill chunks are far larger).
+_DECODE_MAX_QUERY_LEN = 8
+
+
+def _forward_allows_fused_shared_append() -> bool:
+    """False only when the current forward is unambiguously a decode step
+    (longest request query <= ``_DECODE_MAX_QUERY_LEN``). Reads only
+    CPU-side Python ints (``max_query_len``), so it is capture-safe."""
+    if not is_forward_context_available():
+        return True
+    attn_metadata = get_forward_context().attn_metadata
+    if isinstance(attn_metadata, list):
+        # DBO keeps one metadata per microbatch; the batch-level query
+        # shape is shared, so the first element decides.
+        if not attn_metadata:
+            return True
+        attn_metadata = attn_metadata[0]
+    if not isinstance(attn_metadata, dict) or not attn_metadata:
+        return True
+    common = next(iter(attn_metadata.values()))
+    max_query_len = getattr(common, "max_query_len", None)
+    if not isinstance(max_query_len, int):
+        return True
+    return max_query_len > _DECODE_MAX_QUERY_LEN
 
 
 def vllm_topk_softmax(
@@ -83,7 +115,13 @@ def vllm_topk_softplus_sqrt(
     routed_scaling_factor: float = 1.0,
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
+    num_fused_shared_experts: int = 0,
+    shared_expert_base: int = 0,
+    shared_expert_weight: float = 1.0,
 ) -> tuple[torch.Tensor, ...]:
+    """Softplus-sqrt biased top-k. With ``num_fused_shared_experts > 0``
+    the outputs must be (num_tokens, topk + n) buffers; the kernel writes
+    the shared columns itself."""
     ops.topk_hash_softplus_sqrt(
         topk_weights,
         topk_indices,
@@ -97,6 +135,9 @@ def vllm_topk_softplus_sqrt(
         is_padding=get_moe_padding_mask(topk_indices.shape[0]),
         bias_vl=bias_vl,
         image_sentinel_lo=image_sentinel_lo,
+        num_fused_shared_experts=num_fused_shared_experts,
+        shared_expert_base=shared_expert_base,
+        shared_expert_weight=shared_expert_weight,
     )
 
     return topk_weights, topk_indices
@@ -151,6 +192,11 @@ def fused_topk_bias(
     routed_scaling_factor: float = 1.0,
     bias_vl: torch.Tensor | None = None,
     image_sentinel_lo: int = 0,
+    out_topk_weights: torch.Tensor | None = None,
+    out_topk_ids: torch.Tensor | None = None,
+    num_fused_shared_experts: int = 0,
+    shared_expert_base: int = 0,
+    shared_expert_weight: float = 1.0,
 ):
     if (
         input_tokens is not None
@@ -279,15 +325,29 @@ def fused_topk_bias(
 
     if scoring_func == "sqrtsoftplus":
         M = hidden_states.size(0)
-        topk_weights = torch.empty(
-            M, topk, dtype=torch.float32, device=hidden_states.device
-        )
-        topk_ids = torch.empty(
-            M,
-            topk,
-            dtype=torch.int32 if indices_type is None else indices_type,
-            device=hidden_states.device,
-        )
+        if out_topk_weights is not None or out_topk_ids is not None:
+            # In-kernel append fast path: the caller provided persistent
+            # (M, topk + n) buffers; the kernel writes the shared columns.
+            assert out_topk_weights is not None and out_topk_ids is not None
+            assert num_fused_shared_experts > 0
+            expected = (M, topk + num_fused_shared_experts)
+            assert tuple(out_topk_weights.shape) == expected, (
+                f"out_topk_weights shape {tuple(out_topk_weights.shape)} != {expected}"
+            )
+            assert tuple(out_topk_ids.shape) == expected, (
+                f"out_topk_ids shape {tuple(out_topk_ids.shape)} != {expected}"
+            )
+            topk_weights, topk_ids = out_topk_weights, out_topk_ids
+        else:
+            topk_weights = torch.empty(
+                M, topk, dtype=torch.float32, device=hidden_states.device
+            )
+            topk_ids = torch.empty(
+                M,
+                topk,
+                dtype=torch.int32 if indices_type is None else indices_type,
+                device=hidden_states.device,
+            )
         token_expert_indices = torch.empty(
             M, topk, dtype=torch.int32, device=hidden_states.device
         )
@@ -303,6 +363,9 @@ def fused_topk_bias(
             routed_scaling_factor,
             bias_vl=bias_vl,
             image_sentinel_lo=image_sentinel_lo,
+            num_fused_shared_experts=num_fused_shared_experts,
+            shared_expert_base=shared_expert_base,
+            shared_expert_weight=shared_expert_weight,
         )
 
     n_routed_experts = gating_output.shape[-1]
@@ -367,6 +430,67 @@ def fused_topk_bias(
     )
 
 
+# ---------------------------------------------------------------------------
+# Persistent top-k output buffers for the fused-shared-experts fast path:
+# the kernel writes the shared columns into them itself, so the append
+# costs zero extra kernels (the cat-based append costs four tiny
+# launch-bound kernels per layer per step).
+#
+# Keyed by (device, total width, indices dtype) and shared by all layers
+# with the same routing shape. They grow on demand; superseded buffers
+# stay alive because captured CUDA graphs may still reference their
+# storage. The kernel rewrites every element of the returned view on each
+# call, so cross-layer reuse on a single stream is safe.
+# ---------------------------------------------------------------------------
+_FUSED_SHARED_TOPK_BUFS: dict = {}
+_FUSED_SHARED_TOPK_BUF_KEEPALIVE: list = []
+_FUSED_SHARED_TOPK_BUF_INITIAL_ROWS = 1024
+
+
+def _get_fused_shared_topk_buffers(
+    num_tokens: int,
+    topk: int,
+    num_fused_shared: int,
+    shared_expert_base: int,
+    device: torch.device,
+    indices_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """Persistent (ids, weights) buffers of shape (capacity, topk + n), or
+    None when growing is impossible (CUDA graph capture in progress)."""
+    total = topk + num_fused_shared
+    key = (device.index or 0, total, indices_dtype)
+    bufs = _FUSED_SHARED_TOPK_BUFS.get(key)
+    if bufs is None or bufs[0].shape[0] < num_tokens:
+        if torch.cuda.is_current_stream_capturing():
+            # Never (re)allocate during graph capture: the captured graph
+            # must not observe fresh addresses.
+            return None
+        if bufs is not None:
+            # Keep the old storage alive: captured graphs may still write
+            # into it (multi-shape capture sets replay sequentially).
+            _FUSED_SHARED_TOPK_BUF_KEEPALIVE.append(bufs)
+        rows = max(
+            _FUSED_SHARED_TOPK_BUF_INITIAL_ROWS,
+            num_tokens,
+            bufs[0].shape[0] * 2 if bufs is not None else 0,
+        )
+        ids_buf = torch.empty(rows, total, dtype=indices_dtype, device=device)
+        weights_buf = torch.empty(rows, total, dtype=torch.float32, device=device)
+        # Pre-fill the shared id columns once (defensive only: the kernel
+        # rewrites every exposed element on each call).
+        ids_buf[:, topk:].copy_(
+            torch.arange(
+                shared_expert_base,
+                shared_expert_base + num_fused_shared,
+                dtype=indices_dtype,
+                device=device,
+            ).expand(rows, num_fused_shared)
+        )
+        bufs = (ids_buf, weights_buf)
+        _FUSED_SHARED_TOPK_BUFS[key] = bufs
+    return bufs
+
+
 class FusedTopKBiasRouter(BaseRouter):
     """Router using fused top-k with e_score_correction_bias."""
 
@@ -407,6 +531,31 @@ class FusedTopKBiasRouter(BaseRouter):
         # ``shared_expert_weight``, AFTER the routed top-k is renormalized.
         self.num_fused_shared_experts = num_fused_shared_experts
         self.shared_expert_weight = shared_expert_weight
+        # Optional shared-slot append window (set by models whose fused
+        # shared-expert implementation engages only for prefill-sized
+        # batches, e.g. the DeepSeek-V4 heterogeneous FHMoE path). The
+        # window is (min, max]: None (default) appends at every batch
+        # size; ``..._prefill_only`` additionally restricts the append to
+        # non-decode forwards. The fused experts layer dispatches on the
+        # arrived route width.
+        self.shared_expert_append_min_tokens: int | None = None
+        self.shared_expert_append_max_tokens: int | None = None
+        self.shared_expert_append_prefill_only: bool = False
+
+    def _append_shared_experts_for(self, num_tokens: int) -> bool:
+        """Whether the shared slots are appended at this batch size: inside
+        the optional [min, max] token window and, with ``..._prefill_only``,
+        only on non-decode forwards."""
+        min_tokens = self.shared_expert_append_min_tokens
+        max_tokens = self.shared_expert_append_max_tokens
+        prefill_only = self.shared_expert_append_prefill_only
+        if min_tokens is None and max_tokens is None and not prefill_only:
+            return True
+        if prefill_only and not _forward_allows_fused_shared_append():
+            return False
+        if max_tokens is not None and max_tokens > 0 and num_tokens > max_tokens:
+            return False
+        return min_tokens is None or num_tokens > min_tokens
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -427,6 +576,39 @@ class FusedTopKBiasRouter(BaseRouter):
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using fused top-k with bias."""
+        # Zero-kernel append fast path (ROCm AITER): the top-k kernel writes
+        # the shared columns into persistent buffers. Falls back to the
+        # cat-based append on other platforms/scoring funcs, when hashing,
+        # or when the buffers cannot be grown (graph capture in progress).
+        n = self.num_fused_shared_experts
+        out_topk_weights = out_topk_ids = None
+        fused_kwargs: dict[str, Any] = {}
+        if (
+            n > 0
+            and self._append_shared_experts_for(hidden_states.size(0))
+            and self.scoring_func == "sqrtsoftplus"
+            and self._hash_indices_table is None
+            and rocm_aiter_ops.is_fused_moe_enabled()
+        ):
+            bufs = _get_fused_shared_topk_buffers(
+                num_tokens=hidden_states.size(0),
+                topk=self.top_k,
+                num_fused_shared=n,
+                shared_expert_base=self.global_num_experts,
+                device=hidden_states.device,
+                indices_dtype=torch.int32 if indices_type is None else indices_type,
+            )
+            if bufs is not None:
+                ids_buf, weights_buf = bufs
+                m = hidden_states.size(0)
+                out_topk_ids = ids_buf[:m]
+                out_topk_weights = weights_buf[:m]
+                fused_kwargs = {
+                    "num_fused_shared_experts": n,
+                    "shared_expert_base": self.global_num_experts,
+                    "shared_expert_weight": self.shared_expert_weight,
+                }
+
         topk_weights, topk_ids = fused_topk_bias(
             hidden_states=hidden_states,
             gating_output=router_logits,
@@ -442,9 +624,19 @@ class FusedTopKBiasRouter(BaseRouter):
             routed_scaling_factor=self.routed_scaling_factor,
             bias_vl=self.bias_vl.data if self.bias_vl is not None else None,
             image_sentinel_lo=self.image_sentinel_lo,
+            out_topk_weights=out_topk_weights,
+            out_topk_ids=out_topk_ids,
+            **fused_kwargs,
         )
 
-        if self.num_fused_shared_experts > 0:
+        # The in-kernel append already produced (M, top_k + n) outputs; the
+        # width check detects any path that ignored the out buffers (e.g. a
+        # dsv4_topk fast path) and appends with cat as before.
+        if (
+            self.num_fused_shared_experts > 0
+            and self._append_shared_experts_for(topk_ids.shape[0])
+            and topk_ids.shape[-1] == self.top_k
+        ):
             m = topk_ids.shape[0]
             n = self.num_fused_shared_experts
             # global_num_experts counts only the routed experts; the fused

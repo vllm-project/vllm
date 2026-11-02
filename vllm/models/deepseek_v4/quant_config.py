@@ -167,6 +167,21 @@ class DeepseekV4FP8Config(Fp8Config):
             and weight.get("group_size") == 32
         )
 
+    @staticmethod
+    def _is_native_fp8_block32_mxfp4_shared(hf_quant_cfg: dict | None) -> bool:
+        """DeepSeek-native format: linear/shared layers are FP8-E4M3 with
+        [32,32] ue8m0 block scales; routed experts are MXFP4. Accepts both
+        ``quant_method`` spellings: the raw checkpoint schema says ``"fp8"``,
+        while ``ModelConfig``'s override chain rewrites the runtime dict to
+        ``"deepseek_v4_fp8"`` before any model code reads it."""
+        return (
+            isinstance(hf_quant_cfg, dict)
+            and hf_quant_cfg.get("quant_method") in ("fp8", "deepseek_v4_fp8")
+            and hf_quant_cfg.get("weight_block_size") == [32, 32]
+            and hf_quant_cfg.get("scale_fmt") == "ue8m0"
+            and hf_quant_cfg.get("expert_dtype") == "fp4"
+        )
+
     @classmethod
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant, hf_config=None
