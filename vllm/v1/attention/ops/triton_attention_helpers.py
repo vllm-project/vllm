@@ -143,6 +143,36 @@ def init_softmax_M(
 
 
 @triton.jit
+def split_k_segment_layout(
+    seq_len,
+    NUM_SEGMENTS: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+    WINDOW_SEGMENTS: tl.constexpr,
+):
+    """Split-K (3D) segment layout of one sequence.
+
+    Returns ``(base_tile, tiles_per_segment, num_active)``: segment ``s``
+    covers tiles ``[base_tile + s * tiles_per_segment, base_tile + (s + 1) *
+    tiles_per_segment)`` and segments ``s >= num_active`` have no tiles. The
+    segments split the whole sequence, or with ``WINDOW_SEGMENTS`` only the
+    sliding window of a single decode query at position ``seq_len - 1`` (as
+    pruned by ``compute_tile_loop_bounds``). Shared by
+    ``kernel_unified_attention`` and ``reduce_segments``, which must agree on
+    the layout.
+    """
+    if WINDOW_SEGMENTS:
+        base_tile = tl.maximum(seq_len - SLIDING_WINDOW, 0) // TILE_SIZE
+        num_tiles = cdiv_fn(seq_len, TILE_SIZE) - base_tile
+    else:
+        base_tile = 0
+        num_tiles = cdiv_fn(seq_len, TILE_SIZE)
+    tiles_per_segment = cdiv_fn(num_tiles, NUM_SEGMENTS)
+    num_active = cdiv_fn(num_tiles, tiles_per_segment)
+    return base_tile, tiles_per_segment, num_active
+
+
+@triton.jit
 def compute_tile_loop_bounds(
     context_len,
     seq_len,
@@ -166,6 +196,7 @@ def compute_tile_loop_bounds(
     MAX_MM_RANGES: tl.constexpr = 0,
     mm_prefix_range_ptr=None,
     seq_idx=0,
+    segm_base_tile_or_0=0,
 ):
     """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
     derived ``max_seq_prefix_len`` used for per-tile masking.
@@ -183,7 +214,9 @@ def compute_tile_loop_bounds(
        the base mask and each image range intersecting the query block.
     3. 3D scoping: when ``IS_3D`` is True, further narrows to the
        segment's slice via ``(segm_idx * tiles_per_segment,
-       (segm_idx + 1) * tiles_per_segment)``.
+       (segm_idx + 1) * tiles_per_segment)``, offset by
+       ``segm_base_tile_or_0`` when the segments are laid over the sliding
+       window instead of the whole sequence.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -273,8 +306,9 @@ def compute_tile_loop_bounds(
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
     if IS_3D:
-        loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
-        loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
+        segm_lo = segm_base_tile_or_0 + segm_idx_or_0 * tiles_per_segment_or_0
+        loop_lo = max(segm_lo, tile_start)
+        loop_hi = min(segm_lo + tiles_per_segment_or_0, tile_end)
     else:
         loop_lo = tile_start
         loop_hi = tile_end
