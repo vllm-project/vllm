@@ -83,7 +83,7 @@ th:not(:first-child) {
 - *Turing does not support Marlin MXFP4.
 
 !!! note
-    For information on quantization support on Google TPU, please refer to the [TPU-Inference Recommended Models and Features](https://docs.vllm.ai/projects/tpu/en/latest/recommended_models_features/) documentation.
+    For information on quantization support on Google TPU, please refer to the [TPU-Inference Feature Matrix](https://docs.vllm.ai/projects/tpu/en/latest/features/#quantization-support) documentation.
 
 !!! note
     This compatibility chart is subject to change as vLLM continues to evolve and expand its support for different hardware platforms and quantization methods.
