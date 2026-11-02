@@ -1227,3 +1227,33 @@ def test_rdna_hybrid_w4a16_medium_skinny_matches_reference(dtype, has_zp):
     reference = _rdna_hybrid_w4a16_reference(x_mk, w_int4_nk, scales, zp, G, bias=None)
 
     torch.testing.assert_close(output, reference, rtol=2e-2, atol=2e-2)
+
+
+# ---------------------------------------------------------------------------
+# Row offsets past int32
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not on_gfx1x(), reason="Hybrid path is gfx11/gfx12 only")
+@pytest.mark.parametrize(
+    "K,N",
+    [
+        (256, 34816),  # M * N passes 2**31: output offsets
+        (17408, 256),  # M * K passes 2**31: activation offsets
+    ],
+)
+def test_triton_prefill_gemm_rows_past_int32_offsets(K, N):
+    """Rows whose element offset in A or C does not fit in int32."""
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA/HIP device not available")
+    M = 2**31 // max(K, N) + 128
+    G = 128
+
+    set_random_seed(0)
+    x, w_int4, b_q, scales, _, _ = _make_prefill_case(M, K, N, G, torch.bfloat16, False)
+    out = triton_w4a16_skinny_fmt_gemm(a=x, b_q=b_q, scales=scales, group_size=G)
+
+    # Dequantize in bf16 like the kernel does, so a long K adds no rounding gap.
+    w = (w_int4 - 8).to(torch.bfloat16) * scales.repeat_interleave(G, dim=1)
+    ref = (x[-64:].float() @ w.float().t()).to(torch.bfloat16)
+    torch.testing.assert_close(out[-64:], ref, rtol=1e-2, atol=5e-2)

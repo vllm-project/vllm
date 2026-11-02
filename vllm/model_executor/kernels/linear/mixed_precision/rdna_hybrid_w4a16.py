@@ -198,7 +198,8 @@ def _triton_w4a16_skinny_fmt_kernel(
     pid_m = tl.program_id(0)
     pid_n = tl.program_id(1)
 
-    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    # int64 rows: offs_m * stride_am and offs_m * N pass 2**31 for large M
+    offs_m = pid_m.to(tl.int64) * BLOCK_M + tl.arange(0, BLOCK_M)
     offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
 
     # ExLlama unshuffle shifts: shift[j] = (j//2)*4 + (j%2)*16
