@@ -130,6 +130,19 @@ __device__ __forceinline__ void cluster_sync(cg::cluster_group& cluster) {
   }
 }
 
+// Split cluster barrier: every CTA arrives on entry and waits before its first
+// write to a peer's shared memory, which must not happen before the peer runs.
+template <int C>
+__device__ __forceinline__ void cluster_arrive_relaxed() {
+  if constexpr (C > 1) asm volatile("barrier.cluster.arrive.relaxed.aligned;");
+}
+
+template <int C>
+__device__ __forceinline__ void cluster_wait() {
+  if constexpr (C > 1)
+    asm volatile("barrier.cluster.wait.aligned;" ::: "memory");
+}
+
 template <int C, typename T>
 __device__ __forceinline__ T* at_rank(cg::cluster_group& cluster, T* p, int r) {
   if constexpr (C == 1) {
@@ -1013,6 +1026,7 @@ __global__ void __launch_bounds__(kThreads, 1)
   const int tid = threadIdx.x;
   const int lane = tid & 31;
   const int warp = tid >> 5;
+  cluster_arrive_relaxed<C>();
 
   // The row's first loads go out before the request parameters.
   const __nv_bfloat16* row_ptr = logits + row * stride;
@@ -1104,6 +1118,7 @@ __global__ void __launch_bounds__(kThreads, 1)
   } else if (raw_hi < kKeyLo) {
     vmax = 0;
   }
+  cluster_wait<C>();
   if (warp == 0 && lane < C) {
     Smem<C>* dst = at_rank<C>(cluster, &sm, lane);
     dst->peer_max[rank] = vmax;
@@ -1253,6 +1268,7 @@ __global__ void __launch_bounds__(kThreads, 1)
     if (ambiguous) {
       // The precise path's partials reuse this space; peers write after the
       // barrier below.
+      __syncwarp();
       uint4* z = reinterpret_cast<uint4*>(&sm.u.p2);
       for (int i = lane; i < static_cast<int>(sizeof(sm.u.p2) / 16); i += 32)
         z[i] = make_uint4(0, 0, 0, 0);
