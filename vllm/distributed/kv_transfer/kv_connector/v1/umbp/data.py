@@ -28,6 +28,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
     KVCacheGroupSpec,
     KVCacheSpec,
+    MLAAttentionSpec,
+    SlidingWindowMLASpec,
     UniformTypeKVCacheSpecs,
 )
 
@@ -38,6 +40,28 @@ def _layer_specs(group: KVCacheGroupSpec) -> dict[str, KVCacheSpec]:
     if isinstance(spec, UniformTypeKVCacheSpecs):
         return {name: spec.kv_cache_specs[name] for name in group.layer_names}
     return dict.fromkeys(group.layer_names, spec)
+
+
+def tp_replicated_group_ids(
+    config: KVCacheConfig, topology: RankTopology
+) -> frozenset[int]:
+    """Groups whose blocks are byte-identical on every TP rank.
+
+    MLA-style latents (incl. sparse indexers and compressor states) are
+    replicated across TP; context parallelism shards them, so it opts out.
+    """
+    if topology.tp_size == 1 or topology.pcp_size > 1 or topology.dcp_size > 1:
+        return frozenset()
+    return frozenset(
+        group_id
+        for group_id, group in enumerate(config.kv_cache_groups)
+        if group.enable_kv_transfer
+        and group.layer_names
+        and all(
+            isinstance(spec, (MLAAttentionSpec, SlidingWindowMLASpec))
+            for spec in _layer_specs(group).values()
+        )
+    )
 
 
 def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
@@ -206,17 +230,26 @@ class UMBPHandshakeMetadata(KVConnectorHandshakeMetadata):
     """Namespace a worker derived, reported to the scheduler at startup."""
 
     namespace: str
+    replicated_groups: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
 class BlockIdentityCodec:
-    """Build stable rank-local keys from vLLM block hashes."""
+    """Build stable rank-local keys from vLLM block hashes.
+
+    Groups in ``replicated_groups`` get one TP-agnostic key (``tp*``) that
+    every TP rank loads and only TP rank 0 stores.
+    """
 
     namespace: UMBPNamespace
     tp_rank: int = 0
     pp_rank: int = 0
     pcp_rank: int = 0
     dcp_rank: int = 0
+    replicated_groups: frozenset[int] = frozenset()
+
+    def stores_group(self, group_id: int) -> bool:
+        return self.tp_rank == 0 or group_id not in self.replicated_groups
 
     def key(self, block_hash: bytes, group_id: int = 0) -> str:
         return self.key_for_namespace(
@@ -236,9 +269,10 @@ class BlockIdentityCodec:
         if group_id < 0:
             raise ValueError("group_id must be non-negative")
         tp_rank, pcp_rank, dcp_rank, pp_rank = namespace
+        tp = "*" if group_id in self.replicated_groups else tp_rank
         return (
             f"umbp:vllm:v1:{self.namespace.value}:"
-            f"tp{tp_rank}:pcp{pcp_rank}:dcp{dcp_rank}:"
+            f"tp{tp}:pcp{pcp_rank}:dcp{dcp_rank}:"
             f"pp{pp_rank}:g{group_id}:"
             f"{block_hash.hex()}"
         )
@@ -253,7 +287,14 @@ class BlockIdentityCodec:
             self.key_for_namespace(block_hash, group_id, namespace)
             for namespace in topology.all_namespaces()
             for group_id in group_ids
+            if group_id not in self.replicated_groups or namespace[0] == 0
         )
+
+    def keys_per_object(self, topology: RankTopology, group_id: int) -> int:
+        """Number of rank keys that together hold one logical block."""
+        if group_id in self.replicated_groups:
+            return topology.rank_count // topology.tp_size
+        return topology.rank_count
 
 
 @dataclass(frozen=True)
@@ -673,6 +714,10 @@ class RequestTracker:
             return self.saved_tokens
         self.saved_tokens = complete_tokens
         return complete_tokens
+
+
+# Error prefix of a transfer a runtime refused without touching the pool.
+TRANSFER_NOT_ATTEMPTED = "transfer not attempted"
 
 
 class TransferJobStatus(str, Enum):
