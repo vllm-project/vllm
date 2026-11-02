@@ -31,8 +31,10 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     _import_deep_gemm,
+    fp8_einsum,
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
+    get_tma_aligned_size,
     m_grouped_fp8_gemm_nt_contiguous,
     mk_alignment_scope,
 )
@@ -223,6 +225,123 @@ def _deepgemm_fp8_gemm_nt_warmup(
             pbar.update(1)
 
     FP8_GEMM_NT_WARMUP_CACHE.add(w.size())
+
+
+FP8_EINSUM_WARMUP_CACHE: set[tuple] = set()
+
+# Smallest block M DeepGEMM's sm90/sm100 get_layout_candidates enumerates.
+FP8_EINSUM_BLOCK_M_GRANULARITY = 16
+
+
+def _fp8_einsum_warmup_data(
+    module: torch.nn.Module,
+) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int, int], bool] | None:
+    """Return ``(wo_a weight, wo_a scale, einsum recipe, tma_aligned_scales)`` for
+    a DeepSeek-V4 attention layer whose o_proj runs ``fp8_einsum`` (see
+    ``deep_gemm_fp8_o_proj``), else None.
+
+    ``wo_a`` is an ``is_bmm`` linear: its DeepGEMM kernel skips the
+    ``fp8_gemm_nt`` warmup provider because the layer runs through
+    ``fp8_einsum`` instead, so it has to be warmed here.
+    """
+    wo_a = getattr(module, "wo_a", None)
+    recipe = getattr(module, "_einsum_recipe", None)
+    if wo_a is None or recipe is None or not getattr(wo_a, "is_bmm", False):
+        return None
+    weight = getattr(wo_a, "weight", None)
+    if weight is None or weight.dtype != torch.float8_e4m3fn or weight.dim() != 3:
+        return None
+    weight_scale = getattr(wo_a, "weight_scale", None)
+    if weight_scale is None:
+        weight_scale = getattr(wo_a, "weight_scale_inv", None)
+    if weight_scale is None:
+        return None
+    return (
+        weight,
+        weight_scale,
+        tuple(recipe),
+        bool(getattr(module, "_tma_aligned_scales", False)),
+    )
+
+
+def _get_fp8_einsum_warmup_key(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    recipe: tuple[int, int, int],
+    tma_aligned_scales: bool,
+) -> tuple:
+    return (weight.size(), weight_scale.dtype, recipe, tma_aligned_scales)
+
+
+def _get_fp8_einsum_m_values(weight: torch.Tensor, max_tokens: int) -> list[int]:
+    """M values (attention tokens per step) to warm ``fp8_einsum`` with.
+
+    DeepGEMM picks the einsum tile config from M at runtime, so every config a
+    prefill chunk can land on has to be compiled up front. ``relax`` reuses the
+    ``fp8_gemm_nt`` boundary heuristic with N = the einsum output width, plus
+    every M a tile boundary can fall on.
+    """
+    if envs.VLLM_DEEP_GEMM_WARMUP == "relax":
+        n = weight.size(1)
+        m_values = set(_generate_optimal_warmup_m_values(max_tokens, n, weight.device))
+        # Block-M candidates are 16-multiples, so configs change only at M % 16 == 1.
+        m_values.update(range(1, max_tokens + 1, FP8_EINSUM_BLOCK_M_GRANULARITY))
+        return sorted(m for m in m_values if 1 <= m <= max_tokens)
+    assert envs.VLLM_DEEP_GEMM_WARMUP == "full", (
+        "Expected "
+        'VLLM_DEEP_GEMM_WARMUP env to be set to "full" but got '
+        f"{envs.VLLM_DEEP_GEMM_WARMUP}"
+    )
+    return list(range(1, max_tokens + 1))
+
+
+def _deepgemm_fp8_einsum_warmup(
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    recipe: tuple[int, int, int],
+    tma_aligned_scales: bool,
+    max_tokens: int,
+    pbar: tqdm | None = None,
+):
+    key = _get_fp8_einsum_warmup_key(weight, weight_scale, recipe, tma_aligned_scales)
+    if key in FP8_EINSUM_WARMUP_CACHE:
+        return
+
+    n_groups, o_lora_rank, d = weight.size()
+    quant_group_size = recipe[2]
+    num_scale_blocks = d // quant_group_size
+    # Same scale layout fused_inv_rope_fp8_quant hands to fp8_einsum at runtime:
+    # FP32 block scales on SM90, INT32-packed UE8M0 on SM100, TMA-aligned in T.
+    scale_inner = cdiv(num_scale_blocks, 4) if tma_aligned_scales else num_scale_blocks
+    scale_dtype = torch.int32 if tma_aligned_scales else torch.float32
+    device = weight.device
+
+    for num_tokens in _get_fp8_einsum_m_values(weight, max_tokens):
+        tma_aligned_t = get_tma_aligned_size(num_tokens, 4)
+        a = torch.empty(
+            (n_groups, num_tokens, d), device=device, dtype=torch.float8_e4m3fn
+        ).transpose(0, 1)
+        # Must be initialized (UE8M0 packing asserts zero sign/mantissa bits).
+        a_scale = (
+            torch.zeros(
+                n_groups * scale_inner * tma_aligned_t, device=device, dtype=scale_dtype
+            )
+            .as_strided(
+                (n_groups, num_tokens, scale_inner),
+                (scale_inner * tma_aligned_t, 1, tma_aligned_t),
+            )
+            .transpose(0, 1)
+        )
+        out = torch.empty(
+            (num_tokens, n_groups, o_lora_rank), device=device, dtype=torch.bfloat16
+        )
+        fp8_einsum(
+            "bhr,hdr->bhd", (a, a_scale), (weight, weight_scale), out, recipe=recipe
+        )
+        if pbar is not None:
+            pbar.update(1)
+
+    FP8_EINSUM_WARMUP_CACHE.add(key)
 
 
 GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE: set[torch.Size] = set()
@@ -454,6 +573,14 @@ def deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(
         )
 
 
+def deepgemm_fp8_einsum_warmup(
+    model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
+):
+    for m in model.modules():
+        if (data := _fp8_einsum_warmup_data(m)) is not None:
+            _deepgemm_fp8_einsum_warmup(*data, max_tokens=max_tokens, pbar=pbar)
+
+
 @torch.inference_mode()
 def deepgemm_fp8_fp4_mega_moe_warmup(
     model: torch.nn.Module, max_tokens: int, pbar: tqdm | None = None
@@ -469,9 +596,16 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
         GROUPED_FP8_GEMM_NT_CONTIGUOUS_WARMUP_CACHE
     )
     seen_mega_moe_keys: set[tuple] = set(FP8_FP4_MEGA_MOE_WARMUP_CACHE)
+    seen_einsum_keys: set[tuple] = set(FP8_EINSUM_WARMUP_CACHE)
 
     total = 0
     for m in model.modules():
+        if (einsum_data := _fp8_einsum_warmup_data(m)) is not None:
+            einsum_key = _get_fp8_einsum_warmup_key(*einsum_data)
+            if einsum_key not in seen_einsum_keys:
+                total += len(_get_fp8_einsum_m_values(einsum_data[0], max_tokens))
+                seen_einsum_keys.add(einsum_key)
+            continue
         if (data := _deep_gemm_linear_data(m)) is not None:
             w, _ = data
             if w.size() not in seen_fp8_sizes:
@@ -507,9 +641,11 @@ def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
     if is_global_first_rank():
         with tqdm(total=total, desc="DeepGEMM warmup") as pbar:
             deepgemm_fp8_gemm_nt_warmup(model, max_tokens, pbar)
+            deepgemm_fp8_einsum_warmup(model, max_tokens, pbar)
             deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, pbar)
             deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, pbar)
     else:
         deepgemm_fp8_gemm_nt_warmup(model, max_tokens, None)
+        deepgemm_fp8_einsum_warmup(model, max_tokens, None)
         deepgemm_grouped_fp8_gemm_nt_contiguous_warmup(model, max_tokens, None)
         deepgemm_fp8_fp4_mega_moe_warmup(model, max_tokens, None)
