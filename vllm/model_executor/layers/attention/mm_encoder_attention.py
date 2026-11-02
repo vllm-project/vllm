@@ -3,6 +3,7 @@
 
 import functools
 import json
+from collections.abc import Callable
 
 import numpy as np
 import torch
@@ -214,6 +215,38 @@ def bucket_flashinfer_max_seqlen(
     )
 
 
+def _pad_cumulative_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    n = src.shape[0]
+    dst.zero_()
+    dst[:n].copy_(src)
+    if n < dst.shape[0]:
+        dst[n:] = src[-1]
+
+
+def _pad_flashinfer_cu_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    src_mid = src.shape[0] // 2
+    dst_mid = dst.shape[0] // 2
+    assert src_mid <= dst_mid, (
+        f"FlashInfer cu_seqlens replay buffer is larger than capture buffer: "
+        f"src_section={src_mid}, dst_section={dst_mid}"
+    )
+
+    dst.zero_()
+    dst[:src_mid].copy_(src[:src_mid])
+    if src_mid < dst_mid:
+        dst[src_mid:dst_mid] = src[src_mid - 1]
+
+    dst[dst_mid : dst_mid + src_mid].copy_(src[src_mid:])
+    if dst_mid + src_mid < dst.shape[0]:
+        dst[dst_mid + src_mid :] = src[-1]
+
+
 # --8<-- [start:mm_encoder_attn]
 @CustomOp.register("mm_encoder_attn")
 class MMEncoderAttention(CustomOp):
@@ -313,6 +346,16 @@ class MMEncoderAttention(CustomOp):
 
         cu_seqlens = async_tensor_h2d(cu_seqlens, device=device)
         return cu_seqlens
+
+    @classmethod
+    def cu_seqlens_buffer_padding(
+        cls, attn_backend: AttentionBackendEnum
+    ) -> Callable[[torch.Tensor, torch.Tensor], None]:
+        """Copy `maybe_recompute_cu_seqlens`'s output into a larger CUDA
+        graph buffer, padding with empty sequences."""
+        if attn_backend == AttentionBackendEnum.FLASHINFER:
+            return _pad_flashinfer_cu_seqlens_buffer
+        return _pad_cumulative_seqlens_buffer
 
     def __init__(
         self,
