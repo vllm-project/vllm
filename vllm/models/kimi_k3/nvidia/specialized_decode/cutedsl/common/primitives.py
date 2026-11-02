@@ -14,7 +14,7 @@ from cutlass.experimental import primitives as nvvm
 
 
 def ptx(assembly, constraints, operands=(), result=None, *, effects, loc=None, ip=None):
-    """One verbatim asm block; a tuple `result` (even a 1-tuple) returns a tuple."""
+    """One verbatim asm block; a tuple ``result`` (even a 1-tuple) returns a tuple."""
     if isinstance(result, tuple) and len(result) == 1:
         args = (assembly, constraints, operands, result[0])
         return (ptx(*args, effects=effects, loc=loc, ip=ip),)
@@ -46,7 +46,7 @@ def ptx(assembly, constraints, operands=(), result=None, *, effects, loc=None, i
 
 
 def asm(result=None, *, pure=False):
-    """`f(*args) -> (code, constraints, operands[, result, pure])` as one inline-PTX
+    """``f(*args) -> (code, constraints, operands[, result, pure])`` as one inline-PTX
     op. Pointer operands pass their address: 32-bit for "r" (shared), 64-bit for "l"."""
 
     def wrap(fn):
@@ -94,7 +94,7 @@ def fma(a, b, c, *, ftz=False):
 
 
 def dot(a, b, acc=None, **kwargs):
-    """`fma` chain over `zip(a, b)` from `acc`, or from `a[0] * b[0]`."""
+    """``fma`` chain over ``zip(a, b)`` from ``acc``, or from ``a[0] * b[0]``."""
     for x, y in zip(a, b):
         acc = x * y if acc is None else fma(x, y, acc, **kwargs)
     return acc
@@ -115,7 +115,7 @@ def round_pair_square(word):
 
 @asm(Float32, pure=True)
 def inv_rms(value, eps, *, m8=False):
-    """rsqrt(value / 3584 + eps); `m8`: the mean as a reciprocal product refined by
+    """rsqrt(value / 3584 + eps); ``m8``: the mean as a reciprocal product refined by
     its FMA residual."""
     mean = "div.rn.f32 r,$1,0f45600000;"
     if m8:
@@ -143,7 +143,7 @@ def reciprocal64(value: Float64):
 
 @asm(Float32, pure=True)
 def sigmoid_reciprocal(denominator: Float32, *, fast_math):
-    """1 / (1 + exp(-x)) from its denominator: an approximate divide with `fast_math`,
+    """1 / (1 + exp(-x)) from its denominator: an approximate divide with ``fast_math``,
     else the approximate reciprocal refined by two IEEE FMAs (out-of-range: div.rn)."""
     if fast_math:
         return "div.approx.ftz.f32 $0, 0f3f800000, $1;", "=f,f", (denominator,)
@@ -159,7 +159,7 @@ def sigmoid_reciprocal(denominator: Float32, *, fast_math):
 
 @cute.jit
 def sigmoid(value: Float32, fast_math: cutlass.Constexpr = None):
-    """1 / (1 + exp(-x)); correctly rounded when `fast_math` is None."""
+    """1 / (1 + exp(-x)); correctly rounded when ``fast_math`` is None."""
     if cutlass.const_expr(fast_math is None):
         result = div_rn(Float32(1), Float32(1) + cute.math.exp(-value, fastmath=False))
     else:
@@ -219,7 +219,7 @@ def float_bits(value: Float32) -> Int32:
 
 
 def bf16(word, high=False):
-    """FP32 of the low (or high) BF16 half of `word`."""
+    """FP32 of the low (or high) BF16 half of ``word``."""
     return bits_float(word & 0xFFFF0000 if high else word << 16)
 
 
@@ -251,7 +251,7 @@ def gate_bf16_bits(value: Float32):
 
 @asm(Uint32, pure=True)
 def pack_pair(low, high, *, policy="plain"):
-    """BF16x2 of (low, high); `policy=None` is the bare conversion."""
+    """BF16x2 of (low, high); ``policy=None`` is the bare conversion."""
     code = "cvt.rn.bf16x2.f32 $0,$2,$1; "
     if policy == "stage":
         # NaN halves become canonical, so no word is the 0xffffffff staging sentinel.
@@ -278,7 +278,7 @@ bf16x2 = partial(pack_pair, policy=None)
 
 @cute.jit
 def no_neg_zero(word):
-    """`word` with each negative-zero BF16 half made +0."""
+    """``word`` with each negative-zero BF16 half made +0."""
     result = Uint32(word)
     if (result & 0xFFFF) == 0x8000:
         result &= Uint32(0xFFFF0000)
@@ -288,7 +288,7 @@ def no_neg_zero(word):
 
 
 def published(words, ready=True, *, sentinel=0x80000000):
-    """`ready` and no word is the mailbox `sentinel`."""
+    """``ready`` and no word is the mailbox ``sentinel``."""
     for word in words:
         ready &= word != Uint32(sentinel)
     return ready
@@ -309,7 +309,7 @@ def fp8_bits(value: Float32):
 
 @asm()
 def store_fp8_pair(pointer, low: Float32, high: Float32):
-    """FP8 E4M3 (satfinite) of `low` and `high` as the two bytes at `pointer`."""
+    """FP8 E4M3 (satfinite) of ``low`` and ``high`` as the two bytes at ``pointer``."""
     code = "{ .reg .b16 pair; cvt.rn.satfinite.e4m3x2.f32 pair,$2,$1; "
     code += "st.global.b16 [$0],pair; }"
     return code, "l,f,f,~{memory}", (pointer, low, high)
@@ -370,7 +370,7 @@ def mma(a, b, accumulator, *, fp8=False, bf16=False):
 
 
 def mma_into(acc, a, b, **kwargs):
-    """`acc += a @ b` with one `mma`; `acc` is a four-element register view."""
+    """``acc += a @ b`` with one ``mma``; ``acc`` is a four-element register view."""
     result = mma(a, b, tuple(acc[k] for k in range(4)), **kwargs)
     for k in range(4):
         acc[k] = result[k]
@@ -378,7 +378,7 @@ def mma_into(acc, a, b, **kwargs):
 
 @asm()
 def ldmatrix(pointer, *, trans=False, count=4):
-    """`count` 8x8 b16 shared matrices; lanes 8i..8i+7 address matrix i's rows."""
+    """``count`` 8x8 b16 shared matrices; lanes 8i..8i+7 address matrix i's rows."""
     names = ",".join(f"${i}" for i in range(count))
     code = f"ldmatrix.sync.aligned.m8n8.x{count}{'.trans' * trans}.shared.b16 "
     code += f"{{{names}}},[${count}];"
@@ -387,7 +387,7 @@ def ldmatrix(pointer, *, trans=False, count=4):
 
 
 def split(total, i, n):
-    """(first, count) of part `i` of `total` items split `n` ways."""
+    """(first, count) of part ``i`` of ``total`` items split ``n`` ways."""
     first = total * i // n
     return first, total * (i + 1) // n - first
 
@@ -404,12 +404,12 @@ def shared_address(pointer):
 
 
 def at(tensor, *coord):
-    """Pointer to `tensor[coord]`."""
+    """Pointer to ``tensor[coord]``."""
     return tensor.iterator + cute.crd2idx(coord, tensor.layout)
 
 
 def view(base, offset, dtype, shape, stride=None):
-    """`dtype` tensor at byte `offset` of pointer `base`."""
+    """``dtype`` tensor at byte ``offset`` of pointer ``base``."""
     pointer = cute.recast_ptr(base + offset, dtype=dtype)
     return cute.make_tensor(pointer, cute.make_layout(shape, stride=stride))
 
@@ -421,7 +421,7 @@ def zeros(shape, dtype):
 
 
 def alloc(allocator, dtype, shape, align=16):
-    """Row-major `shape` tensor from a `SmemAllocator`."""
+    """Row-major ``shape`` tensor from a ``SmemAllocator``."""
     stride = None
     if isinstance(shape, tuple):
         stride = tuple(math.prod(shape[i + 1 :]) for i in range(len(shape)))
@@ -443,9 +443,9 @@ def load_words(
     word_type="b32",
     result_type=Uint32,
 ):
-    """`count` words (a tuple); `scope` is a relaxed load at that scope.
-    `mutable` (a side-effecting load) for data written during the step (activations,
-    tables, refills). Only static weights use `evict_first`."""
+    """``count`` words (a tuple); ``scope`` is a relaxed load at that scope.
+    ``mutable`` (a side-effecting load) for data written during the step (activations,
+    tables, refills). Only static weights use ``evict_first``."""
     space = "global" + (f".{cache_policy}" if cache_policy else "")
     if shared:
         space = "shared"
@@ -491,8 +491,8 @@ def load_bf16x8(pointer, *, shared=False, mutable=False):
 
 @asm()
 def load_vector(pointer, *, cache="cg"):
-    """`cache` "weight": a streaming L2 evict_first load of static weights; else
-    `ld.global.<cache>`. Side-effecting in every mode."""
+    """``cache`` "weight": a streaming L2 evict_first load of static weights; else
+    ``ld.global.<cache>``. Side-effecting in every mode."""
     opcode, policy, tail = "ld.global." + cache, "", ""
     if cache == "weight":
         policy = ".reg .b64 pol; createpolicy.fractional.L2::evict_first.b64 pol,1.0; "
@@ -512,7 +512,7 @@ def table_load(pointer):
 
 @asm()
 def store_words(pointer, words, *, shared=False, scope=None):
-    """`scope` is a relaxed global store at that scope."""
+    """``scope`` is a relaxed global store at that scope."""
     vector, registers = _vector(len(words), 1)
     if shared:
         # Other threads read it: a memory side effect, like the global stores.
@@ -536,7 +536,7 @@ mailbox_store = partial(store_words, scope="gpu")
 
 @asm()
 def store_f32x4(pointer, values, when=None):
-    """`when`: a predicate, so callers need no branch."""
+    """``when``: a predicate, so callers need no branch."""
     code = "st.global.v4.f32 [$0], {$1, $2, $3, $4};"
     if when is None:
         return code, "l,f,f,f,f", (pointer, *values)
@@ -567,8 +567,8 @@ def store_pair(pointer, a, b):
 
 @asm()
 def push_float(pointer, value, barrier, peer, when=None):
-    """DSMEM store of one FP32 `value` (or a 4-tuple) completing on `barrier`
-    (`when`: predicated on it)."""
+    """DSMEM store of one FP32 ``value`` (or a 4-tuple) completing on ``barrier``
+    (``when``: predicated on it)."""
     values = tuple(map(Float32, value if isinstance(value, tuple) else (value,)))
     vector, registers = _vector(len(values), 1)
     b, p, w = (f"${len(values) + i}" for i in (1, 2, 3))
@@ -603,7 +603,7 @@ def publish_hint(pointer):
 
 @asm()
 def copy_g2s(dst, src, size=16, barrier=None, *, evict_first=False):
-    """16-byte cp.async, or a static/dynamic `size` bulk copy on `barrier`."""
+    """16-byte cp.async, or a static/dynamic ``size`` bulk copy on ``barrier``."""
     operands = [dst, src]
     policy = hint = tail = ""
     if evict_first:
@@ -674,7 +674,7 @@ def prefetch_bytes(src, size):
 
 @dsl_user_op
 def prefetch_bulk(address, size, *, loc=None, ip=None):
-    """`prefetch_bytes` of a 64-bit address through the NVVM op."""
+    """``prefetch_bytes`` of a 64-bit address through the NVVM op."""
     pointer = cute.make_ptr(cutlass.Uint8, address, cute.AddressSpace.gmem)
     nvvm.cp_async_bulk_prefetch(pointer, size, loc=loc, ip=ip)
 
@@ -698,15 +698,15 @@ def acquire_tensormap(pointer):
 
 @asm()
 def acquire_tensormap_asm(pointer):
-    """`acquire_tensormap` as one asm block on the unfolded address."""
+    """``acquire_tensormap`` as one asm block on the unfolded address."""
     code = "fence.proxy.tensormap::generic.acquire.sys [$0],128; "
     return code + "prefetch.tensormap [$0];", "l", (pointer,)
 
 
 @asm(Int32)
 def try_wait(barrier, phase=0, *, test=False, scope="cluster"):
-    """Acquire parity probe at `scope` ("cluster", or "cta" when every arrival is
-    CTA-local); `test` is the non-blocking probe of phase 0."""
+    """Acquire parity probe at ``scope`` ("cluster", or "cta" when every arrival is
+    CTA-local); ``test`` is the non-blocking probe of phase 0."""
     op, parity = ("test_wait", "0") if test else ("try_wait", "$2")
     code = f"{{ .reg .pred p; mbarrier.{op}.parity.acquire.{scope}.shared::cta.b64 "
     code += f"p,[$1],{parity}; selp.u32 $0,1,0,p; }}"
@@ -758,7 +758,7 @@ def group_barrier(group):
 
 @asm()
 def sleep_ns(ns):
-    """`ns` is an immediate if a Python int, else a register."""
+    """``ns`` is an immediate if a Python int, else a register."""
     if isinstance(ns, int):
         return f"nanosleep.u32 {ns};", "", ()
     return "nanosleep.u32 $0;", "r", (Uint32(ns),)
@@ -780,7 +780,7 @@ def fence_tmem(*, before=False):
 
 
 def wait_tmem(barrier, phase=0, scope="cluster"):
-    """`wait`, then order later tcgen05 operations after it."""
+    """``wait``, then order later tcgen05 operations after it."""
     wait(barrier, phase, scope=scope)
     fence_tmem()
 
@@ -793,7 +793,7 @@ def free_tmem(address, columns):
 
 @cute.jit
 def release_tmem(tmem, columns: cutlass.Constexpr[int], warp, owner):
-    """CTA teardown: warp `owner` frees the TMEM after every tcgen05 operation."""
+    """CTA teardown: warp ``owner`` frees the TMEM after every tcgen05 operation."""
     fence_tmem(before=True)
     cute.arch.sync_threads()
     if warp == owner:
@@ -808,7 +808,7 @@ def require_zero_tmem(address):
 
 @asm()
 def load_tmem(address, count=1):
-    """`count` FP32 TMEM columns of this lane, waiting for the load."""
+    """``count`` FP32 TMEM columns of this lane, waiting for the load."""
     registers = ",".join(f"${i}" for i in range(count))
     code = f"tcgen05.ld.sync.aligned.32x32b.x{count}.b32 {{{registers}}},[${count}]; "
     code += "tcgen05.wait::ld.sync.aligned;"
@@ -828,7 +828,7 @@ commit = nvvm.tcgen05_commit
 
 @asm()
 def commit_asm(barrier):
-    """`commit` as an asm block on the unfolded address."""
+    """``commit`` as an asm block on the unfolded address."""
     code = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64 [$0];"
     return code, "r", (barrier,)
 
@@ -836,8 +836,8 @@ def commit_asm(barrier):
 @asm()
 def mma_bf16_block(d, a, b, instruction, accumulate, empty, release):
     """Warp-uniform issue of one 64-K block (K-major 128B-swizzled A and B): the
-    elected lane runs the four K16 BF16 MMAs into `d` (the first accumulates iff
-    `accumulate` is nonzero) and, if `release`, commits `empty`."""
+    elected lane runs the four K16 BF16 MMAs into ``d`` (the first accumulates iff
+    ``accumulate`` is nonzero) and, if ``release``, commits ``empty``."""
     mma = "tcgen05.mma.cta_group::1.kind::f16"
     commit = "tcgen05.commit.cta_group::1.mbarrier::arrive::one.shared::cluster.b64"
     code = "{ .reg .pred e,p0,pt,pc; .reg .b64 a1,a2,a3,b1,b2,b3; "
@@ -855,7 +855,7 @@ def mma_bf16_block(d, a, b, instruction, accumulate, empty, release):
 
 @asm()
 def mma_mx(d, a, b, instruction, sfa, sfb, accumulate):
-    """One block-scaled MXF8 tcgen05 MMA; `accumulate` is a runtime flag."""
+    """One block-scaled MXF8 tcgen05 MMA; ``accumulate`` is a runtime flag."""
     words = (Uint32(v) for v in (instruction, sfa, sfb, accumulate))
     code = "{ .reg .pred p; setp.ne.b32 p,$6,0; tcgen05.mma.cta_group::1"
     code += ".kind::mxf8f6f4.block_scale [$0],$1,$2,$3,[$4],[$5],p; }"
@@ -909,7 +909,7 @@ def launch(kernel, args, grid, block, cluster=None, pdl=True, **options):
 
 @cute.jit
 def scatter_reduce(values, lane, count: cutlass.Constexpr[int]):
-    """Warp-reduce `count` values; lane groups end up owning one value each."""
+    """Warp-reduce ``count`` values; lane groups end up owning one value each."""
     selected = Int32(0)
     for stage in cutlass.range_constexpr(5):
         offset = 16 >> stage

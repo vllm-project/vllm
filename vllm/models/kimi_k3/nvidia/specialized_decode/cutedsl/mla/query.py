@@ -52,9 +52,9 @@ class MlaQuery:
     cluster part with FP32 FMAs; wider batches tile 16-64 requests per CTA (one wave
     of 96 CTAs at B64 for both head counts) and use BF16 MMAs (FP32 accumulation).
 
-    `dcp` (decode context parallel size; args then end with this parity's local q
+    ``dcp`` (decode context parallel size; args then end with this parity's local q
     mailbox, its multicast address and the rank): each CTA also multicasts the query
-    bytes it wrote into head block `rank` of every rank's Lamport q mailbox
+    bytes it wrote into head block ``rank`` of every rank's Lamport q mailbox
     (mla.dcp.DcpBox), then polls its share of the gathered mailbox until no word is
     the sentinel, so the next kernel reads the gathered query."""
 

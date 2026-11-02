@@ -206,7 +206,7 @@ def commit_replayssm_ring_trackers(
     accepted from that query is available only on the next forward pass. This
     function then advances the per-request ring by the accepted prefix and
     records the current query length for the following pass. A zero
-    `prev_query_len` means that reset/prefill left no prior MTP query to
+    ``prev_query_len`` means that reset/prefill left no prior MTP query to
     commit; slot validity is handled independently by the kernel mask.
 
     Standard single-token decode needs no delayed commit: its ReplaySSM kernel
@@ -409,7 +409,7 @@ class CPUSSUBackend(MambaSSUBackend):
     """CPU SSU backend using the compiled C++ VSX/scalar kernel.
 
     On CPU-only platforms (PowerPC, x86 without CUDA) this dispatches to
-    the vectorized C++ kernel registered as `torch.ops._C.selective_state_update_cpu`.
+    the vectorized C++ kernel registered as ``torch.ops._C.selective_state_update_cpu``.
     That kernel uses vec_op SIMD intrinsics (VSX on ppc64le, AVX2 on x86,
     scalar fallback elsewhere) and is parallelised with OpenMP across heads.
 

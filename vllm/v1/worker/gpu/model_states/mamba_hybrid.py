@@ -187,7 +187,7 @@ class MambaHybridModelState(DefaultModelState):
         """Migrate each request's mamba state across block boundaries before the
         forward (V1 align semantics, done on GPU). Runs on real batches only
         (dummy DP/profiling runs skip preprocess_state), and before
-        `prepare_attn` gathers `num_accepted_tokens`, so the boundary reset
+        ``prepare_attn`` gathers ``num_accepted_tokens``, so the boundary reset
         is visible to the forward kernels.
         """
         if not self._align_mode:

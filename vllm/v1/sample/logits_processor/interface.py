@@ -62,8 +62,8 @@ class LogitsProcessor(ABC):
     def validate_params(cls, sampling_params: SamplingParams):
         """Validate sampling params for this logits processor.
 
-        Raise `VLLMValidationError` (preferred) / `ValueError` (backward compatible)
-        for invalid params. Bare `ValueError` is converted to `VLLMValidationError`
+        Raise ``VLLMValidationError`` (preferred) / ``ValueError`` (backward compatible)
+        for invalid params. Bare ``ValueError`` is converted to ``VLLMValidationError``
         at the engine boundary so online serving returns HTTP 400.
         """
         return None

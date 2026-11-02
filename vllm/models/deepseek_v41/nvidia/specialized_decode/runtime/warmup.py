@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tuning and compiling the specialized decode's kernels.
 
-The model state calls `warm_up` once the executor is built, before memory
+The model state calls ``warm_up`` once the executor is built, before memory
 profiling and CUDA graph capture, so no kernel compiles or tunes inside a
 capture. FlashInfer's tuner times each tactic on every TP rank and reduces the
 timings over the TP group, so every rank makes the same calls in the same
@@ -84,7 +84,7 @@ def _tuning() -> Iterator[None]:
 
 
 def _aux_weights(steps: list[AttentionStep]) -> list[torch.Tensor]:
-    """The weights the layers run on `ll_bf16`."""
+    """The weights the layers run on ``ll_bf16``."""
     weights = [w for step in steps if step.aux_gemm for w in side_weights(step.attn)]
     for step in steps:
         wk = key_weight(step.attn)
@@ -96,8 +96,8 @@ def _aux_weights(steps: list[AttentionStep]) -> list[torch.Tensor]:
 def _deferred_moe(
     decode: SpecializedDecode, vllm_config: VllmConfig, rows: int, tune: bool
 ) -> None:
-    """One deferring MoE layer on `rows` random rows with the finalize
-    deferred, as the executor runs it above `LOW_BATCH_MAX_ROWS` rows:
+    """One deferring MoE layer on ``rows`` random rows with the finalize
+    deferred, as the executor runs it above ``LOW_BATCH_MAX_ROWS`` rows:
     tunes its experts over the serving buckets, and allocates what the
     deferred launch allocates on first use before memory profiling."""
     moe = next((plan.moe for plan in decode.plans if plan.moe.deferrable), None)

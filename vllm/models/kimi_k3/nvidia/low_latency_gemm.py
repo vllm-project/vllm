@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Kimi-K3 decode GEMM selection for unquantized BF16 on SM90/SM100/SM103/SM107.
 
-Dispatch is purely by local `(N, K)` shape and token count `M` — the module
+Dispatch is purely by local ``(N, K)`` shape and token count ``M`` — the module
 name plays no role. Each measured shape maps to a :class:`ProjectionSpec`
 holding the winning backend per token count. The static part of the decision is
-resolved once per module at install time into a small `{M: call}` plan, so the
+resolved once per module at install time into a small ``{M: call}`` plan, so the
 per-forward path is a single dict lookup.
 
 The supported capabilities carry separate measured tables:
@@ -68,8 +68,8 @@ _KDA_TP_SIZE = 8
 def _kda_qkvg_flashinfer_backend() -> Literal["cute-dsl"] | None:
     """Return the tested FlashInfer backend for the low-M QKVG branch.
 
-    FlashInfer's `cute-dsl` BF16 GEMM supports SM100 and SM103, but rejects
-    SM90 during backend validation. Other capabilities use `torch.mm` for
+    FlashInfer's ``cute-dsl`` BF16 GEMM supports SM100 and SM103, but rejects
+    SM90 during backend validation. Other capabilities use ``torch.mm`` for
     QKVG while retaining the concurrent F_A/beta and F_B branch.
     """
     if current_platform.is_device_capability(
@@ -639,7 +639,7 @@ def select_kimi_k3_backend(
     *,
     has_residual: bool = False,
 ) -> Backend | None:
-    """Backend for a local `(N, K)` at `num_tokens`, or None to fall back."""
+    """Backend for a local ``(N, K)`` at ``num_tokens``, or None to fall back."""
     spec = KIMI_K3_PROJECTIONS.get((n, k))
     return _backend_for(spec, num_tokens, has_residual) if spec is not None else None
 
@@ -742,10 +742,10 @@ def run_kda_projection_overlap(
     """Run the TP8 KDA decode projection branches concurrently.
 
     Args:
-        hidden_states: Packed BF16 input with shape `[M, 7168]`.
+        hidden_states: Packed BF16 input with shape ``[M, 7168]``.
         packed_weight: Existing Q/K/V/G/F_A/beta/pad weight with shape
-            `[6288, 7168]`.
-        f_b_weight: F_B weight with shape `[1536, 128]`.
+            ``[6288, 7168]``.
+        f_b_weight: F_B weight with shape ``[1536, 128]``.
         aux_stream: Stream for the F_A/beta then F_B branch.
         events: Start and completion events for the stream fork and join.
 
@@ -1004,7 +1004,7 @@ def enable_kimi_k3_low_latency_gemm(
     """Install shape-selected low-latency GEMMs and register CuTe warmups.
 
     Modules are matched purely by type, an exactly-unquantized method, and a
-    local `(N, K)` present in the current device's measured table
+    local ``(N, K)`` present in the current device's measured table
     (:data:`KIMI_K3_PROJECTIONS` on SM103, :data:`KIMI_K3_PROJECTIONS_SM100`
     on SM100, :data:`KIMI_K3_PROJECTIONS_SM90` on SM90).
     """

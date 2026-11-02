@@ -40,22 +40,22 @@
 
 """Routed-expert GEMMs of the DeepSeek-V4.1 low-batch MoE in CuTe DSL.
 
-The low-batch MoE (`routed_expert_gemm.py`) multiplies at most eight token
+The low-batch MoE (``routed_expert_gemm.py``) multiplies at most eight token
 rows by the weights of the experts they chose. Its routing record
-(`routed_expert_route_cute.py`) lists, for each 8-row token tile, the
+(``routed_expert_route_cute.py``) lists, for each 8-row token tile, the
 tile's expert and its row limit (the end of the expert's rows within the
 tile). A GEMM here computes 128 x 8 output tiles from MXFP4 weights (operand
 A, 128 rows of one expert) and MXFP8 activations (operand B, 8 rows) with
-`tcgen05` block-scaled MMAs, as FlashInfer's low-latency block-scaled GEMM
+``tcgen05`` block-scaled MMAs, as FlashInfer's low-latency block-scaled GEMM
 does, over the work items (weight row tile, token tile) of the tiles the
 record uses:
 
-* the kernel is persistent: CTA `b` of `G` takes items `b, b + G, ..`,
+* the kernel is persistent: CTA ``b`` of ``G`` takes items ``b, b + G, ..``,
   so the weight loads stream without a gap from one item to the next, and no
   CTA works on a token tile the call does not use;
-* the warp that loads A loads it at the item's expert `record[4 + c]`;
+* the warp that loads A loads it at the item's expert ``record[4 + c]``;
 * the MMAs run in ascending K order without split-K, the order of the
-  TRT-LLM-gen `t128x8` tactics, so every output is bitwise theirs;
+  TRT-LLM-gen ``t128x8`` tactics, so every output is bitwise theirs;
 * the accumulator has two tensor-memory stages, so the epilogue of one item
   overlaps the MMAs of the next.
 
@@ -70,7 +70,7 @@ pick its experts, so all its warps wait first.
 
 The weights are those vLLM prepares for the TRT-LLM-gen backend, whose rows are
 shuffled for 128-row epilogue tiles: in each block of 32, shuffled row
-`s0 + 8 * s1` (`s0 < 8`, `s1 < 4`) holds row `4 * s0 + s1`. Their
+``s0 + 8 * s1`` (``s0 < 8``, ``s1 < 4``) holds row ``4 * s0 + s1``. Their
 scales are in the 128x4 layout the kernel reads for A.
 
 GEMM1 (:class:`RoutedExpertGemm1`) multiplies the whole routed input (at most
@@ -79,12 +79,12 @@ column of the token routed to it: clamped SwiGLU of the interleaved up/gate
 rows, quantized to MXFP8 (H and its block scales). The epilogue's arithmetic
 follows the GEMM1 kernel from Cake (vllm-project/vllm#59725).
 
-GEMM2 (:class:`RoutedExpertGemm2`) reads token tile `c` of the intermediate
-H, the contiguous rows `8c .. 8c + 7`, and writes BF16 rows of the output in
+GEMM2 (:class:`RoutedExpertGemm2`) reads token tile ``c`` of the intermediate
+H, the contiguous rows ``8c .. 8c + 7``, and writes BF16 rows of the output in
 the same permuted order. H's block scales use the layout the kernel reads for
 B: one 128-row scale atom per 8-row tile, of which rows 0-7 are used
-(`HS[c * K + (k // 128) * 512 + r * 16 + (k // 32) % 4]` for the scale of
-row `8c + r` at column `k`, `K` the bytes of one tile's atoms).
+(``HS[c * K + (k // 128) * 512 + r * 16 + (k // 32) % 4]`` for the scale of
+row ``8c + r`` at column ``k``, ``K`` the bytes of one tile's atoms).
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ EVICT_FIRST = 0x12F0000000000000
 
 
 def tile_scale_bytes(k: int) -> int:
-    """Bytes of one 8-row tile's block scales over `k` columns in the
+    """Bytes of one 8-row tile's block scales over ``k`` columns in the
     per-tile layout B's scales use (one 512-byte atom per 128 columns)."""
     return k // 128 * 512
 
@@ -126,7 +126,7 @@ def tile_scale_bytes(k: int) -> int:
 class RoutedExpertGemm:
     """Persistent block-scaled GEMM over the work items of a routing record
     (see the module docstring). A subclass builds the operands in
-    `__call__` and supplies the epilogue (`store`)."""
+    ``__call__`` and supplies the epilogue (``store``)."""
 
     # GEMM1 reads the record only after its grid dependency wait.
     route_before_wait = True
@@ -210,8 +210,8 @@ class RoutedExpertGemm:
         ctas: Int32,
         stream: cuda.CUstream,
     ):
-        """Build the TMA atoms and launch `ctas` persistent CTAs. `sfb`
-        None: the B load warp writes B's scales itself (`b_side`)."""
+        """Build the TMA atoms and launch ``ctas`` persistent CTAs. ``sfb``
+        None: the B load warp writes B's scales itself (``b_side``)."""
         self.mxf8f6f4 = self.a_dtype.width != self.b_dtype.width
         self.smem_alloc_a_dtype = (
             cutlass.Int8 if self.mxf8f6f4 and self.a_dtype.width < 8 else self.a_dtype
@@ -762,7 +762,7 @@ class RoutedExpertGemm:
 
     @cute.jit
     def b_tile_index(self, n_tile: Int32) -> Int32:
-        """B's 8-row tile for token tile `n_tile`."""
+        """B's 8-row tile for token tile ``n_tile``."""
         return n_tile
 
     def store(
@@ -791,12 +791,12 @@ class RoutedExpertGemm:
 
 @cute.jit
 def unshuffled_row(row: Int32) -> Int32:
-    """The weight row that shuffled row `row` holds (module docstring)."""
+    """The weight row that shuffled row ``row`` holds (module docstring)."""
     return (row & Int32(-32)) | ((row & Int32(7)) << Int32(2)) | ((row >> 3) & 3)
 
 
 class RoutedExpertGemm2(RoutedExpertGemm):
-    """GEMM2: the BF16 rows `h @ w2[expert]^T` of each token tile, in the
+    """GEMM2: the BF16 rows ``h @ w2[expert]^T`` of each token tile, in the
     tile's permuted order."""
 
     def __init__(
@@ -820,8 +820,8 @@ class RoutedExpertGemm2(RoutedExpertGemm):
         stream: cuda.CUstream,
     ):
         """A: w2 (hidden, intermediate, experts), K-major; B: H (rows,
-        intermediate), K-major, `rows` the padded rows; C: (rows, hidden)
-        BF16; `ctas` persistent CTAs."""
+        intermediate), K-major, ``rows`` the padded rows; C: (rows, hidden)
+        BF16; ``ctas`` persistent CTAs."""
         self.a_dtype = a_ptr.value_type
         self.b_dtype = b_ptr.value_type
         self.sf_dtype = sfa_ptr.value_type
@@ -972,8 +972,8 @@ def _asm(result, operands: list, text: str, constraints: str, loc, ip):
 
 @dsl_user_op
 def clamped_swiglu_x2(up0, up1, gate0, gate1, limit, neg_limit, *, loc=None, ip=None):
-    """`h` of two tokens: `up` clamped to [-limit, limit] and `gate` to
-    at most `limit`, then `up * gate * sigmoid(gate)`."""
+    """``h`` of two tokens: ``up`` clamped to [-limit, limit] and ``gate`` to
+    at most ``limit``, then ``up * gate * sigmoid(gate)``."""
     result = _asm(
         llvm.StructType.get_literal([T.f32(), T.f32()]),
         [
@@ -993,7 +993,7 @@ def clamped_swiglu_x2(up0, up1, gate0, gate1, limit, neg_limit, *, loc=None, ip=
 
 @dsl_user_op
 def abs_max_x2(lo, hi, *, loc=None, ip=None) -> Float32:
-    """`max(|lo|, |hi|, 0)`, subnormals flushed."""
+    """``max(|lo|, |hi|, 0)``, subnormals flushed."""
     return Float32(
         _asm(
             T.f32(),
@@ -1010,7 +1010,7 @@ def abs_max_x2(lo, hi, *, loc=None, ip=None) -> Float32:
 
 @dsl_user_op
 def scale_bits_x2(mine0, partner0, mine1, partner1, *, loc=None, ip=None):
-    """The `_SCALES_X2` bits of two blocks."""
+    """The ``_SCALES_X2`` bits of two blocks."""
     result = _asm(
         llvm.StructType.get_literal([T.i32(), T.i32()]),
         [
@@ -1030,8 +1030,8 @@ def scale_bits_x2(mine0, partner0, mine1, partner1, *, loc=None, ip=None):
 
 @dsl_user_op
 def quantize_e4m3x2(lo, hi, inverse_bits, *, loc=None, ip=None) -> Uint16:
-    """`lo` and `hi` times the inverse scale (subnormals flushed) as two
-    saturating E4M3 bytes, `lo` first."""
+    """``lo`` and ``hi`` times the inverse scale (subnormals flushed) as two
+    saturating E4M3 bytes, ``lo`` first."""
     return Uint16(
         _asm(
             T.i16(),
@@ -1071,14 +1071,14 @@ def ue8m0_code(bits: Uint32):
 
 
 class RoutedExpertGemm1(RoutedExpertGemm):
-    """GEMM1: `h = MXFP8(clamped SwiGLU(x @ w13[expert]^T))` of each token
+    """GEMM1: ``h = MXFP8(clamped SwiGLU(x @ w13[expert]^T))`` of each token
     tile, in the tile's permuted rows.
 
-    B is the whole routed input `x` (at most eight rows; rows past its end
+    B is the whole routed input ``x`` (at most eight rows; rows past its end
     read as zero) with its linear UE8M0 scales, which the B load warp writes
-    into the layout the MMA reads. Accumulator column `t` is token `t`;
+    into the layout the MMA reads. Accumulator column ``t`` is token ``t``;
     the epilogue writes it to the tile row that token was routed to
-    (`record[4 + 2 C + 8 c + r] == t`), if any. w13's rows interleave up and
+    (``record[4 + 2 C + 8 c + r] == t``), if any. w13's rows interleave up and
     gate, so each thread pairs them, clamps them, applies SwiGLU, scales each
     32-column block by its amax / 448 rounded up to a power of two (UE8M0),
     and stores E4M3 values with the block scales in the per-tile layout GEMM2
@@ -1118,9 +1118,9 @@ class RoutedExpertGemm1(RoutedExpertGemm):
         stream: cuda.CUstream,
     ):
         """A: w13 (2 x padded, hidden, experts), K-major; B: x (rows,
-        hidden), `b_scale_ptr` its scales as Uint32 words (rows, hidden /
-        128); H (`h_rows`, padded) as Uint16 pairs; HS in the per-tile
-        layout; `clamp` FP32 per expert; `ctas` persistent CTAs."""
+        hidden), ``b_scale_ptr`` its scales as Uint32 words (rows, hidden /
+        128); H (``h_rows``, padded) as Uint16 pairs; HS in the per-tile
+        layout; ``clamp`` FP32 per expert; ``ctas`` persistent CTAs."""
         self.a_dtype = a_ptr.value_type
         self.b_dtype = b_ptr.value_type
         self.sf_dtype = sfa_ptr.value_type
@@ -1154,15 +1154,15 @@ class RoutedExpertGemm1(RoutedExpertGemm):
 
     @cute.jit
     def b_tile_index(self, n_tile: Int32) -> Int32:
-        """Every item multiplies all of `x`."""
+        """Every item multiplies all of ``x``."""
         return Int32(0)
 
     @cute.jit
     def write_b_scales(
         self, sSFB: cute.Tensor, stage: Int32, k_tile: Int32, b_side: tuple
     ):
-        """Copy the stage's scales of `x` (four per 32-bit word) into rows
-        0-7 of B's scale atoms; rows past `x`'s end get scale 1."""
+        """Copy the stage's scales of ``x`` (four per 32-bit word) into rows
+        0-7 of B's scale atoms; rows past ``x``'s end get scale 1."""
         (b_scale,) = b_side
         atoms = self.cta_k // 128
         stage_bytes = 512 * atoms
@@ -1196,8 +1196,8 @@ class RoutedExpertGemm1(RoutedExpertGemm):
         exchange: cute.Tensor,
     ):
         """H and HS of the item (class docstring). The thread holds, for
-        tokens `t, t + 1` (`t` = 2 x lane % 4), the up and gate rows of H
-        columns `p` (registers 0-3) and `p + 1` (4-7), `p` = 64 x m_tile
+        tokens ``t, t + 1`` (``t`` = 2 x lane % 4), the up and gate rows of H
+        columns ``p`` (registers 0-3) and ``p + 1`` (4-7), ``p`` = 64 x m_tile
         + 16 x warp + 2 x lane / 4."""
         mH, mHS, mClamp = epi
         warp = cute.arch.make_warp_uniform(cute.arch.warp_idx()) - self.epilogue_warp

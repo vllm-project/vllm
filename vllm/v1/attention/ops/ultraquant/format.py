@@ -3,7 +3,7 @@
 """FP4 codepoint + UE8M0 scale constants for the UltraQuant KV cache.
 
 K/V codes are FP4 E2M1. Per-group scales are UE8M0 (one byte, a power of
-two): `s = 2^round(log2(c · absmax))` with `c = 0.156`. Decode
+two): ``s = 2^round(log2(c · absmax))`` with ``c = 0.156``. Decode
 consumes Q as FP8 E4M3 so scaled F8F6F4 MFMA can run natively on CDNA4.
 
 AoS slot layout (group_size=32), per (token, head):

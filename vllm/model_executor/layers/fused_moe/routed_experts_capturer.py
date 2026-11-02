@@ -48,12 +48,12 @@ class RoutedExpertsCapturer:
     Layer-level hooks call :meth:`capture` inside the forward pass. Routing
     rows owned by this DP rank are written into a preallocated device buffer.
 
-    The device buffer uses `int32`. Stable snapshots use the narrowest dtype
+    The device buffer uses ``int32``. Stable snapshots use the narrowest dtype
     that can represent every logical expert ID.
 
     Invariants:
         - One instance per worker; shape is fixed at init and covers the
-          worst-case step (`max_num_batched_tokens` tokens).
+          worst-case step (``max_num_batched_tokens`` tokens).
         - Every routed layer overwrites the current step's token rows.
     """
 

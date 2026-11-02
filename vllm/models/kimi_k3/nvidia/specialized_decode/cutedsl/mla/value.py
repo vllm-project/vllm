@@ -25,8 +25,8 @@ class MlaValue:
     """W_UV and the sigmoid gate, [B, H, 512] BF16 latent -> [B, H*128]. One
     128-thread CTA per (32 outputs, head, 16 rows); warp w owns outputs
     8w..8w+7 over the whole latent (BF16 MMA, FP32 accumulation). W_UV must have a
-    contiguous latent axis (the absorbed kv_b_proj view). Rows are tokens, `q` per
-    request (`lengths` per request)."""
+    contiguous latent axis (the absorbed kv_b_proj view). Rows are tokens, ``q`` per
+    request (``lengths`` per request)."""
 
     def __init__(self, heads: int, batch: int, q: int = 1):
         self.heads, self.batch, self.q = heads, batch, q

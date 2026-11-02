@@ -241,7 +241,7 @@ class BaseFrontendArgs:
         """Customize argparse kwargs before arguments are registered.
 
         Subclasses should override this and call
-        `super()._customize_cli_kwargs(frontend_kwargs)` first.
+        ``super()._customize_cli_kwargs(frontend_kwargs)`` first.
         """
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
@@ -264,7 +264,7 @@ class BaseFrontendArgs:
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Register CLI arguments for this frontend class.
 
-        Subclasses should override `_customize_cli_kwargs` instead of
+        Subclasses should override ``_customize_cli_kwargs`` instead of
         this method so that base-class postprocessing is always applied.
         """
         from vllm.engine.arg_utils import get_kwargs

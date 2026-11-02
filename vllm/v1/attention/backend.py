@@ -769,7 +769,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         Speculators can record this call inside their draft decode CUDA graphs,
         so it runs once at capture and never again in Python. Implementations
         must emit only capture-safe operations and write results into persistent
-        tensors that `metadata` already references.
+        tensors that ``metadata`` already references.
         """
         raise NotImplementedError
 

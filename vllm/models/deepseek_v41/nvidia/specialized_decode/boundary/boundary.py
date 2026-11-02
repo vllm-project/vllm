@@ -2,18 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The mHC boundaries of the specialized decode.
 
-Every decoder sublayer ends in a TP-partial output (the attention's `wo_b`,
+Every decoder sublayer ends in a TP-partial output (the attention's ``wo_b``,
 the MoE's routed and shared experts). The next boundary reduces it across the
 TP group, mixes it into the hc residual streams (mHC post) and collapses and
 normalizes the streams into the next sublayer's input (mHC pre). Here the
-fused all-reduce + mHC kernel (`BoundaryAllReduce`) does all of that for every
+fused all-reduce + mHC kernel (``BoundaryAllReduce``) does all of that for every
 step the executor runs; the next sublayer's mHC coefficients then come from the
-stock `mhc_pre_delayed_overlap`, on the shared mHC side stream for up to
-`MHC_OVERLAP_MAX_ROWS` rows and inline after the fused kernel above.
+stock ``mhc_pre_delayed_overlap``, on the shared mHC side stream for up to
+``MHC_OVERLAP_MAX_ROWS`` rows and inline after the fused kernel above.
 
 The fused kernel also finalizes a MoE output left unfinalized, collects a
-`wo_b` output the publishing GEMM already stored into its mailbox, writes the
-attention input as MXFP8 for `fused_wqa_wkv`, and writes only the streams
+``wo_b`` output the publishing GEMM already stored into its mailbox, writes the
+attention input as MXFP8 for ``fused_wqa_wkv``, and writes only the streams
 (residual-only) where the next consumer is not a sublayer's pre: an Engram
 injection and the final collapse.
 """
@@ -114,11 +114,11 @@ class Boundaries:
     ) -> tuple[
         BoundaryState, torch.Tensor, QuantizedActivation | None, torch.Tensor | None
     ]:
-        """Reduce `state.pending` into the streams and prepare the attention
-        (or with `ffn`, the MoE) input of `layer`.
+        """Reduce ``state.pending`` into the streams and prepare the attention
+        (or with ``ffn``, the MoE) input of ``layer``.
 
         Returns the new state, the layer input, the same input as MXFP8 with
-        `quantize`, and with `capture_aux` the mean of the streams (on the
+        ``quantize``, and with ``capture_aux`` the mean of the streams (on the
         side stream when the coefficients run there: join it before reading).
         """
         if ffn:
@@ -175,7 +175,7 @@ class Boundaries:
         return BoundaryState(residual, post, comb, next_pre), layer_input, quant, aux
 
     def post_only(self, state: BoundaryState) -> torch.Tensor:
-        """Reduce `state.pending` into the streams and return them, for an
+        """Reduce ``state.pending`` into the streams and return them, for an
         Engram injection or the final collapse."""
         if isinstance(state.pending, MoEOutput):
             residual, _ = self._reduce(state, None, None, None)
@@ -200,7 +200,7 @@ class Boundaries:
         step: "DecodeStep",
     ) -> tuple[BoundaryState, torch.Tensor]:
         """The stock attention entry without a reduction: mHC pre of
-        `residual` on the side stream, or inline with TileLang."""
+        ``residual`` on the side stream, or inline with TileLang."""
         mhc_pre = (
             partial(mhc_pre_delayed_overlap, stream=layer.mhc_stream)
             if step.side_stream
@@ -230,7 +230,7 @@ class Boundaries:
         norm: RMSNorm | None,
         mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """The fused kernel on `state.pending`; residual-only without `pre`."""
+        """The fused kernel on ``state.pending``; residual-only without ``pre``."""
         norm_weight = None if norm is None else norm.weight
         norm_eps = 0.0 if norm is None else norm.variance_epsilon
         x = state.pending

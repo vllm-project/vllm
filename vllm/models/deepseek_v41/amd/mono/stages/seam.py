@@ -18,7 +18,7 @@ handing off through the tagged mailbox:
     push    (160): a rank's partial given in memory (an attention vLLM ran)
             to every rank's ATTN region, ahead of the slice's reduce
 
-Every elementwise step follows aiter's `mhc_fused_post_pre_delayed_rmsnorm`
+Every elementwise step follows aiter's ``mhc_fused_post_pre_delayed_rmsnorm``
 rounding; the mix projection and the sums of squares, split-K reductions,
 differ only in their split and order.
 """
@@ -81,7 +81,7 @@ def scratch_layout(tokens: int) -> dict[str, tuple[int, int]]:
 
 
 def attn_peer_bytes(tokens: int, tp: int) -> int:
-    """ATTN: `[source rank][token][hidden / 2]` bf16 pairs."""
+    """ATTN: ``[source rank][token][hidden / 2]`` bf16 pairs."""
     return tp * tokens * HIDDEN // 2 * 8
 
 
@@ -94,7 +94,7 @@ def fma(a, b, c):
 
 
 def sigmoid(z):
-    """Triton's `tl.sigmoid`: 1 / (1 + exp2(-z log2(e)))."""
+    """Triton's ``tl.sigmoid``: 1 / (1 + exp2(-z log2(e)))."""
     return fx.Float32(1.0) / (fx.Float32(1.0) + hw_exp2(z * fx.Float32(-LOG2E)))
 
 
@@ -104,7 +104,7 @@ def lane_f32(v, src):
 
 def pend_value(c, t, col, cc):
     """The owed post's sublayer output at (token t, column col): read from
-    `pend`, or where a caller staged it (`pend_lds`, `[token][32]` of this
+    ``pend``, or where a caller staged it (``pend_lds``, ``[token][32]`` of this
     task's columns: a reduction it did first)."""
     if const_expr(c.get("pend_lds") is None):
         return ld_bf(c["args"]["pend"], t * HIDDEN + col)
@@ -114,7 +114,7 @@ def pend_value(c, t, col, cc):
 # ---------------------------------------------------------------- slice
 @traced
 def slice_input(c, task, idx):
-    """Thread `idx`'s pair of the layer input (token idx / 16, columns
+    """Thread ``idx``'s pair of the layer input (token idx / 16, columns
     32 task + 2 (idx % 16) ..)."""
     s, rl = c["S"], c["rl"]
     a = c["args"]
@@ -138,7 +138,7 @@ def slice_at(c0, e):
 
 
 def slice_loads(c, c0, e):
-    """Element e's loads of `stage_slice` (e clamped into the step's)."""
+    """Element e's loads of ``stage_slice`` (e clamped into the step's)."""
     a = c["args"]
     t, o, col = slice_at(c0, e)
     if const_expr(not c.get("fold", True)):
@@ -149,7 +149,7 @@ def slice_loads(c, c0, e):
 
 
 def slice_row(c, c0, e, got):
-    """Element e of `stage_slice`'s R_new from `slice_loads`' values."""
+    """Element e of ``stage_slice``'s R_new from ``slice_loads``' values."""
     a = c["args"]
     t, o, col = slice_at(c0, e)
     if const_expr(not c.get("fold", True)):
@@ -215,7 +215,7 @@ def stage_slice(c, task):
 
 @traced
 def slice_mix(c, task, t0, n):
-    """The mix projection partials of tokens t0 .. t0 + n (`stage_slice`)."""
+    """The mix projection partials of tokens t0 .. t0 + n (``stage_slice``)."""
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     rl, fl, red = c["rl"], c["fl"], c["red"]
     tok = plus(t0, fx.min(lane % 16, n - 1))
@@ -248,7 +248,7 @@ def slice_mix(c, task, t0, n):
 
 # ---------------------------------------------------------------- gate
 def _row(v, lane, q):
-    """Comb lanes 8..23 hold `comb[r][c]` at lane 8 + 4 r + c: element q of
+    """Comb lanes 8..23 hold ``comb[r][c]`` at lane 8 + 4 r + c: element q of
     the row."""
     return lane_f32(v, (lane - 8) // 4 * 4 + 8 + q)
 
@@ -327,7 +327,7 @@ def stage_gate(c, t):
 def stage_norm(c, t, store):
     """Token t's RMSNorm (rstd = rsq(fma(sum, 1/H, eps)), bf16((x rstd) w));
     256 threads, 3 chunks of 8 at 8 t + 2048 c, each chunk's bf16 values handed
-    to `store(t, col, ys, live)` by every thread (`live`: a thread's chunk
+    to ``store(t, col, ys, live)`` by every thread (``live``: a thread's chunk
     in the row; threads 256.. mirror thread 255)."""
     tid, lane, wave, red = c["tid"], c["lane"], c["wave"], c["red"]
     a = c["args"]
@@ -365,8 +365,8 @@ def stage_norm(c, t, store):
 @traced
 def stage_reduce(c, task):
     """The attention output at this slice's 32 columns: the TP ranks' partials
-    in the all-reduce's order (`sum_partials`), in fp32 -> bf16 ->
-    `pend_lds`."""
+    in the all-reduce's order (``sum_partials``), in fp32 -> bf16 ->
+    ``pend_lds``."""
     s, tid = c["S"], c["tid"]
     for pas in range_constexpr(0, s * COLS // 2, THREADS):
         reduce_attn_pair(c, task, plus(pas, tid))
@@ -375,7 +375,7 @@ def stage_reduce(c, task):
 
 @traced
 def reduce_attn_pair(c, task, idx):
-    """Thread `idx`'s column pair of token idx / 16 (`stage_reduce`)."""
+    """Thread ``idx``'s column pair of token idx / 16 (``stage_reduce``)."""
     s = c["S"]
     c0 = task * COLS
     if idx < s * COLS // 2:
@@ -395,9 +395,9 @@ def reduce_attn_pair(c, task, idx):
 
 @traced
 def stage_push(c, task, part):
-    """This rank's attention partial (`part`: bf16 [S, HIDDEN], wo_b's
+    """This rank's attention partial (``part``: bf16 [S, HIDDEN], wo_b's
     unreduced output) at this slice's 32 columns, every token, to every rank's
-    ATTN region: the pairs `stage_reduce` polls, as the bits vLLM wrote."""
+    ATTN region: the pairs ``stage_reduce`` polls, as the bits vLLM wrote."""
     s, tid, tp = c["S"], c["tid"], c["d"].tp
     for pas in range_constexpr(0, s * COLS // 2, THREADS):
         idx = plus(pas, tid)

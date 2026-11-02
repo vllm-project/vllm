@@ -367,7 +367,7 @@ class TrtLlmMxfp4ExpertsModular(TrtLlmMxfp4ExpertsBase, mk.FusedMoEExpertsModula
         local_expert_offset: int,
         topk: int,
     ) -> UnfinalizedMoEOutput | None:
-        """Finalize into `output`, or stop after GEMM2 when it is None."""
+        """Finalize into ``output``, or stop after GEMM2 when it is None."""
         from flashinfer import trtllm_fp4_block_scale_routed_moe
 
         flashinfer_output = trtllm_fp4_block_scale_routed_moe(

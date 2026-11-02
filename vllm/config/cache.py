@@ -75,11 +75,11 @@ KV_CACHE_DTYPES: list[str] = list(get_args(CacheDType))
 
 @runtime_checkable
 class KVCacheDTypeHandler(Protocol):
-    """Contract for a custom `--kv-cache-dtype` value.
+    """Contract for a custom ``--kv-cache-dtype`` value.
 
     A platform backend implements this protocol to answer the questions vLLM
-    currently answers with closed tables (`STR_DTYPE_TO_TORCH_DTYPE` /
-    `get_kv_quant_mode` / `is_quantized_kv_cache`). A single handler may
+    currently answers with closed tables (``STR_DTYPE_TO_TORCH_DTYPE`` /
+    ``get_kv_quant_mode`` / ``is_quantized_kv_cache``). A single handler may
     be device-aware (e.g., resolving different torch dtypes per device
     generation).
     """
@@ -90,7 +90,7 @@ class KVCacheDTypeHandler(Protocol):
         """Storage dtype for KV cache tensors.
 
         Called once at registration time; the result is injected into the
-        shared `STR_DTYPE_TO_TORCH_DTYPE` dict so existing consumers need no
+        shared ``STR_DTYPE_TO_TORCH_DTYPE`` dict so existing consumers need no
         changes. The device must already be resolvable (registration runs at
         platform activation time).
         """
@@ -100,7 +100,7 @@ class KVCacheDTypeHandler(Protocol):
         """The :class:`KVQuantMode` used by generic kernels.
 
         Return an existing mode to reuse generic kernel paths, or
-        `KVQuantMode.CUSTOM` when the backend fully self-manages kernel
+        ``KVQuantMode.CUSTOM`` when the backend fully self-manages kernel
         dispatch.
         """
         ...
@@ -112,18 +112,18 @@ _KV_CACHE_DTYPE_HANDLERS: dict[str, KVCacheDTypeHandler] = {}
 
 
 def register_kv_cache_dtype(name: str):
-    """Register a custom `--kv-cache-dtype` value (eager decorator).
+    """Register a custom ``--kv-cache-dtype`` value (eager decorator).
 
-    Runs at platform activation time (first `current_platform` access),
-    which is after `--help` exits and before any KV cache tensor is
+    Runs at platform activation time (first ``current_platform`` access),
+    which is after ``--help`` exits and before any KV cache tensor is
     allocated. During decoration the handler will:
 
-    - append `name` to the mutable `KV_CACHE_DTYPES` list (driving
+    - append ``name`` to the mutable ``KV_CACHE_DTYPES`` list (driving
       Pydantic + CLI validation);
-    - resolve `torch_dtype()` once and inject it into
-      `STR_DTYPE_TO_TORCH_DTYPE`, so all existing `dict[name]` /
-      `name in dict` sites need zero changes;
-    - be stored for later `quant_mode()` queries.
+    - resolve ``torch_dtype()`` once and inject it into
+      ``STR_DTYPE_TO_TORCH_DTYPE``, so all existing ``dict[name]`` /
+      ``name in dict`` sites need zero changes;
+    - be stored for later ``quant_mode()`` queries.
 
     Examples:
         >>> @register_kv_cache_dtype("int8")
@@ -159,7 +159,7 @@ def register_kv_cache_dtype(name: str):
 
 
 def get_kv_cache_dtype_handler(name: str) -> KVCacheDTypeHandler | None:
-    """Return the handler for `name`.
+    """Return the handler for ``name``.
 
     Returns None for upstream dtypes that have no handler (the dtype table
     already covers these).
@@ -168,7 +168,7 @@ def get_kv_cache_dtype_handler(name: str) -> KVCacheDTypeHandler | None:
 
 
 def is_known_kv_cache_dtype(name: str) -> bool:
-    """Whether `name` is a valid `--kv-cache-dtype` value."""
+    """Whether ``name`` is a valid ``--kv-cache-dtype`` value."""
     return name in KV_CACHE_DTYPES
 
 
@@ -228,7 +228,7 @@ class CacheConfig:
 
     @property
     def device_memory_utilization(self) -> float | None:
-        """Device-neutral alias for `gpu_memory_utilization`."""
+        """Device-neutral alias for ``gpu_memory_utilization``."""
         return self.gpu_memory_utilization
 
     @device_memory_utilization.setter

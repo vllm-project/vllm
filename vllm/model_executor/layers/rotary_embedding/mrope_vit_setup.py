@@ -101,7 +101,7 @@ class VitMropeSetup(PluggableLayer):
     cos/sin cache to size or grow.
 
     Stateless: the caller's inv_freq buffers are passed per call. OOT
-    platforms replace the whole layer via `@VitMropeSetup.register_oot`
+    platforms replace the whole layer via ``@VitMropeSetup.register_oot``
     with a subclass overriding :meth:`forward` (e.g. to retune the kernel
     tiling for their hardware).
     """

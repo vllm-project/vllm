@@ -76,11 +76,11 @@ logger = init_logger(__name__)
 
 
 def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
-    """Sum per-modality placeholder tokens from `mm_placeholders`.
+    """Sum per-modality placeholder tokens from ``mm_placeholders``.
 
-    Keyed by modality name; `PlaceholderRange.length` is the placeholder's
+    Keyed by modality name; ``PlaceholderRange.length`` is the placeholder's
     prompt token span, so each sum matches the placeholder tokens already
-    counted in `usage.prompt_tokens`.
+    counted in ``usage.prompt_tokens``.
     """
     mm_placeholders = cast(
         MultiModalPlaceholders | None, engine_input.get("mm_placeholders")
@@ -98,7 +98,7 @@ def _make_prompt_tokens_details(
     num_cache_creation_tokens: int | None,
     mm_token_counts: dict[str, int] | None,
 ) -> PromptTokenUsageInfo | None:
-    """Build `prompt_tokens_details` from cached + multimodal token counts."""
+    """Build ``prompt_tokens_details`` from cached + multimodal token counts."""
     if not enable_prompt_tokens_details:
         return None
     if (
@@ -224,11 +224,11 @@ class OpenAIServingChat(GenerateBaseServing):
     def _engine_chat_template_kwargs(
         self, chat_template_kwargs: dict[str, Any]
     ) -> dict[str, Any]:
-        """Subclass hook to narrow `chat_template_kwargs` for the engine.
+        """Subclass hook to narrow ``chat_template_kwargs`` for the engine.
 
         The same dict is used twice: to build the API-server-side parser
         instance, and to populate
-        `EngineCoreRequest.reasoning_parser_kwargs` for the engine-core
+        ``EngineCoreRequest.reasoning_parser_kwargs`` for the engine-core
         side. The latter crosses ZMQ as msgpack, so a handler that stashes
         request-scoped state only the API-server-side parser needs (values
         msgpack can't encode, or payloads not worth shipping) can drop
@@ -448,7 +448,7 @@ class OpenAIServingChat(GenerateBaseServing):
         Subclasses can swap in a specialized `ChatMessage` subclass
         (e.g. `CohereServingChatV2` returning `CohereChatMessage`)
         without duplicating the field selection in
-        `assemble_chat_message_fields`. The default returns a plain
+        ``assemble_chat_message_fields``. The default returns a plain
         `ChatMessage`.
         """
         return ChatMessage(*args, **kwargs)
@@ -465,7 +465,7 @@ class OpenAIServingChat(GenerateBaseServing):
         extras (e.g. :class:`CohereServingChatV2` reading grounding
         citations off the reasoning parser and populating
         :class:`CohereChatMessage.citations`) override this to inspect
-        `parser` and mutate/replace `message`.
+        ``parser`` and mutate/replace ``message``.
         """
         return message
 

@@ -871,8 +871,8 @@ class LLM(
     def release_kv_cache_memory(self) -> None:
         """Release the GPU physical memory backing the KV cache.
 
-        Requires a completed `sleep(level=0)` and resident executor memory.
-        Restore with `wake_up(tags=["kv_cache"])`; kept requests are recomputed.
+        Requires a completed ``sleep(level=0)`` and resident executor memory.
+        Restore with ``wake_up(tags=["kv_cache"])``; kept requests are recomputed.
         """
         self.llm_engine.release_kv_cache_memory()
 

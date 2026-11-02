@@ -12,8 +12,8 @@ strings and the turn-boundary tokens differ::
     <|im_start|> -> <seed:bos>
     <|im_end|>   -> <seed:eos>
 
-`<function=...>` and `<parameter=...>` are byte-identical, so the
-entire transition table and `_qwen3_arg_converter` are inherited from
+``<function=...>`` and ``<parameter=...>`` are byte-identical, so the
+entire transition table and ``_qwen3_arg_converter`` are inherited from
 :class:`Qwen3Parser` unchanged.
 """
 

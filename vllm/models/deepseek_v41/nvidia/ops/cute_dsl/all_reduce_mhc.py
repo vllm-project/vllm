@@ -16,7 +16,7 @@ weights.
 Optionally the consumer also writes the normalized output as MXFP8 with UE8M0
 scales in the swizzled 128x4 layout FlashInfer's MXFP8 GEMMs read. It quantizes
 the BF16-rounded output with FlashInfer's own quantize helpers, so the result is
-bit-identical to `mxfp8_quantize` of the BF16 output, without its launch.
+bit-identical to ``mxfp8_quantize`` of the BF16 output, without its launch.
 """
 
 from __future__ import annotations
@@ -497,14 +497,14 @@ class _QuadFinalizePublishDeviceKernel:
 
 
 class _LamportMHCDeviceKernel:
-    """FlashInfer's `_LamportResidualRMSNormDeviceKernel` with mHC.
+    """FlashInfer's ``_LamportResidualRMSNormDeviceKernel`` with mHC.
 
     The residual add and residual copy become the mHC post-mix of the hc
     streams, stored as the residual output, and their pre-mix collapse, which
-    the unchanged RMSNorm normalizes. With `quantize`, the normalized output
+    the unchanged RMSNorm normalizes. With ``quantize``, the normalized output
     is also written as MXFP8 with swizzled 128x4 UE8M0 scales, including the
     zero scales of the padding rows up to a multiple of 128. With
-    `residual_only`, only the residual output is written; the pre-mix, gamma
+    ``residual_only``, only the residual output is written; the pre-mix, gamma
     and normalized output are unused.
     """
 
@@ -930,14 +930,14 @@ class _LamportMHCDeviceKernel:
 class AllReduceMHC:
     """Lamport TP all-reduce fused with mHC post, collapse and RMSNorm.
 
-    `__call__` reduces `x` across the TP group, writes the post-mixed hc
+    ``__call__`` reduces ``x`` across the TP group, writes the post-mixed hc
     streams and the normalized collapse, and leaves the next mixes to the
-    caller. `finalize` does the same for an unfinalized MoE output, folding
+    caller. ``finalize`` does the same for an unfinalized MoE output, folding
     the top-k reduction and the shared-expert add into the publish. Each
     instance owns a Lamport mailbox; construction is collective over the TP
-    group. With `quantize_layer_input`, both also accept `mxfp8_out`
+    group. With ``quantize_layer_input``, both also accept ``mxfp8_out``
     buffers that receive the normalized collapse as MXFP8. With
-    `residual_only`, both also accept `pre` and `norm_weight` of None and
+    ``residual_only``, both also accept ``pre`` and ``norm_weight`` of None and
     then write only the post-mixed streams, for a consumer that collapses them
     itself.
     """
@@ -1137,12 +1137,12 @@ class AllReduceMHC:
             post: [M, hc(, 1)] FP32 post-mix.
             comb: [M, hc, hc] FP32 residual mix, indexed [source, target].
             pre: [M, hc] FP32 carried pre-mix for the collapse. None (with
-                `norm_weight`, built with `residual_only`): write only the
+                ``norm_weight``, built with ``residual_only``): write only the
                 residual streams and return no layer input.
             norm_weight: [hidden] BF16 RMSNorm weight.
             norm_eps: RMSNorm epsilon.
             mxfp8_out: optional [M, hidden] FP8 E4M3 values and swizzled
-                128x4 UE8M0 scales (`mxfp8_scale_bytes(M, hidden)` bytes)
+                128x4 UE8M0 scales (``mxfp8_scale_bytes(M, hidden)`` bytes)
                 that also receive the layer input as MXFP8.
 
         """
@@ -1175,7 +1175,7 @@ class AllReduceMHC:
         norm_eps: float,
         mxfp8_out: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """`__call__` for a MoE output left unfinalized.
+        """``__call__`` for a MoE output left unfinalized.
 
         Args:
             gemm2_permuted: [rows, hidden] BF16 unweighted GEMM2 output in the
@@ -1188,10 +1188,10 @@ class AllReduceMHC:
             post: [M, hc(, 1)] FP32 post-mix.
             comb: [M, hc, hc] FP32 residual mix, indexed [source, target].
             pre: [M, hc] FP32 carried pre-mix for the collapse (None: residual
-                only, as in `__call__`).
-            norm_weight: [hidden] BF16 RMSNorm weight (None with `pre`).
+                only, as in ``__call__``).
+            norm_weight: [hidden] BF16 RMSNorm weight (None with ``pre``).
             norm_eps: RMSNorm epsilon.
-            mxfp8_out: as in `__call__`.
+            mxfp8_out: as in ``__call__``.
 
         """
         m = shared_output.shape[0]
