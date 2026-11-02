@@ -323,11 +323,12 @@ class AttentionGroup:
                 dtype=torch.int32,
                 device=device,
             )
-            self.kernel_block_offsets = torch.arange(
-                spec.block_size // self.kernel_block_size,
-                dtype=torch.int32,
-                device=device,
-            )
+            if self.kernel_block_offsets is None:
+                self.kernel_block_offsets = torch.arange(
+                    spec.block_size // self.kernel_block_size,
+                    dtype=torch.int32,
+                    device=device,
+                )
         self.metadata_builders = [
             builder_cls(
                 kv_cache_spec_builder,

@@ -8,6 +8,7 @@ never addressed by the logical view.
 """
 
 import importlib
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -930,7 +931,7 @@ def test_packed_compressed_group_gets_kernel_block_table():
 def test_packed_group_kernel_blocks_with_unaligned_block_stride():
     """Packed blocks whose spec declares a byte block stride need not be whole
     kernel pages apart: kernel blocks are numbered in units dividing both the
-    block and page strides."""
+    block and page strides, also by groups copied after binding."""
     row, stride_rows = 132, 5 * 64 + 16
     group = _packed_group(4, row, [128, 256], block_stride_alignment=16)
     group.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
@@ -943,6 +944,10 @@ def test_packed_group_kernel_blocks_with_unaligned_block_stride():
     table = group.build_metadata(metadata)
     assert table.tolist() == [[0, 4, 8, 12, 42, 46, 50, 54]]
     assert torch.equal(pages[table[0, 4:], 0].flatten(0, 1), manager[2, 0])
+
+    copy = replace(group, metadata_builders=[])
+    copy.create_metadata_builders(_VLLM_CONFIG, "cpu", kernel_block_size=1024)
+    assert torch.equal(copy.build_metadata(metadata), table)
 
 
 @pytest.mark.parametrize("block_stride_alignment", [None, MultipleOf(256), 256])
