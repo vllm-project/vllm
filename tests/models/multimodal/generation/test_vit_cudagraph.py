@@ -388,6 +388,27 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         needs_video_metadata=True,
         marks=[pytest.mark.core_model],
     ),
+    # Online FP8 also quantizes the vision tower. The quant_fp8 CUDA op (which
+    # vLLM enables for block-scaled FP8 checkpoints) only takes activations in
+    # the model dtype, not in the FP8 weight dtype.
+    "gemma4_fp8": VitCudagraphTestConfig(
+        model="google/gemma-4-E4B-it",
+        image_prompt=(
+            "<bos><start_of_turn>user\n<|image|>\nWhat is in this image?<end_of_turn>\n"
+            "<start_of_turn>model\n"
+        ),
+        video_prompt=(
+            "<bos><start_of_turn>user\n<|video|>\nDescribe this video in one sentence."
+            "<end_of_turn>\n<start_of_turn>model\n"
+        ),
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [1120],
+            "custom_ops": ["+quant_fp8"],
+        },
+        needs_video_metadata=True,
+        vllm_runner_kwargs={"quantization": "fp8"},
+        marks=[pytest.mark.core_model],
+    ),
     "minicpmv_25": VitCudagraphTestConfig(
         model="openbmb/MiniCPM-Llama3-V-2_5",
         modalities=["image"],

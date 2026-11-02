@@ -9,8 +9,13 @@ Note: these tests will only pass on L4 GPU.
 import pytest
 
 from tests.quantization.utils import is_quant_method_supported
+from vllm.assets.image import ImageAsset
+from vllm.assets.video import VideoAsset
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_kv_cache_dtype
 from vllm.platforms import current_platform
+from ..multimodal.generation.vlm_utils.builders import (
+    sample_frames_with_video_metadata,
+)
 from ..utils import check_logprobs_close
 
 
@@ -173,3 +178,43 @@ def test_cpu_models(
             name_0="bf16_kv_cache",
             name_1="fp8_kv_cache",
         )
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("fp8"),
+    reason="fp8 is not supported on this GPU type.",
+)
+@pytest.mark.parametrize(
+    "modality,question,expected",
+    [
+        ("image", "What is the sign in this image?", "stop"),
+        ("video", "What is in this video?", "book"),
+    ],
+)
+def test_gemma4_online_fp8_vision(
+    vllm_runner, modality: str, question: str, expected: str
+) -> None:
+    """Online FP8 quantizes Gemma 4's patch embedder `input_proj` too, which
+    must still get the pixel values in the model dtype, not its FP8 weight
+    dtype."""
+    if modality == "image":
+        mm_data = ImageAsset("stop_sign").pil_image
+    else:
+        video = VideoAsset("baby_reading")
+        mm_data = sample_frames_with_video_metadata(
+            (video.np_ndarrays, video.metadata), num_frames=16
+        )
+    prompt = f"<bos><|turn>user\n<|{modality}|>{question}<turn|>\n<|turn>model\n"
+
+    with vllm_runner(
+        "google/gemma-4-E4B-it",
+        quantization="fp8",
+        max_model_len=4096,
+        enforce_eager=True,
+        # Keep the other vision modality out of the startup profile run.
+        limit_mm_per_prompt={"image": 0, "video": 0, modality: 1},
+    ) as vllm_model:
+        [(_, output)] = vllm_model.generate_greedy(
+            [prompt], max_tokens=32, **{f"{modality}s": [mm_data]}
+        )
+    assert expected in output.lower()

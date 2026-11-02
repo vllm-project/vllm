@@ -142,6 +142,7 @@ steps:
   timeout_in_minutes: 65
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
+  - vllm/model_executor/models/gemma4_mm.py
   - tests/models/quantization
   commands:
     - pytest -v -s models/quantization
@@ -157,6 +158,7 @@ steps:
       - image-build-amd
       source_file_dependencies:
       - vllm/model_executor/layers/quantization
+      - vllm/model_executor/models/gemma4_mm.py
       - tests/models/quantization
       - vllm/_aiter_ops.py
       - vllm/platforms/rocm.py
