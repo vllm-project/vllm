@@ -79,7 +79,8 @@ def mark_padding(
     stale bytes (uninitialized layerwise tensors, or post-processed bytes when
     loading in place). A region of one expert (``param[e]``) is recorded for
     every expert. Records live on the layer, which outlives the parameter
-    tensors across reloads.
+    tensors across reloads, and hold only the latest load's regions: another
+    loader may split the same parameter differently.
     """
     param = getattr(layer, name)
     offset = region.storage_offset() - param.storage_offset()
@@ -91,11 +92,12 @@ def mark_padding(
     layout = (tuple(param.shape), tuple(param.stride()), param.dtype)
     layouts = layer.__dict__.setdefault("_padding_layouts", {})
     regions = layer.__dict__.setdefault("_padding_regions", {})
-    if layouts.get(name) != layout:  # first record, or a new layout: start over
+    marked = layer.__dict__.setdefault("_padding_marked", set())
+    if name not in marked or layouts[name] != layout:  # new load or layout
+        marked.add(name)
         layouts[name] = layout
         regions[name] = {}
     regions[name][(offset, shape, stride)] = value
-    layer._padding_pending = True
 
 
 def fill_padding(module: torch.nn.Module) -> None:
@@ -105,8 +107,13 @@ def fill_padding(module: torch.nn.Module) -> None:
     Code that loads weights and then runs ``process_weights_after_loading`` on
     a layer itself must call this on the layer in between, as cold start and
     layerwise reload do."""
-    if not module.__dict__.pop("_padding_pending", False):
+    marked = module.__dict__.pop("_padding_marked", None)
+    if not marked:
         return
+    # keep only this load's records: earlier loads may have split differently
+    module._padding_regions = {
+        n: r for n, r in module._padding_regions.items() if n in marked
+    }
     for name, regions in module._padding_regions.items():
         param = getattr(module, name, None)
         if param is None:  # released by post-load processing

@@ -20,13 +20,15 @@ class _TestExperts(GptOssRoutedExperts):
         shape: tuple[int, ...],
         *,
         tp_rank: int = 0,
+        intermediate_size: int = 4,
         quant_method_name: str = "TestQuantMethod",
         weight_dtype: str = "",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         torch.nn.Module.__init__(self)
         self.moe_config = SimpleNamespace(
-            moe_parallel_config=SimpleNamespace(tp_size=2, tp_rank=tp_rank)
+            moe_parallel_config=SimpleNamespace(tp_size=2, tp_rank=tp_rank),
+            intermediate_size=intermediate_size,
         )
         self.quant_method = type(
             quant_method_name, (), {"weight_dtype": weight_dtype}
@@ -145,6 +147,7 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
             "w13_weight",
             (2, 4, 4),
             tp_rank=1,
+            intermediate_size=128,
             weight_dtype="gpt_oss_mxfp4",
             dtype=torch.uint8,
         )
@@ -163,6 +166,26 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
 
     assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
     assert torch.equal(experts.w13_weight[0], expected)
+
+
+def test_streamed_mxfp4_expert_splits_like_the_checkpoint_loader() -> None:
+    """A reload may mix the per-expert and full-checkpoint loaders, so the
+    per-expert one splits in whole MXFP4 blocks as the full one does, not by the
+    padded size (here 64 rows per rank padded to 96)."""
+    experts = _TestExperts(
+        "w13_weight",
+        (2, 192, 4),
+        tp_rank=1,
+        intermediate_size=128,
+        weight_dtype="gpt_oss_mxfp4",
+        dtype=torch.uint8,
+    )
+    loaded_weight = torch.arange(1024).to(torch.uint8).reshape(256, 2, 2)
+
+    assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
+    fill_padding(experts)
+    assert torch.equal(experts.w13_weight[0, :128], loaded_weight.reshape(256, 4)[128:])
+    assert torch.count_nonzero(experts.w13_weight[:, 128:]) == 0
 
 
 @pytest.mark.parametrize("per_expert", [True, False])
