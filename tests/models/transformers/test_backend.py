@@ -757,6 +757,30 @@ def test_attention_dispatch_is_required():
         Base._create_attention_instances(model)
 
 
+@pytest.mark.parametrize(
+    ("use_mla", "head_size"), [(None, 192), (False, 16)], ids=["mla", "opt-out"]
+)
+def test_full_attention_head_size_respects_use_mla(use_mla, head_size):
+    """MLA fields resize full attention heads only if the config does not opt out.
+
+    Legacy HunyuanOCR configs carry unused MLA fields alongside `use_mla=False`.
+    """
+    arch_config = SimpleNamespace(head_size=16)
+    model = SimpleNamespace(
+        text_config=SimpleNamespace(
+            kv_lora_rank=512, qk_nope_head_dim=128, qk_rope_head_dim=64, use_mla=use_mla
+        ),
+        model_config=SimpleNamespace(model_arch_config=arch_config),
+        attention_fusers={},
+        _get_attn_cls=lambda: None,
+        _pp_indices=lambda: (0, 0),
+    )
+
+    Base._create_attention_instances(model)
+
+    assert arch_config.head_size == head_size
+
+
 @pytest.mark.parametrize("model_type", ATTENTION_MODEL_TYPES)
 def test_attention_scale_is_the_declared_one(model_type: str):
     """The scale comes off the module, not from the `head_size**-0.5` default.
