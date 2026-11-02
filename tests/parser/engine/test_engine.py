@@ -953,13 +953,12 @@ class TestSkipToolParsingMarkerPassthrough:
         engine = StreamingParserEngine(_absorb_marker_tool_config(), tokenizer=None)
         engine.skip_tool_parsing = True
 
-        text = "reason<think><tool_call>alpha</tool_call>"
+        text = "reason</think><tool_call>alpha <think> </tool_call>"
+        span = "<tool_call>alpha <think> </tool_call>"
         events = engine.parse_complete(text)
 
-        reasoning = "".join(
-            e.value for e in events if e.type == EventType.REASONING_CHUNK
-        )
-        assert reasoning == text
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert content == span
         assert not any(e.type == EventType.REASONING_START for e in events)
 
     def test_marker_inside_skipped_span_forwarded_verbatim(self):
