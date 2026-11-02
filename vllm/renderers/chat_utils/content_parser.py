@@ -54,6 +54,13 @@ _ENABLE_PROMPT_EMBEDS_ERROR: Final[str] = (
 )
 
 
+def uses_audio_in_video(mm_processor_kwargs: dict[str, Any] | None) -> bool:
+    """Whether audio is extracted from video content parts."""
+    return bool(
+        mm_processor_kwargs and mm_processor_kwargs.get("use_audio_in_video", False)
+    )
+
+
 class BaseMultiModalContentParser(ABC):
     def __init__(self) -> None:
         super().__init__()
@@ -158,6 +165,10 @@ class MultiModalContentParser(BaseMultiModalContentParser):
             download_budget=self._tracker.download_budget,
         )
 
+    @cached_property
+    def _use_audio_in_video(self) -> bool:
+        return uses_audio_in_video(self._mm_processor_kwargs)
+
     @property
     def model_config(self) -> ModelConfig:
         return self._tracker.model_config
@@ -180,6 +191,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("prompt_embeds", PROMPT_EMBEDS_PLACEHOLDER_TOKEN)
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
+        image_url = self._tracker.url_to_fetch(image_url, uuid)
         image = self._connector.fetch_image(image_url) if image_url else None
 
         placeholder = self._tracker.add("image", (image, uuid))
@@ -250,6 +262,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("image", placeholder)
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
+        audio_url = self._tracker.url_to_fetch(audio_url, uuid)
         audio = self._connector.fetch_audio(audio_url) if audio_url else None
 
         placeholder = self._tracker.add("audio", (audio, uuid))
@@ -272,6 +285,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        video_url = self._tracker.url_to_fetch(video_url, uuid)
         video = (
             self._connector.fetch_video(
                 video_url=video_url,
@@ -285,11 +299,7 @@ class MultiModalContentParser(BaseMultiModalContentParser):
         self._add_placeholder("video", placeholder)
 
         # Extract audio from video if use_audio_in_video is True
-        if (
-            video_url
-            and self._mm_processor_kwargs
-            and self._mm_processor_kwargs.get("use_audio_in_video", False)
-        ):
+        if video_url and self._use_audio_in_video:
             audio = self._connector.fetch_audio(video_url) if video_url else None
             audio_placeholder = self._tracker.add("audio", (audio, uuid))
             self._add_placeholder("audio", audio_placeholder)
@@ -348,6 +358,10 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
             download_budget=self._tracker.download_budget,
         )
 
+    @cached_property
+    def _use_audio_in_video(self) -> bool:
+        return uses_audio_in_video(self._mm_processor_kwargs)
+
     @property
     def model_config(self) -> ModelConfig:
         return self._tracker.model_config
@@ -388,6 +402,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return image, uuid
 
     def parse_image(self, image_url: str | None, uuid: str | None = None) -> None:
+        image_url = self._tracker.url_to_fetch(image_url, uuid)
         placeholder = self._tracker.add(
             "image", partial(self._image_with_uuid_async, image_url, uuid)
         )
@@ -480,6 +495,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return audio, uuid
 
     def parse_audio(self, audio_url: str | None, uuid: str | None = None) -> None:
+        audio_url = self._tracker.url_to_fetch(audio_url, uuid)
         placeholder = self._tracker.add(
             "audio", partial(self._audio_with_uuid_async, audio_url, uuid)
         )
@@ -513,17 +529,14 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return video, uuid
 
     def parse_video(self, video_url: str | None, uuid: str | None = None) -> None:
+        video_url = self._tracker.url_to_fetch(video_url, uuid)
         placeholder = self._tracker.add(
             "video", partial(self._video_with_uuid_async, video_url, uuid)
         )
         self._add_placeholder("video", placeholder)
 
         # Extract audio from video if use_audio_in_video is True
-        if (
-            video_url
-            and self._mm_processor_kwargs
-            and self._mm_processor_kwargs.get("use_audio_in_video", False)
-        ):
+        if video_url and self._use_audio_in_video:
             audio_placeholder = self._tracker.add(
                 "audio", partial(self._audio_with_uuid_async, video_url, uuid)
             )

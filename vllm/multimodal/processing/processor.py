@@ -987,6 +987,10 @@ def find_mm_placeholders(
     return dict(full_groupby_modality(it))
 
 
+class MultiModalProcessorCacheMissError(ValueError):
+    """A processor cache miss for an item whose media data was omitted."""
+
+
 MultiModalIsCached = dict[str, list[bool]]
 """
 A collection of the `is_cached` flag for each item, with a similar structure as
@@ -1370,7 +1374,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for idx in idxs:
                 data = mm_data_items[modality][idx]
                 if data is None:
-                    raise ValueError(
+                    raise MultiModalProcessorCacheMissError(
                         f"Cache miss for {modality} at index {idx} "
                         f"but data is not provided."
                     )
