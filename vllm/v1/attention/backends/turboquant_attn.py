@@ -114,6 +114,8 @@ def _build_hadamard(d: int, device_str: str) -> torch.Tensor:
 
 @functools.cache
 def _build_hadamard_cached(d: int, device_str: str) -> torch.Tensor:
+    if d <= 0 or (d & (d - 1)) != 0:
+        raise ValueError(f"Hadamard rotation requires power-of-two dimension, got {d}")
     H = torch.tensor([[1.0]])
     while H.shape[0] < d:
         H = torch.cat([torch.cat([H, H], 1), torch.cat([H, -H], 1)], 0)
@@ -188,9 +190,9 @@ class TurboQuantAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_head_size(cls, head_size: int) -> bool:
-        # head_size from spec is effective_head_size (padded_slot//2),
-        # not the model's actual head_dim. Accept any positive value.
-        return head_size > 0
+        # TurboQuant requires a power-of-two head dimension for the Sylvester
+        # Hadamard construction (H_2k = H_k (x) H_2) and Triton power-of-two tiling.
+        return head_size > 0 and (head_size & (head_size - 1)) == 0
 
 
 @dataclass
