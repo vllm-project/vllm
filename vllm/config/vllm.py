@@ -3672,11 +3672,6 @@ class VllmConfig:
             raise ValueError(
                 "--use-replayssm requires --mamba-backend triton or flashinfer"
             )
-        elif self.use_v2_model_runner:
-            raise ValueError(
-                "Triton ReplaySSM requires Model Runner V1; use "
-                "--mamba-backend flashinfer or Model Runner V1"
-            )
         if (
             self.kv_transfer_config is not None
             and self.kv_transfer_config.is_kv_transfer_instance

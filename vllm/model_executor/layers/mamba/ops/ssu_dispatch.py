@@ -239,6 +239,96 @@ def commit_replayssm_ring_trackers(
     )
 
 
+@triton.jit(
+    do_not_specialize=["n_rows", "num_states", "state_batch_indices_stride"],
+    do_not_specialize_on_alignment=["state_batch_indices", "seq_lens"],
+)
+def _plan_replayssm_decode_kernel(
+    ring_pos,
+    state_batch_indices,
+    seq_lens,
+    write_pos,
+    is_flush,
+    state_batch_indices_stride,
+    n_rows,
+    num_states,
+    buffer_len: tl.constexpr,
+    align_block_size: tl.constexpr,
+    pad_slot_id: tl.constexpr,
+    BLOCK: tl.constexpr,
+) -> None:
+    rows = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = rows < n_rows
+    slots = tl.load(
+        state_batch_indices + rows * state_batch_indices_stride,
+        mask=mask,
+        other=pad_slot_id,
+    )
+    valid = mask & (slots != pad_slot_id) & (slots >= 0) & (slots < num_states)
+    pos = tl.load(ring_pos + slots, mask=valid, other=0)
+    pos = tl.minimum(pos, buffer_len - 1)
+    flush = pos == buffer_len - 1
+    if align_block_size > 0:
+        # Standard decode rows carry one token: num_computed = seq_len - 1.
+        seq_len = tl.load(seq_lens + rows, mask=valid, other=1)
+        # The first step of a block restarts that block's empty ring, and the
+        # step completing a block flushes its exact state for prefix caching.
+        pos = tl.where((seq_len - 1) % align_block_size == 0, 0, pos)
+        flush = (pos == buffer_len - 1) | (seq_len % align_block_size == 0)
+    pos = tl.where(valid, pos, 0)
+    flush = valid & flush
+    tl.store(write_pos + rows, pos, mask=mask)
+    tl.store(is_flush + rows, flush.to(tl.int8), mask=mask)
+    tl.store(ring_pos + slots, tl.where(flush, 0, pos + 1), mask=valid)
+
+
+def plan_replayssm_decode(
+    ring_pos: torch.Tensor,
+    state_batch_indices: torch.Tensor,
+    write_pos: torch.Tensor,
+    is_flush: torch.Tensor,
+    buffer_len: int,
+    seq_lens: torch.Tensor | None = None,
+    align_block_size: int = 0,
+    pad_slot_id: int = NULL_BLOCK_ID,
+) -> None:
+    """Plan one Triton ReplaySSM standard-decode step on the GPU.
+
+    ``ring_pos[slot]`` counts the tokens buffered since the slot's last
+    full-state write. For each decode row this writes the step's
+    ``write_pos``/``is_flush`` (read by every layer of the cache group) and
+    advances the slot's counter, so the runner supplies no ring metadata.
+    Prefill resets the counters via ``reset_replayssm_ring_trackers``.
+
+    With ``align_block_size`` > 0 (mamba ``align`` prefix caching), the ring
+    restarts at each block's first step and flushes on the step completing a
+    block; ``seq_lens`` must then hold each row's sequence length.
+    """
+    if state_batch_indices.dim() > 1:
+        state_batch_indices = state_batch_indices[:, 0]
+    n_rows = state_batch_indices.numel()
+    if n_rows == 0:
+        return
+    assert write_pos.numel() >= n_rows and is_flush.numel() >= n_rows
+    if align_block_size > 0:
+        assert seq_lens is not None and seq_lens.numel() >= n_rows
+    block = 128
+    _plan_replayssm_decode_kernel[(triton.cdiv(n_rows, block),)](
+        ring_pos,
+        state_batch_indices,
+        seq_lens if align_block_size > 0 else state_batch_indices,
+        write_pos,
+        is_flush,
+        state_batch_indices.stride(0),
+        n_rows,
+        ring_pos.numel(),
+        buffer_len,
+        align_block_size,
+        pad_slot_id,
+        BLOCK=block,
+    )
+
+
 class MambaSSUBackend(ABC):
     """Abstract base class for Mamba SSU backends."""
 
