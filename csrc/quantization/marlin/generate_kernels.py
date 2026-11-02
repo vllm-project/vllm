@@ -15,11 +15,11 @@ SUPPORT_SM80 = False
 for arch in sys.argv[1].split(","):
     arch = arch[: arch.index(".") + 2].replace(".", "")
     arch = int(arch)
-    # only SM89 and SM120 fully support
-    # mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32.
+    # SM89 and the SM12x family (SM120 RTX 5090, SM121 DGX Spark GB10)
+    # fully support mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32.
     # SM90 and SM100 can use this PTX, but it’s simulated
     # with FP16 MMA, so it cannot achieve any acceleration.
-    if arch in [89, 120]:
+    if arch == 89 or arch // 10 == 12:
         SUPPORT_FP8 = True
     if arch >= 80:
         SUPPORT_SM80 = True
@@ -75,14 +75,14 @@ QUANT_CONFIGS = [
         "b_type": "kU4B8",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [-1, 0, 2, 4, 8],
+        "group_blocks": [-1, 2, 4, 8],
     },
     # GPTQ-INT8
     {
         "b_type": "kU8B128",
         "thread_configs": THREAD_CONFIGS,
         "thread_m_blocks": THREAD_M_BLOCKS,
-        "group_blocks": [-1, 0, 2, 4, 8],
+        "group_blocks": [-1, 2, 4, 8],
     },
     # FP8
     {
@@ -161,12 +161,15 @@ QUANT_CONFIGS = [
     },
 ]
 
+# Kernels are written next to the kernel.h / marlin_template.h they include.
+OUTPUT_DIR = sys.argv[2] if len(sys.argv) > 2 else os.path.dirname(__file__)
+
 
 def remove_old_kernels():
-    for filename in glob.glob(os.path.dirname(__file__) + "/*kernel_*.cu"):
+    for filename in glob.glob(OUTPUT_DIR + "/*kernel_*.cu"):
         subprocess.call(["rm", "-f", filename])
 
-    filename = os.path.dirname(__file__) + "/kernel_selector.h"
+    filename = OUTPUT_DIR + "/kernel_selector.h"
     subprocess.call(["rm", "-f", filename])
 
 
@@ -297,17 +300,17 @@ def generate_new_kernels():
 
             filename = filename.lower()
 
-            with open(os.path.join(os.path.dirname(__file__), filename), "w") as f:
+            with open(os.path.join(OUTPUT_DIR, filename), "w") as f:
                 f.write(file_content)
 
     if not SUPPORT_FP8 and kernel_selector_str != FILE_HEAD_COMMENT:
         kernel_selector_str += (
             "else if (a_type == vllm::kFE4M3fn)\n"
-            "  TORCH_CHECK(false, "
+            "  STD_TORCH_CHECK(false, "
             '"marlin kernel with fp8 activation is not built.");'
         )
 
-    with open(os.path.join(os.path.dirname(__file__), "kernel_selector.h"), "w") as f:
+    with open(os.path.join(OUTPUT_DIR, "kernel_selector.h"), "w") as f:
         f.write(kernel_selector_str)
 
 

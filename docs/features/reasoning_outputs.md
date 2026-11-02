@@ -6,6 +6,7 @@ Reasoning models return an additional `reasoning` field in their outputs, which 
 
 !!! warning
     `reasoning` used to be called `reasoning_content`. To migrate, directly replace `reasoning_content` with `reasoning`.
+    It is important that you also update your client code. Otherwise, your client code could silently read an empty `reasoning_content`, even when `reasoning` is populated.
 
 ## Supported Models
 
@@ -13,7 +14,10 @@ vLLM currently supports the following reasoning models:
 
 | Model Series | Parser Name | Structured Output Support | Tool Calling |
 | ------------ | ----------- | ---------------- | ----------- |
+| [Cohere Command A Reasoning](https://huggingface.co/CohereLabs/command-a-reasoning-08-2025) | `cohere_command3` | `json`, `regex` | ✅ |
+| [Cohere Command A Plus](https://huggingface.co/CohereLabs/command-a-plus-05-2026-bf16) | `cohere_command4` | `json`, `regex` | ✅ |
 | [DeepSeek R1 series](https://huggingface.co/collections/deepseek-ai/deepseek-r1-678e1e131c0169c0bc89728d) | `deepseek_r1` | `json`, `regex` | ❌ |
+| [Gemma 4 series](https://huggingface.co/google/gemma-4-26B-A4B-it) | `gemma4` | `json`, `regex` | ✅ |
 | [DeepSeek-V3.1](https://huggingface.co/collections/deepseek-ai/deepseek-v31-68a491bed32bd77e7fca048f) | `deepseek_v3` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-VL series](https://huggingface.co/baidu/ERNIE-4.5-VL-28B-A3B-PT) | `ernie45` | `json`, `regex` | ❌ |
 | [ERNIE-4.5-21B-A3B-Thinking](https://huggingface.co/baidu/ERNIE-4.5-21B-A3B-Thinking) | `ernie45` | `json`, `regex` | ✅ |
@@ -21,15 +25,21 @@ vLLM currently supports the following reasoning models:
 | [Holo2 series](https://huggingface.co/collections/Hcompany/holo2) | `holo2` | `json`, `regex` | ✅ |
 | [Hunyuan A13B series](https://huggingface.co/collections/tencent/hunyuan-a13b-685ec38e5b46321e3ea7c4be) | `hunyuan_a13b` | `json`, `regex` | ✅ |
 | [IBM Granite 3.2 language models](https://huggingface.co/collections/ibm-granite/granite-32-language-models-67b3bc8c13508f6d064cff9a) | `granite` | ❌ | ❌ |
+| [IBM Granite 4.2 language models](https://huggingface.co/ibm-granite/granite-4.2-30b) | `granite_thinking_parser` | `json`, `regex` | ✅ |
+| [Kolibri 1](https://huggingface.co/Aleph-Alpha/Kolibri-1) | `hf` | `json`, `regex` | ✅ |
 | [MiniMax-M2](https://huggingface.co/MiniMaxAI/MiniMax-M2) | `minimax_m2_append_think` | `json`, `regex` | ✅ |
 | [Qwen3 series](https://huggingface.co/collections/Qwen/qwen3-67dd247413f0e2e4f653967f) | `qwen3` | `json`, `regex` | ✅ |
 | [QwQ-32B](https://huggingface.co/Qwen/QwQ-32B) | `deepseek_r1` | `json`, `regex` | ✅ |
+| [Step-3.5 / Step-3.7 Flash](https://huggingface.co/stepfun-ai/Step-3.5-Flash) | `step3p5` | `json`, `regex` | ✅ |
 
 !!! note
     IBM Granite 3.2 and DeepSeek-V3.1 reasoning is disabled by default; to enable it, you must also pass `thinking=True` in your `chat_template_kwargs`.
+    IBM Granite 4.2 reasoning is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
     The reasoning feature for the Qwen3 series is enabled by default. To disable it, you must pass `enable_thinking=False` in your `chat_template_kwargs`.
+    Gemma 4 reasoning is disabled by default; to enable it, pass `enable_thinking=True` in your `chat_template_kwargs` or set `reasoning_effort` (which enables it automatically).
     DeepSeek-V3.1 tool calling is supported in non-thinking mode.
     Holo2 reasoning is enabled by default. To disable it, you must also pass `thinking=False` in your `chat_template_kwargs`.
+    Kolibri 1 reasoning is enabled by default. To disable it, set `reasoning_effort="none"` or pass `enable_thinking=False` in your `chat_template_kwargs`.
 
 ## Quickstart
 
@@ -102,7 +112,7 @@ Streaming chat completions are also supported for reasoning models. The `reasoni
     }
     ```
 
-OpenAI Python client library does not officially support `reasoning` attribute for streaming output. But the client supports extra attributes in the response. You can use `hasattr` to check if the `reasoning` attribute is present in the response. For example:
+OpenAI Python client library does not officially support `reasoning` attribute for streaming output. But the client supports extra attributes in the response. You can use `getattr` to check if the `reasoning` attribute is present in the response. For example:
 
 ??? code
 
@@ -156,7 +166,7 @@ OpenAI Python client library does not officially support `reasoning` attribute f
             print(content, end="", flush=True)
     ```
 
-Remember to check whether the `reasoning` exists in the response before accessing it. You could check out the [example](https://github.com/vllm-project/vllm/blob/main/examples/online_serving/openai_chat_completion_with_reasoning_streaming.py).
+Remember to check whether the `reasoning` exists in the response before accessing it. You could check out the [example](https://github.com/vllm-project/vllm/blob/main/examples/reasoning/openai_chat_completion_with_reasoning_streaming.py).
 
 ## Tool Calling
 
@@ -228,6 +238,17 @@ vllm serve ibm-granite/granite-3.2-2b-instruct \
     --default-chat-template-kwargs '{"thinking": true}'
 ```
 
+### Mapping Reasoning Efforts
+
+Chat templates differ in which `reasoning_effort` values they recognize, and some silently fall back to another effort (e.g. maximum reasoning) for values they do not know. Use `--reasoning-effort-map` to rewrite the efforts clients send into ones the template supports. For a template that only recognizes `low`, `high` and `max`:
+
+```bash
+vllm serve <model> \
+    --reasoning-effort-map '{"minimal": "low", "medium": "low", "xhigh": "max"}'
+```
+
+The map applies to the effort set through the Chat Completions (`reasoning_effort`), Responses (`reasoning.effort`) and Anthropic Messages (`output_config.effort`) APIs. Efforts that are not listed pass through unchanged, and a `reasoning_effort` set directly in `chat_template_kwargs` is not rewritten. Keys must be one of `none`, `minimal`, `low`, `medium`, `high`, `xhigh` or `max`; values are passed to the chat template as-is. Mapping an effort to `none` disables thinking for templates that honor `enable_thinking`.
+
 ### Request-Level Override
 
 Request-level `chat_template_kwargs` always take priority over server defaults. For example, if the server is started with `enable_thinking=false`, a client can still enable it for a specific request:
@@ -287,6 +308,8 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+The Responses API (`/v1/responses`) accepts the same `thinking_token_budget` field.
+
 ### Offline Inference
 
 ```python
@@ -313,9 +336,107 @@ for output in outputs:
     print("text:", output.outputs[0].text)
 ```
 
+## Automatic `enable_thinking` Activation
+
+Some models (such as Gemma 4, DeepSeek-V4-Pro and IBM Granite 3.2) require `enable_thinking: true` in their chat template kwargs to activate thinking mode — without it, reasoning tokens are never generated regardless of other settings.
+
+When you set `reasoning_effort` in a Chat Completions request (or `reasoning.effort` in a Responses API request), vLLM automatically injects `enable_thinking` into the chat template kwargs:
+
+- `reasoning_effort` = `"low"`, `"medium"`, or `"high"` → `enable_thinking = true`
+- `reasoning_effort` = `"none"` → `enable_thinking = false`
+- `reasoning_effort` not set → `enable_thinking` is not injected (preserves existing behavior)
+
+This means you no longer need to manually pass `chat_template_kwargs: {"enable_thinking": true}` when using `reasoning_effort` — it is handled automatically.
+
+!!! note
+    If you explicitly set `enable_thinking` in `chat_template_kwargs`, your value takes priority over the automatic injection. This allows you to override the behavior if needed.
+
+    For models whose templates don't declare `enable_thinking` (e.g., DeepSeek R1), the injected kwarg is harmlessly filtered out by `resolve_chat_template_kwargs`.
+
+### Example
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="dummy")
+
+# reasoning_effort automatically enables thinking for models that need it
+response = client.chat.completions.create(
+    model="google/gemma-4-26B-A4B-it",
+    messages=[{"role": "user", "content": "What is 15 * 37?"}],
+    reasoning_effort="high",  # Automatically sets enable_thinking=true
+)
+
+print(response.choices[0].message.reasoning)
+print(response.choices[0].message.content)
+```
+
+## Suppressing Reasoning Output
+
+You can suppress reasoning content from API responses using the `include_reasoning` parameter. When set to `false`, reasoning tokens are still generated (so model quality is unaffected) but excluded from the response. This reduces network traffic without changing inference behavior.
+
+The parameter is supported in both the Chat Completions API and the Responses API, for streaming and non-streaming requests.
+
+When `include_reasoning=false`, vLLM also suppresses per-token metadata (logprobs and token IDs) to prevent leaking reasoning content through decoded token text in logprob entries or raw token IDs.
+
+### Chat Completions API
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+model = client.models.list().data[0].id
+
+# Reasoning is included by default (include_reasoning=True)
+response = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "What is 15 * 37?"}],
+    extra_body={"include_reasoning": False},
+)
+
+msg = response.choices[0].message
+assert msg.content  # Content is still present
+assert not getattr(msg, "reasoning", None)  # Reasoning is suppressed
+```
+
+Streaming works the same way, reasoning deltas are omitted from chunks:
+
+```python
+stream = client.chat.completions.create(
+    model=model,
+    messages=[{"role": "user", "content": "What is 15 * 37?"}],
+    stream=True,
+    extra_body={"include_reasoning": False},
+)
+
+for chunk in stream:
+    delta = chunk.choices[0].delta
+    # delta.reasoning will always be None
+    if delta.content:
+        print(delta.content, end="", flush=True)
+```
+
+### Responses API
+
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
+
+response = client.responses.create(
+    model=client.models.list().data[0].id,
+    input="What is 15 * 37?",
+    include_reasoning=False,
+)
+
+# No "reasoning" items in output
+types = [item.type for item in response.output]
+assert "reasoning" not in types
+```
+
 ## Limitations
 
-- The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`).
+- The reasoning content is only available for online serving's chat completion endpoint (`/v1/chat/completions`), Anthropic Messages API (`/v1/messages`) and the Responses API (`/v1/responses`).
 
 ## How to support a new reasoning model
 
@@ -401,7 +522,7 @@ Additionally, to enable structured output, you'll need to create a new `Reasoner
         end_token: str = "</think>"
 
         @classmethod
-        def from_tokenizer(cls, tokenizer: PreTrainedTokenizer) -> Reasoner:
+        def from_tokenizer(cls, tokenizer: PythonBackend) -> Reasoner:
             return cls(
                 start_token_id=tokenizer.encode("<think>", add_special_tokens=False)[0],
                 end_token_id=tokenizer.encode("</think>", add_special_tokens=False)[0],

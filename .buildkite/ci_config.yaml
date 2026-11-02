@@ -8,11 +8,13 @@ run_all_patterns:
   - "CMakeLists.txt"
   - "requirements/common.txt"
   - "requirements/cuda.txt"
+  - "requirements/kv_connectors.txt"
   - "requirements/build/cuda.txt"
   - "requirements/test/cuda.txt"
   - "setup.py"
   - "csrc/"
   - "cmake/"
+  - ".buildkite/check-torch-abi.py"
 run_all_exclude_patterns:
   - "docker/Dockerfile."
   - "csrc/cpu/"

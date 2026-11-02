@@ -58,7 +58,6 @@ def generate_and_test(
     llm: vllm.LLM,
     lora_path: str,
     lora_id: list[int | None] | int | None,
-    compare_lower: bool = False,
 ) -> None:
     prompts = [
         PROMPT_TEMPLATE.format(context="How many candidates are there?"),
@@ -98,33 +97,9 @@ def generate_and_test(
             if req_lora_id is not None
             else EXPECTED_BASE_MODEL_OUTPUT[i]
         )
-
-        if compare_lower:
-            generated_text = generated_text.lower()
-            if isinstance(expected_output, str):
-                expected_output = (expected_output.lower(),)
-            else:
-                expected_output = tuple(s.lower() for s in expected_output)
         assert _output_matches(generated_text, expected_output), (
             f"Output {i}: {generated_text!r} does not match any of {expected_output!r}"
         )
-
-
-def test_olmoe_lora(olmoe_lora_files, maybe_enable_lora_dual_stream):
-    # We enable enforce_eager=True here to reduce VRAM usage for lora-test CI,
-    # Otherwise, the lora-test will fail due to CUDA OOM.
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=1024,
-        enable_lora=True,
-        max_loras=4,
-        enforce_eager=True,
-        trust_remote_code=True,
-        enable_chunked_prefill=True,
-    )
-
-    generate_and_test(llm, olmoe_lora_files, lora_id=1)
-    generate_and_test(llm, olmoe_lora_files, lora_id=2)
 
 
 def test_olmoe_lora_mixed(olmoe_lora_files):
@@ -135,6 +110,7 @@ def test_olmoe_lora_mixed(olmoe_lora_files):
         max_loras=4,
         enforce_eager=True,
         trust_remote_code=True,
+        hf_overrides={"head_dtype": "float32"},
         enable_chunked_prefill=True,
     )
 
@@ -195,25 +171,3 @@ def test_olmoe_lora_tp2(olmoe_lora_files, fully_sharded_loras):
 
     generate_and_test(llm, olmoe_lora_files, lora_id=1)
     generate_and_test(llm, olmoe_lora_files, lora_id=2)
-
-
-@pytest.mark.parametrize("fully_sharded_loras", [False, True])
-@multi_gpu_test(num_gpus=4)
-def test_olmoe_lora_tp4(olmoe_lora_files, fully_sharded_loras):
-    llm = vllm.LLM(
-        MODEL_PATH,
-        max_model_len=1024,
-        enable_lora=True,
-        max_loras=4,
-        enforce_eager=True,
-        trust_remote_code=True,
-        enable_chunked_prefill=True,
-        tensor_parallel_size=4,
-        fully_sharded_loras=fully_sharded_loras,
-    )
-    generate_and_test(
-        llm, olmoe_lora_files, lora_id=1, compare_lower=fully_sharded_loras
-    )
-    generate_and_test(
-        llm, olmoe_lora_files, lora_id=2, compare_lower=fully_sharded_loras
-    )

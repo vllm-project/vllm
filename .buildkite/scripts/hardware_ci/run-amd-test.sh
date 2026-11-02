@@ -1,498 +1,212 @@
 #!/bin/bash
-
-# This script runs tests inside the corresponding ROCm docker container.
-# It handles both single-node and multi-node test configurations.
+# Run one AMD CI job in its Kubernetes pod.
 #
-# Multi-node detection: Instead of matching on fragile group names, we detect
-# multi-node jobs structurally by looking for the bracket command syntax
-# "[node0_cmds] && [node1_cmds]" or via the NUM_NODES environment variable.
-#
-###############################################################################
-# QUOTING / COMMAND PASSING
-#
-# Passing commands as positional arguments ($*) is fragile when the command
-# string itself contains double quotes, e.g.:
-#
-#   bash run-amd-test.sh "export FLAGS="value" && pytest -m "not slow""
-#
-# The outer shell resolves the nested quotes *before* this script runs, so
-# the script receives mangled input it cannot fully recover.
-#
-# Preferred: pass commands via the VLLM_TEST_COMMANDS environment variable:
-#
-#   export VLLM_TEST_COMMANDS='export FLAGS="value" && pytest -m "not slow"'
-#   bash run-amd-test.sh
-#
-# Single-quoted assignment preserves all inner double quotes verbatim.
-# The $* path is kept for backward compatibility but callers should migrate.
-###############################################################################
+# The container image ($ROCM_CI_REPO:build-<build-id>) already contains vLLM,
+# all test dependencies, and /vllm-workspace. This script:
+#   1. Sets up per-job local caches and validates the HF mount.
+#   2. Fetches this build's wheel artifact for python_only_compile.sh.
+#   3. Acquires the DPX GPU partition lock when running on a DPX agent.
+#   4. Runs a preflight check (imports + GPU count).
+#   5. Executes $VLLM_TEST_COMMANDS under a wall-clock timeout.
+#   6. Writes a diagnostics bundle on failure.
 set -o pipefail
 
-# Export Python path
-export PYTHONPATH=".."
+# ---------------------------------------------------------------------------
+# Inputs — set by the pipeline / ci-infra template
+# ---------------------------------------------------------------------------
+commands=${VLLM_TEST_COMMANDS:?VLLM_TEST_COMMANDS must be set by the pipeline}
+gpus=${VLLM_CI_EXPECTED_GPU_COUNT:-1}
+[[ $gpus =~ ^(0|[1-9][0-9]*)$ ]] || { echo "Invalid VLLM_CI_EXPECTED_GPU_COUNT=$gpus" >&2; exit 1; }
+job=${BUILDKITE_JOB_ID:-local}
+job=${job//[^A-Za-z0-9_.-]/_}
+# Short: Ray puts AF_UNIX sockets under $TMPDIR, whose paths may not exceed 107 bytes.
+root=/tmp/vllm-${job##*-}
+root=${root:0:22}
 
-###############################################################################
-# Helper Functions
-###############################################################################
+# ---------------------------------------------------------------------------
+# Cache directories — all under $root so they are job-local and isolated.
+# HF hub is the one exception: it lives on the node's persistent NFS mount.
+# ---------------------------------------------------------------------------
+export HF_HOME=${HF_HOME:-/home/buildkite-agent/huggingface}
+export TIKTOKEN_RS_CACHE_DIR=$HF_HOME/tiktoken-rs-cache
+export PYTHONPATH=/vllm-workspace
+export PYTORCH_ROCM_ARCH=""                        # let vLLM detect arches at runtime
+export TMPDIR=$root/tmp
+export VLLM_RPC_BASE_PATH=/tmp
+export TORCHINDUCTOR_CACHE_DIR=$root/inductor
+export TRITON_CACHE_DIR=$root/triton
+export VLLM_CACHE_ROOT=$root/vllm
+export XDG_CACHE_HOME=$root/xdg
+export HF_DATASETS_CACHE=$root/datasets
+export HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT:-300}
+export HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT:-60}
 
-cleanup_docker() {
-  # Get Docker's root directory
-  docker_root=$(docker info -f '{{.DockerRootDir}}')
-  if [ -z "$docker_root" ]; then
-    echo "Failed to determine Docker root directory."
-    exit 1
-  fi
-  echo "Docker root directory: $docker_root"
+mkdir -p \
+  "$TMPDIR" "$TORCHINDUCTOR_CACHE_DIR" "$TRITON_CACHE_DIR" \
+  "$VLLM_CACHE_ROOT" "$XDG_CACHE_HOME" "$HF_DATASETS_CACHE" \
+  "$TIKTOKEN_RS_CACHE_DIR" || exit 1
 
-  disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
-  threshold=70
-  if [ "$disk_usage" -gt "$threshold" ]; then
-    echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
-    docker image prune -f
-    docker volume prune -f && docker system prune --force --filter "until=72h" --all
-    echo "Docker images and volumes cleanup completed."
-  else
-    echo "Disk usage is below $threshold%. No cleanup needed."
-  fi
-}
+# HF_HOME must be a persistent mount, not rootfs (catches misconfigured nodes).
+[[ $(findmnt -n -T "$HF_HOME" -o TARGET) != / ]] \
+  || { echo "HF_HOME is on rootfs — it must be a persistent node mount" >&2; exit 1; }
 
-cleanup_network() {
-  local max_nodes=${NUM_NODES:-2}
-  for node in $(seq 0 $((max_nodes - 1))); do
-    if docker ps -a -q -f name="node${node}" | grep -q .; then
-      docker stop "node${node}" || true
-    fi
+# hf-xet state corrupts on NFS; redirect it to a local tmpdir when needed.
+if [[ $(findmnt -n -T "$HF_HOME" -o FSTYPE) == nfs* ]]; then
+  export HF_XET_CACHE=$root/hf-xet
+  export HF_XET_HIGH_PERFORMANCE=0
+  export HF_XET_RECONSTRUCTION_USE_VECTORED_WRITE=0
+fi
+
+# ---------------------------------------------------------------------------
+# Terminal and pytest settings
+# ---------------------------------------------------------------------------
+# Keep CI log output colorized.
+: "${TERM:=xterm-256color}" "${FORCE_COLOR:=1}" "${CLICOLOR_FORCE:=1}" "${PY_COLORS:=1}"
+export TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS
+
+# Fault-handler dumps stacks after 25 min; pytest-timeout kills a single test
+# after 40 min (PYTEST_TIMEOUT=2400 s). Both are overridable by the pipeline.
+export PYTHONFAULTHANDLER=1
+export PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-2400}
+export PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} \
+  --color=yes \
+  --durations=25 \
+  --durations-min=1.0 \
+  -o faulthandler_timeout=1500 \
+  --timeout-method=thread"
+
+# After its summary, a pytest process leaves without native library teardown, where it
+# has crashed with SIGSEGV after every test passed (amd_ci_fast_exit.py).
+# Installed into site-packages, not put on PYTHONPATH: commands that set PYTHONPATH themselves
+# still inherit PYTEST_ADDOPTS and must find the plugin.
+ci_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+cp "$ci_dir/amd_ci_fast_exit.py" \
+  "$(python3 -P -c 'import sysconfig; print(sysconfig.get_paths()["purelib"])')/" || exit 1
+export PYTEST_ADDOPTS="$PYTEST_ADDOPTS -p amd_ci_fast_exit"
+
+[[ $gpus == 0 ]] && export VLLM_TARGET_DEVICE=cpu
+
+# ---------------------------------------------------------------------------
+# Wheel reinstall — python_only_compile.sh path
+# ---------------------------------------------------------------------------
+# python_only_compile.sh reinstalls vLLM around this build's wheel, which build.sh uploads as an
+# artifact of the image build step (kept out of the image: only this test needs it).
+if [[ $commands == *python_only_compile.sh* ]]; then
+  wheel_dir=$(mktemp -d)
+  for try in 1 2 3; do
+    buildkite-agent artifact download ".rocm-wheel/vllm-*.whl" "$wheel_dir" --step image-build-amd \
+      && break
+    ((try == 3)) && exit 1
+    sleep $((try * 5))
   done
-  if docker network ls | grep -q docker-net; then
-    docker network rm docker-net || true
-  fi
+  wheels=("$wheel_dir"/.rocm-wheel/vllm-*.whl)
+  [[ ${#wheels[@]} == 1 && -f ${wheels[0]} ]] \
+    || { echo "Expected exactly one wheel artifact, found: ${wheels[*]}" >&2; exit 1; }
+  VLLM_PRECOMPILED_WHEEL_LOCATION=${wheels[0]}
+  VLLM_VERSION_OVERRIDE=$(python3 -P -c \
+    'import importlib.metadata as m; print(m.version("vllm"))') || exit 1
+  export VLLM_TARGET_DEVICE=rocm VLLM_VERSION_OVERRIDE VLLM_PRECOMPILED_WHEEL_LOCATION
+fi
+
+# ---------------------------------------------------------------------------
+# DPX GPU partition lock
+# ---------------------------------------------------------------------------
+# DPX nodes expose exactly one GPU partition per pod. A host-wide lock file
+# prevents a second job from landing on the same device simultaneously.
+_acquire_dpx_lock() {
+  local dev=(/dev/dri/renderD*)
+  [[ ${#dev[@]} == 1 ]] \
+    || { echo "DPX: expected exactly one render device, found ${#dev[@]}" >&2; return 1; }
+  mkdir -p "$HF_HOME/.vllm-dpx-locks"
+  exec 9>>"$HF_HOME/.vllm-dpx-locks/$(stat -Lc %t-%T "${dev[0]}").lock"
+  flock -n 9 || { echo "DPX GPU collision on ${dev[0]}" >&2; return 1; }
 }
 
-is_multi_node() {
-  local cmds="$1"
-  # Primary signal: NUM_NODES environment variable set by the pipeline
-  if [[ "${NUM_NODES:-1}" -gt 1 ]]; then
-    return 0
-  fi
-  # Fallback: detect the bracket syntax structurally
-  # Pattern: [...] && [...] (per-node command arrays)
-  if [[ "$cmds" =~ \[.*\].*\&\&.*\[.*\] ]]; then
-    return 0
-  fi
-  return 1
+if [[ ${BUILDKITE_AGENT_META_DATA_QUEUE:-} == *dpx* && $gpus != 0 ]]; then
+  _acquire_dpx_lock || exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Lifecycle logging
+# ---------------------------------------------------------------------------
+# Structured events for infra dashboards keyed on [amd-ci-teardown].
+# Usage: _teardown_log <event> [key=val ...]
+_teardown_log() {
+  local event=$1; shift
+  printf '[amd-ci-teardown] event=%s' "$event" >&2
+  (($#)) && printf ' %s' "$@" >&2
+  printf '\n' >&2
 }
 
-handle_pytest_exit() {
-  local exit_code=$1
-  if [ "$exit_code" -eq 5 ]; then
-    echo "Pytest exit code 5 (no tests collected) - treating as success."
-    exit 0
-  fi
-  exit "$exit_code"
+# ---------------------------------------------------------------------------
+# Diagnostics bundle (always collected on failure)
+# ---------------------------------------------------------------------------
+# Writes to artifacts/amd-gpu-diagnostics/<job>/diagnostics.log, which the
+# pipeline's artifact_paths uploads even when the step fails.
+diagnostics() {
+  local d=artifacts/amd-gpu-diagnostics/$job
+  mkdir -p "$d"
+  {
+    date
+    echo "node=${VLLM_CI_K8S_NODE_NAME:-?}  pod=${VLLM_CI_K8S_POD_NAME:-?}"
+    echo "--- amd-smi ---"
+    timeout 10 amd-smi list
+    echo "--- rocm-smi pids ---"
+    timeout 10 rocm-smi --showpids
+    echo "--- top processes by RSS ---"
+    ps -eo pid,etime,rss,args --sort=-rss | head -30
+    echo "--- disk / memory ---"
+    df -h /tmp /dev/shm "$HF_HOME"
+    free -g
+    echo "--- devices ---"
+    ls -l /dev/kfd /dev/dri
+  } >"$d/diagnostics.log" 2>&1
 }
 
-###############################################################################
-# Pytest marker/keyword re-quoting
-#
-# When commands are passed through Buildkite -> shell -> $* -> bash -c,
-# quotes around multi-word pytest -m/-k expressions get stripped:
-#   pytest -v -s -m 'not cpu_test' v1/core
-# becomes:
-#   pytest -v -s -m not cpu_test v1/core
-#
-# pytest then interprets "cpu_test" as a file path, not part of the marker.
-#
-# This function detects unquoted expressions after -m/-k and re-quotes them
-# by collecting tokens until a recognizable boundary is reached:
-#   - test path (contains '/')
-#   - test file (ends with '.py')
-#   - another pytest flag (--xxx or -x single-char flags)
-#   - command separator (&& || ; |)
-#   - environment variable assignment (FOO=bar)
-#
-# Single-word markers (e.g. -m cpu_test, -m hybrid_model) pass through
-# unquoted since they have no spaces and work fine.
-#
-# Already-quoted expressions (containing literal single quotes) are passed
-# through untouched to avoid double-quoting values injected by
-# apply_rocm_test_overrides.
-#
-# NOTE: This ONLY fixes -m/-k flags. It cannot recover arbitrary inner
-# double-quotes stripped by the calling shell (see header comment).
-# Use VLLM_TEST_COMMANDS to avoid the problem entirely.
-###############################################################################
-re_quote_pytest_markers() {
-  local input="$1"
-  local output=""
-  local collecting=false
-  local marker_buf=""
+# ---------------------------------------------------------------------------
+# Preflight: verify imports and GPU visibility
+# ---------------------------------------------------------------------------
+# -P: the checkout (cwd) has a vllm/ source tree that would shadow the installed package.
+python3 -P -c "import vllm, torch, transformers, ray" || exit 1
 
-  # Strip backslash-newline continuations, then flatten remaining newlines
-  local flat="${input//$'\\\n'/ }"
-  flat="${flat//$'\n'/ }"
+if [[ $gpus != 0 ]]; then
+  echo "--- ROCm info"
+  rocminfo || { diagnostics; exit 1; }
+  python3 - <<EOF || { diagnostics; exit 1; }
+import torch
+n = torch.cuda.device_count()
+assert torch.version.hip and torch.cuda.is_available() and n == $gpus, \
+    f"preflight: expected $gpus ROCm GPU(s), found {n}"
+EOF
+fi
 
-  # Disable globbing to prevent *.py etc. from expanding during read -ra
-  local restore_glob
-  restore_glob="$(shopt -p -o noglob 2>/dev/null || true)"
-  set -o noglob
-  local -a words
-  read -ra words <<< "$flat"
-  eval "$restore_glob"
+# ---------------------------------------------------------------------------
+# Run
+# ---------------------------------------------------------------------------
+# Scrub orchestration vars before handing control to test commands.
+# (VLLM_CI_* that are test knobs are intentionally left — see tests/ci_envs.py)
+unset VLLM_TEST_COMMANDS VLLM_CI_EXPECTED_GPU_COUNT VLLM_CI_DIAGNOSTICS_DIR
 
-  for word in "${words[@]}"; do
-    if $collecting; then
-      # If the token we're about to collect already contains a literal
-      # single quote, the expression was already quoted upstream.
-      # Flush and stop collecting.
-      if [[ "$word" == *"'"* ]]; then
-        if [[ -n "$marker_buf" ]]; then
-          # Should not normally happen (partial buf + quote), flush raw
-          output+="${marker_buf} "
-          marker_buf=""
-        fi
-        output+="${word} "
-        collecting=false
-        continue
-      fi
+echo "Test commands: $commands"
+echo "--- Test log"
+_teardown_log workload_started "timeout_s=${CONTAINER_TIMEOUT_S:-0}"
 
-      local is_boundary=false
-      case "$word" in
-        # Line-continuation artifact
-        "\\")
-          is_boundary=true ;;
-        # Command separators
-        "&&"|"||"|";"|"|")
-          is_boundary=true ;;
-        # Long flags (--ignore, --shard-id, etc.)
-        --*)
-          is_boundary=true ;;
-        # Short flags (-v, -s, -x, etc.) but NOT negative marker tokens
-        # like "not" which don't start with "-". Also skip -k/-m which
-        # would start a new marker (handled below).
-        -[a-zA-Z])
-          is_boundary=true ;;
-        # Test path (contains /)
-        */*)
-          is_boundary=true ;;
-        # Test file (ends with .py, possibly with ::method)
-        *.py|*.py::*)
-          is_boundary=true ;;
-        # Environment variable assignment preceding a command (FOO=bar)
-        *=*)
-          # Only treat as boundary if it looks like VAR=value, not
-          # pytest filter expressions like num_gpus=2 inside markers
-          if [[ "$word" =~ ^[A-Z_][A-Z0-9_]*= ]]; then
-            is_boundary=true
-          fi
-          ;;
-      esac
-
-      if $is_boundary; then
-        # Strip surrounding double quotes if present (from upstream
-        # single-to-double conversion); without this, wrapping below
-        # would produce '"expr"' with literal double-quote characters.
-        if [[ "$marker_buf" == '"'*'"' ]]; then
-          marker_buf="${marker_buf#\"}"
-          marker_buf="${marker_buf%\"}"
-        fi
-        # Flush the collected marker expression
-        if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
-          output+="'${marker_buf}' "
-        else
-          output+="${marker_buf} "
-        fi
-        collecting=false
-        marker_buf=""
-        # Check if this boundary word itself starts a new -m/-k
-        if [[ "$word" == "-m" || "$word" == "-k" ]]; then
-          output+="${word} "
-          collecting=true
-        # Drop stray backslash tokens silently
-        elif [[ "$word" == "\\" ]]; then
-          :
-        else
-          output+="${word} "
-        fi
-      else
-        # Accumulate into marker buffer
-        if [[ -n "$marker_buf" ]]; then
-          marker_buf+=" ${word}"
-        else
-          marker_buf="${word}"
-        fi
-      fi
-    elif [[ "$word" == "-m" || "$word" == "-k" ]]; then
-      output+="${word} "
-      collecting=true
-      marker_buf=""
-    else
-      output+="${word} "
-    fi
-  done
-
-  # Flush any trailing marker expression (marker at end of command)
-  if $collecting && [[ -n "$marker_buf" ]]; then
-    # Strip surrounding double quotes (see mid-stream flush comment)
-    if [[ "$marker_buf" == '"'*'"' ]]; then
-      marker_buf="${marker_buf#\"}"
-      marker_buf="${marker_buf%\"}"
-    fi
-    if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
-      output+="'${marker_buf}'"
-    else
-      output+="${marker_buf}"
-    fi
-  fi
-
-  echo "${output% }"
-}
-
-###############################################################################
-# ROCm-specific pytest command rewrites
-#
-# These apply ignore flags and environment overrides for tests that are not
-# yet supported or behave differently on ROCm hardware. Kept as a single
-# function so new exclusions are easy to add in one place.
-###############################################################################
-
-apply_rocm_test_overrides() {
-  local cmds="$1"
-
-  # --- Model registry filter ---
-  if [[ $cmds == *"pytest -v -s models/test_registry.py"* ]]; then
-    cmds=${cmds//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
-  fi
-
-  # --- LoRA: disable custom paged attention ---
-  if [[ $cmds == *"pytest -v -s lora"* ]]; then
-    cmds=${cmds//"pytest -v -s lora"/"pytest -v -s lora"}
-  fi
-
-  # --- Kernel ignores ---
-  if [[ $cmds == *" kernels/core"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/core/test_fused_quant_layernorm.py \
-    --ignore=kernels/core/test_permute_cols.py"
-  fi
-
-  if [[ $cmds == *" kernels/attention"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/attention/test_attention_selector.py \
-    --ignore=kernels/attention/test_encoder_decoder_attn.py \
-    --ignore=kernels/attention/test_flash_attn.py \
-    --ignore=kernels/attention/test_flashinfer.py \
-    --ignore=kernels/attention/test_prefix_prefill.py \
-    --ignore=kernels/attention/test_cascade_flash_attn.py \
-    --ignore=kernels/attention/test_mha_attn.py \
-    --ignore=kernels/attention/test_lightning_attn.py \
-    --ignore=kernels/attention/test_attention.py"
-  fi
-
-  if [[ $cmds == *" kernels/quantization"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/quantization/test_int8_quant.py \
-    --ignore=kernels/quantization/test_machete_mm.py \
-    --ignore=kernels/quantization/test_block_fp8.py \
-    --ignore=kernels/quantization/test_block_int8.py \
-    --ignore=kernels/quantization/test_marlin_gemm.py \
-    --ignore=kernels/quantization/test_cutlass_scaled_mm.py \
-    --ignore=kernels/quantization/test_int8_kernel.py"
-  fi
-
-  if [[ $cmds == *" kernels/mamba"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/mamba/test_mamba_mixer2.py \
-    --ignore=kernels/mamba/test_causal_conv1d.py \
-    --ignore=kernels/mamba/test_mamba_ssm_ssd.py"
-  fi
-
-  if [[ $cmds == *" kernels/moe"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py"
-  fi
-
-  # --- Entrypoint ignores ---
-  if [[ $cmds == *" entrypoints/openai "* ]]; then
-    cmds=${cmds//" entrypoints/openai "/" entrypoints/openai \
-    --ignore=entrypoints/openai/chat_completion/test_audio.py \
-    --ignore=entrypoints/openai/completion/test_shutdown.py \
-    --ignore=entrypoints/openai/test_completion.py \
-    --ignore=entrypoints/openai/models/test_models.py \
-    --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
-    --ignore=entrypoints/openai/chat_completion/test_root_path.py \
-    --ignore=entrypoints/openai/completion/test_prompt_validation.py "}
-  fi
-
-  if [[ $cmds == *" entrypoints/serve"* ]]; then
-    cmds="${cmds} \
-    --ignore=entrypoints/serve/lora/test_lora_adapters.py"
-  fi
-
-  if [[ $cmds == *" entrypoints/llm "* ]]; then
-    cmds=${cmds//" entrypoints/llm "/" entrypoints/llm \
-    --ignore=entrypoints/llm/test_chat.py \
-    --ignore=entrypoints/llm/test_accuracy.py \
-    --ignore=entrypoints/llm/test_init.py \
-    --ignore=entrypoints/llm/test_prompt_validation.py "}
-  fi
-
-  # Clean up escaped newlines from --ignore appends
-  cmds=$(echo "$cmds" | sed 's/ \\ / /g')
-
-  echo "$cmds"
-}
-
-###############################################################################
-# Main
-###############################################################################
-
-# --- GPU initialization ---
-echo "--- ROCm info"
-rocminfo
-
-# --- Docker housekeeping ---
-cleanup_docker
-
-# --- Pull test image ---
-echo "--- Pulling container"
-image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
-container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
-docker pull "${image_name}"
-
-remove_docker_container() {
-  docker rm -f "${container_name}" || docker image rm -f "${image_name}" || true
-}
-trap remove_docker_container EXIT
-
-# --- Prepare commands ---
-echo "--- Running container"
-
-HF_CACHE="$(realpath ~)/huggingface"
-mkdir -p "${HF_CACHE}"
-HF_MOUNT="/root/.cache/huggingface"
-
-# ---- Command source selection ----
-# Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
-# Fall back to $* for backward compatibility, but warn that inner
-# double-quotes will have been stripped by the calling shell.
-if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
-  commands="${VLLM_TEST_COMMANDS}"
-  echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
+rc=0
+if [[ ${CONTAINER_TIMEOUT_S:-0} -gt 0 ]]; then
+  # timeout fires TERM, then KILL after 10 s — mirrors the old docker run path.
+  # Not --foreground: the whole process group (pytest, engine workers) must stop, not just bash.
+  # That group is in the background of the job's PTY, where reading the terminal stops it
+  # (SIGTTIN: apt, transformers' trust_remote_code prompt), so stdin is /dev/null.
+  timeout --verbose --signal=TERM --kill-after=10s \
+    "${CONTAINER_TIMEOUT_S}s" bash -o pipefail -c "$commands" </dev/null || rc=$?
 else
-  commands="$*"
-  if [[ -z "$commands" ]]; then
-    echo "Error: No test commands provided." >&2
-    echo "Usage:" >&2
-    echo "  Preferred:  VLLM_TEST_COMMANDS='...' bash $0" >&2
-    echo "  Legacy:     bash $0 \"commands here\"" >&2
-    exit 1
-  fi
-  echo "Commands sourced from positional args (legacy mode)"
-  echo "WARNING: Inner double-quotes in the command string may have been"
-  echo "  stripped by the calling shell. If you see syntax errors, switch to:"
-  echo "  export VLLM_TEST_COMMANDS='your commands here'"
-  echo "  bash $0"
+  bash -o pipefail -c "$commands" </dev/null || rc=$?
 fi
 
-echo "Raw commands: $commands"
+[[ $rc == 5   ]] && rc=0   # pytest exit 5 = no tests collected, not a failure
+[[ $rc == 124 ]] && _teardown_log deadline_exhausted \
+  "configured_s=${CONTAINER_TIMEOUT_S:-0}" "status=$rc"
+_teardown_log workload_finished "status=$rc"
 
-# Fix quoting before ROCm overrides (so overrides see correct structure)
-commands=$(re_quote_pytest_markers "$commands")
-echo "After re-quoting: $commands"
-
-commands=$(apply_rocm_test_overrides "$commands")
-echo "Final commands: $commands"
-
-MYPYTHONPATH=".."
-
-# Verify GPU access
-render_gid=$(getent group render | cut -d: -f3)
-if [[ -z "$render_gid" ]]; then
-  echo "Error: 'render' group not found. This is required for GPU access." >&2
-  exit 1
-fi
-
-# --- RDMA device passthrough (conditional) ---
-# If the host has RDMA devices, pass them through so tests like
-# test_moriio_connector can access ibverbs. On hosts without RDMA
-# hardware the tests will gracefully skip via _rdma_available().
-RDMA_FLAGS=""
-if [ -d /dev/infiniband ]; then
-  echo "RDMA devices detected on host, enabling passthrough"
-  RDMA_FLAGS="--device /dev/infiniband --cap-add=IPC_LOCK"
-else
-  echo "No RDMA devices found on host, RDMA tests will be skipped"
-fi
-
-# --- Route: multi-node vs single-node ---
-if is_multi_node "$commands"; then
-  echo "--- Multi-node job detected"
-  export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
-
-  # Parse the bracket syntax:  prefix ; [node0_cmds] && [node1_cmds]
-  #   BASH_REMATCH[1] = prefix (everything before first bracket)
-  #   BASH_REMATCH[2] = comma-separated node0 commands
-  #   BASH_REMATCH[3] = comma-separated node1 commands
-  if [[ "$commands" =~ ^(.*)\[(.*)"] && ["(.*)\]$ ]]; then
-    prefix=$(echo "${BASH_REMATCH[1]}" | sed 's/;//g')
-    echo "PREFIX: ${prefix}"
-
-    export composite_command="(command rocm-smi || true)"
-    saved_IFS=$IFS
-    IFS=','
-    read -ra node0 <<< "${BASH_REMATCH[2]}"
-    read -ra node1 <<< "${BASH_REMATCH[3]}"
-    IFS=$saved_IFS
-
-    if [[ ${#node0[@]} -ne ${#node1[@]} ]]; then
-      echo "Warning: node0 has ${#node0[@]} commands, node1 has ${#node1[@]}. They will be paired by index."
-    fi
-
-    for i in "${!node0[@]}"; do
-      command_node_0=$(echo "${node0[i]}" | sed 's/\"//g')
-      command_node_1=$(echo "${node1[i]}" | sed 's/\"//g')
-
-      step_cmd="./.buildkite/scripts/run-multi-node-test.sh /vllm-workspace/tests 2 2 ${image_name} '${command_node_0}' '${command_node_1}'"
-      echo "COMMANDS: ${step_cmd}"
-      composite_command="${composite_command} && ${step_cmd}"
-    done
-
-    /bin/bash -c "${composite_command}"
-    exit_code=$?
-    cleanup_network
-    handle_pytest_exit "$exit_code"
-  else
-    echo "Multi-node job detected but failed to parse bracket command syntax."
-    echo "Expected format: prefix ; [node0_cmd1, node0_cmd2] && [node1_cmd1, node1_cmd2]"
-    echo "Got: $commands"
-    cleanup_network
-    exit 111
-  fi
-else
-  echo "--- Single-node job"
-  echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
-
-  docker run \
-    --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
-    $RDMA_FLAGS \
-    --network=host \
-    --shm-size=16gb \
-    --group-add "$render_gid" \
-    --rm \
-    -e HF_TOKEN \
-    -e AWS_ACCESS_KEY_ID \
-    -e AWS_SECRET_ACCESS_KEY \
-    -e BUILDKITE_PARALLEL_JOB \
-    -e BUILDKITE_PARALLEL_JOB_COUNT \
-    -v "${HF_CACHE}:${HF_MOUNT}" \
-    -e "HF_HOME=${HF_MOUNT}" \
-    -e "PYTHONPATH=${MYPYTHONPATH}" \
-    -e "PYTORCH_ROCM_ARCH=" \
-    --name "${container_name}" \
-    "${image_name}" \
-    /bin/bash -c "${commands}"
-
-  exit_code=$?
-  handle_pytest_exit "$exit_code"
-fi
+[[ $rc != 0 ]] && diagnostics
+exit $rc

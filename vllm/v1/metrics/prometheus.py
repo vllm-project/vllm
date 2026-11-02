@@ -42,6 +42,7 @@ def get_prometheus_registry() -> CollectorRegistry:
 
     Returns:
         Registry: A prometheus registry
+
     """
     if os.getenv("PROMETHEUS_MULTIPROC_DIR") is not None:
         logger.debug("Using multiprocess registry for prometheus metrics")
@@ -64,13 +65,12 @@ def unregister_vllm_metrics():
     registry = REGISTRY
     # Unregister any existing vLLM collectors
     for collector in list(registry._collector_to_names):
-        if hasattr(collector, "_name") and "vllm" in collector._name:
+        if hasattr(collector, "_name") and collector._name.startswith("vllm:"):
             registry.unregister(collector)
 
 
 def shutdown_prometheus():
     """Shutdown prometheus metrics."""
-
     path = _prometheus_multiproc_dir
     if path is None:
         return

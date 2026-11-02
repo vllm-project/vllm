@@ -13,7 +13,7 @@ from einops import rearrange
 from transformers.image_processing_utils import BatchFeature
 
 from vllm.config import ModelConfig, VllmConfig
-from vllm.config.multimodal import BaseDummyOptions
+from vllm.config.multimodal import MultiModalDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.inputs import MultiModalDataDict
@@ -25,9 +25,6 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-)
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsLoRA,
@@ -57,6 +54,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    cached_encode,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -71,6 +69,7 @@ from vllm.transformers_utils.processors.isaac import (
     get_image_size_for_max_num_patches,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 
 from .vision import is_vit_use_data_parallel
 
@@ -178,23 +177,23 @@ def create_pixel_shuffle_index_map(
     scale_factor: int = 1,
     device: torch.device | None = None,
 ) -> torch.Tensor:
-    """
-    Build a gather-index map that tells us, for every *output* token after
+    """Build a gather-index map that tells us, for every *output* token after
     pixel-shuffle, which `scale_factor**2` *input* tokens are being merged.
 
-    Args
+    Args:
     ----
     seq_sizes     : (num_images,)  - #patches in each image (row-major order)
     token_grids   : (num_images,2) - (height, width) for every image
     scale_factor  : spatial down-scale factor (≥2)
     device        : (optional) overrides `seq_sizes.device`
 
-    Returns
+    Returns:
     -------
     gather_idx : (new_total_seq_len, scale_factor**2) int64 tensor.
                  gather_idx[i, j] is the *flat* index into the *original*
                  packed sequence for the j-th sub-patch that forms the
                  i-th output token.
+
     """
     if device is None:
         device = seq_sizes.device
@@ -267,6 +266,7 @@ def pixel_shuffle_varlen(
 
     Raises:
         ValueError: If more than one batch item is provided.
+
     """
     keep_batch_dim = x.dim() == 3
     if keep_batch_dim:
@@ -386,26 +386,22 @@ class IsaacDummyInputsBuilder(BaseDummyInputsBuilder[IsaacProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions],
+        mm_options: MultiModalDummyOptions,
     ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-
         target_width, target_height = self.info.get_image_size_with_most_features()
-        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
                 width=target_width,
                 height=target_height,
-                num_images=num_images,
-                overrides=image_overrides,
+                num_images=mm_counts.get("image", 0),
+                overrides=mm_options.get("image"),
             ),
         }
 
 
 class IsaacImagePixelInputs(TensorSchema):
-    """
-    Schema for validating Isaac image inputs.
+    """Schema for validating Isaac image inputs.
 
     Dimensions:
         - np: Number of patches
@@ -443,7 +439,7 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
             "pixel_values": MultiModalFieldConfig.flat_from_sizes(
                 "image", image_grid_sizes
             ),
-            "image_grid_thw": MultiModalFieldConfig.batched("image"),
+            "image_grid_thw": MultiModalFieldConfig.batched("image", keep_on_cpu=True),
         }
 
     def _get_prompt_updates(
@@ -453,6 +449,10 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        tokenizer = self.info.get_tokenizer()
+        image_pad_token_ids = cached_encode(
+            tokenizer, "<|image_pad|>", add_special_tokens=False
+        )
 
         pixel_shuffle_scale = getattr(image_processor, "pixel_shuffle_scale", 2)
         merge_length = pixel_shuffle_scale**2
@@ -463,13 +463,13 @@ class IsaacMultiModalProcessor(BaseMultiModalProcessor):
             assert isinstance(grid_thw, torch.Tensor)
 
             feature_size = int(grid_thw.prod()) // merge_length
-            repl_full = "<|image_pad|>" * feature_size
-            return PromptUpdateDetails.select_text(repl_full, "<|image_pad|>")
+            repl_full = image_pad_token_ids * feature_size
+            return PromptUpdateDetails.select_token_ids(repl_full, image_pad_token_ids)
 
         return [
             PromptReplacement(
                 modality="image",
-                target="<image>",
+                target=cached_encode(tokenizer, "<image>", add_special_tokens=False),
                 replacement=get_replacement_isaac,
             )
         ]
@@ -652,6 +652,14 @@ class Siglip2Encoder(nn.Module):
 
 
 class Siglip2VisionTransformer(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: PixelShuffleSiglip2VisionConfig,
@@ -676,12 +684,10 @@ class Siglip2VisionTransformer(nn.Module):
         self,
         packed_seq_patches: tuple[torch.Tensor, torch.Tensor],
     ) -> torch.Tensor:
-        r"""
-        spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
-            Tensor containing the spatial dimensions (height, width)
-            of the input images.
+        r"""spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
+        Tensor containing the spatial dimensions (height, width)
+        of the input images.
         """
-
         seq_patches, token_grids = packed_seq_patches
         seq_sizes = torch.prod(token_grids, dim=-1)
 
@@ -715,31 +721,8 @@ class Siglip2VisionTransformer(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 def _resolve_vision_token_id(model_config: ModelConfig, vision_token: str) -> int:
@@ -914,7 +897,11 @@ class IsaacForConditionalGeneration(
         for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
             offset = mm_feature.mm_position.offset
             if mm_feature.modality == "image":
-                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                mm_data = mm_feature.data
+                assert mm_data is not None
+                grid_thw = mm_data["image_grid_thw"].data
+                assert isinstance(grid_thw, torch.Tensor)
+                t, h, w = grid_thw.tolist()
                 assert t == 1, f"Image must have 1 frame, got {t}"
                 yield offset, h // spatial_merge_size, w // spatial_merge_size
             else:
@@ -925,7 +912,7 @@ class IsaacForConditionalGeneration(
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        llm_pos_ids_list = []
+        llm_pos_ids_list: list[np.ndarray] = []
         st = 0
         for offset, llm_grid_h, llm_grid_w in self.iter_mm_grid_hw(
             input_tokens, mm_features
@@ -979,7 +966,14 @@ class IsaacForConditionalGeneration(
         device = next(self.language_model.parameters()).device
         dtype = self.vision_embedding.linear_fc1.weight.dtype
         pixel_values = pixel_values.to(device=device, dtype=dtype)
-        spatial_grids = image_grid_thw[:, 1:3].to(device, dtype=torch.int32)
+        # The [:, 1:3] column slice isn't densely laid out, so stage it with a
+        # single copy straight into pinned memory to keep the H2D non-blocking.
+        spatial_grids_cpu = torch.empty(
+            (image_grid_thw.shape[0], 2),
+            dtype=image_grid_thw.dtype,
+            pin_memory=PIN_MEMORY,
+        ).copy_(image_grid_thw[:, 1:3])
+        spatial_grids = async_tensor_h2d(spatial_grids_cpu, device, dtype=torch.int32)
 
         vision_embeddings = self.vision_embedding((pixel_values, spatial_grids))
         merge_size = self.config.vision_config.pixel_shuffle_scale_factor
@@ -1016,9 +1010,7 @@ class IsaacForConditionalGeneration(
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """
-        Get the module prefix in multimodal models
-        """
+        """Get the module prefix in multimodal models."""
         return MultiModelKeys.from_string_field(
             language_model="language_model",
             connector="vision_embedding.linear_fc2",  # The final linear layer

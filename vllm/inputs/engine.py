@@ -3,9 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, Literal, NotRequired, TypeAlias, assert_never
 
-from typing_extensions import NotRequired, TypedDict, assert_never
+from typing_extensions import TypedDict
+
+from vllm.exceptions import VLLMValidationError
 
 if TYPE_CHECKING:
     import torch
@@ -14,8 +16,7 @@ if TYPE_CHECKING:
 
 
 class _InputOptions(TypedDict):
-    """
-    Additional options available to all
+    """Additional options available to all
     [`SingletonInput`][vllm.inputs.engine.SingletonInput] types.
     """
 
@@ -38,6 +39,10 @@ class TokensInput(_InputOptions):
     prompt: NotRequired[str]
     """The prompt text corresponding to the token IDs, if available."""
 
+    prompt_token_offsets: NotRequired[list[tuple[int, int]] | None]
+    """Char-level (start, end) offsets per token, propagated from the
+    renderer's TokensPrompt when offsets were computed."""
+
 
 def tokens_input(
     prompt_token_ids: list[int],
@@ -45,8 +50,7 @@ def tokens_input(
     prompt: str | None = None,
     cache_salt: str | None = None,
 ) -> TokensInput:
-    """
-    Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
+    """Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
     from optional values.
     """
     inputs = TokensInput(type="token", prompt_token_ids=prompt_token_ids)
@@ -71,15 +75,29 @@ class EmbedsInput(_InputOptions):
     prompt: NotRequired[str]
     """The prompt text corresponding to the token IDs, if available."""
 
+    prompt_token_ids: NotRequired[list[int]]
+    """Token IDs of the rendered prompt. Only set for mixed-mode inputs
+    (chat completion with `prompt_embeds` content parts). When present,
+    `is_token_ids` MUST also be present and have the same length. 
+    For pure-embeds inputs this field is absent."""
+
+    is_token_ids: NotRequired[list[bool]]
+    """Per-position mask for mixed-mode inputs. `True` means the position
+    is a real token ID (use the model's embedding layer); `False` means
+    the position uses a pre-computed embedding row from `prompt_embeds`.
+    Length MUST equal `len(prompt_token_ids)`.
+    For pure-embeds inputs this field is absent."""
+
 
 def embeds_input(
     prompt_embeds: "torch.Tensor",
     *,
     prompt: str | None = None,
     cache_salt: str | None = None,
+    prompt_token_ids: list[int] | None = None,
+    is_token_ids: list[bool] | None = None,
 ) -> EmbedsInput:
-    """
-    Construct [`EmbedsInput`][vllm.inputs.engine.EmbedsInput]
+    """Construct [`EmbedsInput`][vllm.inputs.engine.EmbedsInput]
     from optional values.
     """
     inputs = EmbedsInput(type="embeds", prompt_embeds=prompt_embeds)
@@ -88,6 +106,10 @@ def embeds_input(
         inputs["prompt"] = prompt
     if cache_salt is not None:
         inputs["cache_salt"] = cache_salt
+    if prompt_token_ids is not None:
+        inputs["prompt_token_ids"] = prompt_token_ids
+    if is_token_ids is not None:
+        inputs["is_token_ids"] = is_token_ids
 
     return inputs
 
@@ -155,13 +177,13 @@ def mm_input(
 
 
 class MultiModalEncDecInput(MultiModalInput):
-    """
-    Represents multi-modal input to the engine for encoder-decoder models.
+    """Represents multi-modal input to the engine for encoder-decoder models.
 
     Note:
         Even text-only encoder-decoder models are currently implemented
         as multi-modal models for convenience.
         (Example: https://github.com/vllm-project/bart-plugin)
+
     """
 
     encoder_prompt_token_ids: list[int]
@@ -218,8 +240,7 @@ which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 
 
 class EncoderDecoderInput(TypedDict):
-    """
-    A rendered [`EncoderDecoderPrompt`][vllm.inputs.llm.EncoderDecoderPrompt]
+    """A rendered [`EncoderDecoderPrompt`][vllm.inputs.llm.EncoderDecoderPrompt]
     which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
     """
 
@@ -251,7 +272,7 @@ which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 
 def _validate_enc_input(enc_input: SingletonInput) -> EncoderInput:
     if enc_input["type"] == "embeds":
-        raise ValueError(
+        raise VLLMValidationError(
             "Embedding inputs are not supported for encoder-decoder models"
         )
 
@@ -269,7 +290,7 @@ def _validate_enc_input(enc_input: SingletonInput) -> EncoderInput:
 
 def _validate_dec_input(dec_input: SingletonInput) -> DecoderEngineInput:
     if dec_input["type"] == "embeds":
-        raise ValueError(
+        raise VLLMValidationError(
             "Embedding inputs are not supported for encoder-decoder models"
         )
 
@@ -280,8 +301,7 @@ def _prepare_decoder_input_ids_for_generation(
     decoder_input_ids: list[int],
     decoder_start_token_id: int,
 ) -> list[int]:
-    """
-    Prepare `decoder_input_ids` for generation with encoder-decoder models,
+    """Prepare `decoder_input_ids` for generation with encoder-decoder models,
     according to `GenerationMixin._prepare_decoder_input_ids_for_generation()`.
 
     Source:

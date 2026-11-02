@@ -9,11 +9,12 @@ from vllm._custom_ops import (
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
-    pad_nvfp4_activation_for_cutlass,
+    nvfp4_weight_padding_bytes,
     pad_nvfp4_weight_for_cutlass,
     slice_nvfp4_output,
     swizzle_blockscale,
 )
+from vllm.model_executor.utils import replace_parameter
 
 from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 
@@ -34,14 +35,13 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight_scale = torch.nn.Parameter(
-            swizzle_blockscale(layer.weight_scale.data), requires_grad=False
+        replace_parameter(
+            layer,
+            "weight_scale",
+            swizzle_blockscale(layer.weight_scale.data),
         )
-        padded_weight, weights_padding_cols = pad_nvfp4_weight_for_cutlass(
-            layer.weight.data
-        )
-        layer.weight = torch.nn.Parameter(padded_weight, requires_grad=False)
-        layer.weights_padding_cols = weights_padding_cols
+        padded_weight, _ = pad_nvfp4_weight_for_cutlass(layer.weight.data)
+        replace_parameter(layer, "weight", padded_weight)
 
     def apply_weights(
         self,
@@ -52,16 +52,14 @@ class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
         output_size = layer.output_size_per_partition
         output_dtype = x.dtype
         output_shape = [*x.shape[:-1], output_size]
+        weights_padding_bytes = nvfp4_weight_padding_bytes(layer)
 
         x_fp4, x_blockscale = scaled_fp4_quant(
             x,
             layer.input_global_scale_inv,
             is_sf_swizzled_layout=True,
             backend="cutlass",
-        )
-
-        x_fp4 = pad_nvfp4_activation_for_cutlass(
-            x_fp4, getattr(layer, "weights_padding_cols", 0)
+            padded_n=x.shape[-1] + weights_padding_bytes * 2,
         )
 
         out = cutlass_scaled_fp4_mm(

@@ -21,6 +21,22 @@ logger = init_logger(__name__)
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
+def has_native_kv_cache_layout(
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+) -> bool:
+    """Return whether KV cache blocks can use the native ROCm pairing.
+
+    The native reshape_and_cache writer assumes packed blocks. If cache update
+    needs reshape_and_cache_flash for a stride-padded hybrid layout, decode
+    should use the matching Triton path too.
+    """
+    return (
+        key_cache.stride(0) == key_cache.shape[1:].numel()
+        and value_cache.stride(0) == value_cache.shape[1:].numel()
+    )
+
+
 @triton.jit
 def cdiv_fn(x, y):
     return (x + y - 1) // y
@@ -47,7 +63,7 @@ def kernel_paged_attention_2d(
     query_stride_0: tl.int64,  # int
     query_stride_1: tl.int64,  # int, should be equal to head_size
     output_stride_0: tl.int64,  # int
-    output_stride_1: tl.int64,  # int, should be equal to head_size
+    output_stride_1,  # int, should be equal to head_size
     BLOCK_SIZE: tl.constexpr,  # int
     PHYSICAL_BLOCK_SIZE: tl.constexpr,  # int
     HEAD_SIZE: tl.constexpr,  # int
@@ -68,6 +84,7 @@ def kernel_paged_attention_2d(
     query_start_len_ptr,  # [num_seqs+1]
     USE_SINKS: tl.constexpr,  # bool
     USE_FP8: tl.constexpr,
+    INTERLEAVED_V_PACK_FACTOR: tl.constexpr,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
 ):
@@ -154,34 +171,64 @@ def kernel_paged_attention_2d(
             + (offs_d[:, None] % x) * stride_k_cache_4
         )
 
-        # 4D addressing logic of V (Slot is innermost)
-        v_offset = (
-            p_block_idx[:, None] * stride_v_cache_0
-            + kv_head_idx * stride_v_cache_1
-            + offs_d[None, :] * stride_v_cache_2
-            + internal_offsets[:, None] * stride_v_cache_3
-        )
+        # V addressing: standard 4D or interleaved 5D
+        if INTERLEAVED_V_PACK_FACTOR > 0:
+            v_offset = (
+                p_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_1
+                + (internal_offsets[:, None] // INTERLEAVED_V_PACK_FACTOR)
+                * HEAD_SIZE
+                * INTERLEAVED_V_PACK_FACTOR
+                + offs_d[None, :] * INTERLEAVED_V_PACK_FACTOR
+                + (internal_offsets[:, None] % INTERLEAVED_V_PACK_FACTOR)
+            )
+        else:
+            v_offset = (
+                p_block_idx[:, None] * stride_v_cache_0
+                + kv_head_idx * stride_v_cache_1
+                + offs_d[None, :] * stride_v_cache_2
+                + internal_offsets[:, None] * stride_v_cache_3
+            )
 
-        # K : (HEAD_SIZE, BLOCK_SIZE)
-        K_load = tl.load(
-            key_cache_ptr + k_offset,
-            mask=dim_mask[:, None],
-            other=0.0,
-            eviction_policy="evict_last",
-        )
+        # Only the final tile can straddle seq_len. Slots >= seq_len are
+        # unwritten KV cache that may hold NaN/garbage; they are score-masked
+        # below, but 0 * NaN = NaN would still poison the output, so mask them
+        # out of the K/V loads too. Earlier tiles are fully written, so they
+        # use the cheaper token-uniform dim_mask (matching the pre-0.25.0 fast
+        # path) and skip the per-token predicate entirely.
+        # K : (HEAD_SIZE, BLOCK_SIZE), V : (BLOCK_SIZE, HEAD_SIZE)
+        if j == num_blocks - 1:
+            kv_load_mask = abs_token_idx < seq_len
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None] & kv_load_mask[None, :],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :] & kv_load_mask[:, None],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+        else:
+            K_load = tl.load(
+                key_cache_ptr + k_offset,
+                mask=dim_mask[:, None],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
+            V_load = tl.load(
+                value_cache_ptr + v_offset,
+                mask=dim_mask[None, :],
+                other=0.0,
+                eviction_policy="evict_last",
+            )
 
         if K_load.dtype.is_fp8():
             K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
         else:
             K = K_load
-
-        # V : (BLOCK_SIZE, HEAD_SIZE)
-        V_load = tl.load(
-            value_cache_ptr + v_offset,
-            mask=dim_mask[None, :],
-            other=0.0,
-            eviction_policy="evict_last",
-        )
 
         if V_load.dtype.is_fp8():
             V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
@@ -235,10 +282,10 @@ def kernel_paged_attention_2d(
         acc = acc * tl.load(out_scale_inv)
         acc = tl.clamp(acc, FP8_MIN, FP8_MAX)
 
-    output_offset = (
-        cur_batch_in_all_start_index * output_stride_0
-        + query_head_idx * output_stride_1
-    )
+    # Keep the per-head offsets 32-bit: on gfx942 the i64 form is miscompiled
+    # (head stride replaced by an unrelated spilled SGPR) in high-spill variants.
+    output_ptr += cur_batch_in_all_start_index * output_stride_0
+    output_offset = query_head_idx * output_stride_1
 
     tl.store(
         output_ptr + output_offset[:, None] + tl.arange(0, HEAD_SIZE_PADDED)[None, :],
@@ -269,6 +316,7 @@ def chunked_prefill_paged_decode(
     # Optional tensor for sinks
     sinks=None,
     is_block_table_ptr: bool = False,
+    use_interleaved_v_cache: bool = False,
     causal: bool = True,
 ):
     if sm_scale is None:
@@ -278,6 +326,10 @@ def chunked_prefill_paged_decode(
 
     if sliding_window is None or sliding_window <= 0:
         sliding_window = 0
+
+    interleaved_v_pack_factor = (
+        (16 // value_cache.element_size()) if use_interleaved_v_cache else 0
+    )
 
     if max_query_len > 1:
         context_attention_fwd(
@@ -301,6 +353,7 @@ def chunked_prefill_paged_decode(
             skip_decode=True,
             fp8_out_scale=output_scale,
             sinks=sinks,
+            interleaved_v_pack_factor=interleaved_v_pack_factor,
             causal=causal,
         )
 
@@ -333,7 +386,7 @@ def chunked_prefill_paged_decode(
 
     num_queries_per_kv_padded = max(triton.next_power_of_2(num_queries_per_kv), 16)
 
-    from vllm.platforms.rocm import use_rocm_custom_paged_attention
+    from vllm.platforms.rocm import on_rdna, use_rocm_custom_paged_attention
 
     use_custom = use_rocm_custom_paged_attention(
         query.dtype,
@@ -346,14 +399,12 @@ def chunked_prefill_paged_decode(
         alibi_slopes,
         sinks,
     )
-    # Triton is only forced when encountering a non-standard block
-    # like Qwen3 with a size of 544.
-    # 1. Check if block_size is a power of 2 (16, 32, 64...)
-    # 2. If it's a power of 2, we trust the vLLM's native use_custom decision.
-    # 3. If it's not a power of 2 (such as Qwen3's 544),
-    # then our Triton path is forced.
+    has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
+    # Force Triton for non-standard blocks like Qwen3's 544 and for
+    # stride-padded hybrid layouts. The latter use reshape_and_cache_flash
+    # during cache update, so keep decode on the matching stride-aware path.
     is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
-    if not is_pow2:
+    if not is_pow2 or not has_native_layout:
         use_custom = False
 
     if use_custom:
@@ -395,6 +446,7 @@ def chunked_prefill_paged_decode(
             k_scale=k_scale,
             v_scale=v_scale,
             fp8_out_scale=output_scale,
+            use_interleaved_v_cache=use_interleaved_v_cache,
         )
     else:
         logger.warning_once(
@@ -404,7 +456,12 @@ def chunked_prefill_paged_decode(
         real_block_size = value_cache.shape[3]
         # The standard model directly uses the original block_size.
         # Non-standard 544 uses 32 to accommodate integer division logic.
-        TRITON_BLOCK_SIZE = block_size if is_pow2 else 32
+        # Cap at 128 to avoid exceeding GPU shared memory limits
+        # (e.g. hybrid Mamba models inflate block_size to 2048).
+        # The kernel handles TRITON_BLOCK_SIZE != PHYSICAL_BLOCK_SIZE
+        # via the l_block_idx/internal_offsets addressing logic.
+        MAX_TRITON_BLOCK_SIZE = 128
+        TRITON_BLOCK_SIZE = min(block_size, MAX_TRITON_BLOCK_SIZE) if is_pow2 else 32
         if is_block_table_ptr:
             # Using the physical base address of tensors
             kv_element_size = key_cache.element_size()
@@ -419,6 +476,14 @@ def chunked_prefill_paged_decode(
             )
         else:
             processed_block_table = block_table.to(torch.int32)
+
+        # RDNA: more warps and no pipelining for large tiles; num_stages=1 also
+        # avoids bad decode output on gfx12 with Triton buffer ops (#62697).
+        launch_kwargs: dict[str, int] = {}
+        tile_size = TRITON_BLOCK_SIZE * triton.next_power_of_2(head_size)
+        if on_rdna() and (TRITON_BLOCK_SIZE >= 32 or tile_size >= 4096):
+            num_warps = 16 if tile_size >= 8192 else 8 if tile_size >= 4096 else 4
+            launch_kwargs = {"num_warps": num_warps, "num_stages": 1}
 
         kernel_paged_attention_2d[
             (
@@ -466,4 +531,6 @@ def chunked_prefill_paged_decode(
             query_start_len_ptr=query_start_loc,
             USE_SINKS=sinks is not None,
             USE_FP8=output_scale is not None,
+            INTERLEAVED_V_PACK_FACTOR=interleaved_v_pack_factor,
+            **launch_kwargs,
         )

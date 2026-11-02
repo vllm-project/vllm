@@ -4,22 +4,22 @@
 import json
 
 import pytest
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
 
 @pytest.fixture(scope="function")
-def default_tokenizer() -> TokenizerLike:
+def default_tokenizer() -> PreTrainedTokenizerBase:
     """Override module-scoped default_tokenizer because gigachat tests
     mutate the tokenizer via ``add_tokens``."""
-    return AutoTokenizer.from_pretrained("gpt2")
+    return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
 MSG_SEP_TOKEN = "<|message_sep|>\n\n"
@@ -102,7 +102,7 @@ MIXED_OUTPUT_GIGACHAT31 = f"{CONTENT_TEXT}{SIMPLE_FUNCTION_OUTPUT_GIGACHAT31}"
 
 
 @pytest.fixture(name="gigachat_tokenizer")
-def fixture_gigachat_tokenizer(default_tokenizer: TokenizerLike):
+def fixture_gigachat_tokenizer(default_tokenizer: PreTrainedTokenizerBase):
     default_tokenizer.add_tokens(
         [
             MSG_SEP_TOKEN,
@@ -333,9 +333,7 @@ def test_streaming_tool_call_with_large_steps(
     model_output_deltas: list[str],
     gigachat_tokenizer: TokenizerLike,
 ):
-    """
-    Test that the closing braces are streamed correctly.
-    """
+    """Test that the closing braces are streamed correctly."""
     tool_parser: ToolParser = ToolParserManager.get_tool_parser("gigachat3")(
         gigachat_tokenizer
     )

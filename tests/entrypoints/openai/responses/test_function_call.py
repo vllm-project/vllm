@@ -168,8 +168,7 @@ async def test_max_tokens_with_tool_choice_required(
 @pytest.mark.asyncio
 async def test_named_tool_use(client: openai.AsyncOpenAI):
     def get_weather(latitude: float, longitude: float) -> str:
-        """
-        Mock function to simulate getting weather data.
+        """Mock function to simulate getting weather data.
         In a real application, this would call an external weather API.
         """
         return f"Current temperature at ({latitude}, {longitude}) is 20°C."
@@ -323,10 +322,14 @@ async def test_function_calling_with_streaming_expected_arguments(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "tool_choice",
-    ["auto", "required"],
+    ["auto", "required", {"type": "function", "name": "get_current_weather"}],
+)
+@pytest.mark.parametrize(
+    "enable_thinking",
+    [True, False],
 )
 async def test_function_calling_with_streaming_types(
-    client: openai.AsyncOpenAI, model_name: str, tool_choice
+    client: openai.AsyncOpenAI, model_name: str, tool_choice, enable_thinking: bool
 ):
     # this links the "done" type with the "start" type
     # so every "done" type should have a corresponding "start" type
@@ -337,12 +340,12 @@ async def test_function_calling_with_streaming_types(
     # response.created
     # -> response.in_progress
     # -> response.output_item.added
-    # -> response.reasoning_part.added
+    # -> response.content_part.added
     # -> response.reasoning_text.delta
     # ....
     # -> response.reasoning_text.delta
     # -> response.reasoning_text.done
-    # -> response.reasoning_part.done
+    # -> response.content_part.done
     # -> response.output_item.done
     # -> response.output_item.added
     # -> response.content_part.added
@@ -365,12 +368,12 @@ async def test_function_calling_with_streaming_types(
     # response.created
     # -> response.in_progress
     # -> response.output_item.added
-    # -> response.reasoning_part.added
+    # -> response.content_part.added
     # -> response.reasoning_text.delta
     # ....
     # -> response.reasoning_text.delta
     # -> response.reasoning_text.done
-    # -> response.reasoning_part.done
+    # -> response.content_part.done
     # -> response.output_item.done
     # -> response.output_item.added
     # -> response.content_part.added
@@ -421,7 +424,6 @@ async def test_function_calling_with_streaming_types(
         "response.output_text.done": "response.output_text.delta",
         "response.content_part.done": "response.content_part.added",
         "response.reasoning_text.done": "response.reasoning_text.delta",
-        "response.reasoning_part.done": "response.reasoning_part.added",
         "response.function_call_arguments.done": "response.function_call_arguments.delta",  # noqa
     }
 
@@ -436,6 +438,7 @@ async def test_function_calling_with_streaming_types(
         input=input_list,
         tools=tools,
         tool_choice=tool_choice,
+        extra_body={"chat_template_kwargs": {"enable_thinking": enable_thinking}},
         stream=True,
     )
 
@@ -462,7 +465,7 @@ async def test_function_calling_with_streaming_types(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 @pytest.mark.parametrize(
     "tool_choice",
-    ["required", "auto"],
+    ["required", "auto", {"type": "function", "name": "get_weather"}],
 )
 async def test_function_calling_with_streaming_forced_tool_choice(
     client: openai.AsyncOpenAI, model_name: str, tool_choice: str

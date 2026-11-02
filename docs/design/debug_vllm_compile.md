@@ -5,12 +5,14 @@ TL;DR:
 - use tlparse to acquire torch.compile logs. Include these logs in bug reports and/or support asks.
 - The vLLM-torch.compile integration is multiple pieces. vLLM exposes flags to turn off each piece:
 
-| Online Flag | Offline Flag | Result |
-| ----------- | ------------ | ------ |
-| --enforce-eager | enforce_eager=True | Turn off torch.compile and CUDAGraphs |
-| -cc.mode=0 | mode=CompilationMode.NONE | Turn off torch.compile only |
-| -cc.cudagraph_mode=NONE | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE) | Turn off CUDAGraphs only |
-| -cc.backend=eager | compilation_config=CompilationConfig(backend='eager') | Turn off TorchInductor |
+| Online Flag                    | Offline Flag                                                                   | Result                                               |
+|--------------------------------|--------------------------------------------------------------------------------|------------------------------------------------------|
+| --enforce-eager                | enforce_eager=True                                                             | Turn off torch.compile and CUDAGraphs                |
+| -cc.mode=0                     | compilation_config=CompilationConfig(mode=CompilationMode.NONE)                | Turn off torch.compile only                          |
+| -cc.mode=1                     | compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE) | Turn off vLLM-compile modifications to torch.compile |
+| -cc.cudagraph_mode=NONE        | compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE)        | Turn off CUDAGraphs only                             |
+| -cc.backend=eager              | compilation_config=CompilationConfig(backend='eager')                          | Turn off TorchInductor                               |
+| -cc.ir_enable_torch_wrap=False | compilation_config=CompilationConfig(ir_enable_torch_wrap=False)               | Turn off vLLM IR wrapping                            |
 
 ## vLLM-torch.compile overview
 
@@ -22,7 +24,7 @@ Most notably, vLLM-compile is NOT torch.compile, it is a custom compiler built u
 
 - Given a model, we do a full graph capture via TorchDynamo that is dynamic on the batch size (number of tokens)
 - vLLM then optionally splits and/or specializes this graph and then uses TorchInductor to compile each graph into a compiled artifact.
-This step may use vLLM custom Inductor passes to further optimize the graph.
+This step may use vLLM custom Inductor passes to further optimize the graph. This includes vLLM IR lowering to remove dispatch overhead.
 - The compiled artifact is saved to vLLM's compile cache so that it can be loaded in the future.
 - vLLM applies CUDAGraphs to reduce CPU overheads.
 
@@ -34,6 +36,7 @@ For more details on the design, please see the following resources:
 
 - [Introduction to vLLM-torch.compile blogpost](https://blog.vllm.ai/2025/08/20/torch-compile.html)
 - [vLLM-torch.compile integration design](./torch_compile.md)
+- [vLLM IR design](./vllm_ir.md)
 - [vLLM Office Hours #26](https://www.youtube.com/live/xLyxc7hxCJc?si=Xulo9pe53C6ywf0V&t=561)
 - [Talk at PyTorch Conference 2025](https://youtu.be/1wV1ESbGrVQ?si=s1GqymUfwiwOrDTg&t=725)
 
@@ -115,6 +118,21 @@ vllm serve -cc.cudagraph_mode=NONE
 # Offline
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 LLM(model, compilation_config=CompilationConfig(cudagraph_mode=CUDAGraphMode.NONE))
+```
+
+vLLM IR makes heavy use of the compilation pipeline, from functionalization, custom fusions, and lowering.
+To turn that off and capture eager-mode dispatching behavior of vLLM IR, run with `ir_enable_torch_wrap=False`.
+IR torch wrap is only enabled by default when using `mode=VLLM_COMPILE` and `backend="inductor"` (default).
+
+```sh
+# Online
+vllm serve -cc.ir_enable_torch_wrap=False
+```
+
+```py
+# Offline
+from vllm.config.compilation import CompilationConfig
+LLM(model, compilation_config=CompilationConfig(ir_enable_torch_wrap=False))
 ```
 
 ## Debugging TorchDynamo
@@ -232,6 +250,18 @@ TorchInductor takes a captured graph and then compiles it down to some Python co
 that may call 1+ triton kernels. On rare (but unfortunate) occasions, it may
 produce an incorrect triton kernel. This may manifest as silent incorrectness,
 CUDA illegal memory accesses, or loud errors.
+
+### Deterministic compilation
+
+When vLLM selects combo-kernel defaults, it disables combo-kernel benchmarking
+if Inductor's `deterministic` setting is enabled. A `deterministic` value in
+`inductor_compile_config` takes precedence over the global Inductor setting.
+On torch 2.13, `TORCHINDUCTOR_DETERMINISTIC=1` alone is reset by the first
+compiled frame ([pytorch#198563](https://github.com/pytorch/pytorch/issues/198563)),
+so set `deterministic` in `inductor_compile_config` instead.
+Explicit `combo_kernels` or `benchmark_combo_kernel` settings are preserved.
+This avoids conflicting compilation defaults; it does not guarantee reproducible
+model outputs.
 
 ### Inductor runtime assertions
 

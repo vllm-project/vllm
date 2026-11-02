@@ -21,17 +21,14 @@ or just on the low or high end.
 | Fusion                                                                         | `PassConfig` flag            | Fused operations                               | Default at                     | E2E Speedup        | Fullgraph | `num_tokens` |
 | ------------------------------------------------------------------------------ | ---------------------------- | ---------------------------------------------- | ------------------------------ | ------------------ | --------- | ------------ |
 | [AllReduce + RMSNorm](#allreduce--rmsnorm-fuse_allreduce_rms)                  | `fuse_allreduce_rms`         | All-reduce → RMSNorm (+residual_add) (→ quant) | O2 (Hopper/Blackwell + TP > 1) | 5-20%              | No        | Low          |
-| [MiniMax QK Norm](#minimax-qk-norm-fuse_minimax_qk_norm)                       | `fuse_minimax_qk_norm`       | Q/K variance all-reduce → Q/K RMSNorm          | Off by default                 | 2-3%               | No        | Low          |
 | [Attention + Quant](#attention--quantization-fuse_attn_quant)                  | `fuse_attn_quant`            | Attention output → FP8/NVFP4 quant             | Off by default                 | 3-7%               | Yes       | Always       |
 | [MLA Attention + Quant](#attention--quantization-fuse_attn_quant)              | `fuse_attn_quant`            | MLA Attention output → FP8/NVFP4 quant         | Off by default                 | TBD                | Yes       | Always       |
 | [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER only)           | 2-4%               | No        | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
-| [Sequence Parallelism](#sequence-parallelism-enable_sp)                        | `enable_sp`                  | AllReduce → ReduceScatter + AllGather          | Off by default                 | Prereq for AsyncTP | Yes       | High         |
-| [AsyncTP GEMM + collective](#asynctp-gemm--collective-overlap-fuse_gemm_comms) | `fuse_gemm_comms`            | GEMM → reduce-scatter / all-gather → GEMM      | Off by default                 | 7-10%              | Yes       | High         |
 | [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
 | [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
-| [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm → single kernel          | O1 (ROCm/AITER only)           | ~2%                | No        | Always       |
+| [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm (+ FP8 quant) → 1 kernel | O1 (ROCm/AITER only)           | 1-2%               | No        | Always       |
 
 ## Support Matrix
 
@@ -42,13 +39,10 @@ The table below lists the quantization schemes supported by each fusion on each 
 | Fusion                       | SM100 (Blackwell)                        | SM90 (Hopper)                            | SM89 (Ada)                               | SM80 (Ampere) | ROCm                                     |
 | ---------------------------- | ---------------------------------------- | ---------------------------------------- | ---------------------------------------- | ------------- | ---------------------------------------- |
 | `fuse_allreduce_rms`         | FP16/BF16, FP8 static, NVFP4             | FP16/BF16, FP8 static                    | —                                        | —             | —                                        |
-| `fuse_minimax_qk_norm`\*     | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
 | `fuse_attn_quant`\*          | FP8 static\*, NVFP4\*                    | FP8 static\*                             | FP8 static\*                             | —             | FP8 static\*                             |
 | `fuse_attn_quant` (MLA)\*    | FP8 static\*, FP8 per-group\*, NVFP4\*   | FP8 static\*, FP8 per-group\*            | FP8 static\*, FP8 per-group\*            | —             | FP8 static\* (untested)                  |
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
-| `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16†                               | FP16/BF16†    | —                                        |
-| `enable_sp`                  | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
-| `fuse_gemm_comms`            | FP16/BF16, FP8 static†                   | FP16/BF16, FP8 static                    | FP16/BF16†                               | FP16/BF16†    | —                                        |
+| `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
 | `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
 | `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
 | `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
@@ -57,13 +51,6 @@ The table below lists the quantization schemes supported by each fusion on each 
 \* `fuse_attn_quant` support depends on the attention backend in use; not all backends support
 fused quantization output. See the [`fuse_attn_quant` section](#attention--quantization-fuse_attn_quant)
 for per-backend details.
-
-\* `fuse_minimax_qk_norm` is a model-specific pass for `MiniMaxM2ForCausalLM`. It also requires
-tensor parallelism (`tp_size > 1`) and the CUDA custom op `minimax_allreduce_rms_qk`.
-
-† `enable_sp` and `fuse_gemm_comms` are only autoconfigured for SM90 today;
-other architectures support requires setting `PassConfig.sp_min_token_num` explicitly.
-SM100 support also requires setting `VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel`.
 
 ## Enabling / Disabling Fusions
 
@@ -190,101 +177,6 @@ If these conditions are set, the fusion is enabled automatically for optimizatio
 **Code locations.**
 
 - Pass: [`vllm/compilation/passes/fusion/rope_kvcache_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rope_kvcache_fusion.py)
-
-### MiniMax QK Norm (`fuse_minimax_qk_norm`)
-
-!!! info
-    This is a MiniMax-specific compile pass. It is currently only enabled when all of the following hold:
-    the model architecture is `MiniMaxM2ForCausalLM`, tensor parallelism is enabled (`tp_size > 1`),
-    and the CUDA custom op `minimax_allreduce_rms_qk` is available. It is not enabled by default at any
-    optimization level.
-
-**What it fuses.** Fuses the MiniMax M2 Q/K normalization path that performs an all-reduce over the
-per-token Q/K variances before applying RMS normalization to Q and K.
-
-This pass is distinct from [`enable_qk_norm_rope_fusion`](#qk-norm--rope-enable_qk_norm_rope_fusion):
-`fuse_minimax_qk_norm` targets MiniMax M2's tensor-parallel all-reduce + RMSNorm sequence, while
-`enable_qk_norm_rope_fusion` targets the later Q/K RMSNorm + RoPE sequence used by several other models.
-
-Example:
-
-```bash
-vllm serve MiniMaxAI/MiniMax-M2.5 \
-  --tensor-parallel-size 4 \
-  --compilation-config '{"mode": 3, "pass_config": {"fuse_minimax_qk_norm": true}}'
-```
-
-**Code locations.**
-
-- Pass: [`vllm/compilation/passes/fusion/minimax_qk_norm_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/minimax_qk_norm_fusion.py)
-- CUDA op: [`csrc/minimax_reduce_rms_kernel.cu`](https://github.com/vllm-project/vllm/blob/main/csrc/minimax_reduce_rms_kernel.cu) (`minimax_allreduce_rms_qk`)
-- Workspace helper: [`vllm/model_executor/layers/mamba/lamport_workspace.py`](https://github.com/vllm-project/vllm/blob/main/vllm/model_executor/layers/mamba/lamport_workspace.py)
-
-### Sequence Parallelism (`enable_sp`)
-
-**What it fuses.** Replaces all-reduce collectives with reduce-scatter + local RMSNorm + all-gather,
-splitting the sequence dimension across TP ranks. This restructures the graph so the subsequent AsyncTP
-pass can fuse the reduce-scatter / all-gather with the surrounding GEMMs.
-
-Sequence Parallelism itself does not directly improve performance; it is a prerequisite for the
-AsyncTP pass (`fuse_gemm_comms`). SP is only applied above a minimum token threshold that is
-autoconfigured based on device capability and model `hidden_size`. Currently only active on
-H100/SM90 for models with `hidden_size >= 8192`. The threshold is configurable via
-`PassConfig.sp_min_token_num`.
-
-The general transformation:
-
-```text
-Input → AllReduce → RMSNorm → Output
-becomes:
-Input → ReduceScatter → local RMSNorm → AllGather → Output
-```
-
-Patterns covered:
-
-- First block: `AllReduce → RMSNorm` → `ReduceScatter → RMSNorm → AllGather`
-- Middle blocks: `AllReduce → fused_add_RMSNorm` → `ReduceScatter → fused_add_RMSNorm → AllGather`
-- Both with optional `→ FP8 static quant` suffix
-
-Requires: `use_inductor_graph_partition=True` **or** piecewise compilation with static sizes
-divisible by `tensor_parallel_size`.
-
-Supported hardware: Only tested on NVIDIA CUDA, possibly works on ROCm. FP8 all-gather requires sm90+.
-
-**Code locations.**
-
-- Pass: [`vllm/compilation/passes/fusion/sequence_parallelism.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/sequence_parallelism.py)
-
-### AsyncTP GEMM + Collective Overlap (`fuse_gemm_comms`)
-
-!!! info
-    Requires `enable_sp=True` (enabled automatically). This pass is a no-op if Sequence Parallelism has not been applied.
-
-**What it fuses.** After Sequence Parallelism transforms the graph, fuses GEMM kernels with the
-surrounding reduce-scatter (output projection) and all-gather (input projection) using
-`torch.ops.symm_mem` symmetric-memory primitives, overlapping communication and computation.
-This overlap is only profitable for large `num_tokens`, so the fusion (and preceding SP)
-is only performed in the higher compiled range above `PassConfig.sp_min_token_num`.
-
-Patterns covered:
-
-- `GEMM → reduce-scatter` → `fused_matmul_reduce_scatter`
-- `all-gather → GEMM` → `all_gather_matmul`
-- FP8 scaled variants of both patterns
-
-Supported hardware: NVIDIA CUDA with symmetric-memory (`torch.distributed._symmetric_memory`) support.
-
-On B200, pattern-matching fp8 FlashInfer scaled MM is not supported, so it must be disabled
-([#27893](https://github.com/vllm-project/vllm/issues/27893))
-
-```shell
-VLLM_DISABLED_KERNELS=FlashInferFP8ScaledMMLinearKernel ...
-```
-
-**Code locations.**
-
-- Pass: [`vllm/compilation/passes/fusion/collective_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/collective_fusion.py)
-- Sequence parallelism pass: [`vllm/compilation/passes/fusion/sequence_parallelism.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/sequence_parallelism.py)
 
 ### QK Norm + RoPE (`enable_qk_norm_rope_fusion`)
 
@@ -415,11 +307,32 @@ q_normed, kv_normed = fused_mla_dual_rms_norm(
 Requires: AMD ROCm with AITER enabled. Enabled by default at optimization level O1 and above
 when AITER is available.
 
+**FP8 attention variant (per-token quant).** With a per-token FP8 `q_b_proj`,
+only the *q* latent is FP8-quantized while *kv* stays bf16.
+`RocmAiterRMSNormQuantFusionPass` first folds the q side into
+`rocm_aiter_rmsnorm_fused_dynamic_quant`, leaving kv a plain
+`rms_norm` — breaking the symmetric pattern above. The same pass then matches
+this asymmetric pair and lowers it to `fused_mla_dual_rms_norm_per_token_quant`.
+
+```text
+# Unfused (q norm+quant fused; kv still plain rms_norm):
+q_c, kv_lora = split(projected, [q_dim, kv_dim])
+kv_c, k_pe   = split(kv_lora,  [kv_c_dim, k_pe_dim])
+q_fp8, q_scale = rocm_aiter_rmsnorm_fused_dynamic_quant(q_c, q_weight, eps, fp8)
+kv_normed      = rms_norm(kv_c, kv_weight, eps)          # bf16
+
+# Fused:
+q_c, kv_lora = split(projected, [q_dim, kv_dim])
+kv_c, k_pe   = split(kv_lora,  [kv_c_dim, k_pe_dim])
+q_fp8, q_scale, kv_normed = fused_mla_dual_rms_norm_per_token_quant(
+    q_c, q_weight, kv_c, kv_weight, eps1, eps2)
+```
+
 **Code locations.**
 
-- Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`MLADualRMSNormFusionPass`)
-- Custom op: [`vllm/_aiter_ops.py`](https://github.com/vllm-project/vllm/blob/main/vllm/_aiter_ops.py) (`fused_mla_dual_rms_norm`)
-- AITER kernel: [`fused_qk_rmsnorm`](https://github.com/ROCm/aiter/pull/2442)
+- Pass: [`vllm/compilation/passes/fusion/rocm_aiter_fusion.py`](https://github.com/vllm-project/vllm/blob/main/vllm/compilation/passes/fusion/rocm_aiter_fusion.py) (`MLADualRMSNormFusionPass`, `MLADualRMSPerTokenQuantPattern`)
+- Custom op: [`vllm/_aiter_ops.py`](https://github.com/vllm-project/vllm/blob/main/vllm/_aiter_ops.py) (`fused_mla_dual_rms_norm`, `fused_mla_dual_rms_norm_per_token_quant`)
+- AITER kernels: [`fused_qk_rmsnorm`](https://github.com/ROCm/aiter/pull/2442), `fused_qk_rmsnorm_per_token_quant`
 
 ## See Also
 

@@ -5,14 +5,18 @@ from collections.abc import Callable
 
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.eplb.eplb_state import EplbLayerState
+from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.model_executor.layers.fused_moe.eplb_triton import eplb_map_and_record
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
-if current_platform.is_cuda_alike():
+if current_platform.is_cuda_alike() or current_platform.is_xpu():
 
     @triton.jit
     def _eplb_map_and_record_i32_kernel(
@@ -22,6 +26,7 @@ if current_platform.is_cuda_alike():
         out_ids_ptr,
         out_ptr,
         record_enabled_ptr,
+        num_unpadded_tokens_ptr,
         num_logical_experts,
         map_slots,
         out_size,
@@ -34,24 +39,6 @@ if current_platform.is_cuda_alike():
         mask = offs < numel
 
         expert_id = tl.load(topk_ids_ptr + offs, mask=mask, other=0).to(tl.int64)
-        valid_expert = (expert_id >= 0) & (expert_id < num_logical_experts)
-        safe_expert_id = tl.where(valid_expert, expert_id, 0)
-
-        # 1. Convert the logical expert ids to physical expert ids
-        replica_count = tl.load(
-            logical_replica_count_ptr + safe_expert_id,
-            mask=mask & valid_expert,
-            other=1,
-        )
-        # Avoid invalid modulo/div by forcing at least 1.
-        replica_count = tl.maximum(replica_count, 1)
-        # floor(2^32 / phi), classic Knuth multiplicative hash multiplier.
-        KNUTH_MULTIPLIER = 2654435769
-        token_idx = (offs // num_active_experts).to(tl.int64)
-        hashed = (token_idx * KNUTH_MULTIPLIER) & 0xFFFFFFFF
-        replica_idx = hashed % replica_count
-
-        # 2. Record expert load metrics.
 
         # TODO(bowen): When using `FusedMoEModularKernel`, this
         # can be done in a more unified way, since
@@ -64,18 +51,20 @@ if current_platform.is_cuda_alike():
         # If later refactor moved all the MoE kernel calls
         # to the modular kernel, we can move this logic there
         # to achieve better efficiency.
-        map_index = safe_expert_id * map_slots + replica_idx
-        physical_id = tl.load(
-            logical_to_physical_ptr + map_index,
-            mask=mask & valid_expert,
-            other=-1,
+        physical_id = eplb_map_and_record(
+            expert_id,
+            offs // num_active_experts,
+            mask,
+            logical_to_physical_ptr,
+            logical_replica_count_ptr,
+            num_logical_experts,
+            map_slots,
+            out_ptr,
+            out_size,
+            record_enabled_ptr,
+            num_unpadded_tokens_ptr,
         )
         tl.store(out_ids_ptr + offs, physical_id, mask=mask)
-
-        record_enabled = tl.load(record_enabled_ptr) != 0
-        valid = mask & record_enabled & (physical_id >= 0) & (physical_id < out_size)
-        safe_physical_id = tl.where(physical_id >= 0, physical_id, 0)
-        tl.atomic_add(out_ptr + safe_physical_id, 1, mask=valid)
 
     def _eplb_map_and_record_triton(
         topk_ids: torch.Tensor,
@@ -83,6 +72,7 @@ if current_platform.is_cuda_alike():
         logical_replica_count: torch.Tensor,
         expert_load_view: torch.Tensor,
         record_enabled: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None,
     ) -> torch.Tensor:
         topk_ids_in = topk_ids.contiguous().to(dtype=torch.int32)
         numel = topk_ids_in.numel()
@@ -99,6 +89,7 @@ if current_platform.is_cuda_alike():
             out_flat,
             expert_load_view,
             record_enabled,
+            num_unpadded_tokens,
             logical_replica_count.shape[0],
             logical_to_physical_map.shape[1],
             expert_load_view.shape[0],
@@ -114,6 +105,7 @@ if current_platform.is_cuda_alike():
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # Fused triton implementation: mapping + optional recording in one kernel.
         return _eplb_map_and_record_triton(
@@ -122,6 +114,7 @@ if current_platform.is_cuda_alike():
             logical_replica_count=logical_replica_count,
             expert_load_view=expert_load_view,
             record_enabled=record_enabled,
+            num_unpadded_tokens=num_unpadded_tokens,
         )
 else:
 
@@ -131,13 +124,26 @@ else:
         logical_to_physical_map: torch.Tensor,
         logical_replica_count: torch.Tensor,
         record_enabled: torch.Tensor,
+        num_unpadded_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return topk_ids
 
 
-class BaseRouter(FusedMoERouter):
+def get_moe_padding_mask(num_tokens: int) -> torch.Tensor | None:
+    """Rows of the current batch that are CUDA graph or DP padding.
+
+    Routers set these rows' expert ids to -1 so the dispatch and experts skip
+    them; None when VLLM_MOE_SKIP_PADDING is off or the runner does not mark
+    padding.
     """
-    Base router class that provides common functionality for all router implementations.
+    if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
+        is_padding = get_forward_context().is_padding
+        return is_padding[:num_tokens] if is_padding is not None else None
+    return None
+
+
+class BaseRouter(FusedMoERouter):
+    """Base class providing common functionality for all router implementations.
 
     This class implements the template method pattern where select_experts() handles
     common pre-processing and post-processing, delegating the actual routing logic
@@ -148,24 +154,17 @@ class BaseRouter(FusedMoERouter):
         self,
         top_k: int,
         global_num_experts: int,
-        eplb_state: EplbLayerState,
-        enable_eplb: bool = False,
-        # TODO(bnell): Once the MK is constructed at layer init time, we
-        # can make this a plain value instead of a callback.
-        indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        eplb_state: EplbLayerState | None = None,
     ):
+        """Args:
+        top_k: Number of experts to select per token
+        global_num_experts: Total number of experts
+        eplb_state: Optional EPLBLayerState for load balancing
+
         """
-        Note: the indices dtype might not be available at router construction
-        time, so we need to supply a callback to get it at runtime.  This is
-        because the indices type is supplied by modular kernels which are
-        created after MoE layer/router construction.
-        """
-        super().__init__()
+        super().__init__(eplb_state=eplb_state)
         self.top_k = top_k
         self.global_num_experts = global_num_experts
-        self.eplb_state = eplb_state
-        self.enable_eplb = enable_eplb
-        self.indices_type_getter = indices_type_getter
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
 
     def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
@@ -174,41 +173,37 @@ class BaseRouter(FusedMoERouter):
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
-        if self.enable_eplb:
-            if self.eplb_state.expert_load_view is None:
-                raise ValueError("enable_eplb=True requires expert_load_view != None")
-            if self.eplb_state.logical_to_physical_map is None:
-                raise ValueError(
-                    "enable_eplb=True requires logical_to_physical_map != None"
-                )
-            if self.eplb_state.logical_replica_count is None:
-                raise ValueError(
-                    "enable_eplb=True requires logical_replica_count != None"
-                )
-            if self.eplb_state.should_record_tensor is None:
-                raise ValueError(
-                    "enable_eplb=True requires should_record_tensor != None"
-                )
-
-    def _get_indices_type(self) -> torch.dtype | None:
-        """Get the desired indices dtype from the getter function."""
-        return (
-            self.indices_type_getter() if self.indices_type_getter is not None else None
-        )
+        if self.eplb_state is not None:
+            eplb_state = self.eplb_state
+            if eplb_state.expert_load_view is None:
+                raise ValueError("EPLB requires expert_load_view != None")
+            if eplb_state.logical_to_physical_map is None:
+                raise ValueError("EPLB requires logical_to_physical_map != None")
+            if eplb_state.logical_replica_count is None:
+                raise ValueError("EPLB requires logical_replica_count != None")
+            if eplb_state.should_record_tensor is None:
+                raise ValueError("EPLB requires should_record_tensor != None")
+            if eplb_state.num_unpadded_tokens_tensors is None:
+                raise ValueError("EPLB requires num_unpadded_tokens_tensors != None")
 
     def _apply_eplb_mapping(self, topk_ids: torch.Tensor) -> torch.Tensor:
         """Apply EPLB mapping to convert logical expert IDs to physical expert IDs."""
-        if self.enable_eplb:
-            assert self.eplb_state.expert_load_view is not None
-            assert self.eplb_state.logical_to_physical_map is not None
-            assert self.eplb_state.logical_replica_count is not None
-            assert self.eplb_state.should_record_tensor is not None
+        if self.eplb_state is not None:
+            eplb_state = self.eplb_state
+            assert eplb_state.expert_load_view is not None
+            assert eplb_state.logical_to_physical_map is not None
+            assert eplb_state.logical_replica_count is not None
+            assert eplb_state.should_record_tensor is not None
+            assert eplb_state.num_unpadded_tokens_tensors is not None
             return eplb_map_to_physical_and_record(
                 topk_ids=topk_ids,
-                logical_to_physical_map=self.eplb_state.logical_to_physical_map,
-                logical_replica_count=self.eplb_state.logical_replica_count,
-                expert_load_view=self.eplb_state.expert_load_view,
-                record_enabled=self.eplb_state.should_record_tensor,
+                logical_to_physical_map=eplb_state.logical_to_physical_map,
+                logical_replica_count=eplb_state.logical_replica_count,
+                expert_load_view=eplb_state.expert_load_view,
+                record_enabled=eplb_state.should_record_tensor,
+                num_unpadded_tokens=eplb_state.num_unpadded_tokens_tensors[
+                    dbo_current_ubatch_id()
+                ],
             )
         return topk_ids
 
@@ -231,8 +226,7 @@ class BaseRouter(FusedMoERouter):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute the actual routing logic.
+        """Compute the actual routing logic.
 
         This method must be implemented by subclasses to provide the specific
         routing algorithm (e.g., grouped_topk, fused_topk, custom routing, etc.).
@@ -241,29 +235,30 @@ class BaseRouter(FusedMoERouter):
             hidden_states: Input hidden states
             router_logits: Router logits for expert selection
             indices_type: Desired dtype for expert indices (may be None)
+            input_ids: Token ids, for routers that condition on them
 
         Returns:
             tuple of (topk_weights, topk_ids)
+
         """
         raise NotImplementedError
 
-    def select_experts(
+    def _select_experts(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Route the input hidden states to the top-k experts based on the
+        """Route the input hidden states to the top-k experts based on the
         router logits.
 
         This method implements the template method pattern:
         1. Validates EPLB state
-        2. Gets indices type
-        3. Calls _compute_routing() to get topk_weights and topk_ids
-        4. Applies EPLB mapping if enabled
-        5. Converts indices dtype if needed
+        2. Calls _compute_routing() to get topk_weights and topk_ids
+        3. Applies EPLB mapping if enabled
+        4. Converts indices dtype if needed
 
         Returns:
             (topk_weights, topk_ids)
@@ -273,26 +268,24 @@ class BaseRouter(FusedMoERouter):
             **Compatibility**: When EPLB is not enabled, the returned ids are
             equivalent to global logical ids, so should be compatible with
             plain MoE implementations without redundant experts.
+
         """
         # Step 1: Validate EPLB state
         self._validate_eplb_state()
 
-        # Step 2: Get indices type.
-        indices_type = self._get_indices_type()
-
-        # Step 3: Compute routing (delegated to subclass)
+        # Step 2: Compute routing (delegated to subclass)
         topk_weights, topk_ids = self._compute_routing(
-            hidden_states, router_logits, indices_type, input_ids=input_ids
+            hidden_states, router_logits, topk_indices_dtype, input_ids=input_ids
         )
 
         # Capture logical ids before EPLB mapping.
         if self.capture_fn is not None:
             self.capture_fn(topk_ids)
 
-        # Step 4: Apply EPLB mapping
+        # Step 3: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)
 
-        # Step 5: Convert indices dtype
-        topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
+        # Step 4: Convert indices dtype
+        topk_ids = self._convert_indices_dtype(topk_ids, topk_indices_dtype)
 
         return topk_weights, topk_ids

@@ -43,7 +43,7 @@ Both platforms provide equivalent monitoring capabilities:
 First, navigate to this example's directory:
 
 ```bash
-cd examples/online_serving/dashboards
+cd examples/observability/dashboards
 ```
 
 ### Grafana

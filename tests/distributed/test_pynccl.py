@@ -9,12 +9,14 @@ import pytest
 import torch
 import torch.distributed
 
+import vllm.envs as envs
 from tests.utils import ensure_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
+    get_tp_group,
     get_world_group,
     graph_capture,
     init_distributed_environment,
@@ -82,11 +84,18 @@ def test_pynccl():
 @worker_fn_wrapper
 def multiple_allreduce_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
-    groups = [
-        torch.distributed.new_group(ranks=[0, 1], backend="gloo"),
-        torch.distributed.new_group(ranks=[2, 3], backend="gloo"),
-    ]
-    group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        # Eager-init path: parent PG has bound_device_id + a CPU backend,
+        # so split_group is supported.
+        group = torch.distributed.split_group(
+            split_ranks=[[0, 1], [2, 3]], backend="cpu:gloo,cuda:nccl"
+        )
+    else:
+        groups = [
+            torch.distributed.new_group(ranks=[0, 1], backend="gloo"),
+            torch.distributed.new_group(ranks=[2, 3], backend="gloo"),
+        ]
+        group = groups[0] if torch.distributed.get_rank() in [0, 1] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
     # two groups can communicate independently
@@ -189,6 +198,98 @@ def all_gather_worker_fn():
 )
 def test_pynccl_all_gather():
     distributed_run(all_gather_worker_fn, 2)
+
+
+@worker_fn_wrapper
+def cuda_communicator_all_gather_dim_worker_fn():
+    with ensure_current_vllm_config():
+        ensure_model_parallel_initialized(2, 1)
+
+    tp_group = get_tp_group()
+    comm = tp_group.device_communicator
+    assert comm is not None
+
+    rank = tp_group.rank_in_group
+    world_size = tp_group.world_size
+    device = tp_group.device
+
+    shape = (2, 3, 4)
+    num_elems = 1
+    for size in shape:
+        num_elems *= size
+
+    for dim in (1, -1):
+        tensor = (
+            torch.arange(num_elems, dtype=torch.float32, device=device).reshape(shape)
+            + rank * num_elems
+        )
+        expected = torch.cat(
+            [
+                torch.arange(num_elems, dtype=torch.float32, device=device).reshape(
+                    shape
+                )
+                + r * num_elems
+                for r in range(world_size)
+            ],
+            dim=dim,
+        )
+
+        result = comm.all_gather(tensor, dim=dim)
+        torch.accelerator.synchronize()
+        torch.testing.assert_close(result, expected, rtol=1e-5, atol=1e-8)
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+)
+def test_cuda_communicator_all_gather_dim_not_zero():
+    distributed_run(cuda_communicator_all_gather_dim_worker_fn, 2)
+
+
+@worker_fn_wrapper
+def all_to_all_single_worker_fn():
+    pynccl_comm = PyNcclCommunicator(
+        get_world_group().cpu_group, device=get_world_group().device
+    )
+    rank = pynccl_comm.rank
+    world_size = pynccl_comm.world_size
+    device = f"cuda:{rank}"
+
+    # Rank src sends (src + dst) % 3 rows to rank dst, so some splits are
+    # empty. Row i of the src -> dst chunk carries src * 100 + dst * 10 + i.
+    def num_rows(src: int, dst: int) -> int:
+        return (src + dst) % 3
+
+    def chunk(src: int, dst: int) -> torch.Tensor:
+        values = src * 100 + dst * 10 + torch.arange(num_rows(src, dst))
+        return values.to(torch.float32).view(-1, 1).expand(-1, 8)
+
+    send = torch.cat([chunk(rank, dst) for dst in range(world_size)]).to(device)
+    expected = torch.cat([chunk(src, rank) for src in range(world_size)]).to(device)
+    recv = torch.empty_like(expected)
+    output_split_sizes = [num_rows(src, rank) for src in range(world_size)]
+    input_split_sizes = [num_rows(rank, dst) for dst in range(world_size)]
+
+    pynccl_comm.all_to_all_single(recv, send, output_split_sizes, input_split_sizes)
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(recv, expected, rtol=0, atol=0)
+
+    # Split sizes fixed at capture, so the collective replays from a CUDA
+    # graph with fresh inputs.
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        pynccl_comm.all_to_all_single(recv, send, output_split_sizes, input_split_sizes)
+    send.add_(1000)
+    graph.replay()
+    torch.accelerator.synchronize()
+    torch.testing.assert_close(recv, expected + 1000, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 2, reason="Need at least 2 GPUs to run the test."
+)
+def test_pynccl_all_to_all_single():
+    distributed_run(all_to_all_single_worker_fn, 2)
 
 
 @worker_fn_wrapper
@@ -339,11 +440,16 @@ def test_pynccl_send_recv():
 @worker_fn_wrapper
 def multiple_send_recv_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
-    groups = [
-        torch.distributed.new_group(ranks=[0, 2], backend="gloo"),
-        torch.distributed.new_group(ranks=[1, 3], backend="gloo"),
-    ]
-    group = groups[0] if torch.distributed.get_rank() in [0, 2] else groups[1]
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        group = torch.distributed.split_group(
+            split_ranks=[[0, 2], [1, 3]], backend="cpu:gloo,cuda:nccl"
+        )
+    else:
+        groups = [
+            torch.distributed.new_group(ranks=[0, 2], backend="gloo"),
+            torch.distributed.new_group(ranks=[1, 3], backend="gloo"),
+        ]
+        group = groups[0] if torch.distributed.get_rank() in [0, 2] else groups[1]
     pynccl_comm = PyNcclCommunicator(group=group, device=device)
     if torch.distributed.get_rank() == 0:
         tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
@@ -412,3 +518,50 @@ def test_ncclGetUniqueId():
     # 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     # as long as the function doesn't raise an exception, we're good
     assert unique_id is not None
+
+
+def test_nccl_error_includes_last_error():
+    lib = NCCLLibrary()
+    # A NULL output pointer makes NCCL return ncclInvalidArgument, whose error
+    # string is only "invalid argument". The reason is in ncclGetLastError().
+    with pytest.raises(RuntimeError, match="out argument is NULL"):
+        lib.NCCL_CHECK(lib._funcs["ncclGetUniqueId"](None))
+
+
+def test_pynccl_suspend_resume_idempotent():
+    """Repeated suspend/resume (e.g. staged wake-ups) reach NCCL once each."""
+    from unittest.mock import Mock
+
+    comm = object.__new__(PyNcclCommunicator)
+    comm.disabled = False
+    comm._suspended = False
+    comm.comm = object()
+    comm.nccl = Mock()
+
+    comm.suspend()
+    comm.suspend()
+    comm.resume()
+    comm.resume()
+
+    assert comm.nccl.ncclCommSuspend.call_count == 1
+    assert comm.nccl.ncclCommResume.call_count == 1
+
+
+def test_pynccl_suspend_noop_without_symbol():
+    """RCCL / NCCL < 2.29.7 lack ncclCommSuspend; suspend() must no-op, not
+    crash, and resume() must then no-op too since nothing was suspended."""
+    from unittest.mock import Mock
+
+    comm = object.__new__(PyNcclCommunicator)
+    comm.disabled = False
+    comm._suspended = False
+    comm.comm = object()
+    comm.nccl = Mock()
+    comm.nccl.has_symbol.return_value = False
+
+    comm.suspend()
+    comm.resume()
+
+    comm.nccl.ncclCommSuspend.assert_not_called()
+    comm.nccl.ncclCommResume.assert_not_called()
+    assert comm._suspended is False

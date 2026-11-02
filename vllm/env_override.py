@@ -5,21 +5,28 @@ import importlib.util
 import os
 
 
-def _get_torch_cuda_version():
-    """Peripheral function to _maybe_set_cuda_compatibility_path().
+def _get_torch_root():
+    """Locate the installed torch package without importing it."""
+    spec = importlib.util.find_spec("torch")
+    if not spec:
+        return None
+    if spec.origin:
+        return os.path.dirname(spec.origin)
+    if spec.submodule_search_locations:
+        return spec.submodule_search_locations[0]
+    return None
+
+
+def _get_torch_version_attr(attr):
+    """Read an attribute of torch.version without importing torch.
+
     PyTorch version must not be determined by importing directly
     because it will trigger the CUDA initialization, losing the
     chance to set the LD_LIBRARY_PATH beforehand.
     """
     try:
-        spec = importlib.util.find_spec("torch")
-        if not spec:
-            return None
-        if spec.origin:
-            torch_root = os.path.dirname(spec.origin)
-        elif spec.submodule_search_locations:
-            torch_root = spec.submodule_search_locations[0]
-        else:
+        torch_root = _get_torch_root()
+        if not torch_root:
             return None
         version_path = os.path.join(torch_root, "version.py")
         if not os.path.exists(version_path):
@@ -31,9 +38,14 @@ def _get_torch_cuda_version():
         module = importlib.util.module_from_spec(ver_spec)
         # Avoid registering in sys.modules to not confuse future imports
         ver_spec.loader.exec_module(module)
-        return getattr(module, "cuda", None)
+        return getattr(module, attr, None)
     except Exception:
         return None
+
+
+def _get_torch_cuda_version():
+    """Peripheral function to _maybe_set_cuda_compatibility_path()."""
+    return _get_torch_version_attr("cuda")
 
 
 def _maybe_set_cuda_compatibility_path():
@@ -82,12 +94,63 @@ def _maybe_set_cuda_compatibility_path():
     os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_paths)
 
 
+def _maybe_promote_torch_symbols_for_rocm():
+    """Put libtorch_cpu.so in the global symbol scope on ROCm, for GPU profiling.
+
+    Must run before 'import torch'. libkineto advertises itself to
+    rocprofiler-sdk by exporting rocprofiler_configure from libtorch_cpu.so,
+    and rocprofiler-sdk looks for that symbol exactly once, from a lazy
+    initializer that runs *during* 'import torch'. CPython loads extension
+    modules RTLD_LOCAL, so unless something has already placed the symbol in
+    the global scope the lookup misses and no client is ever registered.
+
+    The failure is silent and total: no queue interception, so roctracer
+    yields no GPU records, while torch.profiler still writes a complete
+    CPU-only trace and reports success.
+
+    Best effort. If the library cannot be loaded early we leave the process
+    exactly as it would have been, losing only GPU tracing.
+    """
+    if _get_torch_version_attr("hip") is None:
+        return
+    try:
+        import ctypes
+        import glob
+
+        torch_root = _get_torch_root()
+        if not torch_root:
+            return
+        lib = os.path.join(torch_root, "lib", "libtorch_cpu.so")
+        if not os.path.exists(lib):
+            return
+        try:
+            ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+        except OSError:
+            # Some ROCm wheel layouts leave a stale RUNPATH in libtorch_cpu.so,
+            # so a dependency that resolves once torch has set things up does
+            # not resolve for a standalone load. Satisfy it by search, then
+            # retry; give up quietly if it is not where we expect.
+            site_root = os.path.dirname(torch_root)
+            deps = glob.glob(
+                os.path.join(
+                    site_root, "_rocm_sdk_*", "lib", "*", "lib", "librocm-openblas.so.*"
+                )
+            )
+            if not deps:
+                return
+            ctypes.CDLL(deps[0], mode=ctypes.RTLD_LOCAL)
+            ctypes.CDLL(lib, mode=ctypes.RTLD_GLOBAL)
+    except Exception:
+        return
+
+
 _maybe_set_cuda_compatibility_path()
+_maybe_promote_torch_symbols_for_rocm()
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import is_torch_equal, is_torch_equal_or_newer
+from vllm.utils.torch_version import is_torch_equal, is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -111,6 +174,13 @@ os.environ["TORCHINDUCTOR_COMPILE_THREADS"] = "1"
 # It can still be overridden by setting TRITON_CACHE_AUTOTUNING=0
 # in the environment.
 os.environ.setdefault("TRITON_CACHE_AUTOTUNING", "1")
+
+# When unset, TileLang routes JIT temp dirs through a world-shared
+# /tmp/tvm-debug-mode-tempdirs/ whose ownership is pinned to whichever
+# user compiled first, breaking every other user on a shared host.
+# Opt into per-process tempdirs unless the user explicitly chose the
+# debug layout (see https://github.com/vllm-project/vllm/issues/41410).
+os.environ.setdefault("TILELANG_CLEANUP_TEMP_FILES", "1")
 
 # ===================================================
 # torch 2.9 Inductor PythonWrapperCodegen monkeypatch
@@ -191,8 +261,7 @@ def memory_plan_reuse_patched(self):
 def get_graph_partition_signature_patched(
     self, partitions, skip_cudagraphs: list[bool]
 ):
-    """
-    Gets signature for each graph partition, including input nodes, output nodes, and
+    """Gets signature for each graph partition, including input nodes, output nodes, and
     whether deallocating an input within graph partition.
     """
     from torch._inductor import dependencies
@@ -206,8 +275,7 @@ def get_graph_partition_signature_patched(
     name_to_node = self.get_name_to_nodes()
 
     def is_none_layout(buf_name: str) -> bool:
-        """
-        Checks if buf_name is NoneLayout. Buffers with NoneLayout is not allocated
+        """Checks if buf_name is NoneLayout. Buffers with NoneLayout is not allocated
         so graph partition should not take it as inputs or outputs.
         """
         buf = self.name_to_buf.get(buf_name, None)
@@ -355,8 +423,7 @@ def should_partition_patched(self, node, should_log: bool = False) -> bool:
     # torch._inductor.scheduler.Scheduler.should_partition that modifies
     # the following piece of code so that we always return True:
     # https://github.com/pytorch/pytorch/blob/ecb53078faf86ca1b33277df33b82985675bb011/torch/_inductor/scheduler.py#L4712-L4724
-    """Return True if we should partition the inductor graph on this node"""
-
+    """Return True if we should partition the inductor graph on this node."""
     import torch._inductor.ir as ir
     from torch._inductor.scheduler import (
         BaseSchedulerNode,
@@ -437,8 +504,7 @@ def _update_scheduler_patched(self) -> None:
     # Copied from torch._inductor.graph.GrahLowering._update_scheduler. Patches
     # this method so that we can patch Scheduler.should_partition with the
     # function above
-    """
-    (Re)initializes the scheduler member.  When initializing the scheduler, no CUBIN
+    """(Re)initializes the scheduler member.  When initializing the scheduler, no CUBIN
     files should be generated (to avoid biasing any benchmarks and pessimizing
     fusion decisions).
     """
@@ -460,7 +526,7 @@ def _update_scheduler_patched(self) -> None:
 # For more context, see https://github.com/vllm-project/vllm/issues/30905.
 def _patch_get_raw_stream_if_needed():
     """Workaround for TorchInductor autotune get_raw_stream() bug."""
-    from vllm.utils.torch_utils import is_torch_equal
+    from vllm.utils.torch_version import is_torch_equal
 
     # Only apply the patch for torch 2.9.0 or 2.9.1
     if is_torch_equal("2.9.0") or is_torch_equal("2.9.1"):
@@ -623,7 +689,7 @@ def _apply_fxgraphcache_pickle_patch(pickler_cls, bypass_cls):
 
 def _patch_fxgraphcache_pickle_if_needed():
     """Apply FxGraphCachePickler.dumps ValueError backport when on torch 2.10.x."""
-    from vllm.utils.torch_utils import is_torch_equal_or_newer
+    from vllm.utils.torch_version import is_torch_equal_or_newer
 
     if not is_torch_equal_or_newer("2.10.0") or is_torch_equal_or_newer("2.11.0"):
         return
@@ -634,3 +700,241 @@ def _patch_fxgraphcache_pickle_if_needed():
 
 
 _patch_fxgraphcache_pickle_if_needed()
+
+# ===================================================
+# torch 2.11 Inductor cpp codegen indirect_assert scalar-mask fix
+# ===================================================
+# CppVecKernel.indirect_assert wraps a scalar mask with
+# `VecMask<...>(scalar)`, which is not a valid constructor and triggers a
+# C++ compile error during torch.compile of any model that does indirect
+# indexing inside a tail-vectorized loop (e.g. Qwen3-VL).
+# Failure looks like:
+#   no matching function for call to 'VecMask<int64_t,2>::VecMask(int&)'
+# Upstream fix in PyTorch mainline replaces the call with
+# `VecMask<...>::from(scalar)`, see pytorch/pytorch#178148 (lands in 2.12).
+# This is a thin backport for torch >= 2.11 and < 2.12; remove once the
+# minimum supported torch is 2.12.
+
+
+def _apply_cpp_indirect_assert_patch():
+    """Replace CppVecKernel.indirect_assert with a fixed copy that uses
+    `VecMask<...>::from(scalar)` for scalar masks.
+
+    Idempotent: marks the class with `_vllm_indirect_assert_patched` after
+    the first apply.
+    """
+    from torch._inductor.codegen.cpp import CppVecKernel
+
+    if getattr(CppVecKernel, "_vllm_indirect_assert_patched", False):
+        return
+
+    from torch._inductor.codegen.cpp import CppCSEVariable, cexpr_index
+
+    def patched_indirect_assert(self, var, lower, upper, mask=None):
+        assert isinstance(var, CppCSEVariable)
+        assert var.dtype is not None
+        if not var.is_vec:
+            if isinstance(mask, CppCSEVariable) and mask.is_vec:
+                mask = f"({mask}).all_masked()"
+            return super(CppVecKernel, self).indirect_assert(var, lower, upper, mask)
+        lower_scalar = lower
+        upper_scalar = upper
+        if lower:
+            lower = f"{self._get_vec_type(var.dtype)}({lower})"
+        if upper:
+            upper = f"{self._get_vec_type(var.dtype)}({upper})"
+        if lower and upper:
+            cond = f"({lower} <= {var}) & ({var} < {upper})"
+            cond_print = f"{lower_scalar} <= {var} < {upper_scalar}"
+        elif lower:
+            cond = f"{lower} <= {var}"
+            cond_print = f"{lower_scalar} <= {var}"
+        else:
+            assert upper
+            cond = f"{var} < {upper}"
+            cond_print = f"{var} < {upper_scalar}"
+        cond = f"{self._get_mask_type(var.dtype)}({cond})"
+        if mask:
+            if not mask.is_vec:
+                # Backport of pytorch/pytorch#178148 -- use ::from for
+                # scalar masks so g++ picks the correct overload.
+                mask = f"{self._get_mask_type(var.dtype)}::from({mask})"
+            cond = f"({cond}) | ~({mask})"
+        if self.tail_size:
+            cond = (
+                f"{self._get_mask_type(var.dtype)}::set("
+                f"{self._get_mask_type(var.dtype)}::from(1)"
+                f", ({cond}), {cexpr_index(self.tail_size)})"
+            )
+        cond = f"({cond}).all_masked()"
+        return f'{self.assert_function}({cond}, "index out of bounds: {cond_print}")'
+
+    CppVecKernel.indirect_assert = patched_indirect_assert
+    CppVecKernel._vllm_indirect_assert_patched = True  # type: ignore[attr-defined]
+
+
+def _patch_cpp_indirect_assert_if_needed():
+    """Apply cpp codegen indirect_assert backport when on torch 2.11.x.
+
+    Defers application until torch._inductor.codegen.cpp is naturally
+    imported by Inductor. Importing it eagerly during vllm.__init__ pulls
+    in torch._inductor.scheduler, whose top-level
+    `import torch._inductor.async_compile` can fail with
+    `ModuleNotFoundError: import of torch._inductor.async_compile halted;
+    None in sys.modules` depending on the import order on the runner
+    (observed in vLLM CPU CI).
+    """
+    if not is_torch_equal_or_newer("2.11.0") or is_torch_equal_or_newer("2.12.0.dev"):
+        return
+
+    import sys
+
+    target_name = "torch._inductor.codegen.cpp"
+    if target_name in sys.modules:
+        _apply_cpp_indirect_assert_patch()
+        return
+
+    import importlib.abc
+
+    class _CppCodegenPatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != target_name:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                _apply_cpp_indirect_assert_patch()
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _CppCodegenPatchFinder())
+
+
+_patch_cpp_indirect_assert_if_needed()
+
+# ===================================================
+# torch < 2.13 Inductor implicit-fallback log message
+# ===================================================
+# Before torch 2.13, GraphLowering.call_function builds
+#   log.info("Creating implicit fallback for:\n%s",
+#            error.operator_str(target, args, kwargs))
+# eagerly, even when INFO logging is off. operator_str stringifies every IR
+# argument and IRNode.__str__ has no depth or cycle protection, so deep IR
+# with shared nodes can effectively hang compilation (see #42129, #43111).
+# Only print the target for vllm ops. Remove once every platform pins
+# torch >= 2.13.
+
+_VLLM_FALLBACK_NAMESPACE_PREFIXES = ("vllm::", "vllm_aiter::")
+
+
+def _apply_inductor_operator_str_patch() -> None:
+    from torch._inductor.exc import OperatorIssue
+
+    original = OperatorIssue.operator_str
+
+    def operator_str(target, args, kwargs) -> str:
+        name = target.name() if hasattr(target, "name") else str(target)
+        if name.startswith(_VLLM_FALLBACK_NAMESPACE_PREFIXES):
+            return f"  target: {target}"
+        return original(target, args, kwargs)
+
+    OperatorIssue.operator_str = staticmethod(operator_str)
+
+
+def _patch_inductor_operator_str_if_needed():
+    """Shorten the implicit-fallback message for vllm ops on torch < 2.13.
+
+    Defers application until torch._inductor.exc is imported, so that
+    importing vllm does not import torch._inductor.
+    """
+    if is_torch_equal_or_newer("2.13.0.dev"):
+        return
+
+    import sys
+
+    target_name = "torch._inductor.exc"
+    if target_name in sys.modules:
+        _apply_inductor_operator_str_patch()
+        return
+
+    import importlib.abc
+
+    class _OperatorStrPatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != target_name:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                _apply_inductor_operator_str_patch()
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _OperatorStrPatchFinder())
+
+
+_patch_inductor_operator_str_if_needed()
+
+
+def _apply_inductor_pattern_matcher_patch() -> None:
+    """Allow custom ops and functionalization wrappers with unsupported dtypes."""
+    from torch._inductor import pattern_matcher
+    from torch._inductor.lowering import fallback_node_due_to_unsupported_type
+
+    def fallback_for_builtin(node, allow_cpu_inputs=True):
+        return (
+            isinstance(node.target, torch._ops.OpOverload)
+            and torch._library.utils.is_builtin(node.target)
+            and fallback_node_due_to_unsupported_type(node, allow_cpu_inputs)
+        )
+
+    pattern_matcher.fallback_node_due_to_unsupported_type = fallback_for_builtin
+
+
+def _patch_inductor_pattern_matcher() -> None:
+    """Apply the backport when Inductor imports its pattern matcher."""
+    import sys
+
+    target_name = "torch._inductor.pattern_matcher"
+    if target_name in sys.modules:
+        _apply_inductor_pattern_matcher_patch()
+        return
+
+    import importlib.abc
+
+    class _PatternMatcherPatchFinder(importlib.abc.MetaPathFinder):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != target_name:
+                return None
+            sys.meta_path.remove(self)
+            spec = importlib.util.find_spec(fullname)
+            if spec is None or spec.loader is None:
+                return None
+            original_exec = spec.loader.exec_module
+
+            def _exec_then_patch(module):
+                original_exec(module)
+                _apply_inductor_pattern_matcher_patch()
+
+            spec.loader.exec_module = _exec_then_patch  # type: ignore[method-assign]
+            return spec
+
+    sys.meta_path.insert(0, _PatternMatcherPatchFinder())
+
+
+# Remove once the minimum supported torch includes
+# https://github.com/pytorch/pytorch/pull/196013.
+if not is_torch_equal_or_newer("2.16.0.dev"):
+    _patch_inductor_pattern_matcher()

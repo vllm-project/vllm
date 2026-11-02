@@ -1,16 +1,25 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
 from types import SimpleNamespace
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.triton_utils import tl, triton
+from vllm.utils.torch_utils import direct_register_custom_op
 
 __all__ = [
     "break_fp4_bytes",
+    "dequantize_nvfp4_moe_weights",
     "dequantize_to_dtype",
+    "nvfp4_gathered_bias",
     "ref_nvfp4_quant",
 ]
+
+# Target size of the dequantized expert chunks yielded for requantization.
+_DEQUANT_CHUNK_BYTES = 1 << 30
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
 FLOAT4_E2M1_MAX_RECIPROCAL = 1 / FLOAT4_E2M1_MAX
@@ -18,6 +27,524 @@ FLOAT4_E2M1_MAX_RECIPROCAL = 1 / FLOAT4_E2M1_MAX
 kE2M1ToFloat_handle = SimpleNamespace(
     val=torch.tensor([0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32)
 )
+
+
+@triton.jit
+def _e2m1_inline(nibble):
+    """Decode an NVFP4 nibble (4 bits: 1 sign + 3 magnitude) to float32.
+
+    Uses direct IEEE 754 bit construction.
+    For magnitudes 2-7 the FP32 bit pattern is 0x3F000000 + (mag << 22),
+    which is a single shift + add + bitcast.  Magnitudes 0 (zero) and 1
+    (E2M1 subnormal = 0.5) are patched with two tl.where ops.
+    """
+    magnitude = nibble & 0x07
+    sign = (nibble >> 3) & 1
+
+    fp32_bits = 0x3F000000 + (magnitude.to(tl.int32) << 22)
+    val = fp32_bits.to(tl.float32, bitcast=True)
+
+    val = tl.where(magnitude == 0, 0.0, val)
+    val = tl.where(magnitude == 1, 0.5, val)
+
+    return tl.where(sign == 1, -val, val)
+
+
+@triton.jit
+def _e4m3_inline(byte):
+    """Decode an FP8 E4M3FN byte to float32 without an FP8 pointer type.
+
+    Typed FP8 loads need SM89+ in Triton; reading the scale as uint8 and
+    decoding here keeps the caller portable.
+    """
+    bits = byte.to(tl.int32)
+    exponent = (bits >> 3) & 0xF
+    mantissa = (bits & 0x7).to(tl.float32)
+    normal = (1.0 + mantissa * 0.125) * tl.exp2((exponent - 7).to(tl.float32))
+    val = tl.where(exponent == 0, mantissa * 0.001953125, normal)
+    val = tl.where((bits & 0x7F) == 0x7F, float("nan"), val)
+    return tl.where((bits & 0x80) != 0, -val, val)
+
+
+@triton.jit
+def _nvfp4_gathered_bias_kernel(
+    markov_ptr,
+    packed_weight_ptr,
+    weight_scale_ptr,
+    global_scale_ptr,
+    values_ptr,
+    index_ptr,
+    logits_ptr,
+    stride_markov_b,
+    stride_markov_k,
+    stride_weight_v,
+    stride_weight_k,
+    stride_scale_v,
+    stride_scale_k,
+    stride_values_b,
+    stride_values_j,
+    stride_index_b,
+    stride_index_j,
+    stride_logits_b,
+    stride_logits_v,
+    alpha,
+    TOPK: tl.constexpr,
+    K: tl.constexpr,
+    NUM_BLOCKS: tl.constexpr,
+):
+    """Apply selected NVFP4 Markov-projection rows to dense logits.
+
+    BF16: ``weight[index] -> baddbmm_ -> scatter_``.
+    NVFP4: ``gather packed W2 row -> dequantize 16-element blocks -> dot with
+    Markov embedding -> add base value -> scatter corrected logit``.
+
+    The fused NVFP4 path is needed because packed weights cannot be indexed as
+    BF16 rows, while dequantizing the full vocabulary would defeat top-k.
+    """
+    candidate_id = tl.program_id(0)
+    request_id = candidate_id // TOPK
+    candidate = candidate_id - request_id * TOPK
+
+    vocab_id = tl.load(
+        index_ptr + request_id * stride_index_b + candidate * stride_index_j
+    ).to(tl.int64)
+
+    block_ids = tl.arange(0, NUM_BLOCKS)
+    byte_ids = tl.arange(0, 8)
+    block_mask = block_ids * 16 < K
+
+    packed_offsets = block_ids[:, None] * 8 + byte_ids[None, :]
+    packed = tl.load(
+        packed_weight_ptr
+        + vocab_id * stride_weight_v
+        + packed_offsets * stride_weight_k,
+        mask=block_mask[:, None],
+        other=0,
+    )
+    low = _e2m1_inline(packed & 0x0F)
+    high = _e2m1_inline((packed >> 4) & 0x0F)
+    decoded = tl.interleave(low, high)
+
+    raw_weight_scale = tl.load(
+        weight_scale_ptr + vocab_id * stride_scale_v + block_ids * stride_scale_k,
+        mask=block_mask,
+        other=0,
+    )
+    weight_scale = tl.cast(
+        raw_weight_scale,
+        tl.float8e4nv,
+        bitcast=True,
+    ).to(tl.float32)
+    global_scale = tl.load(global_scale_ptr).to(tl.float32)
+
+    element_ids = tl.arange(0, 16)
+    k_offsets = block_ids[:, None] * 16 + element_ids[None, :]
+    k_mask = k_offsets < K
+    markov = tl.load(
+        markov_ptr + request_id * stride_markov_b + k_offsets * stride_markov_k,
+        mask=k_mask,
+        other=0.0,
+    )
+
+    dequant_weight = (decoded * weight_scale[:, None] * global_scale).to(tl.bfloat16)
+    products = dequant_weight.to(tl.float32) * markov.to(tl.float32)
+    block_sums = tl.sum(products, axis=1)
+    dot = tl.sum(block_sums, axis=0)
+
+    base_value = tl.load(
+        values_ptr + request_id * stride_values_b + candidate * stride_values_j
+    ).to(tl.float32)
+    corrected = base_value + alpha * dot
+    tl.store(
+        logits_ptr + request_id * stride_logits_b + vocab_id * stride_logits_v,
+        corrected,
+    )
+
+
+def _nvfp4_gathered_bias_impl(
+    markov_embed: torch.Tensor,
+    packed_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    global_scale: torch.Tensor,
+    values: torch.Tensor,
+    index: torch.Tensor,
+    logits: torch.Tensor,
+    alpha: float,
+) -> None:
+    if index.numel() == 0:
+        return
+
+    assert markov_embed.dtype == torch.bfloat16
+    assert values.dtype == torch.bfloat16
+    assert logits.dtype == torch.bfloat16
+    assert packed_weight.dtype == torch.uint8
+    assert weight_scale.dtype == torch.float8_e4m3fn
+    assert index.dtype == torch.int64
+    assert markov_embed.is_cuda
+    assert all(
+        tensor.device == markov_embed.device
+        for tensor in (
+            packed_weight,
+            weight_scale,
+            global_scale,
+            values,
+            index,
+            logits,
+        )
+    )
+    assert markov_embed.ndim == 2
+    assert packed_weight.ndim == 2
+    assert weight_scale.ndim == 2
+    assert values.ndim == 2
+    assert index.ndim == 2
+    assert logits.ndim == 2
+    assert global_scale.numel() == 1
+    assert values.shape == index.shape
+    assert logits.shape[0] == index.shape[0] == markov_embed.shape[0]
+
+    k = markov_embed.shape[-1]
+    if k % 16 != 0 or packed_weight.shape[-1] * 2 != k:
+        raise ValueError(
+            "nvfp4_gathered_bias requires k to be divisible by 16 and "
+            f"packed_weight width to equal k / 2; got k={k} and "
+            f"packed_weight width={packed_weight.shape[-1]}"
+        )
+    if weight_scale.shape[-1] != k // 16:
+        raise ValueError(
+            "nvfp4_gathered_bias only supports an NVFP4 group size of 16; "
+            f"got {weight_scale.shape[-1]} scale blocks for k={k}"
+        )
+
+    topk = index.shape[1]
+    num_blocks = triton.next_power_of_2(k // 16)
+    scale_bytes = weight_scale.view(torch.uint8)
+    _nvfp4_gathered_bias_kernel[(index.numel(),)](
+        markov_embed,
+        packed_weight,
+        scale_bytes,
+        global_scale,
+        values,
+        index,
+        logits,
+        markov_embed.stride(0),
+        markov_embed.stride(1),
+        packed_weight.stride(0),
+        packed_weight.stride(1),
+        scale_bytes.stride(0),
+        scale_bytes.stride(1),
+        values.stride(0),
+        values.stride(1),
+        index.stride(0),
+        index.stride(1),
+        logits.stride(0),
+        logits.stride(1),
+        alpha,
+        TOPK=topk,
+        K=k,
+        NUM_BLOCKS=num_blocks,
+        num_warps=4,
+        num_stages=2,
+    )
+
+
+def _nvfp4_gathered_bias_fake(
+    markov_embed: torch.Tensor,
+    packed_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    global_scale: torch.Tensor,
+    values: torch.Tensor,
+    index: torch.Tensor,
+    logits: torch.Tensor,
+    alpha: float,
+) -> None:
+    return None
+
+
+direct_register_custom_op(
+    op_name="nvfp4_gathered_bias",
+    op_func=_nvfp4_gathered_bias_impl,
+    mutates_args=["logits"],
+    fake_impl=_nvfp4_gathered_bias_fake,
+)
+
+
+def nvfp4_gathered_bias(
+    markov_embed: torch.Tensor,
+    packed_weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    global_scale: torch.Tensor,
+    values: torch.Tensor,
+    index: torch.Tensor,
+    logits: torch.Tensor,
+    alpha: float,
+) -> None:
+    torch.ops.vllm.nvfp4_gathered_bias(
+        markov_embed,
+        packed_weight,
+        weight_scale,
+        global_scale,
+        values,
+        index,
+        logits,
+        alpha,
+    )
+
+
+@triton.jit
+def _dequantize_nvfp4_kernel(
+    fp4_ptr,
+    scale_ptr,
+    global_scale_ptr,
+    output_ptr,
+    rows_per_batch: tl.constexpr,
+    num_blocks: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    has_batch_global_scale: tl.constexpr,
+    TILE_BLOCKS: tl.constexpr,
+):
+    """Triton kernel for NVFP4 dequantization (swizzle=False).
+
+    Optimized with 2D tile processing + interleave for coalesced stores.
+    """
+    BLOCK_PACKED: tl.constexpr = BLOCK_SIZE // 2
+
+    row_idx = tl.program_id(0).to(tl.int64)
+    tile_idx = tl.program_id(1)
+
+    if has_batch_global_scale:
+        batch_idx = row_idx // rows_per_batch
+        global_scale = tl.load(global_scale_ptr + batch_idx).to(tl.float32)
+    else:
+        global_scale = tl.load(global_scale_ptr).to(tl.float32)
+
+    fp4_row_offset = row_idx * num_blocks * BLOCK_PACKED
+    scale_row_offset = row_idx * num_blocks
+    output_row_offset = row_idx * num_blocks * BLOCK_SIZE
+
+    start_block = tile_idx * TILE_BLOCKS
+
+    # Load scales for this tile: [TILE_BLOCKS]
+    block_offsets = tl.arange(0, TILE_BLOCKS)
+    block_mask = (start_block + block_offsets) < num_blocks
+
+    raw_scales = tl.load(
+        scale_ptr + scale_row_offset + start_block + block_offsets,
+        mask=block_mask,
+        other=0,
+    )
+    scale_f32 = tl.cast(raw_scales, tl.float8e4nv, bitcast=True).to(tl.float32)
+    scale_values = (scale_f32 * global_scale)[:, None]
+
+    # Load [TILE_BLOCKS, BLOCK_PACKED] packed bytes
+    packed_offsets = tl.arange(0, BLOCK_PACKED)[None, :]
+    byte_indices = (
+        fp4_row_offset
+        + (start_block + block_offsets[:, None]) * BLOCK_PACKED
+        + packed_offsets
+    )
+    elem_mask = block_mask[:, None]
+    raw_bytes = tl.load(fp4_ptr + byte_indices, mask=elem_mask, other=0)
+
+    low_nibble = raw_bytes & 0x0F
+    high_nibble = (raw_bytes >> 4) & 0x0F
+
+    low_result = _e2m1_inline(low_nibble) * scale_values
+    high_result = _e2m1_inline(high_nibble) * scale_values
+
+    # Interleave for coalesced contiguous store
+    result = tl.interleave(low_result, high_result)
+
+    elem_offsets = tl.arange(0, BLOCK_SIZE)[None, :]
+    out_indices = (
+        output_row_offset
+        + (start_block + block_offsets[:, None]) * BLOCK_SIZE
+        + elem_offsets
+    )
+    tl.store(output_ptr + out_indices, result, mask=block_mask[:, None])
+
+
+@triton.jit
+def _round_to_fp4(x):
+    """Round float values to the nearest E2M1 representable value.
+
+    Matches the thresholds in the Python ``cast_to_fp4`` exactly.
+    """
+    sign = tl.where(x < 0.0, -1.0, 1.0)
+    abs_x = tl.abs(x)
+    result = tl.where(abs_x > 5.0, 6.0, 0.0)
+    result = tl.where((abs_x >= 3.5) & (abs_x <= 5.0), 4.0, result)
+    result = tl.where((abs_x > 2.5) & (abs_x < 3.5), 3.0, result)
+    result = tl.where((abs_x >= 1.75) & (abs_x <= 2.5), 2.0, result)
+    result = tl.where((abs_x > 1.25) & (abs_x < 1.75), 1.5, result)
+    result = tl.where((abs_x >= 0.75) & (abs_x <= 1.25), 1.0, result)
+    result = tl.where((abs_x > 0.25) & (abs_x < 0.75), 0.5, result)
+    return result * sign
+
+
+@triton.jit
+def _nvfp4_quant_dequant_kernel(
+    input_ptr,
+    output_ptr,
+    global_scale_ptr,
+    k: tl.constexpr,
+    num_blocks: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    FP4_MAX_RECIPROCAL: tl.constexpr,
+    TILE_BLOCKS: tl.constexpr,
+):
+    """Fused NVFP4 quantize-dequantize kernel.
+
+    Uses a 2D grid (rows x tiles) to parallelize across both rows
+    and quantization groups within a row. Each program handles
+    TILE_BLOCKS groups at once using vectorized 2D operations.
+    """
+    row_idx = tl.program_id(0)
+    tile_idx = tl.program_id(1)
+    global_scale = tl.load(global_scale_ptr).to(tl.float32)
+    row_offset = row_idx * k
+
+    start_block = tile_idx * TILE_BLOCKS
+    block_offsets = tl.arange(0, TILE_BLOCKS)
+    block_mask = (start_block + block_offsets) < num_blocks
+
+    # Load [TILE_BLOCKS, BLOCK_SIZE] elements
+    indices = (
+        row_offset
+        + (start_block + block_offsets[:, None]) * BLOCK_SIZE
+        + tl.arange(0, BLOCK_SIZE)[None, :]
+    )
+    mask_2d = block_mask[:, None]
+    x = tl.load(input_ptr + indices, mask=mask_2d, other=0.0).to(tl.float32)
+
+    # Per-group scale: [TILE_BLOCKS]
+    vec_max = tl.max(tl.abs(x), axis=1)
+    scale = global_scale * (vec_max * FP4_MAX_RECIPROCAL)
+    scale = tl.clamp(scale, -448.0, 448.0)
+    scale = scale.to(tl.float8e4nv).to(tl.float32)
+
+    # Safe reciprocal, broadcast to [TILE_BLOCKS, 1]
+    output_scale = tl.where(scale == 0.0, 0.0, global_scale / scale)[:, None]
+
+    # Quantize: scale, clamp, round to FP4
+    scaled_x = tl.clamp(x * output_scale, -6.0, 6.0)
+    fp4_val = _round_to_fp4(scaled_x)
+
+    # Dequantize: fp4_val * (scale / global_scale)
+    dequant_scale = (scale / global_scale)[:, None]
+    result = fp4_val * dequant_scale
+
+    tl.store(output_ptr + indices, result, mask=mask_2d)
+
+
+def _triton_nvfp4_quant_dequant(
+    x: torch.Tensor,
+    global_scale: torch.Tensor,
+    block_size: int,
+) -> torch.Tensor:
+    """Triton-accelerated NVFP4 quantize-dequantize."""
+    x_m, x_k = x.shape
+
+    if not torch.compiler.is_compiling():
+        assert x_k % block_size == 0, (
+            f"Weight shape K={x_k} is not divisible by block_size={block_size}"
+        )
+
+    output_dtype = x.dtype
+    num_blocks = x_k // block_size
+
+    output = torch.empty(x_m, x_k, dtype=output_dtype, device=x.device)
+
+    tile_blocks = min(64, triton.next_power_of_2(num_blocks))
+    num_tiles = (num_blocks + tile_blocks - 1) // tile_blocks
+    grid = (x_m, num_tiles)
+    _nvfp4_quant_dequant_kernel[grid](
+        x,
+        output,
+        global_scale,
+        x_k,
+        num_blocks,
+        block_size,
+        FLOAT4_E2M1_MAX_RECIPROCAL,
+        tile_blocks,
+    )
+
+    return output
+
+
+def _triton_dequantize_nvfp4(
+    tensor_fp4: torch.Tensor,
+    tensor_sf: torch.Tensor,
+    global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    block_size: int = 16,
+) -> torch.Tensor:
+    """Dequantize NVFP4 using Triton (swizzle=False only).
+
+    Supports both 2D and 3D inputs:
+    - 2D: [m, packed_k] -> [m, k]
+    - 3D: [dim0, m, packed_k] -> [dim0, m, k]
+    """
+    assert tensor_fp4.dtype == torch.uint8
+
+    is_3d = tensor_fp4.ndim == 3
+    if is_3d:
+        dim0, m_per_batch, packed_k = tensor_fp4.shape
+        tensor_fp4_2d = tensor_fp4.reshape(-1, packed_k)
+        tensor_sf_2d = tensor_sf.reshape(-1, tensor_sf.shape[-1])
+        total_rows_flat = dim0 * m_per_batch
+    else:
+        m_per_batch, packed_k = tensor_fp4.shape
+        tensor_fp4_2d = tensor_fp4
+        tensor_sf_2d = tensor_sf
+        total_rows_flat = m_per_batch
+
+    k = packed_k * 2
+    num_blocks = k // block_size
+
+    output = torch.empty(total_rows_flat, k, dtype=dtype, device=tensor_fp4.device)
+
+    # View as uint8 so Triton can load raw bytes and bitcast to float8_e4m3fn
+    scale_raw = tensor_sf_2d.contiguous().view(torch.uint8)
+
+    # Shape-adaptive tile sizing: for large row counts (3D), process
+    # entire row in one tile. For small row counts (2D), use smaller
+    # tiles to increase parallelism across CUs.
+    np2 = triton.next_power_of_2(num_blocks)
+    if total_rows_flat >= 4096:
+        # Many rows: maximize work per CTA, one tile per row
+        tile_blocks = np2
+        nw = 1
+        ns = 2
+    elif total_rows_flat >= 2048:
+        # Medium-many rows: full row, 2 warps
+        tile_blocks = np2
+        nw = 2
+        ns = 2
+    else:
+        # Few rows: use moderate tiles for CU utilization
+        tile_blocks = min(64, np2)
+        nw = 4
+        ns = 2
+    num_tiles = (num_blocks + tile_blocks - 1) // tile_blocks
+    grid = (total_rows_flat, num_tiles)
+    _dequantize_nvfp4_kernel[grid](
+        tensor_fp4_2d,
+        scale_raw,
+        global_scale,
+        output,
+        m_per_batch,
+        num_blocks,
+        block_size,
+        is_3d,
+        tile_blocks,
+        num_warps=nw,
+        num_stages=ns,
+    )
+
+    if is_3d:
+        output = output.reshape(dim0, m_per_batch, k)
+
+    return output
 
 
 def break_fp4_bytes(a, dtype):
@@ -33,7 +560,7 @@ def break_fp4_bytes(a, dtype):
     signs = (combined & 0x08).to(torch.bool)  # Sign bits
     abs_vals = (combined & 0x07).to(torch.long)
 
-    kE2M1 = kE2M1ToFloat_handle.val
+    kE2M1 = kE2M1ToFloat_handle.val.to(device=a.device)
     # Device-aware lookup and sign application
     values = kE2M1[abs_vals] * torch.where(signs, -1.0, 1.0)
     # Reshape to final form
@@ -66,6 +593,11 @@ def dequantize_to_dtype(
     """
     # Two fp4 values are packed into one uint8.
     assert tensor_fp4.dtype == torch.uint8
+
+    if not swizzle and tensor_fp4.is_cuda and current_platform.is_cuda_alike():
+        return _triton_dequantize_nvfp4(
+            tensor_fp4, tensor_sf, global_scale, dtype, block_size
+        )
 
     # We handle 3D tensors reshaping them to 2D.
     is_3d = tensor_fp4.ndim == 3
@@ -100,6 +632,99 @@ def dequantize_to_dtype(
     out = out.reshape(*out.shape[:-2], -1)
 
     return out.to(dtype)
+
+
+def _dequantize_nvfp4_moe_experts(
+    w13_weight_packed: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w13_weight_global_scale: torch.Tensor,
+    w2_weight_packed: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+    w2_weight_global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    group_size: int,
+    invert_global_scales: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if invert_global_scales:
+        w13_weight_global_scale = 1.0 / w13_weight_global_scale
+        w2_weight_global_scale = 1.0 / w2_weight_global_scale
+
+    w13_num_shards = w13_weight_global_scale.shape[1]
+    w13_weights = torch.chunk(w13_weight_packed, w13_num_shards, dim=1)
+    w13_scales = torch.chunk(w13_weight_scale, w13_num_shards, dim=1)
+    w13 = torch.cat(
+        [
+            dequantize_to_dtype(
+                weight,
+                scale,
+                w13_weight_global_scale[:, shard_idx].contiguous(),
+                dtype,
+                block_size=group_size,
+                swizzle=False,
+            )
+            for shard_idx, (weight, scale) in enumerate(
+                zip(w13_weights, w13_scales, strict=True)
+            )
+        ],
+        dim=1,
+    )
+    w2 = dequantize_to_dtype(
+        w2_weight_packed,
+        w2_weight_scale,
+        w2_weight_global_scale,
+        dtype,
+        block_size=group_size,
+        swizzle=False,
+    )
+    return w13, w2
+
+
+@torch.no_grad()
+def dequantize_nvfp4_moe_weights(
+    w13_weight_packed: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w13_weight_global_scale: torch.Tensor,
+    w2_weight_packed: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
+    w2_weight_global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    group_size: int = 16,
+    *,
+    invert_global_scales: bool = True,
+) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+    """Dequantize serialized NVFP4 MoE weights for requantization.
+
+    Compressed-tensors stores global encode scales, while ModelOpt stores
+    ``weight_scale_2`` as the corresponding decode multiplier. Set
+    ``invert_global_scales`` according to the source checkpoint convention.
+
+    Returns:
+        An iterator of ``(experts, w13, w2)`` over groups of experts, so that
+        the dequantized staging tensors stay around ``_DEQUANT_CHUNK_BYTES``.
+
+    """
+    num_experts = w13_weight_packed.shape[0]
+    # Two fp4 values per packed byte.
+    expert_bytes = (
+        dtype.itemsize
+        * 2
+        * (w13_weight_packed[0].numel() + w2_weight_packed[0].numel())
+    )
+    experts_per_chunk = max(1, _DEQUANT_CHUNK_BYTES // expert_bytes)
+    for start in range(0, num_experts, experts_per_chunk):
+        experts = slice(start, min(start + experts_per_chunk, num_experts))
+        w13, w2 = _dequantize_nvfp4_moe_experts(
+            w13_weight_packed[experts],
+            w13_weight_scale[experts],
+            w13_weight_global_scale[experts],
+            w2_weight_packed[experts],
+            w2_weight_scale[experts],
+            w2_weight_global_scale[experts],
+            dtype,
+            group_size,
+            invert_global_scales,
+        )
+        yield experts, w13, w2
 
 
 def get_reciprocal(x):
@@ -145,12 +770,14 @@ def ref_nvfp4_quant(x, global_scale, block_size):
 
 def ref_nvfp4_quant_dequant(
     x: torch.Tensor, global_scale: torch.Tensor, block_size: int
-) -> tuple[torch.Tensor, None]:
-    """
-    NVFP4 quantize-dequantize operation.
+) -> torch.Tensor:
+    """NVFP4 quantize-dequantize operation.
 
     `global_scale` is expected to have a single element.
     """
+    if current_platform.is_cuda_alike():
+        return _triton_nvfp4_quant_dequant(x, global_scale, block_size)
+
     x_m, x_k = x.shape
     output_dtype = x.dtype
 
@@ -162,7 +789,7 @@ def ref_nvfp4_quant_dequant(
     x_blockscale = x_blockscale.unsqueeze(-1) / global_scale
     x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
 
-    return x_dq, None
+    return x_dq
 
 
 def run_nvfp4_emulations(
@@ -176,7 +803,7 @@ def run_nvfp4_emulations(
     output_dtype = x.dtype
     group_size = 16
 
-    x_dq, _ = ref_nvfp4_quant_dequant(x, input_global_scale, block_size=group_size)
+    x_dq = ref_nvfp4_quant_dequant(x, input_global_scale, block_size=group_size)
 
     # dequantize weight
     w_fp4 = weight.data.view(torch.uint8)

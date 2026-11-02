@@ -1,6 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""This file registers Oink implementations for vLLM IR ops.
+
+vLLM does not depend on the external Oink repository/package. When an external
+plugin registers torch.library.custom_op entrypoints under the `oink::`
+namespace (e.g. via vLLM's general_plugins mechanism), these ops will be marked
+ as supported. To dispatch to those ops, set kernel_config.ir_op_priority.<op> to oink.
+Alternatively, `VLLM_USE_OINK_OPS=1` will add this to priority by default.
+"""
+
 import torch
+from torch import Tensor
 
 from vllm import ir
 from vllm.platforms import current_platform
@@ -15,7 +25,7 @@ def has_oink_op(name: str) -> bool:
     return OINK_AVAILABLE and hasattr(torch.ops.oink, name)
 
 
-def _can_view_as_2d(x: torch.Tensor) -> bool:
+def _can_view_as_2d(x: Tensor) -> bool:
     """Return True if x.view(-1, x.shape[-1]) is viewable (no copy)."""
     if x.dim() < 2:
         return False
@@ -32,7 +42,7 @@ def _can_view_as_2d(x: torch.Tensor) -> bool:
     return True
 
 
-def _is_oink_stride_compatible_2d(x_2d: torch.Tensor) -> bool:
+def _is_oink_stride_compatible_2d(x_2d: Tensor) -> bool:
     """Return True if x_2d meets Oink's pointer-path stride constraints."""
     if x_2d.dim() != 2:
         return False
@@ -67,11 +77,51 @@ and no variance_size override.
     "oink", supports_args=oink_rms_supported, supported=has_oink_op("rmsnorm")
 )
 def rms_norm(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
+    x: Tensor,
+    weight: Tensor | None,
     epsilon: float,
     variance_size: int | None = None,
-) -> torch.Tensor:
+) -> Tensor:
     assert variance_size is None
     x_2d = x.view(-1, x.shape[-1])
     return torch.ops.oink.rmsnorm(x_2d, weight, epsilon).view_as(x)
+
+
+oink_add_rms_supported = (
+    lambda x, x_residual, weight, epsilon, variance_size=None: variance_size is None
+    and weight is not None
+    and x.dim() >= 2
+    and x.dtype == weight.dtype
+    and weight.is_contiguous()
+    and _can_view_as_2d(x)
+    and _is_oink_stride_compatible_2d(x.view(-1, x.shape[-1]))
+    # residual must have 2d-compatible strides and match x shape/dtype
+    and x.dtype == x_residual.dtype
+    and x.shape == x_residual.shape
+    and _can_view_as_2d(x_residual)
+    and _is_oink_stride_compatible_2d(x_residual.view(-1, x_residual.shape[-1]))
+)
+"""
+Oink fused_add_rms_norm has the same constraints as rms_norm,
+and residual must be 2d-like with compatible strides.
+"""
+
+
+@ir.ops.fused_add_rms_norm.register_impl(
+    "oink",
+    supports_args=oink_add_rms_supported,
+    supported=has_oink_op("fused_add_rms_norm"),
+    inplace=True,
+)
+def fused_add_rms_norm(
+    x: Tensor,
+    x_residual: Tensor,
+    weight: Tensor | None,
+    epsilon: float,
+    variance_size: int | None = None,
+) -> tuple[Tensor, Tensor]:
+    assert variance_size is None
+    x_2d = x.view(-1, x.shape[-1])
+    residual_2d = x_residual.view(-1, x_residual.shape[-1])
+    torch.ops.oink.fused_add_rms_norm(x_2d, residual_2d, weight, epsilon)
+    return x, x_residual

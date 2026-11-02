@@ -28,16 +28,10 @@ class Qwen2RewardBaseModel(nn.Module, SupportsLoRA, SupportsPP):
     is_pooling_model = True
     pooler: Pooler
 
+    hf_to_vllm_mapper = Qwen2Model.hf_to_vllm_mapper
     packed_modules_mapping = {
-        "qkv_proj": [
-            "q_proj",
-            "k_proj",
-            "v_proj",
-        ],
-        "gate_up_proj": [
-            "gate_proj",
-            "up_proj",
-        ],
+        "qkv_proj": ["q_proj", "k_proj", "v_proj"],
+        "gate_up_proj": ["gate_proj", "up_proj"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):

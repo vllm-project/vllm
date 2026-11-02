@@ -40,3 +40,25 @@ async def test_merge_async_iterators():
             print("Iterator was cancelled normally")
         except (Exception, asyncio.CancelledError) as e:
             raise AssertionError() from e
+
+
+@pytest.mark.asyncio
+async def test_merge_async_iterators_single_closes_underlying():
+    # The single-iterator fast path must close the underlying generator when
+    # the merged generator is closed, matching the multi-iterator path. On the
+    # buggy fast path the underlying generator is left running.
+    closed = False
+
+    async def gen():
+        nonlocal closed
+        try:
+            while True:
+                yield "x"
+                await asyncio.sleep(0.01)
+        finally:
+            closed = True
+
+    merged = merge_async_iterators(gen())
+    assert await anext(merged) == (0, "x")
+    await merged.aclose()
+    assert closed

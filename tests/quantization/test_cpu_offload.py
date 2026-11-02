@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Expanded quantized model tests for CPU offloading
-# Base tests: tests/basic_correctness/test_cpu_offload.py
+# Base tests: tests/basic_correctness/cpu_offload/test_cpu_offload.py
 
 import pytest
 
@@ -70,4 +70,5 @@ def test_cpu_offload_compressed_tensors(monkeypatch):
         ["--enforce_eager"],
         ["--enforce_eager", "--cpu-offload-gb", "1"],
         max_wait_seconds=480,
+        include_seeded_sampling=False,
     )
