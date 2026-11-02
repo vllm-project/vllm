@@ -566,8 +566,12 @@ steps:
   - vllm/envs.py
   - vllm/config
   commands:
-    - pytest -v -s kernels/moe --ignore=kernels/moe/test_modular_oai_triton_moe.py
+    - >-
+      pytest -v -s kernels/moe
+      --ignore=kernels/moe/test_modular_oai_triton_moe.py
+      --ignore=kernels/moe/test_nixl_prepare_finalize.py
     - pytest -v -s kernels/moe/test_modular_oai_triton_moe.py
+    - pytest -v -s kernels/moe/test_nixl_prepare_finalize.py
   mirror:
     amd:
       label: ":amd: (MI300) MoE Kernels"
