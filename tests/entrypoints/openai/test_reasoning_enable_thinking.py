@@ -67,6 +67,37 @@ class TestChatCompletionReasoningEffort:
         params = request.build_chat_params(None, "auto")
         assert params.chat_template_kwargs["reasoning_effort"] == "high"
 
+    def test_effort_map_rewrites_listed_efforts_only(self):
+        """Unsupported efforts are rewritten; the rest reach the template as-is."""
+        effort_map = {"medium": "low"}
+
+        mapped = _build_chat_request(reasoning_effort="medium")
+        params = mapped.build_chat_params(None, "auto", effort_map)
+        assert params.chat_template_kwargs["reasoning_effort"] == "low"
+
+        unmapped = _build_chat_request(reasoning_effort="high")
+        params = unmapped.build_chat_params(None, "auto", effort_map)
+        assert params.chat_template_kwargs["reasoning_effort"] == "high"
+
+    @pytest.mark.parametrize(
+        ("effort", "effort_map", "enable_thinking"),
+        [("minimal", {"minimal": "none"}, False), ("none", {"none": "low"}, True)],
+    )
+    def test_enable_thinking_follows_mapped_effort(
+        self, effort, effort_map, enable_thinking
+    ):
+        request = _build_chat_request(reasoning_effort=effort)
+        params = request.build_chat_params(None, "auto", effort_map)
+        assert params.chat_template_kwargs["enable_thinking"] is enable_thinking
+
+    def test_effort_map_leaves_chat_template_kwargs_alone(self):
+        """An effort passed straight to the template bypasses the map."""
+        request = _build_chat_request(
+            chat_template_kwargs={"reasoning_effort": "medium"},
+        )
+        params = request.build_chat_params(None, "auto", {"medium": "low"})
+        assert params.chat_template_kwargs["reasoning_effort"] == "medium"
+
 
 class TestResponsesReasoningEffort:
     """Responses API: reasoning.effort -> enable_thinking."""
@@ -105,3 +136,10 @@ class TestResponsesReasoningEffort:
         )
         params = request.build_chat_params(None, "auto")
         assert params.chat_template_kwargs["reasoning_effort"] == "high"
+
+    def test_effort_map_rewrites_effort(self):
+        request = _build_responses_request(
+            reasoning=Reasoning(effort="medium"),
+        )
+        params = request.build_chat_params(None, "auto", {"medium": "low"})
+        assert params.chat_template_kwargs["reasoning_effort"] == "low"

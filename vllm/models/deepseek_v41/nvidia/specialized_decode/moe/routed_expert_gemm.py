@@ -55,8 +55,8 @@ from cutlass.cute.runtime import make_fake_stream, make_ptr
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.models.common.ops.moe_tail_fusion.primitives import current_cu_stream
 
-from ...ops.cute_dsl.primitives import current_cu_stream
 from .routed_expert_front_cute import RoutedExpertFront
 from .routed_expert_gemm_cute import (
     RoutedExpertGemm1,

@@ -26,6 +26,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4Static32,
     kMxfp4Dynamic,
     kMxfp4Static,
 )
@@ -487,7 +488,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # so we should not defer input quantization.
         # Otherwise, AITER fused MoE kernels handle input quantization
         # internally via a single fused kernel.
-        return not self.moe_config.use_mori_kernels
+        return not self.moe_config.use_mori_epv1_kernels
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -553,7 +554,7 @@ class AiterExperts(mk.FusedMoEExpertsModular):
         # MoRI dispatches MXFP4 activations packed two per byte, so K is
         # half the hidden size there.
         packed_fp4_input = (
-            self.moe_config.use_mori_kernels and self.quant_config.use_mxfp4_w4a4
+            self.moe_config.use_mori_epv1_kernels and self.quant_config.use_mxfp4_w4a4
         )
         output = (M, K * 2 if packed_fp4_input else K)
         return (workspace1, workspace2, output)
@@ -671,19 +672,22 @@ class AiterFp8ChannelExperts(AiterExperts):
 
 class AiterMxfp4Experts(AiterExperts):
     """MXFP4-quantized weights, with either unquantized (bf16/fp16) or
-    MXFP4-quantized dynamic activations. gfx950-only (not gfx1250)."""
+    MXFP4-quantized dynamic activations. gfx950-only (not gfx1250), except for
+    Kimi-K3's MXFP4 experts requantized to packed int4 at load on gfx942."""
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
+        from vllm.platforms.rocm import on_gfx942, on_gfx950, on_gfx1250
+
+        if (weight_key, activation_key) == (kInt4Static32, None):
+            return on_gfx942()
         SUPPORTED_W_A = [
             (kMxfp4Static, None),
             (kMxfp4Static, kMxfp4Dynamic),
         ]
         if (weight_key, activation_key) not in SUPPORTED_W_A:
             return False
-        from vllm.platforms.rocm import on_gfx950, on_gfx1250
-
         return on_gfx950() and not on_gfx1250()
