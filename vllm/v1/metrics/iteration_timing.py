@@ -15,6 +15,7 @@ from collections import deque
 from collections.abc import Callable
 from copy import copy
 from dataclasses import dataclass
+from functools import wraps
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -23,8 +24,82 @@ from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
+    from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
+
+
+def time_model_execution(func: Callable) -> Callable:
+    @wraps(func)
+    def wrapper(self, scheduler_output: SchedulerOutput, *args, **kwargs):
+        timer = self.iteration_timer
+        # Nested dummy forwards have tokens but no scheduler-assigned ID.
+        if timer is None or (
+            scheduler_output.iteration_metrics_id is None
+            and scheduler_output.total_num_scheduled_tokens > 0
+        ):
+            return func(self, scheduler_output, *args, **kwargs)
+        timer.start(
+            scheduler_output.iteration_metrics_id
+            if scheduler_output.total_num_scheduled_tokens > 0
+            else None
+        )
+        try:
+            output = func(self, scheduler_output, *args, **kwargs)
+        except Exception:
+            timer.cancel()
+            raise
+        # A deferred step ends after sampling and speculative drafting.
+        if output is not None:
+            timer.finish()
+        return timer.drain_into(output)
+
+    return wrapper
+
+
+def finish_iteration_timing(func: Callable) -> Callable:
+    @wraps(func)
+    def wrapper(self: Worker, *args, **kwargs):
+        timer = self.model_runner.iteration_timer
+        if timer is None:
+            return func(self, *args, **kwargs)
+        try:
+            output = func(self, *args, **kwargs)
+        except Exception:
+            timer.cancel()
+            raise
+        timer.finish()
+        return timer.drain_into(output)
+
+    return wrapper
+
+
+def time_dummy_batch(
+    func: Callable[..., None],
+) -> Callable[..., tuple[tuple[int, float], ...] | None]:
+    """Time a dummy step and return previously completed iteration samples."""
+
+    @wraps(func)
+    def wrapper(
+        self: Worker, iteration_metrics_id: int | None = None
+    ) -> tuple[tuple[int, float], ...] | None:
+        timer = self.model_runner.iteration_timer
+        if iteration_metrics_id is None or timer is None:
+            func(self, iteration_metrics_id)
+            return None if iteration_metrics_id is None else ()
+        # Recycle old ready pairs before queuing the next dummy interval.
+        samples = timer.drain_samples()
+        timer.start(iteration_metrics_id)
+        try:
+            func(self, iteration_metrics_id)
+        except Exception:
+            timer.cancel()
+            raise
+        timer.finish()
+        return samples
+
+    return wrapper
 
 
 @dataclass(slots=True)

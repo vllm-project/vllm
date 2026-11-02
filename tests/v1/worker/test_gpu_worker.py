@@ -3,6 +3,7 @@
 
 import json
 from contextlib import nullcontext
+from functools import partial
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -12,7 +13,8 @@ import torch
 from tests.utils import create_new_process_for_each_test
 from vllm.platforms import current_platform
 from vllm.utils.mem_constants import GiB_bytes
-from vllm.v1.metrics.iteration_timing import IterationTimer
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.metrics.iteration_timing import IterationTimer, time_model_execution
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.worker import gpu_worker, startup_plan
 from vllm.v1.worker.gpu_worker import maybe_rocm_profiling_fallback
@@ -514,7 +516,11 @@ def test_iteration_timing_finishes_after_sampling_and_draft(
         use_v2_model_runner=True,
         annotate_profile=lambda _: nullcontext(),
     )
-    scheduler_output = SimpleNamespace(total_num_scheduled_tokens=num_tokens)
+    worker.model_runner.execute_model = partial(
+        time_model_execution(execute_model), worker.model_runner
+    )
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.total_num_scheduled_tokens = num_tokens
     if num_tokens:
         scheduler_output.iteration_metrics_id = 3
     returned = gpu_worker.Worker.execute_model(worker, scheduler_output)
@@ -524,6 +530,15 @@ def test_iteration_timing_finishes_after_sampling_and_draft(
     assert returned is output and returned.iteration_timing_samples == ()
     if num_tokens == 0:
         assert milestones == ["forward"]
+        assert gpu_worker.Worker.poll_iteration_timing(worker) == ()
+        # Cleanup steps have no ID but can carry earlier completed timings.
+        assert timer is not None
+        timer.start(2)
+        timer.finish()
+        events[1].query.return_value = True
+        returned = gpu_worker.Worker.execute_model(worker, scheduler_output)
+        assert returned.iteration_timing_samples == ((2, 15.0),)
+        assert output.iteration_timing_samples == ()
         assert gpu_worker.Worker.poll_iteration_timing(worker) == ()
     elif timed:
         assert milestones == ["start", "forward", "sample", "draft", "end"]
@@ -555,7 +570,9 @@ def test_iteration_timing_discards_failed_step_and_allows_next_step(
         is_pooling_model=False,
     )
     error = RuntimeError("runner failed")
-    getattr(runner, failed_stage).side_effect = error
+    failed_call = getattr(runner, failed_stage)
+    failed_call.side_effect = error
+    runner.execute_model = partial(time_model_execution(runner.execute_model), runner)
     worker = SimpleNamespace(
         model_runner=runner,
         randomize_dummy_inputs=False,
@@ -578,7 +595,7 @@ def test_iteration_timing_discards_failed_step_and_allows_next_step(
     assert raised.value is error
     assert gpu_worker.Worker.poll_iteration_timing(worker) == ()
 
-    getattr(runner, failed_stage).side_effect = None
+    failed_call.side_effect = None
     scheduler_output.iteration_metrics_id = 4
     gpu_worker.Worker.execute_model(worker, scheduler_output)
     assert gpu_worker.Worker.sample_tokens(worker, None) is output
@@ -604,9 +621,17 @@ def test_dummy_iteration_recycles_old_timing_and_preserves_randomized_inputs(
     )
     timed = has_timer and has_iteration_id
 
+    @time_model_execution
+    def execute_model(runner, scheduler_output):
+        milestones.append("forward")
+
     def dummy_run(num_tokens, *, uniform_decode, randomize_inputs):
         assert num_tokens == 4 and uniform_decode and randomize_inputs
-        milestones.extend(("forward", "draft"))
+        # MRV2 calls execute_model inside the outer dummy interval, without an ID.
+        scheduler_output = SchedulerOutput.make_empty()
+        scheduler_output.total_num_scheduled_tokens = num_tokens
+        execute_model(worker.model_runner, scheduler_output)
+        milestones.append("draft")
 
     worker = SimpleNamespace(
         randomize_dummy_inputs=True,

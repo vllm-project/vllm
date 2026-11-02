@@ -78,6 +78,7 @@ from vllm.v1.kv_cache_interface import (
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
 )
+from vllm.v1.metrics.iteration_timing import time_model_execution
 from vllm.v1.outputs import (
     DraftTokenIds,
     ECConnectorOutput,
@@ -1804,6 +1805,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.ec_connector.no_forward(scheduler_output).ec_connector_output,
         )
 
+    @time_model_execution
     @torch.inference_mode()
     def execute_model(
         self,
