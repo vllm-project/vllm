@@ -3172,15 +3172,40 @@ class Scheduler(SchedulerInterface):
         )
 
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        preserve_running_requests: bool = False,
     ) -> bool:
         """Reset the KV prefix cache.
 
-        If reset_running_requests is True, all the running requests will be
-        preempted and moved to the waiting queue.
-        Otherwise, this method will only reset the KV prefix cache when there
-        is no running requests taking KV cache.
+        Args:
+            reset_running_requests: If True, all the running requests will be
+                preempted and moved to the waiting queue. Mutually exclusive
+                with ``preserve_running_requests``.
+            reset_connector: If True, also reset any KV connector state.
+            preserve_running_requests: If True, the prefix cache is cleared
+                without preempting running requests. Blocks held by running
+                requests remain allocated and continue serving those requests,
+                but all cached block hashes (including those on live blocks)
+                are cleared so new requests cannot hit them. Useful under
+                sustained load where the default mode keeps failing. Mutually
+                exclusive with ``reset_running_requests``.
+
+        Returns:
+            True if the prefix cache was successfully reset.
+
+        Raises:
+            ValueError: If both ``reset_running_requests`` and
+                ``preserve_running_requests`` are True.
+
         """
+        if reset_running_requests and preserve_running_requests:
+            raise ValueError(
+                "reset_running_requests and preserve_running_requests are "
+                "mutually exclusive. Choose exactly one (or neither)."
+            )
+
         if reset_running_requests:
             # For logging.
             timestamp = time.monotonic()
@@ -3199,7 +3224,9 @@ class Scheduler(SchedulerInterface):
             # persistent batch in the model runner.
             self.prev_step_scheduled_req_ids.clear()
 
-        reset_successful = self.kv_cache_manager.reset_prefix_cache()
+        reset_successful = self.kv_cache_manager.reset_prefix_cache(
+            preserve_running_requests=preserve_running_requests
+        )
         if reset_running_requests and not reset_successful:
             raise RuntimeError(
                 "Failed to reset KV cache even when all the running requests are "

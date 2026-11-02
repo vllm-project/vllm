@@ -394,12 +394,14 @@ class KVCacheCoordinator(ABC):
                     group_idx,
                 )
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, preserve_running_requests: bool = False) -> bool:
         """Reset each manager's pool once."""
         pools = dict.fromkeys(
             manager.block_pool for manager in self.single_type_managers
         )
-        return all([pool.reset_prefix_cache() for pool in pools])
+        return all(
+            [pool.reset_prefix_cache(preserve_running_requests) for pool in pools]
+        )
 
     def free(self, request_id: str) -> None:
         """Free the blocks for the request.

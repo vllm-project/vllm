@@ -409,10 +409,13 @@ class LLMEngine:
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        preserve_running_requests: bool = False,
     ) -> bool:
         return self.engine_core.reset_prefix_cache(
-            reset_running_requests, reset_connector
+            reset_running_requests, reset_connector, preserve_running_requests
         )
 
     def reset_encoder_cache(self) -> None:

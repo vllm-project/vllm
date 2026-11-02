@@ -868,24 +868,35 @@ class BlockPool:
             block = self.blocks[block_id]
             self._maybe_evict_cached_block(block)
 
-    def reset_prefix_cache(self) -> bool:
+    def reset_prefix_cache(self, preserve_running_requests: bool = False) -> bool:
         """Reset prefix cache. This function may be used in RLHF
         flows to invalidate prefix caching after the weights are updated,
         or used for resetting prefix caching status for benchmarking.
+
+        Args:
+            preserve_running_requests: If True, the prefix cache is cleared
+                without requiring all blocks to be free. Blocks held by
+                running requests remain allocated and continue serving those
+                requests, but their cached hashes are also cleared so that
+                new requests cannot hit them. This allows cache clearing to
+                succeed under sustained load where the default mode would
+                keep failing. Mutually exclusive with preempting running
+                requests at the scheduler layer.
 
         Returns:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
 
         """
-        num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
-        if num_used_blocks != 1:  # The null block is always marked as used
-            logger.warning(
-                "Failed to reset prefix cache because some "
-                "blocks (%d) are not freed yet",
-                num_used_blocks - 1,
-            )
-            return False
+        if not preserve_running_requests:
+            num_used_blocks = self.num_gpu_blocks - self.get_num_free_blocks()
+            if num_used_blocks != 1:  # The null block is always marked as used
+                logger.warning(
+                    "Failed to reset prefix cache because some "
+                    "blocks (%d) are not freed yet",
+                    num_used_blocks - 1,
+                )
+                return False
 
         # Remove all hashes so that no new blocks will hit.
         self.cached_block_hash_to_block = BlockHashToBlockMap()
@@ -902,7 +913,10 @@ class BlockPool:
         if self.metrics_collector:
             self.metrics_collector.reset()
 
-        logger.info("Successfully reset prefix cache")
+        if preserve_running_requests:
+            logger.info("Successfully reset prefix cache (preserving running requests)")
+        else:
+            logger.info("Successfully reset prefix cache")
 
         if self.enable_kv_cache_events:
             self.kv_event_queue.append(AllBlocksCleared())
