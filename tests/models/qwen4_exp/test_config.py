@@ -250,7 +250,7 @@ def test_qwen4_exp_model_state_prepares_ngram_context() -> None:
     model_state.ngram_context = torch.empty((8, 3), dtype=torch.int32)
     model_state.ngram_context_offsets = torch.arange(-3, 0, dtype=torch.int64)
     model_state.ple_query_start_loc = torch.empty(9, dtype=torch.int32)
-    model_state.disk_offload_modules = []
+    model_state.host_staged_modules = []
 
     input_batch = SimpleNamespace(
         num_reqs=2,
@@ -361,7 +361,7 @@ def test_qwen4_exp_model_state_pads_replayed_request_range(state_cls) -> None:
     model_state.ngram_context_offsets = torch.arange(-2, 0, dtype=torch.int64)
     model_state.ple_query_start_loc = torch.zeros(9, dtype=torch.int32)
     # Empty: the disk-offload staging path is covered by test_ple.py.
-    model_state.disk_offload_modules = []
+    model_state.host_staged_modules = []
     req_states = SimpleNamespace(
         # Rows 0 and 1 have prior context, so the context rows are not all sentinel.
         num_computed_tokens=SimpleNamespace(
