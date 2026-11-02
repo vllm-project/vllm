@@ -138,7 +138,7 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
+    ) -> torch.Tensor:
         num_token = output.shape[0]
         assert self._dispatch_topk_ids is not None, (
             "finalize() called before prepare(); mori combine() needs the "
@@ -149,4 +149,6 @@ class MoriPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             None,
             self._dispatch_topk_ids,
         )[0]
-        output.copy_(result[:num_token])
+        # A view of mori's combine buffer, which only the next combine
+        # rewrites; every reader of this layer's MoE output runs before that.
+        return result[:num_token]
