@@ -58,6 +58,7 @@ from vllm.renderers import (
     TokenizeParams,
     map_reasoning_effort,
     merge_kwargs,
+    recursively_merge_kwargs,
 )
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
@@ -804,7 +805,14 @@ class OnlineRenderer:
         ).with_defaults(
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
-            default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
+            # Engine-level `--mm-processor-kwargs` must reach the renderer as
+            # defaults, otherwise model hooks that rely on them (e.g. Qwen3-Omni
+            # `use_audio_in_video`) see them at HF-processor time but not when
+            # deciding which media to load.
+            default_mm_processor_kwargs=recursively_merge_kwargs(
+                mm_config.mm_processor_kwargs if mm_config else None,
+                getattr(request, "mm_processor_kwargs", None),
+            ),
         )
 
         reuse_ids = _reused_prompt_token_ids(request, renderer, messages)

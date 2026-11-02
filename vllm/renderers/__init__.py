@@ -8,6 +8,7 @@ from .params import (
     TokenizeParams,
     map_reasoning_effort,
     merge_kwargs,
+    recursively_merge_kwargs,
 )
 from .registry import RendererRegistry, renderer_from_config
 
@@ -20,4 +21,5 @@ __all__ = [
     "merge_kwargs",
     "ReasoningEffort",
     "map_reasoning_effort",
+    "recursively_merge_kwargs",
 ]

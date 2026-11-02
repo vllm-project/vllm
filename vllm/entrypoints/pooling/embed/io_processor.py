@@ -356,6 +356,11 @@ class EmbedIOProcessor(PoolingIOProcessor):
         ).with_defaults(
             default_template_kwargs,
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
+            # Engine-level `--mm-processor-kwargs` act as defaults, matching
+            # the online chat API path (`OnlineRenderer.preprocess_chat`).
+            default_mm_processor_kwargs=(
+                mm_config.mm_processor_kwargs if mm_config else None
+            ),
         )
 
         params_seq = self._params_to_seq(ctx.pooling_params, num_requests)

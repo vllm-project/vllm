@@ -96,6 +96,10 @@ from vllm.multimodal.processing.processor import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.multimodal.utils import (
+    get_use_audio_in_video,
+    resolve_mm_processor_kwarg,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -560,7 +564,9 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_inputs = super()._get_hf_mm_inputs(mm_items, hf_kwargs)
 
         mm_counts = mm_items.get_all_counts()
-        if hf_kwargs.get("use_audio_in_video"):
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
+        use_audio_in_video = get_use_audio_in_video(merged_kwargs)
+        if use_audio_in_video:
             num_videos = mm_counts.get("video", 0)
             if mm_counts.get("audio", 0) < num_videos:
                 raise ValueError(
@@ -579,33 +585,50 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         # NOTE: WhisperFeatureExtractor cannot handle empty list of audios
         if audios:
             hf_data["audio"] = audios
-        elif (
-            normalized_kwargs.get("use_audio_in_video")
-            and "audio" not in hf_data
-            and hf_data.get("videos")
-        ):
+        elif use_audio_in_video and "audio" not in hf_data and hf_data.get("videos"):
             raise ValueError(
                 "Video doesn't have audio track with `audio_in_video=True`"
             )
 
-        merged = self.info.ctx.get_merged_mm_kwargs(normalized_kwargs)
         if hf_data.get("videos") and (
-            merged.keys() & {"size", "min_pixels", "max_pixels"}
+            merged_kwargs.keys() & {"size", "min_pixels", "max_pixels"}
         ):
             normalized_kwargs = dict(normalized_kwargs)
             video_size = dict(self.info.get_hf_processor().video_processor.size)
-            size_override = merged.get("size")
+            size_override = merged_kwargs.get("size")
             if size_override is not None:
                 video_size = video_size | size_override
-            min_pixels = merged.get("min_pixels")
+            min_pixels = merged_kwargs.get("min_pixels")
             if min_pixels is not None:
                 video_size["shortest_edge"] = min_pixels
-            max_pixels = merged.get("max_pixels")
+            max_pixels = merged_kwargs.get("max_pixels")
             if max_pixels is not None:
                 video_size["longest_edge"] = max_pixels
             normalized_kwargs["size"] = video_size
 
         return hf_inputs._replace(hf_kwargs=normalized_kwargs)
+
+    def _pair_dummy_mm_counts(self, mm_counts: Mapping[str, int]) -> Mapping[str, int]:
+        """Add the audio items paired with dummy videos.
+
+        Args:
+            mm_counts: Requested dummy item count per modality.
+
+        Returns:
+            The counts with one audio item per video when
+            `use_audio_in_video` is in effect, since the HF processor
+            rejects a video without its paired audio track.
+
+        """
+        mm_counts = super()._pair_dummy_mm_counts(mm_counts)
+
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs({})
+        if get_use_audio_in_video(merged_kwargs):
+            num_videos = mm_counts.get("video", 0)
+            if mm_counts.get("audio", 0) < num_videos:
+                mm_counts = {**mm_counts, "audio": num_videos}
+
+        return mm_counts
 
     def _get_mm_fields_config(
         self,
@@ -793,10 +816,11 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_processor_mm_kwargs)
+        processor = self.info.get_hf_processor(**merged_kwargs)
         tokenizer = self.info.get_tokenizer()
         assert isinstance(self.info, Qwen2VLProcessingInfo)
-        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        image_processor = self.info.get_image_processor(**merged_kwargs)
         vocab = tokenizer.get_vocab()
 
         audio_token = processor.audio_token
@@ -849,7 +873,7 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
             token_id = image_token_id if modality == "image" else video_token_id
             return [token_id] * (int(grid_thw.prod()) // merge_length)
 
-        use_audio_in_video = hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        use_audio_in_video = get_use_audio_in_video(merged_kwargs)
         thinker_config = self.info.get_hf_config()
 
         def get_replacement_qwen2_use_audio_in_video(item_idx: int):
@@ -860,11 +884,14 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             audio_in_video_item_idx += 1
 
-            second_per_grid_ts = hf_processor_mm_kwargs.get("second_per_grid_ts", None)
+            # The HF processor output reflects the value it actually used;
+            # only fall back to the configured kwarg when the output lacks it.
             processed_second_per_grid_ts = out_mm_data.get("second_per_grid_ts")
             if isinstance(processed_second_per_grid_ts, torch.Tensor):
                 video_second_per_grid_t = processed_second_per_grid_ts[item_idx].item()
-            elif second_per_grid_ts:
+            elif second_per_grid_ts := resolve_mm_processor_kwarg(
+                merged_kwargs, "second_per_grid_ts"
+            ):
                 video_second_per_grid_t = second_per_grid_ts[item_idx]
             else:
                 video_second_per_grid_t = 1.0
@@ -930,8 +957,12 @@ class Qwen2_5OmniThinkerMultiModalProcessor(BaseMultiModalProcessor[_I]):
         if video_second_per_grid is not None:
             processed_data["second_per_grid_ts"] = video_second_per_grid
 
-        use_audio_in_video = hf_kwargs.get("use_audio_in_video", False)
-        processed_data["use_audio_in_video"] = torch.tensor(use_audio_in_video)
+        # Record the effective flag so it reaches the prompt updates and the
+        # model through the mm kwargs instead of being re-derived per layer.
+        merged_kwargs = self.info.ctx.get_merged_mm_kwargs(hf_kwargs)
+        processed_data["use_audio_in_video"] = torch.tensor(
+            get_use_audio_in_video(merged_kwargs)
+        )
         processed_data.pop("input_ids", None)
 
         return processed_data

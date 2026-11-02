@@ -437,6 +437,22 @@ def _resolve_items(
             _REQUIRE_MM_PROCESSOR_ERROR.format(modality=processor_modalities)
         )
 
+    # A media item may legitimately resolve to None when its UUID references
+    # a cached entry instead of carrying fresh bytes. But a raw item that
+    # resolved to None without a UUID (e.g. a silent video's extracted audio,
+    # which the async loader degrades to None) must not reach the processor:
+    # it would be counted as a real item and then crash the HF call opaquely.
+    # Drop such entries so silent videos degrade to video-only downstream.
+    # UUID-referencing None entries (data=None, uuid set) are kept as-is.
+    def _drop_unresolved(
+        modality: str,
+    ) -> list[tuple[object, str | None]]:
+        return [
+            (data, uuid)
+            for data, uuid in items_by_modality[modality]
+            if data is not None or uuid is not None
+        ]
+
     mm_data = {}
     mm_uuids = {}
     if "image_embeds" in items_by_modality:
@@ -448,8 +464,10 @@ def _resolve_items(
         )
         mm_uuids["image"] = [uuid for data, uuid in items_by_modality["image_embeds"]]
     if "image" in items_by_modality:
-        mm_data["image"] = [data for data, uuid in items_by_modality["image"]]
-        mm_uuids["image"] = [uuid for data, uuid in items_by_modality["image"]]
+        image_items = _drop_unresolved("image")
+        if image_items:
+            mm_data["image"] = [data for data, uuid in image_items]
+            mm_uuids["image"] = [uuid for data, uuid in image_items]
     if "audio_embeds" in items_by_modality:
         assert mm_processor is not None
         mm_data["audio"] = _get_embeds_data(
@@ -459,11 +477,15 @@ def _resolve_items(
         )
         mm_uuids["audio"] = [uuid for data, uuid in items_by_modality["audio_embeds"]]
     if "audio" in items_by_modality:
-        mm_data["audio"] = [data for data, uuid in items_by_modality["audio"]]
-        mm_uuids["audio"] = [uuid for data, uuid in items_by_modality["audio"]]
+        audio_items = _drop_unresolved("audio")
+        if audio_items:
+            mm_data["audio"] = [data for data, uuid in audio_items]
+            mm_uuids["audio"] = [uuid for data, uuid in audio_items]
     if "video" in items_by_modality:
-        mm_data["video"] = [data for data, uuid in items_by_modality["video"]]
-        mm_uuids["video"] = [uuid for data, uuid in items_by_modality["video"]]
+        video_items = _drop_unresolved("video")
+        if video_items:
+            mm_data["video"] = [data for data, uuid in video_items]
+            mm_uuids["video"] = [uuid for data, uuid in video_items]
     if "video_embeds" in items_by_modality:
         assert mm_processor is not None
         mm_data["video"] = _get_embeds_data(
