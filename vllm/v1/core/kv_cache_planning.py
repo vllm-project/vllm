@@ -831,7 +831,12 @@ def _promote_local_kv_cache_specs(
 def _try_get_full_allocation_fallback_groups(
     kv_cache_spec: dict[str, KVCacheSpec],
 ) -> list[KVCacheGroupSpec] | None:
-    """Try a supported full-allocation fallback for local-attention layers."""
+    """Try a supported full-allocation fallback for local-attention layers.
+
+    Full attention is never worse here: without a common page size, a separate
+    sliding-window group still pays for every layer's page on each block ID, so
+    freeing out-of-window blocks saves no memory.
+    """
     if any(isinstance(spec, HiddenStateCacheSpec) for spec in kv_cache_spec.values()):
         return None
     if any(
