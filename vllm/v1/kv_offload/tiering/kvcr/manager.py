@@ -621,10 +621,6 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             )
         return RequestOffloadingContext()
 
-    @override
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        self._align_sequence(keys, req_context, use_current_time=True)
-
     def _align_sequence(
         self,
         keys: Collection[OffloadKey],
@@ -663,7 +659,7 @@ class KVCRSecondaryTierManager(SecondaryTierManager):
             for key, position in req_context._offload_key_positions.items()
             if processed_tokens is None or position <= processed_tokens
         ]
-        self.touch(keys, req_context)
+        self._align_sequence(keys, req_context, use_current_time=True)
         self._kvcr.discard_hint(req_context.req_id)
 
     @override

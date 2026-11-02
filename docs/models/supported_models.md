@@ -451,7 +451,6 @@ th {
 | `NemotronForCausalLM` | Nemotron-3, Nemotron-4, Minitron | `nvidia/Minitron-8B-Base`, `mgoin/Nemotron-4-340B-Base-hf-FP8`, etc. | ✅︎ | ✅︎ |
 | `NemotronHForCausalLM` | Nemotron-H | `nvidia/Nemotron-H-8B-Base-8K`, `nvidia/Nemotron-H-47B-Base-8K`, `nvidia/Nemotron-H-56B-Base-8K`, etc. | ✅︎ | ✅︎ |
 | `OlmoHybridForCausalLM` | OLMo Hybrid | `allenai/Olmo-Hybrid-7B` | ✅︎ | ✅︎ |
-| `OlmoeForCausalLM` | OLMoE | `allenai/OLMoE-1B-7B-0924`, `allenai/OLMoE-1B-7B-0924-Instruct`, etc. | | ✅︎ |
 | `OPTForCausalLM` | OPT, OPT-IML | `facebook/opt-66b`, `facebook/opt-iml-max-30b`, etc. | ✅︎ | ✅︎ |
 | `OrionForCausalLM` | Orion | `OrionStarAI/Orion-14B-Base`, `OrionStarAI/Orion-14B-Chat`, etc. | | ✅︎ |
 | `PanguEmbeddedForCausalLM` | openPangu-Embedded-7B | `FreedomIntelligence/openPangu-Embedded-7B-V1.1` | ✅︎ | ✅︎ |
@@ -497,6 +496,7 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 | `OlmoForCausalLM` | OLMo | `allenai/OLMo-1B-hf`, `allenai/OLMo-7B-hf`, etc. | ✅︎ | ✅︎ |
 | `Olmo2ForCausalLM` | OLMo2 | `allenai/OLMo-2-0425-1B`, etc. | ✅︎ | ✅︎ |
 | `Olmo3ForCausalLM` | OLMo3 | `allenai/Olmo-3-7B-Instruct`, `allenai/Olmo-3-32B-Think`, etc. | ✅︎ | ✅︎ |
+| `OlmoeForCausalLM` | OLMoE | `allenai/OLMoE-1B-7B-0924`, `allenai/OLMoE-1B-7B-0924-Instruct`, etc. | ✅︎ | ✅︎ |
 | `PhiForCausalLM` | Phi | `microsoft/phi-1_5`, `microsoft/phi-2`, etc. | ✅︎ | ✅︎ |
 | `SeedOssForCausalLM` | SeedOss | `ByteDance-Seed/Seed-OSS-36B-Instruct`, etc. | ✅︎ | ✅︎ |
 | `SmolLM3ForCausalLM` | SmolLM3 | `HuggingFaceTB/SmolLM3-3B` | ✅︎ | ✅︎ |
@@ -732,6 +732,13 @@ Some models are supported only via the [Transformers modeling backend](#transfor
     on `transformers>=5.18.0`; older versions still require the flag.
 
 !!! note
+    On ROCm, `Step5ForConditionalGeneration` runs its MoE layers on Triton. With
+    `VLLM_ROCM_USE_AITER=1`, also pass `--moe-backend triton`: AITER's MoE does not
+    apply Step-5's SwiGLU clamp. An FP8 KV cache (`--kv-cache-dtype fp8`) needs
+    `--block-size 32`. The checkpoint ships three MTP layers, enabled with
+    `--speculative-config '{"method":"mtp","num_speculative_tokens":3}'`.
+
+!!! note
     The official `openbmb/MiniCPM-V-2` doesn't work yet, so we need to use a fork (`HwwwH/MiniCPM-V-2`) for now.
     For more details, please see: <https://github.com/vllm-project/vllm/pull/4087#issuecomment-2250397630>
 
@@ -741,6 +748,7 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 
 | Architecture | Models | Example HF Models | [LoRA](../features/lora.md) | [PP](../serving/parallelism_scaling.md) |
 | ------------ | ------ | ----------------- | -------------------- | ------------------------- |
+| `CanaryForConditionalGeneration` | Canary | `nvidia/canary-1b-v2` | | |
 | `CohereAsrForConditionalGeneration` | Cohere-Transcribe | `CohereLabs/cohere-transcribe-03-2026` | | |
 | `FireRedASR2ForConditionalGeneration` | FireRedASR2 | `allendou/FireRedASR2-LLM-vllm`, etc. | | |
 | `FunASRForConditionalGeneration` | FunASR | `FunAudioLLM/Fun-ASR-Nano-2512-vllm`, etc. | | |
@@ -767,6 +775,13 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
     up to one hour, the model's training limit (`--limit-mm-per-prompt '{"audio": {"length": <samples>}}'`
     changes it), and `/v1/audio/transcriptions` splits longer audio into pieces of at most one hour, shorter
     when `--max-model-len` is below 65,536.
+
+    Audio tower: the FP8 and NVFP4 checkpoints quantize the linear layers of its ASR encoder to FP8 through
+    their `quantization_config`. FP8 encoder attention (`--mm-encoder-attn-dtype fp8`) is not supported and
+    raises an error when the model is built. The tower attends through vLLM's multimodal encoder attention
+    backend (FlashAttention on CUDA GPUs that support it; `--mm-encoder-attn-backend` selects another). In
+    bfloat16, its output can depend on that backend and on the other clips in the batch: small rounding
+    differences can flip the thresholded speaker features on some frames.
 
 !!! note
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.

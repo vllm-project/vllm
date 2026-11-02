@@ -8,6 +8,17 @@
 // Note: We register under namespace "_C" so ops are accessible as
 // torch.ops._C.<op_name> for compatibility with existing code.
 STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
+#ifdef VLLM_ENABLE_FUSED_MQA_TOPK
+  // Single-launch fused FP8 MQA-logits + top-k (512/1024/2048) prefill
+  // selection (SM100 family). Workspace tensors are caller-owned; counter must
+  // be zero.
+  ops.def(
+      "fused_mqa_topk_prefill(Tensor q, Tensor k, Tensor scales, "
+      "Tensor weights, Tensor starts, Tensor ends, Tensor! out, "
+      "Tensor! counter, Tensor! values, Tensor! indices, Tensor! retained, "
+      "Tensor! retained_indices, Tensor! counts, Tensor! defer) -> ()");
+#endif
+
   // Compute per-token-group FP8 quantized tensor and scaling factor.
   // The dummy arguments are here so we can correctly fuse with RMSNorm.
   ops.def(
@@ -792,6 +803,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
+#ifdef VLLM_ENABLE_FUSED_MQA_TOPK
+  ops.impl("fused_mqa_topk_prefill", TORCH_BOX(&fused_mqa_topk_prefill));
+#endif
+
   // LongCat n-gram embedding index kernel.
   ops.impl("ngram_compute_n_gram_ids", TORCH_BOX(&ngram_compute_n_gram_ids));
   ops.impl("vocab_parallel_embedding", TORCH_BOX(&vocab_parallel_embedding));
@@ -1076,13 +1091,16 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor(h!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 int resident_null_block=0) -> ()");
+      "                 int resident_null_block=0,"
+      "                 Tensor? num_valid_rows=None) -> ()");
 
   ops.def(
-      "hisparse_invalidate_written_slots(Tensor! device_global_indices,"
+      "hisparse_invalidate_written_slots(Tensor device_global_indices_ptrs,"
       "                                   Tensor request_state_indices,"
       "                                   Tensor req_id_per_token,"
-      "                                   Tensor written_slots) -> ()");
+      "                                   Tensor written_slots,"
+      "                                   int num_state_rows,"
+      "                                   int region_stride) -> ()");
 
   ops.def(
       "hisparse_gather_plan(Tensor host_cache,"

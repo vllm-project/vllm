@@ -24,6 +24,8 @@ from tests.v1.kv_connector.unit.utils import (
     create_scheduler,
     create_vllm_config,
 )
+from tests.v1.spec_decode.utils import attach_speculator_config
+from vllm import SamplingParams
 from vllm.config import KVEventsConfig, KVTransferConfig
 from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading import (
@@ -49,12 +51,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
 )
+from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     KVCacheBlock,
     KVCacheBlockCopy,
+    get_request_block_hasher,
+    init_none_hash,
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import (
@@ -96,7 +101,8 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
+from vllm.v1.worker.gpu.spec_decode.mtp.config import MTPSpeculatorConfig
 
 
 def _as_mock(value: object) -> MagicMock:
@@ -255,7 +261,7 @@ def test_swa_offload_window_covers_unaligned_hit(
     assert len(sched._jobs) == 1
     job = next(iter(sched._jobs.values()))
     if needs_left:
-        assert {left_key, swa[end - 1]} <= job.keys
+        assert {left_key, swa[end - 1]} <= set(job.keys)
     manager.complete_load(job.keys, state.req_context)
 
 
@@ -263,6 +269,7 @@ def _make_partial_tail_scheduler(
     recurrent_only: bool = False,
     eagle: bool = False,
     cache_hit_alignment_tokens: int | None = 4,
+    manager: OffloadingManager | None = None,
 ) -> OffloadingConnectorScheduler:
     vllm_config = _make_vllm_config(extra_config={"self_describing_kv_events": True})
     vllm_config.cache_config.prefix_match_unit = None if recurrent_only else 4
@@ -278,6 +285,8 @@ def _make_partial_tail_scheduler(
     if recurrent_only:
         kv_cache_config.kv_cache_groups = kv_cache_config.kv_cache_groups[1:]
     spec = MockOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    if manager is not None:
+        spec.manager = manager
     return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
 
 
@@ -297,6 +306,21 @@ def _make_partial_tail_request(
     request.lora_request = None
     request.skip_reading_external_kv = False
     request.is_finished.return_value = False
+    scheduler.on_new_request(request)
+    return request
+
+
+def _make_real_partial_tail_request(
+    scheduler: OffloadingConnectorScheduler, request_id: str
+) -> Request:
+    init_none_hash(sha256)
+    request = Request(
+        request_id=request_id,
+        prompt_token_ids=list(range(30)),
+        sampling_params=SamplingParams(max_tokens=1),
+        pooling_params=None,
+        block_hasher=get_request_block_hasher(4, sha256),
+    )
     scheduler.on_new_request(request)
     return request
 
@@ -535,6 +559,44 @@ def test_partial_lookup_returns_exact_boundary_and_group_load_keys():
     assert dst_spec.group_sizes == [2, 1]
     assert dst_spec.block_indices == [0, 1]
     assert req_status.partial_tail_boundary is None
+
+
+def test_partial_tail_lookup_delays_duplicate_inflight_load():
+    """A second request must wait for an in-flight partial-tail load."""
+    manager = CPUOffloadingManager(num_chunks=8)
+    scheduler = _make_partial_tail_scheduler(manager=manager)
+
+    first = _make_real_partial_tail_request(scheduler, "first")
+    second = _make_real_partial_tail_request(scheduler, "second")
+
+    first_state = scheduler._req_status[first.request_id]
+    first_state.num_locally_computed_tokens = 16
+    first_state.update_offload_keys()
+    boundary_keys = [
+        scheduler._make_boundary_key(
+            first, group_config.group_idx, 28, first_state.req_context
+        )
+        for group_config in scheduler.config.kv_group_configs
+    ]
+    stored = manager.prepare_store(boundary_keys, first_state.req_context)
+    assert stored is not None
+    manager.complete_store(stored.keys_to_store, first_state.req_context)
+
+    assert scheduler.get_num_new_matched_tokens(first, 16) == (12, True)
+    scheduler.update_state_after_alloc(
+        first,
+        KVCacheBlocks(
+            (
+                [KVCacheBlock(11), KVCacheBlock(12)],
+                [KVCacheBlock(0, is_null=True), KVCacheBlock(21)],
+            )
+        ),
+        num_external_tokens=12,
+    )
+    assert len(scheduler._jobs) == 1
+
+    assert scheduler.get_num_new_matched_tokens(second, 16) == (None, False)
+    assert len(scheduler._jobs) == 1
 
 
 def test_sync_partial_tail_load_targets_hashed_blocks():
@@ -1593,6 +1655,26 @@ def test_cache_reset_without_in_flight_jobs_holds_nothing():
         scheduler.shutdown()
 
 
+def test_cache_reset_twice_before_a_step_still_flushes():
+    """A second reset before the engine steps must not assert: RL loops call
+    reset_prefix_cache(reset_connector=True) every iteration, and EngineCore
+    drains every queued utility call before it steps again."""
+    scheduler, _ = _make_tiering_engine_scheduler([])
+    try:
+        flushed = _store_in_flight(scheduler)
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+        assert scheduler.reset_prefix_cache(reset_connector=True)
+
+        output = scheduler.schedule()
+        meta = output.kv_connector_metadata
+        assert isinstance(meta, OffloadingConnectorMetadata)
+        assert meta.jobs_to_flush == flushed
+        _report_jobs(scheduler, output, flushed)
+        assert not scheduler.has_requests()
+    finally:
+        scheduler.shutdown()
+
+
 def test_cache_reset_fence_held_too_long_warns_on_idle_steps(monkeypatch):
     """The warning must fire on the empty steps an idle engine takes while the
     fence is held, since no lookup runs there."""
@@ -2155,7 +2237,6 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
         decoded_tokens=[0] * (tokens_per_chunk - 1),
         expected_stored=(3, 4, 5),
     )
-    runner.manager.touch.assert_not_called()
 
     # +1 token -> single block, fail prepare_store
     runner.manager.prepare_store.side_effect = lambda keys, req_context: None
@@ -2184,7 +2265,6 @@ def test_offloading_connector(request_runner, async_scheduling: bool):
     # create a new request differing only on the last token
     runner.new_request(token_ids=[0] * (tokens_per_chunk * 6 - 1) + [1])
     runner.run(decoded_tokens=[0])
-    runner.manager.touch.assert_not_called()
 
     # terminate request
     runner.run(
@@ -2730,7 +2810,6 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0])
-    runner.manager.touch.assert_not_called()
 
     # store 3 more block
     runner.manager.prepare_store.side_effect = lambda keys, req_context: (
@@ -2740,8 +2819,6 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
         decoded_tokens=[0] * (block_size * 3 + 2),
         expected_stored=(0, 1, 2, 3, 4, 5),
     )
-
-    runner.manager.touch.assert_not_called()
 
     # EOS lands in the last slot of the 7th block (offset 6). No forward pass
     # writes that slot, so the finishing step declines the block.
@@ -2759,7 +2836,6 @@ def test_two_groups_full_and_sliding_window(request_runner, async_scheduling: bo
         #   are within the window → loads blocks 1,2
         expected_loaded=((0, 0), (0, 1), (0, 2), (1, 1), (1, 2)),
     )
-    runner.manager.touch.assert_not_called()
 
     # 3 blocks are hit on GPU [0, 1, 2]
     # 1 block loaded [3,]
@@ -2877,7 +2953,6 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
         generate_store_output(keys)
     )
     runner.run(decoded_tokens=[0])
-    runner.manager.touch.assert_not_called()
 
     # Get to 31 tokens
     # No further blocks offloaded
@@ -2887,7 +2962,6 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # Group 0 blocks: [0, 1], ending_token_offset = 24
     # Group 1 blocks: [0, 1], ending_token_offset = 32
     runner.run(decoded_tokens=[0])
-    runner.manager.touch.assert_not_called()
 
     # Get to 35 tokens
     # No further blocks offloaded
@@ -2897,7 +2971,6 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # Group 0 blocks: [0, 1, 2], ending_token_offset = 36
     # Group 1 blocks: [0, 1], ending_token_offset = 32
     runner.run(decoded_tokens=[0])
-    runner.manager.touch.assert_not_called()
 
     # Get to 47 tokens
     # No further blocks offloaded
@@ -2907,7 +2980,6 @@ def test_two_groups_different_block_sizes(request_runner, async_scheduling: bool
     # Group 0 blocks: [0, 1, 2, 3], ending_token_offset = 4
     # Group 1 blocks: [0, 1, 2], ending_token_offset = 48
     runner.run(decoded_tokens=[0])
-    runner.manager.touch.assert_not_called()
 
     runner.run(decoded_tokens=[0], expected_stored=((0, 3), (1, 2)))
 
@@ -3605,7 +3677,7 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     # First store: fires when block 0 is fully populated.
     runner.run(decoded_tokens=[0, 0], expected_stored=(0, 1, 2))
     assert runner.manager.complete_store.call_count == 1
-    first_call_keys = set(runner.manager.complete_store.call_args.args[0])
+    first_call_keys = runner.manager.complete_store.call_args.args[0]
     assert len(first_call_keys) == 1
     runner.manager.complete_store.reset_mock()
 
@@ -3615,13 +3687,54 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
         expected_stored=(3, 4, 5),
     )
     assert runner.manager.complete_store.call_count == 1
-    second_call_keys = set(runner.manager.complete_store.call_args.args[0])
+    second_call_keys = runner.manager.complete_store.call_args.args[0]
     assert first_call_keys != second_call_keys
     runner.manager.complete_store.reset_mock()
 
     # Finish: no store pending -> no further call.
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     assert runner.manager.complete_store.call_count == 0
+
+
+@pytest.mark.parametrize("async_scheduling", [True, False])
+def test_store_job_preserves_order_and_deduplicates_keys(
+    request_runner, async_scheduling: bool
+):
+    tokens_per_block = 4
+    blocks_per_chunk = 3
+    tokens_per_chunk = tokens_per_block * blocks_per_chunk
+    runner = request_runner(
+        blocks_per_chunk=blocks_per_chunk,
+        block_size=tokens_per_block,
+        num_gpu_blocks=100,
+        async_scheduling=async_scheduling,
+    )
+    runner.new_request(token_ids=[0] * (tokens_per_chunk * 2))
+    returned_keys = []
+
+    def prepare_store(keys, req_context):
+        keys = list(keys)
+        returned_keys.extend(keys)
+        output = generate_store_output(keys)
+        output.keys_to_store.append(keys[0])
+        return output
+
+    runner.manager.prepare_store.side_effect = prepare_store
+    job_keys = {}
+
+    def capture_job_keys():
+        job_keys.update(runner.connector_scheduler._jobs.items())
+
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored=tuple(range(6)),
+        post_step_fn=capture_job_keys,
+    )
+
+    assert len(job_keys) == 1
+    keys = next(iter(job_keys.values())).keys
+    assert keys == tuple(returned_keys)
+    assert runner.manager.complete_store.call_args.args[0] == keys
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
@@ -6095,7 +6208,7 @@ def _shared_kv_mtp_config():
     spec.num_speculative_tokens_per_batch_size = None
     spec.max_num_new_slots_for_drafting = 0
     spec.num_speculative_tokens = 1
-    return spec
+    return attach_speculator_config(spec, MTPSpeculatorConfig)
 
 
 class TestSharedGroupMTPOffload:
