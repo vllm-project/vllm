@@ -418,6 +418,8 @@ steps:
   key: qwen3-5-unit-tests-b200
   timeout_in_minutes: 20
   device: b200-k8s
+  # test_fused_allreduce_norm_quant runs TP2.
+  num_devices: 2
   source_file_dependencies:
   - vllm/model_executor/layers/linear.py
   - vllm/model_executor/layers/mamba/gdn
