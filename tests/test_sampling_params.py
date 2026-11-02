@@ -8,6 +8,7 @@ import pytest
 from vllm import SamplingParams
 from vllm.config.diffusion import DiffusionConfig
 from vllm.exceptions import VLLMValidationError
+from vllm.sampling_params import RequestOutputKind
 from vllm.utils.diffusion import validate_diffusion_sampling_params
 from vllm.v1.engine.input_processor import InputProcessor
 
@@ -18,6 +19,7 @@ class MockModelConfig:
     max_logprobs: int = 20
     logits_processors: list | None = None
     return_sampling_mask: bool = False
+    enable_return_last_hidden_states: bool = False
 
     def get_vocab_size(self) -> int:
         return 1024
@@ -280,3 +282,37 @@ def test_extra_args_preserves_custom_objects_and_shared_containers():
     params = SamplingParams(extra_args=extra_args)
     assert params.extra_args["first"][0] is custom
     assert params.extra_args["first"] is params.extra_args["second"]
+
+
+def test_return_last_hidden_states_requires_engine_flag():
+    params = SamplingParams(return_last_hidden_states=True)
+    with pytest.raises(VLLMValidationError, match="enable_return_last_hidden_states"):
+        params.verify(MockModelConfig(), None, None, None)
+    params.verify(
+        MockModelConfig(enable_return_last_hidden_states=True), None, None, None
+    )
+
+
+def test_last_hidden_states_are_not_returned_with_delta_output():
+    """Rows come with the final output, whose token_ids in DELTA mode hold only
+    the last tokens: the one-row-per-token contract would not hold."""
+    config = MockModelConfig(enable_return_last_hidden_states=True)
+    delta = SamplingParams(
+        return_last_hidden_states=True, output_kind=RequestOutputKind.DELTA
+    )
+    with pytest.raises(VLLMValidationError, match="DELTA"):
+        delta.verify(config, None, None, None)
+    for kind in (RequestOutputKind.CUMULATIVE, RequestOutputKind.FINAL_ONLY):
+        SamplingParams(return_last_hidden_states=True, output_kind=kind).verify(
+            config, None, None, None
+        )
+    # Without the request flag, DELTA is as before.
+    SamplingParams(output_kind=RequestOutputKind.DELTA).verify(config, None, None, None)
+
+
+def test_last_hidden_states_engine_flag_alone_changes_nothing():
+    """An engine that allows the output does not impose it on any request."""
+    SamplingParams().verify(
+        MockModelConfig(enable_return_last_hidden_states=True), None, None, None
+    )
+    assert SamplingParams().return_last_hidden_states is False

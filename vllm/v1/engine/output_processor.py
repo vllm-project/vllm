@@ -42,6 +42,7 @@ from vllm.v1.metrics.stats import (
     SchedulerStats,
 )
 from vllm.v1.outputs import SamplingMaskLists
+from vllm.v1.token_outputs import LAST_HIDDEN_STATES
 
 if TYPE_CHECKING:
     from vllm.v1.engine.admission_control import SharedAdmissionStats
@@ -240,6 +241,8 @@ class RequestState:
         self.sampling_mask_chunks: list[SamplingMaskLists] = []
         # (weight version, first output-token index) for each span.
         self.weight_version_starts: list[tuple[str, int]] = []
+        # entry -> the rows received so far (vllm/v1/token_outputs.py).
+        self.token_output_chunks: dict[str, list[torch.Tensor]] = {}
 
         # Stream Interval
         self.stream_interval = stream_interval
@@ -514,12 +517,20 @@ class RequestState:
         if finished and self.routed_experts_chunks:
             routed_experts = np.concatenate(self.routed_experts_chunks, axis=0)
 
+        token_outputs = {}
+        if finished:
+            token_outputs = {
+                name: torch.cat(chunks, dim=0)
+                for name, chunks in self.token_output_chunks.items()
+            }
+
         return CompletionOutput(
             index=self.request_index,
             text=text,
             token_ids=token_ids,
             routed_experts=routed_experts,
             sampling_mask=sampling_mask,
+            last_hidden_states=token_outputs.get(LAST_HIDDEN_STATES),
             logprobs=logprobs,
             cumulative_logprob=self.logprobs_processor.cumulative_logprob,
             finish_reason=str(finish_reason) if finished else None,
@@ -836,6 +847,9 @@ class OutputProcessor:
                     req_state.sampling_mask_chunks.append(
                         engine_core_output.new_sampling_mask
                     )
+                if engine_core_output.new_token_outputs is not None:
+                    for name, rows in engine_core_output.new_token_outputs.items():
+                        req_state.token_output_chunks.setdefault(name, []).append(rows)
 
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
@@ -913,6 +927,10 @@ class OutputProcessor:
             )
         if output.routed_experts is not None:
             req_state.routed_experts_chunks[-1] = output.routed_experts[:-num_dropped]
+        if output.new_token_outputs is not None:
+            output.new_token_outputs = {
+                name: rows[:num_kept] for name, rows in output.new_token_outputs.items()
+            }
 
     def _finish_request(self, req_state: RequestState) -> None:
         req_id = req_state.request_id
