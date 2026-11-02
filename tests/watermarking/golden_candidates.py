@@ -22,6 +22,7 @@ from vllm.config.watermarking import (
 from vllm.v1.watermarking import (
     DualKeyGumbelWatermarkDetector,
     GumbelWatermarkDetector,
+    SBWWatermarkDetector,
     WatermarkDetection,
     WatermarkDetector,
     create_prf,
@@ -48,6 +49,9 @@ WATERMARK_CONFIG_FIELDS = (
     "deduplicate_contexts_max_history",
     "prf",
     "allow_target_only_watermarking",
+    "sbw_scheme",
+    "sbw_gamma",
+    "sbw_delta",
 )
 
 # round(((i + 1) * (5**0.5 - 1) / 2) % 1.0, 4) for i in range(64)
@@ -165,9 +169,25 @@ def _create_dual_key_gumbel_detector(
     )
 
 
+def _create_sbw_detector(
+    key: int,
+    config: WatermarkingSchemeConfig,
+    prf: WatermarkPRFName,
+) -> WatermarkDetector:
+    # SBW uses its own scheme/gamma, not the Gumbel alpha/prf
+    # For golden tests, we use default SBW parameters
+    return SBWWatermarkDetector(
+        key=key,
+        context_width=config.context_width,
+        p_value_threshold=config.p_value_threshold,
+        deduplicate_contexts=config.detection_deduplicate_contexts,
+    )
+
+
 DETECTOR_FACTORIES = {
     "gumbel": _create_gumbel_detector,
     "dual_key_gumbel": _create_dual_key_gumbel_detector,
+    "sbw": _create_sbw_detector,
 }
 
 
@@ -229,6 +249,8 @@ class WatermarkingCandidate:
         detector = self._detector()
         key_b_prf = getattr(detector, "key_b_prf", None)
         dual_key = self.scheme == "dual_key_gumbel"
+        # SBW doesn't use a separate PRF object - it hashes tokens directly
+        detector_prf = getattr(detector, "prf", None)
         return {
             "watermark_config": {
                 field: getattr(config, field) for field in WATERMARK_CONFIG_FIELDS
@@ -247,7 +269,7 @@ class WatermarkingCandidate:
                 "p_value_threshold": detector.p_value_threshold,
                 "deduplicate_contexts": detector.deduplicate_contexts,
                 "alpha": getattr(detector, "alpha", None),
-                "prf_key": str(detector.prf.key),
+                "prf_key": str(detector_prf.key) if detector_prf is not None else None,
                 "key_b_prf_key": None if key_b_prf is None else str(key_b_prf.key),
             },
         }
@@ -623,6 +645,24 @@ WATERMARKING_CANDIDATES = (
         42,
         prf="philox",
         generation_deduplicate_contexts="all",
+        fixture=REPETITIVE_FIXTURE,
+    ),
+    # SBW candidates - bias-based watermarking (supports greedy decoding)
+    _candidate("sbw-philox-key0-cw1", "sbw", 0, prf="philox", context_width=1),
+    _candidate("sbw-philox-key42-cw4", "sbw", 42, prf="philox"),
+    _candidate(
+        "sbw-philox-key42-cw4-wrong-key",
+        "sbw",
+        42,
+        prf="philox",
+        detection_key=43,
+    ),
+    _candidate(
+        "sbw-philox-repeated-cw4",
+        "sbw",
+        42,
+        prf="philox",
+        context_width=4,
         fixture=REPETITIVE_FIXTURE,
     ),
 )
