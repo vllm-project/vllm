@@ -114,6 +114,19 @@ class TestParameterSweepItem:
 class TestParameterSweep:
     """Test ParameterSweep functionality."""
 
+    @pytest.mark.parametrize("first,second", [(1, "1"), (True, "True")])
+    def test_benchmark_names_cannot_collide_after_conversion(self, first, second):
+        with pytest.raises(ValueError, match="Duplicate _benchmark_name values"):
+            ParameterSweep.from_records(
+                [{"_benchmark_name": first}, {"_benchmark_name": second}]
+            )
+
+    def test_distinct_numeric_benchmark_names_remain_supported(self):
+        sweep = ParameterSweep.from_records(
+            [{"_benchmark_name": 1}, {"_benchmark_name": 2}]
+        )
+        assert [item.name for item in sweep] == ["1", "2"]
+
     def test_from_records_list(self):
         """Test creating ParameterSweep from a list of records."""
         records: list[dict[str, object]] = [
