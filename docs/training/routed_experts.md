@@ -52,3 +52,21 @@ Per-request, default `0`: drops the first N prompt-token rows (e.g. routing alre
 - The Rust HTTP frontend never returns `routed_experts` and always sends `routed_experts_prompt_start = 0`. Use the Python API server.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).
+
+## Layer-owned row restoration
+
+Capture sources implement `restore_routed_experts_rows(topk_ids) -> torch.Tensor`.
+Binding registers each MoE module; the capturer calls its restorer and writes
+at the current microbatch offset. `MoERunner` and native MegaMoE reuse the
+existing DP/TP row-count recovery algorithm through `collect_local_routing_rows()`.
+Backends can override the method without replacing the capturer.
+
+Return this DP rank's rows in token order without padding: a 2-D integer tensor
+on the input device with the same top-k width. Do not modify the input or apply
+EPLB mapping. Empty tensors are valid; `None` is not a fallback. Only TP0 publishes.
+For zero/one-token SP batches, non-publishing TP ranks may retain padding.
+
+Read current forward/microbatch metadata at invocation. Collectives must include
+every peer, including empty ranks, with rank-consistent decisions. Use the current
+stream without host reads of device values. Graph replay does not rerun Python:
+recorded operations, addresses and row selection must remain valid.

@@ -32,6 +32,9 @@ from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
 from vllm.model_executor.layers.fused_moe.routed_experts import (
     RoutedExperts,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    collect_local_routing_rows,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
@@ -263,6 +266,7 @@ class MoERunner(MoERunnerInterface):
     ):
         super().__init__()
         self.moe_config = moe_config
+        self._capture_parallel_config = get_current_vllm_config().parallel_config
         self.router = router
         self.routed_input_transform = routed_input_transform
         self.routed_output_transform = routed_output_transform
@@ -297,6 +301,13 @@ class MoERunner(MoERunnerInterface):
 
         # For smuggling this layer into the fused moe custom op
         register_layer_for_moe_forward_op(get_current_vllm_config(), self)
+
+    def restore_routed_experts_rows(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        return collect_local_routing_rows(
+            topk_ids,
+            dp_rank=self._capture_parallel_config.data_parallel_rank,
+            tp_size=self._capture_parallel_config.tensor_parallel_size,
+        )
 
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]

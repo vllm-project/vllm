@@ -27,6 +27,9 @@ from vllm.model_executor.layers.fused_moe.prepare_megamoe import (
     prepare_megamoe_inputs,
     prepare_megamoe_nvfp4_inputs,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+    collect_local_routing_rows,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp8Dynamic,
@@ -291,6 +294,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
         check_deep_gemm_mega_moe_supported(device, hidden_size, intermediate_size)
 
         self.prefix = prefix
+        self._capture_parallel_config = vllm_config.parallel_config
         self.capture_fn: Callable[[torch.Tensor], None] | None = None
         self.num_experts = num_experts
         self.num_local_experts = num_local_experts
@@ -335,6 +339,13 @@ class DeepGemmMegaMoEExperts(nn.Module):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
+
+    def restore_routed_experts_rows(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        return collect_local_routing_rows(
+            topk_ids,
+            dp_rank=self._capture_parallel_config.data_parallel_rank,
+            tp_size=self._capture_parallel_config.tensor_parallel_size,
+        )
 
     @property
     def has_fused_shared_experts(self) -> bool:

@@ -620,10 +620,14 @@ class _YieldingModel(torch.nn.Module):
         return out
 
 
+class _LocalCaptureRows:
+    def restore_routed_experts_rows(self, topk_ids):
+        return topk_ids
+
+
 def _make_capturer(num_tokens: int, device: torch.device) -> RoutedExpertsCapturer:
     capturer = RoutedExpertsCapturer.__new__(RoutedExpertsCapturer)
-    capturer.dp_rank = 0
-    capturer.tp_size = 1
+    capturer.row_restorers = {0: _LocalCaptureRows()}
     capturer.device_buffer = torch.full(
         (num_tokens, 1, 1), -1, dtype=torch.int32, device=device
     )

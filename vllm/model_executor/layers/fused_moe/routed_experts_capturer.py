@@ -14,7 +14,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.parallel_state import get_tp_group
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.platforms import current_platform
 from vllm.v1.worker.ubatching import dbo_current_ubatch_token_offset
@@ -26,6 +26,74 @@ logger = logging.getLogger(__name__)
 class RoutedExpertsCaptureSource(Protocol):
     layer_id: int
     capture_fn: Callable[[torch.Tensor], None] | None
+
+
+@runtime_checkable
+class RoutedExpertsRowRestorer(Protocol):
+    def restore_routed_experts_rows(self, topk_ids: torch.Tensor) -> torch.Tensor:
+        """Return local token-ordered logical IDs without modifying the input."""
+        ...
+
+
+def collect_local_routing_rows(
+    topk_ids: torch.Tensor, *, dp_rank: int, tp_size: int
+) -> torch.Tensor:
+    """Restore this DP rank's token rows, trimming trailing SP padding.
+
+    Layout priority: cross-DP batch, local batch, gathered DP/TP shards,
+    then a local TP shard. Gathered rows are DP-major/TP-minor; preserve
+    this priority when layout sizes coincide. PCP is unsupported.
+
+    Without DP metadata, use the pre-SP batch descriptor. Unknown counts
+    pass through; known counts must match a full, sharded or padded batch.
+    A full local batch avoids gathering, including zero/one-token batches
+    where only the publishing TP0 rank needs the real rows.
+    """
+    ctx = get_forward_context()
+    n = topk_ids.shape[0]
+    dp_metadata = ctx.dp_metadata
+    if dp_metadata is None:
+        if ctx.batch_descriptor is None:
+            return topk_ids
+        num_local_tokens = ctx.batch_descriptor.num_tokens
+    else:
+        num_tokens_dp = dp_metadata.num_tokens_across_dp_cpu
+        num_local_tokens = int(num_tokens_dp[dp_rank].item())
+        if n == int(num_tokens_dp.sum().item()):
+            end = int(num_tokens_dp[: dp_rank + 1].sum().item())
+            return topk_ids[end - num_local_tokens : end]
+
+    if n == num_local_tokens:
+        return topk_ids
+
+    if dp_metadata is not None:
+        shard_sizes = dp_metadata.local_sizes
+        if shard_sizes is not None and n == sum(shard_sizes):
+            num_dp_ranks = len(num_tokens_dp)
+            if len(shard_sizes) % num_dp_ranks != 0:
+                raise ValueError(
+                    "RoutedExpertsCapturer: gathered shard count "
+                    f"{len(shard_sizes)} is not divisible by DP rank count "
+                    f"{num_dp_ranks}"
+                )
+            shards_per_dp_rank = len(shard_sizes) // num_dp_ranks
+            first_shard = dp_rank * shards_per_dp_rank
+            start = sum(shard_sizes[:first_shard])
+            return topk_ids[start : start + num_local_tokens]
+
+    shard_n = (num_local_tokens + tp_size - 1) // tp_size
+    if n == shard_n:
+        return get_tp_group().all_gather(topk_ids.contiguous(), dim=0)[
+            :num_local_tokens
+        ]
+    if dp_metadata is None and n == shard_n * tp_size:
+        return topk_ids[:num_local_tokens]
+
+    raise AssertionError(
+        f"RoutedExpertsCapturer: unexpected topk_ids batch dim {n} "
+        f"(local_tokens={num_local_tokens}, "
+        f"dp_rank={dp_rank}, tp_size={tp_size})"
+    )
 
 
 def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
@@ -82,8 +150,7 @@ class RoutedExpertsCapturer:
             dtype=torch.int32,
             device=current_platform.device_type,
         )
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self.row_restorers: dict[int, RoutedExpertsRowRestorer] = {}
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         if not 0 <= layer_id < self.device_buffer.shape[1]:
@@ -92,70 +159,12 @@ class RoutedExpertsCapturer:
                 f"layer count {self.device_buffer.shape[1]}"
             )
 
-        ctx = get_forward_context()
-        local_topk_ids = self._restore_local_topk_ids(topk_ids, ctx)
+        local_topk_ids = self.row_restorers[layer_id].restore_routed_experts_rows(
+            topk_ids
+        )
         offset = dbo_current_ubatch_token_offset()
         self.device_buffer[offset : offset + len(local_topk_ids), layer_id] = (
             local_topk_ids
-        )
-
-    def _restore_local_topk_ids(
-        self, topk_ids: torch.Tensor, ctx: ForwardContext
-    ) -> torch.Tensor:
-        """Restore this DP rank's token rows, trimming trailing SP padding.
-
-        Layout priority: cross-DP batch, local batch, gathered DP/TP shards,
-        then a local TP shard. Gathered rows are DP-major/TP-minor; preserve
-        this priority when layout sizes coincide. PCP is unsupported.
-
-        Without DP metadata, use the pre-SP batch descriptor. Unknown counts
-        pass through; known counts must match a full, sharded or padded batch.
-        A full local batch avoids gathering, including zero/one-token batches
-        where only the publishing TP0 rank needs the real rows.
-        """
-        n = topk_ids.shape[0]
-        dp_metadata = ctx.dp_metadata
-        if dp_metadata is None:
-            if ctx.batch_descriptor is None:
-                return topk_ids
-            num_local_tokens = ctx.batch_descriptor.num_tokens
-        else:
-            num_tokens_dp = dp_metadata.num_tokens_across_dp_cpu
-            num_local_tokens = int(num_tokens_dp[self.dp_rank].item())
-            if n == int(num_tokens_dp.sum().item()):
-                end = int(num_tokens_dp[: self.dp_rank + 1].sum().item())
-                return topk_ids[end - num_local_tokens : end]
-
-        if n == num_local_tokens:
-            return topk_ids
-
-        if dp_metadata is not None:
-            shard_sizes = dp_metadata.local_sizes
-            if shard_sizes is not None and n == sum(shard_sizes):
-                num_dp_ranks = len(num_tokens_dp)
-                if len(shard_sizes) % num_dp_ranks != 0:
-                    raise ValueError(
-                        "RoutedExpertsCapturer: gathered shard count "
-                        f"{len(shard_sizes)} is not divisible by DP rank count "
-                        f"{num_dp_ranks}"
-                    )
-                shards_per_dp_rank = len(shard_sizes) // num_dp_ranks
-                first_shard = self.dp_rank * shards_per_dp_rank
-                start = sum(shard_sizes[:first_shard])
-                return topk_ids[start : start + num_local_tokens]
-
-        shard_n = (num_local_tokens + self.tp_size - 1) // self.tp_size
-        if n == shard_n:
-            return get_tp_group().all_gather(topk_ids.contiguous(), dim=0)[
-                :num_local_tokens
-            ]
-        if dp_metadata is None and n == shard_n * self.tp_size:
-            return topk_ids[:num_local_tokens]
-
-        raise AssertionError(
-            f"RoutedExpertsCapturer: unexpected topk_ids batch dim {n} "
-            f"(local_tokens={num_local_tokens}, "
-            f"dp_rank={self.dp_rank}, tp_size={self.tp_size})"
         )
 
     def snapshot_routing_data(self, num_tokens: int) -> torch.Tensor:
@@ -193,11 +202,21 @@ def bind_routed_experts_capturer(
 
     num_bound = 0
     for module in model.modules():
+        if not isinstance(module, (MoERunner, RoutedExpertsCaptureSource)):
+            continue
+        if not isinstance(module, RoutedExpertsRowRestorer):
+            raise ValueError(
+                f"{type(module).__name__} must implement restore_routed_experts_rows "
+                "to support routed-experts capture."
+            )
+        if module.layer_id in capturer.row_restorers:
+            raise ValueError(
+                f"Duplicate capture row restorer for layer {module.layer_id}"
+            )
+        capturer.row_restorers[module.layer_id] = module
         if isinstance(module, RoutedExpertsCaptureSource):
             module.capture_fn = partial(capturer.capture, module.layer_id)
             num_bound += 1
-            continue
-        if not isinstance(module, MoERunner):
             continue
         capture_fn = partial(capturer.capture, module.layer_id)
         quant_method = module._quant_method
