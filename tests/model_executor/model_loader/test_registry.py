@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import logging
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -170,3 +173,28 @@ def test_moe_runner_reports_registered_expert_names():
     weights = [("experts.w13_weight", torch.zeros(2, 8, 4))]
     loaded = AutoWeightsLoader(model).load_weights(weights)
     assert loaded == {"experts.routed_experts.w13_weight"}
+
+
+class _StubModel(nn.Module):
+    def load_weights(self, weights) -> None:
+        for _ in weights:
+            pass
+        return None
+
+
+def test_loading_weights_took_names_the_model(caplog):
+    loader = DefaultModelLoader(LoadConfig())
+    loader._init_ep_weight_filter = lambda model_config: None
+    loader._init_mm_encoder_only_weight_filter = lambda model, model_config: None
+    loader.get_all_weights = lambda model_config, model: iter(())
+
+    with caplog.at_level(logging.INFO):
+        loader.load_weights(_StubModel(), SimpleNamespace(quantization=None))
+
+    message = next(
+        r.getMessage()
+        for r in caplog.records
+        if "Loading weights took" in r.getMessage()
+    )
+    # A worker can load a target model and a draft head; both must be attributable.
+    assert message.endswith("(model=_StubModel)")
