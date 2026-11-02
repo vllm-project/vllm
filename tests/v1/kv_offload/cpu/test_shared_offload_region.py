@@ -1402,3 +1402,54 @@ def test_barrier_release_failure_keeps_original_error(iid, monkeypatch, failure_
 
     assert barrier.call_count == (2 if failure_phase == "population" else 1)
     assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
+
+
+# ---------------------------------------------------------------------------
+# /dev/shm exhaustion while pre-faulting
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("named", [False, True])
+@pytest.mark.parametrize("populate_shard", [None, (0, 2)])
+def test_populate_efault_reports_shm_exhaustion(
+    iid, monkeypatch, populate_shard, named
+):
+    """A full tmpfs makes MADV_POPULATE_WRITE fail with EFAULT ("Bad
+    address"); the region must say that /dev/shm ran out instead, naming the
+    allocation and the option that sizes it, and still release its peers."""
+    calls = 0
+
+    def efault_after_probe(*_):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise OSError(errno.EFAULT, "Bad address")
+
+    monkeypatch.setattr(region_module, "_madvise_populate_write", efault_after_probe)
+    name, option = (
+        ("test pool", "--test-pool-size")
+        if named
+        else (
+            "CPU KV offload shared region",
+            "--kv-offloading-size",
+        )
+    )
+    kwargs = {"shm_allocation_name": name, "shm_size_option": option} if named else {}
+    barrier = MagicMock()
+    with pytest.raises(RuntimeError, match="Ran out of /dev/shm") as exc:
+        SharedOffloadRegion(
+            engine_id=iid,
+            num_chunks=4,
+            rank=0,
+            kv_bytes_per_chunk=PAGE_SIZE,
+            cpu_page_size=PAGE_SIZE,
+            barrier=barrier,
+            populate_shard=populate_shard,
+            **kwargs,
+        )
+    assert f"the {name}" in str(exc.value)
+    assert f"Lower {option}" in str(exc.value)
+    assert isinstance(exc.value.__cause__, OSError)
+    assert calls == 2  # the probe, then the first real pre-fault
+    assert barrier.call_count == (1 if populate_shard is None else 2)
+    assert not os.path.exists(f"/dev/shm/vllm_offload_{iid}.mmap")
