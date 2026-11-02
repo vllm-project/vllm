@@ -173,6 +173,7 @@ def _make_b12x_moe_kernel(
     topk: int,
     activation: MoEActivation,
     quant_config: FusedMoEQuantConfig,
+    layers: list | None = None,
 ) -> mk.FusedMoEKernel:
     num_experts = w1.shape[0]
     moe_config = make_dummy_moe_config(
@@ -208,6 +209,8 @@ def _make_b12x_moe_kernel(
             layer.w13_input_scale = 1.0 / quant_config.a1_gscale
             layer.w2_input_scale = 1.0 / quant_config.a2_gscale
     experts.process_weights_after_loading(layer)
+    if layers is not None:
+        layers.append(layer)
     return mk.FusedMoEKernel(
         maybe_make_prepare_finalize(
             moe=moe_config,
@@ -1375,18 +1378,56 @@ def test_b12x_mxfp4_w4a8_compact_n64_runs(workspace_init) -> None:
             case.topk,
             activation=case.activation,
         )
-        output = _run_b12x_moe(
+        num_experts = case.w1.shape[0]
+        w1_scale, w2_scale = case.quant_config.w1_scale, case.quant_config.w2_scale
+        assert w1_scale is not None and w2_scale is not None
+        w1_orig, w2_orig = case.w1.clone(), case.w2.clone()
+        w1_scale_orig, w2_scale_orig = w1_scale.clone(), w2_scale.clone()
+        layers: list = []
+        kernel = _make_b12x_moe_kernel(
             case.hidden_states,
             case.w1,
             case.w2,
-            case.score,
             case.topk,
             case.activation,
             case.quant_config,
+            layers,
+        )
+        (layer,) = layers
+        experts = kernel.impl.fused_experts
+        assert isinstance(experts, B12xExperts)
+        topk_weights, topk_ids, _ = fused_topk(
+            case.hidden_states, case.score, case.topk, renormalize=False
         )
 
-    torch.testing.assert_close(output, reference, atol=2e-1, rtol=2e-1)
-    cosine = torch.nn.functional.cosine_similarity(
-        output.flatten().float(), reference.flatten().float(), dim=0
-    )
-    assert cosine > 0.99
+        def apply() -> torch.Tensor:
+            return kernel.apply(
+                hidden_states=case.hidden_states,
+                w1=case.w1,
+                w2=case.w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=case.activation,
+                global_num_experts=num_experts,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+
+        experts.warmup_launches(layer, token_counts=(1, 16, 64))
+        outputs = [apply()]
+        assert getattr(experts, "_native_experts", None) is not None
+        # Reload the weights, as a weight update does, and run again.
+        # The first load repacks the weights in place; reload from pristine copies.
+        layer.w13_weight, layer.w2_weight = w1_orig.clone(), w2_orig.clone()
+        layer.w13_weight_scale = w1_scale_orig.clone()
+        layer.w2_weight_scale = w2_scale_orig.clone()
+        experts.process_weights_after_loading(layer)
+        assert getattr(experts, "_native_experts", None) is not None
+        outputs.append(apply())
+
+    for output in outputs:
+        torch.testing.assert_close(output, reference, atol=2e-1, rtol=2e-1)
+        cosine = torch.nn.functional.cosine_similarity(
+            output.flatten().float(), reference.flatten().float(), dim=0
+        )
+        assert cosine > 0.99

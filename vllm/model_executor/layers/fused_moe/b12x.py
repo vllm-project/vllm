@@ -375,6 +375,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         compact_n64 = (
             quant_mode == "w4a8_mx"
             and hasattr(fused_moe, "ExecutionCapacity")
+            and get_b12x_preparation() is not None
             and intermediate_size % 128 == 64
         )
         if compact_n64:
@@ -408,13 +409,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                     w2_global_scales=w2_global_scale,
                 ),
             )
-            if owner._impl.representation.value.n64_repack:
-                self._native_experts = owner
-            else:
-                logger.debug(
-                    "b12x compact W4A8 geometry was not N64-repacked; "
-                    "using the legacy execution path"
-                )
+            self._native_experts = owner
             return owner._impl
 
         weight_plan = fused_moe.plan_weights(
@@ -476,6 +471,7 @@ class B12xExperts(mk.FusedMoEExpertsModular):
                 self._preparation_session = None
             self._plans.clear()
         if self._native_experts is not None:
+            # Plans must execute against the reused storage.
             self._native_experts = replace(self._native_experts, _impl=prepared)
         self._prepared_experts = prepared
         layer._b12x_prepared_experts = prepared
@@ -655,6 +651,50 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             int(topk_ids.shape[1]),
         )
 
+    def _prepare_native_plans(
+        self, capacities: Iterable[int], plan_key: tuple[Any, ...]
+    ) -> None:
+        """Plan and prepare one native plan per capacity, cached under plan_key."""
+        fused_moe = _require_b12x_fused_moe()
+        preparation = get_b12x_preparation()
+        if preparation is None:
+            raise RuntimeError("b12x MoE native execution requires b12x.preparation")
+        experts = self._native_experts
+        if experts is None:
+            raise RuntimeError("b12x MoE native plans require native experts")
+        topk, _, apply_router_weight_on_input = plan_key
+        plans = {
+            count: fused_moe.plan_execution(
+                experts=experts,
+                capacity=fused_moe.ExecutionCapacity(
+                    max_tokens=count, top_k=topk, route_num_experts=0
+                ),
+                routing=fused_moe.RoutingSpec(
+                    apply_router_weight_on_input=apply_router_weight_on_input
+                ),
+            )
+            for count in capacities
+        }
+        if self._preparation_session is None:
+            self._preparation_session = preparation.PreparationSession(
+                device=experts.device,
+                autotune=False,
+                compile_workers=0,
+            )
+        result = self._preparation_session.prepare(
+            tuple(
+                plan.request(
+                    name=f"mxfp4-m{count}-k{topk}",
+                    prepare_call=lambda state: preparation.PreparedCall(
+                        run=lambda: None
+                    ),
+                )
+                for count, plan in plans.items()
+            )
+        )
+        result.close()
+        self._plans.update(((count, *plan_key), plan) for count, plan in plans.items())
+
     def _plan(
         self,
         *,
@@ -668,9 +708,10 @@ class B12xExperts(mk.FusedMoEExpertsModular):
         capacity = max(int(tokens), 1)
         if self._native_experts is not None:
             maximum = self.moe_config.max_num_tokens
-            if capacity > maximum:
-                raise ValueError("b12x MoE token count exceeds prepared capacity")
-            capacity = min(1 << (capacity - 1).bit_length(), maximum)
+            # Counts above the maximum (e.g. naive DP all-gather dispatch) get
+            # their own exact-capacity plan instead of a power-of-two bucket.
+            if capacity <= maximum:
+                capacity = min(1 << (capacity - 1).bit_length(), maximum)
         key = (capacity, int(topk), activation, bool(apply_router_weight_on_input))
         plan = self._plans.get(key)
         if plan is not None:
@@ -679,44 +720,14 @@ class B12xExperts(mk.FusedMoEExpertsModular):
             raise RuntimeError("b12x MoE plans must be created before CUDA capture")
 
         if self._native_experts is not None:
-            preparation = get_b12x_preparation()
-            assert preparation is not None
-
             maximum = self.moe_config.max_num_tokens
-            capacities = sorted(
-                {maximum, *(1 << i for i in range(maximum.bit_length()))}
-            )
-            plans = {
-                count: fused_moe.plan_execution(
-                    experts=self._native_experts,
-                    capacity=fused_moe.ExecutionCapacity(
-                        max_tokens=count, top_k=key[1], route_num_experts=0
-                    ),
-                    routing=fused_moe.RoutingSpec(apply_router_weight_on_input=key[3]),
+            if capacity > maximum:
+                capacities = [capacity]
+            else:
+                capacities = sorted(
+                    {maximum, *(1 << i for i in range(maximum.bit_length()))}
                 )
-                for count in capacities
-            }
-            if self._preparation_session is None:
-                self._preparation_session = preparation.PreparationSession(
-                    device=self._native_experts.device,
-                    autotune=False,
-                    compile_workers=0,
-                )
-            result = self._preparation_session.prepare(
-                tuple(
-                    plan.request(
-                        name=f"mxfp4-m{count}-k{key[1]}",
-                        prepare_call=lambda state: preparation.PreparedCall(
-                            run=lambda: None
-                        ),
-                    )
-                    for count, plan in plans.items()
-                )
-            )
-            result.close()
-            self._plans.update(
-                ((count, *key[1:]), plan) for count, plan in plans.items()
-            )
+            self._prepare_native_plans(capacities, key[1:])
             return self._plans[key]
 
         limit, alpha, beta = self._swiglu_params(activation)
