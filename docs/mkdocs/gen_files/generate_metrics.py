@@ -31,14 +31,19 @@ def is_metric_name(value: str) -> bool:
     return value.startswith("vllm:") and value.removeprefix("vllm:").isidentifier()
 
 
-def collect_string_bindings(func: ast.AST) -> dict[str, list[str]]:
-    """Map local names in `func` to the string values they can hold.
+def collect_string_bindings(
+    func: ast.AST,
+) -> tuple[dict[str, list[str]], dict[str, list[tuple[str, ...]]]]:
+    """Collect the literal strings and string tables assigned in `func`.
 
-    Covers `name = "vllm:..."` and `for name, doc in rows` where `rows` is
-    assigned literal lists of string tuples, so that `name=name` resolves.
+    Returns `(strings, tables)`: `strings` maps names assigned a string
+    (`name = "vllm:..."`) to the values they can hold, and `tables` maps names
+    assigned literal lists of string tuples to their rows. Loop targets are not
+    bound here; `MetricExtractor` binds them only inside the loop that unpacks
+    the table.
     """
     strings: dict[str, list[str]] = {}
-    rows: dict[str, list[tuple[str, ...]]] = {}
+    tables: dict[str, list[tuple[str, ...]]] = {}
     for node in ast.walk(func):
         if not (isinstance(node, ast.Assign) and len(node.targets) == 1):
             continue
@@ -52,24 +57,12 @@ def collect_string_bindings(func: ast.AST) -> dict[str, list[str]]:
                 table = ast.literal_eval(value)
             except ValueError:
                 continue
-            rows.setdefault(target.id, []).extend(
+            tables.setdefault(target.id, []).extend(
                 row
                 for row in table
                 if isinstance(row, tuple) and all(isinstance(v, str) for v in row)
             )
-
-    for node in ast.walk(func):
-        if not isinstance(node, ast.For | ast.comprehension):
-            continue
-        target, source = node.target, node.iter
-        if not (isinstance(target, ast.Tuple) and isinstance(source, ast.Name)):
-            continue
-        for i, elt in enumerate(target.elts):
-            if isinstance(elt, ast.Name):
-                strings.setdefault(elt.id, []).extend(
-                    row[i] for row in rows.get(source.id, []) if i < len(row)
-                )
-    return strings
+    return strings, tables
 
 
 class MetricExtractor(ast.NodeVisitor):
@@ -77,33 +70,95 @@ class MetricExtractor(ast.NodeVisitor):
 
     def __init__(self):
         self.metrics: list[dict[str, str]] = []
-        self._bindings: dict[str, list[str]] = {}
+        # Metric calls whose `name=` could not be resolved, as line numbers.
+        self.unresolved: list[int] = []
+        self._strings: dict[str, list[str]] = {}
+        self._tables: dict[str, list[tuple[str, ...]]] = {}
+        # One binding per table row that the enclosing loops can be on.
+        self._rows: list[dict[str, str]] = [{}]
 
     def visit_FunctionDef(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
-        outer = self._bindings
-        self._bindings = collect_string_bindings(node)
+        outer = self._strings, self._tables, self._rows
+        self._strings, self._tables = collect_string_bindings(node)
+        self._rows = [{}]
         self.generic_visit(node)
-        self._bindings = outer
+        self._strings, self._tables, self._rows = outer
 
     visit_AsyncFunctionDef = visit_FunctionDef
+
+    def visit_For(self, node: ast.For | ast.AsyncFor) -> None:
+        self.visit(node.target)
+        self.visit(node.iter)
+        outer = self._rows
+        self._rows = self._bind_rows(node.target, node.iter)
+        for stmt in node.body:
+            self.visit(stmt)
+        self._rows = outer
+        for stmt in node.orelse:
+            self.visit(stmt)
+
+    visit_AsyncFor = visit_For
+
+    def visit_ListComp(
+        self, node: ast.ListComp | ast.SetComp | ast.GeneratorExp | ast.DictComp
+    ) -> None:
+        outer = self._rows
+        for generator in node.generators:
+            self.visit(generator.iter)
+            self._rows = self._bind_rows(generator.target, generator.iter)
+            for cond in generator.ifs:
+                self.visit(cond)
+        if isinstance(node, ast.DictComp):
+            self.visit(node.key)
+            self.visit(node.value)
+        else:
+            self.visit(node.elt)
+        self._rows = outer
+
+    visit_SetComp = visit_GeneratorExp = visit_DictComp = visit_ListComp
+
+    def _bind_rows(self, target: ast.AST, source: ast.AST) -> list[dict[str, str]]:
+        """Bind the names in `target` to each row of the table `source`."""
+        if not (
+            isinstance(target, ast.Tuple)
+            and isinstance(source, ast.Name)
+            and source.id in self._tables
+        ):
+            return self._rows
+        rows = []
+        for outer in self._rows:
+            for row in self._tables[source.id]:
+                bound = dict(outer)
+                for i, elt in enumerate(target.elts):
+                    if isinstance(elt, ast.Name):
+                        if i < len(row):
+                            bound[elt.id] = row[i]
+                        else:
+                            bound.pop(elt.id, None)
+                rows.append(bound)
+        return rows
 
     def visit_Call(self, node: ast.Call) -> None:
         """Visit function calls to find metric class instantiations."""
         metric_type = self._get_metric_type(node)
         if metric_type:
-            names = self._extract_kwarg(node, "name")
-            docs = self._extract_kwarg(node, "documentation")
-            if len(docs) != len(names):
-                docs = [docs[0] if len(docs) == 1 else ""] * len(names)
-
-            for name, documentation in zip(names, docs):
-                self.metrics.append(
-                    {
+            found = []
+            for row in self._rows:
+                names = self._extract_kwarg(node, "name", row)
+                docs = self._extract_kwarg(node, "documentation", row)
+                if len(docs) != len(names):
+                    docs = [docs[0] if len(docs) == 1 else ""] * len(names)
+                for name, documentation in zip(names, docs):
+                    metric = {
                         "name": name,
                         "type": metric_type,
                         "documentation": documentation,
                     }
-                )
+                    if metric not in found:
+                        found.append(metric)
+            if not found:
+                self.unresolved.append(node.lineno)
+            self.metrics.extend(found)
 
         self.generic_visit(node)
 
@@ -118,12 +173,16 @@ class MetricExtractor(ast.NodeVisitor):
             return metric_type_map.get(node.func.attr)
         return None
 
-    def _extract_kwarg(self, node: ast.Call, key: str) -> list[str]:
+    def _extract_kwarg(
+        self, node: ast.Call, key: str, row: dict[str, str]
+    ) -> list[str]:
         """Extract the possible values of a keyword argument of a call."""
         for keyword in node.keywords:
             if keyword.arg == key:
                 if isinstance(keyword.value, ast.Name):
-                    return self._bindings.get(keyword.value.id, [])
+                    if keyword.value.id in row:
+                        return [row[keyword.value.id]]
+                    return self._strings.get(keyword.value.id, [])
                 value = self._get_string_value(keyword.value)
                 return [value] if value is not None else []
         return []
@@ -144,9 +203,15 @@ def extract_metrics_from_file(filepath: Path) -> list[dict[str, str]]:
         tree = ast.parse(source, filename=str(filepath))
         extractor = MetricExtractor()
         extractor.visit(tree)
-        return extractor.metrics
     except Exception as e:
         raise RuntimeError(f"Failed to parse {filepath}: {e}") from e
+    if extractor.unresolved:
+        raise ValueError(
+            f"{filepath}: could not resolve the metric name on line(s) "
+            f"{extractor.unresolved}; use a string literal or a local variable "
+            "assigned one, or teach MetricExtractor this pattern"
+        )
+    return extractor.metrics
 
 
 def generate_markdown_table(metrics: list[dict[str, str]]) -> str:
