@@ -91,6 +91,7 @@ from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsFP32LogitsGather,
     SupportsMultiModal,
     SupportsPP,
 )
@@ -2017,7 +2018,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         )
 
 
-class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
+class MiniMaxM3SparseForCausalLM(
+    nn.Module, SupportsPP, SupportsEagle3, SupportsFP32LogitsGather
+):
     """MiniMax M3 (sparse/dense backbone) for causal language modeling."""
 
     packed_modules_mapping = {
@@ -2117,6 +2120,7 @@ class MiniMaxM3SparseForConditionalGeneration(
     MiniMaxM3EncoderCudaGraphMixin,
     SupportsPP,
     SupportsEagle3,
+    SupportsFP32LogitsGather,
 ):
     """Top-level (VL) entry point for MiniMax M3.
 
