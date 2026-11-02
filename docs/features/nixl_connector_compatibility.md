@@ -129,3 +129,4 @@ Current push PP + HMA limitations:
 - **Static quantization** (scales loaded from checkpoint): ✅ Supported. Scales are loaded independently by each instance from the model checkpoint.
 - **Dynamic quantization** (scales computed at runtime): ❌ Not supported. Per-block scales are not transferred alongside KV cache data.
 - **Packed-layout scales** (scales stored inline with weights): ✅ Supported. Scales are transferred together with the KV cache blocks.
+- **NVFP4** (`--kv-cache-dtype nvfp4`): P and D must use the same block size and KV cache layout. The handshake rejects a smaller prefill block size and the `enable_permute_local_kv` LBHNC → LBNHC permute, because NVFP4 pages keep data and scales in separate areas that the receive-side re-layout cannot handle.
