@@ -125,7 +125,7 @@ cohere-melody==0.13.4
     # via -r requirements/test/xpu.in
 colorama==0.4.6
     # via sacrebleu
-compressed-tensors==0.17.0
+compressed-tensors==0.20.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -763,6 +763,7 @@ psutil==7.2.2
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
+    #   compressed-tensors
     #   peft
     #   tensorizer
 py-cpuinfo==9.0.0

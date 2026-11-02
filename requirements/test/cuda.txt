@@ -149,7 +149,7 @@ colorful==0.5.6
     # via ray
 colorlog==6.10.1
     # via optuna
-compressed-tensors==0.17.0
+compressed-tensors==0.20.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -876,6 +876,7 @@ psutil==6.1.0
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
+    #   compressed-tensors
     #   peft
     #   tensorizer
 py==1.11.0

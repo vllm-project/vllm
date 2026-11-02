@@ -55,8 +55,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
-    kMxfp8Dynamic,
     kFp8Dynamic128Sym,
+    kMxfp8Dynamic,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.platforms import current_platform
@@ -112,7 +112,7 @@ def _compressed_tensors_actorder_config(actorder):
     "actorder", [ActivationOrdering.GROUP, ActivationOrdering.DYNAMIC, True]
 )
 def test_compressed_tensors_rejects_runtime_activation_order(actorder):
-    with pytest.raises(ValueError, match="group/dynamic activation ordering"):
+    with pytest.raises(ValueError, match="has been removed"):
         CompressedTensorsConfig.from_config(
             _compressed_tensors_actorder_config(actorder)
         )

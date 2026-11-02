@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 import torch
 from compressed_tensors.config import CompressionFormat, SparsityCompressionConfig
 from compressed_tensors.quantization import (
-    ActivationOrdering,
     QuantizationArgs,
     QuantizationStrategy,
     QuantizationType,
@@ -335,16 +334,6 @@ class CompressedTensorsConfig(QuantizationConfig):
                 weight_quant = QuantizationArgs.model_validate(
                     quant_config.get("weights")
                 )
-                if weight_quant.actorder in (
-                    ActivationOrdering.GROUP.value,
-                    ActivationOrdering.DYNAMIC.value,
-                ):
-                    raise ValueError(
-                        "Compressed-tensors group/dynamic activation ordering "
-                        f"(actorder={weight_quant.actorder!r}) is no longer supported. "
-                        "Use a checkpoint with static/weight activation ordering or "
-                        "without activation ordering."
-                    )
                 target_scheme_map[target]["weights"] = weight_quant
 
                 target_scheme_map[target]["input_activations"] = None
