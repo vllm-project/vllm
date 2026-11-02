@@ -1,0 +1,152 @@
+# yaml-language-server: $schema=https://recipes.vllm.ai/recipe.schema.json
+
+meta:
+  title: "Flint"
+  slug: "flint"
+  provider: "RecursiveSI"
+  description: "39.8B-parameter (2.5B active) MoE with hybrid sliding-window / full attention, reasoning and tool calling; BF16 and NVFP4 checkpoints on a single Blackwell GPU."
+  date_added: 2026-10-18
+  date_updated: 2026-10-21
+  tasks:
+    - text
+  performance_headline: "Single GB200, NVFP4: ~2.0 ms per output token at batch 1 with 100K context"
+  related_recipes: []
+  default_hardware: gb200
+  hardware:
+    gb200: verified
+
+model:
+  model_id: "RecursiveSI/flint"
+  min_vllm_version: "nightly"
+  install:
+    pip:
+      note: "Use a nightly wheel. The NVFP4 GGUF checkpoint also needs `pip install 'gguf>=0.19.0'`."
+    docker:
+      note: "Use the vLLM nightly image."
+  architecture: moe
+  parameter_count: "39.8B"
+  active_parameters: "2.5B"
+  context_length: 262144
+  base_args: []
+  base_env: {}
+  rust_frontend: unsupported
+
+features:
+  tool_calling:
+    description: "Automatic tool choice with the GLM-4.7 XML tool-call parser (Flint's chat template emits <tool_call>/<arg_key>/<arg_value>); tools are dropped from the prompt when tool_choice is none, as in the reference runtime."
+    args: ["--enable-auto-tool-choice", "--tool-call-parser", "glm47", "--exclude-tools-when-tool-choice-none"]
+  reasoning:
+    description: "Return the <think>…</think> block in the reasoning field; the model decides per turn whether to reason."
+    args: ["--reasoning-parser", "glm47"]
+
+opt_in_features: []
+
+variants:
+  default:
+    precision: bf16
+    vram_minimum_gb: 96
+    description: "BF16 safetensors (79.6 GB of weights)."
+  nvfp4:
+    model_id: "RecursiveSI/flint-nvfp4-gguf"
+    precision: nvfp4
+    vram_minimum_gb: 29
+    description: "NVFP4 GGUF served weight-only (W4A16); 23.5 GB resident after load (the LM head is dequantized to BF16). Config and tokenizer come from the BF16 repo."
+    extra_args: ["--hf-config-path", "RecursiveSI/flint", "--tokenizer", "RecursiveSI/flint"]
+
+compatible_strategies:
+  - single_node_tp
+
+hardware_overrides: {}
+
+strategy_overrides:
+  single_node_tp:
+    tp: 1
+
+guide: |
+  ## Overview
+
+  Flint is a 39.8B-parameter mixture-of-experts model (256 experts, top-6 sigmoid routing plus a
+  shared expert; ~2.5B parameters active per token) with 49 layers: 35 sliding-window layers
+  (window 513, RoPE) and 14 full-attention layers (no RoPE), GQA 32/4, attention sinks, and a
+  262,144-token context. Two checkpoints are served:
+
+  - [RecursiveSI/flint](https://huggingface.co/RecursiveSI/flint): BF16 safetensors.
+  - [RecursiveSI/flint-nvfp4-gguf](https://huggingface.co/RecursiveSI/flint-nvfp4-gguf): a single
+    NVFP4 GGUF (repacked losslessly at load and run as W4A16, like the reference runtime). It ships
+    no config or tokenizer; both come from the BF16 repo.
+
+  Tested end to end on one GB200 (TP=1, BF16 KV cache, CUDA graphs, no torch.compile) for both
+  checkpoints. On a single GPU the Flint kernels are always used (fused MoE, small-batch CuTe GEMV,
+  CuTe decode attention, low-latency decode path for <= 8 requests); TP > 1 and expert parallelism
+  fall back to stock vLLM layers and are not validated.
+
+  ## Launch
+
+  BF16:
+
+  ```bash
+  vllm serve RecursiveSI/flint --served-model-name flint \
+    --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \
+    --exclude-tools-when-tool-choice-none
+  ```
+
+  NVFP4 (requires `gguf>=0.19.0`):
+
+  ```bash
+  vllm serve RecursiveSI/flint-nvfp4-gguf \
+    --hf-config-path RecursiveSI/flint --tokenizer RecursiveSI/flint \
+    --served-model-name flint \
+    --enable-auto-tool-choice --tool-call-parser glm47 --reasoning-parser glm47 \
+    --exclude-tools-when-tool-choice-none
+  ```
+
+  ## Client usage
+
+  Use `/v1/chat/completions`. Sampling defaults from `generation_config.json`: temperature 1.0,
+  top_p 0.95, top_k 20 (greedy decoding is not validated). Reasoning is returned in `reasoning`
+  and counts toward `max_tokens`; use `max_tokens` of at least 32768 for hard problems.
+
+  ```bash
+  curl localhost:8000/v1/chat/completions -H 'Content-Type: application/json' -d '{
+    "model": "flint",
+    "messages": [{"role": "user", "content": "What is 17*23? Answer briefly."}],
+    "max_tokens": 1024
+  }'
+  ```
+
+  Accuracy on GB200 with this recipe (BF16 / NVFP4): GSM8K 0.950 / 0.950, GPQA-Diamond (4 repeats)
+  0.721 / 0.696, MRCR (48 samples, up to 114K-token prompts) ~0.47 / ~0.46, tool-calling suite
+  (19 cases x 10: typed args, tool selection, parallel calls, multi-turn, tool_choice none,
+  escaping, streaming) 10/10 on every case.
+
+  ## Benchmarking
+
+  Forward time on one GB200 (`vllm bench forward`, batch x context, us):
+
+  | shape | BF16 | NVFP4 |
+  |---|---|---|
+  | decode 1 x 100K | 2341 | 1783 |
+  | decode 8 x 100K | 6836 | 5703 |
+  | decode 32 x 100K | 19580 | 16716 |
+  | prefill 8K @ 100K | 145617 | 144765 |
+
+  Serving (NVFP4, `vllm bench serve`, random 1000 in / 1000 out): TPOT 2.0 ms at concurrency 1,
+  2.8 ms at 8, 4.9 ms at 32, 8.5 ms at 128; median inter-token latency 2.06 ms at batch 1 with
+  100K context. Prefill runs eagerly and is CPU-bound on kernel-launch overhead: TTFT is ~60 ms
+  for a short prompt and ~125 ms for an 8K-token prompt.
+
+  ## Troubleshooting
+
+  - Rust frontend: not supported for this recipe. It rejects `--exclude-tools-when-tool-choice-none`,
+    and for NVFP4 also `--hf-config-path` / `--tokenizer`; keep the default Python frontend.
+  - Reasoning parser: the reference runtime's `deepseek-v3` name maps to vLLM's `deepseek_v3`
+    parser, which only extracts reasoning when the request enables `thinking`; with Flint the
+    reasoning then stays in `content`. Use `glm47`.
+  - If `content` contains literal `<think>` or `<tool_call>` text, the server was started without
+    the parsers above.
+  - Batch-1 decode time varies by ~3-4% between sessions (a GPU-side state, not configuration).
+
+  ## References
+
+  - [Flint (BF16) model card](https://huggingface.co/RecursiveSI/flint)
+  - [Flint NVFP4 model card](https://huggingface.co/RecursiveSI/flint-nvfp4-gguf)

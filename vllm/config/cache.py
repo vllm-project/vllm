@@ -55,6 +55,9 @@ CacheDType = Literal[
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
     "turboquant_3bit_nc",
+    "octave_k3v4",
+    "octave_k3v3",
+    "octave_k3v3_compact",
     "ultraquant_4bit",
     "int4_per_token_head",
     "int8_per_token_head",
@@ -180,6 +183,7 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    DEFAULT_GPU_MEMORY_UTILIZATION: ClassVar[float] = 0.92
 
     block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
@@ -209,24 +213,26 @@ class CacheConfig:
 
     This equals to the `hash_block_size` used throughout the KV cache code.
     """
-    gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
+    gpu_memory_utilization: float | None = Field(default=None, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
-    utilization. If unspecified, will use the default value of 0.92. This is a
-    per-instance limit, and only applies to the current vLLM instance. It does
-    not matter if you have another vLLM instance running on the same GPU. For
-    example, if you have two vLLM instances running on the same GPU, you can
-    set the GPU memory utilization to 0.5 for each instance. On non-GPU
-    installs, this value controls the corresponding device memory utilization.
-    """
+    utilization. This is a per-instance limit, and only applies to the current
+    vLLM instance. It does not matter if you have another vLLM instance running
+    on the same GPU. For example, if you have two vLLM instances running on the
+    same GPU, you can set the GPU memory utilization to 0.5 for each instance.
+    On non-GPU installs, this value controls the corresponding device memory
+    utilization.
+
+    If unspecified, 1.0 with the extensible KV cache (sized from measured
+    memory) and 0.92 otherwise; see `resolved_gpu_memory_utilization`."""
 
     @property
-    def device_memory_utilization(self) -> float:
+    def device_memory_utilization(self) -> float | None:
         """Device-neutral alias for ``gpu_memory_utilization``."""
         return self.gpu_memory_utilization
 
     @device_memory_utilization.setter
-    def device_memory_utilization(self, value: float) -> None:
+    def device_memory_utilization(self, value: float | None) -> None:
         self.gpu_memory_utilization = value
 
     cache_dtype: CacheDType | str = "auto"
@@ -332,6 +338,9 @@ class CacheConfig:
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
+    simple_cpu_offload_num_blocks: int | None = field(default=None, init=False)
+    """Worker-aligned offload block count for ``SimpleCPUOffloadConnector``."""
+
     # Set after KV cache initialization.
     effective_attention_block_size: int | None = field(default=None, init=False)
     """Full-attention block size in tokens, including DCP, or None if unavailable."""
@@ -374,6 +383,15 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    enable_extensible_kv_cache: bool = Field(default=None)  # type: ignore[assignment]
+    """Reserve the KV cache address range with device virtual memory and commit
+    physical pages after warmup, so the cache is sized from the memory actually
+    free after CUDA graph capture rather than from a profiling estimate. If
+    unspecified, enabled on CUDA and ROCm with the V2 model runner unless
+    kv_cache_memory_bytes is set; falls back to estimate-based sizing where the
+    driver lacks VMM support. Explicitly requesting it where unsupported is an
+    error."""
+
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
     the total buffer size summed across all TP ranks. By default, this is set
@@ -412,9 +430,11 @@ class CacheConfig:
             "skip_page_size_padded",
             "user_specified_block_size",
             "_block_size_resolved",
+            "_extensible_kv_cache_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "simple_cpu_offload_num_blocks",
             "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",
@@ -423,6 +443,8 @@ class CacheConfig:
             # Feature toggles not impacting compiled graph shape
             "kv_sharing_fast_prefill",
             "swa_bounded_replay",
+            # Runtime memory allocation strategy, not graph structure.
+            "enable_extensible_kv_cache",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
@@ -438,7 +460,10 @@ class CacheConfig:
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
-    @field_validator("block_size", mode="wrap")
+    _extensible_kv_cache_resolved: bool = field(default=False, init=False)
+    """Set once `enable_extensible_kv_cache` has been settled for the model."""
+
+    @field_validator("block_size", "enable_extensible_kv_cache", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         if value is None:
@@ -457,6 +482,15 @@ class CacheConfig:
         else:
             self.user_specified_block_size = True
         return self
+
+    @property
+    def resolved_gpu_memory_utilization(self) -> float:
+        """`gpu_memory_utilization`, or its default given the sizing mode."""
+        if self.gpu_memory_utilization is not None:
+            return self.gpu_memory_utilization
+        if self.enable_extensible_kv_cache:
+            return 1.0
+        return self.DEFAULT_GPU_MEMORY_UTILIZATION
 
     @field_validator("cache_dtype", mode="after")
     @classmethod

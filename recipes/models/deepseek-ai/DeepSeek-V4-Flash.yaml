@@ -21,17 +21,6 @@ meta:
     mi300x: verified
     mi325x: verified
     mi355x: verified
-    # Atlas A5 8-card mixed serving of FP8 (Preview). 950PR verified 2026-08-29
-    # on vLLM Ascend 0.23.0 (DP4+EP, MTP k=1). 950DT matches the v0.23.0
-    # vLLM Ascend mixed recipe (same command, 4 of 8 NPUs).
-    # 950PR additionally verified 2026-09-09 on FP8 (0731) with DSpark k=5,
-    # same DP4+EP command; 950DT follows it. See the hardware note for the
-    # required fix.
-    ascend_950dt_8x: verified
-    ascend_950pr_8x: verified
-    # Atlas 800 A3 (16× Ascend 910C, 64 GB each). W8A8 quantized checkpoint,
-    # DP2+TP8 on all 16 NPUs. Verified 2026-09-23 on vLLM Ascend v0.23.0-a3.
-    ascend_910c: verified
 
 model:
   model_id: "deepseek-ai/DeepSeek-V4-Flash"
@@ -94,13 +83,6 @@ features:
             args:
               - "--speculative-config"
               - '{"method":"mtp","num_speculative_tokens":1}'
-          # Preview MTP head is next-1. vLLM Ascend 0.23.0 runs the draft eager
-          # while the target keeps FULL_DECODE_ONLY ACLGraph. DSpark is not in
-          # this release; do not raise k or switch method on the preview weights.
-          npu:
-            args:
-              - "--speculative-config"
-              - '{"method":"mtp","num_speculative_tokens":1,"enforce_eager":true}'
       dspark:
         label: "DSpark"
         description: "DSpark drafting, 7 draft tokens, probabilistic sampling. Requires the DSpark or 0731 checkpoint (Variant row)."
@@ -117,13 +99,6 @@ features:
             args:
               - "--speculative-config"
               - '{"method":"dspark","num_speculative_tokens":5,"draft_sample_method":"probabilistic","attention_backend":"B12X_MLA_SPARSE"}'
-          # 950PR was verified at k=5 with an eager draft while the target keeps
-          # its FULL_DECODE_ONLY ACLGraph. vLLM Ascend does not implement
-          # probabilistic draft sampling, so that key is left off.
-          npu:
-            args:
-              - "--speculative-config"
-              - '{"method":"dspark","num_speculative_tokens":5,"enforce_eager":true}'
 
       dflash:
         label: "DFlash"
@@ -145,12 +120,7 @@ variants:
     precision: fp8
     vram_minimum_gb: 200
     description: "Official DeepSeek-V4-Flash release (2026-07-31) superseding the preview — substantially stronger agentic performance, with the DSpark draft module attached."
-    # 950PR does load this checkpoint's DSpark draft module: the v0.23.0-a5 tag
-    # currently ships vLLM Ascend main (0.1.dev1+g6e6aad57e), not the 0.23.0
-    # release. 950DT is offered on the same grounds the FP8 (Preview) row
-    # already uses — one A5 profile, one command, 4 of 8 NPUs — and its 4x96 GB
-    # clears this variant's 200 GB minimum. 0731 itself was run on 950PR.
-    supported_hardware: [arch:sm90, arch:sm100, arch:sm103, arch:gfx942, mi355x, rtx_pro_6000_8x, dgx_spark_gb10, ascend_950pr_8x, ascend_950dt_8x]
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103, arch:gfx942, mi355x, rtx_pro_6000_8x, dgx_spark_gb10]
     min_vllm_version: "0.25.0"
     docker_image: "vllm/vllm-openai:v0.28.0"
     default_modes:
@@ -158,16 +128,6 @@ variants:
     hardware_overrides:
       rtx_pro_6000_8x:
         docker_image: "vllm/vllm-openai:nightly"
-      # Same pinning as the FP8 (Preview) variant below: the NVIDIA wheel
-      # carries no NPU kernels, so the pip tab is hidden here.
-      ascend_950pr_8x:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
-        install:
-          pip: false
-      ascend_950dt_8x:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
-        install:
-          pip: false
       dgx_spark_gb10:
         docker_image: "eugr/spark-vllm-b12x:latest"
         # No wheel path here: the B12X args and env below ship only in the
@@ -296,17 +256,6 @@ variants:
         extra_args:
           - "--moe-backend"
           - "deep_gemm_mega_moe"
-      # `computeDockerMeta` has no Huawei brand, so a bare string docker_image
-      # would only pin NVIDIA. Exact-GPU overrides land regardless of brand.
-      # The pip tab is hidden: the official vLLM wheel has no NPU kernels.
-      ascend_950dt_8x:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
-        install:
-          pip: false
-      ascend_950pr_8x:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a5"
-        install:
-          pip: false
   nvfp4:
     model_id: "nvidia/DeepSeek-V4-Flash-NVFP4"
     precision: nvfp4
@@ -451,59 +400,6 @@ variants:
         extra_args:
           - "--moe-backend"
           - "deep_gemm_mega_moe"
-  ascend_w8a8:
-    # W8A8 quantized checkpoint for Atlas 800 A3 (16× Ascend 910C, 64 GB each).
-    # TP8 shards the 284B weights across 8 NPUs (35.5 GB each), fitting within
-    # the 64 GB per-NPU limit. DP2 uses all 16 NPUs (2 replicas × 8 NPUs each).
-    model_id: "Eco-Tech/DeepSeek-V4-Flash-w8a8-mtp"
-    label: "W8A8 (Ascend A3)"
-    precision: int8
-    vram_minimum_gb: 341
-    description: "ModelSlim INT8 W8A8 checkpoint for one Atlas 800 A3 node (16× Ascend 910C), using DP2+TP8. Requires --quantization ascend."
-    supported_hardware: [ascend_910c]
-    tp:
-      ascend_910c: 8
-    min_vllm_version: "0.23.0"
-    extra_args:
-      - "--data-parallel-size"
-      - "2"
-      - "--quantization"
-      - "ascend"
-      - "--max-num-seqs"
-      - "32"
-      - "--max-num-batched-tokens"
-      - "10240"
-      - "--gpu-memory-utilization"
-      - "0.90"
-      - "--block-size"
-      - "128"
-      - "--compilation-config"
-      - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-      - "--async-scheduling"
-      - "--api-server-count"
-      - "1"
-      - "--safetensors-load-strategy"
-      - "prefetch"
-      - "--additional-config"
-      - '{"ascend_compilation_config":{"enable_npugraph_ex":true,"enable_static_kernel":false},"enable_cpu_binding":true,"multistream_overlap_shared_expert":true}'
-    extra_env:
-      HCCL_OP_EXPANSION_MODE: "AIV"
-      HCCL_BUFFSIZE: "2560"
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "10"
-      TASK_QUEUE_ENABLE: "1"
-      LD_PRELOAD: "/usr/lib/aarch64-linux-gnu/libjemalloc.so.2:$LD_PRELOAD"
-      # Override the npu generation-level "0,1,2,3" (for A5) — A3 uses all 16 NPUs.
-      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15"
-      # Pull W8A8 weights from ModelScope (Eco-Tech checkpoint).
-      VLLM_USE_MODELSCOPE: "True"
-    hardware_overrides:
-      ascend_910c:
-        docker_image: "quay.io/ascend/vllm-ascend:v0.23.0-a3"
-        # Ascend recommends Docker; no official pip wheel for NPU.
-        install:
-          pip: false
 
 compatible_strategies:
   - single_node_tp
@@ -534,21 +430,8 @@ strategy_hardware:
   # hardware; this makes the Strategy row agree. multi_node_dep needs no entry:
   # the Nodes row is pinned to 1 here, which already hides every multi_node
   # strategy.
-  # Atlas A5 mixed serving is DP+EP only (vLLM Ascend 0.23.0). TP-only does not
-  # partition the V4 MoE layers on 950; TEP and intra-node PD are documented
-  # separately in the vLLM Ascend 1P1D tutorial, not this builder.
-  single_node_tp:
-    npu: unsupported
-  single_node_tep:
-    npu: unsupported
-  multi_node_dep:
-    npu: unsupported
   pd_cluster:
     rtx_pro_6000_8x: unsupported
-    npu: unsupported
-    # Atlas 800 A3 PD separation (1P1D or multi-node) is documented in the
-    # vllm-ascend tutorial separately from the A5 single-node mixed path.
-    ascend_910c: supported
 
 hardware_overrides:
   blackwell:
@@ -571,16 +454,6 @@ hardware_overrides:
       - '{"mode": 3, "cudagraph_mode": "FULL_DECODE_ONLY"}'
     extra_env:
       VLLM_ROCM_USE_AITER: "1"
-  # Shared by 950DT 8x (8×96 GB) and 950PR 8x (8×128 GB). Mixed serving uses 4 of the
-  # 8 NPUs (DP4+EP). HCCL_BUFFSIZE=1024 is required for MC2 dispatch; 200 MB
-  # default fails profile_run with aclnnMoeDistributeDispatchV4 561002.
-  npu:
-    extra_env:
-      PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-      OMP_PROC_BIND: "false"
-      OMP_NUM_THREADS: "10"
-      HCCL_BUFFSIZE: "1024"
-      ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
 
 strategy_overrides:
   single_node_tp:
@@ -591,7 +464,7 @@ strategy_overrides:
     hardware_overrides:
       hopper:
         extra_args:
-          - "--no-enable-flashinfer-autotune"
+          - "--disable-flashinfer-autotune"
       blackwell:
     # Replaces recipe-level blackwell override: keeps the FP4 indexer cache
     # but drops --moe-backend deep_gemm_mega_moe (TP-only path uses the
@@ -599,7 +472,7 @@ strategy_overrides:
         extra_args:
          - "--attention_config.indexer_kv_dtype"
          - "mxfp4"
-         - "--no-enable-flashinfer-autotune"
+         - "--disable-flashinfer-autotune"
       rtx_pro_6000_8x:
         extra_args:
           - "--attention_config.indexer_kv_dtype"
@@ -645,38 +518,6 @@ strategy_overrides:
         extra_args:
           - "--gpu-memory-utilization"
           - "0.85"
-      npu:
-        # A per-strategy generation override replaces the recipe-level one, and
-        # DEP is the only strategy the A5 pills can select — so hardware_overrides.npu
-        # never reaches the command and its env has to be repeated here. Without
-        # HCCL_BUFFSIZE the MC2 dispatch fails profile_run with
-        # aclnnMoeDistributeDispatchV4 561002.
-        extra_env:
-          PYTORCH_NPU_ALLOC_CONF: "expandable_segments:True"
-          OMP_PROC_BIND: "false"
-          OMP_NUM_THREADS: "10"
-          HCCL_BUFFSIZE: "1024"
-          ASCEND_RT_VISIBLE_DEVICES: "0,1,2,3"
-        extra_args:
-          - "--block-size"
-          - "32"
-          - "--kv-cache-dtype"
-          - "auto"
-          - "--safetensors-load-strategy"
-          - "prefetch"
-          - "--async-scheduling"
-          - "--max-num-seqs"
-          - "64"
-          - "--max-num-batched-tokens"
-          - "4096"
-          - "--gpu-memory-utilization"
-          - "0.9"
-          - "--api-server-count"
-          - "1"
-          - "--compilation-config"
-          - '{"cudagraph_mode":"FULL_DECODE_ONLY"}'
-          - "--additional-config"
-          - '{"enable_cpu_binding": true, "multistream_overlap_shared_expert": true, "enable_shared_expert_dp": true}'
   multi_node_dep:
     extra_args:
       - "--compilation-config"
@@ -742,24 +583,6 @@ hardware_notes:
     link:
       label: "DGX Spark cluster guide"
       href: "#dgx-spark-gb10-cluster"
-  ascend_950dt_8x:
-    title: "vLLM Ascend A5 image required"
-    body: "Mixed serving on one 8-card 950DT node uses 4 of 8 NPUs (DP4+EP). FP8 (Preview) runs MTP k=1; FP8 (0731) runs DSpark k=5, verified on 950PR and offered here on the same A5 command. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=1024 before launch. DeepSeek-V4 on 950 also needs the indexer quant_mode fix in vllm-project/vllm-ascend#16104 — without it the image the tag currently ships aborts during warmup with QuantLightningIndexerV2 EZ0021."
-    link:
-      label: "Ascend 950DT 8x mixed"
-      href: "#huawei-ascend-950dt-8x"
-  ascend_950pr_8x:
-    title: "vLLM Ascend A5 image required"
-    body: "Mixed serving on one 8-card 950PR node uses 4 of 8 NPUs (DP4+EP). FP8 (Preview) runs MTP k=1, same command as 950DT; FP8 (0731) runs DSpark k=5. Pin quay.io/ascend/vllm-ascend:v0.23.0-a5 and set HCCL_BUFFSIZE=1024 before launch. DeepSeek-V4 on 950 also needs the indexer quant_mode fix in vllm-project/vllm-ascend#16104 — without it the image the tag currently ships aborts during warmup with QuantLightningIndexerV2 EZ0021."
-    link:
-      label: "Ascend 950PR 8x mixed"
-      href: "#huawei-ascend-950pr-8x"
-  ascend_910c:
-    title: "vLLM Ascend A3 image required"
-    body: "Single-node DP2+TP8 on all 16 NPUs using the W8A8 quantized checkpoint from Eco-Tech. TP8 shards the 284B weights to 35.5 GB per NPU (within the 64 GB limit). Pin quay.io/ascend/vllm-ascend:v0.23.0-a3 — the NVIDIA pip wheel cannot run here. Set HCCL_BUFFSIZE=2560 before launch. The A3 path uses ModelScope to download the W8A8 weights (pip install modelscope). Multi-node PD separation is also available; see the vllm-ascend tutorial."
-    link:
-      label: "Ascend 910C A3 reference"
-      href: "https://docs.vllm.ai/projects/ascend/en/latest/tutorials/models/DeepSeek-V4-Flash.html"
 
 guide: |
   ## Overview

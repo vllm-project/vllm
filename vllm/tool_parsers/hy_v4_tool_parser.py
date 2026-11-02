@@ -805,7 +805,7 @@ class HYV4ToolExtractor:
         # --- scan all fully closed kv pairs ---
         arg_pairs = self.func_args_regex.findall(args_text)
         for key, value in arg_pairs:
-            key = key.strip()
+            # Property names are exact schema keys, including whitespace.
             if key not in self._completed_args:
                 self._completed_args[key] = _parse_value(
                     value, self._streaming_tool_name or "", key, tools
@@ -827,9 +827,7 @@ class HYV4ToolExtractor:
                 ak_start + len(self.arg_key_start_token),
             )
             if ak_end != -1:
-                partial_key = tail[
-                    ak_start + len(self.arg_key_start_token) : ak_end
-                ].strip()
+                partial_key = tail[ak_start + len(self.arg_key_start_token) : ak_end]
                 self._current_arg_key = partial_key
                 self._current_arg_is_string = _is_only_string_type(
                     self._streaming_tool_name or "",

@@ -196,9 +196,14 @@ def test_fused_norm_rope(
     bs = max_pos  # single block covering all tokens
     mla_dim = cfg.kv_lora + cfg.rope_dim
     mla_fp8 = mla_dtype == "fp8"
+    unit_scale = (
+        mla_fp8 and cfg == MODEL_CONFIGS[0] and num_tokens == 4 and index_interleave
+    )
     if mla_fp8:
         mla_cache = torch.zeros(1, bs, mla_dim, device=dev, dtype=torch.uint8)
-        mla_k_scale = torch.tensor([0.3], device=dev, dtype=torch.float32)
+        mla_k_scale = torch.tensor(
+            [1.0 if unit_scale else 0.3], device=dev, dtype=torch.float32
+        )
     else:
         mla_cache = torch.zeros(1, bs, mla_dim, device=dev, dtype=torch.bfloat16)
         mla_k_scale = None
@@ -228,6 +233,7 @@ def test_fused_norm_rope(
         mla_kv_cache=mla_cache,
         mla_kv_cache_dtype=mla_dtype,
         mla_k_scale=mla_k_scale,
+        skip_scale=unit_scale,
         has_indexer=True,
         index_rope_interleave=index_interleave,
     )
@@ -636,13 +642,13 @@ def nvfp4_sf_byte(s: torch.Tensor) -> torch.Tensor:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_device_capability(100),
-    reason="nvfp4_ds_mla requires SM100 (Blackwell)",
+    not (current_platform.is_device_capability_family(100)),
+    reason="nvfp4_ds_mla requires SM100 family",
 )
 @pytest.mark.parametrize("cfg", MODEL_CONFIGS, ids=MODEL_IDS)
 @pytest.mark.parametrize("num_tokens", [1, 4, 17, 512])
 def test_fused_norm_rope_nvfp4_ds_mla(num_tokens: int, cfg: ModelConfig):
-    """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 only).
+    """nvfp4_ds_mla MLA cache layout (FlashMLA sparse, SM100 family).
 
     Per-token 352-byte entry: 256 B of 512 e2m1 NoPE packed 2/byte (low nibble
     = even element) | 64 B unscaled e4m3 RoPE | 32 B byte-permuted e4m3 tile

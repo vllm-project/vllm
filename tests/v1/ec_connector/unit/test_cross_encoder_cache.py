@@ -21,6 +21,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake.config import MooncakeEC
 from vllm.distributed.ec_transfer.ec_connector.mooncake.metadata import (
     ECMooncakeConnectorMetadata,
     ECMooncakePushSpec,
+    ECMooncakeWorkerMetadata,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_ec_connector import (
     ECMooncakeConnector,
@@ -68,6 +69,7 @@ def test_push_shapes_follow_each_modality(monkeypatch):
         metadata = instance.build_connector_meta(
             SimpleNamespace(free_encoder_mm_hashes=[], preempted_req_ids=set())
         )
+        assert isinstance(metadata, ECMooncakeConnectorMetadata)
         assert [spec.shape for spec in metadata.pushes] == [(2, 8192), (2, 2048)]
     finally:
         instance.close()
@@ -309,7 +311,7 @@ def test_non_matrix_output_is_rejected_before_registration(backend):
     client.store.register_buffer.assert_not_called()
 
 
-def make_worker(backend):
+def make_worker(backend, monkeypatch):
     from vllm.distributed.ec_transfer.ec_connector.mooncake.worker import (
         ECMooncakeWorker,
     )
@@ -331,8 +333,8 @@ def make_worker(backend):
     worker._failed_loads = set()
     worker._failed_saves = set()
     worker._push_ready = threading.Event()
-    worker._flush_pending_pushes = MagicMock()
-    worker._bind_push_source = MagicMock()
+    monkeypatch.setattr(worker, "_flush_pending_pushes", MagicMock())
+    monkeypatch.setattr(worker, "_bind_push_source", MagicMock())
     connector = object.__new__(ECMooncakeConnector)
     connector._worker = worker
     connector._role = ECConnectorRole.WORKER
@@ -355,7 +357,7 @@ def make_worker(backend):
         "registration-failure",
     ],
 )
-def test_reuse_pipeline(backend, mode):
+def test_reuse_pipeline(backend, mode, monkeypatch):
     from vllm.multimodal.inputs import (
         MultiModalFeatureSpec,
         MultiModalKwargsItem,
@@ -401,7 +403,7 @@ def test_reuse_pipeline(backend, mode):
     if mode == "registration-failure":
         native.register_buffer = MagicMock(return_value=-500)
         hits.clear()
-    connector = make_worker(backend)
+    connector = make_worker(backend, monkeypatch)
     metadata = ECMooncakeConnectorMetadata(
         store_candidates=dict.fromkeys("abc", SPEC),
         pushes=[
@@ -451,6 +453,8 @@ def test_reuse_pipeline(backend, mode):
         assert runner.prepare_mm_inputs({"req": [0, 1, 2]})[0] == missing
         ModelState.execute_mm_encoder(state, {"req": [0, 1, 2]})
     assert runner.execute_mm_encoder.call_count == bool(missing)
+    assert output is not None
+    assert isinstance(output.ec_connector_worker_meta, ECMooncakeWorkerMetadata)
     assert output.ec_connector_worker_meta.pending_saves is False
     assert all(
         torch.equal(
@@ -696,7 +700,7 @@ def test_completion_race_preserves_failure_and_reclaims_other_items(
         backend._enqueue_save("later", torch.ones(2, 2))
 
 
-def test_readiness_and_shutdown_do_not_block_p2p_completion(backend):
+def test_readiness_and_shutdown_do_not_block_p2p_completion(backend, monkeypatch):
     ready, waiting, entered = [threading.Event() for _ in range(3)]
 
     original = backend._executor.shutdown
@@ -722,7 +726,7 @@ def test_readiness_and_shutdown_do_not_block_p2p_completion(backend):
         return put(*args)
 
     native.batch_put_from_multi_buffers = waiting_put
-    connector = make_worker(backend)
+    connector = make_worker(backend, monkeypatch)
     connector.bind_connector_metadata(
         ECMooncakeConnectorMetadata(store_candidates={"a": SPEC})
     )

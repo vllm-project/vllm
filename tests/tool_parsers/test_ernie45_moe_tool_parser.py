@@ -344,14 +344,17 @@ def test_extract_tool_calls_streaming_incremental(
         tool_calls = delta_message.tool_calls
         for tool_call_chunk in tool_calls:
             index = tool_call_chunk.index
+            assert tool_call_chunk.function is not None
             if index not in tool_calls_dict:
                 if tool_call_chunk.function.arguments is None:
                     tool_call_chunk.function.arguments = ""
                 tool_calls_dict[index] = tool_call_chunk
             else:
-                tool_calls_dict[
-                    index
-                ].function.arguments += tool_call_chunk.function.arguments
+                accumulated = tool_calls_dict[index].function
+                assert accumulated is not None
+                assert accumulated.arguments is not None
+                assert tool_call_chunk.function.arguments is not None
+                accumulated.arguments += tool_call_chunk.function.arguments
     actual_tool_calls = list(tool_calls_dict.values())
 
     assert len(actual_tool_calls) > 0

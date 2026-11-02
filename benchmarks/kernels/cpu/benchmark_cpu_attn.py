@@ -163,6 +163,7 @@ def main(
         sliding_window_size=sliding_window if sliding_window is not None else -1,
         isa=isa,
         enable_kv_split=enable_kv_split,
+        kv_cache_dtype=kv_cache_dtype,
     )
 
     out_with_split = torch.empty_like(query)

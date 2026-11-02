@@ -893,7 +893,9 @@ class MoRIIOWrapper:
                 state = TransferBatchState.PENDING
         return state
 
-    def waiting_for_transfer_complete(self, transfer_statuses: list[Any] | None = None):
+    def waiting_for_transfer_complete(
+        self, transfer_statuses: list[Any] | None = None, fail_fast: bool = True
+    ):
         if transfer_statuses is None:
             with self.lock:
                 transfers_to_wait = self.transfer_status[:]
@@ -906,9 +908,11 @@ class MoRIIOWrapper:
 
         wait_all = getattr(self.moriio_engine, "wait_all", None)
         if wait_all is None or StatusCode is None:
-            self._poll_transfers_until_done(transfers_to_wait)
+            self._poll_transfers_until_done(transfers_to_wait, fail_fast)
             return
 
+        # wait_all waits on every status until the deadline; a failure does not
+        # end it early, so fail_fast only applies to the polling fallback.
         # Zero means a nonblocking progress call in Mori, not an immediate
         # deadline. Round up so even sub-millisecond waits remain blocking.
         timeout_ms = ceil(self._transfer_timeout * 1000)
@@ -927,12 +931,15 @@ class MoRIIOWrapper:
                 f"MoRIIO batch wait failed ({result}): " + "; ".join(details)
             )
 
-    def _poll_transfers_until_done(self, transfers_to_wait: list[Any]) -> None:
+    def _poll_transfers_until_done(
+        self, transfers_to_wait: list[Any], fail_fast: bool = True
+    ) -> None:
         """Fallback for mori builds without the batched wait.
 
-        Gives failure precedence over pending: once any status has failed the
-        request is lost, so waiting out the remaining ones would only delay the
-        barrier by up to transfer_timeout.
+        With fail_fast, failure takes precedence over pending: once any status
+        has failed the request is lost, so waiting out the remaining ones would
+        only delay the barrier by up to transfer_timeout. Pass False when the
+        statuses span several requests.
         """
         timeout = self._transfer_timeout
         deadline = time.monotonic() + timeout
@@ -959,7 +966,7 @@ class MoRIIOWrapper:
                     )
                 else:
                     still_waiting.append(status)
-            if errors:
+            if errors and fail_fast:
                 break
             remaining = still_waiting
             if remaining:

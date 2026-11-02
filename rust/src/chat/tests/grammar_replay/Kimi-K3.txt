@@ -1,6 +1,6 @@
 # auto (from_token_zero)
 sequence
-  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
   or
     sequence
       tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
@@ -47,7 +47,7 @@ sequence
 
 # required (from_token_zero)
 sequence
-  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
   sequence
     optional tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
     tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
@@ -73,7 +73,7 @@ sequence
 
 # named (from_token_zero)
 sequence
-  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
   sequence
     optional tag `<|open|>response<|sep|>` text excluding [`<|open|>`, `<|close|>`, `<|end_of_msg|>`] `<|close|>response<|sep|>`
     tag `<|open|>tools<|sep|>` .. `<|close|>tools<|sep|>`
@@ -89,13 +89,13 @@ sequence
 
 # none_schema (from_token_zero)
 sequence
-  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
   tag `<|open|>response<|sep|>` json({ answer: string }) `<|close|>response<|sep|>`
   optional `<|close|>message<|sep|>`
 
 # auto_schema_content, auto_schema_calls (from_token_zero)
 sequence
-  tag `` text excluding [`<|close|>think<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
+  tag `` text excluding [`<|close|>think<|sep|>`, `<|open|>response<|sep|>`, `<|end_of_msg|>`] `<|close|>think<|sep|>`
   or
     sequence
       tag `<|open|>response<|sep|>` json({ answer: string }) `<|close|>response<|sep|>`

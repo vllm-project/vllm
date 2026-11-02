@@ -8,7 +8,7 @@ Run `pytest tests/kernels/test_moe.py`.
 import functools
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 import pytest
 import torch
@@ -75,7 +75,7 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     class FakeKernel:
         def __getitem__(self, grid):
             def launch(*args, **kwargs) -> None:
-                captured["a_scale"] = args[4]
+                captured["a_scale"] = args[5]
 
             return launch
 
@@ -172,7 +172,15 @@ EP_SIZE = [1, 4]
 TOP_KS = [2, 6]
 TOP_KS_SMALL = [1, 2]
 
-MOE_MARLIN_QUANT_TEST_CONFIGS = [
+
+class MarlinMoEQuantTestConfig(TypedDict):
+    a_type: NotRequired[list[ScalarType]]
+    b_type: ScalarType
+    c_type: NotRequired[list[ScalarType]]
+    group_blocks: list[int]
+
+
+MOE_MARLIN_QUANT_TEST_CONFIGS: list[MarlinMoEQuantTestConfig] = [
     # AWQ-INT4
     {"b_type": scalar_types.uint4, "group_blocks": [-1, 2, 4, 8]},
     # GPTQ-INT4
@@ -545,6 +553,68 @@ def test_fused_moe_int64_overflow(workspace_init):
             topk=topk,
             global_num_experts=e,
         )
+
+
+@pytest.mark.parametrize("m", [1, 2, 4])
+@pytest.mark.parametrize("host_resident", [False, True])
+@pytest.mark.parametrize("modular", [True, False])
+def test_host_resident_weights_take_sorted_path(
+    m: int, host_resident: bool, modular: bool, monkeypatch, workspace_init
+):
+    """At small batch the naive path reads an expert once per (token, expert)
+    pair. Weights read from host memory in place (UVA offloading) must take
+    the sorted path instead, with the same output."""
+    from vllm.utils.platform_utils import is_uva_available
+    from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+    if host_resident and not is_uva_available():
+        pytest.skip("needs UVA")
+    set_random_seed(7)
+    e, n, k, topk, dtype = 128, 256, 128, 8, torch.bfloat16
+    # Inputs scaled so that outputs sit well above the tolerance below.
+    a = torch.randn((m, k), device="cuda", dtype=dtype)
+    w1 = torch.randn((e, 2 * n, k), dtype=dtype) / 8
+    w2 = torch.randn((e, k, n), dtype=dtype) / 8
+    score = torch.randn((m, e), device="cuda", dtype=dtype)
+    if host_resident:
+        w1_dev = get_accelerator_view_from_cpu_tensor(w1.pin_memory())
+        w2_dev = get_accelerator_view_from_cpu_tensor(w2.pin_memory())
+        w1_dev._vllm_is_uva_offloaded = True
+        w2_dev._vllm_is_uva_offloaded = True
+    else:
+        w1_dev, w2_dev = w1.cuda(), w2.cuda()
+
+    aligned: list[int] = []
+    align = fused_moe_module.moe_align_block_size
+
+    def counting_align(*args, **kwargs):
+        aligned.append(1)
+        return align(*args, **kwargs)
+
+    monkeypatch.setattr(fused_moe_module, "moe_align_block_size", counting_align)
+    with set_current_vllm_config(vllm_config):
+        if modular:
+            fused_moe_fn = modular_triton_fused_moe(
+                make_dummy_moe_config(), FUSED_MOE_UNQUANTIZED_CONFIG
+            )
+            topk_weights, topk_ids, _ = fused_topk(a, score, topk, False)
+            out = fused_moe_fn.apply(
+                a,
+                w1_dev,
+                w2_dev,
+                topk_weights,
+                topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=False,
+            )
+        else:
+            out = fused_moe(a, w1_dev, w2_dev, score, topk, renormalize=False)
+        ref = torch_moe(a, w1.cuda(), w2.cuda(), score, topk)
+    assert ref.abs().mean() > 0.1
+    torch.testing.assert_close(out, ref, atol=2e-2, rtol=2e-2)
+    assert bool(aligned) == host_resident
 
 
 @pytest.mark.parametrize("m,n,k", FUSED_MOE_MNK_FACTORS_SMALL_M)

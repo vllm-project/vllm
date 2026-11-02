@@ -2276,7 +2276,10 @@ def test_convert_ids_to_tokens_pre_args_tekken():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("reasoning_effort", [None, "none", "high"])
+@pytest.mark.parametrize(
+    "reasoning_effort",
+    [None, "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+)
 def test_validate_request_params_valid_effort(reasoning_effort: str | None) -> None:
     request = ChatCompletionRequest(
         model="test-model",
@@ -2284,17 +2287,6 @@ def test_validate_request_params_valid_effort(reasoning_effort: str | None) -> N
         reasoning_effort=reasoning_effort,
     )
     assert validate_request_params(request) is None
-
-
-def test_validate_request_params_rejects_unsupported_effort() -> None:
-    request = ChatCompletionRequest(
-        model="test-model",
-        messages=[],
-        reasoning_effort="medium",
-    )
-    with pytest.raises(VLLMValidationError, match="reasoning_effort") as exc_info:
-        validate_request_params(request)
-    assert exc_info.value.parameter == "reasoning_effort"
 
 
 def test_validate_request_params_rejects_chat_template() -> None:
@@ -2325,19 +2317,17 @@ def v15_mistral_tokenizer() -> MistralTokenizer:
     raise AssertionError("unreachable")
 
 
-@pytest.fixture(scope="module")
-def v13_mistral_tokenizer() -> MistralTokenizer:
-    """Load the v13 Mistral tokenizer; skip if unavailable."""
-    try:
-        return MistralTokenizer.from_pretrained("mistralai/Magistral-Small-2509")
-    except Exception:
-        pytest.skip("v13 tokenizer unavailable")
-    raise AssertionError("unreachable")
-
-
-def test_v15_apply_chat_template_passes_reasoning_effort_high(
+@pytest.mark.parametrize(
+    "extra_kwargs",
+    [
+        {"reasoning_effort": "high"},
+        {"response_format": {"type": "json_object"}},
+    ],
+)
+def test_apply_chat_template_forwards_kwargs(
     monkeypatch: pytest.MonkeyPatch,
     v15_mistral_tokenizer: MistralTokenizer,
+    extra_kwargs: dict[str, Any],
 ) -> None:
     captured_kwargs: list[dict] = []
 
@@ -2352,54 +2342,25 @@ def test_v15_apply_chat_template_passes_reasoning_effort_high(
     )
 
     v15_mistral_tokenizer.apply_chat_template(
-        messages=_PASSTHROUGH_MESSAGES,
-        reasoning_effort="high",
+        messages=_PASSTHROUGH_MESSAGES, **extra_kwargs
     )
 
-    assert captured_kwargs[-1]["reasoning_effort"] == "high"
+    assert captured_kwargs[-1].items() >= extra_kwargs.items()
 
 
-def test_v15_apply_chat_template_passes_reasoning_effort_none_by_default(
-    monkeypatch: pytest.MonkeyPatch,
+def test_apply_chat_template_accepts_renderer_kwargs(
     v15_mistral_tokenizer: MistralTokenizer,
 ) -> None:
-    captured_kwargs: list[dict] = []
-
-    def fake_apply_chat_template(**kwargs):
-        captured_kwargs.append(kwargs)
-        return [0]
-
-    monkeypatch.setattr(
-        v15_mistral_tokenizer.transformers_tokenizer,
-        "apply_chat_template",
-        fake_apply_chat_template,
-    )
-
-    v15_mistral_tokenizer.apply_chat_template(messages=_PASSTHROUGH_MESSAGES)
-
-    assert "reasoning_effort" in captured_kwargs[-1]
-    assert captured_kwargs[-1]["reasoning_effort"] is None
-
-
-def test_pre_v15_apply_chat_template_omits_reasoning_effort(
-    monkeypatch: pytest.MonkeyPatch,
-    v13_mistral_tokenizer: MistralTokenizer,
-) -> None:
-    captured_kwargs: list[dict] = []
-
-    def fake_apply_chat_template(**kwargs):
-        captured_kwargs.append(kwargs)
-        return [0]
-
-    monkeypatch.setattr(
-        v13_mistral_tokenizer.transformers_tokenizer,
-        "apply_chat_template",
-        fake_apply_chat_template,
-    )
-
-    v13_mistral_tokenizer.apply_chat_template(
+    """Renderer kwargs must not collide with the explicit transformers args."""
+    token_ids = v15_mistral_tokenizer.apply_chat_template(
         messages=_PASSTHROUGH_MESSAGES,
+        add_generation_prompt=True,
+        continue_final_message=False,
+        tokenize=True,
+        return_dict=False,
+        chat_template=None,
         reasoning_effort="high",
+        response_format={"type": "json_object"},
     )
 
-    assert "reasoning_effort" not in captured_kwargs[-1]
+    assert isinstance(token_ids, list) and token_ids
