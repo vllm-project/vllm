@@ -21,7 +21,7 @@ from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetric
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import (
-    _REGION_SEGMENTS,
+    REGION_SEGMENTS,
     SharedOffloadRegion,
 )
 
@@ -196,7 +196,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
-                num_segments=_REGION_SEGMENTS,
+                num_segments=REGION_SEGMENTS,
                 populate_shard=(
                     (worker_index, world_size) if self.replicated_layout else None
                 ),

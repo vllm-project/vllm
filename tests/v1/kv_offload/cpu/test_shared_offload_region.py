@@ -7,6 +7,7 @@ import ctypes
 import errno
 import mmap
 import os
+import tempfile
 import threading
 import time
 import uuid
@@ -660,6 +661,8 @@ def test_segmented_region_maps_files_back_to_back(iid, monkeypatch):
     """Rows split over three shm files mapped back to back: each worker sees
     the other's writes in every file, and the creator removes every file."""
     monkeypatch.setattr(region_module, "_MIN_SEGMENT_BYTES", PAGE_SIZE)
+    # The reservation must not need a writable temp directory.
+    monkeypatch.setattr(tempfile, "tempdir", "/nonexistent")
     map_segments = SharedOffloadRegion._map_segments
 
     def check_reservation(region):

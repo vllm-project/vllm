@@ -6,7 +6,6 @@ import errno
 import functools
 import mmap
 import os
-import tempfile
 import time
 from collections.abc import Callable, Iterator
 from ctypes import c_int, c_long, c_size_t, c_void_p
@@ -31,7 +30,7 @@ _MAP_FIXED = 0x10
 _MIN_SEGMENT_BYTES = 1 << 30
 # Split the shared region into this many shm files so workers pre-fault them
 # in parallel (page-cache inserts are serialized per file).
-_REGION_SEGMENTS = 32
+REGION_SEGMENTS = 32
 
 
 def _wait_for_file_size(fd: int, expected_size: int, timeout: float = 30.0) -> None:
@@ -197,14 +196,17 @@ class SharedOffloadRegion:
                     prot=mmap.PROT_READ | mmap.PROT_WRITE,
                 )
             else:
-                with tempfile.TemporaryFile() as reservation:
-                    reservation.truncate(self.total_size_bytes)
+                reservation = os.memfd_create("vllm_offload_reservation")
+                try:
+                    os.ftruncate(reservation, self.total_size_bytes)
                     self.mmap_obj = mmap.mmap(
-                        reservation.fileno(),
+                        reservation,
                         self.total_size_bytes,
                         flags=mmap.MAP_SHARED,
                         prot=mmap.PROT_READ | mmap.PROT_WRITE,
                     )
+                finally:
+                    os.close(reservation)
                 self._map_segments()
             if barrier is not None:
                 barriers_remaining -= 1
