@@ -92,6 +92,7 @@ if TYPE_CHECKING:
     VLLM_MAIN_CUDA_VERSION: str = "13.0"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
+    VLLM_BI_REPLAY_STAGE_LAYERS: int = 0
     VLLM_TRITON_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
@@ -659,6 +660,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
     "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
+    # Batch-invariant exact SWA replay: run the decoder replay layers in stages
+    # of this many layers, each on only the trailing rows its layers need for
+    # the last window to come out exact (0: every replay layer on the same rows).
+    "VLLM_BI_REPLAY_STAGE_LAYERS": lambda: int(
+        os.getenv("VLLM_BI_REPLAY_STAGE_LAYERS", "0")
+    ),
     "VLLM_REPLICATE_EMBED": lambda: (
         os.getenv("VLLM_REPLICATE_EMBED", "0").strip().lower() in ("1", "true")
     ),

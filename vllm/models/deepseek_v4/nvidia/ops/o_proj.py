@@ -5,6 +5,8 @@ from collections.abc import Callable
 import torch
 import torch.nn as nn
 
+from vllm import envs
+from vllm.model_executor.kernels.batch_invariant import block32_scaled_mm
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic128Sym,
@@ -86,13 +88,23 @@ def deep_gemm_fp8_o_proj(
             if hasattr(wo_a, "weight_scale")
             else wo_a.weight_scale_inv
         )
-        fp8_einsum(
-            "bhr,hdr->bhd",
-            (o_proj_input, o_scale),
-            (wo_a.weight, weight_scale),
-            z,
-            recipe=einsum_recipe,
-        )
+        if envs.VLLM_BATCH_INVARIANT and einsum_recipe == (1, 1, 32):
+            z = block32_scaled_mm(
+                o_proj_input,
+                o_scale,
+                wo_a.weight,
+                weight_scale,
+                z.dtype,
+                grouped=True,
+            )
+        else:
+            fp8_einsum(
+                "bhr,hdr->bhd",
+                (o_proj_input, o_scale),
+                (wo_a.weight, weight_scale),
+                z,
+                recipe=einsum_recipe,
+            )
     else:
         grouped_weight = wo_a.weight.view(n_groups, o_lora_rank, -1)
         torch.bmm(

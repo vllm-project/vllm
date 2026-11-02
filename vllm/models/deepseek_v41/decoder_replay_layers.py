@@ -14,7 +14,7 @@ break out to the replay batch, which may run in a graph of its own
 """
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import torch
 
@@ -28,13 +28,53 @@ from vllm.forward_context import (
 from vllm.model_executor.layers.fused_moe.moe_output import MoEOutput
 
 
+def exact_replay_rows(window: int, num_layers: int) -> int:
+    """Trailing rows to recompute so that the last ``window`` rows' outputs come
+    out as in the full forward after ``num_layers`` sliding-window layers: a
+    row's window reaches ``window - 1`` rows back, so each layer the exact rows
+    lose that many at their low end."""
+    return window + num_layers * (window - 1)
+
+
+def exact_replay_stages(
+    window: int, cut: int, end: int, layers_per_stage: int
+) -> list[tuple[int, int, int]]:
+    """``(first layer, end layer, rows)`` of each replay stage of layers
+    ``cut``..``end``: a stage runs each request's last ``rows`` rows, as many as
+    the layers from its first one on need for the last ``window`` rows to come
+    out exact. The cut writes every row's KV, so the first stage keeps the rows
+    of the layer after it."""
+    stages = []
+    first = cut
+    while first < end:
+        stop = min(end, max(first, cut + 1) + layers_per_stage)
+        stages.append(
+            (first, stop, exact_replay_rows(window, end - max(first, cut + 1)))
+        )
+        first = stop
+    return stages
+
+
+@dataclass
+class ReplayStage:
+    """A later replay stage: ``select`` picks its rows out of the previous stage's
+    outputs, ``rows`` are their batch rows."""
+
+    rows: torch.Tensor
+    select: torch.Tensor
+    forward_context: ForwardContext
+    run_graph: Callable[..., tuple[torch.Tensor, ...]] | None = None
+
+
 @dataclass
 class ReplayBatch:
-    """One forward's replay batch; ``run_graph`` is set when it runs in a graph."""
+    """One forward's replay batch; ``run_graph`` is set when it runs in a graph.
+    ``stages`` run after it on fewer rows each (layer-wise exact replay)."""
 
     rows: torch.Tensor
     forward_context: ForwardContext
     run_graph: Callable[..., tuple[torch.Tensor, ...]] | None = None
+    stages: list[ReplayStage] = field(default_factory=list)
     num_padded: int | None = None
 
 
@@ -48,6 +88,16 @@ class DecoderReplayLayers:
     first replay layer's SWA metadata, built with the batch's window starts.
     ``has_early_aux`` tells whether layers before the replay layers capture aux
     hidden states, which the forward holds across the replay layers.
+    ``kept_rows`` is how many trailing rows of each prefill the layers run on:
+    ``window`` by default, more when their outputs must match the full forward.
+
+    With ``stage_rows`` the layers run in stages instead, each on fewer trailing
+    rows (``exact_replay_stages``): ``run_stage(i, *inputs)`` runs stage ``i``
+    and returns its output, pre-mix, post-mix, res-mix and residual (the last
+    stage: its collapsed output and pre-mix), then the aux hidden states it
+    captures. ``stage_metadata_prefixes`` are the metadata keys each stage reads.
+    ``select_shared_rows(select)`` keeps the given rows of the per-row buffers
+    layers share across stages (indexer top-k, candidate blocks).
     """
 
     def __init__(
@@ -58,8 +108,20 @@ class DecoderReplayLayers:
         metadata_prefixes: set[str],
         first_swa_prefix: str,
         has_early_aux: Callable[[], bool] = lambda: False,
+        kept_rows: int | None = None,
+        stage_rows: list[int] | None = None,
+        run_stage: Callable[..., tuple[torch.Tensor, ...]] | None = None,
+        stage_metadata_prefixes: list[set[str]] | None = None,
+        select_shared_rows: Callable[[torch.Tensor], None] | None = None,
     ) -> None:
         self.window = window
+        self.kept_rows = window if kept_rows is None else kept_rows
+        self.stage_rows = stage_rows or [self.kept_rows]
+        assert self.stage_rows[0] == self.kept_rows
+        assert len(self.stage_rows) == 1 or run_stage is not None
+        self.run_stage = run_stage
+        self.select_shared_rows = select_shared_rows
+        self.stage_metadata_prefixes = stage_metadata_prefixes or [metadata_prefixes]
         self.run_layers = run_layers
         self.write_batch_kv = write_batch_kv
         self.metadata_prefixes = metadata_prefixes
@@ -118,6 +180,8 @@ class DecoderReplayLayers:
             return self.run_layers(hidden_states, *states)
         # Replay batch steps hold more than `window` tokens: no deferred MoE finalize.
         assert isinstance(hidden_states, torch.Tensor)
+        if replay_batch.stages:
+            return self._run_stages(replay_batch, hidden_states, *states)
         rows = replay_batch.rows
         inputs = (hidden_states, *states)
         with override_forward_context(replay_batch.forward_context):
@@ -144,3 +208,72 @@ class DecoderReplayLayers:
             )
             for out in row_outputs
         )
+
+    def _run_stages(
+        self,
+        replay_batch: ReplayBatch,
+        hidden_states: torch.Tensor,
+        *states: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, ...]:
+        """Run the stages in turn, each on its rows of the previous one's outputs.
+        Each stage's aux hidden states go to batch rows right away: a later
+        stage's graph may reuse their memory."""
+        positions, input_ids = states[0], states[1]
+        num_tokens = hidden_states.shape[0]
+        stages = [
+            ReplayStage(
+                replay_batch.rows,
+                replay_batch.rows,
+                replay_batch.forward_context,
+                replay_batch.run_graph,
+            ),
+            *replay_batch.stages,
+        ]
+        aux: list[torch.Tensor] = []
+        carried: tuple[torch.Tensor, ...] = ()
+        for i, stage in enumerate(stages):
+            if i == 0:
+                sources = [(t, stage.rows) for t in (hidden_states, *states)]
+            else:
+                hidden, pre_mix, post_mix, res_mix, residual = carried
+                sources = [
+                    (hidden, stage.select),
+                    (positions, stage.rows),
+                    (input_ids, stage.rows),
+                    (pre_mix, stage.select),
+                    (post_mix, stage.select),
+                    (res_mix, stage.select),
+                    (residual, stage.select),
+                ]
+                if self.select_shared_rows is not None:
+                    self.select_shared_rows(stage.select)
+            with override_forward_context(stage.forward_context):
+                if stage.run_graph is not None:
+                    outputs = stage.run_graph(
+                        [index for _, index in sources], [t for t, _ in sources]
+                    )
+                else:
+                    assert self.run_stage is not None
+                    outputs = self.run_stage(
+                        i,
+                        *(
+                            None if t is None else t.index_select(0, index)
+                            for t, index in sources
+                        ),
+                    )
+            num_carried = 2 if i == len(stages) - 1 else 5
+            aux.extend(
+                _to_batch_rows(out, stage.rows, num_tokens)
+                for out in outputs[num_carried:]
+            )
+            carried = tuple(outputs[:num_carried])
+        last_rows = stages[-1].rows
+        final = [_to_batch_rows(out, last_rows, num_tokens) for out in carried]
+        return (*final, *aux)
+
+
+def _to_batch_rows(
+    out: torch.Tensor, rows: torch.Tensor, num_tokens: int
+) -> torch.Tensor:
+    # The rows outside the replay batch stay zero; nothing reads them.
+    return out.new_zeros((num_tokens, *out.shape[1:])).index_copy_(0, rows, out)
