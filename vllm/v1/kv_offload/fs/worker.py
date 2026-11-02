@@ -111,7 +111,11 @@ class FSOffloadingWorker(OffloadingWorker):
         return True
 
     def submit_load(
-        self, job_id: int, src_spec: LoadStoreSpec, device_ptrs: DevicePointers
+        self,
+        job_id: int,
+        src_spec: LoadStoreSpec,
+        device_ptrs: DevicePointers,
+        expedited: bool = False,
     ) -> bool:
         assert isinstance(src_spec, FSLoadStoreSpec)
         completions, num_bytes = self._submit_io(

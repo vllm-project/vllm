@@ -269,9 +269,7 @@ class OffloadingConnectorWorker:
                 )
             else:
                 self._load_jobs[job_id] = entry.req_id
-                success = self.worker.submit_load(
-                    job_id, entry.src_spec, device_ptrs
-                )
+                success = self.worker.submit_load(job_id, entry.src_spec, device_ptrs)
             assert success
         if sync_job_ids:
             self.worker.wait(sync_job_ids)
