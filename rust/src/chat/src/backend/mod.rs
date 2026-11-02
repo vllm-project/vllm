@@ -37,6 +37,12 @@ pub trait ChatBackend: Send + Sync {
         None
     }
 
+    /// Whether `selection` is `auto` and resolves to no tool parser for this
+    /// model, so every request with `tools` will be rejected.
+    fn auto_tool_parser_unresolved(&self, _selection: &ParserSelection) -> bool {
+        false
+    }
+
     /// Create a request-scoped output processor after request-level adjustments
     /// are applied.
     fn new_chat_output_processor(
