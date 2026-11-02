@@ -228,7 +228,14 @@ class SimpleContext(ConversationContext):
 
         # Accumulate text, token_ids, and logprobs for streaming mode
         delta_output = output.outputs[0]
-        self._accumulated_text += delta_output.text
+        # `+=` on an attribute copies the whole text each time. CPython only
+        # extends a str in place when a local holds the only reference.
+        text = self._accumulated_text
+        self._accumulated_text = ""
+        try:
+            text += delta_output.text
+        finally:
+            self._accumulated_text = text
         self._accumulated_token_ids.extend(delta_output.token_ids)
         if delta_output.logprobs is not None:
             self._accumulated_logprobs.extend(delta_output.logprobs)

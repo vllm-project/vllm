@@ -835,6 +835,16 @@ class SimpleStreamingState:
     tool_call_payload_end: int = 0
     current_state: _StateType = field(default_factory=lambda: _StateType.NONE)
 
+    def append_text(self, delta: str) -> None:
+        # `+=` on an attribute copies the whole text each time. CPython only
+        # extends a str in place when a local holds the only reference.
+        text = self.accumulated_text
+        self.accumulated_text = ""
+        try:
+            text += delta
+        finally:
+            self.accumulated_text = text
+
 
 def emit_simple_content_open(
     state: SimpleStreamingState,
@@ -896,7 +906,7 @@ def emit_simple_content_delta(
     delta: str,
     logprobs: list[response_output_text.Logprob] | None = None,
 ) -> list[StreamingResponsesResponse]:
-    state.accumulated_text += delta
+    state.append_text(delta)
     if logprobs:
         state.accumulated_logprobs.extend(logprobs)
     return [
@@ -992,7 +1002,7 @@ def emit_simple_reasoning_delta(
     state: SimpleStreamingState,
     delta: str,
 ) -> list[StreamingResponsesResponse]:
-    state.accumulated_text += delta
+    state.append_text(delta)
     return [
         ResponseReasoningTextDeltaEvent(
             type="response.reasoning_text.delta",
@@ -1137,7 +1147,7 @@ def emit_simple_tool_call_delta(
     state: SimpleStreamingState,
     delta: str,
 ) -> list[StreamingResponsesResponse]:
-    state.accumulated_text += delta
+    state.append_text(delta)
     if state.tool_call_is_custom:
         return _emit_custom_tool_input_delta(state, _custom_tool_input_prefix(state))
     return [
