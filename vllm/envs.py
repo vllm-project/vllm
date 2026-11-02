@@ -707,7 +707,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.environ.get("VLLM_DOCKER_BUILD_CONTEXT", "").strip().lower() in ("1", "true")
     ),
     # Build provenance metadata embedded in official vllm-openai images.
-    # Set via Docker ENV at image build time; informational only.
+    # Set via Docker ENV at image build time. Commit and image tag also
+    # identify deployed code for MooncakeStore's automatic cache prefix.
     "VLLM_BUILD_COMMIT": lambda: os.environ.get("VLLM_BUILD_COMMIT", "unknown"),
     "VLLM_BUILD_PIPELINE": lambda: os.environ.get("VLLM_BUILD_PIPELINE", "local"),
     "VLLM_BUILD_URL": lambda: os.environ.get("VLLM_BUILD_URL", ""),

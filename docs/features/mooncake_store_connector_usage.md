@@ -326,10 +326,66 @@ Strict isolation requires a Mooncake master started with `--enable_multi_tenants
   `"NVLINK"` is used in the [EGM deployment example](#standalone-egm-over-nvlink);
   `"BAREX"` selects the BAR-exposed allocator. Unset by default. Both are
   incompatible with sleep mode and the CuMem allocator.
-- `cache_prefix` (str): Namespace prepended to every store key. Lets separate deployments share one Mooncake master without polluting each other — instances configured with different prefixes never see each other's cached blocks, even for identical prompts. All instances that should share a prefix cache must use the same value. Default: `""` (no prefix; keys are byte-identical to the unprefixed format).
+- `cache_prefix` (str): Namespace prepended to every store key. Different prefixes isolate cached blocks, even for identical prompts. Set to `"auto"` to derive a deployment fingerprint automatically (see below). Other strings remain literal custom prefixes. Default: `""` (no prefix; existing key format).
 - `save_decode_cache` (bool): Enable offloading decode tokens' KV cache. A `kv_consumer` does not save during prefill; when decode starts, it fills any missing block-aligned prompt prefix before appending completed decode blocks. Default: `false`.
 - `store_tp_size` (int): Common Store TP for divisible heterogeneous-TP
   sharing. See [Sharing one Store across multiple Prefill TP sizes](#sharing-one-store-across-multiple-prefill-tp-sizes).
+
+#### Automatic cache prefix
+
+Enable automatic namespacing for **MooncakeStoreConnector** with:
+
+```json
+{
+  "kv_connector": "MooncakeStoreConnector",
+  "kv_role": "kv_both",
+  "kv_connector_extra_config": {"cache_prefix": "auto"}
+}
+```
+
+vLLM replaces `"auto"` with `auto-<SHA-256>` in every Store key and logs the
+resolved prefix. The fingerprint includes `VLLM_IMAGE_TAG`, `VLLM_BUILD_COMMIT`,
+the vLLM version, resolved model and quantization configuration, compute
+configuration hashes, loading and scheduling settings, and KV-cache and Store
+payload format settings. Scheduler capacities (`max_num_batched_tokens`,
+`max_num_seqs`, queue limits and derived CUDA graph batch sizes) are excluded.
+Changing these limits therefore preserves the namespace; batching itself can
+still introduce numerical differences when recomputing KV.
+Online quantization uses its declared arguments, including when composed with
+checkpoint quantization; loading timers and the runtime layer inventory are
+excluded.
+
+The environment fingerprint includes registered vLLM settings with their parsed
+defaults, unregistered `VLLM_*` settings, `NCCL_*`, `CUBLAS_*`, `CUBLASLT_*`,
+`FLASHINFER_*`, `TRITON_*`, `NVIDIA_TF32_OVERRIDE` and `LD_LIBRARY_PATH`.
+Explicit exclusions remove credentials, logging, ranks, ports and runtime cache
+directories. Invalid registered values fail startup rather than being skipped.
+Unrelated environment variables are not hashed; plugin settings outside these
+names must be represented in the vLLM configuration or added to the fingerprint
+before relying on automatic isolation. Engine IDs, Store addresses and
+producer/consumer roles do not affect the prefix.
+
+Official public release builds already pass both build identity arguments using
+`.buildkite/scripts/docker-build-metadata-args.sh`. For a custom Docker build,
+pass `--build-arg VLLM_IMAGE_TAG=<immutable-image-reference>` and
+`--build-arg VLLM_BUILD_COMMIT=<source-commit>`. Docker's `--tag` alone does not
+set the environment inside the image.
+
+Set an immutable `VLLM_IMAGE_TAG` or a known `VLLM_BUILD_COMMIT`. Startup fails
+when both are missing or only the default development identity is available.
+Rebuilding a mutable tag such as `latest` without changing the build identity
+cannot invalidate cached KV. Likewise, pin model revisions and replace the
+model identity when overwriting local weights; this feature does not hash
+weight files or detect live weight updates.
+
+Changing the code identity, quantization, KV dtype or other fingerprinted
+settings makes existing cached blocks invisible to the new deployment. Old
+blocks remain in Mooncake until normal eviction. Identically configured
+replicas share the fingerprint. Isolation is conservative: different compute
+settings (including TP sizes) may prevent reuse even when their Store payloads
+are compatible. Use a shared custom prefix when deliberately enabling such
+reuse. The exact string `"auto"` is now reserved; every other custom prefix and
+the empty default keep their previous behavior.
 
 LBHNC/HND is strongly recommended for TP-sharded Store when supported. LBNHC/NHD
 creates many transfer segments and may significantly reduce PUT/GET performance.

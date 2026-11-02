@@ -40,6 +40,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.cache_prefix import (  # noqa: E501
+    resolve_cache_prefix,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
@@ -1480,6 +1483,7 @@ class MooncakeStoreWorker:
         vllm_config: VllmConfig,
         kv_cache_config: KVCacheConfig,
     ):
+        cache_prefix = resolve_cache_prefix(vllm_config)
         try:
             from mooncake.store import (  # type: ignore
                 MooncakeDistributedStore,
@@ -1655,11 +1659,7 @@ class MooncakeStoreWorker:
             pcp_rank=self.pcp_rank,
             dcp_rank=self.dcp_rank,
             pp_rank=self.pp_rank,
-            cache_prefix=str(
-                vllm_config.kv_transfer_config.kv_connector_extra_config.get(
-                    "cache_prefix", ""
-                )
-            ),
+            cache_prefix=cache_prefix,
             store_namespace=store_namespace,
         )
         self.token_dbs = self._build_token_databases(metadata, store_group_plans)
