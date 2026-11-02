@@ -3267,7 +3267,9 @@ class MoRIIOConnectorWorker:
         # rank and spread reads across them; other configs keep the DP-only key.
         return f"{engine_name}_dp{dp_rank}_tp{tp_rank}"
 
-    def _eager_handshake_all_dp_ranks(self, metadata: MoRIIOConnectorMetadata) -> None:
+    def _eager_handshake_all_dp_ranks(
+        self, metadata: MoRIIOConnectorMetadata
+    ) -> set[EngineId]:
         """Handshake EVERY remote prefill DP rank BEFORE the decode forward pass,
         identically across all local TP workers.
 
@@ -3292,15 +3294,21 @@ class MoRIIOConnectorWorker:
 
         Failure handling: handshake exceptions are caught, never raised before
         the collective (raising early would hang the peers still waiting for it).
-        Every worker reaches the all-reduce(MIN) vote; if ANY worker failed, ALL
-        raise the same error AFTER the collective, so the step fails fast and
-        uniformly in ~seconds instead of one rank hanging the forward for 600s.
+        Every worker reaches the all-reduce(MIN) vote, so every worker agrees on
+        which engines failed. A failed engine is returned rather than raised so
+        only its requests fail; the next step retries the missing ranks. Hybrid
+        models still raise, as the scheduler cannot recover their load errors.
+
+        Returns:
+            Remote engines whose handshake failed on at least one TP worker.
+
         """
         import torch.distributed as dist
 
         # Distinct remote engines referenced this step, in metadata (==
         # scheduler) order so every TP worker iterates engines identically.
         engines: dict[str, ReqMeta] = {}
+        failed: set[EngineId] = set()
         for _req_id, meta in metadata.reqs_to_recv.items():
             remote_engine_id = (
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
@@ -3397,13 +3405,17 @@ class MoRIIOConnectorWorker:
             vote = torch.tensor([1 if all_ok else 0], device="cpu", dtype=torch.int32)
             dist.all_reduce(vote, group=self.tp_group.cpu_group, op=dist.ReduceOp.MIN)
             if int(vote.item()) == 0:
-                raise HandshakeError(
-                    f"Eager MoRIIO handshake failed for {remote_engine_id} on "
-                    "at least one TP rank; failing this step fast to avoid a "
-                    "TP collective hang"
-                )
+                if self._has_mamba:
+                    raise HandshakeError(
+                        f"Eager MoRIIO handshake failed for {remote_engine_id} "
+                        "on at least one TP rank; HMA load-error recovery is "
+                        "unsupported"
+                    )
+                failed.add(remote_engine_id)
+                continue
 
             self._eager_handshaked_engines.add(remote_engine_id)
+        return failed
 
     def start_load_kv(self, metadata: MoRIIOConnectorMetadata):
         """Start loading by triggering non-blocking moriio_xfer.
@@ -3429,7 +3441,7 @@ class MoRIIOConnectorWorker:
         # read enters the forward pass. A lazy per-rank handshake on the read
         # path lets TP workers diverge into a forward collective while a peer is
         # still blocked handshaking -> NCCL hang (see below).
-        self._eager_handshake_all_dp_ranks(metadata)
+        failed_engines = self._eager_handshake_all_dp_ranks(metadata)
 
         wait_handshake_readd_req = False
         remote_engine_id = None
@@ -3439,6 +3451,9 @@ class MoRIIOConnectorWorker:
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
             )
             meta.remote_engine_id = remote_engine_id
+            if remote_engine_id in failed_engines:
+                self._fail_recv_without_read(req_id, meta)
+                continue
             # The eager handshake above already covered every referenced engine
             # (and keys the mirror per (dp, tp), which the DP-only dp0 probe below
             # would miss). Only fall back to the lazy background handshake for an
@@ -4140,21 +4155,8 @@ class MoRIIOConnectorWorker:
             if chosen_tp is not None
             else self._remote_tp_rank(remote_tp_size)
         )
-        # Every prefill rank holding this rank's share frees its blocks only
-        # once released, including the ones whose identical copy is not read.
-        holders = (
-            (eff_tp,)
-            if remote_tp_size == self.world_size
-            else get_moriio_read_holder_tp_ranks(
-                self.tp_rank, self.world_size, remote_tp_size
-            )
-        )
-        notify_ports = tuple(
-            str(
-                remote_notify_port
-                + get_port_offset(int(remote_dp_rank), tp_rank, remote_tp_size)
-            )
-            for tp_rank in holders
+        notify_ports = self._read_notify_ports(
+            remote_notify_port, remote_tp_size, int(remote_dp_rank), eff_tp
         )
         if not any(local_block_ids):
             # A request aborted before decode allocation still carries the
@@ -4278,6 +4280,64 @@ class MoRIIOConnectorWorker:
                     notify_ports,
                     transfer_id,
                 )
+
+    def _read_notify_ports(
+        self,
+        remote_notify_port: int,
+        remote_tp_size: int,
+        remote_dp_rank: int,
+        eff_tp: int,
+    ) -> tuple[str, ...]:
+        """Notify ports of every prefill rank holding this rank's READ share.
+
+        Each holder frees its blocks only once released, including the ones
+        whose identical copy is not read.
+        """
+        holders = (
+            (eff_tp,)
+            if remote_tp_size == self.world_size
+            else get_moriio_read_holder_tp_ranks(
+                self.tp_rank, self.world_size, remote_tp_size
+            )
+        )
+        return tuple(
+            str(
+                remote_notify_port
+                + get_port_offset(remote_dp_rank, tp_rank, remote_tp_size)
+            )
+            for tp_rank in holders
+        )
+
+    def _fail_recv_without_read(self, req_id: ReqId, meta: ReqMeta) -> None:
+        """Fail a READ whose prefill handshake failed, without posting it.
+
+        The destination blocks go to the scheduler's load-error recovery, and
+        prefill is asked to release its blocks instead of waiting for its own
+        timeout. The release is best effort: the peer may be unreachable.
+        """
+        logger.error(
+            "MoRIIO handshake with %s failed; reporting a load error for "
+            "request %s without reading it.",
+            meta.remote_engine_id,
+            req_id,
+        )
+        self._invalid_block_ids.update(
+            block_id for group in meta.local_block_ids for block_id in group
+        )
+        remote_tp_size = int(meta.tp_size) or self.world_size
+        ports = self._read_notify_ports(
+            meta.remote_notify_port,
+            remote_tp_size,
+            int(meta.remote_dp_rank),
+            self._remote_tp_rank(remote_tp_size),
+        )
+        try:
+            self._send_read_release(meta.transfer_id, meta.remote_host, ports)
+        except Exception:
+            logger.exception(
+                "Failed to ask prefill to release request %s after a failed handshake",
+                req_id,
+            )
 
     def _send_read_release(
         self, transfer_id: str, host: str, ports: tuple[str, ...]
