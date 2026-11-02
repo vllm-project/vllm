@@ -716,7 +716,9 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
     def _supports_current_device() -> bool:
         p = current_platform
         return p.is_cuda() and (
-            p.is_device_capability_family(100) or p.is_device_capability_family(120)
+            p.is_device_capability_family(100)
+            # SM110 excluded: grouped NVFP4 kernel is sm100-only
+            or p.is_device_capability_family(120)
         )
 
     @staticmethod
