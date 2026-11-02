@@ -356,6 +356,34 @@ def mfma_bf16(a, b, acc):
     )
 
 
+def mfma_bf16_k16(a, b, acc):
+    """``acc + A @ B.T`` over 16 K: ``a``, ``b`` a lane's 4 bf16 as Int16
+    (16x16x16): lane ``l`` holds row ``l % 16``, K ``4 (l / 16) + [0, 4)``."""
+    return fx.Vector(
+        rocdl.mfma_f32_16x16x16bf16_1k(
+            T.vec(4, T.f32),
+            [
+                fx.Vector(a).ir_value(),
+                fx.Vector(b).ir_value(),
+                fx.Vector(acc).ir_value(),
+                0,
+                0,
+                0,
+            ],
+        )
+    )
+
+
+def lds_ld_tr16(ptr):
+    """ds_read_b64_tr_b16 at LDS pointer ``ptr`` (a bf16 iterator plus an
+    element offset): four bf16 transposed across the lanes, as Int16."""
+    return fx.Vector(
+        rocdl.ds_read_tr16_b64(
+            fx.Vector.make_type(4, fx.BFloat16), fx.to_llvm_ptr(ptr)
+        ).result
+    ).bitcast(fx.Int16)
+
+
 def mfma_f4(a, b, acc, sa, sb, opsel_a=0):
     """``acc + A @ B.T`` over 128 K of e2m1: ``a`` / ``b`` a lane's four Int32 (32
     codes), ``sa`` / ``sb`` its E8M0 scale codes (``opsel_a`` picks A's byte of

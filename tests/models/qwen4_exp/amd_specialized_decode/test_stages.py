@@ -1038,3 +1038,117 @@ def test_allreduce_codec_follows_quickreduce(monkeypatch, level, codec):
 
     monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", level)
     assert allreduce_codec() == codec
+
+
+@pytest.mark.parametrize("rows", [32, 128])
+def test_qsa_sparse_attention(rows):
+    """``wide.attention`` over a strided paged K | V pool against float64
+    softmax attention of each row's tokens: the selected compressed blocks
+    (all of a row's complete blocks in any order up to 512, else 512 of them)
+    and the open tail, from no context to past the 2048-token budget, with a
+    hole (-1) in a list and a padded row (request -1, zero output)."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide import attention
+
+    gen = torch.Generator().manual_seed(rows)
+    page, heads, hd, top, ratio = 96, 12, 256, 512, 4
+    contexts = [[5001, 0, 1, 37, 2048, 2051, 3003][r % 7] for r in range(rows)]
+    pages_per_row = -(-max(contexts) // page)
+    blocks = rows * pages_per_row + 1
+    stride = page * 2 * hd + 4096  # pages apart in the pool, as vLLM's hybrid pool
+    pool = torch.randn(blocks * stride, generator=gen).to(torch.bfloat16)
+    kv = pool.as_strided((blocks, 1, page, 2 * hd), (stride, page * 2 * hd, 2 * hd, 1))
+    table = (
+        torch.randperm(blocks - 1, generator=gen)[: rows * pages_per_row] + 1
+    ).view(rows, -1)
+    t2r = torch.arange(rows, dtype=torch.int32)
+    t2r[1] = -1
+    sel = torch.full((rows, top), -1, dtype=torch.int32)
+    for r, c in enumerate(contexts):
+        sel[r, : min(c // ratio, top)] = torch.randperm(c // ratio, generator=gen)[
+            :top
+        ].int()
+    sel[4, 3] = -1  # a hole
+    q = (torch.randn(rows, heads, hd, generator=gen) * 0.5).to(torch.bfloat16)
+
+    expect = torch.zeros(rows, heads, hd, dtype=torch.float64)
+    for r, c in enumerate(contexts):
+        chosen = sel[r][sel[r] >= 0].long()
+        t = torch.cat(
+            [
+                (chosen[:, None] * ratio + torch.arange(ratio)).flatten(),
+                torch.arange(c // ratio * ratio, c),
+            ]
+        )
+        if t2r[r] < 0 or not t.numel():
+            continue
+        rec = kv[table[r][t // page], 0, t % page].double()  # [tokens, 512]
+        k, v = rec[:, :hd], rec[:, hd:]
+        p = torch.softmax(q[r].double() @ k.T / hd**0.5, dim=-1)
+        expect[r] = p @ v
+
+    dev = torch.device("cuda")
+    out = torch.empty(rows, heads, hd, dtype=torch.bfloat16, device=dev)
+    attention.sparse_attention(
+        q.to(dev),
+        pool.to(dev).as_strided(kv.shape, kv.stride()),
+        sel.to(dev),
+        table.int().to(dev).contiguous(),
+        t2r.to(dev),
+        torch.tensor(contexts, dtype=torch.int32, device=dev),
+        ratio,
+        out,
+    )
+    assert out[1].abs().max().item() == 0
+    assert rel(out.float(), expect) < 1e-2
+
+
+@pytest.mark.parametrize("rows", [32, 128])
+def test_qsa_indexer_scores(rows):
+    """``wide.indexer.score`` over a strided paged compressed-key pool
+    against float64 ``sum_h relu(q_h . k_c) / sqrt(128)`` on each row's
+    visible columns, and the visible counts exactly (a padded row sees none)."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide import indexer
+
+    gen = torch.Generator().manual_seed(rows)
+    page, width, heads, dim, ratio = 64, 40, 4, 128, 4
+    contexts = [[9001, 0, 3, 37, 2048, 4095, 6000][r % 7] for r in range(rows)]
+    stride = page * dim + 1024
+    pool_pages = rows * width + 1
+    pool = torch.randn(pool_pages * stride, generator=gen).to(torch.bfloat16)
+    kc = pool.as_strided((pool_pages, page, 1, dim), (stride, dim, dim, 1))
+    table = (
+        (torch.randperm(pool_pages - 1, generator=gen) + 1)[: rows * width]
+        .view(rows, width)
+        .int()
+    )
+    t2r = torch.arange(rows, dtype=torch.int32)
+    t2r[2] = -1
+    q = torch.randn(rows, heads, dim, generator=gen).to(torch.bfloat16)
+    seq = torch.tensor(contexts, dtype=torch.int32)
+    positions = (seq - 1).clamp(min=0).long()
+
+    dev = torch.device("cuda")
+    columns = width * page
+    logits = torch.full((rows, columns), float("nan"), device=dev)
+    visible = torch.full((rows,), -7, dtype=torch.int32, device=dev)
+    indexer.score(
+        q.to(dev),
+        pool.to(dev).as_strided(kc.shape, kc.stride()),
+        table.to(dev),
+        t2r.to(dev),
+        positions.to(dev),
+        seq.to(dev),
+        ratio,
+        logits,
+        visible,
+    )
+    visible, logits = visible.cpu(), logits.cpu()
+    for r, c in enumerate(contexts):
+        want = 0 if t2r[r] < 0 else min(c // ratio, columns)
+        assert visible[r].item() == want
+        if not want:
+            continue
+        cols = torch.arange(want)
+        keys = kc[table[r][cols // page].long(), cols % page, 0].double()  # [want, dim]
+        expect = (q[r].double() @ keys.T).clamp(min=0).sum(0) / dim**0.5
+        assert rel(logits[r, :want], expect) < 1e-5

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The launches of one decoder layer: vLLM's modules and tensors in, the
-kernels' arguments out (``Launcher``), and ``qsa_core``, vLLM's QSA attention
-up to o_proj's input.
+kernels' arguments out (``Launcher``), and ``qsa_core``, the QSA attention
+up to o_proj's input (vLLM's prepare and top-k around the wide indexer
+scores and sparse attention).
 
 ``Launcher`` holds the per-rank state every launch reads: the scratch every
 width shares (launches of a step run in order), the block-input buffer, the
@@ -11,15 +12,20 @@ fold counters, the step epoch (bumped once a step; a CUDA graph captures the
 bump, and the TP exchange tags carry it), the health words and the peer
 mailboxes of the TP exchange."""
 
+from typing import cast
+
 import torch
 
+from vllm import _custom_ops as ops
 from vllm import envs
+from vllm.forward_context import get_forward_context
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime.guards import (
     experts_rip,
     gdn_states,
     mxfp4_shuffled,
     router_gate,
 )
+from vllm.models.qwen4_exp.amd.specialized_decode.wide import attention, indexer
 from vllm.models.qwen4_exp.amd.specialized_decode.wide import layer as K
 from vllm.models.qwen4_exp.amd.specialized_decode.wide import layout as L
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.abi import (
@@ -32,6 +38,8 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.grid import (
     sync_words,
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange
+from vllm.models.qwen4_exp.common.qsa import Qwen4ExpQSAMetadata
+from vllm.models.qwen4_exp.common.qsa_indexer import QSAIndexerMetadata
 from vllm.platforms import current_platform
 
 # Profiling: set True in the worker before the model is built (for example on
@@ -196,10 +204,48 @@ class Launcher:
         return seq + 1
 
 
+def _wide_qsa(attn) -> bool:
+    """The layer's indexer scores and sparse attention run the wide kernels:
+    bf16 K/V (one kv head a rank) and bf16 compressed keys in vLLM's paged
+    layouts, the fused prepare, no top-k reuse (MTP)."""
+    ix = attn.indexer
+    return (
+        attn.use_fused_qsa_prepare
+        and attn.impl.octave_fmt is None
+        and not ix.skip_topk
+        and attn.kv_cache.dtype == torch.bfloat16
+        and attn.num_kv_heads == 1
+        and attn.head_dim == attention.HEAD_DIM
+        and attn.num_heads <= attention.COLS
+        and ix.indexer_dtype == torch.bfloat16
+        and ix.compressed_key_cache.kv_cache.dtype == torch.bfloat16
+        and ix.index_head_dim == indexer.DIM
+    )
+
+
+_SELECT: dict = {}
+
+
+def _select_buffers(rows: int, columns: int, blocks: int, device):
+    """The scores, visible counts and top-k blocks of a width's rows (one
+    set: the layers run in order)."""
+    k = (rows, columns, blocks, str(device))
+    if k not in _SELECT:
+        _SELECT[k] = (
+            torch.empty(rows, columns, dtype=torch.float32, device=device),
+            torch.empty(rows, dtype=torch.int32, device=device),
+            torch.empty(rows, blocks, dtype=torch.int32, device=device),
+        )
+    return _SELECT[k]
+
+
 def qsa_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
     """``Qwen4ExpQSAAttention.forward`` up to the output gate (the qsa_back
     launch applies it to o_proj's input) -> (attention output [S, heads HD],
-    gate [S, heads HD])."""
+    gate [S, heads HD]). vLLM's fused prepare writes the caches and prepares
+    the queries and the gate; ``wide.indexer`` scores the compressed blocks,
+    vLLM's decode top-k selects them and ``wide.attention`` attends their
+    tokens in place (other cache formats run vLLM's whole QSA)."""
     from vllm.models.qwen4_exp.amd import qsa
 
     qkv, _ = attn.qkv_proj(x)
@@ -207,7 +253,61 @@ def qsa_core(attn, x, positions) -> tuple[torch.Tensor, torch.Tensor]:
     name = qsa._encode_layer_name(attn.layer_name)
     out = qkv.new_empty(n, attn.num_heads, attn.head_dim)
     gate = torch.empty_like(out)
-    if current_platform.opaque_attention_op():
+    if _wide_qsa(attn):
+        ix = attn.indexer
+        md = get_forward_context().attn_metadata
+        main = cast(Qwen4ExpQSAMetadata, md[attn.layer_name])
+        raw = cast(QSAIndexerMetadata, md[ix.raw_key_cache.prefix])
+        comp = cast(QSAIndexerMetadata, md[ix.compressed_key_cache.prefix])
+        rows = raw.num_actual_tokens
+        q_raw, raw_keys = ix.project(x[:rows])
+        q_ix, (query, _) = ix._fused_prepare(
+            q_raw,
+            raw_keys,
+            positions[..., :rows],
+            raw,
+            comp,
+            attn,
+            qkv,
+            main.slot_mapping,
+            gate,
+        )
+        keys = ix.compressed_key_cache.kv_cache
+        top = ix.token_topk // ix.compress_ratio
+        logits, visible, blocks = _select_buffers(
+            n, comp.block_table.shape[1] * keys.shape[1], top, x.device
+        )
+        logits, visible, blocks = logits[:rows], visible[:rows], blocks[:rows]
+        token_to_req = comp.token_to_req[:rows]
+        indexer.score(
+            q_ix,
+            keys,
+            comp.block_table,
+            token_to_req,
+            comp.logical_positions[:rows],
+            comp.seq_lens,
+            ix.compress_ratio,
+            logits,
+            visible,
+        )
+        ops.top_k_per_row_decode(
+            logits, 1, visible, blocks, rows, logits.stride(0), logits.stride(1), top
+        )
+        attention.sparse_attention(
+            query,
+            attn.kv_cache,
+            blocks,
+            main.block_table,
+            token_to_req,
+            comp.seq_lens,
+            ix.compress_ratio,
+            out[:rows],
+        )
+        if rows < n:
+            # padded rows: zero output, as vLLM's attention leaves them
+            out[rows:].zero_()
+            gate[rows:].zero_()
+    elif current_platform.opaque_attention_op():
         torch.ops.vllm.qwen4_exp_qsa_prepare_with_output(
             x, positions, qkv, out, gate, name
         )
