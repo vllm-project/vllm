@@ -277,9 +277,10 @@ def get_processor(
             f"found type: {type(processor)}"
         )
 
-    # Report the Hub ID rather than the local snapshot it was loaded from
+    # Report the Hub ID rather than the local snapshot it was loaded from.
+    # A tokenizer passed in by the caller may come from another repo.
     tokenizer = getattr(processor, "tokenizer", processor)
-    if hasattr(tokenizer, "name_or_path"):
+    if getattr(tokenizer, "name_or_path", None) == processor_name:
         tokenizer.name_or_path = requested_name
 
     return processor
