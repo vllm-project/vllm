@@ -138,6 +138,7 @@ MoEBackend = Literal[
     "triton_unfused",
     "aiter",
     "aiter_mega_moe",
+    "aiter_flydsl_mxfp4_bf16",
     "aiter_triton_mxfp4_bf16",
     "aiter_triton_mxfp4_mxfp4",
     "flydsl",
@@ -335,6 +336,9 @@ class KernelConfig:
     - "aiter_mega_moe": Use the AITER MegaMoE fused dispatch/GEMM/combine
       kernel (ROCm gfx950, requires DP+EP with a MoRI all2all backend;
       DeepSeek-V4 only)
+    - "aiter_flydsl_mxfp4_bf16": Opt in to AITER FlyDSL native MXFP4
+      with BF16 clamped SiLU (gfx942, TP without EP, no bias;
+      requires AITER's flydsl_a16w4_moe API)
     - "aiter_triton_mxfp4_bf16": Use the AITER Triton MXFP4 W4A16
       (moe_gemm_a16w4) MoE kernel (ROCm gfx942/gfx950/gfx1250)
     - "aiter_triton_mxfp4_mxfp4": Use the AITER Triton/Gluon MXFP4 W4A4

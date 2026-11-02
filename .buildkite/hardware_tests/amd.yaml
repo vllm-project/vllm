@@ -24,6 +24,44 @@ steps:
         - exit_status: -10  # Agent was lost
           limit: 1
 
+  - label: ":amd: (MI300) FlyDSL MXFP4 dependency and Quark loading"
+    key: aiter-flydsl-mxfp4-gfx942-amd
+    depends_on:
+      - image-build-amd
+    device: mi300_1
+    num_devices: 1
+    dind: false
+    optional: false
+    timeout_in_minutes: 30
+    working_dir: /vllm-workspace/
+    source_file_dependencies:
+      - .buildkite/hardware_tests/amd.yaml
+      - tests/kernels/moe/test_ocp_mx_moe.py
+      - vllm/model_executor/layers/fused_moe/
+      - vllm/model_executor/layers/quantization/quark/
+      - vllm/config/kernel.py
+      - vllm/_aiter_ops.py
+    commands:
+      - |
+        set -euo pipefail
+        test_root=$(mktemp -d)
+        trap 'rm -rf "$test_root"' EXIT
+        uv venv --system-site-packages \
+          --python "${VIRTUAL_ENV:+$VIRTUAL_ENV/bin/}python" "$test_root/venv"
+        test_python="$test_root/venv/bin/python"
+        export VLLM_ROCM_USE_AITER=0 VLLM_ROCM_USE_AITER_MOE=0
+        export VLLM_GPU_SYNC_CHECK=error
+        "$test_python" -c 'from vllm.platforms.rocm import on_gfx942; assert on_gfx942()'
+        "$test_python" -m pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py -k aiter_flydsl
+        AITER_USE_SYSTEM_TRITON=1 GPU_ARCHS=gfx942 PREBUILD_KERNELS=0 uv pip install \
+          --python "$test_python" --target "$test_root/dependencies" \
+          --no-deps --no-build-isolation \
+          'amd-aiter @ git+https://github.com/ROCm/aiter.git@f52deefccdb66c410b337a2947050b228a55e547' \
+          'flydsl==0.4.0'
+        export PYTHONPATH="$test_root/dependencies:${PYTHONPATH:-.}"
+        "$test_python" -c 'from aiter.ops.flydsl.kernels.moe_2stage_a16wmix import flydsl_a16w4_moe; assert callable(flydsl_a16w4_moe)'
+        "$test_python" -m pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py -k aiter_flydsl
+
   - label: ":docker: Build ROCm test image"
     key: image-build-amd
     depends_on:
