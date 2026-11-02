@@ -1,13 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Which MiniMax-M3.1 DSpark draft steps run on the drafter kernels
-(``VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=1``).
+(on by default; ``VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=0`` keeps the stock layers).
 
 A draft step of 1..MAX_REQS requests (7 query rows each) runs its 5 layers and
 final norm in launches of up to 8 requests; other steps run the stock layers.
 Every condition is decided from TP-replicated state: the kernels exchange
 partials in-kernel, so ranks that disagreed would wait on each other.
 """
+
+import importlib.util
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -16,10 +19,16 @@ from vllm.forward_context import get_forward_context, is_forward_context_availab
 from vllm.logger import init_logger
 from vllm.models.minimax_m3.amd.mono.config import MonoUnsupported
 from vllm.models.minimax_m3.amd.mono.drafter import layout
-from vllm.models.minimax_m3.amd.mono.drafter.runner import MAX_REQS, DrafterRunner
 from vllm.platforms.rocm import on_gfx950
 
+if TYPE_CHECKING:
+    from vllm.models.minimax_m3.amd.mono.drafter.runner import DrafterRunner
+
 logger = init_logger(__name__)
+
+
+def _flydsl_available() -> bool:
+    return importlib.util.find_spec("flydsl") is not None
 
 
 def _config_refusal(vllm_config: VllmConfig) -> str | None:
@@ -28,6 +37,7 @@ def _config_refusal(vllm_config: VllmConfig) -> str | None:
     spec = vllm_config.speculative_config
     checks = (
         (on_gfx950(), "not gfx950"),
+        (_flydsl_available(), "FlyDSL not installed"),
         (pc.tensor_parallel_size == 4, f"TP {pc.tensor_parallel_size} != 4"),
         (pc.data_parallel_size == 1, "DP > 1"),
         (pc.pipeline_parallel_size == 1, "PP > 1"),
@@ -70,6 +80,8 @@ class DrafterDecode:
             return True
         if torch.cuda.is_current_stream_capturing():
             return False
+        from vllm.models.minimax_m3.amd.mono.drafter.runner import DrafterRunner
+
         try:
             self._runner = DrafterRunner(self._model)
         except MonoUnsupported as why:
@@ -89,7 +101,7 @@ class DrafterDecode:
         if not self._enabled:
             return None
         n = positions.numel()
-        if n % layout.QPR or not 0 < n // layout.QPR <= MAX_REQS:
+        if n % layout.QPR or not 0 < n // layout.QPR <= layout.MAX_REQS:
             return None
         if positions.dtype != torch.int64:
             return None

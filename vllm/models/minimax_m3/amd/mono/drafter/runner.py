@@ -16,14 +16,11 @@ from vllm.models.minimax_m3.amd.mono.drafter import layout
 from vllm.models.minimax_m3.amd.mono.drafter.layer import build_drafter
 from vllm.models.minimax_m3.amd.mono.drafter.wide import build_wide
 from vllm.models.minimax_m3.amd.mono.peer_buffer import PeerBuffer
+from vllm.platforms import current_platform
 
 # the symmetric buffer: the narrow kernel's all-reduce slots, then the wide kernel's
 PEER_BYTES = layout.SYM_BYTES + layout.SYM_W_BYTES
 WIDE_BASE = layout.SYM_BYTES
-# requests a step takes, in launches of up to 8: 1..2 run the narrow kernel,
-# 3..8 the wide one. A FULL graph replay pads 9 requests to 10; the kernels
-# treat a padded request (seq_len 0) as one with no keys.
-MAX_REQS = 10
 WAIT_S = 10.0
 
 _GEMV = {
@@ -84,6 +81,12 @@ class DrafterRunner:
     """
 
     def __init__(self, model) -> None:
+        device_index = torch.accelerator.current_device_index()
+        cus = current_platform.get_device_properties(device_index).multi_processor_count
+        if cus != layout.BLOCKS:
+            raise MonoUnsupported(
+                f"{cus} CUs: the kernels need all {layout.BLOCKS} CTAs co-resident"
+            )
         if get_tensor_model_parallel_world_size() != 4:
             raise MonoUnsupported("TP != 4")
         if len(model.layers) != layout.LAYERS:
@@ -103,7 +106,7 @@ class DrafterRunner:
             if kv.element_size() != 1 or not kv.is_contiguous():
                 raise MonoUnsupported(f"draft KV cache {kv.dtype}")
 
-        dev = torch.device("cuda", torch.accelerator.current_device_index())
+        dev = torch.device("cuda", device_index)
         self.rank = get_tensor_model_parallel_rank()
         self.peers = PeerBuffer(PEER_BYTES, get_tp_group().cpu_group, self.rank, 4, dev)
         self.pe = [int(a) for a in self.peers.addresses.tolist()]
@@ -128,7 +131,7 @@ class DrafterRunner:
         self.narrow = build_drafter(wait_ticks=wait)
         self.wide = build_wide(WIDE_BASE, wait_ticks=wait)
         self.no_slots = torch.full(
-            (layout.QPR * MAX_REQS,), -1, dtype=torch.int64, device=dev
+            (layout.QPR * layout.MAX_REQS,), -1, dtype=torch.int64, device=dev
         )
 
     def stale(self) -> bool:

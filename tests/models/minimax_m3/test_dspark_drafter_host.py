@@ -3,8 +3,9 @@
 """Deployment checks of the MiniMax-M3.1 DSpark drafter kernels that need no GPU.
 
 The kernels are built for 7 query rows a request at TP4; any other deployment
-must keep the stock draft layers. The kernel package imports flydsl at module
-import, so these tests run where it is installed (the ROCm images).
+must keep the stock draft layers, as must a ROCm install without FlyDSL. These
+tests run in the ROCm images (where FlyDSL is installed); elsewhere they are
+skipped.
 """
 
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ def _vllm_config(tp=4, dp=1, pp=1, method="dspark", k=7):
 @pytest.fixture(autouse=True)
 def _gfx950(monkeypatch):
     monkeypatch.setattr(dispatch, "on_gfx950", lambda: True)
+    monkeypatch.setattr(dispatch, "_flydsl_available", lambda: True)
 
 
 def test_supported_deployment():
@@ -56,4 +58,9 @@ def test_no_speculative_config():
 
 def test_not_gfx950(monkeypatch):
     monkeypatch.setattr(dispatch, "on_gfx950", lambda: False)
+    assert dispatch._config_refusal(_vllm_config()) is not None
+
+
+def test_no_flydsl(monkeypatch):
+    monkeypatch.setattr(dispatch, "_flydsl_available", lambda: False)
     assert dispatch._config_refusal(_vllm_config()) is not None

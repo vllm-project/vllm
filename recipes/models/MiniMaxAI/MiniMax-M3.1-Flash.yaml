@@ -1414,6 +1414,9 @@ guide: |
     by context instead of by index head.
   - `--quantization-config.moe mxfp8` re-quantizes the NVFP4 experts to MXFP8 at
     load for the AITER MoE.
+  - With a seven-token DSpark draft (`num_speculative_tokens: 7`), draft steps of
+    up to 10 requests run the draft layers as fused FlyDSL kernels;
+    `VLLM_ROCM_MINIMAX_M3_MONO_DRAFTER=0` keeps the stock draft layers.
 
   ### DBO and SP prefill (TP4, AMD MI355X)
 
