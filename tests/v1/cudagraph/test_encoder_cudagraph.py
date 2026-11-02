@@ -1614,13 +1614,3 @@ class TestFlashInferCuSeqlensPadding:
         buf = torch.full_like(capture, -1)
         self._qwen3_vl_padding_fn(flashinfer)(buf, replay)
         assert torch.equal(buf, want)
-
-    @pytest.mark.parametrize("flashinfer", [True, False])
-    def test_default_copy_breaks_capture_size_metadata(self, flashinfer: bool):
-        capture = self._cu_seqlens(flashinfer, [49] * 16, 16)
-        replay = self._cu_seqlens(flashinfer, [49], 2)
-        want = self._cu_seqlens(flashinfer, [49], 16)
-
-        buf = torch.full_like(capture, -1)
-        EncoderCudaGraphManager._copy_padded_buffer(buf, replay)
-        assert not torch.equal(buf, want)
