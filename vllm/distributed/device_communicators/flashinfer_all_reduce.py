@@ -528,12 +528,20 @@ class FlashInferAllReduce:
             dtype=input_tensor.dtype,
             group=self.group,
         )
+        # Same hazard as the fused AR+RMSNorm pass: this call defers the
+        # one-shot/two-shot choice to FlashInfer AUTO, which always selects
+        # the one-shot Lamport kernel at num_tokens <= PDL_ADVANCE_LAUNCH_TOKENS,
+        # and that kernel signals PDL completion before its output buffer is
+        # committed when trigger_completion_at_end is False (NaN race window;
+        # see allreduce_rms_fusion.py and flashinfer-ai/flashinfer#1223).
+        # Calls above the threshold already completed at the end, so this
+        # changes only the hazardous small-call case.
         return flashinfer_comm.allreduce_fusion(
             input=input_tensor,
             workspace=workspace,
             pattern=flashinfer_comm.AllReduceFusionPattern.kAllReduce,
             launch_with_pdl=True,
-            trigger_completion_at_end=num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
+            trigger_completion_at_end=True,
         )
 
     def destroy(self):
