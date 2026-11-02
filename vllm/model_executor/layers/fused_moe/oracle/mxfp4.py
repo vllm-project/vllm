@@ -177,6 +177,7 @@ class Mxfp4MoeBackend(Enum):
     XPU = "XPU"
     # CPU
     CPU = "CPU"
+    ZEN_CPU = "ZEN_CPU"
     # Emulation
     EMULATION = "EMULATION"
     # Humming
@@ -339,6 +340,13 @@ def backend_to_kernel_cls(
 
         return [XPUExpertsMxFp4]
 
+    elif backend == Mxfp4MoeBackend.ZEN_CPU:
+        from vllm.model_executor.layers.fused_moe.experts.zentorch_moe import (
+            ZentorchExpertsMxfp4,
+        )
+
+        return [ZentorchExpertsMxfp4]
+
     elif backend == Mxfp4MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsMxfp4
 
@@ -401,7 +409,10 @@ def map_mxfp4_backend(runner_backend: MoEBackend) -> list[Mxfp4MoeBackend]:
         "aiter_triton_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4],
         "aiter_mxfp4_mxfp4": [Mxfp4MoeBackend.AITER_MXFP4_MXFP4],
         "xpu": [Mxfp4MoeBackend.XPU],
+        # Each name resolves to exactly one backend; "auto" is what prefers
+        # ZEN_CPU over the native kernel.
         "cpu": [Mxfp4MoeBackend.CPU],
+        "zen_cpu": [Mxfp4MoeBackend.ZEN_CPU],
         "emulation": [Mxfp4MoeBackend.EMULATION],
     }
     if backends := mapping.get(runner_backend):
@@ -433,6 +444,7 @@ def _get_priority_backends_for_gpt_oss() -> list[Mxfp4MoeBackend]:
         Mxfp4MoeBackend.BATCHED_MARLIN,
         Mxfp4MoeBackend.HUMMING,
         Mxfp4MoeBackend.XPU,
+        Mxfp4MoeBackend.ZEN_CPU,
         Mxfp4MoeBackend.CPU,
         Mxfp4MoeBackend.EMULATION,
     ]
@@ -465,7 +477,7 @@ def _get_priority_backends() -> list[Mxfp4MoeBackend]:
     if current_platform.is_xpu():
         return [Mxfp4MoeBackend.XPU]
     if current_platform.is_cpu():
-        return [Mxfp4MoeBackend.CPU]
+        return [Mxfp4MoeBackend.ZEN_CPU, Mxfp4MoeBackend.CPU]
     _AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.DEEPGEMM_MXFP4,
@@ -1506,6 +1518,21 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             w13_bias,
             w2_bias,
         )
+    elif mxfp4_backend == Mxfp4MoeBackend.ZEN_CPU:
+        from vllm.model_executor.kernels.linear.zentorch_utils import (
+            w4_group_scale_from_e8m0,
+        )
+
+        w13_bias_out = None if w13_bias is None else w13_bias.data.to(torch.bfloat16)
+        w2_bias_out = None if w2_bias is None else w2_bias.data.to(torch.bfloat16)
+        return (
+            w13_weight.data.contiguous(),
+            w2_weight.data.contiguous(),
+            w4_group_scale_from_e8m0(w13_weight_scale.data),
+            w4_group_scale_from_e8m0(w2_weight_scale.data),
+            w13_bias_out,
+            w2_bias_out,
+        )
     elif mxfp4_backend == Mxfp4MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_mxfp4_moe_layer_for_cpu,
@@ -2031,6 +2058,7 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         Mxfp4MoeBackend.AITER_MXFP4_MXFP4,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_MXFP4,
         Mxfp4MoeBackend.AITER_MXFP4_FP8,
+        Mxfp4MoeBackend.ZEN_CPU,
     ):
         return convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             mxfp4_backend=mxfp4_backend,
@@ -2207,6 +2235,7 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.AITER_MXFP4_BF16,
         Mxfp4MoeBackend.AITER_TRITON_MXFP4_BF16,
         Mxfp4MoeBackend.CPU,
+        Mxfp4MoeBackend.ZEN_CPU,
     ):
         return mxfp4_w4a16_moe_quant_config(
             w1_bias=w1_bias,
