@@ -1205,13 +1205,6 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
         return loader.load_weights(interleaved_weights(), mapper=self.hf_to_vllm_mapper)
 
     def process_weights_after_loading(self) -> None:
-        n_gates = materialize_residual_path_constants(self)
-        logger.info(
-            "Materialized residual-path constants for %d gated residual connections",
-            n_gates,
-        )
-
-    def process_weights_after_loading(self) -> None:
         # The experts are in their kernel layout only after the per-layer
         # quant finalize, which runs between load_weights and this hook.
         maybe_attach_mono(self)
