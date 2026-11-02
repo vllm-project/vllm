@@ -34,27 +34,21 @@ logger = init_logger(__name__)
 
 # Index heads per rank (TP4 / TP2 / TP1).
 NUM_INDEX_HEADS = (1, 2, 4)
-# Decode CP: rows per request (DSpark 3).
+# Decode CP: rows per request (DSpark 3); DSpark 7 splits each request in two.
 CP_QUERY_LEN = 4
 
 
 def _cp_requests(
     d: MiniMaxM3IndexerDecodeMetadata,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """The CP scorer's 4-row requests: a request of k * 4 rows scores as k
-    requests on its block table row, each 4 tokens shorter than the next, so
-    every row keeps its causal length. Built once a step on the shared
-    metadata."""
-    k = d.decode_query_len // CP_QUERY_LEN
-    if k == 1:
+    """The CP scorer's 4-row requests. DSpark 7's 8-row request scores as two on
+    its block table row, the first 4 tokens shorter, so every row keeps its
+    causal length."""
+    if d.decode_query_len == CP_QUERY_LEN:
         return d.block_table, d.seq_lens
-    split = getattr(d, "_cp_split", None)
-    if split is None:
-        back = torch.arange(k - 1, -1, -1, device=d.seq_lens.device) * CP_QUERY_LEN
-        seq_lens = (d.seq_lens[:, None] - back.to(d.seq_lens.dtype)).clamp_(min=0)
-        split = (d.block_table.repeat_interleave(k, dim=0), seq_lens.flatten())
-        d._cp_split = split  # type: ignore[attr-defined]
-    return split
+    first = (d.seq_lens - CP_QUERY_LEN).clamp_(min=0)  # padding stays 0
+    seq_lens = torch.stack((first, d.seq_lens), dim=1).flatten()
+    return d.block_table.repeat_interleave(2, dim=0), seq_lens
 
 
 def rocm_nvfp4_indexer_unsupported_reason(
@@ -156,7 +150,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             # The push has no back-pressure; under DBO no all-reduce orders it.
             or dbo_enabled()
             or self.num_index_heads != 1
-            or query_len % CP_QUERY_LEN
+            or query_len not in (CP_QUERY_LEN, 2 * CP_QUERY_LEN)
             or num_decodes * query_len > cp.max_rows
         ):
             return None
@@ -202,7 +196,9 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             assert d is not None
             cp = self._decode_cp(md.num_decodes, d.decode_query_len)
             if cp is not None:
-                block_table, seq_lens = _cp_requests(d)
+                if md.cp_requests is None:
+                    md.cp_requests = _cp_requests(d)
+                block_table, seq_lens = md.cp_requests
                 # A view of the receive buffer, valid until the next call.
                 score = cp.score_push(
                     iq[:nd, 0],
