@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.sample.logprob import LogprobTokenIdsState
 from vllm.v1.worker.gpu.sample.output import SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
@@ -404,8 +405,13 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
     processed_logits = torch.zeros((12, vocab_size), device=device)
     processed_logits[0, 0] = -float("inf")
     processed_logits[rows_per_request + 1, 1] = -float("inf")
-    draft_logits = torch.zeros(
-        (num_reqs, num_speculative_steps, vocab_size), device=device
+    draft_logits = DraftLogitsCache(
+        num_reqs,
+        num_speculative_steps,
+        vocab_size,
+        dtype=torch.float32,
+        fill=0.0,
+        device=device,
     )
     draft_sampled = torch.zeros(
         (num_reqs, rows_per_request), dtype=torch.int64, device=device
@@ -425,6 +431,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
         ),
         use_fp64_gumbel=False,
         apply_sampling_params=lambda logits, *_: logits,
+        trace_replay_state=None,
     )
     rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps)
     pos = torch.arange(12, dtype=torch.int32, device=device)

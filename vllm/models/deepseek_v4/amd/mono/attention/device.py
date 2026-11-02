@@ -334,7 +334,10 @@ def mx_code(amax):
     + 127, 0, 254), amax floored at FLT_MIN."""
     a = fx.max(amax, fx.Float32(FLT_MIN))
     q = div_rn(a, fx.Float32(FP8_MAX), fx.Float32(1.0 / FP8_MAX))
-    return fx.min(fx.max(ceil_exp(q), fx.Int32(0)), fx.Int32(254))
+    bits = q.bitcast(fx.Int32)
+    sub = (bits > 0x400000).select(fx.Int32(1), fx.Int32(0))
+    e = (bits < 0x800000).select(sub, ceil_exp(q))
+    return fx.min(fx.max(e, fx.Int32(0)), fx.Int32(254))
 
 
 def mx_mul(code):

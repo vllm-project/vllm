@@ -22,6 +22,7 @@ from vllm.v1.attention.backends.flash_attn import (
 from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 from vllm.v1.kv_cache_layout import KVCacheLayout
 
+from ..common.ops.summary_update import build_prefill_groups
 from .ops.attention_gate import headwise_sigmoid_gate
 from .ops.sparse_prefill import make_prefill_chunks
 from .ops.sparse_prefill_pages import (
@@ -29,7 +30,6 @@ from .ops.sparse_prefill_pages import (
     plan_staged_prefill_pages,
     stage_prefill_pages,
 )
-from .ops.summary_update import build_prefill_groups
 
 # Transient dense BF16 copy of a prefill batch's live pages for one KV group.
 _PREFILL_STAGING_BYTES = 512 << 20
