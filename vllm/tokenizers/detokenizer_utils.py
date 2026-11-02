@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import json
-from typing import cast
 
 from vllm.tokenizers import TokenizerLike
 
@@ -17,7 +16,7 @@ def _replace_none_with_empty(tokens: list[str | None]):
 
 def _convert_tokens_to_string_with_added_encoders(
     tokenizer: TokenizerLike,
-    output_tokens: list[str | bytes],
+    output_tokens: list[str],
     skip_special_tokens: bool,
     spaces_between_special_tokens: bool,
 ) -> str:
@@ -30,7 +29,7 @@ def _convert_tokens_to_string_with_added_encoders(
     # localize frequently used objects;
 
     sub_texts: list[str] = []
-    current_sub_text: list[str | bytes] = []
+    current_sub_text: list[str] = []
     convert_tokens_to_string = tokenizer.convert_tokens_to_string
     added_vocab_set = set(tokenizer.get_added_vocab())
     all_special_tokens = (
@@ -45,7 +44,7 @@ def _convert_tokens_to_string_with_added_encoders(
             if current_sub_text:
                 sub_texts.append(convert_tokens_to_string(current_sub_text))
                 current_sub_text.clear()
-            sub_texts.append(cast(str, token))
+            sub_texts.append(token)
         else:
             current_sub_text.append(token)
     if current_sub_text:
@@ -121,7 +120,7 @@ def convert_prompt_ids_to_tokens(
     tokenizer: TokenizerLike,
     prompt_ids: list[int],
     skip_special_tokens: bool = False,
-) -> tuple[list[str | bytes], int, int]:
+) -> tuple[list[str], int, int]:
     """Converts the prompt ids to tokens and returns the tokens and offsets
     for incremental detokenization.
 
@@ -164,8 +163,7 @@ def convert_ids_list_to_tokens(
     marker = get_leading_space_marker(tokenizer)
     if marker is None:
         return [tokenizer.decode([tid]) or "" for tid in token_ids]
-    # Only tokenizers with str pieces have a marker.
-    raw_tokens = cast(list[str], tokenizer.convert_ids_to_tokens(token_ids))
+    raw_tokens = tokenizer.convert_ids_to_tokens(token_ids)
     return [
         _restore_leading_spaces(raw, tokenizer.decode([tid]) or "", marker)
         for tid, raw in zip(token_ids, raw_tokens)
@@ -178,12 +176,12 @@ def convert_ids_list_to_tokens(
 def detokenize_incrementally(
     tokenizer: TokenizerLike,
     all_input_ids: list[int],
-    prev_tokens: list[str | bytes] | None,
+    prev_tokens: list[str] | None,
     prefix_offset: int,
     read_offset: int,
     skip_special_tokens: bool = False,
     spaces_between_special_tokens: bool = True,
-) -> tuple[list[str | bytes], str, int, int]:
+) -> tuple[list[str], str, int, int]:
     """Detokenizes the input ids incrementally and returns the new tokens
     and the new text.
 
