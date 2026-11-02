@@ -7,7 +7,7 @@ vllm serve Qwen/Qwen3-30B-A3B --enable-return-routed-experts
 # offline: LLM("Qwen/Qwen3-30B-A3B", enable_return_routed_experts=True)
 ```
 
-The flag sets `AuxOutputConfig.enable_return_routed_experts` (full form: `--aux-output-config '{"enable_return_routed_experts": true, "max_bytes": N}'`). There is no per-request on/off switch.
+The flag sets `AuxOutputConfig.enable_return_routed_experts` (full form: `--aux-output-config '{"enable_return_routed_experts": true, "max_bytes": N}'`). Requests can opt out with [`return_aux_outputs`](#return_aux_outputs).
 
 ## Requirements
 
@@ -34,7 +34,7 @@ Routing is stored by the aux output connector (`vllm/distributed/aux_output_conn
 - **Shape:** `(num_tokens - 1 - routed_experts_prompt_start, num_moe_layers, num_experts_per_tok)`, `num_tokens` = prompt + output. The last sampled token has no row.
 - **Rows:** row `i` is position `routed_experts_prompt_start + i` of `prompt_token_ids + output_token_ids`.
 - **dtype:** `uint8` for at most 256 experts, else `uint16`; logical expert IDs.
-- Filled only when the request finishes. `None` if the flag is off or the request aborted before any forward pass.
+- Filled only when the request finishes. `None` if the flag is off, the request set `return_aux_outputs=False`, or the request aborted before any forward pass.
 
 ```python
 import base64, io
@@ -47,8 +47,16 @@ experts = np.load(io.BytesIO(base64.b64decode(choice["routed_experts"])))
 
 Per-request, default `0`: drops the first N prompt-token rows (e.g. routing already received in earlier turns). Must be `0 <= value <= prompt_len`, else HTTP 400. Pass it top-level on `/v1/*completions`, inside `sampling_params` on `/inference/v1/generate`, or as `SamplingParams(routed_experts_prompt_start=...)`.
 
+## `return_aux_outputs`
+
+Per-request, default `true`. Set it to `false` for requests that don't need RL auxiliary outputs, such as evaluation traffic on a server that also serves rollouts. Such a request gets no `routed_experts`, no `sampling_mask` and no sample `logprobs` or `logprob_token_ids`, and vLLM does not store its routing. `prompt_logprobs` and the `top_k` sampling parameter are unaffected. Pass it inside `sampling_params` on `/inference/v1/generate` or as `SamplingParams(return_aux_outputs=False)`.
+
+Requests that opt out get their own prefix-cache namespace, because their KV blocks have no stored routing. They share cached prefixes with each other but not with requests that record routing.
+
+Routing capture and mask computation run for the whole batch, so an opted-out request still pays that part of the cost while the server flags are on.
+
 ## Limitations
 
-- The Rust HTTP frontend never returns `routed_experts` and always sends `routed_experts_prompt_start = 0`. Use the Python API server.
+- The Rust HTTP frontend returns `routed_experts` only on `/inference/v1/generate`. Its completions and chat completions routes return no routing.
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).
