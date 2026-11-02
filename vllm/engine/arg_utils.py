@@ -282,10 +282,8 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
     return type_hints
 
 
-NEEDS_HELP = (
-    any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
-    or "mkdocs" in sys.modules  # mkdocs SUBCOMMAND
-)
+IS_ARGPARSE = any("--help" in arg for arg in sys.argv)  # vllm SUBCOMMAND --help
+NEEDS_HELP = IS_ARGPARSE or "mkdocs" in sys.modules  # mkdocs SUBCOMMAND
 
 
 def _maybe_add_docs_url(cls: Any) -> str:
@@ -354,8 +352,9 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         # Get the help text for the field
         name = field.name
         help = cls_docs.get(name, "").strip()
-        # Escape % for argparse
-        help = help.replace("%", "%%")
+        # Escape % for argparse's %-formatting in _expand_help
+        if IS_ARGPARSE:
+            help = help.replace("%", "%%")
 
         # Initialise the kwargs dictionary for the field
         kwargs[name] = {"default": default, "help": help}
@@ -611,8 +610,9 @@ class EngineArgs:
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
     offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
-    gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
+    gpu_memory_utilization: float | None = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
+    enable_extensible_kv_cache: bool | None = CacheConfig.enable_extensible_kv_cache
     max_num_batched_tokens: int | None = None
     max_num_scheduled_tokens: int | None = None
     long_prefill_token_threshold: int = SchedulerConfig.long_prefill_token_threshold
@@ -1398,6 +1398,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
+        )
+        cache_group.add_argument(
+            "--enable-extensible-kv-cache",
+            **cache_kwargs["enable_extensible_kv_cache"],
         )
         cache_group.add_argument("--kv-cache-dtype", **cache_kwargs["cache_dtype"])
         cache_group.add_argument(
@@ -2314,6 +2318,7 @@ class EngineArgs:
             block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
+            enable_extensible_kv_cache=self.enable_extensible_kv_cache,  # type: ignore[arg-type]
             cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
