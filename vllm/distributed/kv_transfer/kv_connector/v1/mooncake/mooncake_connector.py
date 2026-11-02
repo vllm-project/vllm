@@ -52,15 +52,15 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.stats import (
     MooncakeKVConnectorStats,
     MooncakePromMetrics,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.classic import (
-    ClassicTransferBackend,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
     MemoryRegion,
     RangeRequest,
     TransferBackend,
     TransferOp,
     TransferState,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.te import (
+    TransferEngineBackend,
 )
 from vllm.distributed.parallel_state import (
     get_pp_group,
@@ -1403,7 +1403,7 @@ class MooncakeConnectorWorker:
         logger.info(
             "The Mooncake Transfer Engine is using %s as its protocol.", protocol
         )
-        self.transfer_backend: TransferBackend = ClassicTransferBackend(
+        self.transfer_backend: TransferBackend = TransferEngineBackend(
             engine_cls=TransferEngine,
             hostname=self.hostname,
             protocol=protocol,
