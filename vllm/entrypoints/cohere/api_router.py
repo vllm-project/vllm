@@ -36,6 +36,7 @@ from http import HTTPStatus
 
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
+from starlette._utils import get_route_path
 from starlette.middleware.base import BaseHTTPMiddleware
 
 import vllm.envs as envs
@@ -227,8 +228,9 @@ if _SDK_AVAILABLE:
         """
 
         async def dispatch(self, request: Request, call_next):
+            route_path = get_route_path(request.scope)
             response = await call_next(request)
-            if not request.url.path.startswith(_COHERE_PATH_PREFIX):
+            if not route_path.startswith(_COHERE_PATH_PREFIX):
                 return response
             if response.status_code < 400:
                 return response
