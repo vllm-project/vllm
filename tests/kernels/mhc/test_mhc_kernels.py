@@ -1472,7 +1472,8 @@ def test_mhc_pre_delayed_rocm_aiter_fused_rms_norm(num_tokens, seam):
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm required")
-def test_mhc_post_collapse_rms_norm_warmup_covers_runtime():
+@pytest.mark.parametrize("num_tokens", [1, 7, 128])
+def test_mhc_post_collapse_rms_norm_warmup_covers_runtime(num_tokens):
     """Warmup compiles the one variant every runtime token count launches."""
     from vllm.model_executor.kernels.mhc.triton import (
         MHC_POST_COLLAPSE_RMS_NORM_KERNEL,
@@ -1488,26 +1489,36 @@ def test_mhc_post_collapse_rms_norm_warmup_covers_runtime():
         hidden_size=hidden_size, weight_dtype=torch.bfloat16
     )
     assert len(kernel_cache) == 1
-    for num_tokens in (1, 7, 128):
-        residual, _, _, _, norm_weight = _rocm_mhc_inputs(
-            num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=hc_mult
-        )
-        mhc_post_collapse_rms_norm_triton(
-            residual,
-            torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE),
-            torch.rand(num_tokens, hc_mult, 1, device=DEVICE),
-            torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE),
-            torch.rand(num_tokens, hc_mult, device=DEVICE),
-            norm_weight,
-            1e-6,
-        )
-        assert len(kernel_cache) == 1
+    residual, _, _, _, norm_weight = _rocm_mhc_inputs(
+        num_tokens=num_tokens, hidden_size=hidden_size, hc_mult=hc_mult
+    )
+    mhc_post_collapse_rms_norm_triton(
+        residual,
+        torch.randn(num_tokens, hidden_size, dtype=torch.bfloat16, device=DEVICE),
+        torch.rand(num_tokens, hc_mult, 1, device=DEVICE),
+        torch.rand(num_tokens, hc_mult, hc_mult, device=DEVICE),
+        torch.rand(num_tokens, hc_mult, device=DEVICE),
+        norm_weight,
+        1e-6,
+    )
+    assert len(kernel_cache) == 1
 
 
-@pytest.mark.skipif(
-    not (current_platform.is_rocm() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
-    reason="AITER fused delayed-seam kernel required (gfx950)",
+def _on_cdna4() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import get_cdna_version
+
+    return get_cdna_version() == 4
+
+
+requires_rocm_mhc_overlap = pytest.mark.skipif(
+    not (_on_cdna4() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
+    reason="gfx950 with AITER's fused delayed-seam kernel required",
 )
+
+
+@requires_rocm_mhc_overlap
 @pytest.mark.parametrize("num_tokens", [1, 2, 7, 16, 64, 128])
 @pytest.mark.parametrize("seam", ["post", "no_post"])
 def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(
@@ -1575,21 +1586,20 @@ def test_deepseek_v41_rocm_mhc_overlap_matches_fused_seam(
             check(actual)
 
 
-@pytest.mark.skipif(
-    not (current_platform.is_rocm() and HAS_AITER_MHC_FUSED_POST_PRE_DELAYED_RMS_NORM),
-    reason="AITER fused delayed-seam kernel required (gfx950)",
-)
+@requires_rocm_mhc_overlap
+@pytest.mark.parametrize("over_limit", [False, True], ids=["at_limit", "over_limit"])
 @pytest.mark.parametrize(
     "entry,num_splits",
     [("broadcast", 1), ("pipeline", 1), ("residual", 2), ("engram", 1)],
 )
 def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
-    entry, num_splits, monkeypatch, default_vllm_config
+    entry, num_splits, over_limit, monkeypatch, default_vllm_config
 ):
-    """The decoder layer splits its seams only inside a FULL graph capture, and
-    the replayed layer matches the serial one. ``num_splits`` counts the seams
-    that carry a post block: layer 0, a pipeline entry and Engram fold none into
-    the attention seam, and the FFN seam always has one."""
+    """The decoder layer splits its seams only inside a FULL graph capture of at
+    most ``MHC_OVERLAP_MAX_TOKENS`` tokens, and the replayed layer matches the
+    serial one. ``num_splits`` counts the seams that carry a post block: layer
+    0, a pipeline entry and Engram fold none into the attention seam, and the
+    FFN seam always has one."""
     from vllm.config import CUDAGraphMode
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.kernels.mhc.triton import (
@@ -1602,7 +1612,8 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     from vllm.models.deepseek_v41.amd.model import DeepseekV4DecoderLayer
 
     set_random_seed(0)
-    num_tokens, hidden_size = 16, 5120
+    num_tokens = amd_mhc.MHC_OVERLAP_MAX_TOKENS + over_limit
+    hidden_size = 5120
     decoder = DeepseekV4DecoderLayer.__new__(DeepseekV4DecoderLayer)
     nn.Module.__init__(decoder)
     decoder.mono = None
@@ -1683,7 +1694,7 @@ def test_deepseek_v41_rocm_decoder_overlap_matches_serial(
     assert not splits, "the overlap must not run eagerly or in piecewise graphs"
 
     graph, actual = capture(CUDAGraphMode.FULL)
-    assert splits == [True] * num_splits
+    assert splits == ([] if over_limit else [True] * num_splits)
     graph.replay()
     for result, ref in zip(actual, expected, strict=True):
         torch.testing.assert_close(result, ref, atol=2e-2, rtol=1e-2)
