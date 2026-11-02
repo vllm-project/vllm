@@ -15,6 +15,7 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     CrossAttentionManager,
+    DFlashSlidingWindowManager,
     MambaManager,
     SingleTypeKVCacheManager,
     get_manager_for_kv_cache_spec,
@@ -60,6 +61,19 @@ def _validate_prefix_cache_retention_interval(
             "must be non-negative and a multiple of scheduler_block_size "
             f"({scheduler_block_size})."
         )
+
+
+def _request_length_kwargs(
+    manager_cls: type[SingleTypeKVCacheManager], max_cache_hit_length: int
+) -> dict[str, int]:
+    """Hit-lookup kwargs for managers whose hit rule depends on the request end.
+
+    Lookups cap hits below the request length, so ``max_cache_hit_length + 1``
+    is at most the request length; an underestimate only asks for more blocks.
+    """
+    if issubclass(manager_cls, DFlashSlidingWindowManager):
+        return {"num_request_tokens": max_cache_hit_length + 1}
+    return {}
 
 
 def replay_boundaries(
@@ -897,6 +911,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     pcp_world_size=self.single_type_managers[
                         first_group_id
                     ].pcp_world_size,
+                    **_request_length_kwargs(manager_cls, max_cache_hit_length),
                 )
                 if drop_eagle_block:
                     eagle_verified.add(idx)
@@ -979,6 +994,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 alignment_tokens=self._cache_hit_alignment_tokens,
                 dcp_world_size=manager.dcp_world_size,
                 pcp_world_size=manager.pcp_world_size,
+                **_request_length_kwargs(manager_cls, max_cache_hit_length),
             )
             for gid, blks in zip(group_ids, blocks):
                 hit_blocks[gid] = blks
