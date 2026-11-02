@@ -48,6 +48,10 @@ def default_server_args():
         "2048",
         "--max-num-seqs",
         "128",
+        "--enable-prompt-tokens-details",
+        "--enable-prefix-caching",
+        "--block-size",
+        "16",
         "--enforce-eager",
     ]
 
@@ -251,6 +255,39 @@ async def test_batched_chat_completions_logprob_token_ids(
     }
 
 
+@pytest.mark.asyncio
+async def test_batched_chat_completions_prompt_tokens_details(
+    server: RemoteOpenAIServer,
+) -> None:
+    """Batch cache counts include both conversations."""
+    conversation = [{"role": "user", "content": "Repeat the word alpha. " * 20}]
+    body = {"model": MODEL_NAME, "max_tokens": 1, "temperature": 0}
+    usages = []
+
+    async with httpx.AsyncClient() as http_client:
+        # Warm the prefix, measure one conversation, then measure a batch of two.
+        for endpoint, messages in (
+            ("v1/chat/completions", conversation),
+            ("v1/chat/completions", conversation),
+            ("v1/chat/completions/batch", [conversation] * 2),
+        ):
+            response = await http_client.post(
+                server.url_for(endpoint),
+                json={**body, "messages": messages},
+                timeout=60,
+            )
+            assert response.status_code == 200, response.text
+            usages.append(response.json()["usage"])
+
+    single_details = usages[1]["prompt_tokens_details"]
+    batch_details = usages[2]["prompt_tokens_details"]
+    assert single_details is not None
+    assert single_details["cached_tokens"] > 0
+    assert batch_details is not None
+    for field in ("cached_tokens", "created_cache_tokens"):
+        assert batch_details[field] == 2 * single_details[field]
+
+
 def _make_request_output(
     prompt_idx: int,
     text: str,
@@ -295,6 +332,7 @@ async def test_batched_echo_does_not_prepend_user_prompt() -> None:
     serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
     serving.response_role = "assistant"
     serving.system_fingerprint = None
+    serving.enable_prompt_tokens_details = False
 
     conversations = [[{"role": "user", "content": "USER PROMPT"}]]
     request = BatchChatCompletionRequest(
@@ -324,6 +362,7 @@ async def test_batched_echo_prepends_matching_assistant_prefix() -> None:
     serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
     serving.response_role = "assistant"
     serving.system_fingerprint = None
+    serving.enable_prompt_tokens_details = False
 
     conversations = [
         [
@@ -438,6 +477,7 @@ async def test_batched_parser_receives_each_prompt_prefix() -> None:
     serving = OpenAIServingChatBatch.__new__(OpenAIServingChatBatch)
     serving.response_role = "assistant"
     serving.system_fingerprint = None
+    serving.enable_prompt_tokens_details = False
     serving.chat_template = None
     serving.chat_template_content_format = "auto"  # type: ignore[misc]  # Final attr
     serving.default_chat_template_kwargs = {}
