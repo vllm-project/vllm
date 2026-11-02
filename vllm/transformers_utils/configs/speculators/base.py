@@ -132,6 +132,6 @@ class SpeculatorsConfig(PreTrainedConfig):
         }
         if result["method"] == "peagle":
             result.update({"method": "eagle3", "parallel_drafting": True})
-        elif result["method"] == "dflash2":
+        elif result["method"] in ("dflash2", "dspine"):
             result["method"] = "dflash"
         return result

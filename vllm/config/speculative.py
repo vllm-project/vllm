@@ -77,7 +77,7 @@ MTPModelTypes = Literal[
     "glm5_next_mtp",
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
-DFlashModelTypes = Literal["dflash"]
+DFlashModelTypes = Literal["dflash", "dspine"]
 DSparkModelTypes = Literal["dspark"]
 EagleModelTypes = Literal[
     "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
@@ -189,6 +189,111 @@ def _get_nested_config_value(config: Any, section: str, name: str) -> Any:
     if isinstance(nested_config, Mapping):
         return nested_config.get(name)
     return getattr(nested_config, name, None)
+
+
+def _draft_carries_dspine_bridge(draft_model_config: ModelConfig) -> bool:
+    """Whether the draft checkpoint carries a DSpine code bridge."""
+    hf_config = draft_model_config.hf_config
+    architectures = list(draft_model_config.architectures or [])
+    architectures.extend(getattr(hf_config, "architectures", None) or [])
+    return "DSpineDraftModel" in architectures or bool(
+        _get_nested_config_value(
+            hf_config,
+            "dflash_config",
+            "selected_prefix_code_bridge",
+        )
+    )
+
+
+def _apply_dspine_draft_config(spec: "SpeculativeConfig") -> None:
+    """Rewrite a DSpine draft onto DSpineDraftModel and check its contract.
+
+    Called from DFlash draft setup, after the draft config is wrapped. Token
+    width is resolved separately so it lands before the num_speculative_tokens
+    requirement; tensor-parallel size is checked after that is assigned.
+    """
+    draft = spec.draft_model_config
+    if draft is None:
+        return
+    carries_dspine_bridge = _draft_carries_dspine_bridge(draft)
+    if getattr(spec, "_requested_dspine", False) and not carries_dspine_bridge:
+        raise ValueError(
+            "Speculative method 'dspine' requires a DSpine draft "
+            "(dflash_config.selected_prefix_code_bridge is missing)."
+        )
+    if not carries_dspine_bridge:
+        return
+    if spec.method != "dflash":
+        raise ValueError(
+            "This draft checkpoint carries a DSpine code bridge; "
+            "serve it with method='dspine' or method='dflash'."
+        )
+    hf_config = draft.hf_config
+    hf_config.architectures = ["DSpineDraftModel"]
+    spec.update_arch_()
+    if (
+        _get_nested_config_value(
+            hf_config,
+            "dflash_config",
+            "draft_block_causal",
+        )
+        and getattr(hf_config, "is_causal", None) is None
+    ):
+        hf_config.is_causal = True
+    if spec.kv_cache_dtype in ("nvfp4", "fp4_mx_block16"):
+        raise ValueError(
+            f"DSpine does not support kv_cache_dtype={spec.kv_cache_dtype!r}."
+        )
+
+
+def _resolve_dspine_num_speculative_tokens(spec: "SpeculativeConfig") -> None:
+    """Default or check num_speculative_tokens against the DSpine block size."""
+    draft = spec.draft_model_config
+    if draft is None or not _draft_carries_dspine_bridge(draft):
+        return
+    hf_config = draft.hf_config
+    dspine_block_size = getattr(hf_config, "block_size", None)
+    if dspine_block_size is None:
+        dspine_block_size = _get_nested_config_value(
+            hf_config,
+            "dflash_config",
+            "block_size",
+        )
+    if dspine_block_size is None:
+        return
+    if spec.num_speculative_tokens is None:
+        spec.num_speculative_tokens = int(dspine_block_size) - 1
+    elif int(spec.num_speculative_tokens) + 1 != int(dspine_block_size):
+        raise ValueError(
+            "DSpine's code bridge is trained for block size "
+            f"{int(dspine_block_size)}; num_speculative_tokens "
+            f"must be {int(dspine_block_size) - 1}, got "
+            f"{spec.num_speculative_tokens}."
+        )
+
+
+def _validate_dspine_draft(spec: "SpeculativeConfig") -> None:
+    """Reject a DSpine draft served by the wrong method or with TP > 1."""
+    draft = spec.draft_model_config
+    if draft is None:
+        return
+    carries_dspine_bridge = _draft_carries_dspine_bridge(draft)
+    if getattr(spec, "_requested_dspine", False) and not carries_dspine_bridge:
+        raise ValueError(
+            "Speculative method 'dspine' requires a DSpine draft "
+            "(dflash_config.selected_prefix_code_bridge is missing)."
+        )
+    if not carries_dspine_bridge:
+        return
+    if spec.method != "dflash":
+        raise ValueError(
+            "This draft checkpoint carries a DSpine code bridge; "
+            "serve it with method='dspine' or method='dflash'."
+        )
+    if spec.draft_tensor_parallel_size != 1:
+        raise ValueError(
+            "DSpine speculative decoding supports tensor_parallel_size == 1 only."
+        )
 
 
 def _get_qwen3_dspark_value(config: Any, name: str) -> Any:
@@ -1362,6 +1467,13 @@ class SpeculativeConfig:
         elif self.method == "[ngram]":
             self.method = "ngram"
 
+        # `dspine` is an alias of `dflash`. Remember the request so draft
+        # setup can require a DSpine code bridge.
+        requested_dspine = self.method == "dspine"
+        if requested_dspine:
+            self.method = "dflash"
+        object.__setattr__(self, "_requested_dspine", requested_dspine)
+
         config_cls = get_method_config_class(self)
         # DSpark drafts carry their own width (block size), so the default
         # draft is resolved even without num_speculative_tokens.
@@ -1370,6 +1482,7 @@ class SpeculativeConfig:
         ):
             self.model = config_cls.default_model(self)
         config_cls.configure(self)
+        _validate_dspine_draft(self)
         # The draft checkpoint may have determined the speculator.
         config_cls = get_speculator_config_class(self)
 
