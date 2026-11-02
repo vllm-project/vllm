@@ -4,12 +4,12 @@ import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.classic import (
-    ClassicTransferBackend,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
     TransferBackend,
     TransferEngineKind,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.te import (
+    TransferEngineBackend,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent import (
     TentTransferBackend,
@@ -18,7 +18,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.tent_config 
     TENT_METRICS_BASE_PORT,
 )
 
-# Mooncake reads these inside the classic engine constructor.
+# Mooncake reads these inside the Transfer Engine constructor.
 _TENT_ENV_VARS = ("MC_USE_TENT", "MC_USE_TEV1")
 _DISABLED_VALUES = ("0", "false", "off", "no")
 
@@ -37,7 +37,7 @@ def resolve_transfer_engine(
     if requested is None:
         if env_requests_tent:
             return TransferEngineKind.TENT
-        return TransferEngineKind.CLASSIC
+        return TransferEngineKind.TE
     valid = [kind.value for kind in TransferEngineKind]
     if requested not in valid:
         raise RuntimeError(
@@ -63,14 +63,14 @@ def create_transfer_backend(
     device_id: int,
     overrides: Mapping[str, Any] | None = None,
 ) -> TransferBackend:
-    if kind is TransferEngineKind.CLASSIC:
+    if kind is TransferEngineKind.TE:
         if engine_cls is None:
             raise RuntimeError(
                 "Mooncake is not available on this worker, so transfer_engine="
-                "'classic' cannot run; install Mooncake or select "
+                "'te' cannot run; install Mooncake or select "
                 "transfer_engine='tent'."
             )
-        return ClassicTransferBackend(
+        return TransferEngineBackend(
             engine_cls=engine_cls,
             hostname=hostname,
             protocol=protocol,

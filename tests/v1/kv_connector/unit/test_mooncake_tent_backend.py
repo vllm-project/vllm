@@ -519,8 +519,8 @@ def test_tent_config_rejects_a_protocol_the_engine_cannot_use():
         )
 
 
-def test_resolve_transfer_engine_defaults_to_classic():
-    assert resolve_transfer_engine({}, environ={}) is TransferEngineKind.CLASSIC
+def test_resolve_transfer_engine_defaults_to_te():
+    assert resolve_transfer_engine({}, environ={}) is TransferEngineKind.TE
 
 
 def test_resolve_transfer_engine_honours_the_config():
@@ -540,14 +540,12 @@ def test_resolve_transfer_engine_follows_mooncake_env(value):
 def test_resolve_transfer_engine_ignores_a_disabled_env(value):
     kind = resolve_transfer_engine({}, environ={"MC_USE_TENT": value})
 
-    assert kind is TransferEngineKind.CLASSIC
+    assert kind is TransferEngineKind.TE
 
 
 def test_resolve_transfer_engine_rejects_a_contradicting_environment():
     with pytest.raises(RuntimeError, match="MC_USE_TENT or MC_USE_TEV1"):
-        resolve_transfer_engine(
-            {"transfer_engine": "classic"}, environ={"MC_USE_TEV1": "1"}
-        )
+        resolve_transfer_engine({"transfer_engine": "te"}, environ={"MC_USE_TEV1": "1"})
 
 
 def test_resolve_transfer_engine_rejects_an_unknown_value():
@@ -555,10 +553,10 @@ def test_resolve_transfer_engine_rejects_an_unknown_value():
         resolve_transfer_engine({"transfer_engine": "nixl"}, environ={})
 
 
-def test_create_backend_rejects_classic_without_mooncake():
+def test_create_backend_rejects_te_without_mooncake():
     with pytest.raises(RuntimeError, match="Mooncake is not available"):
         create_transfer_backend(
-            TransferEngineKind.CLASSIC,
+            TransferEngineKind.TE,
             engine_cls=None,
             hostname="10.0.0.1",
             protocol="tcp",

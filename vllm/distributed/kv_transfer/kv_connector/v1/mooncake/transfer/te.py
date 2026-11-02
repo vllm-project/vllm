@@ -16,10 +16,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine impor
 SESSION_METADATA = "P2PHANDSHAKE"
 
 
-class ClassicTransferBackend(TransferBackend):
+class TransferEngineBackend(TransferBackend):
     """Wraps `mooncake.engine.TransferEngine` behind the backend interface.
 
-    The classic engine reports one status per batch, so every range of a
+    The Transfer Engine reports one status per batch, so every range of a
     submission shares the same outcome.
     """
 
@@ -41,7 +41,7 @@ class ClassicTransferBackend(TransferBackend):
 
     @property
     def kind(self) -> TransferEngineKind:
-        return TransferEngineKind.CLASSIC
+        return TransferEngineKind.TE
 
     @property
     def rpc_port(self) -> int:
@@ -89,4 +89,4 @@ class ClassicTransferBackend(TransferBackend):
         return [TransferEvent(state=state, error=error) for _ in ranges]
 
     def shutdown(self) -> None:
-        """The classic engine exposes no teardown entry point."""
+        """The Transfer Engine exposes no teardown entry point."""

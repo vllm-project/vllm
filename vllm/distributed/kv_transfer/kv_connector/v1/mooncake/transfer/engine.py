@@ -11,7 +11,7 @@ WIRE_VERSION = 1
 
 
 class TransferEngineKind(Enum):
-    CLASSIC = "classic"
+    TE = "te"
     TENT = "tent"
 
 
@@ -48,7 +48,7 @@ class TransferEvent:
 def format_peer_address(hostname: str, port: int) -> str:
     """Names a peer the way both engines parse it.
 
-    IPv6 addresses are bracketed, which is what the classic engine's
+    IPv6 addresses are bracketed, which is what the Transfer Engine's
     `parseHostNameWithPort` and TENT's segment naming both expect.
     """
     if ":" in hostname:

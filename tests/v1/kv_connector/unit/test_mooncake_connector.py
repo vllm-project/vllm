@@ -1230,7 +1230,7 @@ def _xfer_meta(
             list(region.shared_group_ids) for region in regions
         ],
         registered_row_offsets=[region.row_offset for region in regions],
-        remote_transfer_engine=TransferEngineKind.CLASSIC.value,
+        remote_transfer_engine=TransferEngineKind.TE.value,
         wire_version=WIRE_VERSION,
     )
     fields.update(overrides)
@@ -2892,7 +2892,7 @@ def _short_xfer_meta(worker, layout_id: int, req_blocks: dict) -> MooncakeXferMe
         remote_tp_size=worker.tp_size,
         remote_tp_rank=0,
         remote_pp_size=worker.pp_size,
-        remote_transfer_engine=TransferEngineKind.CLASSIC.value,
+        remote_transfer_engine=TransferEngineKind.TE.value,
         wire_version=WIRE_VERSION,
         layout_id=layout_id,
         req_blocks=req_blocks,
@@ -3541,11 +3541,11 @@ def test_worker_rejects_a_peer_running_another_engine():
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
     worker.transfer_backend = _StubTransfer(TransferEngineKind.TENT)
 
-    mismatch = worker._engine_mismatch(_peer("classic"))
+    mismatch = worker._engine_mismatch(_peer("te"))
 
     assert mismatch is not None
     assert "both sides must select the same engine" in mismatch
-    assert "transfer_engine='classic'" in mismatch
+    assert "transfer_engine='te'" in mismatch
 
 
 def test_worker_rejects_a_peer_with_another_wire_version():

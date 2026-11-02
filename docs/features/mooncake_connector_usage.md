@@ -81,7 +81,7 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 - **num_workers**: Size of thread pool for one prefiller worker to transfer KV caches by mooncake. (default 10)
 - **mooncake_protocol**: Mooncake connector protocol. (default "rdma")
 - **device_name**: Comma-separated whitelist of RDMA devices (e.g. `"mlx5_0,mlx5_1"`) to restrict topology discovery to. Empty discovers every device. Useful on hosts exposing a mix of InfiniBand and RoCE ports, where both peers must settle on the same link layer.
-- **transfer_engine**: `"classic"` (default) or `"tent"`, the Mooncake transfer engine that moves the KV blocks. Left unset, `MC_USE_TENT` or `MC_USE_TEV1` selects `"tent"`; setting `"classic"` while either variable is set is an error rather than a silent override. Both sides of a transfer must run the same engine, and a peer that disagrees is rejected when it registers a transfer.
+- **transfer_engine**: `"te"` (default) or `"tent"`, the Mooncake transfer engine that moves the KV blocks. `"te"` is Mooncake's Transfer Engine; `"tent"` is Transfer Engine NEXT. Left unset, `MC_USE_TENT` or `MC_USE_TEV1` selects `"tent"`; setting `"te"` while either variable is set is an error rather than a silent override. Both sides of a transfer must run the same engine, and a peer that disagrees is rejected when it registers a transfer.
 - **tent_config**: Optional object deep-merged into the TENT configuration vLLM generates. The generated keys cover `metadata_type`, `rpc_server_hostname`, the requested transport, the RDMA device whitelist and the metrics port; overrides replace them.
 - **kv_lease_duration**: Seconds the prefiller holds a finished request's KV blocks before the decoder must renew them. (default unset)
     - Unset keeps the fixed `VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT`.
@@ -90,7 +90,7 @@ cache), see [ECMooncakeConnector Usage Guide](mooncake_ec_connector_usage.md).
 - **bootstrap_server_address**: Optional `"host:port"` of an already running Mooncake bootstrap server. All prefiller ranks register with this endpoint instead of launching an embedded server. The caller owns the server lifetime and must configure the proxy to use the same endpoint. The example proxy assumes the bootstrap server is on the prefiller API host; a different host requires a proxy that supplies that address in `remote_bootstrap_addr`. Omit this option to use the embedded server and `VLLM_MOONCAKE_BOOTSTRAP_PORT`.
 
 !!! note
-    `transfer_engine: "tent"` needs a `tent` Python module in the Mooncake build (`-DUSE_TENT=ON`). A wheel built without it fails at startup with the build instructions, so keep `classic` unless the deployment ships TENT.
+    `transfer_engine: "tent"` needs a `tent` Python module in the Mooncake build (`-DUSE_TENT=ON`). A wheel built without it fails at startup with the build instructions, so keep `te` unless the deployment ships TENT.
 
 ### TENT transfer engine
 

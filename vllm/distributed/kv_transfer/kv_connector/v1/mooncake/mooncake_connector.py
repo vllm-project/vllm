@@ -1725,8 +1725,8 @@ class MooncakeConnectorWorker:
     def _engine_mismatch(self, meta: MooncakeXferMetadata) -> str | None:
         """Rejects peers this worker cannot move KV blocks with.
 
-        A classic engine and TENT address peer memory differently, so a mixed
-        pair would otherwise fail inside the engine.
+        A Transfer Engine peer and a TENT peer address remote memory differently,
+        so a mixed pair would otherwise fail inside the engine.
         """
         remote_engine = meta.remote_transfer_engine or "unknown"
         if meta.remote_transfer_engine != self.transfer_backend.kind.value:

@@ -501,7 +501,7 @@ def _import_tent_module() -> Any:
             "transfer_engine='tent' requires the 'tent' Python module, which this "
             "Mooncake build does not ship. Build Mooncake with -DUSE_TENT=ON, make "
             "the resulting 'tent' module importable, or select "
-            "transfer_engine='classic'."
+            "transfer_engine='te'."
         )
     return importlib.import_module("tent")
 

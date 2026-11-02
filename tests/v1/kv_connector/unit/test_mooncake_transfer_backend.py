@@ -5,15 +5,15 @@ import threading
 
 import pytest
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.classic import (
-    ClassicTransferBackend,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
     MemoryRegion,
     RangeRequest,
     TransferEvent,
     TransferOp,
     TransferState,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.te import (
+    TransferEngineBackend,
 )
 
 
@@ -62,8 +62,8 @@ class FakeEngine:
         return self.unregister_status
 
 
-def make_backend(engine: FakeEngine) -> ClassicTransferBackend:
-    return ClassicTransferBackend(
+def make_backend(engine: FakeEngine) -> TransferEngineBackend:
+    return TransferEngineBackend(
         engine_cls=lambda: engine,
         hostname="10.0.0.1",
         protocol="rdma",
