@@ -1355,9 +1355,7 @@ class Gemma4ForConditionalGeneration(
         local_len_tensor = torch.zeros(total_items, dtype=torch.int64, device=device)
         for idx, output in zip(local_indices, local_outputs):
             local_len_tensor[idx] = output.shape[0]
-        actual_item_lens = tensor_model_parallel_all_reduce(
-            local_len_tensor
-        ).tolist()
+        actual_item_lens = tensor_model_parallel_all_reduce(local_len_tensor).tolist()
 
         hidden_size = self.config.text_config.hidden_size
         max_output_tokens_per_rank = max(
@@ -1407,9 +1405,7 @@ class Gemma4ForConditionalGeneration(
         for rank in range(tp_size):
             start = rank * max_output_tokens_per_rank
             rank_count = images_per_rank[rank]
-            rank_indices = image_rank_assignment[
-                current_idx : current_idx + rank_count
-            ]
+            rank_indices = image_rank_assignment[current_idx : current_idx + rank_count]
             rank_tokens = sum(actual_item_lens[i] for i in rank_indices)
             current_idx += rank_count
             rank_outputs.append(gathered[start : start + rank_tokens])
@@ -1419,9 +1415,7 @@ class Gemma4ForConditionalGeneration(
         for rank in range(tp_size):
             count = images_per_rank[rank]
             if count > 0:
-                rank_items = image_rank_assignment[
-                    current_idx : current_idx + count
-                ]
+                rank_items = image_rank_assignment[current_idx : current_idx + count]
                 scatter_output_slices(
                     rank_outputs[rank],
                     rank_items,
