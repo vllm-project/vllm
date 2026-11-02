@@ -5,7 +5,7 @@
 import time
 from typing import Any, Literal
 
-from pydantic import Field, model_validator
+from pydantic import ConfigDict, Field, StrictBool, model_validator
 
 from vllm.entrypoints.generate.base.protocol import validate_cache_salt
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
@@ -19,6 +19,8 @@ class QuestionSpec(OpenAIBaseModel):
 
 
 class StructuredDecisionRequest(OpenAIBaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     model: str | None = None
     state: Any = Field(..., description="What the questions are about: text or JSON.")
     questions: dict[str, QuestionSpec] = Field(
@@ -37,6 +39,10 @@ class StructuredDecisionRequest(OpenAIBaseModel):
         default=None, description="Video URLs or data URLs, for models that see."
     )
     chat_template_kwargs: dict[str, Any] | None = None
+    joint: StrictBool = Field(
+        default=False,
+        description="Answer the questions jointly; diffusion models only.",
+    )
     cache_salt: str | None = Field(
         default=None,
         description=(
@@ -73,6 +79,16 @@ class QuestionDiagnostics(OpenAIBaseModel):
     argmax_is_label: bool
 
 
+class JointCanvas(OpenAIBaseModel):
+    questions: list[str] = Field(description="The question ids this canvas read.")
+    width: int
+    slots: list[int] = Field(description="Each question's canvas position.")
+
+
+class JointDiagnostics(OpenAIBaseModel):
+    canvases: list[JointCanvas]
+
+
 class StructuredDecisionResponse(OpenAIBaseModel):
     id: str
     object: Literal["structured_decision"] = "structured_decision"
@@ -81,3 +97,4 @@ class StructuredDecisionResponse(OpenAIBaseModel):
     answers: dict[str, dict[str, Any]]
     usage: DecisionUsage
     diagnostics: dict[str, QuestionDiagnostics]
+    joint: JointDiagnostics | None = None

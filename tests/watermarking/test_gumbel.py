@@ -18,6 +18,8 @@ from vllm.v1.watermarking.watermarker import RandomSampler
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.watermark import philox_gumbel_sample
 
+DEVICE = current_platform.device_type
+
 
 def test_gamma_survival_integer_shape():
     assert _gamma_survival_integer_shape(0.0, 4) == 1.0
@@ -125,7 +127,8 @@ def test_dual_key_alpha_defaults_match():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA-like or XPU accelerator",
 )
 @pytest.mark.parametrize("key", [1, 2**32, 42, 15726070495360670683])
 @pytest.mark.parametrize("context_width", [1, 4, 16])
@@ -136,17 +139,18 @@ def test_fused_watermarker_matches_cpu(key: int, context_width: int):
     watermarker = GumbelWatermarker(key, context_width)
 
     expected = watermarker.sample(logits, contexts).token_ids
-    actual = watermarker.sample(logits.cuda(), contexts.cuda()).token_ids.cpu()
+    actual = watermarker.sample(logits.to(DEVICE), contexts.to(DEVICE)).token_ids.cpu()
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA-like or XPU accelerator",
 )
 def test_fused_watermarker_handles_nan_logits():
-    contexts = torch.zeros((2, 4), dtype=torch.int64, device="cuda")
-    logits = torch.full((2, 1025), float("nan"), device="cuda")
+    contexts = torch.zeros((2, 4), dtype=torch.int64, device=DEVICE)
+    logits = torch.full((2, 1025), float("nan"), device=DEVICE)
     watermarker = GumbelWatermarker(key=42, context_width=4)
 
     token_ids = watermarker.sample(logits, contexts).token_ids
@@ -155,13 +159,14 @@ def test_fused_watermarker_handles_nan_logits():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA-like or XPU accelerator",
 )
 def test_fused_watermarker_handles_noncontiguous_inputs():
-    contexts = torch.randint(0, 248320, (8, 8), dtype=torch.int64, device="cuda")[
+    contexts = torch.randint(0, 248320, (8, 8), dtype=torch.int64, device=DEVICE)[
         :, ::2
     ]
-    logits = torch.randn(8, 2050, device="cuda")[:, ::2]
+    logits = torch.randn(8, 2050, device=DEVICE)[:, ::2]
     watermarker = GumbelWatermarker(key=42, context_width=4)
 
     expected = watermarker.sample(logits.contiguous(), contexts.contiguous()).token_ids
@@ -171,25 +176,26 @@ def test_fused_watermarker_handles_noncontiguous_inputs():
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA-like or XPU accelerator",
 )
 @pytest.mark.parametrize("use_fp64", [False, True])
 def test_philox_gumbel_sample_skip_mask_matches_separate_samplers(use_fp64: bool):
     torch.manual_seed(0)
-    logits = torch.randn(8, 8193, device="cuda")
-    context_storage = torch.randint(0, 248320, (8, 8), dtype=torch.int64, device="cuda")
+    logits = torch.randn(8, 8193, device=DEVICE)
+    context_storage = torch.randint(0, 248320, (8, 8), dtype=torch.int64, device=DEVICE)
     contexts = context_storage[:, ::2]
     repeated_mask = torch.tensor(
-        [False, False, False, True, False, False, True, False], device="cuda"
+        [False, False, False, True, False, False, True, False], device=DEVICE
     )
     watermarking = torch.tensor(
-        [True, False, True, True, False, True, True, False], device="cuda"
+        [True, False, True, True, False, True, True, False], device=DEVICE
     )
-    req_indices = torch.tensor([3, 1, 7, 0, 4, 2, 6, 5], device="cuda")
-    temperatures = torch.ones(8, dtype=torch.float32, device="cuda")
+    req_indices = torch.tensor([3, 1, 7, 0, 4, 2, 6, 5], device=DEVICE)
+    temperatures = torch.ones(8, dtype=torch.float32, device=DEVICE)
     temperatures[2] = 0
-    seeds = torch.arange(8, dtype=torch.int64, device="cuda") + 1000
-    positions = torch.arange(8, dtype=torch.int64, device="cuda") + 100
+    seeds = torch.arange(8, dtype=torch.int64, device=DEVICE) + 1000
+    positions = torch.arange(8, dtype=torch.int64, device=DEVICE) + 100
     watermark_mask = (
         watermarking[req_indices] & (temperatures[req_indices] != 0) & ~repeated_mask
     )
@@ -222,27 +228,28 @@ def test_philox_gumbel_sample_skip_mask_matches_separate_samplers(use_fp64: bool
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(), reason="requires a CUDA-like accelerator"
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="requires a CUDA-like or XPU accelerator",
 )
 def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
     torch.manual_seed(0)
     num_rows, vocab_size, num_steps = 5, 4099, 3
-    logits = torch.randn(num_rows, vocab_size, device="cuda", dtype=torch.float16)
-    temperatures = torch.tensor([0.0, 0.3, 0.5, 1.0, 2.0], device="cuda")
+    logits = torch.randn(num_rows, vocab_size, device=DEVICE, dtype=torch.float16)
+    temperatures = torch.tensor([0.0, 0.3, 0.5, 1.0, 2.0], device=DEVICE)
     processed_logits = logits / torch.where(
         temperatures == 0, 1, temperatures
     ).unsqueeze(-1)
-    contexts = torch.randint(0, vocab_size, (num_rows, 4), device="cuda")
-    idx_mapping = torch.arange(num_rows, dtype=torch.int32, device="cuda")
-    seeds = torch.arange(num_rows, dtype=torch.int64, device="cuda") + 10
-    positions = torch.arange(num_rows, dtype=torch.int64, device="cuda") + 20
+    contexts = torch.randint(0, vocab_size, (num_rows, 4), device=DEVICE)
+    idx_mapping = torch.arange(num_rows, dtype=torch.int32, device=DEVICE)
+    seeds = torch.arange(num_rows, dtype=torch.int64, device=DEVICE) + 10
+    positions = torch.arange(num_rows, dtype=torch.int64, device=DEVICE) + 20
     # The skipped rows must divide by a temperature other than 1, or the
     # unprocessed logits the cache stores are the logits the sampler sees.
     # Row 0 keeps a greedy row in the skipped set.
-    skip_mask = torch.tensor([True, True, False, False, True], device="cuda")
-    cols = torch.arange(num_rows, dtype=torch.int32, device="cuda") % num_steps
+    skip_mask = torch.tensor([True, True, False, False, True], device=DEVICE)
+    cols = torch.arange(num_rows, dtype=torch.int32, device=DEVICE) % num_steps
     cache = torch.zeros(
-        num_rows, num_steps, vocab_size + 1, dtype=logits.dtype, device="cuda"
+        num_rows, num_steps, vocab_size + 1, dtype=logits.dtype, device=DEVICE
     )
 
     ordinary = gumbel_sample(
@@ -253,6 +260,8 @@ def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
         positions,
         apply_temperature=True,
         is_drafting=True,
+        logits_cache=cache,
+        logits_cache_col=cols,
     )
     watermarked = philox_gumbel_sample(processed_logits, contexts, 42)
     expected = torch.where(skip_mask, ordinary, watermarked)
@@ -277,6 +286,6 @@ def test_philox_mixed_draft_sampling_caches_unprocessed_logits():
     )
 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    stored = cache[torch.arange(num_rows, device="cuda"), cols.long(), :vocab_size]
+    stored = cache[torch.arange(num_rows, device=DEVICE), cols.long(), :vocab_size]
     assert torch.equal(stored.view(torch.int16), logits.view(torch.int16))
     assert not cache[:, :, -1].any()

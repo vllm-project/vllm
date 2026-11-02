@@ -21,12 +21,13 @@ from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
+DEVICE = current_platform.device_type
 DTYPE = torch.bfloat16
 VOCAB, HIDDEN, NUM_TOKENS, EPS = 8192, 4096, 129, 1e-6
 
-requires_cuda = pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="fused embed/norm Triton kernels require a CUDA/ROCm device",
+requires_gpu = pytest.mark.skipif(
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
+    reason="fused embed/norm Triton kernels require a CUDA/ROCm/XPU device",
 )
 
 
@@ -36,16 +37,16 @@ def _rmsnorm(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
     return x.float() * torch.rsqrt(var + eps) * w.float()
 
 
-@requires_cuda
+@requires_gpu
 @torch.inference_mode()
 def test_fused_embed_norm_matches_reference():
     """Main-model fusion: the residual is the exact gather and the second output
     is a correct RMSNorm. The norm matches a full-precision reference to ~2 bf16
     ulp (rtol 1e-2) -- that gap is bf16 rounding, not the kernel."""
     set_random_seed(13)
-    table = torch.randn(VOCAB, HIDDEN, dtype=DTYPE, device="cuda")
-    ids = torch.randint(0, VOCAB, (NUM_TOKENS,), dtype=torch.int32, device="cuda")
-    weight = torch.empty(HIDDEN, dtype=DTYPE, device="cuda").normal_(1.0, 0.1)
+    table = torch.randn(VOCAB, HIDDEN, dtype=DTYPE, device=DEVICE)
+    ids = torch.randint(0, VOCAB, (NUM_TOKENS,), dtype=torch.int32, device=DEVICE)
+    weight = torch.empty(HIDDEN, dtype=DTYPE, device=DEVICE).normal_(1.0, 0.1)
 
     residual, normed = fused_embed_norm(ids, table, chain_weight=weight, eps=EPS)
 
@@ -56,18 +57,18 @@ def test_fused_embed_norm_matches_reference():
     )
 
 
-@requires_cuda
+@requires_gpu
 @torch.inference_mode()
 def test_fused_embed_eh_norm_matches_reference():
     """MTP fusion (folded gather) is bit-exact vs gathering the embeds and
     feeding the untouched model-local ``fused_eh_norm``."""
     set_random_seed(13)
-    table = torch.randn(VOCAB, HIDDEN, dtype=DTYPE, device="cuda")
-    ids = torch.randint(0, VOCAB, (NUM_TOKENS,), dtype=torch.int32, device="cuda")
-    prev = torch.randn(NUM_TOKENS, HIDDEN, dtype=DTYPE, device="cuda")
-    enorm_w = torch.randn(HIDDEN, dtype=DTYPE, device="cuda")
-    hnorm_w = torch.randn(HIDDEN, dtype=DTYPE, device="cuda")
-    positions = torch.arange(NUM_TOKENS, device="cuda")  # includes pos 0
+    table = torch.randn(VOCAB, HIDDEN, dtype=DTYPE, device=DEVICE)
+    ids = torch.randint(0, VOCAB, (NUM_TOKENS,), dtype=torch.int32, device=DEVICE)
+    prev = torch.randn(NUM_TOKENS, HIDDEN, dtype=DTYPE, device=DEVICE)
+    enorm_w = torch.randn(HIDDEN, dtype=DTYPE, device=DEVICE)
+    hnorm_w = torch.randn(HIDDEN, dtype=DTYPE, device=DEVICE)
+    positions = torch.arange(NUM_TOKENS, device=DEVICE)  # includes pos 0
 
     fused = fused_embed_eh_norm(positions, ids, table, prev, enorm_w, hnorm_w, EPS)
     ref = fused_eh_norm(positions, table[ids.long()], prev, enorm_w, hnorm_w, EPS)

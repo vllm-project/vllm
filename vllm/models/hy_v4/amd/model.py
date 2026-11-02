@@ -53,22 +53,30 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
+    compute_skip_topk_layers,
+    copy_pp_buffers,
     get_pp_missing_layer_names,
     is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
+    pp_topk_buffers,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from ..nvidia.attention import (
     HYV4MLAAttention,
-    compute_skip_topk_layers,
     is_skip_topk_indexer_weight,
+    sparse_layer_ids,
 )
-from ..nvidia.hc import HYV4HCHeadLayer, HYV4HCLayer
 from ..nvidia.moe import HYV4FeedForward, HYV4MoEFused
+from .hc import (
+    HYV4HCHeadLayer,
+    HYV4HCLayer,
+    HYV4HCPreLayer,
+)
+from .triton_ihc import triton_ihc_post_pre_rms_norm, triton_ihc_supported
 
 logger = init_logger(__name__)
 
@@ -192,15 +200,35 @@ class HYV4DecoderLayer(nn.Module):
         hidden_states = self.hc_attn_layer.prepare_input(hidden_states)
         hidden_states, post_gates, residual = self.hc_attn_layer.pre(hidden_states)
         hidden_states = self.input_layernorm(hidden_states)
-        hidden_states = self.self_attn(
+        attention_output = self.self_attn(
             positions=positions,
             hidden_states=hidden_states,
         )
-        hidden_states = self.hc_attn_layer.post(hidden_states, residual, post_gates)
-
-        hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
-        hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
-        hidden_states = self.post_attention_layernorm(hidden_states)
+        can_fuse_ihc_post_pre_rms_norm = (
+            triton_ihc_supported(attention_output)
+            and self.hc_attn_layer.hc_post.hpc_op is None
+            and self.hc_mlp_layer.hc_pre.hpc_op is None
+        )
+        if can_fuse_ihc_post_pre_rms_norm:
+            hidden_states, post_gates, residual = triton_ihc_post_pre_rms_norm(
+                attention_output,
+                residual,
+                post_gates,
+                self.hc_mlp_layer.hc_pre.hc_fn.weight,
+                self.hc_mlp_layer.hc_pre.hc_scale,
+                self.hc_mlp_layer.hc_pre.hc_base,
+                self.post_attention_layernorm.weight,
+                self.hc_mlp_layer.hc_pre.magnitude,
+                self.hc_mlp_layer.hc_pre.hc_eps,
+                self.hc_mlp_layer.hc_pre.layernorm_epsilon,
+            )
+        else:
+            hidden_states = self.hc_attn_layer.post(
+                attention_output, residual, post_gates
+            )
+            hidden_states = self.hc_mlp_layer.prepare_input(hidden_states)
+            hidden_states, post_gates, residual = self.hc_mlp_layer.pre(hidden_states)
+            hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
         hidden_states = self.hc_mlp_layer.post(hidden_states, residual, post_gates)
 
@@ -262,6 +290,9 @@ class HYV4Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
+        self.pp_buffers = pp_topk_buffers(
+            config, self.topk_indices_buffer, sparse_layer_ids(config)
+        )
         if self.enable_ihc:
             # iHC head layer: merge the residual channels into one stream.
             if get_pp_group().is_last_rank:
@@ -276,13 +307,15 @@ class HYV4Model(nn.Module):
                 self.hc_head = PPMissingLayer()
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(
-                    ["hidden_states"], config.hc_mult * config.hidden_size
+                    ["hidden_states"],
+                    config.hc_mult * config.hidden_size,
+                    self.pp_buffers,
                 )
             )
         else:
             self.make_empty_intermediate_tensors = (
                 make_empty_intermediate_tensors_factory(
-                    ["hidden_states", "residual"], config.hidden_size
+                    ["hidden_states", "residual"], config.hidden_size, self.pp_buffers
                 )
             )
 
@@ -373,17 +406,21 @@ class HYV4Model(nn.Module):
             # previous PP stage is reshaped back to 3D by the first layer's
             # prepare_input, and residual is unused.
             residual = None if self.enable_ihc else intermediate_tensors["residual"]
+            copy_pp_buffers(intermediate_tensors, self.pp_buffers)
 
         for layer in islice(self.layers, self.start_layer, self.end_layer):
             hidden_states, residual = layer(positions, hidden_states, residual)
 
         if not get_pp_group().is_last_rank:
+            buffers = {k: v[: positions.shape[0]] for k, v in self.pp_buffers.items()}
             if self.enable_ihc:
                 # hidden_states is [num_tokens, hc, h]; flatten the channel dim
                 # for PP transfer (matches the 2D receive buffer).
-                return IntermediateTensors({"hidden_states": hidden_states.flatten(1)})
+                return IntermediateTensors(
+                    {"hidden_states": hidden_states.flatten(1), **buffers}
+                )
             return IntermediateTensors(
-                {"hidden_states": hidden_states, "residual": residual}
+                {"hidden_states": hidden_states, "residual": residual, **buffers}
             )
         if self.enable_ihc:
             hidden_states = self.hc_head(hidden_states)
@@ -598,6 +635,15 @@ class HYV4Model(nn.Module):
 
         return loaded_params
 
+    @torch.no_grad()
+    def process_weights_after_loading(self) -> None:
+        """Make static iHC weights contiguous for the ROCm Triton kernels."""
+        for layer in self.modules():
+            if isinstance(layer, HYV4HCPreLayer):
+                layer.hc_fn.weight.data = layer.hc_fn.weight.data.contiguous()
+            elif isinstance(layer, HYV4HCHeadLayer):
+                layer.hc_head_fn.weight.data = layer.hc_head_fn.weight.data.contiguous()
+
 
 class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
     hf_to_vllm_mapper = WeightsMapper(
@@ -693,6 +739,9 @@ class HYV4ForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         drop_mapper = WeightsMapper(orig_to_new_prefix=drop_prefixes)
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper | drop_mapper)
+
+    def process_weights_after_loading(self) -> None:
+        self.model.process_weights_after_loading()
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         return self.model.get_expert_mapping()

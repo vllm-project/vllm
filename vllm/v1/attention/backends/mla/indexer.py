@@ -10,6 +10,11 @@ import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.attention.dsa.fused_mqa_topk import (
+    FUSED_MQA_TOPK_MAX_KEYS,
+    FUSED_MQA_TOPK_MAX_ROWS,
+    use_fused_mqa_topk,
+)
 from vllm.model_executor.warmup.jit_warmup import kernel_launcher, zip_inputs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     LaunchSpec,
@@ -19,6 +24,7 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     triton_scalar_specialization_rep,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
     get_paged_mqa_logits_metadata,
@@ -69,13 +75,16 @@ def dsa_indexer_uses_fp4(vllm_config: VllmConfig) -> bool:
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.platforms.rocm import get_cdna_version
 
-        # Only DeepSeek-V4.1 is wired to the ROCm MXFP4 cache; other DSA models
-        # would silently keep their FP8 one.
+        # Only DeepSeek-V4 and V4.1 are wired to the ROCm MXFP4 cache; other
+        # DSA models would silently keep their FP8 one.
         model_config = vllm_config.model_config
-        if model_config is None or model_config.hf_config.model_type != "deepseek_v41":
+        if model_config is None or model_config.hf_config.model_type not in (
+            "deepseek_v4",
+            "deepseek_v41",
+        ):
             raise ValueError(
                 "indexer_kv_dtype='mxfp4' on ROCm is only supported for "
-                "DeepSeek-V4.1-Flash."
+                "DeepSeek-V4 and DeepSeek-V4.1."
             )
         if get_cdna_version() != 4:
             raise ValueError(
@@ -204,19 +213,16 @@ class PrepareUniformDecodeKernel(
         )
 
 
-# Below this many rows per rank, stay replicated (TP4 engages at 64K rows).
-MIN_TP_SHARD_ROWS_PER_RANK = 16_384
-
-
 def balanced_prefill_row_shard(
     seq_lens_cpu: torch.Tensor,
     query_lens_cpu: torch.Tensor,
     compress_ratio: int,
     tp_size: int,
+    min_rows: int,
 ) -> list[int] | None:
     """Return contiguous TP row counts balanced by indexer MQA work."""
     num_rows = int(query_lens_cpu.sum())
-    if tp_size < 2 or num_rows < MIN_TP_SHARD_ROWS_PER_RANK * tp_size:
+    if tp_size < 2 or num_rows < max(min_rows, tp_size):
         return None
 
     query_lens = query_lens_cpu.to(torch.int64)
@@ -610,7 +616,7 @@ class BuildPrefillChunkMetadataKernel(
             dict.fromkeys(
                 max(1, int(ratio))
                 for ratio in (
-                    *(getattr(hf_text_config, "compress_ratios", None) or (1,)),
+                    *(get_compress_ratios(hf_text_config) or (1,)),
                     getattr(hf_text_config, "index_kpool", 1) or 1,
                 )
             )
@@ -926,6 +932,19 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     return max_model_len * (576 * 2 // 132) * factor
 
 
+def dense_logits_rows(max_seqlen_k: int, max_logits_bytes: int | None = None) -> int:
+    """Query rows per dense MQA-logits call whose fp32 [rows, max_seqlen_k]
+    logits fit max_logits_bytes (default: VLLM_SPARSE_INDEXER_MAX_LOGITS_MB).
+
+    The prefill chunk planner sub-chunks requests with it; the indexers split
+    the rows of chunks planned for fused_mqa_topk (not bounded by the budget)
+    that take the dense path.
+    """
+    if max_logits_bytes is None:
+        max_logits_bytes = envs.VLLM_SPARSE_INDEXER_MAX_LOGITS_MB * 1024 * 1024
+    return max(1, max_logits_bytes // (4 * max(1, max_seqlen_k)))
+
+
 def _supports_varlen_paged_mqa_logits() -> bool:
     return (
         current_platform.is_cuda()
@@ -1024,7 +1043,29 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
+        self.use_adaptive_verification = bool(
+            self.vllm_config.speculative_config
+            and self.vllm_config.speculative_config.enable_adaptive_verification
+        )
         self.indexer_uses_fp4 = dsa_indexer_uses_fp4(self.vllm_config)
+        # Plan prefill chunks for the fused MQA+top-k kernel (not bounded by
+        # the logits budget). PCP + DCP has its own planner. v4.1 candidate
+        # selection is not excluded: its pre-candidate indexers take
+        # fused_mqa_topk and the others row-split their dense logits. Indexers
+        # that pad their heads to 32 run fused_mqa_topk on budget-planned
+        # chunks.
+        model_config = self.vllm_config.model_config
+        cfg = model_config.hf_text_config if model_config is not None else None
+        self.fused_mqa_topk_eligible = cfg is not None and use_fused_mqa_topk(
+            query_shape=(
+                getattr(cfg, "index_n_heads", 0),
+                getattr(cfg, "index_head_dim", 0),
+            ),
+            topk=getattr(cfg, "index_topk", 0)
+            // (getattr(cfg, "index_kpool", None) or 1),
+            fp4_cache=self.indexer_uses_fp4,
+            full_context=self.dcp_world_size == 1,
+        )
 
         next_n = self.num_speculative_tokens + 1
         self.decode_threshold = next_n
@@ -1088,8 +1129,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.dcp_rank_tensor = torch.tensor(
             self.dcp_rank, dtype=torch.int32, device=self.device
         )
+        # Only decode tokens are expanded: at most next_n per request. Allocated
+        # after the memory profile, so it must not scale with the token budget.
+        max_decode_tokens = min(
+            scheduler_config.max_num_seqs * next_n,
+            scheduler_config.max_num_batched_tokens,
+        )
         self.expanded_block_table_buffer = torch.zeros(
-            (scheduler_config.max_num_batched_tokens, block_table_width),
+            (max_decode_tokens, block_table_width),
             dtype=torch.int32,
             device=self.device,
         )
@@ -1361,6 +1408,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        fused_mqa_topk_eligible: bool = False,
     ) -> list[tuple[slice, slice]]:
         """Split this step's prefill requests into chunks, respecting:
         - N constraint: total_seq_lens <= workspace_size (existing O(N)
@@ -1369,6 +1417,13 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         When a single request-level chunk still exceeds the logits budget,
         sub-chunks on the query dimension (M) to bound peak memory.
+
+        With ``fused_mqa_topk_eligible`` (chunks for the fused MQA+top-k kernel,
+        which needs no logits buffer) chunks whose gathered keys fit
+        FUSED_MQA_TOPK_MAX_KEYS are bounded by FUSED_MQA_TOPK_MAX_ROWS rows
+        instead of the logits budget. Requests are never packed past that key
+        limit, so only a single request longer than it takes the logits-budget
+        path. Chunks the dispatch keeps dense are row-split by the indexer.
 
         Returns list of (req_slice, query_slice) tuples.
         """
@@ -1386,7 +1441,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     compressed_seq_lens_cpu[end].item(),
                 )
                 new_m, new_n = chunk_m + q, chunk_n + s
-                if new_n <= workspace_size and new_m * new_n <= max_logits_elems:
+                if fused_mqa_topk_eligible and new_n <= FUSED_MQA_TOPK_MAX_KEYS:
+                    fits = new_m <= FUSED_MQA_TOPK_MAX_ROWS
+                else:
+                    # fused_mqa_topk planning never packs past the key limit.
+                    fits = (
+                        not fused_mqa_topk_eligible
+                        and new_m * new_n <= max_logits_elems
+                    )
+                if new_n <= workspace_size and fits:
                     chunk_m, chunk_n = new_m, new_n
                     end += 1
                 else:
@@ -1403,8 +1466,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             req_slice = slice(start + request_offset, end + request_offset)
             max_q = (
-                max(1, max_logits_elems // chunk_n) if chunk_n > 0 else max(1, chunk_m)
+                dense_logits_rows(chunk_n, max_logits_bytes)
+                if chunk_n > 0
+                else max(1, chunk_m)
             )
+            if fused_mqa_topk_eligible and chunk_n <= FUSED_MQA_TOPK_MAX_KEYS:
+                max_q = FUSED_MQA_TOPK_MAX_ROWS
             for q_off in range(0, chunk_m, max_q):
                 sub_m = min(max_q, chunk_m - q_off)
                 chunks.append((req_slice, slice(q_off, q_off + sub_m)))
@@ -1540,6 +1607,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.max_prefill_buffer_size,
                     max_logits_bytes,
                     request_offset=num_decodes,
+                    fused_mqa_topk_eligible=self.fused_mqa_topk_eligible,
                 )
 
             chunks = []
@@ -1583,6 +1651,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     prefill_query_lens_cpu,
                     self.compress_ratio,
                     self.tp_size,
+                    self.vllm_config.attention_config.indexer_tp_shard_min_rows,
                 )
             prefill_metadata = DeepseekV32IndexerPrefillMetadata(
                 chunks,
@@ -1596,6 +1665,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         decode_metadata = None
         if num_decodes > 0:
+            assert num_decode_tokens <= self.expanded_block_table_buffer.shape[0]
             if not self.supports_varlen:
                 torch.diff(
                     common_attn_metadata.query_start_loc[: num_decodes + 1],
@@ -1627,6 +1697,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             min_decode_len = int(decode_lens_cpu.min().item())
             write_is_uniform = min_decode_len == max_decode_len
             next_n = 1 + self.num_speculative_tokens
+            if self.use_adaptive_verification:
+                # Varlen FULL graphs are captured by distributing the graph's
+                # token bucket over as many one-token dummy requests as
+                # possible. Runtime adaptive budgets can put up to next_n
+                # tokens in one request, so the capture-time scatter width and
+                # branch must describe that upper bound rather than the dummy
+                # partition. Device per-request lengths still select the live
+                # rows at replay.
+                max_decode_len = next_n
+                write_is_uniform = False
             # The kernel sees max_decode_len Q rows, not the configured next_n,
             # so legality is per-step: on SM90 a uniformly 3-deep batch has no
             # native kernel. max_decode_len <= 1 always has one.

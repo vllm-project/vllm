@@ -9,6 +9,7 @@
 
 use std::collections::HashMap;
 use std::error::Error as _;
+use std::ffi::OsStr;
 use std::fs;
 use std::iter;
 use std::path::Path;
@@ -29,10 +30,24 @@ use crate::renderer::hf::{TemplateMessage, TemplateTool};
 
 type Result<T> = std::result::Result<T, TemplateError>;
 
-/// Default fuel budget for template rendering. Prevents unbounded loops and
-/// string operations from exhausting CPU. Each template instruction consumes
-/// one unit of fuel; when depleted, rendering aborts with an error.
+/// Default fuel budget for rendering request-supplied templates. Prevents
+/// unbounded loops and string operations from exhausting CPU. Each template
+/// instruction consumes one unit of fuel; when depleted, rendering aborts with
+/// an error.
 const DEFAULT_TEMPLATE_FUEL: u64 = 500_000;
+
+/// Fuel budget for request-supplied templates from the value of
+/// `VLLM_CHAT_TEMPLATE_FUEL`, if set. `0` disables the limit.
+pub(super) fn request_template_fuel(value: Option<&OsStr>) -> Result<Option<u64>> {
+    let fuel = match value {
+        None => DEFAULT_TEMPLATE_FUEL,
+        Some(value) => value
+            .to_str()
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| TemplateError::InvalidFuel(value.to_owned()))?,
+    };
+    Ok((fuel > 0).then_some(fuel))
+}
 
 /// Build a pre-configured environment with the given template string.
 fn build_environment(template: String) -> Result<Environment<'static>> {
@@ -41,13 +56,14 @@ fn build_environment(template: String) -> Result<Environment<'static>> {
     env.set_trim_blocks(true);
     env.set_lstrip_blocks(true);
 
-    env.set_fuel(Some(DEFAULT_TEMPLATE_FUEL));
-
     env.add_template_owned("chat".to_owned(), template)?;
 
     env.set_unknown_method_callback(minijinja_contrib::pycompat::unknown_method_callback);
     env.add_filter("tojson", hf_tojson_filter);
     env.add_function("__hf_generation", render_generation);
+    env.add_function("strftime_now", |format: String| {
+        chrono::Local::now().format(&format).to_string()
+    });
     env.add_function("raise_exception", raise_exception);
 
     Ok(env)
@@ -166,11 +182,21 @@ impl CompiledChatTemplate {
         })
     }
 
+    /// Limit each render to `fuel` template instructions; `None` removes the
+    /// limit.
+    pub fn with_fuel(mut self, fuel: Option<u64>) -> Self {
+        self.env.set_fuel(fuel);
+        self
+    }
+
     /// Apply the compiled template to the given context and return the rendered
     /// prompt.
     pub fn apply(&self, ctx: TemplateContext<'_>) -> Result<String> {
         let tmpl = self.env.get_template("chat")?;
-        tmpl.render(ctx).map_err(TemplateError::from)
+        tmpl.render(ctx).map_err(|error| match error.kind() {
+            ErrorKind::OutOfFuel => TemplateError::OutOfFuel(error),
+            _ => TemplateError::Jinja(error),
+        })
     }
 
     pub fn content_format(&self) -> ChatTemplateContentFormat {
@@ -182,7 +208,9 @@ impl CompiledChatTemplate {
 mod tests {
     use std::fs;
 
+    use expect_test::expect;
     use tempfile::TempDir;
+    use thiserror_ext::AsReport as _;
     use vllm_text::backend::hf::{HfSpecialTokens, NamedSpecialToken};
 
     use super::*;
@@ -230,6 +258,28 @@ mod tests {
         assert!(
             err.contains("failed to render jinja template"),
             "Error should explain parse failure, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_strftime_now_matches_transformers_contract() {
+        // `strftime_now` renders local wall-clock time with strftime-style
+        // formats, like the transformers Jinja environment.
+        let template = CompiledChatTemplate::new(
+            "{{ strftime_now('literal') }}|{{ strftime_now('%Y-%m-%d') }}".to_string(),
+            ChatTemplateContentFormatOption::Auto,
+        )
+        .unwrap();
+
+        let result = template.apply(TemplateContext::default()).unwrap();
+
+        let (literal, date) = result.split_once('|').unwrap();
+        assert_eq!(literal, "literal");
+        let is_digit_at =
+            |range: std::ops::Range<usize>| date[range].chars().all(|c| c.is_ascii_digit());
+        assert!(
+            date.len() == 10 && is_digit_at(0..4) && is_digit_at(5..7) && is_digit_at(8..10),
+            "expected %Y-%m-%d date, got: {date}"
         );
     }
 
@@ -284,6 +334,51 @@ mod tests {
             None,
             "expected a jinja render error, got: {error:?}"
         );
+    }
+
+    /// Each turn costs a fixed number of instructions, like a chat template's message loop.
+    fn render_turns(turns: usize, fuel: Option<u64>) -> Result<String> {
+        let template =
+            "{% for turn in turns %}{% for _ in range(10) %}{{ turn }}{% endfor %}{% endfor %}";
+        let template = CompiledChatTemplate {
+            env: build_environment(template.to_string())?,
+            content_format: ChatTemplateContentFormat::String,
+        }
+        .with_fuel(fuel);
+        let mut kwargs = HashMap::new();
+        kwargs.insert("turns".to_string(), serde_json::json!(vec![0; turns]));
+        template.apply(TemplateContext {
+            template_kwargs: Some(&kwargs),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn test_long_conversation_exceeds_default_fuel() {
+        let error = render_turns(20_000, Some(DEFAULT_TEMPLATE_FUEL)).unwrap_err();
+        expect!["chat template exceeded its fuel budget; adjust VLLM_CHAT_TEMPLATE_FUEL to override: engine ran out of fuel (in chat:1)"].assert_eq(&error.to_report_string());
+    }
+
+    #[test]
+    fn test_raised_or_disabled_fuel_renders_long_conversation() {
+        assert!(render_turns(20_000, Some(5_000_000)).is_ok());
+        assert!(render_turns(20_000, None).is_ok());
+    }
+
+    #[test]
+    fn test_request_template_fuel_rejects_invalid_value() {
+        assert_eq!(
+            request_template_fuel(None).unwrap(),
+            Some(DEFAULT_TEMPLATE_FUEL)
+        );
+        assert_eq!(
+            request_template_fuel(Some("2000000".as_ref())).unwrap(),
+            Some(2_000_000)
+        );
+        assert_eq!(request_template_fuel(Some("0".as_ref())).unwrap(), None);
+        let error = request_template_fuel(Some("-1".as_ref())).unwrap_err();
+        expect![[r#"VLLM_CHAT_TEMPLATE_FUEL must be a non-negative integer, got "-1""#]]
+            .assert_eq(&error.to_report_string());
     }
 
     #[test]

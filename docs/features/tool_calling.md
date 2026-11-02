@@ -86,7 +86,7 @@ For more advanced usage, including parallel tool calls and different model-speci
 ## Named Function Calling
 
 vLLM supports named function calling in the chat completion API by default. This should work with most structured outputs backends supported by vLLM. You are guaranteed a validly-parsable function call - not a
-high-quality one.
+high-quality one. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
 
 vLLM will use structured outputs to ensure the response matches the tool parameter object defined by the JSON schema in the `tools` parameter.
 For best results, we recommend ensuring that the expected output format / schema is specified in the prompt to ensure that the model's intended generation is aligned with the schema that it's being forced to generate by the structured outputs backend.
@@ -100,7 +100,7 @@ In the Responses API, `tool_choice={"type": "function", "name": "..."}` can sele
 
 vLLM supports the `tool_choice='required'` option in the chat completion API. Similar to the named function calling, it also uses structured outputs, so this is enabled by default and will work with any supported model. However, support for alternative decoding backends are on the [roadmap](../usage/v1_guide.md#features) for the V1 engine.
 
-When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter.
+When tool_choice='required' is set, the model is guaranteed to generate one or more tool calls based on the specified tool list in the `tools` parameter. The number of tool calls depends on the user's query. The output format strictly follows the schema defined in the `tools` parameter. On recent Mistral models in the official Mistral format, a call is not guaranteed; see [Mistral Models](#mistral-models-mistral).
 
 ## None Function Calling
 
@@ -146,13 +146,15 @@ Most OpenAI-compatible clients and agent frameworks never set `strict` on their 
 
 | Value | Behavior |
 | --- | --- |
-| `auto` (default) | Follow the request's tool choice and per-tool strictness. Required/named choices activate structural tags; `tool_choice="auto"` activates them when at least one tool sets `strict: true`. |
+| `auto` | Follow the request's tool choice and per-tool strictness. Required/named choices activate structural tags; `tool_choice="auto"` activates them when at least one tool sets `strict: true`. |
 | `function` | Constrain the tool-call envelope (markup and the function name) for every request with tools, leaving argument contents free unless the client marked the tool `strict: true`. |
 | `parameter` | Additionally pin argument schemas for every tool, as if every tool had `strict: true`. |
 
 ```bash
 vllm serve ... --tool-strict-level function
 ```
+
+When the option is unset, the tool parser's default level applies: `function` for `glm47`, `auto` for the other parsers. Passing `--tool-strict-level auto` overrides a parser default.
 
 The floor never relaxes a constraint the request would already receive: tools the client marked `strict: true` keep their schemas at every level. With `tool_choice="auto"`, the grammar does not force a tool call; a plain text response stays valid. `VLLM_ENFORCE_STRICT_TOOL_CALLING=false` disables structural tags entirely and takes precedence over this option.
 
@@ -172,6 +174,10 @@ template configured in the `tokenizer_config.json`. In this case, it will be use
 from HuggingFace; and you can find an example of this in a `tokenizer_config.json` [here](https://huggingface.co/NousResearch/Hermes-2-Pro-Llama-3-8B/blob/main/tokenizer_config.json).
 
 If your favorite tool-calling model is not supported, please feel free to contribute a parser & tool use chat template!
+
+When a custom structured-output grammar includes reasoning or tool-call
+delimiters, its token constraints must match the configured parser. See
+[Custom grammars and parser boundary tokens](structured_outputs.md#custom-grammars-and-parser-boundary-tokens).
 
 ### Checkpoint Response Templates (`hf`)
 
@@ -198,6 +204,30 @@ checkpoint's output format.
 
 !!! note
     With `tool_choice="auto"`, structural-tag constraints require both `VLLM_ENFORCE_STRICT_TOOL_CALLING=true` (the default) and at least one tool with `strict: true`, or a server-side floor set via `--tool-strict-level`. When these conditions are met and the selected parser supports structural tags, vLLM constrains the tool-call envelope and pins the argument schema of each tool that sets `strict: true` (or of every tool under `--tool-strict-level parameter`). Otherwise, vLLM extracts tool calls from raw text, so arguments may occasionally be malformed or violate the function's parameter schema.
+
+### Beam Models (`beam`)
+
+Beam checkpoints describe their output format with `response_template` metadata, so the `beam` parser reads it like the `hf` parser does:
+
+```bash
+vllm serve <model> \
+    --enable-auto-tool-choice \
+    --tool-call-parser beam \
+    --reasoning-parser beam
+```
+
+Unlike `hf`, the `beam` parser also constrains its output. For strict tools, required or named tool choice, and structured outputs, it derives a
+structural-tag grammar from the template. The grammar follows the template's tool call format, pins the arguments of strict tools when their
+encoding can be derived, allows a single call with `parallel_tool_calls=false`, and frames a structured output as the answer. Raw string arguments
+keep the `format` or `pattern` of their schema, as XGrammar keeps them in JSON strings, unless a match could end the value early. With
+`tool_choice="none"`, the grammar allows only reasoning and an answer, so a model that still sees the tools in its prompt cannot call them. When no
+grammar can be derived, required and named tool choice are rejected, and strict tools under `tool_choice="auto"` are left unconstrained with a
+warning.
+
+It also constrains the output of requests without strict tools, forced tool choice, or structured outputs to the template's format: tool calls with
+free arguments or an answer, or just the rest of an answer the prompt already opened. This always-on grammar needs the `xgrammar` structured
+outputs backend, the default, and is disabled with `VLLM_BEAM_ALWAYS_CONSTRAIN_OUTPUT=0`. From the message start, every `beam` grammar opens with
+reasoning that holds visible text, unless `enable_thinking` is false.
 
 ### Hermes Models (`hermes`)
 
@@ -230,6 +260,12 @@ Known issues:
       it works with vLLM's tool call IDs (provided `tool_call_id` fields are truncated to the last 9 digits)
     * [examples/tool_chat_template_mistral_parallel.jinja](../../examples/tool_chat_template_mistral_parallel.jinja) - this is a "better" version that adds a tool-use system prompt
       when tools are provided, that results in much better reliability when working with parallel tool calling.
+
+3. With the official Mistral format (`--tokenizer_mode mistral`) and a Tekken v11+ tokenizer, as in recent models such as Mistral Small 3.2, Ministral 3 and Magistral,
+   Chat Completions tool calls are constrained by [mistral-common](https://github.com/mistralai/mistral-common)'s grammar.
+   For `tool_choice="required"` and named tool choice, this grammar allows content, including reasoning, before the tool calls, and the model is not told that a call is required.
+   A call is therefore not guaranteed: the model can keep answering in text until `max_tokens` (`finish_reason="length"`).
+   Tool names are enforced only for a named tool choice or when at least one tool sets `strict: true`, and argument schemas only for tools with `strict: true`.
 
 Recommended flags:
 
@@ -400,6 +436,18 @@ Supported models:
 
 Flags: `--tool-call-parser kimi_k2`
 
+### Kolibri 1 Models (`hf`)
+
+Supported models:
+
+* `Aleph-Alpha/Kolibri-1`
+* `Aleph-Alpha/Kolibri-1-BF16`
+
+Flags: `--tool-call-parser hf --reasoning-parser hf --enable-auto-tool-choice`
+
+The `hf` parsers read Kolibri 1's output format from the [checkpoint response template](#checkpoint-response-templates-hf), so the limits of the `hf` parser apply.
+Kolibri 1 emits Hermes-style tool calls, so `--tool-call-parser hermes --reasoning-parser qwen3` also works, for example for tool choices the `hf` parser rejects.
+
 ### Hunyuan Models (`hunyuan_a13b`)
 
 Supported models:
@@ -540,6 +588,25 @@ Supported models:
 * `swiss-ai/Apertus-70B-Instruct-2509`
 
 Flags: `--tool-call-parser apertus`
+
+### Muse Models (`muse`)
+
+The Muse parser supports the ATEM tool-call format used by Muse Spark Open.
+Enable tool calling with `--enable-auto-tool-choice`,
+`--tool-call-parser muse`, and `--reasoning-parser muse`. `musespark1x` is an
+alias for both parsers. The `muse_glimmer` entry points share the Muse implementation while retaining
+their original channel semantics, including recipient-less tool-parser content.
+
+The parsers route `to=self` and recipient-less messages to reasoning,
+`to=user` and `to=commentary` messages to content, and tool recipients to
+ATEM tool-call extraction. `to=developer` messages are omitted. Framing
+special tokens are preserved for parsing and removed from surfaced content.
+
+The Rust frontend also provides a Muse unified parser under `muse` and
+`musespark1x`, and selects it automatically for Muse Spark model names.
+Existing automatic parser selection for Muse Glimmer is unchanged.
+
+Parser availability alone does not enable Muse Spark model execution.
 
 ### Models with Pythonic Tool Calls (`pythonic`)
 

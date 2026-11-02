@@ -34,7 +34,7 @@ class VitCudagraphTestConfig:
 
 def params_with_marks(
     configs: dict[str, VitCudagraphTestConfig],
-) -> list[pytest.param]:
+) -> list[object]:
     return [
         pytest.param(model_id, marks=cfg.marks) for model_id, cfg in configs.items()
     ]
@@ -68,6 +68,10 @@ def step3_vl_chat_template(content: str) -> str:
 
 def gemma3_chat_template(content: str) -> str:
     return f"<bos><start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n"
+
+
+def deepseek_vl2_chat_template(content: str) -> str:
+    return f"<|User|>: {content}\n\n<|Assistant|>:"
 
 
 def ernie45_vl_chat_template(content: str) -> str:
@@ -255,7 +259,7 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={
             "load_format": "dummy",
             "attention_backend": (
-                "ROCM_FLASHMLA_SPARSE_DSV4"
+                "ROCM_FLASHMLA_SPARSE_DSV41"
                 if current_platform.is_rocm()
                 else "FLASHMLA_SPARSE_DSV41"
             ),
@@ -355,6 +359,15 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
             ),
         },
         skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
+    ),
+    "deepseek_vl2": VitCudagraphTestConfig(
+        model="deepseek-ai/deepseek-vl2-tiny",
+        modalities=["image"],
+        image_prompt=deepseek_vl2_chat_template("<image>\nWhat is in this image?"),
+        vllm_runner_kwargs={
+            "hf_overrides": {"architectures": ["DeepseekVLV2ForCausalLM"]},
+        },
+        marks=[pytest.mark.core_model],
     ),
     "gemma4": VitCudagraphTestConfig(
         model="google/gemma-4-E2B-it",
@@ -507,6 +520,7 @@ def test_vit_cudagraph_video(model_id, vllm_runner, video_assets):
             "baby_reading": config.video_prompt,  # type: ignore[typeddict-item]
         }
     )
+    sampled_vids: list
     if config.needs_video_metadata:
         sampled_vids = [
             sample_frames_with_video_metadata(

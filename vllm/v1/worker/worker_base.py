@@ -109,9 +109,14 @@ class WorkerBase:
         backends = get_current_attn_backends(self.vllm_config)
         return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
 
-    def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
-        """Adopt the KV cache layout resolved by the engine core."""
+    def set_kv_cache_layout(
+        self, kv_cache_layout: str, cp_kv_cache_interleave_size: int
+    ) -> None:
+        """Assign the KV cache layout and CP interleave size resolved by the core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
+        self.vllm_config.parallel_config.cp_kv_cache_interleave_size = (
+            cp_kv_cache_interleave_size
+        )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.

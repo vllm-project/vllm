@@ -154,6 +154,79 @@ fn media_order_excludes_dropped_historical_developer_content() {
     assert!(media_order.is_empty());
 }
 
+#[test]
+fn drop_thinking_keeps_current_turn_across_tool_results() {
+    let mut messages = vec![
+        ChatMessage::user("q1"),
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning { text: "r1".into() },
+            AssistantContentBlock::Text { text: "a1".into() },
+        ]),
+        ChatMessage::user("q2"),
+        ChatMessage::assistant_blocks(vec![
+            AssistantContentBlock::Reasoning { text: "r2".into() },
+            AssistantContentBlock::ToolCall(AssistantToolCall {
+                id: "call-1".to_string(),
+                name: "lookup".to_string(),
+                arguments: "{}".to_string(),
+            }),
+        ]),
+        ChatMessage::tool_response("value", "call-1"),
+    ];
+    let request = ChatRequest {
+        messages: messages.clone(),
+        ..ChatRequest::for_test()
+    };
+    expect![[r#"
+        <｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
+
+        <｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜User｜>q2<｜Assistant｜><think>r2</think>
+
+        <｜DSML｜ calls>
+        <｜DSML｜ invoke name="lookup">
+
+        </｜DSML｜ invoke>
+        </｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>value</tool_result><｜Assistant｜><think>"#]]
+    .assert_eq(&render(&request));
+
+    messages.push(ChatMessage::user("q3"));
+    let request = ChatRequest {
+        messages,
+        ..ChatRequest::for_test()
+    };
+    expect![[r#"
+        <｜begin▁of▁sentence｜><｜System｜>Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)
+
+        <｜User｜>q1<｜Assistant｜></think>a1<｜end▁of▁sentence｜><｜User｜>q2<｜Assistant｜></think>
+
+        <｜DSML｜ calls>
+        <｜DSML｜ invoke name="lookup">
+
+        </｜DSML｜ invoke>
+        </｜DSML｜ calls><｜end▁of▁sentence｜><｜User｜><tool_result>value</tool_result>
+
+        q3<｜Assistant｜><think>"#]]
+    .assert_eq(&render(&request));
+}
+
+#[test]
+fn rejects_image_placeholder_in_message_text() {
+    let text = "hi <｜deepseek_image｜>";
+    for message in [
+        ChatMessage::user(text),
+        ChatMessage::user(vec![ChatContentPart::text(text)]),
+        ChatMessage::tool_response(text, "call-1"),
+        ChatMessage::assistant_blocks(vec![AssistantContentBlock::Reasoning { text: text.into() }]),
+    ] {
+        let request = ChatRequest {
+            messages: vec![message, ChatMessage::user("question")],
+            ..ChatRequest::for_test()
+        };
+        let error = DeepSeekV41ChatRenderer::default().render(&request).unwrap_err();
+        assert!(error.is_request_validation_error());
+    }
+}
+
 fn image_part(uuid: &str) -> ChatContentPart {
     ChatContentPart::ImageUrl {
         image_url: format!("data:image/png;base64,{uuid}"),
@@ -375,4 +448,32 @@ fn joins_text_parts_with_reference_separator_and_preserves_literal_tags() {
         .insert("thinking".into(), Value::Bool(false));
     expect!["<｜begin▁of▁sentence｜><｜User｜>first\n\n<｜DSML｜invoke name=\"literal\"><｜Assistant｜></think>"]
         .assert_eq(&render(&request));
+}
+
+#[test]
+fn joins_assistant_text_parts_with_reference_separator() {
+    let mut request = ChatRequest {
+        messages: vec![
+            ChatMessage::user("question"),
+            ChatMessage::assistant_blocks(vec![
+                AssistantContentBlock::Text {
+                    text: "answer one".to_string(),
+                },
+                AssistantContentBlock::Text {
+                    text: "answer two".to_string(),
+                },
+            ]),
+            ChatMessage::user("next"),
+        ],
+        ..ChatRequest::for_test()
+    };
+    request
+        .chat_options
+        .template_kwargs
+        .insert("thinking".into(), Value::Bool(false));
+    expect![[r#"
+        <｜begin▁of▁sentence｜><｜User｜>question<｜Assistant｜></think>answer one
+
+        answer two<｜end▁of▁sentence｜><｜User｜>next<｜Assistant｜></think>"#]]
+    .assert_eq(&render(&request));
 }

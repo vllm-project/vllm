@@ -37,6 +37,7 @@ from vllm.multimodal.inputs import (
 )
 from vllm.outputs import CompletionOutput, RequestOutput, SamplingMask
 from vllm.renderers import renderer_from_config
+from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -122,6 +123,7 @@ def _build_serving_tokens(engine: AsyncLLM, **kwargs) -> ServingTokens:
         engine,
         models,
         online_renderer=online_renderer,
+        online_derenderer=MagicMock(spec=OnlineDerenderer),
         request_logger=None,
         **kwargs,
     )

@@ -13,6 +13,14 @@ from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_
 logger = init_logger(__name__)
 
 
+def should_use_gfx1250_mx_scale_swizzle() -> bool:
+    if not current_platform.is_rocm():
+        return False
+    from vllm.platforms.rocm import on_gfx1250
+
+    return on_gfx1250()
+
+
 def should_use_cdna4_mx_scale_swizzle() -> bool:
     """Whether to use the CDNA4 swizzled scale layout for mxfp4 on gfx950.
 
@@ -25,6 +33,15 @@ def should_use_cdna4_mx_scale_swizzle() -> bool:
     from vllm.platforms.rocm import on_gfx950
 
     return on_gfx950() and get_tensor_model_parallel_world_size() <= 2
+
+
+def get_aiter_mx_scale_swizzle() -> str | None:
+    """AITER `swizzle_mx_scale` arg matching the load-time scale swizzle."""
+    if should_use_gfx1250_mx_scale_swizzle():
+        return "GFX1250_SCALE"
+    if should_use_cdna4_mx_scale_swizzle():
+        return "CDNA4_SCALE"
+    return None
 
 
 def weight_mx_scale(precision_config):
@@ -120,14 +137,15 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
                 K = scale.shape[-1]
                 pad_k = -K % 4
                 scale = torch.nn.functional.pad(scale, (0, pad_k))
-        elif current_platform.is_device_capability_family(
-            100
-        ) or current_platform.is_device_capability_family(120):
-            # Native MXFP (cap >= 10.0) requires the persistent kernel. On
-            # SM12x, epilogue_subtile=1 also keeps the heuristic away from a
-            # triton_kernels 3.5.1 codegen bug (SWAP_XW with a subtiled
-            # epilogue); block_m is pinned per call in
-            # gpt_oss_triton_kernels_moe to fit the 99KB shared memory.
+        elif any(
+            current_platform.is_device_capability_family(family)
+            for family in (100, 110, 120)
+        ):
+            # Native MXFP (cap >= 10.0) requires the persistent kernel, and
+            # epilogue_subtile=1 keeps the heuristic away from a triton_kernels
+            # 3.5.1 codegen bug (SWAP_XW with a subtiled epilogue) that SM110
+            # and SM12x otherwise hit. On SM12x, block_m is also pinned per
+            # call in gpt_oss_triton_kernels_moe to fit the 99KB shared memory.
             constraints = {
                 "is_persistent": True,
                 "epilogue_subtile": 1,
@@ -136,6 +154,17 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     # transpose the tensor so that the quantization axis is on dim1
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
+
+    if should_use_gfx1250_mx_scale_swizzle():
+        from aiter.ops.triton.utils.shuffle import shuffle_scale_moe
+
+        assert (
+            scale.dim() == 3 and scale.shape[-1] % 32 == 0 and scale.shape[-2] % 4 == 0
+        ), f"GFX1250 scale swizzle needs (E,K_SCALE%4,N%32); got {tuple(scale.shape)}"
+        scale = shuffle_scale_moe(
+            scale, arch="gfx1250", preshuffle_factor=32, scale_kwidth=4
+        )
+
     quant_tensor = convert_layout(
         wrap_torch_tensor(quant_tensor, dtype=FP4), value_layout, **value_layout_opts
     )

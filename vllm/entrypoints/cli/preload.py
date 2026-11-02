@@ -24,9 +24,11 @@ import queue
 import signal
 import sys
 import threading
+import time
 import typing
 from collections.abc import Sequence
 from itertools import product
+from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
 
 from fastapi import FastAPI
@@ -34,7 +36,7 @@ from fastapi.responses import Response
 
 from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.cli.types import CLISubcommand
-from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_cache.protocol import (
     check_ipc_platform_support,
@@ -100,6 +102,37 @@ def _start_health_server(
     return server, thread
 
 
+def _validate_seed_args(
+    args: argparse.Namespace, *, world_size: int, num_groups: int
+) -> None:
+    """Validate the seed CLI options before any daemon spawns."""
+    for flag, host, port in (
+        ("--seed-listen", args.seed_listen_host, args.seed_listen_port),
+        ("--seed-source", args.seed_source_host, args.seed_source_port),
+    ):
+        if (host is None) != (port is None):
+            raise ValueError(f"{flag}-host and {flag}-port must be provided together")
+    has_endpoint = any(
+        value is not None
+        for value in (
+            args.seed_listen_host,
+            args.seed_listen_port,
+            args.seed_source_host,
+            args.seed_source_port,
+        )
+    )
+    if has_endpoint != bool(args.seed_token):
+        raise ValueError("Preload daemons must set --seed-token to enable D2D transfer")
+    for base_port in (args.seed_listen_port, args.seed_source_port):
+        if base_port is None:
+            continue
+        max_port = base_port + num_groups * world_size - 1
+        if not 1 <= base_port <= 65535 or max_port > 65535:
+            raise ValueError(
+                f"Daemon-to-daemon port range {base_port}-{max_port} exceeds 65535"
+            )
+
+
 class PreloadSubcommand(CLISubcommand):
     """The `preload` subcommand for the vLLM CLI."""
 
@@ -119,9 +152,9 @@ class PreloadSubcommand(CLISubcommand):
             type=int,
             default=None,
             help="Rendezvous port for the daemon's own TP group. Must differ "
-            "from the engine's --master-port (the daemon holds its group open "
-            "while serving) and match across nodes. Required when --nnodes > "
-            "1; defaults to a free port for single-node.",
+            "from the engine's --master-port (the daemons may still be loading "
+            "when the engine starts) and match across nodes. Required when "
+            "--nnodes > 1; defaults to a free port for single-node.",
         )
         parser.add_argument(
             "--weight-cache-draft-master-port",
@@ -143,6 +176,39 @@ class PreloadSubcommand(CLISubcommand):
             default="0.0.0.0",
             help="Host for the parent /health endpoint (default: 0.0.0.0).",
         )
+        parser.add_argument(
+            "--seed-listen-host",
+            type=str,
+            default=None,
+            help="Host to bind for authenticated daemon-to-daemon requests.",
+        )
+        parser.add_argument(
+            "--seed-listen-port",
+            type=int,
+            default=None,
+            help="Base port for daemon-to-daemon requests; each daemon binds "
+            "base_port + group offset + its global rank.",
+        )
+        parser.add_argument(
+            "--seed-source-host",
+            type=str,
+            default=None,
+            help="Host of a source daemon replica to seed warmup caches from.",
+        )
+        parser.add_argument(
+            "--seed-source-port",
+            type=int,
+            default=None,
+            help="Base port of the source daemon replica; each daemon dials "
+            "base_port + group offset + its global rank.",
+        )
+        parser.add_argument(
+            "--seed-token",
+            type=str,
+            default=None,
+            help="Shared secret for daemon-to-daemon requests. The JSON "
+            "connection is unencrypted; use a trusted network.",
+        )
 
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
@@ -153,6 +219,7 @@ class PreloadSubcommand(CLISubcommand):
             get_draft_daemon_config,
             plan_local_ranks,
         )
+        from vllm.model_executor.model_loader.weight_cache.seed import SeedConfig
         from vllm.model_executor.model_loader.weight_cache.utils import (
             format_daemon_role,
         )
@@ -179,6 +246,7 @@ class PreloadSubcommand(CLISubcommand):
         tp_size = parallel_config.tensor_parallel_size
         pp_size = parallel_config.pipeline_parallel_size
         dp_size = parallel_config.data_parallel_size
+        world_size = dp_size * pp_size * tp_size
 
         placements = plan_local_ranks(parallel_config)
         local_world_size = len(placements)
@@ -248,32 +316,54 @@ class PreloadSubcommand(CLISubcommand):
                 groups, placements
             )
         }
-        procs = [
-            ctx.Process(
-                target=_run_daemon,
-                args=(
-                    dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank,
-                    local_rank,
-                    config,
-                    init_method,
-                    args.weight_cache_socket_dir,
-                    ready_queue,
-                    is_draft,
-                    dp_rank,
-                    pp_rank,
-                ),
-                name=(
-                    f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
-                    f"{(dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank)}"
-                ),
-            )
-            for (is_draft, config, init_method), (
-                local_rank,
-                dp_rank,
-                pp_rank,
-                tp_rank,
-            ) in product(groups, placements)
-        ]
+        _validate_seed_args(args, world_size=world_size, num_groups=len(groups))
+
+        def _seed_endpoint(
+            host: str | None, base_port: int | None, offset: int
+        ) -> tuple[str, int] | None:
+            # Validated above: host and port are provided together.
+            if host is None or base_port is None:
+                return None
+            return host, base_port + offset
+
+        procs: list[BaseProcess] = []
+        for group_index, (is_draft, config, init_method) in enumerate(groups):
+            # Draft daemons live past the target group's port block so both
+            # roles can be reached over a single seed host:base_port.
+            port_offset = group_index * world_size
+            for local_rank, dp_rank, pp_rank, tp_rank in placements:
+                global_rank = dp_rank * pp_size * tp_size + pp_rank * tp_size + tp_rank
+                offset = port_offset + global_rank
+                seed_config = SeedConfig(
+                    listen=_seed_endpoint(
+                        args.seed_listen_host, args.seed_listen_port, offset
+                    ),
+                    source=_seed_endpoint(
+                        args.seed_source_host, args.seed_source_port, offset
+                    ),
+                    token=args.seed_token,
+                )
+                procs.append(
+                    ctx.Process(
+                        target=_run_daemon,
+                        args=(
+                            global_rank,
+                            local_rank,
+                            config,
+                            init_method,
+                            args.weight_cache_socket_dir,
+                            ready_queue,
+                            is_draft,
+                            dp_rank,
+                            pp_rank,
+                            seed_config,
+                        ),
+                        name=(
+                            f"vllm-weight-cache-{format_daemon_role(is_draft)}-"
+                            f"{global_rank}"
+                        ),
+                    )
+                )
         health_state = _HealthState(procs)
         health_server = None
         health_thread = None
@@ -283,58 +373,79 @@ class PreloadSubcommand(CLISubcommand):
                 args.weight_cache_health_port,
                 health_state,
             )
-        for proc in procs:
-            proc.start()
+        shutdown_requested = False
+        exit_code = 0
 
         def _shutdown(signum, frame):
-            if health_server is not None:
-                health_server.should_exit = True
-            for proc in procs:
-                proc.terminate()
+            nonlocal shutdown_requested, exit_code
+            shutdown_requested = True
+            exit_code = 128 + signum
 
         signal.signal(signal.SIGINT, _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
 
-        ready: set[tuple[str, int]] = set()
-        while len(ready) < len(expected_ready):
-            try:
-                ready.add(ready_queue.get(timeout=1.0))
-            except queue.Empty:
+        started: list[BaseProcess] = []
+        try:
+            for proc in procs:
+                if shutdown_requested:
+                    break
+                proc.start()
+                started.append(proc)
+
+            ready: set[tuple[str, int]] = set()
+            while not shutdown_requested:
                 dead = [p for p in procs if p.exitcode is not None]
                 if dead:
                     logger.error(
-                        "Weight cache daemon rank(s) exited during startup "
+                        "Weight cache daemon rank(s) exited during %s "
                         "(exitcodes=%s); shutting down.",
+                        "serving" if ready == expected_ready else "startup",
                         [p.exitcode for p in dead],
                     )
-                    for proc in procs:
-                        proc.terminate()
-                    for proc in procs:
-                        proc.join()
-                    if health_server is not None:
-                        health_server.should_exit = True
-                    if health_thread is not None:
-                        health_thread.join()
-                    sys.exit(max((p.exitcode or 0) for p in procs))
-        health_state.mark_ready()
-        socket_dir_msg = args.weight_cache_socket_dir or "the default socket dir"
-        logger.info_once(
-            "===== Weight cache daemon READY: node %d/%d serving %d local "
-            "rank(s) x %d role(s) in %s =====",
-            node_rank,
-            nnodes,
-            local_world_size,
-            len(groups),
-            socket_dir_msg,
-        )
-
-        for proc in procs:
-            proc.join()
-        if health_server is not None:
-            health_server.should_exit = True
-        if health_thread is not None:
-            health_thread.join()
-        sys.exit(max(proc.exitcode or 0 for proc in procs))
+                    # Preserve the failure before terminating healthy siblings.
+                    # A clean rank exit is also unexpected while serving.
+                    failure = next((code for p in dead if (code := p.exitcode)), 1)
+                    exit_code = 128 - failure if failure < 0 else failure
+                    break
+                if ready == expected_ready:
+                    wait([p.sentinel for p in procs], timeout=1.0)
+                    continue
+                try:
+                    ready.add(ready_queue.get(timeout=1.0))
+                except queue.Empty:
+                    continue
+                if ready == expected_ready:
+                    health_state.mark_ready()
+                    socket_dir_msg = (
+                        args.weight_cache_socket_dir or "the default socket dir"
+                    )
+                    logger.info_once(
+                        "===== Weight cache daemon READY: node %d/%d serving %d "
+                        "local rank(s) x %d role(s) in %s =====",
+                        node_rank,
+                        nnodes,
+                        local_world_size,
+                        len(groups),
+                        socket_dir_msg,
+                    )
+        finally:
+            if health_server is not None:
+                health_server.should_exit = True
+            for proc in started:
+                if proc.is_alive():
+                    proc.terminate()
+            deadline = time.monotonic() + 10.0
+            for proc in started:
+                proc.join(timeout=max(0.0, deadline - time.monotonic()))
+            for proc in started:
+                if proc.is_alive():
+                    proc.kill()
+            for proc in started:
+                proc.join()
+            if health_thread is not None:
+                health_thread.join()
+            ready_queue.close()
+        sys.exit(exit_code)
 
     def subparser_init(
         self, subparsers: argparse._SubParsersAction
