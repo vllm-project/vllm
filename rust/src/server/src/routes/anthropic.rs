@@ -11,6 +11,7 @@ use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use validator::Validate;
 
+use crate::config::{ApiServerOptions, OutputLogConfig};
 use crate::error::{ApiError, chat_submit_error, invalid_request, server_error, text_submit_error};
 use crate::lora::LoraModelResolution;
 use crate::routes::openai::utils::types::{
@@ -22,8 +23,8 @@ use crate::state::AppState;
 use crate::utils::{ResolvedRequestContext, resolve_request_context};
 use tracing_futures::Instrument as _;
 use vllm_chat::{
-    AssistantContentBlock, AssistantMessageExt as _, ChatContent, ChatContentPart, ChatMessage,
-    ChatOptions, ChatRequest, FinishReason, GenerationPromptMode, ResolvedToolContext,
+    AssistantContentBlock, AssistantMessageExt as _, ChatContent, ChatContentPart, ChatLlm,
+    ChatMessage, ChatOptions, ChatRequest, FinishReason, GenerationPromptMode, ResolvedToolContext,
     SamplingParams,
 };
 use vllm_engine_core_client::protocol::output::StopReason;
@@ -239,8 +240,9 @@ pub async fn count_tokens(
         Ok(body) => body.0,
         Err(error) => return error_response(error.into()),
     };
-    match MessagesLlm::new(&state)
-        .count_tokens(body, resolve_request_context(&headers, None))
+    let model = state.resolve_model_with_loras(Some(&body.model)).await;
+    match MessagesLlm::new(&state.chat, state.api_server_options)
+        .count_tokens(body, &model, resolve_request_context(&headers, None))
         .await
     {
         Ok(response) => Json(response).into_response(),
@@ -267,8 +269,9 @@ pub async fn messages(
         Ok(body) => body.0,
         Err(error) => return error_response(error.into()),
     };
-    match MessagesLlm::new(&state)
-        .create(body, resolve_request_context(&headers, None))
+    let model = state.resolve_model_with_loras(Some(&body.model)).await;
+    match MessagesLlm::new(&state.chat, state.api_server_options)
+        .create(body, &model, resolve_request_context(&headers, None))
         .await
     {
         Ok(response) => Json(response).into_response(),
@@ -278,29 +281,35 @@ pub async fn messages(
 
 /// Anthropic request handling over the application's shared chat inference.
 pub(crate) struct MessagesLlm<'a> {
-    state: &'a AppState,
+    chat: &'a ChatLlm,
+    enable_log_requests: bool,
+    log_outputs: OutputLogConfig,
+    enable_prompt_tokens_details: bool,
 }
 
 impl<'a> MessagesLlm<'a> {
-    pub(crate) fn new(state: &'a AppState) -> Self {
-        Self { state }
+    pub(crate) fn new(chat: &'a ChatLlm, options: ApiServerOptions) -> Self {
+        Self {
+            chat,
+            enable_log_requests: options.enable_log_requests,
+            log_outputs: options.log_outputs,
+            enable_prompt_tokens_details: options.enable_prompt_tokens_details,
+        }
     }
     pub(crate) async fn count_tokens(
         &self,
         body: MessagesRequest,
+        model: &LoraModelResolution,
         context: ResolvedRequestContext,
     ) -> Result<CountTokensResponse, ApiError> {
-        let model = self.state.resolve_model_with_loras(Some(&body.model)).await;
-        let request = body.into_chat_request(&model, context)?;
+        let request = body.into_chat_request(model, context)?;
         let text = self
-            .state
             .chat
             .request_processor()
             .prepare_for_tokenization(request)
             .await
             .map_err(|error| chat_submit_error("count_tokens failed", error))?;
         let tokens = self
-            .state
             .chat
             .text()
             .request_processor()
@@ -316,6 +325,7 @@ impl<'a> MessagesLlm<'a> {
     pub(crate) async fn create(
         &self,
         body: MessagesRequest,
+        model: &LoraModelResolution,
         context: ResolvedRequestContext,
     ) -> Result<MessagesResponse, ApiError> {
         if body.max_tokens.is_none() {
@@ -324,17 +334,16 @@ impl<'a> MessagesLlm<'a> {
                 "max_tokens is required for generation"
             ));
         }
-        let model = self.state.resolve_model_with_loras(Some(&body.model)).await;
-        let request = body.into_chat_request(&model, context)?;
+        let request = body.into_chat_request(model, context)?;
         validate_max_output_tokens(
             "max_tokens",
             request.sampling_params.max_tokens,
-            self.state.chat.engine_core_client().max_model_len(),
+            self.chat.engine_core_client().max_model_len(),
         )?;
         let request_id = request.request_id.clone();
         let span = tracing::info_span!("messages", request_id = %request_id, engine_request_id = tracing::field::Empty);
         let response = async {
-        let response = self.state.chat.chat(request).await
+        let response = self.chat.chat(request).await
             .map_err(|error| chat_submit_error("failed to submit Messages request", error))?
             .collect_message().await
             .map_err(|error| chat_submit_error("failed to collect Messages response", error))?;
@@ -343,18 +352,17 @@ impl<'a> MessagesLlm<'a> {
             return Err(invalid_request!("Reasoning and tool output are not supported yet"));
         }
         let text = response.message.text();
-        let options = self.state.api_server_options;
-        if options.enable_log_requests {
+        if self.enable_log_requests {
             tracing::info!(model = %model.response_model(), prompt_tokens = response.usage.prompt_token_count,
                 output_tokens = response.usage.output_token_count, finish_reason = reason, "Messages finished");
         }
-        if options.log_outputs.logs_complete() && !text.is_empty() {
-            options.log_outputs.log(LoggedOutput::Response, &text, Some(&response.token_ids), Some(reason));
+        if self.log_outputs.logs_complete() && !text.is_empty() {
+            self.log_outputs.log(LoggedOutput::Response, &text, Some(&response.token_ids), Some(reason));
         }
         Ok(MessagesResponse {
             id: request_id, message_type: "message", message: Message::Assistant { content: TextContent::Blocks(vec![TextBlock::Text { text }]) }, model: model.response_model(),
             stop_reason: reason, stop_sequence: sequence.map(str::to_owned),
-            usage: usage(response.usage.engine, options.enable_prompt_tokens_details),
+            usage: usage(response.usage.engine, self.enable_prompt_tokens_details),
             kv_transfer_params: response.kv_transfer_params, ec_transfer_params: response.ec_transfer_params,
         })
     }.instrument(span).await?;
