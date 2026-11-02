@@ -263,6 +263,8 @@ filelock==3.25.2
     #   ray
     #   torch
     #   virtualenv
+flatbuffers==25.12.19
+    # via onnxruntime
 fonttools==4.62.1
     # via
     #   -r requirements/test/rocm.in
@@ -627,6 +629,7 @@ numpy==2.2.6
     #   ml-dtypes
     #   mteb
     #   numba
+    #   onnxruntime
     #   opencv-python-headless
     #   optuna
     #   pandas
@@ -654,6 +657,8 @@ numpy==2.2.6
     #   tritonclient
     #   vocos
     #   xgrammar
+onnxruntime==1.27.0
+    # via -r requirements/test/rocm.in
 open-clip-torch==2.32.0
     # via -r requirements/test/rocm.in
 openai==2.31.0
@@ -751,6 +756,7 @@ packaging==26.3
     #   lazy-loader
     #   lm-format-enforcer
     #   matplotlib
+    #   onnxruntime
     #   optuna
     #   peft
     #   plotly
@@ -759,6 +765,7 @@ packaging==26.3
     #   pytest-rerunfailures
     #   ray
     #   scikit-image
+    #   silero-vad
     #   statsmodels
     #   transformers
     #   typepy
@@ -846,6 +853,7 @@ protobuf==6.33.6
     #   google-api-core
     #   googleapis-common-protos
     #   grpcio-reflection
+    #   onnxruntime
     #   opentelemetry-proto
     #   proto-plus
     #   ray
@@ -1155,6 +1163,8 @@ shellingham==1.5.4
     # via
     #   perceptron
     #   typer
+silero-vad==6.2.3
+    # via -r requirements/test/rocm.in
 simplejson==3.20.2
     # via choreographer
 six==1.17.0
