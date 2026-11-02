@@ -1013,18 +1013,19 @@ def init_mxfp8_linear_kernel(
     )
 
 
-def _user_linear_activation_override() -> QuantKey | None:
-    """User's linear activation override from quantization_config, or None."""
+def _user_linear_activation_override() -> tuple[QuantKey | None, bool]:
+    """User's linear activation override from quantization_config, and whether
+    it was set."""
     from vllm.config import get_current_vllm_config_or_none
     from vllm.config.quantization import QuantizationConfigArgs
 
     config = get_current_vllm_config_or_none()
     if config is None or config.model_config is None:
-        return None
+        return None, False
     args = config.model_config.quantization_config
     if not isinstance(args, QuantizationConfigArgs) or args.linear is None:
-        return None
-    return args.linear.activation
+        return None, False
+    return args.linear.activation, "activation" in args.linear.fields_set
 
 
 def _resolve_linear_activation_key(
@@ -1032,9 +1033,10 @@ def _resolve_linear_activation_key(
 ) -> QuantKey | None:
     """Apply ``--quantization-config.linear.activation`` to the checkpoint's
     activation key. The override wins: it may replace a checkpoint's MXFP4
-    activations with a format a kernel computes directly (e.g. int8)."""
-    user_override = _user_linear_activation_override()
-    if user_override is None or user_override == model_activation_key:
+    activations with a format a kernel computes directly (e.g. int8), or with
+    ``null`` to run the layer weight-only."""
+    user_override, has_user_override = _user_linear_activation_override()
+    if not has_user_override or user_override == model_activation_key:
         return model_activation_key
     if model_activation_key is not None:
         logger.warning_once(
