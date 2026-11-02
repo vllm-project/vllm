@@ -232,16 +232,17 @@ class DeepGemmMegaMoEExperts(nn.Module):
     """Routed experts, and optionally the shared expert, as one MegaMoE launch.
 
     Parameters are registered in the kernel layout and every checkpoint shard is
-    written straight into it, so loading (and reloading) needs no post-load
+    written straight into it, so the weights and block scales need no post-load
     transform. Whether the shared expert runs inside the launch is decided here,
     before any weight loads; a fused layer owns the shared-expert weights and
     the caller drops its shared MLP.
 
     NVFP4 experts also take per-expert ``weight_scale_2`` (``w1`` and ``w3``
     must match: one L1 scale per expert) and ``w2`` ``input_scale``; the kernel
-    quantizes every L2 input with the max of the latter over all loaded
-    experts. Dispatch uses per-token scales, so ``w1``/``w3`` ``input_scale``
-    are not loaded.
+    quantizes every L2 input with the max of the latter over all experts. Each
+    lands in its own checkpoint slot; ``process_weights_after_loading`` checks
+    and combines them. Dispatch uses per-token scales, so ``w1``/``w3``
+    ``input_scale`` are not loaded.
 
     Args:
         num_experts: Physical experts across EP ranks, redundant included.
@@ -312,11 +313,8 @@ class DeepGemmMegaMoEExperts(nn.Module):
         self.fast_math = fast_math
         self._kernel_kwargs = activation.kernel_kwargs()
         self.eplb_state = EplbLayerState()
-        # L2 input scale of every logical expert; the NVFP4 kernel takes the max.
-        self._w2_input_scales = torch.zeros(self.num_logical_experts, device="cpu")
+        # Max of w2_input_scale, set after loading.
         self.l2_activation_scale = 1.0
-        # The first of each expert's w1/w3 weight_scale_2 until the other loads.
-        self._pending_l1_scales: dict[int, tuple[str, float]] = {}
 
         self.num_shared_experts, self.shared_spec = self._fusable_shared_experts(
             shared_experts
@@ -415,19 +413,34 @@ class DeepGemmMegaMoEExperts(nn.Module):
     def _create_weights(self) -> None:
         """Register the routed and fused shared-expert parameters.
 
-        Routed parameters are indexed by local expert on dim 0, which EPLB moves.
+        Routed parameters are indexed by local expert on dim 0, which EPLB moves,
+        except ``w13_weight_scale_2``: ``(2, e)``, so its w1 row is the kernel's
+        contiguous L1 alpha.
         """
         e, h, i = self.num_local_experts, self.hidden_size, self.intermediate_size
         fmt = self.weight_format
         self._register_weight("w13", (e, 2 * i, h), fmt.routed)
         self._register_weight("w2", (e, h, i), fmt.routed)
         if fmt.routed.has_global_scale:
-            # w13_weight_scale_2 is the kernel's L1 alpha (per-token dispatch).
-            for name in ("w13_weight_scale_2", "w2_weight_scale_2", "w2_input_scale"):
-                scale = torch.zeros(e, dtype=torch.float32)
-                self.register_parameter(name, nn.Parameter(scale, requires_grad=False))
+            # Checkpoint scales: w1 and w3 per local expert, w2 per local expert,
+            # and the w2 input scale of every logical expert, so all ranks agree
+            # on the L2 activation scale and EPLB can move experts.
+            for name, shape, dummy in (
+                ("w13_weight_scale_2", (2, e), 1e-3),
+                ("w2_weight_scale_2", (e,), None),
+                ("w2_input_scale", (self.num_logical_experts,), 1.0),
+            ):
+                scale = nn.Parameter(
+                    torch.zeros(shape, dtype=torch.float32), requires_grad=False
+                )
+                if dummy is not None:
+                    # Dummy loads keep w1 and w3 equal and the L2 scale at 1.
+                    set_weight_attrs(scale, {"dummy_weight_value": dummy})
+                self.register_parameter(name, scale)
             # w2 global weight scale times the L2 activation scale, per launch.
             l2_alpha = torch.zeros(e, dtype=torch.float32)
+            # No loader writes it: layerwise reload must not wait for it.
+            l2_alpha.weight_loader_numel = 0
             self.register_buffer("_l2_alpha", l2_alpha, persistent=False)
         if self.shared_spec is not None:
             # The shared expert has the layout of one routed expert slice.
@@ -484,46 +497,55 @@ class DeepGemmMegaMoEExperts(nn.Module):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if not loaded_weight.is_meta:
-            self._record_global_scale(weight_name, loaded_weight, shard_id, expert_id)
-        local_expert_ids = self._map_global_expert_id(expert_id)
         param_prefix = "w2_" if shard_id == "w2" else "w13_"
-        if not local_expert_ids or param_prefix not in weight_name:
+        if param_prefix not in weight_name:
             return False if return_success else None
-        is_global_scale = weight_name.endswith(("weight_scale_2", "input_scale"))
+        if weight_name.endswith("w2_input_scale"):
+            # Indexed by logical expert on every rank.
+            param.data[expert_id].copy_(loaded_weight.reshape(()))
+            return True if return_success else None
+        local_expert_ids = self._map_global_expert_id(expert_id)
+        if not local_expert_ids:
+            return False if return_success else None
+        is_global_scale = weight_name.endswith("weight_scale_2")
         is_scale = weight_name.endswith("weight_scale")
         for local_expert_id in local_expert_ids:
             if is_global_scale:
-                param.data[local_expert_id].copy_(loaded_weight.reshape(()))
+                dst = param.data
+                if shard_id != "w2":
+                    dst = dst[0 if shard_id == "w1" else 1]
+                dst[local_expert_id].copy_(loaded_weight.reshape(()))
             else:
                 self._load_weight(
                     param.data[local_expert_id], loaded_weight, shard_id, is_scale
                 )
         return True if return_success else None
 
-    def _record_global_scale(
-        self, weight_name: str, scale: torch.Tensor, shard_id: str, expert_id: int
-    ) -> None:
-        """Track NVFP4 global scales the kernel takes one of per launch or expert.
+    def process_weights_after_loading(self) -> None:
+        """Check the loaded NVFP4 global scales and set the L2 activation scale.
 
-        Every rank sees the scales of all experts, so ranks agree and EPLB can
-        move experts.
+        Runs after every load and reload. ``l2_activation_scale`` is passed to
+        the kernels by value, so graphs captured before a reload keep the old one.
+
+        Raises:
+            ValueError: If an expert's ``w1`` and ``w3`` ``weight_scale_2``
+                differ; the kernel takes one L1 scale per expert.
+
         """
-        if weight_name.endswith("w2_input_scale"):
-            self._w2_input_scales[expert_id] = scale.max()
-            self.l2_activation_scale = float(self._w2_input_scales.max()) or 1.0
-        elif weight_name.endswith("w13_weight_scale_2"):
-            # Compare w1 and w3 of the same load, not the live (maybe stale) slot.
-            prev = self._pending_l1_scales.pop(expert_id, None)
-            value = float(scale)
-            if prev is None or prev[0] == shard_id:
-                self._pending_l1_scales[expert_id] = (shard_id, value)
-            elif not math.isclose(value, prev[1], rel_tol=1e-5):
-                raise ValueError(
-                    f"MegaMoE NVFP4 expert {expert_id}: {prev[0]} weight_scale_2 "
-                    f"{prev[1]} != {shard_id} weight_scale_2 {value}; the kernel "
-                    "takes one L1 scale per expert."
-                )
+        scales = getattr(self, "w13_weight_scale_2", None)
+        if scales is None or scales.is_meta:
+            return
+        w1_scale, w3_scale = scales
+        mismatch = ~torch.isclose(w3_scale, w1_scale, rtol=1e-5, atol=0.0)
+        if mismatch.any():
+            slot = int(mismatch.nonzero()[0])
+            expert_id = (self.experts_start_idx + slot) % self.num_logical_experts
+            raise ValueError(
+                f"MegaMoE NVFP4 expert {expert_id}: w1 weight_scale_2 "
+                f"{float(w1_scale[slot])} != w3 weight_scale_2 "
+                f"{float(w3_scale[slot])}; the kernel takes one L1 scale per expert."
+            )
+        self.l2_activation_scale = float(self.w2_input_scale.max()) or 1.0
 
     def load_shared_expert_weight(self, name: str, loaded_weight: torch.Tensor) -> str:
         """Load one shared-expert checkpoint tensor; return the parameter name."""
@@ -582,9 +604,15 @@ class DeepGemmMegaMoEExperts(nn.Module):
             raise ValueError(
                 f"Scale shape {tuple(sf.shape)} does not tile ({rows}, {cols})"
             )
-        sf = sf.repeat_interleave(rows // sf.shape[0], 0)
-        sf = sf.repeat_interleave(cols // sf.shape[1], 1)
-        return sf.contiguous().clone().view(torch.int32)
+        # Views only, unless the scales are coarser than the kernel's or the bytes
+        # cannot be reinterpreted as int32 (non-contiguous or misaligned).
+        if sf.shape[0] != rows:
+            sf = sf.repeat_interleave(rows // sf.shape[0], 0)
+        if sf.shape[1] != cols:
+            sf = sf.repeat_interleave(cols // sf.shape[1], 1)
+        if not sf.is_contiguous() or sf.storage_offset() % 4:
+            sf = sf.clone(memory_format=torch.contiguous_format)
+        return sf.view(torch.int32)
 
     @staticmethod
     def _kernel_layout_shard(
@@ -702,11 +730,19 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 f"stride={tuple(t.stride())} dtype={t.dtype}"
             )
 
-        return [
-            _to_eplb_view(name, param)
+        # w2_input_scale holds every logical expert on every rank;
+        # w13_weight_scale_2 has the expert dim second, so it goes by row.
+        skip = ("w2_input_scale", "w13_weight_scale_2")
+        tensors = [
+            (name, param)
             for name, param in self.named_parameters(recurse=False)
-            if not name.startswith("shared_")
+            if not name.startswith("shared_") and name not in skip
         ]
+        if self.weight_format.routed.has_global_scale:
+            tensors += [
+                ("w13_weight_scale_2", s) for s in self.w13_weight_scale_2.unbind(0)
+            ]
+        return [_to_eplb_view(name, t) for name, t in tensors]
 
     def update_expert_map(self) -> None:
         pass
@@ -802,7 +838,7 @@ class DeepGemmMegaMoEExperts(nn.Module):
                 eplb_state=self.eplb_state,
             )
             kwargs.update(
-                l1_alpha=self.w13_weight_scale_2,
+                l1_alpha=self.w13_weight_scale_2[0],
                 l2_alpha=self._l2_alpha,
                 l2_activation_scale=l2_activation_scale,
                 use_x_scales=True,
