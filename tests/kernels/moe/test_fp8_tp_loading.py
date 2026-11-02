@@ -68,6 +68,7 @@ def _make_fp8_tp_experts(
         or Fp8Config(is_checkpoint_fp8_serialized=True, weight_block_size=[128, 128]),
         expert_map_manager=SimpleNamespace(
             local_num_experts=num_experts,
+            num_fused_shared_experts=0,
             placement_strategy="linear",
             expert_map=None,
             expert_mask=None,

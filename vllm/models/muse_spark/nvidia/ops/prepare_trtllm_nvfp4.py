@@ -117,6 +117,8 @@ def norm_quant_trtllm_nvfp4(
     norm_eps: float,
     gain_center: float,
     global_scale: torch.Tensor,
+    *,
+    out: tuple[torch.Tensor, torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """RMSNorm + NVFP4 quant of ``[M, H]`` pooled states, in any rank-block layout.
 
@@ -128,10 +130,20 @@ def norm_quant_trtllm_nvfp4(
     shard = pooled.shape[1]
     assert pooled.dtype == torch.bfloat16 and pooled.is_contiguous()
     assert pooled.shape[0] * shard == num_tokens * hidden and hidden % _BLOCK_K == 0
-    packed = torch.empty(
-        num_tokens, hidden // 2, dtype=torch.uint8, device=pooled.device
-    )
-    sf = torch.empty(num_tokens, hidden // 16, dtype=torch.uint8, device=pooled.device)
+    if out is None:
+        packed = torch.empty(
+            num_tokens, hidden // 2, dtype=torch.uint8, device=pooled.device
+        )
+        sf = torch.empty(
+            num_tokens, hidden // 16, dtype=torch.uint8, device=pooled.device
+        )
+    else:
+        packed, sf = out
+        assert packed.shape == (num_tokens, hidden // 2)
+        assert sf.shape == (num_tokens, hidden // 16)
+        assert packed.dtype == sf.dtype == torch.uint8
+        assert packed.is_contiguous() and sf.is_contiguous()
+        assert packed.device == sf.device == pooled.device
     if num_tokens == 0:
         return packed, sf
     enable_pdl = _enable_pdl()

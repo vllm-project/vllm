@@ -59,6 +59,8 @@ Prompt embeddings can be included as content parts in chat messages, interleaved
 
 Each `prompt_embeds` content part contains a `data` field with a base64-encoded `torch.Tensor` of shape `(num_tokens, hidden_size)`. Multiple `prompt_embeds` parts can appear in any message, in any position relative to text parts. The server expands each part into the correct number of placeholder tokens during chat template rendering, then splices the pre-computed embeddings into the model's input at the corresponding positions.
 
+For multimodal models, `prompt_embeds` parts can also be mixed with image content parts. Their placeholder token IDs are replaced with safe dummy IDs before model execution; the supplied embeddings replace the dummy embeddings at those positions.
+
 Unlike the Completions API, a `prompt_embeds` content part should encode **only** the content, not a templated conversation. The server wraps the chat template around the embedded content at request time, the same way it would for a plain text `content` string. Embedding a full templated conversation here would double-apply the template and produce incorrect inputs to the model.
 
 Assistant messages can also pass a single `prompt_embeds` part as `reasoning` instead of a string:

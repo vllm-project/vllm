@@ -127,6 +127,24 @@ def test_lru_cache():
     assert 6 in cache
 
 
+def test_lru_cache_peek_preserves_eviction_order_and_stats():
+    cache = LRUCache[str, object | None](2)
+    payload = object()
+    cache.put("oldest", payload)
+    cache.put("newest", None)
+    initial_stats = cache.stat()
+
+    assert cache.peek("oldest") is payload
+    assert cache.peek("newest", payload) is None
+    assert cache.peek("missing") is None
+    assert cache.peek("missing", payload) is payload
+    assert cache.stat() == initial_stats
+
+    cache.put("replacement", object())
+    assert "oldest" not in cache
+    assert "newest" in cache
+
+
 def test_lru_cache_put_if_fits():
     cache = LRUCache[str, int](10, getsizeof=lambda x: x)
 

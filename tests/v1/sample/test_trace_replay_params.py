@@ -102,13 +102,12 @@ def test_validate_trace_replay_noop_when_unset():
     )
 
 
-def test_trace_decode_token_ids_rejects_speculative_decoding():
+def test_trace_decode_token_ids_allows_speculative_decoding():
     params = SamplingParams(trace_decode_token_ids=[1])
-    with pytest.raises(ValueError, match="not supported with speculative decoding"):
-        params._validate_trace_replay(
-            _make_model_config(vocab_size=100),
-            speculative_config=object(),
-        )
+    params._validate_trace_replay(
+        _make_model_config(vocab_size=100),
+        speculative_config=object(),
+    )
 
 
 def test_trace_decode_token_ids_rejects_structured_outputs():
