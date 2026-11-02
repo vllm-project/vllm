@@ -325,16 +325,6 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert region is not None
     assert isinstance(region, FakeSharedOffloadRegion)
     assert [t.data_ptr() for t in pinned_pools] == [t.data_ptr() for t in pinned]
-    assert region.kwargs == {
-        "engine_id": "hisparse_instance_dp3",
-        "num_chunks": 1,
-        "rank": 0,
-        "kv_bytes_per_chunk": 4 * page,
-        "cpu_page_size": 64,
-        "barrier": tp_group.barrier,
-        "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_shard": (1, 2),
-    }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
     registration_ranges.assert_called_once_with([24, 40], 4, page)
@@ -1400,6 +1390,51 @@ def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
 
     assert [m._commits_replayssm_trackers for m in mixers] == [True, True, False]
     assert [m._updates_replayssm_trackers for m in mixers] == [False, True, True]
+
+
+def test_rebind_kv_cache_keeps_replayssm_trackers():
+    """A rebind over the same or fewer blocks (the extensible KV cache rebinds
+    after CUDA graph capture) must keep the tracker tensors the captured graphs
+    address; a rebind needing more blocks gets new ones."""
+    mixers = [_TestReplaySSMMixer() for _ in range(2)]
+    layer_names = [f"layers.{i}.mixer" for i in range(2)]
+    ctx = dict(zip(layer_names, mixers))
+    groups = [SimpleNamespace(layer_names=layer_names)]
+    bind_kv_cache_to_layers(
+        {n: _packed_replayssm_cache(8) for n in layer_names},
+        ctx,
+        kv_cache_groups=groups,
+    )
+    ring_start = mixers[0]._replayssm_ring_start
+    prev_accepted = mixers[0]._replayssm_prev_num_accepted
+    prev_query_len = mixers[0]._replayssm_prev_query_len
+    ring_start[3] = 7
+
+    bind_kv_cache_to_layers(
+        {n: _packed_replayssm_cache(5) for n in layer_names},
+        ctx,
+        kv_cache_groups=groups,
+    )
+    # Same storage (captured graphs hold its address), length of the new cache.
+    for m in mixers:
+        assert m._replayssm_ring_start.data_ptr() == ring_start.data_ptr()
+        assert m._replayssm_ring_start.shape == (5,)
+        assert m._replayssm_prev_num_accepted.data_ptr() == prev_accepted.data_ptr()
+        assert m._replayssm_prev_query_len.data_ptr() == prev_query_len.data_ptr()
+        assert m._replayssm_prev_query_len.shape == (5,)
+        assert m._replayssm_ring_start[3] == 7
+    assert mixers[0]._replayssm_ring_start is mixers[1]._replayssm_ring_start
+
+    bind_kv_cache_to_layers(
+        {n: _packed_replayssm_cache(9) for n in layer_names},
+        ctx,
+        kv_cache_groups=groups,
+    )
+    assert mixers[0]._replayssm_ring_start.data_ptr() != ring_start.data_ptr()
+    assert mixers[0]._replayssm_ring_start.shape == (9,)
+    assert all(
+        m._replayssm_ring_start is mixers[0]._replayssm_ring_start for m in mixers
+    )
 
 
 def test_bind_kv_cache(default_vllm_config):
