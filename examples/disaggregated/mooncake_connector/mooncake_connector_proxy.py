@@ -8,7 +8,8 @@ import itertools
 import os
 import urllib
 import uuid
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Coroutine
+from contextlib import aclosing, asynccontextmanager
 from typing import Any
 
 import httpx
@@ -259,6 +260,10 @@ async def send_request_to_service(
     }
     req_data["stream"] = False
     req_data["max_tokens"] = 1
+    # Mooncake publishes producer blocks only for length-capped requests.
+    req_data["ignore_eos"] = True
+    req_data["stop"] = None
+    req_data["stop_token_ids"] = []
     if "max_completion_tokens" in req_data:
         req_data["max_completion_tokens"] = 1
     if "stream_options" in req_data:
@@ -308,6 +313,43 @@ async def stream_service_response(
             yield chunk
 
 
+async def _stream_with_prefill(
+    prefill_request: Coroutine[Any, Any, Any], stream: AsyncGenerator[bytes, None]
+):
+    """Run P/D concurrently and propagate either side's failure."""
+    prefill = asyncio.create_task(prefill_request)
+    next_chunk = None
+    prefill_done = False
+    try:
+        while True:
+            next_chunk = asyncio.create_task(anext(stream))
+            while True:
+                pending = {next_chunk}
+                if not prefill_done:
+                    pending.add(prefill)
+                done, _ = await asyncio.wait(
+                    pending, return_when=asyncio.FIRST_COMPLETED
+                )
+                if prefill in done:
+                    prefill.result()
+                    prefill_done = True
+                if next_chunk in done:
+                    try:
+                        chunk = next_chunk.result()
+                    except StopAsyncIteration:
+                        await prefill
+                        return
+                    yield chunk
+                    break
+    finally:
+        tasks = [prefill] + ([next_chunk] if next_chunk is not None else [])
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await stream.aclose()
+
+
 async def _handle_completions(api: str, request: Request):
     if not app.state.ready.is_set():
         raise HTTPException(status_code=503, detail="Service Unavailable")
@@ -319,26 +361,23 @@ async def _handle_completions(api: str, request: Request):
         # Get the next prefill client in round-robin fashion
         prefill_client_info, prefill_dp_rank = get_next_client(request.app, "prefill")
 
-        # Send request to prefill service
-        asyncio.create_task(
-            send_request_to_service(
-                prefill_client_info, prefill_dp_rank, api, req_data, request_id
-            )
-        )
-
         decode_client_info = get_next_client(request.app, "decode")
 
-        # Stream response from decode service
         async def generate_stream():
-            async for chunk in stream_service_response(
+            prefill = send_request_to_service(
+                prefill_client_info, prefill_dp_rank, api, req_data, request_id
+            )
+            stream = stream_service_response(
                 prefill_client_info,
                 prefill_dp_rank,
                 decode_client_info,
                 api,
                 req_data,
                 request_id=request_id,
-            ):
-                yield chunk
+            )
+            async with aclosing(_stream_with_prefill(prefill, stream)) as combined:
+                async for chunk in combined:
+                    yield chunk
 
         media_type = (
             "text/event-stream" if req_data.get("stream") else "application/json"

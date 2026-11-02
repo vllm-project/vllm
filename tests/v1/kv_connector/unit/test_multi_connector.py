@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
+    KVConnectorWorkerMemoryPlan,
     SupportsHMA,
     supports_hma,
 )
@@ -172,6 +173,23 @@ def test_register_finished_partial_tail_notifies_every_connector():
     second.register_finished_partial_tail.assert_called_once_with(
         request, block_ids, offloads
     )
+
+
+def test_initialize_worker_memory_dispatches_child_plans():
+    connector = object.__new__(MultiConnector)
+    first = MagicMock(spec_set=KVConnectorBase_V1)
+    second = MagicMock(spec_set=KVConnectorBase_V1)
+    connector._connectors = [first, second]
+    first_plan = KVConnectorWorkerMemoryPlan(reserved_bytes=11)
+    second_plan = KVConnectorWorkerMemoryPlan(reserved_bytes=29)
+    parent_plan = KVConnectorWorkerMemoryPlan(
+        reserved_bytes=40, connector_data=(first_plan, second_plan)
+    )
+
+    connector.initialize_worker_memory(parent_plan)
+
+    first.initialize_worker_memory.assert_called_once_with(first_plan)
+    second.initialize_worker_memory.assert_called_once_with(second_plan)
 
 
 @pytest.fixture
@@ -378,12 +396,12 @@ def test_multi_example_connector_consistency():
         f"update_state_after_alloc num_blocks=[{expected_num_blocks}] 0",
         "build_connector_meta",
     ]
-    # First three events are from initialization. Layer hooks run before the
-    # deferred load starts after the forward pass.
+    # Initialization precedes layer hooks and the deferred load after forward.
     expected_worker_prefix = [
         "get_mem_pool_context",
         "register_kv_caches",
         "set_host_xfer_buffer_ops",
+        "initialize_worker_memory",
         "get_handshake_metadata",
         "handle_preemptions",
         "bind_connector_metadata",
@@ -1294,3 +1312,45 @@ def test_multi_connector_mixed_hma_disables_hybrid_kv_cache(monkeypatch):
             assert mc._all_support_hma is False
         finally:
             llm.llm_engine.engine_core.shutdown()
+
+
+def test_worker_memory_plan_uses_each_child_config_and_sums_budget(monkeypatch):
+    from types import SimpleNamespace
+
+    children = [
+        {
+            "kv_connector": "MockConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"reserved": size},
+        }
+        for size in (0, 11, 29)
+    ]
+    parent = SimpleNamespace(
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            engine_id="parent-engine",
+            kv_connector_extra_config={"connectors": children},
+        )
+    )
+    original = parent.kv_transfer_config
+    specs = {"layer": object()}
+    seen = []
+
+    def plan(cls, config, cache_specs):
+        assert cache_specs is specs
+        assert config is not parent
+        assert config.kv_transfer_config.engine_id == "parent-engine"
+        assert config.kv_transfer_config.kv_connector == "MockConnector"
+        size = config.kv_transfer_config.kv_connector_extra_config["reserved"]
+        result = KVConnectorWorkerMemoryPlan(reserved_bytes=size, connector_data=size)
+        seen.append(result)
+        return result
+
+    monkeypatch.setattr(MockConnector, "build_worker_memory_plan", classmethod(plan))
+    result = MultiConnector.build_worker_memory_plan(parent, specs)
+    assert result.reserved_bytes == 40
+    assert result.connector_data == tuple(seen)
+    assert [p.connector_data for p in seen] == [0, 11, 29]
+    assert parent.kv_transfer_config is original
+    assert original.kv_connector_extra_config["connectors"] == children
