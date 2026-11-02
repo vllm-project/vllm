@@ -13,6 +13,7 @@ from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.common.cli_args import (
     make_arg_parser,
     propagate_flash_late_interaction,
+    validate_grpc_auth_args,
     validate_parsed_serve_args,
 )
 from vllm.entrypoints.common.startup import VLLM_SUBCMD_PARSER_EPILOG
@@ -157,6 +158,8 @@ class ServeSubcommand(CLISubcommand):
 
     def validate(self, args: argparse.Namespace) -> None:
         validate_parsed_serve_args(args)
+        if args.grpc:
+            validate_grpc_auth_args(args)
 
     def subparser_init(
         self, subparsers: argparse._SubParsersAction
