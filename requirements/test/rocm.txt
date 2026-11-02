@@ -1083,15 +1083,15 @@ rpds-py==0.30.0
     # via
     #   jsonschema
     #   referencing
-runai-model-streamer==0.15.7
+runai-model-streamer==0.17.1
     # via
     #   -c requirements/rocm.txt
     #   -r requirements/test/rocm.in
-runai-model-streamer-azure==0.15.7
+runai-model-streamer-azure==0.17.1
     # via runai-model-streamer
-runai-model-streamer-gcs==0.15.7
+runai-model-streamer-gcs==0.17.1
     # via runai-model-streamer
-runai-model-streamer-s3==0.15.7
+runai-model-streamer-s3==0.17.1
     # via runai-model-streamer
 s3transfer==0.16.0
     # via boto3
