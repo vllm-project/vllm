@@ -9,21 +9,14 @@ from .ppl_utils import vqa_ppl_test
 GEMMA_PPL_TOL = 0.02
 
 MODELS = [
-    #GenerateModelInfo(
-    #    "google/gemma-3-4b-it", image_token_id=262144, hf_ppl=119.61958312988281
-    #),
-    # GenerateModelInfo("google/gemma-3n-E2B-it"),
-    # GenerateModelInfo("google/gemma-4-E2B-it"),
-     GenerateModelInfo("google/paligemma-3b-mix-224"),
-    # GenerateModelInfo("google/paligemma2-3b-ft-docci-448"),
+    GenerateModelInfo(
+        "google/gemma-3-4b-it", image_token_id=262144, hf_ppl=119.61958312988281
+    ),
 ]
-
-# google/vaultgemma-1b
-# google/diffusiongemma-26B-A4B-it
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-@pytest.mark.parametrize("mm_device_do_normalize", [True, False])
+@pytest.mark.parametrize("mm_device_do_normalize", [False, True])
 def test_ppl(
     hf_runner,
     vllm_runner,
@@ -42,7 +35,7 @@ def test_ppl(
 
 
 @pytest.mark.parametrize("model_info", MODELS)
-@pytest.mark.parametrize("mm_device_do_normalize", [True, False])
+@pytest.mark.parametrize("mm_device_do_normalize", [False, True])
 def test_ppl_gc(
     hf_runner,
     vllm_runner,

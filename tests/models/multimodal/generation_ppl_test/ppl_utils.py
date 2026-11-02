@@ -39,7 +39,7 @@ def vqa_ppl_test(
     images = []
     prompts = []
     for row in dataset:
-        image = row["image"]
+        image = _ensure_rgb(row["image"])
         images.append(image)
 
         question = row["question"]
@@ -115,7 +115,8 @@ def vqa_ppl_test(
         vllm_dtype = model_config.dtype
         head_dtype = model_config.head_dtype
 
-    # Accelerate ppl test by setting Transformers ppl score to a constant
+    # Accelerate the PPL test by setting the Transformers PPL score to a
+    # constant, if provided in model_info.
     if model_info.hf_ppl is None:
         with hf_runner(
             model_info.name,
@@ -133,6 +134,7 @@ def vqa_ppl_test(
                     return_tensors="pt",
                     **mm_processor_kwargs,
                 )
+                inputs.pop("labels", None)
                 inputs = inputs.to("cuda")
                 input_ids = inputs["input_ids"]
 
@@ -160,3 +162,9 @@ def vqa_ppl_test(
 
     assert abs(differ) < tol
     return vllm_ppl
+
+
+def _ensure_rgb(image):
+    if image.mode != "RGB":
+        image = image.convert("RGB")
+    return image
