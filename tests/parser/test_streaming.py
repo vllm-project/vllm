@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.reasoning.olmo3_reasoning_parser import Olmo3ReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 
@@ -837,3 +838,96 @@ def test_engine_reasoning_hermes_tool_multibyte_holdback(tokenizer, request_obj)
     )
     assert json.loads(tool_args) == {"city": city}
     assert content == ""
+
+
+class HoldbackThinkReasoningParser(ThinkReasoningParser):
+    """Legacy parser that holds every reasoning delta back, flushable at end.
+
+    Stands in for legacy parsers with a string buffer (e.g. olmo3) whose
+    held-back tail only surfaces when the serving layer asks for it.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._held: list[str] = []
+
+    def extract_reasoning_streaming(self, *args, **kwargs):
+        delta = super().extract_reasoning_streaming(*args, **kwargs)
+        if delta is not None and delta.reasoning:
+            self._held.append(delta.reasoning)
+            delta.reasoning = None
+            if delta.content is None and not delta.tool_calls:
+                delta = None
+        return delta
+
+    def finish_streaming(self):
+        if not self._held:
+            return None
+        text = "".join(self._held)
+        self._held.clear()
+        return DeltaMessage(reasoning=text)
+
+
+def test_parse_delta_finished_flushes_legacy_reasoning_holdback(tokenizer, request_obj):
+    # finalize_generation must give a legacy reasoning parser that defines
+    # finish_streaming one chance to flush its held-back tail at stream end.
+    class TestParser(DelegatingParser):
+        reasoning_parser_cls = HoldbackThinkReasoningParser
+        tool_parser_cls = None
+
+    parser = TestParser(tokenizer)
+    text = "<think>let me think</think>the answer"
+    results = stream_text(parser, tokenizer, text, request_obj)
+    reasoning, content, _ = collect_fields(results)
+    assert reasoning == ""
+    assert content == "the answer"
+
+    final = parser.parse_delta("", [], request_obj, finished=True)
+    assert final is not None
+    assert final.reasoning == "let me think"
+
+    # no double flush on a repeated finished call
+    again = parser.parse_delta("", [], request_obj, finished=True)
+    assert again is None or not again.reasoning
+
+
+class _Olmo3VocabTokenizer:
+    """Just enough vocab for Olmo3ReasoningParser's think_end splits."""
+
+    def get_vocab(self):
+        return {"Ġ</": 1, "</": 2, "think": 3, ">": 4}
+
+
+def test_parse_delta_contained_marker_substring_streams_mid_stream(request_obj):
+    # The same no-latency property one layer up, through the facade rather
+    # than against the reasoning parser directly: a delta that occurs inside
+    # a marker but cannot grow into one must come back from the parse_delta
+    # call that fed it, not ride along with the next chunk.
+    class TestParser(DelegatingParser):
+        reasoning_parser_cls = Olmo3ReasoningParser
+        tool_parser_cls = None
+
+    parser = TestParser(_Olmo3VocabTokenizer())
+    prev = ""
+
+    def step(chunk):
+        nonlocal prev
+        message = parser.parse_delta(chunk, [], request_obj, finished=False)
+        prev += chunk
+        return message
+
+    step("<think>")
+    assert step("R").reasoning == "R"
+    step("</")
+    step("think")
+    step(">")
+    assert step("plain ").content == "plain "
+
+    contained = step("think")
+    assert contained is not None, "contained delta was held back at the facade"
+    assert contained.content == "think"
+
+    assert step("ing done").content == "ing done"
+
+    final = parser.parse_delta("", [], request_obj, finished=True)
+    assert final is None or not final.content
