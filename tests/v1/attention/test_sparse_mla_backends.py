@@ -3212,36 +3212,11 @@ def test_hisparse_gather_zeroes_unaligned_destination():
         global_indices,
         hot_indices,
         miss_mask,
-        None,
     )
     torch.accelerator.synchronize()
 
     torch.testing.assert_close(hot_cache[1, 0], torch.zeros_like(hot_cache[1, 0]))
     assert storage[row_bytes].item() == 7
-
-
-@requires_hisparse_ops
-def test_hisparse_gather_rejects_short_attention_block_stride():
-    """Reject a stride that would let the gather kernel cross block bounds."""
-    device = torch.device(DEVICE_TYPE)
-    host_cache = torch.ones(1, 16, dtype=torch.uint8).pin_memory()
-    hot_cache = torch.empty((1, 2, 16), dtype=torch.uint8, device=device)
-    global_indices = torch.zeros((1, 1), dtype=torch.int32, device=device)
-    hot_indices = torch.zeros_like(global_indices)
-    miss_mask = torch.ones_like(global_indices)
-    attention_indices = torch.empty_like(global_indices)
-
-    with pytest.raises(RuntimeError, match="stride must cover one hot block"):
-        torch.ops._C_cache_ops.hisparse_gather_plan(
-            host_cache,
-            hot_cache,
-            global_indices,
-            hot_indices,
-            miss_mask,
-            None,
-            attention_indices,
-            1,
-        )
 
 
 @requires_hisparse_ops

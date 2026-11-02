@@ -1913,7 +1913,6 @@ class NixlBaseConnectorWorker:
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = sum(self.region_num_blocks)
 
-        self._mixed_mem_types = len(set(region_mem_types)) > 1
         self._skip_dram_xfer = self._leaves_dram_xfer_to_rank0()
         if self._mixed_mem_types:
             assert self.use_mla and not self._has_mamba, (

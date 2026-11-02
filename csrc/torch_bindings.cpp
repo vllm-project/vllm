@@ -1077,21 +1077,18 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                 Tensor? request_state_indices,"
       "                 int region_stride,"
       "                 int max_union_rows,"
-      "                 Tensor(a!)? miss_mask=None,"
-      "                 Tensor(b!)? stats=None,"
-      "                 Tensor(c!)? attention_indices=None,"
+      "                 Tensor(a!)? stats=None,"
+      "                 Tensor(b!)? attention_indices=None,"
       "                 int attention_block_stride=0,"
       "                 Tensor? request_ids=None,"
       "                 Tensor? source_block_table=None,"
       "                 int source_block_size=0,"
-      "                 Tensor(d!)? resolved_global_indices=None,"
-      "                 Tensor(e!)? valid_counts=None,"
-      "                 Tensor(f!)? swap_host_physical_rows=None,"
-      "                 Tensor(g!)? swap_device_physical_rows=None,"
-      "                 Tensor(h!)? swap_counts=None,"
+      "                 Tensor(c!)? valid_counts=None,"
+      "                 Tensor(d!)? swap_host_physical_rows=None,"
+      "                 Tensor(e!)? swap_device_physical_rows=None,"
+      "                 Tensor(f!)? swap_counts=None,"
       "                 Tensor? resident_block_table=None,"
       "                 int resident_block_size=0,"
-      "                 int resident_null_block=0,"
       "                 Tensor? num_valid_rows=None) -> ()");
 
   ops.def(
@@ -1107,10 +1104,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     Tensor! hot_cache,"
       "                     Tensor global_indices,"
       "                     Tensor hot_indices,"
-      "                     Tensor miss_mask,"
-      "                     Tensor? request_state_indices,"
-      "                     Tensor(a!)? attention_indices=None,"
-      "                     int attention_block_stride=0) -> ()");
+      "                     Tensor miss_mask) -> ()");
 
   ops.def(
       "hisparse_gather_compact(Tensor host_cache,"

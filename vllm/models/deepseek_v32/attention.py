@@ -362,12 +362,8 @@ class DeepseekV32Attention(MLAAttention):
             mla_kv_cache = None if hisparse_cache is not None else self.kv_cache
             mla_k_scale = self._k_scale
 
-        if self.use_pcp or hisparse_cache is None:
-            kv_c_out = torch.empty_like(kv_c)
-            k_pe_out = torch.empty_like(k_pe)
-        else:
-            kv_c_out = torch.empty_like(kv_c)
-            k_pe_out = torch.empty_like(k_pe)
+        kv_c_out = torch.empty_like(kv_c)
+        k_pe_out = torch.empty_like(k_pe)
         q_c = fused_norm_rope(
             positions,
             q_c,
@@ -400,7 +396,6 @@ class DeepseekV32Attention(MLAAttention):
         )
 
         if hisparse_cache is not None and mla_slot is not None:
-            assert kv_c_out is not None and k_pe_out is not None
             self.update_kv_cache(
                 kv_c_out,
                 k_pe_out,
