@@ -48,7 +48,12 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
     def _prefill_capture_inputs(
         self,
     ) -> tuple[InputBuffers, list[list[AttentionGroup]]]:
-        return self.target_input_buffers, self.target_attn_groups
+        attn_groups = (
+            self.target_attn_groups
+            if self.can_reuse_target_attn_metadata
+            else self.attn_groups
+        )
+        return self.target_input_buffers, attn_groups
 
     def _prepare_decode_inputs(
         self,
@@ -73,7 +78,7 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
             BLOCK_SIZE=1024,
             ADVANCE_DRAFT_POSITIONS=self.advance_draft_positions,
         )
-        
+
     def supports_batch_sharded_draft_logits(self) -> bool:
         # Every draft logits write goes through sample_draft.
         return True

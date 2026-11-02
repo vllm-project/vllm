@@ -24,7 +24,7 @@ logger = init_logger(__name__)
 class AutoRegressiveSpeculator(DraftModelSpeculator):
     """Shared CUDA graph and decode loop for autoregressive speculators."""
 
-    draft_seq_len_offset = 0
+    num_extra_query_per_req = 0
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -248,7 +248,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                     batch_desc=batch_desc,
                     num_query_per_req=1,
                     seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                    step=step + self.draft_seq_len_offset,
+                    step=step + self.num_extra_query_per_req,
                 )
 
             self.current_draft_step.fill_(step)
@@ -302,7 +302,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 num_reqs=num_reqs,
                 num_query_per_req=1,
                 seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-                step=1 + self.draft_seq_len_offset,
+                step=1 + self.num_extra_query_per_req,
             )
 
         self._generate_fused_drafts(

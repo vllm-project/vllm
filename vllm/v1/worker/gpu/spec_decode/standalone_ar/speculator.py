@@ -40,7 +40,6 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
 
     # Standalone AR drafting needs one extra slot per request for correction.
     num_extra_query_per_req = 1
-    draft_seq_len_offset = 1
 
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
@@ -395,8 +394,11 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
                 num_reqs=num_reqs,
                 batch_desc=prefill_batch_desc,
                 query_start_loc_np=query_start_loc_cpu,
-                seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
-                step=1,
+                seq_lens_cpu_upper_bound=(
+                    input_batch.seq_lens_cpu_upper_bound[:num_reqs]
+                    + self.num_extra_query_per_req
+                ),
+                step=0,
                 slot_mappings=slot_mappings,
             )
             kv_cache_config = self.kv_cache_config
