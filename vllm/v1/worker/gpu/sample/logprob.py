@@ -4,6 +4,7 @@
 import numpy as np
 import torch
 
+from vllm import envs
 from vllm.sampling_params import MAX_LOGPROB_TOKEN_IDS, SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
@@ -84,6 +85,11 @@ def _ranks_kernel(
 def compute_token_logprobs(
     logits: torch.Tensor, token_ids: torch.Tensor
 ) -> torch.Tensor:
+    if envs.VLLM_BATCH_INVARIANT:
+        from vllm.model_executor.kernels.batch_invariant import native_log_softmax
+
+        return native_log_softmax(logits.float()).gather(-1, token_ids.long())
+
     # NOTE(woosuk): To save GPU memory, we do not materialize the full
     # [batch_size, vocab_size] logprobs tensor. The kernel computes
     # max + logsumexp per row and only emits logprobs at `token_ids`.
