@@ -45,6 +45,14 @@ from vllm import LLM
 llm = LLM(model="Qwen/Qwen2.5-VL-3B-Instruct", max_model_len=2048, max_num_seqs=2)
 ```
 
+On hybrid Mamba/attention models (Qwen3-Next, Qwen3.5/3.6/3.8, Granite 4, Jamba, ...) `max_num_seqs` is also bounded by the Mamba cache: each decode sequence needs one block, and the pool is sized from what is left after the weights and the KV cache. At a long `max_model_len` on a card with little headroom the pool can hold fewer blocks than the default `max_num_seqs` (256, or 1024 on cards with 70 GiB or more), and the engine stops rather than lowering the concurrency ceiling on its own:
+
+```text
+ValueError: max_num_seqs (1024) exceeds available Mamba cache blocks (969). Each decode sequence requires one Mamba cache block, so CUDA graph capture cannot proceed. Please lower max_num_seqs to at most 969 or increase gpu_memory_utilization.
+```
+
+Set `max_num_seqs` to the number in the message, raise `gpu_memory_utilization`, or shorten `max_model_len`. The block count is known only after the weights are loaded and the KV cache is profiled.
+
 ## Reduce CUDA Graphs
 
 By default, we optimize model inference using CUDA graphs which take up extra memory in the GPU.
