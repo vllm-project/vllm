@@ -334,6 +334,14 @@ class TestStreamingHappyPath:
                 "No prefix id. " + _wrap(_tool("get_weather:0", '{"city": "NYC"}')),
                 id="no_functions_prefix",
             ),
+            pytest.param(
+                "Help. "
+                + _wrap(
+                    _tool("functions.invalid.0", '{"city": "Beijing"}'),
+                    _tool("functions.valid:1", '{"city": "Shanghai"}'),
+                ),
+                id="invalid_id_skipped",
+            ),
         ],
     )
     def test_streaming_matches_nonstreaming(self, parser, model_output):
