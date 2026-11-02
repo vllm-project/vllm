@@ -1,11 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+import socket
 from argparse import Namespace
 
 import pytest
 from starlette.datastructures import State
 
 import vllm.entrypoints.launchers.render.app_state as app_state_mod
+import vllm.entrypoints.launchers.render.entry as entry_mod
+from vllm import envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.common.cli_args import make_arg_parser
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -82,3 +86,26 @@ def test_explicit_reasoning_parser_flag_wins_over_model_default():
     )
 
     assert vllm_config.structured_outputs_config.reasoning_parser == "deepseek_r1"
+
+
+@pytest.mark.asyncio
+async def test_render_server_forwards_shutdown_timeout(monkeypatch):
+    """Render server plugins drain within --shutdown-timeout, so the render
+    entry must carry it into the VllmConfig the server reads at shutdown."""
+    served = []
+
+    async def serve(vllm_config, listen_address, sock, args):
+        served.append(vllm_config)
+        return asyncio.create_task(asyncio.sleep(0))
+
+    monkeypatch.setattr(
+        entry_mod, "setup_server", lambda *a, **kw: ("", socket.socket())
+    )
+    monkeypatch.setattr(entry_mod, "build_and_serve_renderer", serve)
+    monkeypatch.setattr(entry_mod.signal, "signal", lambda *args: None)
+    monkeypatch.setitem(vars(envs), "VLLM_CPU_KVCACHE_SPACE", None)
+
+    args = _render_cli_args("facebook/opt-125m", "--shutdown-timeout", "7")
+    await entry_mod.run_launch_fastapi(args)
+
+    assert served[0].shutdown_timeout == 7

@@ -301,6 +301,7 @@ async def serve_http(
         loop.add_signal_handler(signal.SIGINT, signal_handler)
         loop.add_signal_handler(signal.SIGTERM, signal_handler)
         shutdown_task = loop.create_task(handle_shutdown())
+        app.state.shutdown_task = shutdown_task
 
         await server_task
         return dummy_shutdown()

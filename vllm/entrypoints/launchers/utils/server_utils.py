@@ -122,6 +122,10 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            # The watchdog can stop HTTP while a graceful shutdown is draining.
+            shutdown = getattr(app.state, "shutdown_task", None)
+            if shutdown is not None and shutdown.cancel():
+                await asyncio.wait([shutdown])
             await stop_endpoint_plugins(app.state)
     finally:
         # Ensure app state including engine ref is gc'd

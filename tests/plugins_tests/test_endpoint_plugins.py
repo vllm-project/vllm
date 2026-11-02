@@ -12,12 +12,14 @@ request through the plugin's route.
 import asyncio
 import os
 import signal
+import time
 from argparse import Namespace
 from typing import Any
 
 import httpx
 import pytest
 from fastapi import APIRouter, FastAPI
+from starlette.datastructures import State
 from vllm_add_dummy_endpoint_plugin import DummyAdminEndpointPlugin
 
 from vllm.config import VllmConfig
@@ -32,6 +34,7 @@ from vllm.plugins import load_endpoint_plugins
 from vllm.plugins.endpoint_plugins.interface import (
     EndpointPlugin,
     attach_endpoint_plugins,
+    drain_endpoint_plugins,
     init_endpoint_plugins_state,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -486,25 +489,24 @@ def test_legacy_plugin_satisfies_protocol():
 
 @pytest.mark.asyncio
 async def test_lifecycle_order_on_request_shutdown(monkeypatch: pytest.MonkeyPatch):
-    """Admission closes before any drain runs, drains run before the engine
-    stops, and stops run in reverse start order after HTTP stops."""
+    """`state.draining` is set before any drain runs, drains run concurrently
+    before the engine stops, and stops run in reverse start order after HTTP
+    stops."""
     events: list[str] = []
-    drain_entered = asyncio.Event()
+    entered = {"first": asyncio.Event(), "second": asyncio.Event()}
     release_drain = asyncio.Event()
 
-    class _First(DummyAdminEndpointPlugin):
-        name = "first"
-
+    class _Draining(DummyAdminEndpointPlugin):
         async def drain(self, state, timeout):
             events.append(f"drain:{self.name}:draining={state.draining}")
-            drain_entered.set()
+            entered[self.name].set()
             await release_drain.wait()
 
-    class _Second(DummyAdminEndpointPlugin):
-        name = "second"
+    class _First(_Draining):
+        name = "first"
 
-        async def drain(self, state, timeout):
-            events.append(f"drain:{self.name}:draining={state.draining}")
+    class _Second(_Draining):
+        name = "second"
 
     engine = _ServingEngineClient(events, shutdown_timeout=30)
     app, serve_task, url = await _serve(
@@ -513,7 +515,8 @@ async def test_lifecycle_order_on_request_shutdown(monkeypatch: pytest.MonkeyPat
     assert await _health(url) == 200
 
     app.state.request_shutdown()
-    await drain_entered.wait()
+    async with asyncio.timeout(5):  # sequential drains never enter the second
+        await asyncio.gather(*(event.wait() for event in entered.values()))
     assert await _health(url) == 503
     release_drain.set()
     shutdown = await serve_task
@@ -612,7 +615,7 @@ async def test_drain_overrun_and_error_are_isolated(monkeypatch: pytest.MonkeyPa
 
     name = DummyAdminEndpointPlugin.name
     assert f"drain:{name}" in events
-    assert "drain:hanging:cancelled" in events
+    assert events.index("drain:hanging:cancelled") < events.index("engine_shutdown")
     assert [e for e in events if not e.startswith("drain:")][-4:] == [
         "engine_shutdown",
         f"stop:{name}",
@@ -684,6 +687,59 @@ async def test_watchdog_exit_stops_without_drain(monkeypatch: pytest.MonkeyPatch
 
     name = DummyAdminEndpointPlugin.name
     assert events == [f"start:{name}", f"stop:{name}"]
+
+
+class _HangingDrain(DummyAdminEndpointPlugin):
+    """Records when its drain starts and when it is cancelled."""
+
+    def __init__(self, events: list[str]):
+        super().__init__(events)
+        self.entered = asyncio.Event()
+
+    async def drain(self, state, timeout):
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.events.append("drain:cancelled")
+            raise
+
+
+@pytest.mark.asyncio
+async def test_cancelled_shutdown_cancels_drains():
+    """Cancelling the shutdown cancels running drains rather than leaving them
+    behind to race `stop`."""
+    state = State()
+    state.started_endpoint_plugins = [plugin := _HangingDrain([])]
+    task = asyncio.create_task(drain_endpoint_plugins(state, time.monotonic() + 30))
+    await plugin.entered.wait()
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert plugin.events == ["drain:cancelled"]
+
+
+@pytest.mark.asyncio
+async def test_watchdog_exit_during_drain_cancels_drain_before_stop(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """If the engine dies while plugins drain, the drain is cancelled and
+    finished before `stop` runs."""
+    events: list[str] = []
+    engine = _ServingEngineClient(events, shutdown_timeout=30)
+    plugin = _HangingDrain(events)
+    app, serve_task, _ = await _serve(monkeypatch, [plugin], engine)
+
+    app.state.request_shutdown()
+    await plugin.entered.wait()
+    engine.errored = True
+    engine.is_running = False
+    terminate_if_errored(app.state.server, engine)
+    await (await serve_task)
+
+    name = DummyAdminEndpointPlugin.name
+    assert events == [f"start:{name}", "drain:cancelled", f"stop:{name}"]
 
 
 @pytest.mark.asyncio

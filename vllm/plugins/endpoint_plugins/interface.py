@@ -3,10 +3,10 @@
 """Contract for `vllm.endpoint_plugins` entry points.
 
 An endpoint plugin adds HTTP routes to the OpenAI compatible API server.
-Its scope is HTTP surface only. It registers routes and optionally
-per app state used by those routes. It must not open new paths into the
-engine by reaching the engine the same way an in-tree serving handler does
-via `EngineClient` (e.g. `engine_client.collective_rpc(...)`).
+It registers routes and optionally per app state used by those routes, and
+may serve a listener of its own (see `EndpointPlugin`). It must not open new
+paths into the engine by reaching the engine the same way an in-tree serving
+handler does via `EngineClient` (e.g. `engine_client.collective_rpc(...)`).
 
 If a plugin also needs engine side behavior (a new worker side RPC method,
 a custom stat, etc.) pair this entry point with one registered under
@@ -29,6 +29,7 @@ either exclude `"render"` from `required_tasks` or check for `None` in
 """
 
 import asyncio
+import contextlib
 import time
 from argparse import Namespace
 from collections.abc import Sequence
@@ -67,15 +68,19 @@ class EndpointPlugin(Protocol):
       `/health`. `False` or an exception returns 503.
     - `async drain(state, timeout)`: called concurrently on shutdown, before
       the engine shuts down, with the remaining `--shutdown-timeout` budget.
-      `state.draining` is already set; stop admitting new work. Overruns are
-      cancelled.
+      Core sets `state.draining` before any drain runs; the plugin's own
+      admission paths must check it, and its drain closes its listener.
+      Overruns are cancelled; drain must honor cancellation.
     - `async stop(state)`: called exactly once per started plugin, in reverse
-      order, after HTTP stops.
+      order, after HTTP stops. It must return promptly and not wait for
+      in-flight work (that is `drain`'s job); core does not time-bound it.
 
     `state.request_shutdown()` starts the same graceful shutdown as SIGTERM.
     A plugin that serves a non-HTTP listener (e.g. gRPC) must set the class
     attribute `owns_non_http_listener = True`; such plugins require
-    `--api-server-count 1`.
+    `--api-server-count 1`. That check does not cover data parallel external
+    load balancing, where each rank runs its own API server: the listener
+    must then use a distinct port per rank (e.g. base + data parallel rank).
     """
 
     name: str
@@ -196,7 +201,11 @@ async def init_endpoint_plugins_state(
 
 
 async def start_endpoint_plugins(state: State, plugins: Sequence[Any]) -> None:
-    """Start `plugins` in order, stopping the started ones if one fails."""
+    """Start `plugins` in order, stopping the started ones if one fails.
+
+    Sets `state.draining = False` first, so plugins can read it directly.
+    """
+    state.draining = False
     state.started_endpoint_plugins = started = []
     for plugin in plugins:
         if (start := getattr(plugin, "start", None)) is not None:
@@ -225,35 +234,43 @@ def endpoint_plugins_ready(state: State) -> bool:
     return True
 
 
+async def _drain(plugin: Any, state: State, timeout: float) -> None:
+    try:
+        await plugin.drain(state, timeout)
+    except asyncio.CancelledError:
+        logger.warning("Endpoint plugin %s drain was cancelled", plugin.name)
+        raise
+    except Exception:
+        logger.exception("Endpoint plugin %s failed to drain", plugin.name)
+
+
 async def drain_endpoint_plugins(state: State, deadline: float) -> None:
-    """Close admission, then drain started plugins until `deadline`.
+    """Set `state.draining`, then drain started plugins concurrently.
+
+    `state.draining` is set before anything is awaited. Drains still running
+    at the deadline, or when the caller is cancelled, are cancelled and
+    awaited, so none outlives this call. A drain that swallows
+    `CancelledError` therefore delays shutdown.
 
     Args:
         state: The app state.
-        deadline: A `time.monotonic()` deadline. Drains still running when it
-            passes are cancelled. If it has already passed, no drain is called.
+        deadline: A `time.monotonic()` deadline. If it has already passed, no
+            drain is called.
 
     """
     state.draining = True
-    timeout = deadline - time.monotonic()
-    tasks = {
-        asyncio.create_task(drain(state, timeout)): plugin
+    plugins = [
+        plugin
         for plugin in getattr(state, "started_endpoint_plugins", [])
-        if timeout > 0 and (drain := getattr(plugin, "drain", None)) is not None
-    }
-    if not tasks:
+        if getattr(plugin, "drain", None) is not None
+    ]
+    timeout = deadline - time.monotonic()
+    if timeout <= 0 or not plugins:
         return
-    done, pending = await asyncio.wait(tasks, timeout=timeout)
-    for task in pending:
-        task.cancel()
-        logger.warning(
-            "Endpoint plugin %s did not drain within %.1fs", tasks[task].name, timeout
-        )
-    for task in done:
-        if not task.cancelled() and (exc := task.exception()) is not None:
-            logger.error(
-                "Endpoint plugin %s failed to drain", tasks[task].name, exc_info=exc
-            )
+    with contextlib.suppress(TimeoutError):
+        async with asyncio.timeout(timeout), asyncio.TaskGroup() as tg:
+            for plugin in plugins:
+                tg.create_task(_drain(plugin, state, timeout))
 
 
 async def stop_endpoint_plugins(state: State) -> None:
