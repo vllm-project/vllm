@@ -119,6 +119,10 @@ DEFAULT_BREAKABLE_CUDAGRAPH_ARCHITECTURES = frozenset(
     }
 )
 
+# Prefill-sized capture sizes added above the default ceiling for Qwen3.5 on
+# breakable CUDA graphs: every 64 tokens up to 2048.
+_QWEN3_5_PREFILL_CAPTURE_SIZES = tuple(range(576, 2049, 64))
+
 
 @lru_cache
 def default_breakable_cudagraph_architectures() -> frozenset[str]:
@@ -2506,6 +2510,7 @@ class VllmConfig:
             # is computed here, so an explicit capture range is left exactly as
             # configured.
             uniform_decode_sizes: list[int] = []
+            prefill_sizes: list[int] = []
             if max_cudagraph_capture_size is None:
                 from vllm.platforms import current_platform
 
@@ -2597,6 +2602,25 @@ class VllmConfig:
                     )
                 elif max_num_seqs <= max_cudagraph_capture_size:
                     uniform_decode_sizes = [max_num_seqs]
+                cudagraph_mode = self.compilation_config.cudagraph_mode
+                if (
+                    current_platform.is_cuda()
+                    and envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+                    and cudagraph_mode.has_piecewise_cudagraphs()
+                    and max_cudagraph_capture_size == default_max_graph_size
+                    and set(self.model_config.architectures) & _QWEN3_5_ARCHITECTURES
+                ):
+                    # Breakable CUDA graphs run attention eagerly between the
+                    # captured segments, so prefill-sized batches capture like
+                    # any other size. Qwen3.5 on NVIDIA also skips
+                    # torch.compile, so a prefill above the ceiling would launch
+                    # every op from Python instead. A coarse grid keeps the
+                    # extra capture time and graph memory small.
+                    prefill_sizes = [
+                        size
+                        for size in _QWEN3_5_PREFILL_CAPTURE_SIZES
+                        if size > default_max_graph_size
+                    ]
             max_num_tokens = self.scheduler_config.max_num_batched_tokens
             max_cudagraph_capture_size = min(max_num_tokens, max_cudagraph_capture_size)
 
@@ -2649,6 +2673,9 @@ class VllmConfig:
                 # users explicitly configure wider capture sizes.
                 cudagraph_capture_sizes += [
                     size for size in uniform_decode_sizes if size <= max_num_tokens
+                ]
+                cudagraph_capture_sizes += [
+                    size for size in prefill_sizes if size <= max_num_tokens
                 ]
                 # de-duplicate and sort the sizes
                 cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))

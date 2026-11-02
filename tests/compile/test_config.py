@@ -971,6 +971,118 @@ def test_default_cudagraph_capture_size_still_clamped_by_token_budget():
     assert 544 not in compilation_config.cudagraph_capture_sizes
 
 
+QWEN3_5_MOE = "Qwen3_5MoeForConditionalGeneration"
+
+
+@pytest.mark.parametrize(
+    ("breakable", "arch", "max_num_seqs", "max_num_batched_tokens", "expected"),
+    [
+        # Qwen3.5 on breakable CUDA graphs adds the coarse prefill grid above 512.
+        ("1", QWEN3_5_MOE, 256, 8192, list(range(576, 2049, 64))),
+        # ... clamped by the token budget.
+        ("1", QWEN3_5_MOE, 256, 1024, list(range(576, 1025, 64))),
+        # Without breakable CUDA graphs the default stops at 512.
+        ("0", QWEN3_5_MOE, 256, 8192, []),
+        # A ceiling lowered by a small max_num_seqs is left alone.
+        ("1", QWEN3_5_MOE, 8, 8192, []),
+        # Other breakable architectures keep the default ceiling.
+        ("1", "DeepseekV41ForCausalLM", 256, 8192, []),
+    ],
+)
+def test_breakable_cudagraph_default_adds_prefill_capture_sizes(
+    monkeypatch, breakable, arch, max_num_seqs, max_num_batched_tokens, expected
+):
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", breakable)
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=max_num_seqs,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=max_num_batched_tokens,
+        compilation_config=compilation_config,
+    )
+    config.model_config.architectures = [arch]
+
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=False
+        ),
+    ):
+        VllmConfig._set_cudagraph_sizes(config)
+
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert [size for size in sizes if size > 512] == expected
+    # The grid up to the default ceiling is unchanged.
+    token_grid_max = min(max_num_seqs * 2, 512)
+    token_grid = [1, 2, 4] + list(range(8, min(token_grid_max + 1, 256), 8))
+    token_grid += list(range(256, token_grid_max + 1, 16))
+    assert [size for size in sizes if size <= 512] == sorted(
+        set(token_grid) | ({max_num_seqs} if max_num_seqs <= token_grid_max else set())
+    )
+    assert compilation_config.max_cudagraph_capture_size == sizes[-1]
+
+
+@pytest.mark.parametrize(
+    ("is_cuda", "blackwell", "mode", "num_speculative_tokens", "expected"),
+    [
+        # Data center Blackwell: the grid starts above its 1024 ceiling.
+        (True, True, CUDAGraphMode.FULL_AND_PIECEWISE, 0, list(range(1088, 2049, 64))),
+        # MTP: uniform decode sizes stay within the ceiling, the grid is added.
+        (True, False, CUDAGraphMode.FULL_AND_PIECEWISE, 2, list(range(576, 2049, 64))),
+        # No piecewise graphs to run prefills in.
+        (True, False, CUDAGraphMode.FULL, 0, []),
+        # Qwen3.5 moves to breakable CUDA graphs on NVIDIA only.
+        (False, False, CUDAGraphMode.FULL_AND_PIECEWISE, 0, []),
+    ],
+)
+def test_breakable_cudagraph_prefill_capture_sizes_by_platform_and_mode(
+    monkeypatch, is_cuda, blackwell, mode, num_speculative_tokens, expected
+):
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    compilation_config = CompilationConfig(cudagraph_mode=mode)
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=512,
+        num_speculative_tokens=num_speculative_tokens,
+        max_num_batched_tokens=8192,
+        compilation_config=compilation_config,
+    )
+    config.model_config.architectures = [QWEN3_5_MOE]
+
+    with (
+        patch.object(current_platform, "is_cuda", return_value=is_cuda),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=blackwell
+        ),
+    ):
+        VllmConfig._set_cudagraph_sizes(config)
+
+    ceiling = 1024 if blackwell else 512
+    sizes = compilation_config.cudagraph_capture_sizes
+    assert [size for size in sizes if size > ceiling] == expected
+
+
+def test_breakable_cudagraph_keeps_explicit_capture_size(monkeypatch):
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
+    compilation_config = CompilationConfig(
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        max_cudagraph_capture_size=256,
+    )
+    config = _mock_config_for_cudagraph_sizes(
+        max_num_seqs=256,
+        num_speculative_tokens=0,
+        max_num_batched_tokens=8192,
+        compilation_config=compilation_config,
+    )
+    config.model_config.architectures = [QWEN3_5_MOE]
+
+    VllmConfig._set_cudagraph_sizes(config)
+
+    assert compilation_config.cudagraph_capture_sizes[-1] == 256
+    assert compilation_config.max_cudagraph_capture_size == 256
+
+
 @pytest.mark.skipif(
     not current_platform.support_static_graph_mode(),
     reason="Skip if static graph mode is not supported",
