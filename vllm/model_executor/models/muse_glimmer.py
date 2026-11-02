@@ -83,6 +83,7 @@ from vllm.multimodal.processing import (
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
+from vllm.utils.torch_utils import async_tensor_h2d
 
 from .interfaces import (
     EagleModelMixin,
@@ -569,132 +570,134 @@ class MuseGlimmerVisionEncoder(nn.Module):
             )
 
     def _make_2d_rope(
-        self, grid_height: int, grid_width: int, device: torch.device
+        self, height: torch.Tensor, width: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         spatial_dim = self.head_dim // 2
         inv_freq = 1.0 / (
             10000.0
             ** (
-                torch.arange(0, spatial_dim, 2, dtype=torch.float32, device=device)
+                torch.arange(
+                    0, spatial_dim, 2, dtype=torch.float32, device=height.device
+                )
                 / spatial_dim
             )
         )
-        height = torch.arange(1, grid_height + 1, dtype=torch.float32, device=device)
-        width = torch.arange(1, grid_width + 1, dtype=torch.float32, device=device)
-        height = height.unsqueeze(1).expand(-1, grid_width).reshape(-1)
-        width = width.unsqueeze(0).expand(grid_height, -1).reshape(-1)
         freq_w = torch.outer(width, inv_freq)
         freq_h = torch.outer(height, inv_freq)
         freqs = torch.cat([freq_w, freq_h], dim=-1)
         return torch.cos(freqs), torch.sin(freqs)
 
-    def _get_pos_emb(
-        self, grid_height: int, grid_width: int, device: torch.device
-    ) -> torch.Tensor:
-        h_grid = (
-            torch.arange(grid_height, device=device, dtype=torch.float32) + 0.5
-        ) * (self.pos_emb_height / grid_height) - 0.5
-        w_grid = (
-            torch.arange(grid_width, device=device, dtype=torch.float32) + 0.5
-        ) * (self.pos_emb_width / grid_width) - 0.5
-        h_floor = torch.floor(h_grid).long()
-        w_floor = torch.floor(w_grid).long()
+    def _get_pos_emb_layout(
+        self, grid_height: int, grid_width: int
+    ) -> tuple[np.ndarray, np.ndarray]:
+        h_grid = (np.arange(grid_height, dtype=np.float32) + np.float32(0.5)) * (
+            np.float32(self.pos_emb_height / grid_height)
+        ) - np.float32(0.5)
+        w_grid = (np.arange(grid_width, dtype=np.float32) + np.float32(0.5)) * (
+            np.float32(self.pos_emb_width / grid_width)
+        ) - np.float32(0.5)
+        h_floor = np.floor(h_grid).astype(np.int64)
+        w_floor = np.floor(w_grid).astype(np.int64)
         h_ceil = h_floor + 1
         w_ceil = w_floor + 1
-        h_frac = h_grid - h_floor.float()
-        w_frac = w_grid - w_floor.float()
+        h_frac = h_grid - h_floor.astype(np.float32)
+        w_frac = w_grid - w_floor.astype(np.float32)
 
         h_floor_valid = (h_floor >= 0) & (h_floor < self.pos_emb_height)
         h_ceil_valid = (h_ceil >= 0) & (h_ceil < self.pos_emb_height)
         w_floor_valid = (w_floor >= 0) & (w_floor < self.pos_emb_width)
         w_ceil_valid = (w_ceil >= 0) & (w_ceil < self.pos_emb_width)
-        h_floor = h_floor.clamp(0, self.pos_emb_height - 1)
-        h_ceil = h_ceil.clamp(0, self.pos_emb_height - 1)
-        w_floor = w_floor.clamp(0, self.pos_emb_width - 1)
-        w_ceil = w_ceil.clamp(0, self.pos_emb_width - 1)
+        h_floor = h_floor.clip(0, self.pos_emb_height - 1)
+        h_ceil = h_ceil.clip(0, self.pos_emb_height - 1)
+        w_floor = w_floor.clip(0, self.pos_emb_width - 1)
+        w_ceil = w_ceil.clip(0, self.pos_emb_width - 1)
 
         h_floor_offset = h_floor * self.pos_emb_width
         h_ceil_offset = h_ceil * self.pos_emb_width
-        indices = torch.stack(
+        indices = np.stack(
             [
-                (h_floor_offset[:, None] + w_floor[None, :]).flatten(),
-                (h_floor_offset[:, None] + w_ceil[None, :]).flatten(),
-                (h_ceil_offset[:, None] + w_floor[None, :]).flatten(),
-                (h_ceil_offset[:, None] + w_ceil[None, :]).flatten(),
+                (h_floor_offset[:, None] + w_floor[None, :]).reshape(-1),
+                (h_floor_offset[:, None] + w_ceil[None, :]).reshape(-1),
+                (h_ceil_offset[:, None] + w_floor[None, :]).reshape(-1),
+                (h_ceil_offset[:, None] + w_ceil[None, :]).reshape(-1),
             ]
         )
-        weights = torch.stack(
+        weights = np.stack(
             [
                 (
                     (1 - h_frac)[:, None]
                     * (1 - w_frac)[None, :]
                     * (h_floor_valid[:, None] & w_floor_valid[None, :])
-                ).flatten(),
+                ).reshape(-1),
                 (
                     (1 - h_frac)[:, None]
                     * w_frac[None, :]
                     * (h_floor_valid[:, None] & w_ceil_valid[None, :])
-                ).flatten(),
+                ).reshape(-1),
                 (
                     h_frac[:, None]
                     * (1 - w_frac)[None, :]
                     * (h_ceil_valid[:, None] & w_floor_valid[None, :])
-                ).flatten(),
+                ).reshape(-1),
                 (
                     h_frac[:, None]
                     * w_frac[None, :]
                     * (h_ceil_valid[:, None] & w_ceil_valid[None, :])
-                ).flatten(),
+                ).reshape(-1),
             ]
         )
-        return (self.positional_embedding_vlm[indices] * weights[..., None]).sum(0)
+        return indices, weights
 
-    def _pixel_shuffle_downsample(
-        self, hidden_states: torch.Tensor, grid_height: int, grid_width: int
+    def _get_pos_emb(
+        self, grid_height: int, grid_width: int, device: torch.device
     ) -> torch.Tensor:
+        indices, weights = self._get_pos_emb_layout(grid_height, grid_width)
+        return (
+            self.positional_embedding_vlm[async_tensor_h2d(indices, device=device)]
+            * async_tensor_h2d(weights, device=device)[..., None]
+        ).sum(0)
+
+    def _get_pixel_shuffle_order(self, grid_height: int, grid_width: int) -> np.ndarray:
         factor = self.merge_size
-        output_tokens = (grid_height // factor) * (grid_width // factor)
-        permutation = torch.arange(
-            grid_height * grid_width, device=hidden_states.device
-        )
-        permutation = permutation.view(
+        order = np.arange(grid_height * grid_width).reshape(
             grid_height // factor, factor, grid_width // factor, factor
         )
-        permutation = permutation.permute(0, 2, 1, 3).reshape(-1)
-        hidden_states = hidden_states.squeeze(0)[permutation]
-        hidden_size = hidden_states.shape[-1]
-        hidden_states = (
-            hidden_states.view(output_tokens, factor * factor, hidden_size)
+        return order.transpose(0, 2, 1, 3).reshape(-1)
+
+    def _pixel_shuffle_downsample(
+        self, hidden_states: torch.Tensor, order: torch.Tensor
+    ) -> torch.Tensor:
+        factor_sq = self.merge_size**2
+        return (
+            hidden_states[order]
+            .view(-1, factor_sq, self.hidden_size)
             .permute(0, 2, 1)
             .contiguous()
-            .view(output_tokens, hidden_size * factor * factor)
+            .view(-1, self.hidden_size * factor_sq)
         )
-        return hidden_states.unsqueeze(0)
 
     def _get_sparse_permutation(
-        self, grid_height: int, grid_width: int, device: torch.device
-    ) -> tuple[torch.Tensor, list[int]]:
+        self, grid_height: int, grid_width: int
+    ) -> tuple[np.ndarray, list[int]]:
         block_height = self.pos_emb_height
         block_width = self.pos_emb_width
         padded_height = math.ceil(grid_height / block_height) * block_height
         padded_width = math.ceil(grid_width / block_width) * block_width
-        indices = torch.arange(grid_height * grid_width, device=device).view(
-            grid_height, grid_width
-        )
-        indices = F.pad(
+        indices = np.arange(grid_height * grid_width).reshape(grid_height, grid_width)
+        indices = np.pad(
             indices,
-            (0, padded_width - grid_width, 0, padded_height - grid_height),
-            value=-1,
-        ).flatten()
-        indices = indices.view(
+            ((0, padded_height - grid_height), (0, padded_width - grid_width)),
+            constant_values=-1,
+        )
+        indices = indices.reshape(
             padded_height // block_height,
             block_height,
             padded_width // block_width,
             block_width,
         )
-        indices = indices.permute(0, 2, 1, 3).reshape(-1)
-        valid = (indices != -1).view(-1, block_height * block_width)
-        return indices[indices != -1], valid.sum(dim=1).tolist()
+        indices = indices.transpose(0, 2, 1, 3).reshape(-1)
+        valid = (indices != -1).reshape(-1, block_height * block_width)
+        return indices[indices != -1], valid.sum(axis=1).tolist()
 
     def _get_attention_metadata(
         self,
@@ -744,52 +747,78 @@ class MuseGlimmerVisionEncoder(nn.Module):
             for num_groups, grid_height, grid_width in grid_thw.tolist()
             for _ in range(num_groups)
         ]
-        patch_groups = pixel_values.to(device=device, dtype=dtype).split(
-            [grid_height * grid_width for grid_height, grid_width in grids]
-        )
-
-        all_hidden_states = []
-        all_rotary_pos_emb_cos = []
-        all_rotary_pos_emb_sin = []
+        global_seq_lens = [
+            grid_height * grid_width for grid_height, grid_width in grids
+        ]
+        layouts: dict[
+            tuple[int, int],
+            tuple[
+                np.ndarray, np.ndarray, np.ndarray, tuple[np.ndarray, list[int]] | None
+            ],
+        ] = {}
+        heights: list[np.ndarray] = []
+        widths: list[np.ndarray] = []
+        shuffle_orders: list[np.ndarray] = []
+        window_orders: list[np.ndarray] = []
         sparse_seq_lens: list[int] = []
-        global_seq_lens: list[int] = []
-        metadata = []
-        for patches, (grid_height, grid_width) in zip(patch_groups, grids):
+        offset = 0
+        for grid in grids:
+            grid_height, grid_width = grid
             if grid_height % self.merge_size or grid_width % self.merge_size:
                 raise ValueError(
                     "MuseGlimmer vision grid must be divisible by the merge size"
                 )
-            num_tokens = grid_height * grid_width
-            hidden_states = self.conv1_linear(patches.unsqueeze(0))
-            hidden_states = hidden_states + self._get_pos_emb(
-                grid_height, grid_width, device
-            ).unsqueeze(0).to(dtype)
-            hidden_states = self.ln_pre(hidden_states.view(-1, self.hidden_size)).view(
-                1, -1, self.hidden_size
-            )
-            rotary_pos_emb_cos, rotary_pos_emb_sin = self._make_2d_rope(
-                grid_height, grid_width, device
-            )
-
-            permutation = None
-            if has_sparse_layers:
-                permutation, seq_lens = self._get_sparse_permutation(
-                    grid_height, grid_width, device
+            if grid not in layouts:
+                rows, cols = np.divmod(np.arange(grid_height * grid_width), grid_width)
+                layouts[grid] = (
+                    rows + 1,
+                    cols + 1,
+                    self._get_pixel_shuffle_order(grid_height, grid_width),
+                    self._get_sparse_permutation(grid_height, grid_width)
+                    if has_sparse_layers
+                    else None,
                 )
-                hidden_states = hidden_states[:, permutation]
-                rotary_pos_emb_cos = rotary_pos_emb_cos[permutation]
-                rotary_pos_emb_sin = rotary_pos_emb_sin[permutation]
+            height, width, shuffle_order, sparse_layout = layouts[grid]
+            heights.append(height)
+            widths.append(width)
+            shuffle_orders.append(offset + shuffle_order)
+            if sparse_layout is not None:
+                window_order, seq_lens = sparse_layout
+                window_orders.append(offset + window_order)
                 sparse_seq_lens.extend(seq_lens)
+            offset += grid_height * grid_width
 
-            all_hidden_states.append(hidden_states.squeeze(0))
-            all_rotary_pos_emb_cos.append(rotary_pos_emb_cos)
-            all_rotary_pos_emb_sin.append(rotary_pos_emb_sin)
-            global_seq_lens.append(num_tokens)
-            metadata.append((grid_height, grid_width, num_tokens, permutation))
+        pixel_values = pixel_values.to(device=device, dtype=dtype)
+        # Per group: one matmul over the whole call is not bit-identical on all GPUs.
+        hidden_states = torch.cat(
+            [
+                self.conv1_linear(patches)
+                for patches in pixel_values.split(global_seq_lens)
+            ]
+        )
+        pos_embs = {
+            grid: self._get_pos_emb(*grid, device).to(dtype) for grid in layouts
+        }
+        hidden_states = self.ln_pre(
+            hidden_states + torch.cat([pos_embs[grid] for grid in grids])
+        )
+        rotary_pos_emb_cos, rotary_pos_emb_sin = self._make_2d_rope(
+            async_tensor_h2d(np.concatenate(heights).astype(np.float32), device=device),
+            async_tensor_h2d(np.concatenate(widths).astype(np.float32), device=device),
+        )
 
-        hidden_states = torch.cat(all_hidden_states).unsqueeze(0)
-        rotary_pos_emb_cos = torch.cat(all_rotary_pos_emb_cos)
-        rotary_pos_emb_sin = torch.cat(all_rotary_pos_emb_sin)
+        inverse = None
+        if has_sparse_layers:
+            window_order = np.concatenate(window_orders)
+            permutation = async_tensor_h2d(window_order, device=device)
+            inverse_order = np.empty_like(window_order)
+            inverse_order[window_order] = np.arange(len(window_order))
+            inverse = async_tensor_h2d(inverse_order, device=device)
+            hidden_states = hidden_states[permutation]
+            rotary_pos_emb_cos = rotary_pos_emb_cos[permutation]
+            rotary_pos_emb_sin = rotary_pos_emb_sin[permutation]
+
+        hidden_states = hidden_states.unsqueeze(0)
         global_attention_metadata = self._get_attention_metadata(
             global_seq_lens,
             device,
@@ -814,22 +843,14 @@ class MuseGlimmerVisionEncoder(nn.Module):
                 *attention_metadata,
             )
 
-        features = []
-        offset = 0
-        for grid_height, grid_width, num_tokens, permutation in metadata:
-            item = hidden_states[:, offset : offset + num_tokens]
-            offset += num_tokens
-            if permutation is not None:
-                inverse = torch.empty_like(permutation)
-                inverse[permutation] = torch.arange(len(permutation), device=device)
-                item = item[:, inverse]
-            item = self.ln_post(item.view(-1, self.hidden_size)).view(
-                1, -1, self.hidden_size
-            )
-            features.append(
-                self._pixel_shuffle_downsample(item, grid_height, grid_width).squeeze(0)
-            )
-        return torch.cat(features)
+        hidden_states = hidden_states.squeeze(0)
+        if inverse is not None:
+            hidden_states = hidden_states[inverse]
+        hidden_states = self.ln_post(hidden_states)
+        return self._pixel_shuffle_downsample(
+            hidden_states,
+            async_tensor_h2d(np.concatenate(shuffle_orders), device=device),
+        )
 
 
 class MuseGlimmerVisionAdapter(nn.Module):

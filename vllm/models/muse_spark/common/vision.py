@@ -8,6 +8,7 @@ Its 1-indexed 2D RoPE does not fit get_rope(), so the grid is precomputed.
 import math
 from collections.abc import Sequence
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -27,6 +28,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.model_executor.models.vision import is_vit_use_data_parallel
 from vllm.transformers_utils.configs.muse_spark import MuseSparkVisionConfig
+from vllm.utils.torch_utils import async_tensor_h2d
 
 
 def _precompute_rope_freqs_cis(
@@ -128,21 +130,18 @@ def _get_sparse_attention_perm(
     grid_w: int,
     pos_emb_grid_height: int,
     pos_emb_grid_width: int,
-    device: torch.device,
-) -> tuple[torch.Tensor, torch.Tensor, int]:
+) -> tuple[np.ndarray, np.ndarray, int]:
     """Compute permutation and sequence lengths for sparse attention."""
     padded_grid_h = math.ceil(grid_h / pos_emb_grid_height) * pos_emb_grid_height
     padded_grid_w = math.ceil(grid_w / pos_emb_grid_width) * pos_emb_grid_width
 
-    sp_perm = torch.arange(
-        cur_sp_idx,
-        cur_sp_idx + grid_h * grid_w,
-        device=device,
-    ).view(grid_h, grid_w)
-    sp_perm = F.pad(
+    sp_perm = np.arange(cur_sp_idx, cur_sp_idx + grid_h * grid_w).reshape(
+        grid_h, grid_w
+    )
+    sp_perm = np.pad(
         sp_perm,
-        (0, padded_grid_w - grid_w, 0, padded_grid_h - grid_h),
-        value=-1,
+        ((0, padded_grid_h - grid_h), (0, padded_grid_w - grid_w)),
+        constant_values=-1,
     ).flatten()
 
     h = padded_grid_h // pos_emb_grid_height
@@ -151,18 +150,20 @@ def _get_sparse_attention_perm(
     r2 = pos_emb_grid_width
 
     # Equivalent to: rearrange("(h r1 w r2) -> (h w r1 r2)", ...)
-    sp_perm = sp_perm.reshape(h, r1, w, r2).permute(0, 2, 1, 3).reshape(-1)
+    sp_perm = sp_perm.reshape(h, r1, w, r2).transpose(0, 2, 1, 3).reshape(-1)
     sp_perm = sp_perm[sp_perm != -1]
 
-    sp_slen = torch.ones((grid_h, grid_w), device=device, dtype=torch.int)
-    sp_slen = F.pad(
+    sp_slen = np.ones((grid_h, grid_w), dtype=np.int32)
+    sp_slen = np.pad(
         sp_slen,
-        (0, padded_grid_w - grid_w, 0, padded_grid_h - grid_h),
-        value=0,
+        ((0, padded_grid_h - grid_h), (0, padded_grid_w - grid_w)),
+        constant_values=0,
     ).flatten()
     # Equivalent to: rearrange("(h r1 w r2) -> (h w) (r1 r2)", ...)
-    sp_slen = sp_slen.reshape(h, r1, w, r2).permute(0, 2, 1, 3).reshape(h * w, r1 * r2)
-    sp_slen = sp_slen.sum(dim=1)
+    sp_slen = (
+        sp_slen.reshape(h, r1, w, r2).transpose(0, 2, 1, 3).reshape(h * w, r1 * r2)
+    )
+    sp_slen = sp_slen.sum(axis=1)
     cur_sp_idx += grid_h * grid_w
 
     return sp_perm, sp_slen, cur_sp_idx
@@ -173,11 +174,10 @@ def _seqlens_to_cu_seqlens(
     device: torch.device,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Return (cu_seqlens, max_seqlen); max_seqlen stays on CPU to avoid a sync."""
-    seqlens_t = torch.tensor(seqlens, dtype=torch.int32, device=device)
-    cu_seqlens = torch.zeros(len(seqlens) + 1, dtype=torch.int32, device=device)
-    torch.cumsum(seqlens_t, dim=0, out=cu_seqlens[1:])
+    cu_seqlens = np.zeros(len(seqlens) + 1, dtype=np.int32)
+    np.cumsum(seqlens, dtype=np.int32, out=cu_seqlens[1:])
     max_seqlen_cpu = torch.tensor(max(seqlens), dtype=torch.int32, device="cpu")
-    return cu_seqlens, max_seqlen_cpu
+    return async_tensor_h2d(cu_seqlens, device=device), max_seqlen_cpu
 
 
 class NaViTAttention(nn.Module):
@@ -597,8 +597,8 @@ class NaViT(nn.Module):
         ds_perm_list: list[torch.Tensor] = []
         freq_cis_list: list[torch.Tensor] = []
 
-        sp_perm_list: list[torch.Tensor] = []
-        sp_slen_list: list[torch.Tensor] = []
+        sp_perm_list: list[np.ndarray] = []
+        sp_slen_list: list[np.ndarray] = []
 
         cur_ds_idx = 0
         cur_sp_idx = 0
@@ -678,7 +678,6 @@ class NaViT(nn.Module):
                     grid_w=grid_w,
                     pos_emb_grid_height=self.pos_emb_grid_height,
                     pos_emb_grid_width=self.pos_emb_grid_width,
-                    device=device,
                 )
 
             ds_perm, cur_ds_idx = _get_pixel_shuffle_perm(
@@ -706,8 +705,10 @@ class NaViT(nn.Module):
         sparse_cu_seqlens = None
         sparse_max_seqlen_cpu = None
         if self.sparse_attention_factor > 1:
-            batch_sp_perm = torch.cat(sp_perm_list, dim=0)
-            sp_slen_cat = torch.cat(sp_slen_list, dim=0).tolist()
+            batch_sp_perm = async_tensor_h2d(
+                np.concatenate(sp_perm_list), device=device
+            )
+            sp_slen_cat = np.concatenate(sp_slen_list).tolist()
             sparse_cu_seqlens, sparse_max_seqlen_cpu = _seqlens_to_cu_seqlens(
                 sp_slen_cat, device
             )
