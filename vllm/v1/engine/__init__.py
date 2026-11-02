@@ -91,6 +91,22 @@ class FinishReason(enum.IntEnum):
 
 
 @dataclass
+class PrefixHashConfig:
+    """What a frontend needs to compute a request's prompt block hashes itself
+    (see `EngineCoreRequest.block_hashes`)."""
+
+    # The --prefix-caching-hash-algo name, e.g. "sha256".
+    hash_algo: str
+    # Tokens per hashed block.
+    hash_block_size: int
+    # Parent hash of the first block.
+    none_hash: bytes
+    # Tokens after each block that its hash also covers (as extra keys), so a
+    # block is hashed only once they exist.
+    num_lookahead_tokens: int = 0
+
+
+@dataclass
 class EngineCoreReadyResponse:
     """Sent from EngineCore to each frontend at the end of engine startup.
 
@@ -132,6 +148,9 @@ class EngineCoreReadyResponse:
     # `/server_info` without holding the config themselves (the Rust frontend).
     # Sent only with VLLM_SERVER_DEV_MODE, the same gate as `/server_info`.
     vllm_config: dict[str, Any] | None = None
+    # Set when the engine hashes request blocks (prefix caching or a KV
+    # connector), so that a frontend can send prompt block hashes.
+    prefix_hash_config: PrefixHashConfig | None = None
 
 
 class EngineCoreRequest(
@@ -187,6 +206,10 @@ class EngineCoreRequest(
 
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
+
+    # Prompt block hashes computed by the frontend with the engine's
+    # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
+    block_hashes: list[bytes] | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -357,3 +380,5 @@ class EngineStatusType(enum.IntEnum):
     HEALTHY = 0
     DEAD = 1
     UNHEALTHY = 2
+    # Faulted; querying the workers' all2all mask before going UNHEALTHY.
+    DIAGNOSING = 3
