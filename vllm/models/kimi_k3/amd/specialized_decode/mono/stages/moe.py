@@ -531,7 +531,7 @@ def _route_out(c, t, red, sel, rank, me, ms):
 @traced
 def route_parts(c, t):
     """(OPT_RLOG_PARTS) Token t's router partials (every rank's 4 K
-    parts, RLOGP) -> LDS ``vals`` [part][expert], wave q < R_PARTS polling part
+    parts, RLOGP) -> LDS `vals[part][expert]`, wave q < R_PARTS polling part
     q (one batch: the 14 experts of its lane); ``stage_route`` sums each
     expert's parts in part order, as the router's part 0 did."""
     s, lane, wave = c["S"], c["lane"], c["wave"]

@@ -215,7 +215,7 @@ def sent_bytes() -> int:
 
 def rlogp_half_bytes() -> int:
     """(OPT_RLOG_PARTS) One epoch parity's RLOGP, tagged pairs
-    [src rank][part][token][router row], SENT_ROWS rows."""
+    `[src rank][part][token][router row]`, SENT_ROWS rows."""
     return TP_ * k2b.R_PARTS * SENT_ROWS * (k2b.E // TP_) * 8
 
 
