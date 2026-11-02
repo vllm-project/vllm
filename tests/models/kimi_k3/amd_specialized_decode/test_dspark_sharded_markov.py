@@ -71,6 +71,7 @@ def _speculator(head, lp, base, base_local, device):
 
     class Spec:
         _sample_sequential = DSparkSpeculator._sample_sequential
+        _sample_markov_chain = DSparkSpeculator._sample_markov_chain
         _sample_logits = DSparkSpeculator._sample_logits
         _maybe_predict_acceptance = DraftModelSpeculator._maybe_predict_acceptance
 
