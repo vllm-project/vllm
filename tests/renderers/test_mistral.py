@@ -17,7 +17,11 @@ from vllm.entrypoints.generate.base.protocol import (
     ResponseFormat as OpenAIResponseFormat,
 )
 from vllm.renderers import ChatParams
-from vllm.renderers.mistral import MistralRenderer, safe_apply_chat_template
+from vllm.renderers.mistral import (
+    MistralRenderer,
+    _convert_developer_to_system,
+    safe_apply_chat_template,
+)
 from vllm.tokenizers.mistral import MistralTokenizer
 
 MODEL_NAME = "mistralai/Mistral-7B-Instruct-v0.3"
@@ -196,3 +200,51 @@ def test_apply_mistral_chat_template_thinking_chunk():
     )
 
     assert string_tokens == expected_tokens
+
+
+def test_convert_developer_to_system():
+    messages = [
+        {"role": "developer", "content": "Be brief."},
+        {"role": "user", "content": "Hi"},
+    ]
+    converted = _convert_developer_to_system(messages)
+    assert converted[0]["role"] == "system"
+    assert converted[0]["content"] == "Be brief."
+    assert converted[1]["role"] == "user"
+    assert messages[0]["role"] == "developer"
+
+
+def test_developer_role_renders_with_mistral_tokenizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """developer messages should be folded into system before tokenization."""
+    captured_messages: list = []
+
+    def capturing_apply(*args, **kwargs):
+        captured_messages.extend(args[0] if args else kwargs.get("messages", []))
+        return [1, 2, 3]
+
+    mock_tokenizer = Mock(spec=MistralTokenizer)
+    mock_tokenizer.apply_chat_template = capturing_apply
+
+    renderer = MistralRenderer(
+        MockVllmConfig(
+            MockModelConfig(skip_tokenizer_init=True),
+            parallel_config=MockParallelConfig(),
+        ),
+        tokenizer=mock_tokenizer,
+    )
+    monkeypatch.setattr(
+        "vllm.renderers.mistral.parse_chat_messages",
+        lambda *_args, **_kwargs: ([], None, None),
+    )
+
+    messages = [
+        {"role": "developer", "content": "Be brief."},
+        {"role": "user", "content": "Hello"},
+    ]
+    renderer.render_messages(messages, ChatParams())
+
+    assert all(m.get("role") != "developer" for m in captured_messages)
+    assert captured_messages[0]["role"] == "system"
+    assert captured_messages[0]["content"] == "Be brief."
