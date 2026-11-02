@@ -1211,7 +1211,9 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             n_gates,
         )
         # The experts are in their kernel layout only after the per-layer
-        # quant finalize, which runs between load_weights and this hook.
+        # quant finalize, which runs between load_weights and this hook. The
+        # monokernel also needs the cached coefficients and the folded router
+        # weights from above.
         maybe_attach_mono(self)
 
 
