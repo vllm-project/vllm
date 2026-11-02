@@ -70,7 +70,7 @@ use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_llm::Llm;
-use vllm_text::{Prompt, TextLlm, TextRequest, TextRequestProcessor};
+use vllm_text::{BeamSearchParams, Prompt, TextLlm, TextRequest, TextRequestProcessor};
 
 /// Chat request preparation shared by inference and render-only frontends.
 pub struct ChatRequestProcessor {
@@ -288,27 +288,49 @@ impl ChatRequestProcessor {
     /// for lowering.
     pub async fn prepare(
         &self,
-        mut request: ChatRequest,
+        request: ChatRequest,
         text_processor: &TextRequestProcessor,
     ) -> Result<PreparedChatRequest> {
+        let (text_request, mut output_processors, prompt_text) =
+            self.prepare_for_outputs(request, text_processor, 1).await?;
+        Ok(PreparedChatRequest {
+            text_request,
+            output_processor: output_processors.pop().expect("one output processor requested"),
+            prompt_text,
+        })
+    }
+
+    /// Like [`Self::prepare`], with one output processor per output sequence.
+    async fn prepare_for_outputs(
+        &self,
+        mut request: ChatRequest,
+        text_processor: &TextRequestProcessor,
+        num_outputs: usize,
+    ) -> Result<(TextRequest, Vec<DynChatOutputProcessor>, Option<String>)> {
         request.validate()?;
         self.map_reasoning_effort(&mut request);
 
-        let mut output_processor = self.backend.new_chat_output_processor(
-            &mut request,
-            NewChatOutputProcessorOptions {
-                tool_call_parser: &self.tool_call_parser,
-                reasoning_parser: &self.reasoning_parser,
-                tool_strict_level: self.tool_strict_level,
-            },
-        )?;
+        let mut output_processors = (0..num_outputs)
+            .map(|_| {
+                self.backend.new_chat_output_processor(
+                    &mut request,
+                    NewChatOutputProcessorOptions {
+                        tool_call_parser: &self.tool_call_parser,
+                        reasoning_parser: &self.reasoning_parser,
+                        tool_strict_level: self.tool_strict_level,
+                    },
+                )
+            })
+            .collect::<Result<Vec<_>>>()?;
         let (mut text_request, prompt_text) = self.prepare_text_request(request).await?;
 
-        // Initialize the output processor from the final prompt token IDs and apply
-        // the output grammar to the request, if any.
+        // Initialize the output processors from the final prompt token IDs and
+        // apply the output grammar to the request, if any.
         let prompt_token_ids = text_processor.tokenize_in_place(&mut text_request)?;
-        output_processor.initialize(prompt_token_ids)?;
-        let grammar = output_processor.build_output_grammar()?;
+        for output_processor in &mut output_processors {
+            output_processor.initialize(prompt_token_ids)?;
+        }
+        let grammar = output_processors[0].build_output_grammar()?;
         // Output grammars are xgrammar structural tags. With another backend the
         // request keeps its own constraint and parsing runs unconstrained.
         match text_processor.structured_outputs_backend() {
@@ -326,11 +348,7 @@ impl ChatRequestProcessor {
             }
         }
 
-        Ok(PreparedChatRequest {
-            text_request,
-            output_processor,
-            prompt_text,
-        })
+        Ok((text_request, output_processors, prompt_text))
     }
 }
 
@@ -487,6 +505,46 @@ impl ChatLlm {
         let structured_stream = output_processor.process(decoded_stream)?;
 
         Ok(ChatEventStream::new(request_id, structured_stream).with_prompt_text(prompt_text))
+    }
+
+    /// Run beam search and return one finished chat stream per beam, best first.
+    pub async fn beam_search(
+        &self,
+        request: ChatRequest,
+        params: BeamSearchParams,
+    ) -> Result<Vec<ChatEventStream>> {
+        let requested_constraint = request.sampling_params.structured_outputs.is_some();
+        let (text_request, output_processors, prompt_text) = self
+            .processor
+            .prepare_for_outputs(
+                request,
+                self.text.request_processor(),
+                params.beam_width.get() as usize,
+            )
+            .await?;
+        // The engine cannot resume a tool choice's output grammar from a beam's
+        // tokens. TODO: enforce it per beam with a frontend grammar matcher, as
+        // Python's offline `LLM.beam_search` does.
+        if !requested_constraint && text_request.sampling_params.structured_outputs.is_some() {
+            return Err(vllm_text::Error::UnsupportedWithBeamSearch {
+                param: "tool_choice",
+            }
+            .into());
+        }
+        let request_id = text_request.request_id.clone();
+        let beams = self.text.beam_search(text_request, params).await?;
+
+        // A failed search returns fewer streams than processors.
+        beams
+            .into_iter()
+            .zip(output_processors)
+            .map(|(beam, output_processor)| {
+                let structured_stream =
+                    output_processor.process(beam.map_err(Error::from).boxed())?;
+                Ok(ChatEventStream::new(request_id.clone(), structured_stream)
+                    .with_prompt_text(prompt_text.clone()))
+            })
+            .collect()
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.

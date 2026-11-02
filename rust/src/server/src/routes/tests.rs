@@ -10639,3 +10639,571 @@ async fn log_outputs_disabled_logs_nothing() {
 
     assert_eq!(logs, "");
 }
+
+mod beam_search {
+    use tokio::sync::mpsc;
+    use vllm_text::SamplingHints;
+
+    use super::*;
+
+    /// A visible byte, so a leaked EOS shows up in the text.
+    const EOS: u32 = b'.' as u32;
+
+    /// [`FakeChatBackend`] with an EOS token.
+    #[derive(Debug)]
+    struct BeamTestBackend(FakeChatBackend);
+
+    impl TextBackend for BeamTestBackend {
+        fn tokenizer(&self) -> DynTokenizer {
+            self.0.tokenizer()
+        }
+
+        fn model_id(&self) -> &str {
+            self.0.model_id()
+        }
+
+        fn sampling_hints(&self) -> vllm_text::Result<SamplingHints> {
+            Ok(SamplingHints {
+                primary_eos_token_id: Some(EOS),
+                ..SamplingHints::default()
+            })
+        }
+    }
+
+    impl ChatBackend for BeamTestBackend {
+        fn chat_renderer(&self) -> DynChatRenderer {
+            self.0.chat_renderer()
+        }
+
+        fn new_chat_output_processor(
+            &self,
+            request: &mut ChatRequest,
+            options: NewChatOutputProcessorOptions<'_>,
+        ) -> vllm_chat::Result<DynChatOutputProcessor> {
+            self.0.new_chat_output_processor(request, options)
+        }
+    }
+
+    /// The engine's answer to one single-token beam-search step.
+    enum Step {
+        /// Candidates `(token, logprob)`, the sampled token first.
+        Candidates(&'static [(u8, f32)]),
+        Error,
+        /// Never answer.
+        Hang,
+    }
+
+    enum EngineEvent {
+        Add(Box<EngineCoreRequest>),
+        Abort(Vec<String>),
+    }
+
+    /// Greedy decoding takes "a" then "x"; beam search keeps "b".
+    fn two_step_script(generated: &str) -> Step {
+        match generated {
+            "" => Step::Candidates(&[(b'a', -0.4), (b'a', -0.4), (b'b', -0.6), (b'c', -3.0)]),
+            "a" => Step::Candidates(&[(b'x', -1.5), (b'x', -1.5), (b'y', -1.6), (b'.', -2.0)]),
+            "b" => Step::Candidates(&[(b'z', -0.1), (b'z', -0.1), (b'.', -0.2), (b'w', -2.5)]),
+            _ => unreachable!("unexpected beam {generated:?}"),
+        }
+    }
+
+    fn step_logprobs(candidates: &[(u8, f32)]) -> Logprobs {
+        Logprobs {
+            positions: vec![PositionLogprobs {
+                entries: (0..)
+                    .zip(candidates)
+                    .map(|(index, &(token, logprob))| TokenLogprob {
+                        token_id: token.into(),
+                        logprob,
+                        rank: u32::max(index, 1),
+                    })
+                    .collect(),
+            }],
+        }
+    }
+
+    /// Serve requests from an engine that answers each step with `script`.
+    async fn beam_test_app(
+        script: fn(&str) -> Step,
+    ) -> (
+        axum::Router,
+        MockEngineTask,
+        mpsc::UnboundedReceiver<EngineEvent>,
+    ) {
+        beam_test_app_with_backend(FakeChatBackend::new(), script).await
+    }
+
+    async fn beam_test_app_with_backend(
+        backend: FakeChatBackend,
+        script: fn(&str) -> Step,
+    ) -> (
+        axum::Router,
+        MockEngineTask,
+        mpsc::UnboundedReceiver<EngineEvent>,
+    ) {
+        let ipc = IpcNamespace::new().expect("create ipc namespace");
+        let handshake_address = ipc.handshake_endpoint();
+        let (events_tx, events_rx) = mpsc::unbounded_channel();
+
+        let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+            handshake_address.clone(),
+            b"engine-openai-beam-search".to_vec(),
+            move |dealer, push| {
+                boxed_test_future(async move {
+                    // The first step extends the bare prompt.
+                    let mut prompt_len = None;
+                    loop {
+                        let message = recv_engine_message(dealer).await;
+                        if message[0].as_ref() == [0x01] {
+                            let ids = rmp_serde::from_slice(&message[1]).expect("decode abort");
+                            let _ = events_tx.send(EngineEvent::Abort(ids));
+                            continue;
+                        }
+                        let request: EngineCoreRequest =
+                            rmp_serde::from_slice(&message[1]).expect("decode request");
+                        let prompt = request.prompt_token_ids.clone().expect("prompt token ids");
+                        let prompt_len = *prompt_len.get_or_insert(prompt.len());
+                        let generated = String::from_utf8(
+                            prompt[prompt_len..].iter().map(|&id| id as u8).collect(),
+                        )
+                        .expect("ascii beam");
+                        let request_id = request.request_id.clone();
+                        let _ = events_tx.send(EngineEvent::Add(Box::new(request)));
+                        let output = match script(&generated) {
+                            Step::Candidates(candidates) => request_output_with_logprobs(
+                                &request_id,
+                                vec![candidates[0].0.into()],
+                                Some(EngineCoreFinishReason::Length),
+                                None,
+                                Some(step_logprobs(candidates)),
+                                None,
+                            ),
+                            Step::Error => request_output(
+                                &request_id,
+                                vec![],
+                                Some(EngineCoreFinishReason::Error),
+                            ),
+                            Step::Hang => continue,
+                        };
+                        let outputs = RequestBatchOutputs {
+                            outputs: vec![output],
+                            ..Default::default()
+                        };
+                        send_outputs(push, outputs.into()).await;
+                    }
+                })
+            },
+        ));
+
+        let client = EngineCoreClient::connect(
+            EngineCoreClientConfig::new_single(handshake_address)
+                .with_model_name("test-model")
+                .with_local_input_output_addresses(
+                    Some(ipc.input_endpoint()),
+                    Some(ipc.output_endpoint()),
+                ),
+        )
+        .await
+        .expect("connect client");
+        let chat =
+            ChatLlm::from_shared_backend(test_llm(client), Arc::new(BeamTestBackend(backend)));
+        let app = build_router(Arc::new(AppState::new(
+            vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+            chat,
+        )));
+        (app, engine_task, events_rx)
+    }
+
+    /// The step requests the engine received, as `(prompt suffix, max_tokens,
+    /// logprobs, beam index in the request ID)`.
+    fn step_requests(
+        events: &mut mpsc::UnboundedReceiver<EngineEvent>,
+        prompt_len: usize,
+    ) -> Vec<(String, u32, Option<i32>, String)> {
+        std::iter::from_fn(|| events.try_recv().ok())
+            .filter_map(|event| match event {
+                EngineEvent::Add(request) => Some(request),
+                EngineEvent::Abort(_) => None,
+            })
+            .map(|request| {
+                let prompt = request.prompt_token_ids.expect("prompt token ids");
+                let params = request.sampling_params.expect("sampling params");
+                (
+                    prompt[prompt_len..].iter().map(|&id| id as u8 as char).collect(),
+                    params.max_tokens,
+                    params.logprobs,
+                    request
+                        .request_id
+                        .rsplit_once("-beam-")
+                        .expect("beam request ID")
+                        .1
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// Beams come back best first: length-capped "bz", then "b" stopped at EOS.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn completions_beam_search_returns_beams_in_score_order() {
+        let (mut app, engine_task, mut events) = beam_test_app(two_step_script).await;
+        let (status, body) = post_json(
+            &mut app,
+            "/v1/completions",
+            json!({"prompt": "hi", "max_tokens": 2, "n": 2, "use_beam_search": true,
+                "temperature": 0, "add_special_tokens": false}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        expect_test::expect![[r#"
+            [
+                Object {
+                    "index": Number(0),
+                    "text": String("bz"),
+                    "logprobs": Null,
+                    "finish_reason": String("length"),
+                    "stop_reason": Null,
+                    "prompt_logprobs": Null,
+                    "token_ids": Null,
+                    "prompt_token_ids": Null,
+                    "routed_experts": Null,
+                    "weight_versions": Null,
+                },
+                Object {
+                    "index": Number(1),
+                    "text": String("b"),
+                    "logprobs": Null,
+                    "finish_reason": String("stop"),
+                    "stop_reason": Number(46),
+                    "prompt_logprobs": Null,
+                    "token_ids": Null,
+                    "prompt_token_ids": Null,
+                    "routed_experts": Null,
+                    "weight_versions": Null,
+                },
+            ]
+        "#]]
+        .assert_debug_eq(body["choices"].as_array().unwrap());
+        // The prompt counts once.
+        expect_test::expect![[r#"{"prompt_tokens":2,"total_tokens":5,"completion_tokens":3,"prompt_tokens_details":null,"completion_tokens_details":null}"#]]
+            .assert_eq(&body["usage"].to_string());
+
+        // One request for the first step, then one per live beam.
+        expect_test::expect![[r#"
+            [
+                (
+                    "",
+                    1,
+                    Some(
+                        4,
+                    ),
+                    "0",
+                ),
+                (
+                    "a",
+                    1,
+                    Some(
+                        4,
+                    ),
+                    "0",
+                ),
+                (
+                    "b",
+                    1,
+                    Some(
+                        4,
+                    ),
+                    "1",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&step_requests(&mut events, 2));
+        engine_task.abort_and_join().await;
+    }
+
+    /// Logprobs lead with the token each beam took.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn chat_beam_search_returns_one_message_per_beam() {
+        let (mut app, engine_task, _events) = beam_test_app(two_step_script).await;
+        let (status, body) = post_json(
+            &mut app,
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2, "n": 2,
+                "use_beam_search": true, "logprobs": true, "top_logprobs": 1}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let choices = body["choices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|choice| {
+                let tokens = choice["logprobs"]["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|content| {
+                        let top = content["top_logprobs"].as_array().unwrap();
+                        format!("{}{:?}", content["token"], top.len())
+                    })
+                    .collect::<Vec<_>>();
+                json!([
+                    choice["index"],
+                    choice["message"]["content"],
+                    choice["finish_reason"],
+                    tokens
+                ])
+            })
+            .collect::<Vec<_>>();
+        expect_test::expect![[
+            r#"[[0,"bz","length",["\"b\"1","\"z\"1"]],[1,"b","stop",["\"b\"1"]]]"#
+        ]]
+        .assert_eq(&json!(choices).to_string());
+        engine_task.abort_and_join().await;
+    }
+
+    /// A beam that stops at EOS on its first token reports empty logprobs.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn beam_search_eos_only_beam_has_empty_logprobs() {
+        fn script(generated: &str) -> Step {
+            match generated {
+                "" => Step::Candidates(&[(b'.', -0.1), (b'.', -0.1), (b'a', -2.0)]),
+                "a" => Step::Candidates(&[(b'x', -1.0), (b'x', -1.0), (b'y', -2.0)]),
+                _ => unreachable!("unexpected beam {generated:?}"),
+            }
+        }
+        let beam = json!({"max_tokens": 2, "n": 1, "use_beam_search": true});
+        let mut chat = json!({"messages": [{"role": "user", "content": "hi"}], "logprobs": true});
+        let mut completion = json!({"prompt": "hi", "logprobs": 1});
+        for request in [&mut chat, &mut completion] {
+            request.as_object_mut().unwrap().extend(beam.as_object().unwrap().clone());
+        }
+
+        let mut results = Vec::new();
+        for (path, request) in [
+            ("/v1/chat/completions", chat),
+            ("/v1/completions", completion),
+        ] {
+            // The scripted engine reads beams relative to its first prompt.
+            let (mut app, engine_task, _events) = beam_test_app(script).await;
+            let (status, body) = post_json(&mut app, path, request).await;
+            let choice = &body["choices"][0];
+            results.push(format!(
+                "{path}: {status} {} {}",
+                choice["finish_reason"], choice["logprobs"]
+            ));
+            engine_task.abort_and_join().await;
+        }
+        expect_test::expect![[r#"
+            /v1/chat/completions: 200 OK "stop" {"content":[]}
+            /v1/completions: 200 OK "stop" {"tokens":[],"token_logprobs":[],"top_logprobs":[],"text_offset":[]}"#]].assert_eq(&results.join("\n"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn beam_search_step_error_fails_the_request() {
+        fn script(generated: &str) -> Step {
+            match generated {
+                "a" => Step::Error,
+                generated => two_step_script(generated),
+            }
+        }
+        let (mut app, engine_task, _events) = beam_test_app(script).await;
+        let (status, body) = post_json(
+            &mut app,
+            "/v1/completions",
+            json!({"prompt": "hi", "max_tokens": 2, "n": 2, "use_beam_search": true}),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+        engine_task.abort_and_join().await;
+    }
+
+    /// A client that goes away mid-search aborts the step requests in flight.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn dropped_beam_search_aborts_in_flight_steps() {
+        fn script(generated: &str) -> Step {
+            match generated {
+                "" => two_step_script(generated),
+                _ => Step::Hang,
+            }
+        }
+        let (app, engine_task, mut events) = beam_test_app(script).await;
+        // The router outlives the request, as in a server.
+        let mut request_app = app.clone();
+        let request = tokio::spawn(async move {
+            post_json(
+                &mut request_app,
+                "/v1/completions",
+                json!({"prompt": "hi", "max_tokens": 2, "n": 2, "use_beam_search": true}),
+            )
+            .await
+        });
+
+        let mut in_flight = BTreeSet::new();
+        while in_flight.len() < 3 {
+            match events.recv().await.expect("engine event") {
+                EngineEvent::Add(request) => in_flight.insert(request.request_id),
+                EngineEvent::Abort(_) => panic!("aborted before the client went away"),
+            };
+        }
+        request.abort();
+        let mut aborted = BTreeSet::new();
+        while aborted.len() < 2 {
+            match tokio::time::timeout(Duration::from_secs(5), events.recv())
+                .await
+                .expect("abort timeout")
+                .expect("engine event")
+            {
+                EngineEvent::Abort(ids) => aborted.extend(ids),
+                EngineEvent::Add(request) => panic!("unexpected step {}", request.request_id),
+            }
+        }
+        // The first step finished; both second-step requests are aborted.
+        assert!(aborted.iter().all(|id| id.ends_with("-beam-0") || id.ends_with("-beam-1")));
+        assert!(
+            aborted.is_subset(&in_flight),
+            "{aborted:?} not in {in_flight:?}"
+        );
+        engine_task.abort_and_join().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn beam_search_rejects_unsupported_requests() {
+        let (mut app, engine_task) = test_app_with_engine_handle().await;
+        let completion = json!({"prompt": "hi", "use_beam_search": true});
+        let chat = json!({"messages": [{"role": "user", "content": "hi"}],
+            "use_beam_search": true});
+        let mut errors = Vec::new();
+        for (path, base, extra) in [
+            ("/v1/completions", &completion, json!({"stream": true})),
+            (
+                "/v1/completions",
+                &completion,
+                json!({"echo": true, "logprobs": 1}),
+            ),
+            (
+                "/v1/completions",
+                &completion,
+                json!({"echo": true, "max_tokens": 0}),
+            ),
+            ("/v1/completions", &completion, json!({"n": 0})),
+            ("/v1/completions", &completion, json!({"top_p": 0.5})),
+            ("/v1/completions", &completion, json!({"stop": ["x"]})),
+            (
+                "/v1/completions",
+                &completion,
+                json!({"allowed_token_ids": [1]}),
+            ),
+            ("/v1/completions", &completion, json!({"n": 100})),
+            (
+                "/v1/completions",
+                &completion,
+                json!({"logprobs": 1, "logprob_token_ids": [1]}),
+            ),
+            ("/v1/chat/completions", &chat, json!({"stream": true})),
+            ("/v1/chat/completions", &chat, json!({"seed": 1})),
+            (
+                "/v1/chat/completions",
+                &chat,
+                json!({"response_format": {"type": "json_object"}}),
+            ),
+            ("/v1/completions", &json!({"prompt": "hi"}), json!({"n": 2})),
+            (
+                "/v1/completions",
+                &json!({"prompt": "hi"}),
+                json!({"length_penalty": 2.0}),
+            ),
+            (
+                "/v1/chat/completions",
+                &json!({"messages": [{"role": "user", "content": "hi"}]}),
+                json!({"n": 2}),
+            ),
+        ] {
+            let mut body = base.clone();
+            body.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            let (status, error) = post_json(&mut app, path, body.clone()).await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}: {error}");
+            errors.push(format!(
+                "{extra} -> {} {}",
+                error["error"]["param"], error["error"]["message"]
+            ));
+        }
+        expect_test::expect![[r#"
+            {"stream":true} -> null "Streaming is not currently supported with beam search"
+            {"echo":true,"logprobs":1} -> "echo" "`echo` with `logprobs` is not supported with beam search because beam search does not compute prompt logprobs."
+            {"echo":true,"max_tokens":0} -> "max_tokens" "max_tokens=0 is not supported with beam search."
+            {"n":0} -> null "beam_width must be at least 1, got 0."
+            {"top_p":0.5} -> "top_p" "`top_p` is not supported with beam search."
+            {"stop":["x"]} -> "stop" "`stop` is not supported with beam search."
+            {"allowed_token_ids":[1]} -> "allowed_token_ids" "`allowed_token_ids` is not supported with beam search."
+            {"n":100} -> null "requested logprobs of 200, which is greater than max allowed: 20"
+            {"logprobs":1,"logprob_token_ids":[1]} -> "logprob_token_ids" "`logprob_token_ids` is not supported with beam search."
+            {"stream":true} -> "stream" "Streaming is not supported with beam search."
+            {"seed":1} -> "seed" "`seed` is not supported with beam search."
+            {"response_format":{"type":"json_object"}} -> "structured_outputs" "`structured_outputs` is not supported with beam search."
+            {"n":2} -> "n" "Only n=1 is supported without use_beam_search."
+            {"length_penalty":2.0} -> "length_penalty" "length_penalty is only supported with use_beam_search."
+            {"n":2} -> "n" "Only n=1 is supported without use_beam_search.""#]].assert_eq(&errors.join("\n"));
+        engine_task.abort_and_join().await;
+    }
+
+    /// Tools work unless `tool_choice` implies a grammar.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn chat_beam_search_accepts_tools_without_a_grammar() {
+        let tools = json!([{"type": "function", "function": {"name": "search",
+            "parameters": {"type": "object", "properties": {}}}}]);
+        let mut statuses = Vec::new();
+        for tool_choice in ["auto", "none", "required"] {
+            let (mut app, engine_task, _events) = beam_test_app_with_backend(
+                FakeChatBackend::with_model_id("Qwen/Qwen3-0.6B"),
+                two_step_script,
+            )
+            .await;
+            let (status, body) = post_json(
+                &mut app,
+                "/v1/chat/completions",
+                json!({"messages": [{"role": "user", "content": "hi"}], "max_tokens": 2,
+                    "n": 2, "use_beam_search": true, "tools": tools,
+                    "tool_choice": tool_choice}),
+            )
+            .await;
+            statuses.push(format!(
+                "{tool_choice}: {status} {}",
+                body["error"]["message"]
+            ));
+            engine_task.abort_and_join().await;
+        }
+        expect_test::expect![[r#"
+            auto: 200 OK null
+            none: 200 OK null
+            required: 400 Bad Request "`tool_choice` is not supported with beam search.""#]]
+        .assert_eq(&statuses.join("\n"));
+    }
+
+    /// Like Python, default beam fields are accepted without beam search.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[serial]
+    async fn default_beam_fields_are_accepted_without_beam_search() {
+        let (mut app, engine_task) = test_app_with_engine_handle().await;
+        let (status, body) = post_json(
+            &mut app,
+            "/v1/completions",
+            json!({"prompt": "hi", "n": 1, "length_penalty": 1.0, "use_beam_search": false}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["choices"].as_array().unwrap().len(), 1);
+        engine_task.abort_and_join().await;
+    }
+}

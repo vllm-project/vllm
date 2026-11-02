@@ -5931,6 +5931,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trait-set",
+ "uuid",
  "vllm-engine-core-client",
  "vllm-llm",
  "vllm-tokenizer",
