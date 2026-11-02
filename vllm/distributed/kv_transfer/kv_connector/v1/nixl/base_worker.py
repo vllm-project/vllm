@@ -54,18 +54,20 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.stats import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.tp_mapping import (
     TPMapping,
-    _is_attention_spec,
-    _is_ssm_spec,
     compute_tp_mapping,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
     _NIXL_SUPPORTED_DEVICE,
-    get_representative_spec_type,
     zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
     derive_mamba_conv_split,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.transfer_planning import (
+    get_representative_spec_type,
+    is_attention_spec,
+    is_ssm_spec,
 )
 from vllm.distributed.nixl_utils import (
     NixlWrapper,
@@ -254,9 +256,17 @@ class NixlBaseConnectorWorker:
             if not blocks.size or not group_regions.size:
                 continue
             spec_type = self._group_spec_types[i]
-            if _is_attention_spec(spec_type):
+            # Hybrid regions are keyed by base address, so some hold only
+            # another group's layers (e.g. KDA-only or scratch-only tensors).
+            # Reading them for this group would only re-read aliased bytes.
+            own_regions = (
+                self._group_region_indices[i] if self._group_region_indices else None
+            )
+            if own_regions:
+                group_regions = np.asarray(own_regions, dtype=np.int64)
+            if is_attention_spec(spec_type):
                 desc_ids = region_offsets[group_regions][:, None] + blocks[None, :]
-            elif _is_ssm_spec(spec_type):
+            elif is_ssm_spec(spec_type):
                 if i == self._ple_group_index:
                     ssm_desc_ids = np.array([num_ssm_descs], dtype=np.int64)
                 else:
@@ -298,7 +308,7 @@ class NixlBaseConnectorWorker:
         Each Nx5 strided desc covers one region, so slicing it slices every block.
         """
         fa_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            i for i, t in enumerate(self._group_spec_types) if is_attention_spec(t)
         )
         fa_num_splits = len(plan.source_ranks_per_group[fa_idx])
 
@@ -306,7 +316,7 @@ class NixlBaseConnectorWorker:
         num_descs = int(src_blocks_data[:, 4].sum())
         has_ssm_descs = num_fa_descs < num_descs
         ssm_idx = next(
-            (i for i, t in enumerate(self._group_spec_types) if _is_ssm_spec(t)),
+            (i for i, t in enumerate(self._group_spec_types) if is_ssm_spec(t)),
             None,
         )
         ssm_num_splits = (
@@ -627,7 +637,7 @@ class NixlBaseConnectorWorker:
         for remote, local, group in zip(pairs.remote, pairs.local, pairs.group):
             if group == self._ple_group_index:
                 ple_regions.add(remote)
-            elif _is_ssm_spec(self._group_spec_types[group]):
+            elif is_ssm_spec(self._group_spec_types[group]):
                 ssm_pairs.append((ssm_slot[local], remote))
         if len(ple_regions) > 1:
             raise NotImplementedError(
@@ -2276,7 +2286,7 @@ class NixlBaseConnectorWorker:
             "Remote KV cache base addresses must not be empty."
         )
         fa_group_idx = next(
-            i for i, t in enumerate(self._group_spec_types) if _is_attention_spec(t)
+            i for i, t in enumerate(self._group_spec_types) if is_attention_spec(t)
         )
         region_num_blocks = nixl_agent_meta.region_num_blocks or [
             nixl_agent_meta.num_blocks
@@ -3316,7 +3326,7 @@ class NixlBaseConnectorWorker:
             )
             if block_size_ratio > 1 or self.enable_permute_local_kv or hetero_ppl:
                 for g, local_group in enumerate(meta.local_physical_block_ids):
-                    if not local_group or _is_ssm_spec(self._group_spec_types[g]):
+                    if not local_group or is_ssm_spec(self._group_spec_types[g]):
                         continue
                     # Number of remote-sized sub-blocks the transfer covered;
                     # everything past this was clipped and must be zeroed.
@@ -3622,7 +3632,7 @@ class NixlBaseConnectorWorker:
         mapped_remote: list[list[int]] = []
         for i, remote_group in enumerate(remote_block_ids):
             local_group = local_block_ids[i] if local_block_ids else []
-            if _is_ssm_spec(self._group_spec_types[i]):
+            if is_ssm_spec(self._group_spec_types[i]):
                 mapped_local.append(list(local_group))
                 mapped_remote.append(list(remote_group))
                 continue
@@ -3655,7 +3665,7 @@ class NixlBaseConnectorWorker:
         physical_block_ids = []
         for i, group in enumerate(block_ids):
             spec = self.kv_cache_config.transfer_groups[i].kv_cache_spec
-            if _is_ssm_spec(get_representative_spec_type(spec)):
+            if is_ssm_spec(get_representative_spec_type(spec)):
                 physical_block_ids.append(group)
             else:
                 physical_block_ids.append(
@@ -3841,7 +3851,7 @@ class NixlBaseConnectorWorker:
             for i, prefill_group in enumerate(prefill_block_ids):
                 num_decode_blocks = len(decode_block_ids[i])
                 num_prefill_blocks = len(prefill_group)
-                if _is_ssm_spec(self._group_spec_types[i]):
+                if is_ssm_spec(self._group_spec_types[i]):
                     if num_decode_blocks == num_prefill_blocks:
                         continue
                     # Only state-bearing slots reach here, normally just one
