@@ -16,6 +16,7 @@ a single ``wo_a`` einsum covers the whole step.
 """
 
 from dataclasses import replace
+from functools import cached_property
 from typing import TYPE_CHECKING, cast
 
 import torch
@@ -37,6 +38,7 @@ from vllm.models.deepseek_v41.common.ops.fused_layout import (
     permute_on_load,
     q_fused_permutation,
 )
+from vllm.models.deepseek_v41.common.ops.query_quant import can_fuse_query_quant
 from vllm.models.deepseek_v41.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v41.sparse_mla import (
     DeepseekV4FlashMLAMetadata,
@@ -44,7 +46,7 @@ from vllm.models.deepseek_v41.sparse_mla import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import fp8_einsum, get_tma_aligned_size
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.attention.ops.flashmla import is_flashmla_sparse_supported
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -221,19 +223,46 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         einsum consumes the kernel's output with no repacking.
         """
         groups = self.n_local_groups
+        num_tokens = attn_out.data.shape[0]
+        quantize = self._can_quantize_o_proj
         z = torch.empty(
-            (attn_out.data.shape[0], groups, self.o_lora_rank),
-            dtype=torch.bfloat16,
+            (num_tokens, groups, self.o_lora_rank),
+            dtype=torch.float8_e4m3fn if quantize else torch.bfloat16,
             device=attn_out.data.device,
         )
+        if quantize:
+            # wo_a writes wo_b's MXFP8 input with F8_128x4 UE8M0 scales. Padded
+            # scale rows stay unwritten and only reach wo_b rows it never stores.
+            z_scale = torch.empty(
+                (cdiv(num_tokens, 128), groups * self.o_lora_rank // 128, 128),
+                dtype=torch.int32,
+                device=z.device,
+            )
         fp8_einsum(
             "bhr,hdr->bhd",
             (attn_out.data[:, :groups], attn_out.scale[:, :groups]),
             (self.wo_a.weight, self.wo_a.weight_scale),
-            z,
+            (z, z_scale) if quantize else z,
             recipe=self._einsum_recipe,
+            use_128x4_sfd_layout=quantize,
         )
-        return self._wo_b_proj(z.flatten(1))
+        z = z.flatten(1)
+        if not quantize:
+            return self._wo_b_proj(z)
+        scale = z_scale.view(-1).view(torch.uint8)
+        return self._wo_b_proj(
+            QuantizedActivation(z, scale, torch.bfloat16, z.shape, kMxfp8Dynamic)
+        )
+
+    @cached_property
+    def _can_quantize_o_proj(self) -> bool:
+        return (
+            self._einsum_recipe == (1, 1, 32)
+            and self.o_lora_rank % 128 == 0
+            # The fused GEMM + reduce-scatter takes a BF16 z only.
+            and self.gemm_rs is None
+            and can_fuse_query_quant([self.wo_b])
+        )
 
     # ---- forward -----------------------------------------------------------
 
@@ -264,14 +293,12 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         swa_metadata = cast(
             "DeepseekSparseSWAMetadata", attn_metadata[self.swa_cache_layer.prefix]
         )
-        # The kernel takes int32 RoPE positions.
-        positions_int32 = positions.to(torch.int32)
         num_decode_tokens = swa_metadata.num_decode_tokens
 
         if swa_metadata.num_prefills > 0:
             self._forward_prefill_mega(
                 q[num_decode_tokens:],
-                positions_int32[num_decode_tokens:],
+                positions[num_decode_tokens:],
                 flashmla_metadata,
                 swa_metadata,
                 output,
@@ -280,7 +307,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         if swa_metadata.num_decodes > 0:
             self._forward_decode_mega(
                 q[:num_decode_tokens],
-                positions_int32[:num_decode_tokens],
+                positions[:num_decode_tokens],
                 flashmla_metadata,
                 swa_metadata,
                 _token_slice(output, 0, num_decode_tokens),
@@ -295,9 +322,18 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         else:
             assert self.topk_indices_buffer is not None
             top_k = self.topk_indices_buffer.shape[-1]
-        combined_topk = round_up(top_k + self.window_size, 128)
+        # One request covers the KV chunk (retained at the tail at runtime) and
+        # the index scratch (taken from the head) side by side.
         current_workspace_manager().get_simultaneous(
             ((self.PREFILL_CHUNK_SIZE, m, q.shape[-1]), torch.bfloat16),
+            *self._prefill_index_workspace_specs(top_k),
+        )
+
+    def _prefill_index_workspace_specs(
+        self, top_k: int
+    ) -> tuple[tuple[tuple[int, ...], torch.dtype], ...]:
+        combined_topk = round_up(top_k + self.window_size, 128)
+        return (
             ((self.max_num_batched_tokens, combined_topk), torch.int32),
             ((self.max_num_batched_tokens,), torch.int32),
         )
@@ -326,7 +362,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def _forward_decode_mega(
         self,
         q: torch.Tensor,
-        positions_int32: torch.Tensor,
+        positions: torch.Tensor,
         flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
         out: QuantizedActivation,
@@ -355,7 +391,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
             extra_len,
             False,  # enable_q_norm
             0.0,  # rms_norm_eps
-            positions_int32,
+            positions,
             *_ROPE_ARGS,
             self.rotary_emb.cos_sin_cache,
             self.n_wv_group,
@@ -367,7 +403,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def _forward_prefill_mega(
         self,
         q: torch.Tensor,
-        positions_int32: torch.Tensor,
+        positions: torch.Tensor,
         flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
         out: QuantizedActivation,
@@ -395,27 +431,39 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         )
         assert chunk_plan, "prefill chunk plan must be non-empty when num_prefills > 0"
         workspace_manager = current_workspace_manager()
-        combined_topk = round_up(top_k + self.window_size, 128)
-        for chunk_start, chunk_end, chunk_n, chunk_m in chunk_plan:
+        index_specs = self._prefill_index_workspace_specs(top_k)
+        for chunk in chunk_plan:
+            chunk_start, chunk_end, chunk_n, chunk_m = chunk
             chunk_size = chunk_end - chunk_start
-            kv_ws, idx_ws, lens_ws = workspace_manager.get_simultaneous(
-                ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16),
-                ((self.max_num_batched_tokens, combined_topk), torch.int32),
-                ((self.max_num_batched_tokens,), torch.int32),
-            )
-            if not swa_only:
-                assert flashmla_metadata is not None
-                dequantize_and_gather_k_cache(
-                    kv_ws[:chunk_size, :chunk_n],
-                    self._compressed_kv_cache(),
-                    seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
-                    gather_lens=None,
-                    block_table=flashmla_metadata.block_table[num_decodes:][
-                        chunk_start:chunk_end
-                    ],
-                    block_size=flashmla_metadata.block_size // self.compress_ratio,
-                    offset=0,
+            kv_spec = ((chunk_size, chunk_m, q.shape[-1]), torch.bfloat16)
+            if swa_only:
+                kv_ws, idx_ws, lens_ws = workspace_manager.get_simultaneous(
+                    kv_spec, *index_specs
                 )
+            else:
+                assert flashmla_metadata is not None
+                idx_ws, lens_ws = workspace_manager.get_simultaneous(*index_specs)
+                # The chunk's compressed columns stay in the workspace's tail
+                # span, which the scratch of the layers in between leaves
+                # alone. A kv source has just inserted this step's rows, so it
+                # always gathers; the consumers after it in the same forward
+                # reuse its columns while the span still holds this source and
+                # chunk, and rewrite only their SWA columns.
+                kv_ws, intact = workspace_manager.get_retained(
+                    (self.compressed_cache_prefix, chunk), *kv_spec
+                )
+                if self.is_kv_source or not intact:
+                    dequantize_and_gather_k_cache(
+                        kv_ws[:, :chunk_n],
+                        self._compressed_kv_cache(),
+                        seq_lens=seq_lens[chunk_start:chunk_end] // self.compress_ratio,
+                        gather_lens=None,
+                        block_table=flashmla_metadata.block_table[num_decodes:][
+                            chunk_start:chunk_end
+                        ],
+                        block_size=flashmla_metadata.block_size // self.compress_ratio,
+                        offset=0,
+                    )
             dequantize_and_gather_k_cache(
                 kv_ws[:chunk_size],
                 self.swa_cache_layer.kv_cache,
@@ -456,7 +504,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
                 combined_lens,
                 False,  # enable_q_norm
                 0.0,  # rms_norm_eps
-                positions_int32[qs:qe],
+                positions[qs:qe],
                 *_ROPE_ARGS,
                 self.rotary_emb.cos_sin_cache,
                 self.n_wv_group,
