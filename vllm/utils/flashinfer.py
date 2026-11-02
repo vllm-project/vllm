@@ -29,6 +29,13 @@ from vllm.utils.torch_utils import PIN_MEMORY
 logger = init_logger(__name__)
 
 
+def is_flashinfer_autotuning() -> bool:
+    """Whether a FlashInfer autotune(True) context is active."""
+    from flashinfer.autotuner import AutoTuner
+
+    return AutoTuner.get().is_tuning_mode
+
+
 def flashinfer_bf16_mm(
     a: torch.Tensor,
     b: torch.Tensor,
@@ -162,6 +169,15 @@ def has_flashinfer_bf16_gemm() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and callable(getattr(mod, "mm_bf16", None))
+
+
+@functools.cache
+def has_flashinfer_concat_mla_kv_quant_fp8() -> bool:
+    """Return whether FlashInfer exposes the MLA K/V pack + fp8 cast API."""
+    if not has_flashinfer():
+        return False
+    mod = _get_submodule("flashinfer")
+    return mod is not None and callable(getattr(mod, "concat_mla_kv_quant_fp8", None))
 
 
 @functools.cache
@@ -1192,7 +1208,8 @@ def flashinfer_scaled_fp8_mm(
         scale_a,
         scale_b,
         out_dtype,
-        "auto",
+        # Autotuned "auto" can switch backends between M buckets.
+        "cutlass" if envs.VLLM_BATCH_INVARIANT else "auto",
     ).view(a.shape[0], b.shape[1])
 
     if bias is not None:
@@ -1301,7 +1318,9 @@ def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
 __all__ = [
     "has_flashinfer",
     "flashinfer_bf16_mm",
+    "is_flashinfer_autotuning",
     "has_flashinfer_bf16_gemm",
+    "has_flashinfer_concat_mla_kv_quant_fp8",
     "is_flashinfer_bf16_gemm_supported",
     "is_flashinfer_cutedsl_bf16_gemm_supported",
     "flashinfer_trtllm_fp8_block_scale_moe",
