@@ -210,8 +210,11 @@ def test_v2_load_model_builds_state_through_runner_hook(monkeypatch, override):
     )
     monkeypatch.setattr(mrv2, "init_model_state", factory)
 
+    encoder_cache = object()
     runner_cls = CustomStateRunner if override else mrv2.GPUModelRunner
-    runner = _make_runner(runner_cls, is_last_pp_rank=False)
+    runner = _make_runner(
+        runner_cls, is_last_pp_rank=False, encoder_cache=encoder_cache
+    )
     runner.load_model()
 
     if override:
@@ -219,7 +222,9 @@ def test_v2_load_model_builds_state_through_runner_hook(monkeypatch, override):
         assert factory_calls == []
     else:
         assert runner.model_state is default_state
-        assert factory_calls == [(runner.vllm_config, model, None, runner.device)]
+        assert factory_calls == [
+            (runner.vllm_config, model, encoder_cache, runner.device)
+        ]
 
 
 def test_v2_setup_eplb_from_mapping_updates_state_in_place():
