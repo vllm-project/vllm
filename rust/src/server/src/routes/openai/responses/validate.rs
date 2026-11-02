@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use super::types::{ResponseToolChoice, ResponsesRequest};
+use super::types::ResponsesRequest;
 use crate::error::{ApiError, bail_invalid_request};
 
 /// Enforce the compatibility contract of the Rust Responses API frontend.
@@ -44,25 +44,6 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         bail_invalid_request!(param = "prompt", "prompt template is not supported");
     }
 
-    if let Some(ResponseToolChoice::Mode(mode)) = &request.tool_choice
-        && !matches!(mode.as_str(), "none" | "auto" | "required")
-    {
-        bail_invalid_request!(
-            param = "tool_choice",
-            "tool_choice string form must be one of 'none', 'auto', or 'required'; \
-             got '{mode}'."
-        );
-    }
-
-    if let Some(truncation) = &request.truncation
-        && !matches!(truncation.as_str(), "auto" | "disabled")
-    {
-        bail_invalid_request!(
-            param = "truncation",
-            "truncation must be 'auto' or 'disabled'; got '{truncation}'."
-        );
-    }
-
     if let Some(metadata) = &request.metadata
         && (metadata.len() > 16
             || metadata
@@ -73,12 +54,6 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
             param = "metadata",
             "metadata supports at most 16 pairs, with keys up to 64 characters and values up to 512 characters"
         );
-    }
-
-    if let Some(tier) = request.service_tier.as_deref()
-        && !matches!(tier, "auto" | "default" | "flex" | "scale" | "priority")
-    {
-        bail_invalid_request!(param = "service_tier", "unknown service_tier '{tier}'");
     }
 
     if let Some(include) = &request.include
@@ -99,25 +74,6 @@ pub(super) fn validate_request_compat(request: &ResponsesRequest) -> Result<(), 
         );
     }
 
-    if let Some(summary) =
-        request.reasoning.as_ref().and_then(|reasoning| reasoning.summary.as_deref())
-        && !matches!(summary, "auto" | "concise" | "detailed")
-    {
-        bail_invalid_request!(
-            param = "reasoning.summary",
-            "unknown reasoning.summary '{summary}'"
-        );
-    }
-
-    if let Some(verbosity) = request.text.as_ref().and_then(|text| text.verbosity.as_deref())
-        && !matches!(verbosity, "low" | "medium" | "high")
-    {
-        bail_invalid_request!(
-            param = "text.verbosity",
-            "unknown text.verbosity '{verbosity}'"
-        );
-    }
-
     Ok(())
 }
 
@@ -128,7 +84,6 @@ mod tests {
     use super::*;
     fn base_request() -> ResponsesRequest {
         serde_json::from_value(json!({
-            "model": "test-model",
             "input": "hello",
         }))
         .unwrap()
@@ -153,8 +108,7 @@ mod tests {
 
     #[test]
     fn store_true_without_background_is_accepted() {
-        let mut request = base_request();
-        request.store = Some(true);
+        let request = serde_json::from_value(json!({"input": "hello", "store": true})).unwrap();
         assert!(validate_request_compat(&request).is_ok());
     }
 
@@ -164,29 +118,6 @@ mod tests {
         request.prompt = Some(json!({"id": "ptmpl"}));
         let error = validate_request_compat(&request).unwrap_err();
         assert!(matches!(error, ApiError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn unknown_tool_choice_mode_is_rejected() {
-        let mut request = base_request();
-        request.tool_choice = Some(ResponseToolChoice::Mode("sometimes".to_string()));
-        let error = validate_request_compat(&request).unwrap_err();
-        assert!(matches!(error, ApiError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn unknown_truncation_value_is_rejected() {
-        let mut request = base_request();
-        request.truncation = Some("maybe".to_string());
-        let error = validate_request_compat(&request).unwrap_err();
-        assert!(matches!(error, ApiError::InvalidRequest { .. }));
-    }
-
-    #[test]
-    fn auto_truncation_is_accepted() {
-        let mut request = base_request();
-        request.truncation = Some("auto".to_string());
-        assert!(validate_request_compat(&request).is_ok());
     }
 
     #[test]
@@ -217,7 +148,6 @@ mod tests {
     #[test]
     fn output_presentation_controls_are_accepted_for_compatibility() {
         let request = serde_json::from_value(json!({
-            "model": "test-model",
             "input": "hello",
             "include": ["reasoning.encrypted_content"],
             "reasoning": {"summary": "concise"},

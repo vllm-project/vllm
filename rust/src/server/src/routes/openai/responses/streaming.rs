@@ -10,7 +10,10 @@
 //! deliberate improvement: item IDs stay consistent between streamed events
 //! and the terminal response payload.
 
-use serde_json::{Map, Value};
+use std::sync::Arc;
+
+use serde::Serialize;
+use serde_json::Value;
 use uuid::Uuid;
 use vllm_chat::{
     AssistantBlockKind, AssistantContentBlock, AssistantMessage, AssistantToolCall, ChatEvent,
@@ -19,53 +22,146 @@ use vllm_chat::{
 
 use super::convert::build_output_items;
 use super::types::{
-    AssistantRole, ResponseItemStatus, ResponseOutputContentPart, ResponseOutputItem, TextPart,
+    AssistantRole, ResponseItemStatus, ResponseOutputContentPart, ResponseOutputItem,
+    ResponsesResponse, TextPart,
 };
 
-/// One Responses API SSE event.
+/// One Responses API SSE event payload.
 ///
-/// The flat wire shape carries `type` and `sequence_number` next to the
-/// event-specific payload (`response`, `item`, `part`, ...), matching how the
-/// Python frontend serializes its typed SDK events. `sequence_number` is
-/// assigned centrally by the SSE encoder for all events of one request.
-#[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ResponseStreamEvent {
-    /// The wire `type` string (e.g. `response.output_text.delta`).
-    event_type: &'static str,
-    /// Event-specific payload fields, serialized flat after `type`.
-    payload: Map<String, Value>,
+/// The wire `type` comes from [`Self::event_type`], which also names the SSE
+/// `event:` line, so it is added by [`SequencedEvent`] rather than repeated
+/// as a serde tag.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub(crate) enum ResponseStreamEvent {
+    Created {
+        response: Arc<ResponsesResponse>,
+    },
+    InProgress {
+        response: Arc<ResponsesResponse>,
+    },
+    Completed {
+        response: Arc<ResponsesResponse>,
+    },
+    Incomplete {
+        response: Arc<ResponsesResponse>,
+    },
+    Failed {
+        response: Arc<ResponsesResponse>,
+    },
+    OutputItemAdded {
+        output_index: u32,
+        item: ResponseOutputItem,
+    },
+    OutputItemDone {
+        output_index: u32,
+        item: ResponseOutputItem,
+    },
+    ContentPartAdded {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        part: ResponseStreamPart,
+    },
+    ContentPartDone {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        part: ResponseStreamPart,
+    },
+    OutputTextDelta {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        delta: String,
+        /// TODO: populated when output logprobs are implemented.
+        logprobs: Vec<Value>,
+    },
+    OutputTextDone {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        text: String,
+        /// TODO: populated when output logprobs are implemented.
+        logprobs: Vec<Value>,
+    },
+    ReasoningTextDelta {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        delta: String,
+    },
+    ReasoningTextDone {
+        item_id: String,
+        output_index: u32,
+        content_index: u32,
+        text: String,
+    },
+    FunctionCallArgumentsDelta {
+        item_id: String,
+        output_index: u32,
+        delta: String,
+    },
+    FunctionCallArgumentsDone {
+        item_id: String,
+        output_index: u32,
+        name: String,
+        arguments: String,
+    },
 }
 
 impl ResponseStreamEvent {
-    /// Return the wire event type (used for the SSE `event:` line).
+    /// Return the wire event type (used for `type` and the SSE `event:` line).
     pub(crate) fn event_type(&self) -> &'static str {
-        self.event_type
-    }
-
-    /// Serialize the full wire payload including `type` and the assigned
-    /// sequence number.
-    pub(crate) fn into_json(mut self, sequence_number: u64) -> String {
-        self.payload.insert(
-            "type".to_string(),
-            Value::String(self.event_type.to_string()),
-        );
-        self.payload.insert("sequence_number".to_string(), Value::from(sequence_number));
-        serde_json::to_string(&Value::Object(self.payload))
-            .expect("stream event payload must serialize to JSON")
+        match self {
+            Self::Created { .. } => "response.created",
+            Self::InProgress { .. } => "response.in_progress",
+            Self::Completed { .. } => "response.completed",
+            Self::Incomplete { .. } => "response.incomplete",
+            Self::Failed { .. } => "response.failed",
+            Self::OutputItemAdded { .. } => "response.output_item.added",
+            Self::OutputItemDone { .. } => "response.output_item.done",
+            Self::ContentPartAdded { .. } => "response.content_part.added",
+            Self::ContentPartDone { .. } => "response.content_part.done",
+            Self::OutputTextDelta { .. } => "response.output_text.delta",
+            Self::OutputTextDone { .. } => "response.output_text.done",
+            Self::ReasoningTextDelta { .. } => "response.reasoning_text.delta",
+            Self::ReasoningTextDone { .. } => "response.reasoning_text.done",
+            Self::FunctionCallArgumentsDelta { .. } => "response.function_call_arguments.delta",
+            Self::FunctionCallArgumentsDone { .. } => "response.function_call_arguments.done",
+        }
     }
 }
 
-/// Build one lifecycle event (`response.created`, `response.in_progress`,
-/// `response.completed`, `response.incomplete`, `response.failed`).
-pub(crate) fn response_lifecycle_event(
+/// Wire form of one event: `type` and `sequence_number` next to the payload,
+/// matching how the Python frontend serializes its typed SDK events.
+/// `sequence_number` is assigned centrally by the SSE encoder for all events
+/// of one request.
+#[derive(Debug, Serialize)]
+pub(crate) struct SequencedEvent<'a> {
+    #[serde(rename = "type")]
     event_type: &'static str,
-    response: &super::types::ResponsesResponse,
-) -> ResponseStreamEvent {
-    let response = serde_json::to_value(response).expect("response must serialize to JSON");
-    ResponseStreamEvent {
-        event_type,
-        payload: Map::from_iter([("response".to_string(), response)]),
+    sequence_number: u64,
+    #[serde(flatten)]
+    event: &'a ResponseStreamEvent,
+}
+
+impl<'a> SequencedEvent<'a> {
+    pub(crate) fn new(event: &'a ResponseStreamEvent, sequence_number: u64) -> Self {
+        Self {
+            event_type: event.event_type(),
+            sequence_number,
+            event,
+        }
     }
+}
+
+/// Content part carried by `response.content_part.*` events.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(untagged)]
+pub(crate) enum ResponseStreamPart {
+    Output(ResponseOutputContentPart),
+    Reasoning(TextPart),
 }
 
 /// State machine that maps one `vllm-chat` event stream onto Responses API
@@ -175,12 +271,12 @@ impl OutputItemStreamer {
         };
         if let Some(position) = events
             .iter()
-            .position(|event| event.event_type() == "response.output_item.added")
-            && let Some((index, item)) = self.pending_item.take()
+            .position(|event| matches!(event, ResponseStreamEvent::OutputItemAdded { .. }))
+            && let Some((output_index, item)) = self.pending_item.take()
         {
             events.insert(
                 position,
-                output_item_event("response.output_item.done", index, item),
+                ResponseStreamEvent::OutputItemDone { output_index, item },
             );
         }
         events
@@ -193,14 +289,14 @@ impl OutputItemStreamer {
         finish_reason: Option<&FinishReason>,
     ) -> Vec<ResponseStreamEvent> {
         let mut events = self.close_current(None);
-        if let Some((index, mut item)) = self.pending_item.take() {
+        if let Some((output_index, mut item)) = self.pending_item.take() {
             if matches!(finish_reason, Some(FinishReason::Length)) {
                 item.mark_incomplete();
                 if let Some(last) = self.completed_items.last_mut() {
                     last.mark_incomplete();
                 }
             }
-            events.push(output_item_event("response.output_item.done", index, item));
+            events.push(ResponseStreamEvent::OutputItemDone { output_index, item });
         }
         events
     }
@@ -266,16 +362,13 @@ impl OutputItemStreamer {
             text: String::new(),
         });
         vec![
-            output_item_event("response.output_item.added", output_index, item),
-            part_event(
-                "response.content_part.added",
+            ResponseStreamEvent::OutputItemAdded { output_index, item },
+            ResponseStreamEvent::ContentPartAdded {
+                item_id,
                 output_index,
-                &item_id,
-                [(
-                    "part",
-                    serde_json::json!({"type": "reasoning_text", "text": ""}),
-                )],
-            ),
+                content_index: 0,
+                part: ResponseStreamPart::Reasoning(TextPart::reasoning_text(String::new())),
+            },
         ]
     }
 
@@ -297,8 +390,17 @@ impl OutputItemStreamer {
             text: String::new(),
         });
         vec![
-            output_item_event("response.output_item.added", output_index, item),
-            content_part_added(output_index, &item_id),
+            ResponseStreamEvent::OutputItemAdded { output_index, item },
+            ResponseStreamEvent::ContentPartAdded {
+                item_id,
+                output_index,
+                content_index: 0,
+                part: ResponseStreamPart::Output(ResponseOutputContentPart::OutputText {
+                    text: String::new(),
+                    annotations: vec![],
+                    logprobs: Some(vec![]),
+                }),
+            },
         ]
     }
 
@@ -321,7 +423,7 @@ impl OutputItemStreamer {
             arguments: String::new(),
             status: Some(ResponseItemStatus::InProgress),
         };
-        output_item_event("response.output_item.added", output_index, item)
+        ResponseStreamEvent::OutputItemAdded { output_index, item }
     }
 
     fn reasoning_delta(&mut self, delta: String) -> ResponseStreamEvent {
@@ -329,12 +431,12 @@ impl OutputItemStreamer {
             unreachable!("reasoning delta requires an open reasoning item");
         };
         text.push_str(&delta);
-        part_event(
-            "response.reasoning_text.delta",
-            self.output_index,
-            item_id,
-            [("delta", Value::String(delta))],
-        )
+        ResponseStreamEvent::ReasoningTextDelta {
+            item_id: item_id.clone(),
+            output_index: self.output_index,
+            content_index: 0,
+            delta,
+        }
     }
 
     fn text_delta(&mut self, delta: String) -> ResponseStreamEvent {
@@ -342,15 +444,13 @@ impl OutputItemStreamer {
             unreachable!("text delta requires an open message item");
         };
         text.push_str(&delta);
-        part_event(
-            "response.output_text.delta",
-            self.output_index,
-            item_id,
-            [
-                ("delta", Value::String(delta)),
-                ("logprobs", Value::Array(vec![])),
-            ],
-        )
+        ResponseStreamEvent::OutputTextDelta {
+            item_id: item_id.clone(),
+            output_index: self.output_index,
+            content_index: 0,
+            delta,
+            logprobs: vec![],
+        }
     }
 
     fn function_call_delta(&mut self, delta: String) -> ResponseStreamEvent {
@@ -365,12 +465,11 @@ impl OutputItemStreamer {
         };
         arguments.push_str(&delta);
         *saw_delta = true;
-        part_event(
-            "response.function_call_arguments.delta",
-            self.output_index,
-            item_id,
-            [("delta", Value::String(delta))],
-        )
+        ResponseStreamEvent::FunctionCallArgumentsDelta {
+            item_id: item_id.clone(),
+            output_index: self.output_index,
+            delta,
+        }
     }
 
     /// Close the current item, emitting the done event sequence.
@@ -396,21 +495,18 @@ impl OutputItemStreamer {
                 };
                 (
                     vec![
-                        part_event(
-                            "response.reasoning_text.done",
+                        ResponseStreamEvent::ReasoningTextDone {
+                            item_id: item_id.clone(),
                             output_index,
-                            &item_id,
-                            [("text", Value::String(text))],
-                        ),
-                        part_event(
-                            "response.content_part.done",
+                            content_index: 0,
+                            text,
+                        },
+                        ResponseStreamEvent::ContentPartDone {
+                            item_id,
                             output_index,
-                            &item_id,
-                            [(
-                                "part",
-                                serde_json::to_value(part).expect("part must serialize"),
-                            )],
-                        ),
+                            content_index: 0,
+                            part: ResponseStreamPart::Reasoning(part),
+                        },
                     ],
                     item,
                 )
@@ -429,24 +525,19 @@ impl OutputItemStreamer {
                 };
                 (
                     vec![
-                        part_event(
-                            "response.output_text.done",
+                        ResponseStreamEvent::OutputTextDone {
+                            item_id: item_id.clone(),
                             output_index,
-                            &item_id,
-                            [
-                                ("text", Value::String(text)),
-                                ("logprobs", Value::Array(vec![])),
-                            ],
-                        ),
-                        part_event(
-                            "response.content_part.done",
+                            content_index: 0,
+                            text,
+                            logprobs: vec![],
+                        },
+                        ResponseStreamEvent::ContentPartDone {
+                            item_id,
                             output_index,
-                            &item_id,
-                            [(
-                                "part",
-                                serde_json::to_value(&part).expect("part must serialize"),
-                            )],
-                        ),
+                            content_index: 0,
+                            part: ResponseStreamPart::Output(part),
+                        },
                     ],
                     item,
                 )
@@ -462,15 +553,12 @@ impl OutputItemStreamer {
                     Some(call) => (call.id.clone(), call.name.clone(), call.arguments.clone()),
                     None => (call_id, name, arguments),
                 };
-                let events = vec![part_event(
-                    "response.function_call_arguments.done",
+                let events = vec![ResponseStreamEvent::FunctionCallArgumentsDone {
+                    item_id: item_id.clone(),
                     output_index,
-                    &item_id,
-                    [
-                        ("arguments", Value::String(arguments.clone())),
-                        ("name", Value::String(name.clone())),
-                    ],
-                )];
+                    name: name.clone(),
+                    arguments: arguments.clone(),
+                }];
                 let item = ResponseOutputItem::FunctionCall {
                     id: item_id,
                     call_id,
@@ -528,61 +616,6 @@ fn block_text(block: &AssistantContentBlock) -> Option<&str> {
     }
 }
 
-/// Build one `response.output_item.added`/`response.output_item.done` event.
-fn output_item_event(
-    event_type: &'static str,
-    output_index: u32,
-    item: ResponseOutputItem,
-) -> ResponseStreamEvent {
-    let item = serde_json::to_value(item).expect("output item must serialize to JSON");
-    ResponseStreamEvent {
-        event_type,
-        payload: Map::from_iter([
-            ("output_index".to_string(), Value::from(output_index)),
-            ("item".to_string(), item),
-        ]),
-    }
-}
-
-/// Build one `response.content_part.added` event.
-fn content_part_added(output_index: u32, item_id: &str) -> ResponseStreamEvent {
-    part_event(
-        "response.content_part.added",
-        output_index,
-        item_id,
-        [(
-            "part",
-            serde_json::json!({
-                "type": "output_text",
-                "text": "",
-                "annotations": [],
-                "logprobs": [],
-            }),
-        )],
-    )
-}
-
-/// Build one part-scoped event carrying the shared
-/// `item_id`/`output_index`/`content_index` frame.
-fn part_event<const N: usize>(
-    event_type: &'static str,
-    output_index: u32,
-    item_id: &str,
-    payload: [(&str, Value); N],
-) -> ResponseStreamEvent {
-    let mut fields = Map::with_capacity(N + 3);
-    fields.insert("item_id".to_string(), Value::String(item_id.to_string()));
-    fields.insert("output_index".to_string(), Value::from(output_index));
-    fields.insert("content_index".to_string(), Value::from(0u32));
-    for (key, value) in payload {
-        fields.insert(key.to_string(), value);
-    }
-    ResponseStreamEvent {
-        event_type,
-        payload: fields,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use serde_json::Value;
@@ -608,8 +641,8 @@ mod tests {
         });
         events.extend(streamer.on_stream_end(Some(&FinishReason::Stop(None))));
         let payloads: Vec<Value> = events
-            .into_iter()
-            .map(|event| serde_json::from_str(&event.into_json(0)).unwrap())
+            .iter()
+            .map(|event| serde_json::to_value(SequencedEvent::new(event, 0)).unwrap())
             .collect();
 
         assert_eq!(payloads[0]["type"], "response.function_call_arguments.done");

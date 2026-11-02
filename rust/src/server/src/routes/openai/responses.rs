@@ -32,8 +32,8 @@ use tracing_futures::Instrument as _;
 use vllm_chat::{ChatEvent, ChatEventStreamTrait, ChatTokenUsage, FinishReason};
 
 use self::convert::{ResponseMeta, build_response, build_usage, prepare_responses_request};
-use self::streaming::{OutputItemStreamer, ResponseStreamEvent, response_lifecycle_event};
-use self::types::{ResponseError, ResponseItemStatus, ResponsesRequest};
+use self::streaming::{OutputItemStreamer, ResponseStreamEvent, SequencedEvent};
+use self::types::{ResponseError, ResponseItemStatus, ResponsesRequest, ResponsesResponse};
 use crate::error::{ApiError, chat_submit_error, invalid_request, text_submit_error};
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::state::AppState;
@@ -152,7 +152,7 @@ async fn responses_event_stream(
 ) -> Result<(), Infallible> {
     let mut items = OutputItemStreamer::new(meta.include_reasoning);
 
-    let initial = build_response(
+    let initial = Arc::new(build_response(
         &meta,
         &request_id,
         created_at,
@@ -161,9 +161,12 @@ async fn responses_event_stream(
         None,
         None,
         None,
-    );
-    y.yield_ok(response_lifecycle_event("response.created", &initial)).await;
-    y.yield_ok(response_lifecycle_event("response.in_progress", &initial)).await;
+    ));
+    y.yield_ok(ResponseStreamEvent::Created {
+        response: Arc::clone(&initial),
+    })
+    .await;
+    y.yield_ok(ResponseStreamEvent::InProgress { response: initial }).await;
 
     let mut terminal: Option<TerminalOutput> = None;
     while let Some(next) = stream.next().await {
@@ -260,25 +263,24 @@ async fn responses_event_stream(
         kv_transfer_params,
         ec_transfer_params,
     );
-    y.yield_ok(response_lifecycle_event(
-        terminal_event_type(&finish_reason),
-        &final_response,
-    ))
-    .await;
+    y.yield_ok(terminal_event(&finish_reason, Arc::new(final_response))).await;
     Ok(())
 }
 
-/// Return the Responses lifecycle event associated with a terminal finish.
-fn terminal_event_type(finish_reason: &FinishReason) -> &'static str {
+/// Build the Responses lifecycle event associated with a terminal finish.
+fn terminal_event(
+    finish_reason: &FinishReason,
+    response: Arc<ResponsesResponse>,
+) -> ResponseStreamEvent {
     match finish_reason {
-        FinishReason::Length => "response.incomplete",
+        FinishReason::Length => ResponseStreamEvent::Incomplete { response },
         // The Responses streaming API exposes no `response.cancelled` event.
         // Preserve the cancellation outcome on the response object itself.
         FinishReason::Abort | FinishReason::Stop(_) | FinishReason::Repetition(_) => {
-            "response.completed"
+            ResponseStreamEvent::Completed { response }
         }
         // Error finishes are emitted above with an error payload.
-        FinishReason::Error(_) => "response.failed",
+        FinishReason::Error(_) => ResponseStreamEvent::Failed { response },
     }
 }
 
@@ -306,7 +308,10 @@ async fn emit_failed(
         code: "server_error".to_string(),
         message: message.to_string(),
     });
-    y.yield_ok(response_lifecycle_event("response.failed", &failed)).await;
+    y.yield_ok(ResponseStreamEvent::Failed {
+        response: Arc::new(failed),
+    })
+    .await;
 }
 
 /// Convert Responses API SSE events into transport-level SSE events,
@@ -324,10 +329,12 @@ async fn responses_sse_stream(
             Ok(event) => event,
             Err(error) => match error {},
         };
-        let event_type = event.event_type();
-        let data = event.into_json(sequence);
-        trace!(payload = %data, "responses emitting event");
-        y.yield_ok(Event::default().event(event_type).data(data)).await;
+        trace!(?event, "responses emitting event");
+        let sse_event = Event::default()
+            .event(event.event_type())
+            .json_data(SequencedEvent::new(&event, sequence))
+            .expect("Responses stream event must serialize to JSON");
+        y.yield_ok(sse_event).await;
         sequence += 1;
     }
     Ok(())

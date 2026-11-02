@@ -11,6 +11,7 @@
 //! single assistant chat message, and function-call output items become
 //! tool-response messages.
 
+use itertools::Itertools as _;
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::warn;
@@ -25,10 +26,11 @@ use vllm_text::output::TextDecodeOptions;
 
 use super::types::{
     AssistantRole, IncompleteDetails, InputTokensDetails, OutputTokensDetails,
-    ResponseInputContentPart, ResponseInputItem, ResponseInputReasoning, ResponseItemStatus,
-    ResponseMessageContent, ResponseObject, ResponseOutputContentPart, ResponseOutputItem,
-    ResponseTextConfig, ResponseTextFormat, ResponseUsage, ResponsesInput, ResponsesReasoning,
-    ResponsesRequest, ResponsesResponse, TextPart,
+    ResponseInputContentPart, ResponseInputItem, ResponseInputReasoning, ResponseInputRole,
+    ResponseItemStatus, ResponseMessageContent, ResponseObject, ResponseOutputContentPart,
+    ResponseOutputItem, ResponseTextConfig, ResponseTextFormat, ResponseToolChoice,
+    ResponseToolChoiceObject, ResponseTruncation, ResponseUsage, ResponsesInput,
+    ResponsesReasoning, ResponsesRequest, ResponsesResponse, ResponsesTool, ServiceTier, TextPart,
 };
 use super::validate;
 use crate::error::{ApiError, bail_invalid_request};
@@ -37,7 +39,9 @@ use crate::routes::openai::utils::resolve_generation_prompt_truncation;
 use crate::routes::openai::utils::structured_outputs::{
     JsonSchemaFormat, ResponseFormat, convert_from_response_format,
 };
-use crate::routes::openai::utils::types::ReasoningEffort;
+use crate::routes::openai::utils::types::{
+    FunctionChoice, ReasoningEffort, ToolChoiceValue, ToolReference,
+};
 use crate::utils::{
     ResolvedRequestContext, convert_logit_bias, merge_ec_transfer_params, merge_kv_transfer_params,
     resolve_session_id,
@@ -50,19 +54,19 @@ pub(crate) struct ResponseMeta {
     pub model: String,
     pub instructions: Option<String>,
     pub metadata: Option<std::collections::HashMap<String, String>>,
-    pub tools: Vec<Value>,
-    pub tool_choice: Value,
+    pub tools: Vec<ResponsesTool>,
+    pub tool_choice: ResponseToolChoice,
     pub parallel_tool_calls: bool,
     pub max_output_tokens: Option<u32>,
     pub max_tool_calls: Option<u32>,
     pub previous_response_id: Option<String>,
     pub reasoning: Option<ResponsesReasoning>,
-    pub service_tier: String,
+    pub service_tier: ServiceTier,
     pub temperature: f32,
     pub top_p: f32,
     pub top_logprobs: Option<i32>,
     pub text: Option<ResponseTextConfig>,
-    pub truncation: String,
+    pub truncation: ResponseTruncation,
     pub user: Option<String>,
     pub presence_penalty: Option<f32>,
     pub frequency_penalty: Option<f32>,
@@ -106,7 +110,6 @@ pub(crate) fn prepare_responses_request(
         reasoning,
         include_reasoning,
         service_tier,
-        store: _,
         background: _,
         stream,
         temperature,
@@ -149,7 +152,10 @@ pub(crate) fn prepare_responses_request(
         GenerationPromptMode::StartNewAssistant
     };
 
-    let converted_tools = convert_tools(&tools)?;
+    let converted_tools = tools
+        .iter()
+        .map(|ResponsesTool::Function(function)| ChatTool::from(function.clone()))
+        .collect::<Vec<_>>();
     let requested_tool_choice = normalize_tool_choice(tool_choice, converted_tools.is_empty())?;
     let tool_context = ResolvedToolContext::new(
         &messages,
@@ -227,7 +233,8 @@ pub(crate) fn prepare_responses_request(
         })?;
 
     let session_id = resolve_session_id(&ctx, session_id.as_deref(), vllm_xargs.as_ref());
-    let prompt_truncation = response_prompt_truncation(truncation.as_deref())?;
+    let truncation = truncation.unwrap_or_default();
+    let prompt_truncation = response_prompt_truncation(truncation)?;
 
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
@@ -302,12 +309,12 @@ pub(crate) fn prepare_responses_request(
         max_tool_calls,
         previous_response_id,
         reasoning,
-        service_tier: service_tier.unwrap_or_else(|| "auto".to_string()),
+        service_tier: service_tier.unwrap_or_default(),
         temperature: temperature.unwrap_or(1.0),
         top_p: top_p.unwrap_or(1.0),
         top_logprobs,
         text,
-        truncation: truncation.unwrap_or_else(|| "disabled".to_string()),
+        truncation,
         user,
         presence_penalty,
         frequency_penalty,
@@ -326,9 +333,9 @@ pub(crate) fn prepare_responses_request(
 /// `auto` retains the newest prompt tokens that fit after output-token
 /// reservation, matching the Python Responses frontend.
 fn response_prompt_truncation(
-    truncation: Option<&str>,
+    truncation: ResponseTruncation,
 ) -> Result<Option<vllm_text::PromptTruncation>, ApiError> {
-    if truncation != Some("auto") {
+    if truncation == ResponseTruncation::Disabled {
         return Ok(None);
     }
 
@@ -340,94 +347,53 @@ fn response_prompt_truncation(
     })
 }
 
-/// Convert Responses API tools into internal chat tools.
-///
-/// Only `function` tools are supported; built-in tool types
-/// (`web_search_preview`, `code_interpreter`, `image_generation`, `mcp`, ...)
-/// are rejected because this frontend has no builtin-tool executor.
-fn convert_tools(tools: &[Value]) -> Result<Vec<ChatTool>, ApiError> {
-    tools
-        .iter()
-        .enumerate()
-        .map(|(index, tool)| {
-            let tool_type = tool.get("type").and_then(Value::as_str).unwrap_or_default();
-            if tool_type != "function" {
-                bail_invalid_request!(
-                    param = "tools",
-                    "Only function tools are supported by this frontend; got tool type \
-                     '{tool_type}' at index {index}."
-                );
-            }
-            serde_json::from_value(tool.clone()).map_err(|error| {
-                ApiError::invalid_request(
-                    format!("failed to parse function tool at index {index}: {error}"),
-                    Some("tools"),
-                )
-            })
-        })
-        .collect()
-}
-
 /// Resolve the requested tool choice, mirroring the Python
 /// `check_tool_usage` validator: without tools, `auto` is normalized to
 /// `none` and named function choices are errors; with tools, named choices
 /// must exist (enforced by
 /// [`ResolvedToolContext`]).
 fn normalize_tool_choice(
-    tool_choice: Option<super::types::ResponseToolChoice>,
+    tool_choice: Option<ResponseToolChoice>,
     tools_empty: bool,
 ) -> Result<Option<ChatToolChoice>, ApiError> {
-    use super::types::ResponseToolChoice as Choice;
-
-    match tool_choice {
-        None => Ok(None),
-        Some(Choice::Mode(mode)) => match mode.as_str() {
-            "none" => Ok(Some(ChatToolChoice::None)),
-            "auto" if tools_empty => Ok(Some(ChatToolChoice::None)),
-            "auto" => Ok(Some(ChatToolChoice::Auto)),
-            "required" => Ok(Some(ChatToolChoice::Required)),
-            // Unreachable: unknown modes are rejected by
-            // validate_request_compat.
-            _ => unreachable!(),
-        },
-        Some(Choice::Object(value))
-            if value.get("type").and_then(Value::as_str) == Some("function") =>
-        {
+    let Some(tool_choice) = tool_choice else {
+        return Ok(None);
+    };
+    Ok(Some(match tool_choice {
+        ResponseToolChoice::Value(ToolChoiceValue::None) => ChatToolChoice::None,
+        ResponseToolChoice::Value(ToolChoiceValue::Auto) if tools_empty => ChatToolChoice::None,
+        ResponseToolChoice::Value(ToolChoiceValue::Auto) => ChatToolChoice::Auto,
+        ResponseToolChoice::Value(ToolChoiceValue::Required) => ChatToolChoice::Required,
+        ResponseToolChoice::Object(ResponseToolChoiceObject::Function(FunctionChoice { name })) => {
             if tools_empty {
                 bail_invalid_request!(
                     param = "tool_choice",
                     "Tool choice 'function' not found in 'tools' parameter."
                 );
             }
-            let Some(name) = value.get("name").and_then(Value::as_str) else {
-                bail_invalid_request!(
-                    param = "tool_choice",
-                    "Function tool choice requires a 'name' field."
-                );
-            };
-            Ok(Some(ChatToolChoice::Function {
-                name: name.to_string(),
-            }))
+            ChatToolChoice::Function { name }
         }
-        Some(Choice::Object(value)) => {
-            let tool_type = value.get("type").and_then(Value::as_str).unwrap_or("<missing type>");
+        ResponseToolChoice::Object(ResponseToolChoiceObject::AllowedTools { tools, .. }) => {
             bail_invalid_request!(
                 param = "tool_choice",
-                "Tool choice type '{tool_type}' is not supported by this frontend."
+                "allowed_tools tool_choice is not supported yet: {}.",
+                tools.iter().map(ToolReference::identifier).join(", ")
             );
         }
-    }
+    }))
 }
 
 /// Echoed tool choice in the response, after resolution: without tools the
 /// resolved choice is always `none` (Python parity).
-fn echo_tool_choice(tool_context: &ResolvedToolContext) -> Value {
+fn echo_tool_choice(tool_context: &ResolvedToolContext) -> ResponseToolChoice {
     match &tool_context.tool_choice {
-        ChatToolChoice::None => Value::String("none".to_string()),
-        ChatToolChoice::Auto => Value::String("auto".to_string()),
-        ChatToolChoice::Required => Value::String("required".to_string()),
+        ChatToolChoice::None => ResponseToolChoice::Value(ToolChoiceValue::None),
+        ChatToolChoice::Auto => ResponseToolChoice::Value(ToolChoiceValue::Auto),
+        ChatToolChoice::Required => ResponseToolChoice::Value(ToolChoiceValue::Required),
         ChatToolChoice::Function { name } => {
-            serde_json::json!({"type": "function", "name": name})
+            ResponseToolChoice::Object(ResponseToolChoiceObject::Function(FunctionChoice {
+                name: name.clone(),
+            }))
         }
     }
 }
@@ -459,21 +425,22 @@ fn convert_input(
     let continue_final = should_continue_final_message(&items);
 
     let mut assistant = AssistantTurn::default();
-    for (index, raw) in items.iter().enumerate() {
-        match parse_input_item(index, raw)? {
-            ResponseInputItem::Message(message) => match message.role.as_str() {
-                "system" | "developer" | "user" => {
+    for item in items {
+        match item {
+            ResponseInputItem::Message(message) => match message.role {
+                role @ (ResponseInputRole::System
+                | ResponseInputRole::Developer
+                | ResponseInputRole::User) => {
                     assistant.flush(&mut messages);
-                    let content =
-                        convert_content_parts(message.role.as_str(), message.content, true)?;
-                    messages.push(match message.role.as_str() {
-                        "system" => ChatMessage::system(content),
-                        "developer" => ChatMessage::developer(content, None),
+                    let content = convert_content_parts(message.content, true)?;
+                    messages.push(match role {
+                        ResponseInputRole::System => ChatMessage::system(content),
+                        ResponseInputRole::Developer => ChatMessage::developer(content, None),
                         _ => ChatMessage::user(content),
                     });
                 }
-                "assistant" => {
-                    let content = convert_content_parts("assistant", message.content, false)?;
+                ResponseInputRole::Assistant => {
+                    let content = convert_content_parts(message.content, false)?;
                     let text = content.try_flatten_to_text().map_err(|_| {
                         ApiError::invalid_request(
                             "assistant input items only support text content".to_string(),
@@ -481,12 +448,6 @@ fn convert_input(
                         )
                     })?;
                     assistant.push_text(&mut messages, text);
-                }
-                role => {
-                    bail_invalid_request!(
-                        param = "input",
-                        "unsupported role '{role}' in message input item"
-                    );
                 }
             },
             ResponseInputItem::FunctionCall(call) => {
@@ -515,6 +476,13 @@ fn convert_input(
                     assistant.push_reasoning(&mut messages, text);
                 }
             }
+            ResponseInputItem::ItemReference {} => {
+                bail_invalid_request!(
+                    param = "input",
+                    "item_reference input items require the Responses API store, which is \
+                     not supported by this frontend."
+                );
+            }
         }
     }
     assistant.flush(&mut messages);
@@ -531,63 +499,8 @@ fn convert_input(
     Ok((messages, continue_final))
 }
 
-/// Parse one raw input item value into a typed input item, inserting
-/// `type: "message"` when a message-shaped item omits it (mirroring the
-/// Python `input_item_parsing` model validator).
-fn parse_input_item(index: usize, raw: &Value) -> Result<ResponseInputItem, ApiError> {
-    let Some(object) = raw.as_object() else {
-        bail_invalid_request!(
-            param = "input",
-            "input item at index {index} must be an object"
-        );
-    };
-
-    let item_type = object.get("type").and_then(Value::as_str);
-    let effective_type = match (item_type, object.get("role").and_then(Value::as_str)) {
-        (None, Some(_)) => "message",
-        (item_type, _) => item_type.unwrap_or_default(),
-    };
-    match effective_type {
-        "message" | "function_call" | "function_call_output" | "reasoning" => {}
-        "item_reference" => {
-            bail_invalid_request!(
-                param = "input",
-                "item_reference input items require the Responses API store, which is \
-                 not supported by this frontend."
-            );
-        }
-        "" => {
-            bail_invalid_request!(
-                param = "input",
-                "input item at index {index} is missing required field 'type' (or 'role' \
-                 for message items)."
-            );
-        }
-        other => {
-            bail_invalid_request!(
-                param = "input",
-                "input item at index {index} has unsupported type '{other}'."
-            );
-        }
-    }
-
-    let mut value = raw.clone();
-    if item_type.is_none()
-        && let Some(object) = value.as_object_mut()
-    {
-        object.insert("type".to_string(), Value::String("message".to_string()));
-    }
-    serde_json::from_value(value).map_err(|error| {
-        ApiError::invalid_request(
-            format!("failed to parse input item at index {index}: {error}"),
-            Some("input"),
-        )
-    })
-}
-
 /// Convert message content into internal chat content.
 fn convert_content_parts(
-    role: &str,
     content: ResponseMessageContent,
     allow_multimodal: bool,
 ) -> Result<ChatContent, ApiError> {
@@ -614,7 +527,7 @@ fn convert_content_parts(
                         if !allow_multimodal {
                             bail_invalid_request!(
                                 param = "input",
-                                "input_image parts are not supported for role '{role}'."
+                                "input_image parts are not supported in assistant messages."
                             );
                         }
                         if file_id.is_some() {
@@ -640,7 +553,7 @@ fn convert_content_parts(
                         if !allow_multimodal {
                             bail_invalid_request!(
                                 param = "input",
-                                "input_audio parts are not supported for role '{role}'."
+                                "input_audio parts are not supported in assistant messages."
                             );
                         }
                         let Some(format) = input_audio.format else {
@@ -879,14 +792,14 @@ pub(crate) fn build_response(
         previous_response_id: meta.previous_response_id.clone(),
         prompt: None,
         reasoning: meta.reasoning.clone(),
-        service_tier: meta.service_tier.clone(),
+        service_tier: meta.service_tier,
         temperature: meta.temperature,
         text: meta.text.clone(),
         tool_choice: meta.tool_choice.clone(),
         tools: meta.tools.clone(),
         top_p: meta.top_p,
         top_logprobs: meta.top_logprobs,
-        truncation: meta.truncation.clone(),
+        truncation: meta.truncation,
         usage,
         user: meta.user.clone(),
         presence_penalty: meta.presence_penalty,
@@ -912,19 +825,18 @@ fn part_type_name(part: &ResponseInputContentPart) -> &'static str {
 /// reasoning item that generation should continue.
 ///
 /// Mirrors `should_continue_final_message` in the Python frontend.
-fn should_continue_final_message(items: &[Value]) -> bool {
-    let Some(last) = items.last() else {
-        return false;
+fn should_continue_final_message(items: &[ResponseInputItem]) -> bool {
+    let partial = |status: Option<ResponseItemStatus>| {
+        matches!(
+            status,
+            Some(ResponseItemStatus::InProgress | ResponseItemStatus::Incomplete)
+        )
     };
-    let status = last.get("status").and_then(Value::as_str);
-    if !matches!(status, Some("in_progress" | "incomplete")) {
-        return false;
-    }
-    match last.get("type").and_then(Value::as_str) {
-        Some("reasoning") => true,
-        Some("message") => last.get("role").and_then(Value::as_str) == Some("assistant"),
-        // Type-less items with a role are messages.
-        None => last.get("role").and_then(Value::as_str) == Some("assistant"),
+    match items.last() {
+        Some(ResponseInputItem::Reasoning(reasoning)) => partial(reasoning.status),
+        Some(ResponseInputItem::Message(message)) => {
+            message.role == ResponseInputRole::Assistant && partial(message.status)
+        }
         _ => false,
     }
 }
@@ -949,13 +861,13 @@ mod tests {
 
     #[test]
     fn responses_function_tool_defaults_parameters_to_null() {
-        let tools = convert_tools(&[json!({
+        let ResponsesTool::Function(function) = serde_json::from_value(json!({
             "type": "function",
             "name": "lookup",
-        })])
-        .expect("convert function tool");
+        }))
+        .expect("deserialize function tool");
 
-        assert_eq!(tools[0].parameters, Value::Null);
+        assert_eq!(ChatTool::from(function).parameters, Value::Null);
     }
 
     #[test]
@@ -979,9 +891,8 @@ mod tests {
 
     #[test]
     fn auto_truncation_uses_the_shared_input_budget_policy() {
-        assert!(response_prompt_truncation(Some("disabled")).unwrap().is_none());
-        assert!(response_prompt_truncation(None).unwrap().is_none());
-        assert!(response_prompt_truncation(Some("auto")).unwrap().is_some());
+        assert!(response_prompt_truncation(ResponseTruncation::Disabled).unwrap().is_none());
+        assert!(response_prompt_truncation(ResponseTruncation::Auto).unwrap().is_some());
     }
 
     #[test]
@@ -998,7 +909,7 @@ mod tests {
         .expect("deserialize Responses audio content");
 
         let converted =
-            convert_content_parts("user", content, true).expect("convert Responses audio content");
+            convert_content_parts(content, true).expect("convert Responses audio content");
         assert_eq!(
             converted,
             ChatContent::Parts(vec![ChatContentPart::InputAudio {

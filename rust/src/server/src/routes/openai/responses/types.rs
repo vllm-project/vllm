@@ -9,30 +9,61 @@
 //! frontend.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use crate::routes::openai::utils::types::{
-    InputAudio, ReasoningEffort, StringOrArray, default_true, deserialize_request_top_k,
+    Function, FunctionChoice, InputAudio, ReasoningEffort, StringOrArray, ToolChoiceValue,
+    ToolReference, default_true, deserialize_request_top_k,
 };
 use llm_multimodal::ImageDetail;
+use serde::de::{self, Deserializer, SeqAccess, Visitor};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use validator::Validate;
 
 /// Responses API `input` field: either a plain string (single user message)
 /// or a list of input/output items.
-///
-/// Items stay as raw JSON values at this layer so that conversion in
-/// `convert.rs` can normalize legacy shapes (e.g. type-less messages) and
-/// report precise per-item errors, mirroring the Python `input_item_parsing`
-/// validator.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(untagged)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ResponsesInput {
     /// Simple text input; rendered as one user message.
     Text(String),
     /// Ordered list of input/output items (messages, function calls,
     /// function call outputs, reasoning items, ...).
-    Items(Vec<Value>),
+    Items(Vec<ResponseInputItem>),
+}
+
+impl<'de> Deserialize<'de> for ResponsesInput {
+    /// Deserialize by JSON type rather than `#[serde(untagged)]`, which would
+    /// replace a precise per-item error with a generic one.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct InputVisitor;
+
+        impl<'de> Visitor<'de> for InputVisitor {
+            type Value = ResponsesInput;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a string or a list of input items")
+            }
+
+            fn visit_str<E: de::Error>(self, text: &str) -> Result<Self::Value, E> {
+                Ok(ResponsesInput::Text(text.to_owned()))
+            }
+
+            fn visit_string<E: de::Error>(self, text: String) -> Result<Self::Value, E> {
+                Ok(ResponsesInput::Text(text))
+            }
+
+            fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+                let mut items = Vec::with_capacity(seq.size_hint().unwrap_or_default());
+                while let Some(item) = seq.next_element()? {
+                    items.push(item);
+                }
+                Ok(ResponsesInput::Items(items))
+            }
+        }
+
+        deserializer.deserialize_any(InputVisitor)
+    }
 }
 
 /// Responses API reasoning configuration.
@@ -46,7 +77,16 @@ pub struct ResponsesReasoning {
     #[serde(default)]
     pub effort: Option<ReasoningEffort>,
     #[serde(default)]
-    pub summary: Option<String>,
+    pub summary: Option<ReasoningSummary>,
+}
+
+/// Responses API `reasoning.summary` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningSummary {
+    Auto,
+    Concise,
+    Detailed,
 }
 
 /// Responses API `text.format` variants.
@@ -80,32 +120,81 @@ pub struct ResponseTextConfig {
     #[serde(default)]
     pub format: Option<ResponseTextFormat>,
     #[serde(default)]
-    pub verbosity: Option<String>,
+    pub verbosity: Option<TextVerbosity>,
+}
+
+/// Responses API `text.verbosity` values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextVerbosity {
+    Low,
+    Medium,
+    High,
+}
+
+/// Responses API `truncation` strategy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseTruncation {
+    Auto,
+    #[default]
+    Disabled,
+}
+
+/// Responses API `service_tier` values. Python echoes the requested tier;
+/// it does not affect scheduling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceTier {
+    #[default]
+    Auto,
+    Default,
+    Flex,
+    Scale,
+    Priority,
+}
+
+/// One Responses API tool.
+///
+/// The function tool is the chat-completions [`Function`] flattened next to
+/// `type`. Built-in tool types (web search, code interpreter, MCP, ...) are
+/// rejected during deserialization because this frontend has no built-in
+/// tool executor.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponsesTool {
+    Function(Function),
 }
 
 /// Responses API `tool_choice` field.
 ///
-/// The string form covers `none`/`auto`/`required`; the object form is kept
-/// as raw JSON so `convert.rs` can distinguish supported
-/// (`{"type": "function", "name": ...}`) from unsupported object choices and
-/// report precise errors.
-///
-/// TODO: support `allowed_tools` object choices.
+/// Mirrors the chat-completions [`ToolChoice`](crate::routes::openai::utils::types::ToolChoice),
+/// except that object choices are flat: `{"type": "function", "name": ...}`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ResponseToolChoice {
     /// `none` / `auto` / `required`.
-    Mode(String),
-    /// Object form, e.g. `{"type": "function", "name": "..."}`.
-    Object(Value),
+    Value(ToolChoiceValue),
+    Object(ResponseToolChoiceObject),
+}
+
+/// Object form of [`ResponseToolChoice`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ResponseToolChoiceObject {
+    Function(FunctionChoice),
+    /// TODO: support `allowed_tools` tool choices.
+    AllowedTools {
+        mode: String,
+        tools: Vec<ToolReference>,
+    },
 }
 
 /// Responses API request body accepted by the Rust frontend.
 ///
-/// Mirrors the Python vLLM `ResponsesRequest` class; unsupported built-in
-/// tool types and store-dependent features are validated in
-/// `validate.rs`/`convert.rs` rather than at deserialization time so errors
-/// can carry the reporting `param`.
+/// Mirrors the Python vLLM `ResponsesRequest` class. Unknown tool,
+/// tool-choice, and input-item types fail deserialization; store-dependent
+/// features are validated in `validate.rs`/`convert.rs`.
 ///
 /// `background`, `store=true` retention, and `previous_response_id` require
 /// server-side state, which this stateless frontend does not provide; see
@@ -115,7 +204,7 @@ pub enum ResponseToolChoice {
 /// are accepted for Codex/Python compatibility, without generating encrypted
 /// state, summaries, or applying a verbosity policy. Other `include` values
 /// that this frontend cannot produce are rejected.
-#[derive(Debug, Clone, Deserialize, Serialize, Validate)]
+#[derive(Debug, Clone, Deserialize, Validate)]
 pub struct ResponsesRequest {
     /// The model ID served by this frontend. Optional; defaults to the
     /// served model when omitted.
@@ -126,11 +215,9 @@ pub struct ResponsesRequest {
     /// System-level instructions prepended to the conversation.
     #[serde(default)]
     pub instructions: Option<String>,
-    /// Function tools available to the model. Built-in tool types
-    /// (web search, code interpreter, MCP, ...) are not supported and are
-    /// rejected during conversion.
+    /// Function tools available to the model.
     #[serde(default)]
-    pub tools: Vec<Value>,
+    pub tools: Vec<ResponsesTool>,
     /// Tool selection behavior.
     #[serde(default)]
     pub tool_choice: Option<ResponseToolChoice>,
@@ -159,9 +246,7 @@ pub struct ResponsesRequest {
     #[serde(default = "default_true")]
     pub include_reasoning: bool,
     #[serde(default)]
-    pub service_tier: Option<String>,
-    #[serde(default)]
-    pub store: Option<bool>,
+    pub service_tier: Option<ServiceTier>,
     #[serde(default)]
     pub background: Option<bool>,
     #[serde(default)]
@@ -181,7 +266,7 @@ pub struct ResponsesRequest {
     #[serde(default)]
     pub text: Option<ResponseTextConfig>,
     #[serde(default)]
-    pub truncation: Option<String>,
+    pub truncation: Option<ResponseTruncation>,
     #[serde(default)]
     pub user: Option<String>,
     #[serde(default)]
@@ -234,44 +319,64 @@ pub struct ResponsesRequest {
 
 impl crate::routes::openai::utils::types::Normalizable for ResponsesRequest {}
 
-/// One typed input/output item, parsed from the raw JSON in
-/// [`ResponsesInput::Items`] during conversion.
+/// One typed input/output item of [`ResponsesInput::Items`].
 ///
 /// Variants cover the supported Responses API history surface: messages,
-/// function calls, function call outputs, and reasoning items. Item types
-/// requiring server-side state or unsupported modalities (`item_reference`,
-/// `custom_tool_call`, `mcp_call`, file inputs, ...) are rejected with
-/// explicit errors by the converter.
-#[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum ResponseInputItem {
+/// function calls, function call outputs, and reasoning items. Other item
+/// types (`custom_tool_call`, `mcp_call`, ...) fail deserialization;
+/// `item_reference` is kept to report that it requires the response store.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case", remote = "Self")]
+pub enum ResponseInputItem {
     /// Chat-style message item (`EasyInputMessageParam` or
-    /// `ResponseOutputMessage` shapes both land here; `convert.rs` inserts
-    /// `type: "message"` when absent, mirroring the Python validator).
+    /// `ResponseOutputMessage` shapes both land here).
     Message(ResponseInputMessage),
     FunctionCall(ResponseInputFunctionCall),
     FunctionCallOutput(ResponseInputFunctionCallOutput),
     Reasoning(ResponseInputReasoning),
+    ItemReference {},
+}
+
+impl<'de> Deserialize<'de> for ResponseInputItem {
+    /// Insert `type: "message"` when a message-shaped item omits it, mirroring
+    /// the Python `input_item_parsing` validator.
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let mut item = serde_json::Map::deserialize(deserializer)?;
+        if !item.contains_key("type") && item.contains_key("role") {
+            item.insert("type".to_owned(), Value::from("message"));
+        }
+        // Calls the derived (`remote = "Self"`) implementation.
+        ResponseInputItem::deserialize(Value::Object(item)).map_err(de::Error::custom)
+    }
+}
+
+/// Role of one message input item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResponseInputRole {
+    User,
+    System,
+    Developer,
+    Assistant,
 }
 
 /// One message-shaped input item.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(super) struct ResponseInputMessage {
-    pub role: String,
+pub struct ResponseInputMessage {
+    pub role: ResponseInputRole,
     pub content: ResponseMessageContent,
     /// `in_progress`/`incomplete` on the final assistant item requests a
     /// partial-completion continuation (see `should_continue_final_message`
     /// in the Python frontend).
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<ResponseItemStatus>,
 }
 
 /// Message content: either a plain string or a list of typed parts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
-pub(super) enum ResponseMessageContent {
+pub enum ResponseMessageContent {
     Text(String),
     Parts(Vec<ResponseInputContentPart>),
 }
@@ -284,7 +389,7 @@ pub(super) enum ResponseMessageContent {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub(super) enum ResponseInputContentPart {
+pub enum ResponseInputContentPart {
     InputText {
         text: String,
     },
@@ -316,26 +421,26 @@ pub(super) enum ResponseInputContentPart {
 /// One `function_call` input item (assistant tool invocation in history).
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(super) struct ResponseInputFunctionCall {
+pub struct ResponseInputFunctionCall {
     pub call_id: String,
     pub name: String,
     pub arguments: String,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<ResponseItemStatus>,
 }
 
 /// One `function_call_output` input item (tool result in history).
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(super) struct ResponseInputFunctionCallOutput {
+pub struct ResponseInputFunctionCallOutput {
     pub call_id: String,
     pub output: ResponseMessageContent,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<ResponseItemStatus>,
 }
 
 /// One `reasoning` input item (assistant reasoning in history).
@@ -346,7 +451,7 @@ pub(super) struct ResponseInputFunctionCallOutput {
 /// rejected.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(super) struct ResponseInputReasoning {
+pub struct ResponseInputReasoning {
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -356,7 +461,7 @@ pub(super) struct ResponseInputReasoning {
     #[serde(default)]
     pub encrypted_content: Option<String>,
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<ResponseItemStatus>,
 }
 
 /// One plain-text part used by reasoning items.
@@ -403,9 +508,11 @@ pub enum ResponseOutputContentPart {
     OutputText {
         text: String,
         annotations: Vec<Value>,
+        /// Empty on `response.content_part.added`, like Python; omitted
+        /// elsewhere.
+        ///
         /// TODO: populated when `include=message.output_text.logprobs` is
         /// implemented.
-        #[serde(skip)]
         logprobs: Option<Vec<Value>>,
     },
     Refusal {
@@ -538,19 +645,18 @@ pub struct ResponsesResponse {
     pub prompt: Option<Value>,
     #[serde(default)]
     pub reasoning: Option<ResponsesReasoning>,
-    pub service_tier: String,
+    pub service_tier: ServiceTier,
     pub temperature: f32,
     #[serde(default)]
     pub text: Option<ResponseTextConfig>,
-    /// Echoed resolved tool choice. Raw JSON so named function choices round
-    /// trip verbatim.
-    pub tool_choice: Value,
-    /// Echoed request tools (raw JSON, as received).
-    pub tools: Vec<Value>,
+    /// Echoed resolved tool choice.
+    pub tool_choice: ResponseToolChoice,
+    /// Echoed request tools.
+    pub tools: Vec<ResponsesTool>,
     pub top_p: f32,
     #[serde(default)]
     pub top_logprobs: Option<i32>,
-    pub truncation: String,
+    pub truncation: ResponseTruncation,
     #[serde(default)]
     pub usage: Option<ResponseUsage>,
     #[serde(default)]
@@ -633,7 +739,7 @@ mod tests {
     }
 
     #[test]
-    fn request_deserializes_item_list_input_as_raw_values() {
+    fn request_deserializes_typed_input_items() {
         let request: ResponsesRequest = serde_json::from_value(json!({
             "model": "test-model",
             "input": [
@@ -644,14 +750,34 @@ mod tests {
             ],
         }))
         .unwrap();
-        match request.input {
-            ResponsesInput::Items(items) => {
-                assert_eq!(items.len(), 4);
-                assert_eq!(items[0]["role"], "user");
-                assert_eq!(items[1]["type"], "function_call");
-            }
-            other => panic!("expected item list, got {other:?}"),
-        }
+        let ResponsesInput::Items(items) = request.input else {
+            panic!("expected item list");
+        };
+        assert!(matches!(
+            &items[..],
+            [
+                ResponseInputItem::Message(ResponseInputMessage {
+                    role: ResponseInputRole::User,
+                    ..
+                }),
+                ResponseInputItem::FunctionCall(_),
+                ResponseInputItem::FunctionCallOutput(_),
+                ResponseInputItem::Reasoning(_),
+            ]
+        ));
+    }
+
+    #[test]
+    fn request_reports_unsupported_input_item_type() {
+        let error = serde_json::from_value::<ResponsesRequest>(json!({
+            "input": [
+                {"role": "user", "content": "hi"},
+                {"type": "custom_tool_call", "call_id": "call_1", "name": "f", "input": ""},
+            ],
+        }))
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unknown variant `custom_tool_call`"));
     }
 
     #[test]
@@ -683,14 +809,14 @@ mod tests {
             previous_response_id: None,
             prompt: None,
             reasoning: None,
-            service_tier: "auto".to_string(),
+            service_tier: ServiceTier::Auto,
             temperature: 1.0,
             text: None,
-            tool_choice: json!("auto"),
+            tool_choice: ResponseToolChoice::Value(ToolChoiceValue::Auto),
             tools: vec![],
             top_p: 1.0,
             top_logprobs: None,
-            truncation: "disabled".to_string(),
+            truncation: ResponseTruncation::Disabled,
             usage: Some(ResponseUsage {
                 input_tokens: 3,
                 input_tokens_details: InputTokensDetails {

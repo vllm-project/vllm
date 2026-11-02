@@ -15,6 +15,7 @@ use async_openai::config::OpenAIConfig;
 use async_openai::types::chat::{
     ChatCompletionRequestUserMessageArgs, CreateChatCompletionRequestArgs,
 };
+use async_openai::types::responses::{CreateResponseArgs, ResponseStreamEvent};
 use futures::StreamExt as _;
 use serial_test::serial;
 use vllm_chat::{
@@ -355,4 +356,62 @@ async fn streaming_chat_via_http_client() {
 
     engine_task.await.expect("mock engine task");
     server_task.abort();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn streaming_responses_via_http_client() {
+    let (client, server_task, engine_task) = http_test_server(
+        b"engine-http-responses-stream",
+        default_stream_output_specs(),
+    )
+    .await;
+
+    let request = CreateResponseArgs::default()
+        .model("test-model")
+        .input("hello")
+        .max_output_tokens(10u32)
+        .stream(true)
+        .build()
+        .expect("build request");
+
+    let mut stream = client.responses().create_stream(request).await.expect("stream response");
+
+    // Every event must decode into the typed SDK event union.
+    let mut events = Vec::new();
+    while let Some(event) = stream.next().await {
+        events.push(event.expect("stream event"));
+    }
+
+    assert!(matches!(
+        events.first(),
+        Some(ResponseStreamEvent::ResponseCreated(_))
+    ));
+    let text = events
+        .iter()
+        .filter_map(|event| match event {
+            ResponseStreamEvent::ResponseOutputTextDelta(delta) => Some(delta.delta.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    assert_eq!(text, "hi");
+    let Some(ResponseStreamEvent::ResponseCompleted(completed)) = events.last() else {
+        panic!("expected a terminal response.completed event: {events:?}");
+    };
+    assert_eq!(completed.response.output_text().as_deref(), Some("hi"));
+    let sequence_numbers = events.iter().map(sequence_number).collect::<Vec<_>>();
+    assert_eq!(
+        sequence_numbers,
+        (0..events.len() as u64).collect::<Vec<_>>()
+    );
+
+    engine_task.await.expect("mock engine task");
+    server_task.abort();
+}
+
+/// Return the `sequence_number` of one typed Responses stream event.
+fn sequence_number(event: &ResponseStreamEvent) -> u64 {
+    serde_json::to_value(event).expect("serialize event")["sequence_number"]
+        .as_u64()
+        .expect("sequence_number")
 }

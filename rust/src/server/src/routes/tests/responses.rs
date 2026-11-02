@@ -888,7 +888,11 @@ async fn responses_store_dependent_features_are_rejected() {
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
-    assert_eq!(json["error"]["param"], "tools");
+    let message = json["error"]["message"].as_str().expect("error message");
+    assert!(
+        message.contains("tools[0]") && message.contains("web_search_preview"),
+        "{message}"
+    );
 
     // store=true executes normally (store-off Python parity).
     let json = responses_stream_terminal(
