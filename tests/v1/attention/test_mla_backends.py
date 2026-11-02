@@ -15,6 +15,7 @@ from typing import Any, Literal
 import pytest
 import torch
 
+from tests.models.utils import check_logprobs_close
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
@@ -73,6 +74,44 @@ if current_platform.is_rocm():
     BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_triton_mla_packed_fp8_generation(vllm_runner):
+    """Packed FP8 MLA preserves greedy predictions through prefill and decode."""
+    prefix = "Paris is the capital of France. " * 24
+    prompts = [prefix + "The capital of France is", prefix + "France's capital is"]
+    runner_kwargs = dict(
+        dtype="bfloat16",
+        attention_config={"backend": "TRITON_MLA"},
+        max_model_len=512,
+        max_num_batched_tokens=64,
+        max_num_seqs=2,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        enforce_eager=True,
+    )
+    model_name = "deepseek-ai/DeepSeek-V2-Lite-Chat"
+    with vllm_runner(model_name, kv_cache_dtype="auto", **runner_kwargs) as model:
+        reference = model.generate_greedy_logprobs(prompts, 8, 1)
+    with vllm_runner(model_name, kv_cache_dtype="fp8_ds_mla", **runner_kwargs) as model:
+        packed = model.generate_greedy_logprobs(prompts, 8, 1)
+        reused = model.generate_greedy_logprobs(prompts[:1], 8, 1)
+    check_logprobs_close(
+        outputs_0_lst=reference,
+        outputs_1_lst=packed,
+        name_0="BF16 Triton MLA",
+        name_1="packed FP8 Triton MLA",
+        always_check_logprobs=True,
+        warn_on_mismatch=False,
+    )
+    check_logprobs_close(
+        outputs_0_lst=reference[:1],
+        outputs_1_lst=reused,
+        name_0="BF16 Triton MLA",
+        name_1="packed FP8 with prefix reuse",
+        always_check_logprobs=True,
+        warn_on_mismatch=False,
+    )
 
 
 @pytest.mark.parametrize(
