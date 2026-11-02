@@ -102,6 +102,10 @@ class SpecializedDecode:
         )
         self._kv: tuple[int, int] | None = None
         self.steps = 0
+        # the epoch at the last LOG_EVERY step, copied without blocking
+        self.counted = torch.zeros(1, dtype=torch.int32, pin_memory=True)
+        self.counted_event: torch.cuda.Event | None = None
+        self.counted_at = 0
         logger.info(
             "%s: %d layers, widths %s, %d builds, %d launches a step, %s TP "
             "all-reduce lines; other steps run vLLM's decode",
@@ -229,20 +233,24 @@ class SpecializedDecode:
     def after_step(self) -> None:
         """Once per executed step, from compute_logits (eager on every rank,
         also under graph replay). Raises on every rank once a rank gave up an
-        in-kernel wait; logs every LOG_EVERY steps how many ran on the kernels
-        (the epoch counts specialized steps, graph replays included)."""
+        in-kernel wait; every LOG_EVERY steps logs how many of the steps up to
+        the previous LOG_EVERY ran on the kernels (the epoch counts
+        specialized steps, graph replays included; copied without a host
+        sync, so the count trails by LOG_EVERY steps)."""
         self.failstop.after_step()
         if torch.cuda.is_current_stream_capturing():
             return
         self.steps += 1
-        if self.steps % self.LOG_EVERY == 0:
+        if self.steps % self.LOG_EVERY:
+            return
+        if self.counted_event is not None and self.counted_event.query():
             logger.info(
                 "%s: %d specialized steps of %d",
                 NAME,
-                self.specialized_steps(),
-                self.steps,
+                int(self.counted[0]),
+                self.counted_at,
             )
-
-    def specialized_steps(self) -> int:
-        """Steps that ran on the kernels so far (a host sync)."""
-        return int(self.launch.epoch[0].item())
+        self.counted.copy_(self.launch.epoch[:1], non_blocking=True)
+        self.counted_event = torch.cuda.Event()
+        self.counted_event.record()
+        self.counted_at = self.steps
