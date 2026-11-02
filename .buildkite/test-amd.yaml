@@ -5839,6 +5839,25 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s -rs v1/kv_connector/umbp_integration
 
+- label: ":amd: (MI355) UMBP Standalone Integration"
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
+  dind: false
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/umbp/
+  - vllm/distributed/kv_transfer/kv_connector/v1/base.py
+  - tests/v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py
+  - tests/v1/kv_connector/umbp_test_utils.py
+  - tests/v1/kv_connector/conftest.py
+  - docker/Dockerfile.rocm_base
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s -rs v1/kv_connector/umbp_integration/test_mori_standalone_gpu.py
+
 - label: ":amd: (MI355 DPX) V1 Attention Shard %N" # TBD
   timeout_in_minutes: 125
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
