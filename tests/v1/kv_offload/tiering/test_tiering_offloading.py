@@ -2111,3 +2111,34 @@ class TestLookupPinHandoff:
         manager.on_new_request(next_ctx)
         assert manager.lookup(secondary_hit, next_ctx) is LookupResult.HIT_PENDING
         assert primary.lookup(hit, next_ctx) is LookupResult.MISS
+
+    def test_prepare_load_releases_all_lookup_pins(self):
+        """Consuming one HIT releases other temporary pins from that lookup walk."""
+        mock_region = _mock_mmap_region(2)
+        primary = CPUPrimaryTierOffloadingManager(num_chunks=2, mmap_region=mock_region)
+        secondary = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="example",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary, secondary_tiers=[secondary]
+        )
+        ctx = ReqContext(req_id="lookup-pin-handoff")
+        manager.on_new_request(ctx)
+        first, second, secondary_hit = to_keys([1, 2, 3])
+
+        for key in (first, second):
+            manager.prepare_store([key], ctx)
+            manager.complete_store([key], ctx, success=True)
+        manager._process_finished_jobs()
+        secondary.chunks[secondary_hit] = True
+
+        assert manager.lookup(first, ctx) is LookupResult.HIT
+        assert manager.lookup(second, ctx) is LookupResult.HIT
+        assert manager.lookup(first, ctx) is LookupResult.HIT
+        manager.prepare_load([first], ctx)
+
+        # The load pins first; releasing all temporary lookup pins makes
+        # second available for the secondary promotion.
+        assert manager.lookup(secondary_hit, ctx) is LookupResult.HIT_PENDING
