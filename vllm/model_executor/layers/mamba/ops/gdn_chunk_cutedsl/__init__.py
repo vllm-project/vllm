@@ -192,7 +192,11 @@ def chunk_gated_delta_rule_cutedsl(
     u = q.new_empty(pad_t, num_v_heads, V_dim)
     w = q.new_empty(pad_t, num_v_heads, K_dim)
 
-    num_sms = torch.cuda.get_device_properties(q.device).multi_processor_count
+    # Kernels launch num_sms // num_v_heads CTAs per head; keep at least one.
+    num_sms = max(
+        torch.cuda.get_device_properties(q.device).multi_processor_count,
+        num_v_heads,
+    )
     kkt_inv_uw_cutedsl(
         k,
         v,

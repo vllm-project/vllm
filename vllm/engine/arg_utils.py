@@ -1953,7 +1953,9 @@ class EngineArgs:
             dest="gdn_prefill_backend",
             choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"],
             default=None,
-            help="Select GDN prefill backend.",
+            help="Select GDN prefill backend. 'cutedsl' is opt-in and needs "
+            "CUDA SM10x or SM11x with head_k_dim=128 and CUDA 13+; elsewhere "
+            "it falls back to Triton.",
         )
         parser.add_argument(
             "--kda-prefill-backend",
