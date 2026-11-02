@@ -11,6 +11,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.attention.backend import AttentionCGSupport
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import (
@@ -23,8 +24,12 @@ from vllm.v1.worker.gpu.cp_utils import cp_local_slot
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.spec_decode.dflash.config import DFlashSpeculatorConfig
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
-from vllm.v1.worker.gpu.spec_decode.dflash.utils import load_dflash_model
+from vllm.v1.worker.gpu.spec_decode.draft_token_head import (
+    DraftBlockInput,
+    DraftTokenHead,
+)
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     get_eagle3_aux_layers_from_config,
 )
@@ -38,7 +43,12 @@ logger = init_logger(__name__)
 class DFlashSpeculator(DraftModelSpeculator):
     _speculator_name = "DFlash"  # For logging, so we can share methods with subclasses
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        draft_token_head: DraftTokenHead,
+    ):
         parallel_config = vllm_config.parallel_config
         speculative_config = vllm_config.speculative_config
         assert speculative_config is not None
@@ -53,6 +63,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             ),
         )
         super().__init__(vllm_config, device)
+        self.draft_token_head = draft_token_head
 
         self.hidden_states = torch.zeros(
             self.max_num_tokens, self.hidden_size, dtype=self.dtype, device=device
@@ -241,7 +252,12 @@ class DFlashSpeculator(DraftModelSpeculator):
         target_model: nn.Module,
         target_attn_layer_names: set[str],
     ) -> nn.Module:
-        return load_dflash_model(target_model, self.vllm_config)
+        config = self.speculative_config.speculator_config
+        assert isinstance(config, DFlashSpeculatorConfig)
+        load = resolve_obj_by_qualname(config.draft_model_loader)
+        model = load(target_model, self.vllm_config)
+        self.draft_token_head.post_load(model)
+        return model
 
     def set_attn(
         self,
@@ -347,7 +363,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
     ) -> None:
-        last_hidden_states = self._run_model(
+        hidden_states = self._run_model(
             num_tokens_padded,
             attn_metadata,
             slot_mappings,
@@ -355,27 +371,34 @@ class DFlashSpeculator(DraftModelSpeculator):
             cudagraph_runtime_mode,
         )
         num_sample = num_reqs * self.num_speculative_steps
-        sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
-        idx_mapping = self.sample_idx_mapping[:num_sample]
-        draft_step = self.sample_col[:num_sample]
+        sample_hidden_states = hidden_states[self.sample_indices[:num_sample]]
         # Draft models without get_top_tokens() never use local argmax reduction.
         logits = self.compute_draft_logits(sample_hidden_states, 0)
-        # sample_pos is the predicted token's position P. Sampling keys a draw
-        # by the position before the sampled token, P-1.
-        draft_tokens = self.sample_draft_logits(
-            logits,
-            self.sample_pos[:num_sample] - 1,
-            idx_mapping,
-            self.temperature,
-            self.seeds,
-            draft_step,
-            self.draft_logits,
-            num_steps=self.num_speculative_steps,
+        input = DraftBlockInput(
+            num_reqs=num_reqs,
+            num_query_per_req=self.num_query_per_req,
+            num_speculative_steps=self.num_speculative_steps,
+            hidden_states=hidden_states,
+            logits=logits,
+            # Query offset 0 of each request's block holds its anchor.
+            anchor_ids=self.input_buffers.input_ids[
+                : num_reqs * self.num_query_per_req : self.num_query_per_req
+            ],
+            # sample_pos is the predicted token's position P. Sampling keys a
+            # draw by the position before the sampled token, P-1.
+            sample_src_positions=self.sample_pos[:num_sample] - 1,
+            idx_mapping=self.sample_idx_mapping[:num_sample],
+            draft_step=self.sample_col[:num_sample],
+            temperature=self.temperature,
+            seeds=self.seeds,
+            draft_logits=self.draft_logits,
+            watermarker=self.draft_watermarker,
+            use_fp64_gumbel=self.use_fp64_gumbel,
+            needs_logits=self.acceptance_estimator is not None,
         )
-        self._maybe_predict_acceptance(logits, idx_mapping, draft_step)
-        self.draft_tokens[:num_reqs] = draft_tokens.view(
-            num_reqs, self.num_speculative_steps
-        )
+        output = self.draft_token_head.draft(input)
+        self._maybe_predict_acceptance(output.acceptance)
+        self.draft_tokens[:num_reqs] = output.draft_tokens
 
     def _num_graph_context_tokens(self, num_reqs: int) -> int:
         # Context rows a captured draft step stores: one full verify per request.
@@ -437,7 +460,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         inside the FULL graph, so it must not sync with the host."""
 
     def supports_batch_sharded_draft_logits(self) -> bool:
-        # Every draft logits write goes through sample_draft_logits.
+        # Every draft logits write goes through the draft token head.
         return True
 
     @torch.inference_mode()

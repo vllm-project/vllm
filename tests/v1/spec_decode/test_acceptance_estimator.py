@@ -14,6 +14,7 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    AcceptanceEstimationInput,
     OnlineAcceptanceEstimator,
     _accumulate_kernel,
     _refit_kernel,
@@ -88,7 +89,8 @@ def test_predict_agrees_across_slot_and_batch_order(tokens_per_req: int):
 
     confidence_probs = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
     temperature = torch.rand(MAX_NUM_REQS, device=device) + 0.5
-    estimator.predict(logits, idx_mapping, draft_step, confidence_probs, temperature)
+    estimator_input = AcceptanceEstimationInput(logits, idx_mapping, draft_step)
+    estimator.predict(estimator_input, confidence_probs, temperature)
 
     expected = _expected_probs(
         estimator, logits, steps.long(), temperature[idx_mapping.long()]
@@ -120,7 +122,8 @@ def test_predict_skips_cudagraph_padded_rows():
 
     confidence_probs = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
     temperature = torch.rand(MAX_NUM_REQS, device=device) + 0.5
-    estimator.predict(logits, idx_mapping, draft_step, confidence_probs, temperature)
+    estimator_input = AcceptanceEstimationInput(logits, idx_mapping, draft_step)
+    estimator.predict(estimator_input, confidence_probs, temperature)
 
     live = (slots.long(), torch.full((num_reqs,), 1, device=device))
     expected = _expected_probs(
@@ -284,7 +287,8 @@ def test_feature_ignores_which_token_was_drawn():
     temperature = torch.ones(MAX_NUM_REQS, device=device)
     confidence_probs = torch.zeros(MAX_NUM_REQS, NUM_STEPS, device=device)
 
-    estimator.predict(logits, idx_mapping, draft_step, confidence_probs, temperature)
+    estimator_input = AcceptanceEstimationInput(logits, idx_mapping, draft_step)
+    estimator.predict(estimator_input, confidence_probs, temperature)
     assert estimator.features[0, 0] == estimator.features[1, 0]
 
     # And the value is the top token's log-odds, not the top-2 margin.

@@ -7,6 +7,7 @@ from torch import nn
 from vllm.config import VllmConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.v1.worker.gpu.spec_decode.dflash2.speculator import DFlash2Speculator
+from vllm.v1.worker.gpu.spec_decode.draft_token_head import DraftTokenHead
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import get_target_lm_head
 
 
@@ -14,8 +15,13 @@ class LiLiCorrSpeculator(DFlash2Speculator):
     _speculator_name = "LiLiCorr"
     _candidate_top_k_key = "lilicorr_candidate_topk"
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        draft_token_head: DraftTokenHead,
+    ):
+        super().__init__(vllm_config, device, draft_token_head)
         config = self.draft_model_config.hf_config
         self.anchor_hidden = torch.zeros(
             self.max_num_reqs, config.hidden_size, dtype=self.dtype, device=device

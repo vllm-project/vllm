@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import inspect
 from collections.abc import Callable
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 
@@ -44,6 +44,10 @@ def init_speculator(
         )
     # BaseSpeculator doesn't define the constructor signature.
     factory = cast(Callable[..., "BaseSpeculator"], speculator_cls)
-    if "req_states" in inspect.signature(factory).parameters:
-        return factory(vllm_config, device, req_states=req_states)
-    return factory(vllm_config, device)
+    parameters = inspect.signature(factory).parameters
+    kwargs: dict[str, Any] = {}
+    if "req_states" in parameters:
+        kwargs["req_states"] = req_states
+    if "draft_token_head" in parameters:
+        kwargs["draft_token_head"] = speculator_config.create_draft_token_head()
+    return factory(vllm_config, device, **kwargs)

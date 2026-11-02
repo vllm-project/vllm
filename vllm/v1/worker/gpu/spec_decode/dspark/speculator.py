@@ -44,7 +44,11 @@ from vllm.v1.worker.gpu.sample.batch_shard import (
 )
 from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
+from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    AcceptanceEstimationInput,
+)
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.draft_token_head import DraftTokenHead
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
 
 logger = init_logger(__name__)
@@ -53,8 +57,13 @@ logger = init_logger(__name__)
 class DSparkSpeculator(DFlashSpeculator):
     _speculator_name = "DSpark"
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
-        super().__init__(vllm_config, device)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        device: torch.device,
+        draft_token_head: DraftTokenHead,
+    ):
+        super().__init__(vllm_config, device, draft_token_head)
 
         # Whether to sample from the anchor position. When True, uses anchor-as-first
         # (N slots, each position predicts the next token). When False, uses 1+N
@@ -192,7 +201,9 @@ class DSparkSpeculator(DFlashSpeculator):
         sample_pos: torch.Tensor,
         step: int,
     ) -> torch.Tensor:
-        self._maybe_predict_acceptance(logits, idx_map, self._step_cols[step])
+        self._maybe_predict_acceptance(
+            AcceptanceEstimationInput(logits, idx_map, self._step_cols[step])
+        )
         if self.draft_logits is None:
             draft_ids = greedy_argmax(logits)
             return self.model.map_draft_to_target(draft_ids)

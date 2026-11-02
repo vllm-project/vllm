@@ -115,19 +115,21 @@ class XPressRefinerHead(nn.Module):
 
     def jacobi_refine_greedy(
         self,
-        base_logits_full: torch.Tensor,
+        base_logits: torch.Tensor,
         h_full: torch.Tensor,
         anchor_ids: torch.Tensor,
         tok_am1_ids: torch.Tensor,
         num_passes: int,
         with_logits: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """The refined draft ids [N, B-1] and, if with_logits, the last pass's
+        """From the base logits at the draft slots [N, B-1, V] and the hidden
+        states of each block [N, B, H], the refined draft ids [N, B-1] and, if
+        with_logits, the last pass's
         refined logits per draft slot [N * (B-1), C or V]: over the top-C
         candidates if topc is set, else over the vocabulary (a scratch buffer
         that the next call overwrites)."""
         # Greedy, so a settled prefix stays settled and K passes converge monotonically.
-        N, B, _ = base_logits_full.shape
+        N, B = h_full.shape[:2]
         hcache = self.hidden_cache(h_full)
         blk = torch.empty(N, B, dtype=torch.long, device=h_full.device)
         blk[:, 0] = anchor_ids
@@ -142,8 +144,8 @@ class XPressRefinerHead(nn.Module):
             "build_fused_buffers() first"
         )
         rows = N * (B - 1)
-        v = base_logits_full.shape[-1]
-        blk[:, 1:] = base_logits_full[:, 1:, :].argmax(dim=-1)
+        v = base_logits.shape[-1]
+        blk[:, 1:] = base_logits.argmax(dim=-1)
 
         if self.topc:
             # One pass over the base logits yields the candidate set, its logits and
@@ -151,7 +153,7 @@ class XPressRefinerHead(nn.Module):
             # full-vocabulary argmax. Gathered once per draft step, never rescored
             # between passes, which is what keeps the per-pass [r, V] read away.
             c = min(self.topc, v)
-            slots = base_logits_full[:, 1:, :]
+            slots = base_logits
             # _topk routes to flashinfer's kernel when it is available, which is
             # about twice torch.topk's speed and is the largest fixed cost of this
             # path. The candidate set is only ever indexed, never traversed in rank
@@ -164,8 +166,8 @@ class XPressRefinerHead(nn.Module):
                 N,
                 B - 1,
                 self.rank,
-                dtype=base_logits_full.dtype,
-                device=base_logits_full.device,
+                dtype=base_logits.dtype,
+                device=base_logits.device,
             )
             for _ in range(num_passes):
                 kernels.xpress_latent_pass(
@@ -188,10 +190,10 @@ class XPressRefinerHead(nn.Module):
             logits = base_c + bias_c.view(rows, c) if with_logits else None
             return blk[:, 1:], logits
 
-        sc = self._scratch_buffers(base_logits_full.dtype, base_logits_full.device)
+        sc = self._scratch_buffers(base_logits.dtype, base_logits.device)
         lat, bias = sc["lat"][:N], sc["bias"][:rows]
         base, ov, oi = sc["base"][:rows], sc["ov"][:rows], sc["oi"][:rows]
-        base.copy_(base_logits_full[:, 1:, :].reshape(rows, v))
+        base.copy_(base_logits.reshape(rows, v))
         xh = torch.mm(hcache.view(N * B, -1), buf["whc_t"]).view(N, B, self.rank)
         # Three launches per pass: latent, the w2 GEMM, then add+argmax straight
         # into blk. The [N, B, V] sum is never materialized.

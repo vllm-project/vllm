@@ -1,12 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
+
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_max_and_sumexp,
 )
+
+
+@dataclass
+class AcceptanceEstimationInput:
+    # [num_rows, vocab or candidates] the distribution each draft token was
+    # drafted from, or None if never materialized (local argmax reduction,
+    # which the estimator rejects at startup).
+    logits: torch.Tensor | None
+    # [num_rows] request state index and draft position of each row.
+    idx_mapping: torch.Tensor
+    draft_step: torch.Tensor
+
 
 # The feature is a log-odds, log(q / (1 - q)), which a row carrying all of its
 # mass on one token sends to infinity. Clamp it symmetrically.
@@ -463,12 +477,12 @@ class OnlineAcceptanceEstimator:
 
     def predict(
         self,
-        logits: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        draft_step: torch.Tensor,
+        input: AcceptanceEstimationInput,
         confidence_probs: torch.Tensor,
         temperature: torch.Tensor,
     ) -> None:
+        logits = input.logits
+        assert logits is not None
         num_tokens, vocab_size = logits.shape
         VOCAB_BLOCK_SIZE = 4096
         num_blocks = triton.cdiv(vocab_size, VOCAB_BLOCK_SIZE)
@@ -483,8 +497,8 @@ class OnlineAcceptanceEstimator:
             local_sumexp.stride(0),
             logits,
             logits.stride(0),
-            idx_mapping,
-            idx_mapping.stride(0),
+            input.idx_mapping,
+            input.idx_mapping.stride(0),
             temperature,
             num_tokens,
             vocab_size,
@@ -503,12 +517,12 @@ class OnlineAcceptanceEstimator:
             local_max.stride(0),
             local_sumexp,
             local_sumexp.stride(0),
-            idx_mapping,
-            idx_mapping.stride(0),
-            draft_step,
+            input.idx_mapping,
+            input.idx_mapping.stride(0),
+            input.draft_step,
             num_tokens,
             num_blocks,
-            per_token_step=draft_step.dim() > 0,
+            per_token_step=input.draft_step.dim() > 0,
             NUM_SPECULATIVE_STEPS=self.num_speculative_steps,
             MAX_LOG_ODDS=_MAX_LOG_ODDS,
             PADDED_VOCAB_NUM_BLOCKS=triton.next_power_of_2(num_blocks),

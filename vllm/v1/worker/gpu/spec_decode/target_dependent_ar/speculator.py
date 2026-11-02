@@ -14,6 +14,10 @@ from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.sample.draft import sample_independently
+from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    AcceptanceEstimationInput,
+)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.target_dependent_ar.cudagraph_utils import (
     SpeculatorCudaGraphManager,
@@ -166,7 +170,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         self.on_multi_step_decode_end(self.max_num_reqs)
 
     def supports_batch_sharded_draft_logits(self) -> bool:
-        # Every draft logits write goes through sample_draft_logits.
+        # Every draft logits write goes through the draft token head.
         return True
 
     @torch.inference_mode()
@@ -499,7 +503,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             draft_tokens = self.get_draft_top_tokens(sample_hidden_states, 0)
         else:
             logits = self.compute_draft_logits(sample_hidden_states, 0)
-            draft_tokens = self.sample_draft_logits(
+            draft_tokens = sample_independently(
                 logits,
                 sample_src_positions,
                 idx_mapping,
@@ -507,9 +511,13 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                self.draft_watermarker,
+                self.use_fp64_gumbel,
             )
         self.draft_tokens[:num_reqs, 0] = draft_tokens
-        self._maybe_predict_acceptance(logits, idx_mapping, self.current_draft_step)
+        self._maybe_predict_acceptance(
+            AcceptanceEstimationInput(logits, idx_mapping, self.current_draft_step)
+        )
         if last_hidden_states is hidden_states:
             self.hidden_states[:num_reqs] = sample_hidden_states
         else:
@@ -689,7 +697,7 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             draft_tokens = self.get_draft_top_tokens(sample_hidden_states, 0)
         else:
             logits = self.compute_draft_logits(sample_hidden_states, 0)
-            draft_tokens = self.sample_draft_logits(
+            draft_tokens = sample_independently(
                 logits,
                 sample_src_positions,
                 idx_mapping,
@@ -697,8 +705,12 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                self.draft_watermarker,
+                self.use_fp64_gumbel,
             )
-        self._maybe_predict_acceptance(logits, idx_mapping, self.current_draft_step)
+        self._maybe_predict_acceptance(
+            AcceptanceEstimationInput(logits, idx_mapping, self.current_draft_step)
+        )
 
         # Update the inputs for the next step.
         update_draft_inputs(

@@ -36,9 +36,8 @@ from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.sample.batch_shard import batch_sharded_sampling_enabled
-from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    AcceptanceEstimationInput,
     OnlineAcceptanceEstimator,
 )
 from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
@@ -543,65 +542,10 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         return self.model.get_top_tokens(hidden_states)
 
-    def sample_draft_logits(
-        self,
-        logits: torch.Tensor,
-        sample_src_positions: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
-        seeds: torch.Tensor,
-        draft_step: torch.Tensor,
-        draft_logits: DraftLogitsCache | None,
-        num_steps: int = 1,
-    ) -> torch.Tensor:
-        """Sample draft tokens from `logits`, caching them in `draft_logits`
-        for probabilistic rejection sampling."""
-        if draft_logits is not None and self.draft_watermarker is not None:
-            sampled = self.draft_watermarker.sample(
-                logits,
-                idx_mapping,
-                temperature,
-                seeds,
-                sample_src_positions,
-                apply_temperature=True,
-                is_drafting=True,
-                logits_cache=draft_logits.values,
-                logits_cache_col=draft_step,
-                use_fp64=self.use_fp64_gumbel,
-                num_steps=num_steps,
-            )
-        elif draft_logits is not None:
-            sampled = gumbel_sample(
-                logits,
-                idx_mapping,
-                temperature,
-                seeds,
-                sample_src_positions,
-                apply_temperature=True,
-                is_drafting=True,
-                logits_cache=draft_logits.values,
-                logits_cache_col=draft_step,
-                use_fp64=self.use_fp64_gumbel,
-                logits_cache_row_mapping=draft_logits.row_mapping,
-            )
-        else:
-            sampled = greedy_argmax(logits)
-        return sampled
-
-    def _maybe_predict_acceptance(
-        self,
-        logits: torch.Tensor | None,
-        idx_mapping: torch.Tensor,
-        draft_step: torch.Tensor,
-    ) -> None:
-        # Local argmax reduction (logits None) is rejected with the estimator.
-        if self.acceptance_estimator is not None and logits is not None:
+    def _maybe_predict_acceptance(self, input: AcceptanceEstimationInput) -> None:
+        if self.acceptance_estimator is not None and input.logits is not None:
             self.acceptance_estimator.predict(
-                logits,
-                idx_mapping,
-                draft_step,
-                self.draft_token_confidence_probs,
-                self.temperature,
+                input, self.draft_token_confidence_probs, self.temperature
             )
 
     def observe_verification(

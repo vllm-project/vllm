@@ -21,6 +21,10 @@ from vllm.v1.worker.gpu.cudagraph_utils import BatchExecutionDescriptor
 from vllm.v1.worker.gpu.dp_utils import DPSyncState
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.sample.draft import sample_independently
+from vllm.v1.worker.gpu.spec_decode.acceptance_estimator import (
+    AcceptanceEstimationInput,
+)
 from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import get_pp_safe_draft_load_config
 from vllm.v1.worker.utils import AttentionGroup
@@ -252,7 +256,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
             draft_tokens = self.get_draft_top_tokens(sample_hidden_states, 0)
         else:
             logits = self.compute_draft_logits(sample_hidden_states, 0)
-            draft_tokens = self.sample_draft_logits(
+            draft_tokens = sample_independently(
                 logits,
                 positions_buf[last_indices],
                 idx_mapping,
@@ -260,9 +264,13 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 self.seeds,
                 self.current_draft_step,
                 self.draft_logits,
+                self.draft_watermarker,
+                self.use_fp64_gumbel,
             )
         self.draft_tokens[:num_reqs, 0] = draft_tokens
-        self._maybe_predict_acceptance(logits, idx_mapping, self.current_draft_step)
+        self._maybe_predict_acceptance(
+            AcceptanceEstimationInput(logits, idx_mapping, self.current_draft_step)
+        )
 
     def _multi_step_decode(
         self,
@@ -357,7 +365,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                 draft_tokens = self.get_draft_top_tokens(sample_hidden_states, 0)
             else:
                 logits = self.compute_draft_logits(sample_hidden_states, 0)
-                draft_tokens = self.sample_draft_logits(
+                draft_tokens = sample_independently(
                     logits,
                     self.input_buffers.positions[:num_reqs],
                     idx_mapping,
@@ -365,12 +373,16 @@ class StandaloneARSpeculator(DraftModelSpeculator):
                     self.seeds,
                     self.current_draft_step,
                     self.draft_logits,
+                    self.draft_watermarker,
+                    self.use_fp64_gumbel,
                 )
             self.draft_tokens[:num_reqs, step] = draft_tokens
-            self._maybe_predict_acceptance(logits, idx_mapping, self.current_draft_step)
+            self._maybe_predict_acceptance(
+                AcceptanceEstimationInput(logits, idx_mapping, self.current_draft_step)
+            )
 
     def supports_batch_sharded_draft_logits(self) -> bool:
-        # Every draft logits write goes through sample_draft_logits.
+        # Every draft logits write goes through the draft token head.
         return True
 
     @torch.inference_mode()
@@ -403,7 +415,7 @@ class StandaloneARSpeculator(DraftModelSpeculator):
         )
 
         # Copy per-request temperature/seeds/idx_mapping into pre-allocated
-        # buffers so sample_draft_logits can read them without extra slicing.
+        # buffers so the draft token head can read them without extra slicing.
         self._copy_request_inputs(
             num_reqs,
             input_batch.idx_mapping,

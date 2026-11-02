@@ -362,7 +362,7 @@ def _stub_base(monkeypatch, draft_logits):
     pass a tensor already in that state.
     """
 
-    def init_base(self, _vllm_config, device):
+    def init_base(self, _vllm_config, device, _draft_token_head):
         self.draft_model_config = SimpleNamespace(
             hf_config=SimpleNamespace(dflash_config={"selector_top_k": 3})
         )
@@ -384,7 +384,7 @@ def test_selector_leaves_greedy_drafting_without_proposal_logits(monkeypatch):
     allocating one here would claim a proposal the walk never sampled from.
     """
     _stub_base(monkeypatch, None)
-    speculator = DFlash2Speculator(None, torch.device("cpu"))
+    speculator = DFlash2Speculator(None, torch.device("cpu"), None)
 
     assert speculator.draft_logits is None
 
