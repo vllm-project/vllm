@@ -22,7 +22,7 @@ export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
 export PATH="$CARGO_HOME/bin:$PATH"
 
 CARGO_BINSTALL_VERSION="${CARGO_BINSTALL_VERSION:-1.20.1}"
-UV_VERSION="${UV_VERSION:-0.11.28}"
+UV_VERSION="${UV_VERSION:-0.13.4}"
 UV_SCRIPT_PYTHON_VERSION="${UV_SCRIPT_PYTHON_VERSION:-3.12}"
 
 CARGO_SORT_VERSION_REQ="${CARGO_SORT_VERSION_REQ:-2}"
@@ -60,12 +60,12 @@ install_cargo_binstall() {
 
 install_cargo_sort() {
   log_section "Installing cargo-sort ${CARGO_SORT_VERSION_REQ}"
-  cargo binstall --no-confirm --force "cargo-sort@${CARGO_SORT_VERSION_REQ}"
+  cargo binstall --no-confirm --force --locked "cargo-sort@${CARGO_SORT_VERSION_REQ}"
 }
 
 install_cargo_deny() {
   log_section "Installing cargo-deny ${CARGO_DENY_VERSION_REQ}"
-  cargo binstall --no-confirm --force "cargo-deny@${CARGO_DENY_VERSION_REQ}"
+  cargo binstall --no-confirm --force --locked "cargo-deny@${CARGO_DENY_VERSION_REQ}"
 }
 
 install_cargo_nextest() {
@@ -74,6 +74,7 @@ install_cargo_nextest() {
     --no-confirm \
     --force \
     --secure \
+    --locked \
     "cargo-nextest@${CARGO_NEXTEST_VERSION_REQ}"
 }
 

@@ -7,16 +7,16 @@ import torch
 
 from vllm import PromptType, TextPrompt
 from vllm.config import ModelConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
+from vllm.renderers.chat_utils import (
     BaseMultiModalItemTracker,
     ChatCompletionContentPartParam,
     ChatCompletionContentPartTextParam,
     ConversationMessage,
     MultiModalItemTracker,
-    _parse_chat_message_content_parts,
+    parse_chat_message_content_parts,
 )
-from vllm.exceptions import VLLMValidationError
-from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 
 from .typing import (
     ScoreContentPartParam,
@@ -193,7 +193,7 @@ def _parse_score_content(
 
     mm_parser = mm_tracker.create_parser()
 
-    parse_res = _parse_chat_message_content_parts(
+    parse_res = parse_chat_message_content_parts(
         role=role,
         parts=parts,
         mm_tracker=mm_tracker,
@@ -262,21 +262,30 @@ def parse_score_data(
     return prompt_1, prompt_2, mm_items, mm_uuids
 
 
-def compress_token_type_ids(token_type_ids: list[int]) -> int:
-    """Return position of the first 1 or the length of the list
-    if not found.
+def compress_token_type_ids(token_type_ids: list[int]) -> tuple[int, int]:
+    """Return the half-open range containing token type 1.
+
+    Right padding uses the tokenizer's padding token type, which is commonly
+    zero. Therefore, a padded query-document pair can contain zeros followed
+    by ones followed by trailing zeros.
     """
     first_one = len(token_type_ids)
+    first_zero_after_one = len(token_type_ids)
     err_msg = (
         "Token type ids are expected to be a sequence"
-        " of zeros followed by a sequence of ones"
+        " of zeros followed by ones and optional trailing zeros"
     )
     for i, type_id in enumerate(token_type_ids):
-        if type_id == 0 and first_one < i:
+        if type_id not in (0, 1):
             raise ValueError(err_msg)
-        elif type_id == 1 and first_one > i:
-            first_one = i
-        elif type_id > 1:
-            raise ValueError(err_msg)
+        if type_id == 1:
+            if first_zero_after_one < len(token_type_ids):
+                raise ValueError(err_msg)
+            if first_one == len(token_type_ids):
+                first_one = i
+        elif first_one < len(token_type_ids) and first_zero_after_one == len(
+            token_type_ids
+        ):
+            first_zero_after_one = i
 
-    return first_one
+    return first_one, first_zero_after_one

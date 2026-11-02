@@ -29,8 +29,11 @@ if not current_platform.is_cuda():
 #  `is_quant_method_supported` conflates kernels with quantization methods
 #  an assumption which is breaking down as quantizations methods can have
 #  have kernels and some kernels support multiple quantization methods.
-capability = current_platform.get_device_capability()
-IS_SUPPORTED_BY_GPU = capability is not None and capability[0] >= 9
+# CUTLASS W4A8 kernels are only built for SM90 (9.0a); the kernel selector
+# requires exactly SM90 too, so match it here rather than accepting >= 90.
+IS_SUPPORTED_BY_GPU = (
+    current_platform.is_cuda() and current_platform.is_device_capability(90)
+)
 
 MNK_SHAPES = [
     (1, 128, 128),
@@ -106,10 +109,6 @@ TEST_TYPES = [
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
 #  unit tests to a common utility function. Currently the use of
-#  `is_quant_method_supported` conflates kernels with quantization methods
-#  an assumption which is breaking down as quantizations methods can have
-#  have kernels and some kernels support multiple quantization methods.
-IS_SUPPORTED_BY_GPU = current_platform.has_device_capability(90)
 
 
 # For testing quantized linear kernels

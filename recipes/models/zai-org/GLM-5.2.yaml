@@ -1,0 +1,471 @@
+meta:
+  title: "GLM-5.2"
+  slug: "glm-5.2"
+  provider: "GLM (Z-AI)"
+  description: "GLM-5.2 — frontier-scale MoE language model (~743B total parameters, 39B active) with up to 5-token MTP speculative decoding and thinking mode"
+  date_added: 2026-06-16
+  date_updated: 2026-10-03
+  tasks:
+    - text
+  performance_headline: "Latest GLM-5 series MoE with extended MTP (5 draft tokens), improved reasoning and agentic performance"
+  related_recipes:
+    - "zai-org/GLM-5"
+    - "zai-org/GLM-5.1"
+  hardware:
+    b300: verified
+    b200: verified
+    mi300x: verified
+    mi325x: verified
+    mi350x: verified
+    mi355x: verified
+
+model:
+  model_id: "zai-org/GLM-5.2"
+  min_vllm_version: "0.24.0"
+  default_frontend: rust
+  docker_image:
+    nvidia: "vllm/vllm-openai:v0.28.0"
+    amd: "vllm/vllm-openai-rocm:nightly"
+  architecture: moe
+  parameter_count: "743B"
+  active_parameters: "39B"
+  context_length: 1048576
+  base_args:
+    - "--kv-cache-dtype"
+    - "fp8_e4m3"
+  base_env: {}
+
+features:
+  tool_calling:
+    description: "GLM-4.7 tool call parser with automatic tool choice"
+    args:
+      - "--tool-call-parser"
+      - "glm47"
+      - "--enable-auto-tool-choice"
+  reasoning:
+    description: "GLM-4.7 reasoning parser — thinking mode enabled by default on requests"
+    args:
+      - "--reasoning-parser"
+      - "glm47"
+  spec_decoding:
+    description: "Multi-Token Prediction speculative decoding (up to 7 draft tokens)"
+    default_mode: mtp
+    modes:
+      mtp:
+        label: "MTP"
+        description: "Built-in Multi-Token Prediction, 5 draft tokens."
+        variants:
+          - default
+          - nvfp4
+          - redhat_nvfp4
+          - bf16
+          - mxfp4
+          - redhat_fp8
+          - redhat_nvfp4_plain
+        args:
+          - "--speculative-config"
+          - '{"method":"mtp","num_speculative_tokens":5}'
+      dspark:
+        label: "DSpark"
+        description: "DSpark drafting with an externally trained 7-token draft model; the served GLM checkpoint is unchanged."
+        variants:
+          - default
+        args:
+          - "--speculative-config"
+          - '{"model": "RedHatAI/GLM-5.2-speculator.dspark","num_speculative_tokens": 7,"method": "dspark"}'
+
+opt_in_features:
+  - spec_decoding
+
+variants:
+  default:
+    model_id: "zai-org/GLM-5.2-FP8"
+    precision: fp8
+    vram_minimum_gb: 893
+    description: "Native FP8 checkpoint — 8xH200/H20 (141GB × 8) single-node serving"
+  mxfp4:
+    model_id: "amd/GLM-5.2-MXFP4"
+    precision: mxfp4
+    vram_minimum_gb: 446
+    supported_hardware:
+      - mi355x
+    description: "AMD Quark MXFP4 checkpoint — MoE weights quantized for MI355X (gfx950)"
+    hardware_overrides:
+      mi355x:
+        extra_args:
+          - "--trust-remote-code"
+        extra_env:
+          VLLM_USE_V2_MODEL_RUNNER: "1"
+          VLLM_ROCM_USE_AITER_FP8BMM: "0"
+          VLLM_ROCM_USE_AITER_FP4BMM: "0"
+  nvfp4:
+    model_id: "nvidia/GLM-5.2-NVFP4"
+    precision: nvfp4
+    vram_minimum_gb: 558
+    description: "NVIDIA modelopt NVFP4 checkpoint — only MoE expert linears are quantized to NVFP4; shared experts, attention, embeddings, and the early dense layers stay FP8/BF16, with FP8 KV cache. Blackwell GPUs (B200/B300) only."
+  redhat_nvfp4:
+    model_id: "RedHatAI/GLM-5.2-NVFP4-FP8"
+    precision: nvfp4
+    label: "NVFP4+FP8 (RedHat)"
+    vram_minimum_gb: 558
+    description: "RedHatAI NVFP4+FP8 mixed-precision checkpoint (MoE expert linears NVFP4, attention/embeddings FP8) for Blackwell GPUs"
+  bf16:
+    precision: bf16
+    vram_minimum_gb: 1786
+    description: "Full precision BF16 — requires multi-node deployment"
+
+  redhat_fp8:
+    model_id: "RedHatAI/GLM-5.2-FP8"
+    precision: fp8
+    label: "FP8 (RedHat)"
+    vram_minimum_gb: 892
+    description: "RedHatAI FP8 quantization"
+
+  redhat_nvfp4_plain:
+    model_id: "RedHatAI/GLM-5.2-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHat)"
+    vram_minimum_gb: 477
+    description: "RedHatAI NVFP4 quantization"
+
+
+compatible_strategies:
+  - single_node_tp
+  - single_node_tep
+  - multi_node_tp
+  - multi_node_tp_pp
+  - multi_node_tep
+  - multi_node_dep
+  - pd_cluster
+
+kv_offload_support:
+  offloading_cpu: verified
+  offloading_fs: verified
+
+hardware_overrides:
+  hopper:
+    # H100/H200 use plain fp8 KV cache; Blackwell keeps base_args' fp8_e4m3,H20 do not use kvcache fp8 
+    # The synthesizer's last-wins dedupe lets this shadow --kv-cache-dtype.
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  amd:
+    extra_args:
+      - "--linear-backend"
+      - "aiter"
+      - "--moe-backend"
+      - "aiter"
+    extra_env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "1"
+
+strategy_overrides: {}
+
+guide: |
+  ## Overview
+
+  GLM-5.2 is the newest model in the GLM-5 series — a ~743B-parameter MoE (39B active) from
+  Z-AI. The
+  headline change over GLM-5 / 5.1 is that **Multi-Token Prediction (MTP) is extended from 3 to
+  5 draft tokens**, lifting end-to-end throughput on reasoning, coding, and agentic workloads.
+  It ships as BF16, native-FP8, and AMD Quark MXFP4 checkpoints, and keeps the GLM
+  thinking-mode behavior.
+
+  This recipe targets the **FP8** checkpoint, the practical default: it fits on a single
+  8xH200 / 8xH20 node and — with FP8 KV cache — reaches the full 1M-token context on 8xB200.
+  On AMD MI355X hardware, use the **MXFP4** variant when HBM footprint is the priority.
+
+  ## Prerequisites
+
+  - **vLLM >= 0.24.0** for the `glm47` reasoning parser. If you need tool calling and MTP at the same time, use the latest
+    `main` branch.
+  - **GPU:** 8xH200 or 8xH20 (141 GB each) for single-node FP8; 8xB200 (180 GB each) for the
+    full 1M context.
+  - **MXFP4:** use the AMD Quark checkpoint on MI355X with ROCm and AITER enabled.
+    TP=8 is recommended for the full MXFP4 model on an 8x MI355X node; TP=4 is
+    also supported when memory headroom allows.
+
+  ## Installation
+
+  ### Docker
+
+  ```bash
+  docker run --gpus all \
+    -p 8000:8000 \
+    --ipc=host \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    vllm/vllm-openai:v0.28.0 zai-org/GLM-5.2-FP8 \
+      --tensor-parallel-size 8 \
+      --tool-call-parser glm47 \
+      --reasoning-parser glm47 \
+      --enable-auto-tool-choice \
+      --served-model-name glm-5.2-fp8 \
+      --max-model-len 131072
+  ```
+
+  On CUDA 12.x, swap the image for `vllm/vllm-openai:v0.28.0-cu129`.
+
+  ### From source
+
+  ```bash
+  uv venv
+  source .venv/bin/activate
+  uv pip install "vllm==0.28.0" --torch-backend=auto
+  uv pip install "transformers>=5.9.0"
+  ```
+
+  ## Launching the server
+
+  ### FP8 on 8xH200 (standard)
+
+  ```bash
+  vllm serve zai-org/GLM-5.2-FP8 \
+    --kv-cache-dtype fp8 \
+    --tensor-parallel-size 8 \
+    --speculative-config.method mtp \
+    --speculative-config.num_speculative_tokens 5 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm47 \
+    --enable-auto-tool-choice \
+    --served-model-name glm-5.2-fp8
+  ```
+  ### FP8 on 8xH20 (dspark with best practices)
+  ```bash
+  vllm serve zai-org/GLM-5.2-FP8 \
+     --tensor-parallel-size 8 \
+     --tool-call-parser glm47 \
+     --reasoning-parser glm47 \
+     --enable-auto-tool-choice \
+     --max-model-len 200000 \
+     --max-num-seqs 16 \
+     --max-num-batched-tokens 32768 \
+     --speculative-config '{"model": "RedHatAI/GLM-5.2-speculator.dspark","num_speculative_tokens": 7,"method": "dspark"}' \
+     --served-model-name glm-5.2-fp8
+  ```
+  tps up to 70+ for single request
+
+  ### FP8 on AMD MI300X/MI325X/MI350X/MI355X (full 1M context)
+
+  GLM-5.2 has a native 1M-token window. Whether the full window fits on ROCm is a
+  KV-cache VRAM question, so the levers are `--max-model-len` and `--max-num-seqs`.
+  Start with the values below, then scale them with your node's HBM and workload:
+  raise the context window when startup reports KV-cache headroom, or lower the
+  sequence cap if long prompts OOM under concurrency.
+
+  ```bash
+  VLLM_ROCM_USE_AITER=1 \
+  VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 \
+  vllm serve zai-org/GLM-5.2-FP8 \
+    --kv-cache-dtype fp8_e4m3 \
+    --tensor-parallel-size 8 \
+    --speculative-config.method mtp \
+    --speculative-config.num_speculative_tokens 5 \
+    --tool-call-parser glm47 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm47 \
+    --gpu-memory-utilization 0.80 \
+    --max-model-len 524288 \
+    --max-num-seqs 32 \
+    --linear-backend aiter \
+    --moe-backend aiter
+  ```
+
+  - **`--max-model-len`** — caps the served context window; raise it toward the native
+    1M window when your HBM budget and workload leave KV-cache headroom.
+  - **`--max-num-seqs 32`** — the main knob for fitting long context under concurrency;
+    start at 32 and tune it to your HBM (up on headroom, down on OOM).
+  - **`--gpu-memory-utilization 0.80`** — leaves ROCm runtime headroom for MTP graph capture
+    and inference; raise it only after a representative concurrent smoke test.
+  - **`--speculative-config.num_speculative_tokens 5`** — enables GLM-5.2's 5-token MTP
+    path; reduce it if your workload shows low acceptance or higher latency.
+  - **`VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1`** — enables the shared-expert fused
+    MoE path. `VLLM_ROCM_USE_AITER_LINEAR` and `VLLM_ROCM_USE_AITER_MOE` default to enabled
+    when `VLLM_ROCM_USE_AITER=1`.
+
+  On 8x MI325X this command serves the full `--max-model-len 524288` at
+  `--gpu-memory-utilization 0.80`, reporting a 1,564,016-token KV cache and 2.98x maximum
+  concurrency. MTP is healthy there: a mean acceptance length of 4.00 out of 5 drafted
+  tokens on a short greedy generation.
+
+  On 8x MI350X it reports a 2,205,424-token KV cache and 4.21x maximum concurrency at the
+  same settings, and MTP's mean acceptance length is 3.62 out of 5 drafted tokens on a
+  512-token greedy generation.
+
+  ### MXFP4 on AMD MI355X
+
+  The AMD Quark MXFP4 checkpoint quantizes the MoE weights while leaving non-MoE modules in
+  higher precision. The recipe UI only enables this variant for supported AMD MI355X
+  hardware. Use ROCm AITER kernels:
+
+  ```bash
+  export HIP_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  export VLLM_ROCM_USE_AITER=1
+  export VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1
+  export VLLM_USE_V2_MODEL_RUNNER=1
+  export VLLM_ROCM_USE_AITER_FP8BMM=0
+  export VLLM_ROCM_USE_AITER_FP4BMM=0
+
+  vllm serve amd/GLM-5.2-MXFP4 \
+    --trust-remote-code \
+    --kv-cache-dtype fp8_e4m3 \
+    --tensor-parallel-size 8 \
+    --gpu-memory-utilization 0.90 \
+    --max-model-len 32768 \
+    --tool-call-parser glm47 \
+    --enable-auto-tool-choice \
+    --reasoning-parser glm47 \
+    --no-enable-prefix-caching \
+    --served-model-name glm-5.2-mxfp4
+  ```
+
+  For TP=4 validation runs, use `HIP_VISIBLE_DEVICES=0,1,2,3` and
+  `--tensor-parallel-size 4`.
+
+  ### FP8 on 8xB200 (full 1M context)
+
+  GLM-5.2 has a native 1M-token window. Whether the full window fits is a KV-cache VRAM
+  question, so the lever is `--max-num-seqs` — it bounds how many sequences share the KV budget
+  at once, leaving room for each to hold a long context. **Start at 32** and scale with your
+  node's VRAM: raise it on larger trays (e.g. 8xB300) or short-prompt traffic, lower it if you
+  OOM at full context. FP8 KV cache (`--kv-cache-dtype fp8_e4m3`, already in the base flags)
+  roughly halves that budget, which is what makes 1M reachable at all.
+
+  ```bash
+  VLLM_DEEP_GEMM_WARMUP=skip vllm serve zai-org/GLM-5.2-FP8 \
+    --kv-cache-dtype fp8_e4m3 \
+    --tensor-parallel-size 8 \
+    --speculative-config.method mtp \
+    --speculative-config.num_speculative_tokens 5 \
+    --max-num-seqs 32 \
+    --tool-call-parser glm47 \
+    --reasoning-parser glm47 \
+    --enable-auto-tool-choice \
+    --served-model-name glm-5.2-fp8
+  ```
+
+  - **`--max-num-seqs 32`** — the single knob for fitting 1M context; start at 32 and tune it to
+    your VRAM (up on headroom, down on OOM).
+  - **`VLLM_DEEP_GEMM_WARMUP=skip`** — skips DeepGEMM JIT warmup for a faster startup; the first
+    few requests compile kernels on demand instead.
+  - **BF16** needs multi-node plus an extra loader flag — see [Troubleshooting](#troubleshooting).
+
+  ### NVFP4 on Blackwell (B200/B300)
+
+  The `nvidia/GLM-5.2-NVFP4` variant is NVIDIA's modelopt re-quantization: only the MoE
+  expert linears drop to NVFP4 while shared experts, attention, embeddings, and the early
+  dense layers stay FP8/BF16, with FP8 KV cache. The ~465 GB checkpoint fits comfortably on
+  Blackwell — vLLM auto-detects the quantization from the checkpoint, so no `--quantization`
+  flag is needed. Select the **NVFP4** variant above (Blackwell-only) or run NVIDIA's command:
+
+  ```bash
+  vllm serve nvidia/GLM-5.2-NVFP4 \
+    --tensor-parallel-size 8 \
+    --enable-expert-parallel \
+    --reasoning-parser glm47 \
+    --tool-call-parser glm47 \
+    --enable-auto-tool-choice \
+    --kv-cache-dtype fp8_e4m3 \
+    --served-model-name glm-5.2-nvfp4
+  ```
+
+  ## Reasoning modes
+
+  Thinking is **on by default**. GLM-5.2 reuses the DeepSeek-V4 `reasoning_effort` mechanism,
+  with two effort levels driven by the `reasoning_effort` field:
+
+  | Mode | How to request | Behavior |
+  |------|----------------|----------|
+  | **Think Max** (default) | omit `reasoning_effort`, or set `"max"` | Deepest reasoning — hard math, multi-step planning, agentic tasks. Highest token cost. |
+  | **Think High** | `"reasoning_effort": "high"` | Balanced depth and latency. |
+  | **Non-think** | `chat_template_kwargs.enable_thinking: false` | Fast, no chain-of-thought. |
+
+  The chat template resolves effort to **`max` unless `reasoning_effort` is explicitly `"high"`**,
+  so Max is the default and High is opt-in. Pass it through `chat_template_kwargs` (the
+  DeepSeek-V4 path) or the top-level OpenAI `reasoning_effort` field; it has no effect when
+  thinking is disabled.
+
+  ## Client usage
+
+  ```python
+  from openai import OpenAI
+
+  client = OpenAI(api_key="EMPTY", base_url="http://localhost:8000/v1")
+  msgs = [{"role": "user", "content": "Summarize GLM-5.2 in one sentence."}]
+
+  # Think Max (default) — just omit reasoning_effort
+  client.chat.completions.create(model="glm-5.2-fp8", messages=msgs, max_tokens=4096)
+
+  # Think High — explicitly request reasoning_effort: "high"
+  client.chat.completions.create(
+      model="glm-5.2-fp8",
+      messages=msgs,
+      max_tokens=4096,
+      extra_body={"chat_template_kwargs": {"reasoning_effort": "high"}},
+  )
+
+  # Non-think
+  client.chat.completions.create(
+      model="glm-5.2-fp8",
+      messages=msgs,
+      max_tokens=4096,
+      extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+  )
+  ```
+
+  ### cURL — Think High
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "glm-5.2-fp8",
+      "messages": [{"role": "user", "content": "Summarize GLM-5.2 in one sentence."}],
+      "temperature": 1,
+      "max_tokens": 4096,
+      "chat_template_kwargs": {"reasoning_effort": "high"}
+    }'
+  ```
+
+  ### cURL — non-think
+
+  ```bash
+  curl http://localhost:8000/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+      "model": "glm-5.2-fp8",
+      "messages": [{"role": "user", "content": "Summarize GLM-5.2 in one sentence."}],
+      "temperature": 1,
+      "max_tokens": 4096,
+      "chat_template_kwargs": {"enable_thinking": false}
+    }'
+  ```
+
+  ## Benchmarking
+
+  Add `--no-enable-prefix-caching` to the server command for a clean measurement.
+
+  ```bash
+  vllm bench serve \
+    --model zai-org/GLM-5.2-FP8 \
+    --dataset-name random \
+    --random-input 8000 \
+    --random-output 1024 \
+    --request-rate 10 \
+    --num-prompts 32 \
+    --ignore-eos
+  ```
+
+  > **Note:** pure throughput benchmarks tend to under-report real speed, because MTP's
+  > acceptance rate is usually low in synthetic runs.
+
+  ## Troubleshooting
+
+  - **FP8 performance:** DeepGEMM is required — install via `install_deepgemm.sh`.
+  - **MTP performance:** We fixed some MTP acceptance rate issue in [This PR](https://github.com/vllm-project/vllm/pull/45895). If you encounter MTP acceptance rate issue, please update your branch or refer to [GLM-5.2 Docker Image](https://hub.docker.com/r/vllm/vllm-openai/tags?name=glm52).
+
+  ## References
+
+  - [Model card](https://huggingface.co/zai-org/GLM-5.2)
+  - [FP8 checkpoint](https://huggingface.co/zai-org/GLM-5.2-FP8)
+  - [MXFP4 checkpoint](https://huggingface.co/amd/GLM-5.2-MXFP4)
+  - [NVFP4 checkpoint (NVIDIA)](https://huggingface.co/nvidia/GLM-5.2-NVFP4)

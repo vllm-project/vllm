@@ -93,7 +93,7 @@ def test_default_watermarking_resolves_when_configured():
     assert enabled.watermarking is None
 
 
-@pytest.mark.parametrize("watermarking", [None, True])
+@pytest.mark.parametrize("watermarking", [True])
 def test_requested_watermarking_without_engine_config_warns_and_disables(
     watermarking, caplog_vllm, reset_warning_once
 ):
@@ -148,6 +148,7 @@ def test_incompatible_modes_are_allowed_when_watermarking_is_disabled(params):
 @pytest.mark.parametrize(
     "params",
     [
+        SamplingParams(),
         SamplingParams(temperature=0),
         SamplingParams(trace_decode_token_ids=[1]),
     ],
@@ -158,7 +159,7 @@ def test_requests_without_engine_config_are_unwatermarked(
     with caplog_vllm.at_level("WARNING"):
         resolved = _validate(params, server_uses_watermarking=False)
 
-    assert "engine has no watermark configuration" in caplog_vllm.text
+    assert "engine has no watermark configuration" not in caplog_vllm.text
     assert resolved is False
     assert params.watermarking is None
 
