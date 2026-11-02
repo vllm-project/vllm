@@ -37,6 +37,8 @@ from vllm.utils.flashinfer import has_flashinfer
 class TrtLlmMxfp4ExpertsBase:
     """MXFP4 TRTLLM-Gen MoE kernels. Shared base for modular and monolithic."""
 
+    kept_constants: tuple[str, ...] = ("gemm1_alpha", "gemm1_beta", "gemm1_clamp_limit")
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,

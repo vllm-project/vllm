@@ -5,7 +5,7 @@
 import copy
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any
+from typing import Any, overload
 
 import torch
 
@@ -222,6 +222,32 @@ def replace_parameter(
         set_weight_attrs(new_param, {"weight_loader": weight_loader})
 
     setattr(layer, param_name, new_param)
+
+
+@overload
+def refill_derived(obj: object, name: str, new: None) -> None: ...
+
+
+@overload
+def refill_derived(obj: object, name: str, new: torch.Tensor) -> torch.Tensor: ...
+
+
+def refill_derived(
+    obj: object, name: str, new: torch.Tensor | None
+) -> torch.Tensor | None:
+    """Set ``obj.name`` (a plain attribute, never a parameter or buffer) to a
+    tensor derived from the weights. A held tensor of the same shape, dtype and
+    device is refilled in place, so captured CUDA graphs keep its address; it
+    must own its storage. Returns the tensor now held under ``name``."""
+    old = getattr(obj, name, None)
+    if (
+        isinstance(old, torch.Tensor)
+        and new is not None
+        and (old.shape, old.dtype, old.device) == (new.shape, new.dtype, new.device)
+    ):
+        return old.copy_(new)
+    setattr(obj, name, new)
+    return new
 
 
 def move_parameter(layer: torch.nn.Module, src_name: str, dst_name: str) -> None:

@@ -49,6 +49,27 @@ def test_block_mixing_is_causal():
     )
 
 
+# A weight update reruns the post-load hook: the fused copies take the new weights
+# and keep their storage, which captured CUDA graphs read.
+def test_fused_buffers_refilled_in_place():
+    head = _head()
+    head.fold_from_raw_(torch.randn(R, B, B, dtype=torch.float64) * 0.3)
+    head.process_weights_after_loading()
+    buf = head._fused_buf
+    assert buf is not None
+    ptrs = {k: v.data_ptr() for k, v in buf.items()}
+
+    with torch.no_grad():
+        head.mlp_down.weight.mul_(-2)
+    head.fold_from_raw_(torch.randn(R, B, B, dtype=torch.float64) * 0.3)
+    head.process_weights_after_loading()
+
+    assert head._fused_buf is buf
+    assert {k: v.data_ptr() for k, v in buf.items()} == ptrs
+    torch.testing.assert_close(buf["wd_t"], head.mlp_down.weight.t())
+    torch.testing.assert_close(buf["mix_kjc"], head.mix_L.permute(1, 2, 0))
+
+
 # Greedy refine has no sampling, so repeated calls must agree exactly. The fused
 # kernels are the only implementation, so this runs where they do: on a GPU, at
 # the serving dtype.
@@ -57,7 +78,7 @@ def test_jacobi_is_deterministic():
     dtype = torch.bfloat16
     head = _head(device="cuda", dtype=dtype)
     head.fold_from_raw_(torch.randn(R, B, B, dtype=dtype, device="cuda") * 0.3)
-    head.build_fused_buffers()
+    head.process_weights_after_loading()
     torch.manual_seed(13)
     base = torch.randn(2, B, V, dtype=dtype, device="cuda")
     h = torch.randn(2, B, H, dtype=dtype, device="cuda")

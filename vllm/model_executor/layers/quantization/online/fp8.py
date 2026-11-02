@@ -571,6 +571,7 @@ class _Fp8OnlineMoEBase(OnlineMoEMethodBase):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module

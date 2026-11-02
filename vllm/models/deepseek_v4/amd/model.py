@@ -73,6 +73,7 @@ from vllm.model_executor.models.utils import (
     make_layers,
     maybe_prefix,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.models.deepseek_v4.amd.mega_moe import (
     DeepseekV4AiterMegaMoEExperts,
     finalize_mega_moe_weights,
@@ -394,10 +395,12 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
             raise ValueError("Heterogeneous fusion requires one appended expert.")
         if self.shared_expert_id != self.global_num_experts:
             raise ValueError("The shared expert ID must name the appended slot.")
-        self.register_buffer("shared_w1", None, persistent=False)
-        self.register_buffer("shared_w2", None, persistent=False)
-        self.register_buffer("shared_w1_scale", None, persistent=False)
-        self.register_buffer("shared_w2_scale", None, persistent=False)
+        # derived from the shared expert's weights after loading, refilled in
+        # place on reloads (captured CUDA graphs read them)
+        self.shared_w1: torch.Tensor | None = None
+        self.shared_w2: torch.Tensor | None = None
+        self.shared_w1_scale: torch.Tensor | None = None
+        self.shared_w2_scale: torch.Tensor | None = None
 
     def _get_quant_method(self, prefix, quant_config, moe_config):
         quant_method = super()._get_quant_method(prefix, quant_config, moe_config)
@@ -418,10 +421,18 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
             shared_expert.down_proj.weight_scale_inv,
             self.moe_config.intermediate_size_per_partition,
         )
-        self.shared_w1 = rocm_aiter_ops.shuffle_weight_a16w4(shared[0], 16, True)
-        self.shared_w2 = rocm_aiter_ops.shuffle_weight_a16w4(shared[1], 16, False)
-        self.shared_w1_scale = rocm_aiter_ops.shuffle_scale_a16w4(shared[2], 1, True)
-        self.shared_w2_scale = rocm_aiter_ops.shuffle_scale(shared[3])
+        refill_derived(
+            self, "shared_w1", rocm_aiter_ops.shuffle_weight_a16w4(shared[0], 16, True)
+        )
+        refill_derived(
+            self, "shared_w2", rocm_aiter_ops.shuffle_weight_a16w4(shared[1], 16, False)
+        )
+        refill_derived(
+            self,
+            "shared_w1_scale",
+            rocm_aiter_ops.shuffle_scale_a16w4(shared[2], 1, True),
+        )
+        refill_derived(self, "shared_w2_scale", rocm_aiter_ops.shuffle_scale(shared[3]))
 
         self._ensure_moe_quant_config_init()
         quant_config = self.quant_method.moe_quant_config
@@ -430,21 +441,23 @@ class DeepseekV4HeterogeneousSharedRoutedExperts(RoutedExperts):
         if quant_config.w1_scale is None or quant_config.w2_scale is None:
             raise RuntimeError("The routed MXFP4 scales are unavailable.")
 
-        def routed_scales(scale: torch.Tensor) -> torch.Tensor:
+        def routed_scales(name: str, scale: torch.Tensor) -> torch.Tensor:
             scale = scale.reshape(self.local_num_experts, -1, scale.shape[-1])[
                 : self.shared_expert_id
             ]
-            return scale.reshape(-1, scale.shape[-1]).contiguous()
+            return refill_derived(
+                self, name, scale.reshape(-1, scale.shape[-1]).contiguous()
+            )
 
         self._routed_quant_config = replace(
             quant_config,
             _w1=replace(
                 quant_config._w1,
-                scale=routed_scales(quant_config.w1_scale),
+                scale=routed_scales("_routed_w1_scale", quant_config.w1_scale),
             ),
             _w2=replace(
                 quant_config._w2,
-                scale=routed_scales(quant_config.w2_scale),
+                scale=routed_scales("_routed_w2_scale", quant_config.w2_scale),
             ),
         )
 

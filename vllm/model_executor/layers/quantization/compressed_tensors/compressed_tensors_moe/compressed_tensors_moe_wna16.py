@@ -464,15 +464,11 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         if self.is_marlin:
             # Register input global scales if present
             if w13_input_global_scale is not None:
-                layer.register_parameter(
-                    "w13_input_global_scale",
-                    torch.nn.Parameter(w13_input_global_scale, requires_grad=False),
+                replace_parameter(
+                    layer, "w13_input_global_scale", w13_input_global_scale
                 )
             if w2_input_global_scale is not None:
-                layer.register_parameter(
-                    "w2_input_global_scale",
-                    torch.nn.Parameter(w2_input_global_scale, requires_grad=False),
-                )
+                replace_parameter(layer, "w2_input_global_scale", w2_input_global_scale)
 
         # Alias packed weights to w13_weight/w2_weight for the modular kernel interface
         layer.w13_weight = layer.w13_weight_packed
