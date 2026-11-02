@@ -25,7 +25,8 @@ PROMPTS = ["The capital of France is", "def fibonacci(n):"]
 pytestmark = multi_gpu_marks(num_gpus=2)
 
 
-def test_expert_parallel_without_eplb_accepts_weight_updates(vllm_runner):
+def test_expert_parallel_without_eplb_accepts_weight_updates(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     with vllm_runner(MODEL, **ENGINE_KWARGS) as runner:
         llm = runner.llm
         sampling_params = SamplingParams(temperature=0, max_tokens=8, ignore_eos=True)
