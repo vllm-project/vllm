@@ -8,6 +8,7 @@ from argparse import Namespace
 
 from vllm import AsyncEngineArgs, envs
 from vllm.config import VllmConfig
+from vllm.distributed.io_transfer import ensure_io_transfer_shutdown
 from vllm.logger import configure_logging_from_args, init_logger
 
 from ..app import build_app
@@ -92,6 +93,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     # GPU-less entrypoint bypasses. Model-specific defaults are then applied
     # by `verify_and_update_config` during VllmConfig construction.
     vllm_config = VllmConfig(
+        io_transfer_config=args.io_transfer_config,
         model_config=model_config,
         logging_config=engine_args.create_logging_config(),
         structured_outputs_config=engine_args.create_structured_outputs_config(),
@@ -102,6 +104,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     try:
         await shutdown_task
     finally:
+        ensure_io_transfer_shutdown()
         sock.close()
 
 

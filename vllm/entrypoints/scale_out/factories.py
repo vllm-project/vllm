@@ -36,6 +36,8 @@ def init_render_state(
     disabled_thinking_effort: "AnthropicDisabledThinkingEffortOption" = "auto",
     disabled_thinking_effort_resolver: "DisabledThinkingEffortResolver | None" = None,
 ):
+    from vllm.distributed.io_transfer import get_io_executor
+
     from .derender.serving import ServingDerender
     from .render.serving import ServingRender
 
@@ -46,12 +48,18 @@ def init_render_state(
         tool_server=state.tool_server,
         disabled_thinking_effort=disabled_thinking_effort,
         disabled_thinking_effort_resolver=disabled_thinking_effort_resolver,
+        io_processor=getattr(state, "io_processor", None),
+        io_connector=getattr(state, "io_connector", None),
+        io_executor=get_io_executor(),
     )
 
     state.serving_derender = ServingDerender(
         state.openai_serving_models,
         state.online_derenderer,
         request_logger=request_logger,
+        io_processor=getattr(state, "io_processor", None),
+        io_connector=getattr(state, "io_connector", None),
+        io_executor=get_io_executor(),
     )
 
 

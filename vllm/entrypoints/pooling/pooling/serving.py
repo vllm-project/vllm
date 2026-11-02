@@ -2,12 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import assert_never, cast
 
+from fastapi import Request
 from fastapi.responses import Response, StreamingResponse
 
+from vllm.distributed.io_transfer import (
+    ensure_io_transfer_initialized,
+    get_io_transfer,
+    has_io_transfer,
+)
+from vllm.entrypoints.generate.base.protocol import RequestResponseMetadata
+from vllm.entrypoints.pooling.pooling.tensor_serde import encode_tensor
+from vllm.entrypoints.scale_out.token_in_token_out.mm_serde import decode_mm_kwargs_item
+from vllm.entrypoints.serve.engine.protocol import ErrorResponse
 from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.exceptions import VLLMValidationError
+from vllm.inputs.engine import mm_input
 from vllm.logger import init_logger
-from vllm.outputs import PoolingRequestOutput
+from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    PlaceholderRange,
+)
+from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.tasks import SupportedTask
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
@@ -23,6 +39,11 @@ from ..utils import (
     get_pooling_usage,
 )
 from .protocol import (
+    DataLocation,
+    DataObject,
+    DataRef,
+    GeneratePoolingRequest,
+    GeneratePoolingResponse,
     IOProcessorRequest,
     PoolingRequest,
     PoolingResponse,
@@ -51,6 +72,11 @@ class ServingPooling(PoolingBaseServing):
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
+
+        # Inference instances reuse the renderer executor for connector calls
+        # rather than creating a dedicated IO thread pool.
+        ensure_io_transfer_initialized(self.vllm_config)
+        self.io_connector = get_io_transfer() if has_io_transfer() else None
 
     def get_io_processor(self, request: AnyPoolingRequest) -> PoolingIOProcessor:
         request = cast(PoolingRequest, request)
@@ -188,3 +214,125 @@ class ServingPooling(PoolingBaseServing):
             embed_dtype=embed_dtype,
             endianness=endianness,
         )
+
+    async def _generate_pooling_engine_call(
+        self,
+        ctx: PoolingServeContext,
+        request: GeneratePoolingRequest,
+    ) -> GeneratePoolingResponse:
+        """Execute the engine call for a GeneratePoolingRequest.
+        :meth:`PoolingServingBase._engine_call`.
+        """
+        # Derive output object_id from the inbound data_ref so the
+        # derender side can locate it without recomputing any hash.
+        # Replace '/' in model name so it is safe to embed in a
+        # filename on both sender and receiver
+        assert request.data_ref is not None
+        assert isinstance(self.vllm_config.model_config.served_model_name, str)
+        safe_model_name = self.vllm_config.model_config.served_model_name.replace(
+            "/", "_"
+        )
+        output_object_id = f"{request.data_ref.object_id}:{safe_model_name}:output"
+
+        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
+        mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
+        if request.data is not None and request.data_ref is not None:
+            mm_kwargs = {"image": [decode_mm_kwargs_item(request.data.data)]}
+        elif request.data_ref is not None and self.io_connector:
+            data_obj = await self.io_connector.get_data_async(
+                request.data_ref, executor=self._executor
+            )
+            # The connector owns serialization: get_data() returns the
+            # raw MultiModalKwargsItem — no base64 decode needed.
+            mm_kwargs = {"image": [cast(MultiModalKwargsItem, data_obj.data)]}
+        else:
+            raise KeyError("Couldn't find data.")
+
+        mm_hashes = {"image": [request.data_ref.object_id]}
+
+        engine_input = mm_input(
+            prompt_token_ids=request.token_ids,
+            mm_kwargs=MultiModalKwargsItems(mm_kwargs),
+            mm_hashes=mm_hashes,
+            mm_placeholders=mm_placeholders,
+            cache_salt=request.cache_salt,
+        )
+
+        assert self.engine_client is not None
+
+        generator = self.engine_client.encode(
+            engine_input,
+            request.to_pooling_params(),
+            request.request_id,
+            priority=request.priority,
+        )
+
+        assert generator is not None
+
+        pooling_request_output: PoolingRequestOutput[PoolingOutput] = await anext(
+            generator
+        )
+
+        tensor = pooling_request_output.outputs.data
+
+        output_data_obj: DataObject | None
+        if self.io_connector:
+            # Pass the raw tensor — the connector owns serialization
+            # and will use MsgpackEncoder for a zero-copy ZMQ transfer.
+            data_ref = await self.io_connector.put_data_async(
+                output_object_id,
+                tensor,
+                executor=self._executor,
+            )
+            output_data_obj = None
+        else:
+            # No connector: encode to base64 for JSON transport.
+            data_ref = DataRef(
+                object_id=output_object_id, location=DataLocation(locator="")
+            )
+            output_data_obj = DataObject(data=encode_tensor(tensor))
+
+        return GeneratePoolingResponse(
+            request_id=request.request_id,
+            output_data_ref=data_ref,
+            output_metadata_ref=request.metadata_ref,  # Forwarding it to the next stage
+            output_data=output_data_obj,
+            output_metadata=request.metadata,  # Forwarding it to the next stage
+        )
+
+    async def serve_pooling_embeds(
+        self,
+        request: GeneratePoolingRequest,
+        raw_request: Request | None = None,
+    ) -> GeneratePoolingResponse | ErrorResponse:
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            logger.error("Error with model %s", error_check_ret)
+            return error_check_ret
+
+        # If the engine is dead, raise the engine's DEAD_ERROR.
+        if self.engine_client and self.engine_client.errored:
+            raise self.engine_client.dead_error
+
+        request_metadata = RequestResponseMetadata(request_id=request.request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
+        io_processor = self.io_processors["plugin"]
+        model_name = self.models.model_name()
+
+        pooling_params = io_processor.create_pooling_params(request)
+        ctx = PoolingServeContext(
+            request=request,
+            raw_request=raw_request,
+            model_name=model_name,
+            pooling_params=pooling_params,
+            request_id=request.request_id,
+            lora_request=self._maybe_get_adapters(request),
+            priorities=request.priority,
+            prompt_extras=None,
+        )
+
+        self._validate_request(ctx)
+
+        return await self._generate_pooling_engine_call(ctx, request)

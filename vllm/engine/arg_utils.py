@@ -47,6 +47,7 @@ from vllm.config import (
     EngramConfig,
     EPLBConfig,
     FaultToleranceConfig,
+    IOTransferConfig,
     KernelConfig,
     KVEventsConfig,
     KVTransferConfig,
@@ -792,6 +793,7 @@ class EngineArgs:
     ec_manager_config: EncoderCacheManagerConfig = get_field(
         VllmConfig, "ec_manager_config"
     )
+    io_transfer_config: IOTransferConfig | None = None
     reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
@@ -1892,6 +1894,9 @@ class EngineArgs:
             "--ec-manager-config", **vllm_kwargs["ec_manager_config"]
         )
         vllm_group.add_argument(
+            "--io-transfer-config", **vllm_kwargs["io_transfer_config"]
+        )
+        vllm_group.add_argument(
             "--compilation-config", "-cc", **vllm_kwargs["compilation_config"]
         )
         vllm_group.add_argument(
@@ -2910,6 +2915,7 @@ class EngineArgs:
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
             ec_manager_config=self.ec_manager_config,
+            io_transfer_config=self.io_transfer_config,
             reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
