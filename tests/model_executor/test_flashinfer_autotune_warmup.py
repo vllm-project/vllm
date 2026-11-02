@@ -19,6 +19,7 @@ import vllm.utils.flashinfer as fi_utils
 from vllm.model_executor.warmup.kernel_warmup import (
     _flashinfer_autotune_token_counts,
     _run_flashinfer_autotune_dummy_runs,
+    _run_flashinfer_tactic_warmup,
     flashinfer_autotune,
 )
 
@@ -245,6 +246,7 @@ def test_flashinfer_autotune_lifecycle(
     monkeypatch.setattr(
         warmup, "autotune_hisparse_flashinfer_attention", events.hisparse
     )
+    monkeypatch.setattr(warmup, "_run_flashinfer_tactic_warmup", events.warm)
 
     if failure is None:
         warmup.flashinfer_autotune(runner)
@@ -287,7 +289,39 @@ def test_flashinfer_autotune_lifecycle(
             expected.extend([call.reload(), call.barrier()])
         elif not use_v2:
             expected.append(call.tuner.save_configs(str(rank_cache_path)))
+        expected.append(call.warm(runner, skip_attn=hisparse))
     assert events.mock_calls == expected
+
+
+@pytest.mark.parametrize("skip_attn", [False, True])
+def test_flashinfer_tactic_warmup_runs_both_ends_of_each_bucket(skip_attn):
+    runner = _make_runner([])
+
+    with (
+        patch(
+            "vllm.model_executor.warmup.kernel_warmup."
+            "_flashinfer_autotune_token_counts",
+            return_value=(8192, 128),
+        ),
+        patch(
+            "vllm.utils.flashinfer.flashinfer_get_hybrid_num_tokens_buckets",
+            return_value=(1, 64, 128, 1024, 8192),
+        ) as get_buckets,
+        patch("vllm.utils.flashinfer.autotune") as autotune,
+    ):
+        _run_flashinfer_tactic_warmup(runner, skip_attn=skip_attn)
+
+    get_buckets.assert_called_once_with(8192)
+    autotune.assert_not_called()
+    assert runner._dummy_run.call_args_list == [
+        call(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            **({"skip_attn": True} if skip_attn else {}),
+        )
+        for num_tokens in (1, 2, 64, 65, 129, 1024, 1025)
+    ]
 
 
 @pytest.mark.parametrize(
@@ -580,6 +614,9 @@ def autotune_run(monkeypatch, tmp_path):
         )
         monkeypatch.setattr(warmup, "replayssm_autotune_warmup", lambda runner: None)
         monkeypatch.setattr(warmup, "_autotune_kimi_k3_kda_qkvg", lambda model: None)
+        monkeypatch.setattr(
+            warmup, "_run_flashinfer_tactic_warmup", lambda runner, **kwargs: None
+        )
         return run
 
     return make_run

@@ -435,6 +435,35 @@ def _run_flashinfer_autotune_dummy_runs(
             autotune_indexer_wq_b(runner.get_model(), max_tuning_tokens)
 
 
+def _run_flashinfer_tactic_warmup(
+    runner: "GPUModelRunner", *, skip_attn: bool = False
+) -> None:
+    """Run every token bucket outside tune mode to compile its cached tactic.
+
+    A tuning pass runs only its own token count. On a cache hit nothing is
+    profiled, so the tactics selected for the other buckets would otherwise
+    JIT-compile on live requests. Serving rounds M up to a bucket, so run both
+    ends of each bucket's range: a model can switch paths inside it (e.g. a
+    fused kernel from M >= 512 that leaves the 512 bucket's GEMM tactic to
+    M in 257..511).
+    """
+    import vllm.utils.flashinfer as fi_utils
+
+    dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
+    buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(max_tokens)
+    token_counts = set(buckets)
+    token_counts.update(prev + 1 for prev in buckets[:-1])
+    token_counts.difference_update(_flashinfer_autotune_token_counts(runner))
+    for num_tokens in sorted(token_counts):
+        runner._dummy_run(
+            num_tokens=num_tokens,
+            skip_eplb=True,
+            is_profile=True,
+            **dummy_run_kwargs,
+        )
+
+
 def _autotune_cache_fingerprint(path: Path) -> tuple[str, int] | None:
     """Identify a saved autotune file by its FlashInfer metadata and size."""
     try:
@@ -563,8 +592,6 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
                 # HiSparse hot-buffer attention is bounded by decode batch
                 # size, not the prefill-sized batch used for the full model.
                 autotune_hisparse_flashinfer_attention(runner)
-            # Run on a cache hit too: the dummy runs JIT-compile the kernels of
-            # the cached tactics, which would otherwise compile on live requests.
             _run_flashinfer_autotune_dummy_runs(runner, skip_attn=skip_attn)
             replayssm_autotune_warmup(runner)
             _autotune_kimi_k3_kda_qkvg(runner.get_model())
@@ -580,3 +607,6 @@ def flashinfer_autotune(runner: "GPUModelRunner", *, skip_attn: bool = False) ->
             world.barrier()
     elif tuner._dirty:
         tuner.save_configs(str(cache_path))
+
+    with torch.inference_mode():
+        _run_flashinfer_tactic_warmup(runner, skip_attn=skip_attn)
