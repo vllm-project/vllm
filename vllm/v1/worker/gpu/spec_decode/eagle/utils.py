@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Literal
+
 import torch
 import torch.nn as nn
 
@@ -38,6 +40,36 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
     if w.is_cuda and torch.accelerator.get_memory_info(w.device)[0] < w.numel() * 2:
         return torch.equal(w.cpu(), target_w.cpu())
     return torch.equal(w, target_w)
+
+
+def share_target_lm_head(
+    draft_model: nn.Module,
+    target_lm_head: nn.Module | None,
+    quantization: Literal["fp8", "nvfp4"] | None,
+    can_share: bool = True,
+) -> nn.Module | None:
+    """Install the target lm_head, or its quantized copy, on a drafter that
+    shares it. Returns the installed head, or None if the drafter keeps its own.
+    """
+    draft_lm_head = getattr(draft_model, "lm_head", None)
+    if not (
+        can_share
+        and target_lm_head is not None
+        and _should_share(draft_model, "has_own_lm_head", draft_lm_head, target_lm_head)
+    ):
+        if quantization is not None:
+            raise ValueError(
+                "draft_lm_head_quantization needs a drafter that shares the "
+                "target lm_head."
+            )
+        return None
+    head = target_lm_head
+    if quantization is not None:
+        head = quantized_lm_head_copy(target_lm_head, quantization)
+    if draft_lm_head is not None:
+        del draft_model.lm_head
+    draft_model.lm_head = head
+    return head
 
 
 def get_target_lm_head(target_model: nn.Module, target_language_model: nn.Module):
@@ -110,25 +142,20 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
 
     maybe_share_target_embed(eagle_model, draft_inner, target_inner)
 
-    target_lm_head = get_target_lm_head(target_model, target_language_model)
-    draft_lm_head = getattr(eagle_model, "lm_head", None)
-    if target_lm_head is not None and _should_share(
-        eagle_model, "has_own_lm_head", draft_lm_head, target_lm_head
-    ):
-        draft_head = target_lm_head
-        # With a draft token map only its rows are quantized, in
-        # load_draft_token_map below.
-        if (
-            speculative_config.draft_lm_head_quantization is not None
-            and speculative_config.draft_token_map is None
-        ):
-            draft_head = quantized_lm_head_copy(
-                target_lm_head, speculative_config.draft_lm_head_quantization
-            )
-        if draft_lm_head is not None:
-            del eagle_model.lm_head
-        eagle_model.lm_head = draft_head
-
+    quantization = speculative_config.draft_lm_head_quantization
+    has_token_map = speculative_config.draft_token_map is not None
+    # With a draft token map only its rows are quantized, in
+    # load_draft_token_map below.
+    draft_head = share_target_lm_head(
+        eagle_model,
+        get_target_lm_head(target_model, target_language_model),
+        None if has_token_map else quantization,
+    )
+    if draft_head is None and quantization is not None:
+        raise ValueError(
+            "draft_lm_head_quantization needs a drafter that shares the target lm_head."
+        )
+    if draft_head is not None:
         # MTP layers route logits through layer.shared_head.head, not
         # eagle_model.lm_head, so the per-layer copies need fixing up too.
         layers = getattr(draft_inner, "layers", None)
@@ -139,13 +166,9 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
                 if sh is not None and hasattr(sh, "head"):
                     del sh.head
                     sh.head = draft_head
-    elif speculative_config.draft_lm_head_quantization is not None:
-        raise ValueError(
-            "draft_lm_head_quantization needs a drafter that shares the target lm_head."
-        )
 
     # Only now does the drafter hold the lm_head it drafts with.
-    if speculative_config.draft_token_map is not None:
+    if has_token_map:
         from vllm.model_executor.layers.draft_vocab import load_draft_token_map
 
         load_draft_token_map(eagle_model, vllm_config)
