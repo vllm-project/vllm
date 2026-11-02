@@ -1103,8 +1103,11 @@ def test_filter_reused_manager():
     assert manager.counts[to_keys([1])[0]] == 1
     assert manager.counts[to_keys([2])[0]] == 1
 
-    # 2nd offer -> the whole repeated prefix becomes eligible at once
-    prepare_store_output = manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    # 2nd offer, by another request -> the whole repeated prefix becomes
+    # eligible at once
+    prepare_store_output = manager.prepare_store(
+        to_keys([1, 2]), make_req_context("second")
+    )
     assert prepare_store_output is not None
     assert prepare_store_output.keys_to_store == to_keys([1, 2])
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
@@ -1135,9 +1138,9 @@ def test_filter_reused_manager_oversized_offer_makes_progress():
     keys = to_keys([1, 2, 3, 4])
     stored_keys: set[OffloadKey] = set()
 
-    for _ in range(4):
+    for i in range(4):
         remaining_keys = [key for key in keys if key not in stored_keys]
-        output = manager.prepare_store(remaining_keys, _EMPTY_REQ_CTX)
+        output = manager.prepare_store(remaining_keys, make_req_context(f"req-{i}"))
         assert output is not None
         if output.keys_to_store:
             manager.complete_store(output.keys_to_store, _EMPTY_REQ_CTX)
@@ -1155,10 +1158,10 @@ def test_store_threshold_does_not_hide_ready_reuse():
     )
     head, tail, noise_1, noise_2, replacement = to_keys(list(range(5)))
 
-    seed_ctx = make_req_context("seed")
-    output = manager.prepare_store([head, tail], seed_ctx)
+    output = manager.prepare_store([head, tail], make_req_context("seed-first"))
     assert output is not None
     assert not output.keys_to_store
+    seed_ctx = make_req_context("seed")
     output = manager.prepare_store([head, tail], seed_ctx)
     assert output is not None
     assert output.keys_to_store == [head, tail]
@@ -1179,13 +1182,84 @@ def test_store_threshold_does_not_hide_ready_reuse():
     assert manager.stores_skipped_in_current_batch == skipped_before_reuse
     manager.on_request_finished(reuse_ctx)
 
+    output = manager.prepare_store([replacement], make_req_context("replacement-first"))
+    assert output is not None
+    assert not output.keys_to_store
     replacement_ctx = make_req_context("replacement")
     output = manager.prepare_store([replacement], replacement_ctx)
     assert output is not None
-    assert not output.keys_to_store
-    output = manager.prepare_store([replacement], replacement_ctx)
-    assert output is not None
     assert output.evicted_keys == [head]
+
+
+@pytest.mark.parametrize("store_threshold", [2, 3])
+def test_store_threshold_does_not_count_retries_of_a_failed_offer(
+    store_threshold: int,
+):
+    """After prepare_store() returns None, the scheduler offers the same keys
+    again. A retry must not admit a key that only one request offered, nor
+    count that key's skip again."""
+    manager = make_cpu_manager(num_chunks=2, store_threshold=store_threshold)
+    pinned = to_keys([100, 101])
+    warm, cold = to_keys([1, 2])
+
+    # Other requests offer `pinned` and `warm`, so one more offer admits them.
+    for i in range(store_threshold - 1):
+        manager.prepare_store([*pinned, warm], make_req_context(f"warmup-{i}"))
+    # Fill both chunks with stores that stay in flight.
+    pin_ctx = make_req_context("pin")
+    output = manager.prepare_store(pinned, pin_ctx)
+    assert output is not None
+    assert output.keys_to_store == pinned
+    manager.get_stats()  # drop the warm-up skips
+
+    ctx = make_req_context("req")
+    assert manager.prepare_store([warm, cold], ctx) is None
+    assert manager.prepare_store([warm, cold], ctx) is None
+    # The stores complete, so both chunks become evictable.
+    manager.complete_store(pinned, pin_ctx)
+    output = manager.prepare_store([warm, cold], ctx)
+    assert output is not None
+    assert output.keys_to_store == [warm]
+    assert manager.counts is not None
+    assert manager.counts[cold] == 1
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 1
+
+
+@pytest.mark.parametrize("store_threshold", [2, 3])
+def test_store_threshold_counts_a_key_once_per_request(store_threshold: int):
+    """A preempted request restarts its stores from chunk 0 and offers its keys
+    again through the same context. Each key counts once per request, so the
+    re-offers must not admit a key that only this request offered, nor count
+    its skip again. Another request's offer still counts."""
+    manager = make_cpu_manager(num_chunks=4, store_threshold=store_threshold)
+    warm, cold = to_keys([1, 2])
+
+    # Other requests offer `warm`, so one more offer admits it.
+    for i in range(store_threshold - 1):
+        manager.prepare_store([warm], make_req_context(f"warmup-{i}"))
+    manager.get_stats()  # drop the warm-up skips
+
+    ctx = make_req_context("req")
+    output = manager.prepare_store([warm, cold], ctx)
+    assert output is not None
+    assert output.keys_to_store == [warm]
+    manager.complete_store([warm], ctx)
+
+    # Preempted and rescheduled, as often as it takes to reach the threshold.
+    for _ in range(store_threshold - 1):
+        output = manager.prepare_store([warm, cold], ctx)
+        assert output is not None
+        assert output.keys_to_store == []
+    assert manager.counts is not None
+    assert manager.counts[cold] == 1
+    stats = manager.get_stats()
+    assert stats is not None
+    assert stats.reduce()[CPUOffloadingMetrics.STORES_SKIPPED] == 1
+
+    manager.prepare_store([cold], make_req_context("other"))
+    assert manager.counts[cold] == 2
 
 
 def test_evictable_cache_chunk_count(monkeypatch):
