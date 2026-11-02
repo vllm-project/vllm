@@ -18,13 +18,16 @@ else()
     set(TRITON_GIT "https://github.com/triton-lang/triton.git")
     set(TRITON_KERNELS_TAG "v3.5.1")
   endif()
-  message (STATUS "[triton_kernels] Fetch from ${TRITON_GIT}:${TRITON_KERNELS_TAG}")
+  # Download a source tarball of the pinned revision instead of git-cloning the
+  # whole Triton repo (a raw commit sha cannot be shallow-cloned by FetchContent,
+  # which pulls ~400MB of history). The tarball is a few MB.
+  string(REGEX REPLACE "\\.git$" "" TRITON_REPO_URL "${TRITON_GIT}")
+  set(TRITON_KERNELS_URL "${TRITON_REPO_URL}/archive/${TRITON_KERNELS_TAG}.tar.gz")
+  message (STATUS "[triton_kernels] Fetch from ${TRITON_KERNELS_URL}")
   FetchContent_Declare(
           triton_kernels
-          # TODO (varun) : Fetch just the triton_kernels directory from Triton
-          GIT_REPOSITORY ${TRITON_GIT}
-          GIT_TAG ${TRITON_KERNELS_TAG}
-          GIT_PROGRESS TRUE
+          URL ${TRITON_KERNELS_URL}
+          DOWNLOAD_EXTRACT_TIMESTAMP TRUE
           SOURCE_SUBDIR python/triton_kernels/triton_kernels
   )
 endif()
