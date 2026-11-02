@@ -25,6 +25,15 @@ from vllm.v1.kv_offload.pointer_utils import iter_pointer_groups
 logger = init_logger(__name__)
 
 
+@dataclass(slots=True)
+class FileOp:
+    """A single device-memory <-> file transfer operation."""
+
+    device_ptr: int
+    size_bytes: int
+    file_offset: int
+
+
 class FSLoadStoreSpec(LoadStoreSpec):
     """Spec for loading/storing KV blocks from a filesystem tier.
 
@@ -63,15 +72,14 @@ class FSOffloadingWorker(OffloadingWorker):
     @abstractmethod
     def submit_io(
         self,
-        file_ops: list[tuple[str, list[tuple[int, int, int]]]],
+        file_ops: list[tuple[str, list[FileOp]]],
         is_store: bool,
         ready_event: torch.Event,
     ) -> list[IOCompletion]:
         """Submit a batch of per-file I/O operations.
 
         Args:
-            file_ops: list of (file_path, ops) where each ops is a list
-                of (device_ptr, size_bytes, file_offset) tuples.
+            file_ops: list of (file_path, ops) pairs.
             is_store: True for device->file, False for file->device.
             ready_event: device data is not valid until this event
                 completes. Honor it with ready_event.synchronize() on an
@@ -84,13 +92,7 @@ class FSOffloadingWorker(OffloadingWorker):
         """
 
     def shutdown_dispatch(self) -> None:
-        """Stop accepting I/O and wait for in-flight work."""
-        try:
-            for t in self._transfers.values():
-                for c in t.completions:
-                    c.result()
-        finally:
-            self._transfers.clear()
+        """Stop accepting I/O dispatches (e.g. tear down a thread pool)."""
 
     def shutdown_backend(self) -> None:
         """Release backend resources (e.g. cuFileDriverClose)."""
@@ -164,9 +166,15 @@ class FSOffloadingWorker(OffloadingWorker):
 
     def shutdown(self) -> None:
         try:
-            self.shutdown_dispatch()
+            for t in self._transfers.values():
+                for c in t.completions:
+                    c.result()
         finally:
-            self.shutdown_backend()
+            self._transfers.clear()
+            try:
+                self.shutdown_dispatch()
+            finally:
+                self.shutdown_backend()
 
     def _submit_io(
         self,
@@ -175,7 +183,7 @@ class FSOffloadingWorker(OffloadingWorker):
         is_store: bool,
     ) -> tuple[list[IOCompletion], int]:
         """Build per-file ops from device pointers and delegate to submit_io."""
-        file_ops: list[tuple[str, list[tuple[int, int, int]]]] = []
+        file_ops: list[tuple[str, list[FileOp]]] = []
         total_bytes = 0
         key_idx = 0
 
@@ -189,7 +197,7 @@ class FSOffloadingWorker(OffloadingWorker):
                 capacity = self._block_size_factor - file_blk_start
                 n_blks = min(capacity, g.group_size - dev_blk)
 
-                ops: list[tuple[int, int, int]] = []
+                ops: list[FileOp] = []
                 for d in range(g.n_data_refs):
                     base = g.dev_ptr_offset + d * g.group_size + dev_blk
                     blk_size = int(device_ptrs.sizes[base])
@@ -199,10 +207,10 @@ class FSOffloadingWorker(OffloadingWorker):
                             d * self._block_size_factor + file_blk_start + b
                         ) * blk_size
                         ops.append(
-                            (
-                                int(device_ptrs.ptrs[idx]),
-                                int(device_ptrs.sizes[idx]),
-                                file_offset,
+                            FileOp(
+                                device_ptr=int(device_ptrs.ptrs[idx]),
+                                size_bytes=int(device_ptrs.sizes[idx]),
+                                file_offset=file_offset,
                             )
                         )
                         total_bytes += int(device_ptrs.sizes[idx])
@@ -243,28 +251,16 @@ class ThreadPoolFSWorker(FSOffloadingWorker):
         self._pool = ThreadPoolExecutor(max_workers=max_io_threads, initializer=_init)
 
     @abstractmethod
-    def write_block(self, file_path: str, ops: list[tuple[int, int, int]]) -> None:
-        """Write device data to a file.
-
-        Args:
-            file_path: destination file path.
-            ops: list of (device_ptr, size_bytes, file_offset) tuples.
-
-        """
+    def write_block(self, file_path: str, ops: list[FileOp]) -> None:
+        """Write device data to a file."""
 
     @abstractmethod
-    def read_block(self, file_path: str, ops: list[tuple[int, int, int]]) -> None:
-        """Read file data into device memory.
-
-        Args:
-            file_path: source file path.
-            ops: list of (device_ptr, size_bytes, file_offset) tuples.
-
-        """
+    def read_block(self, file_path: str, ops: list[FileOp]) -> None:
+        """Read file data into device memory."""
 
     def submit_io(
         self,
-        file_ops: list[tuple[str, list[tuple[int, int, int]]]],
+        file_ops: list[tuple[str, list[FileOp]]],
         is_store: bool,
         ready_event: torch.Event,
     ) -> list[IOCompletion]:
@@ -274,7 +270,7 @@ class ThreadPoolFSWorker(FSOffloadingWorker):
             event: torch.Event,
             fn,
             path: str,
-            ops: list[tuple[int, int, int]],
+            ops: list[FileOp],
         ):
             event.synchronize()
             return fn(path, ops)
@@ -284,5 +280,20 @@ class ThreadPoolFSWorker(FSOffloadingWorker):
             for path, ops in file_ops
         ]
 
-    def shutdown_backend(self) -> None:
+    def shutdown_dispatch(self) -> None:
         self._pool.shutdown(wait=True)
+
+
+class StreamCompletion:
+    """IOCompletion backed by a CUDA event — no host thread required."""
+
+    __slots__ = ("_event",)
+
+    def __init__(self, event: torch.Event):
+        self._event = event
+
+    def done(self) -> bool:
+        return self._event.query()
+
+    def result(self, timeout: float | None = None) -> None:
+        self._event.synchronize()

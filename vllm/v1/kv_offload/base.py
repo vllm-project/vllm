@@ -700,26 +700,11 @@ class IOCompletion(Protocol):
     """Completion handle for an async I/O operation.
 
     `concurrent.futures.Future` satisfies this unchanged.  Stream-ordered
-    backends can use `StreamCompletion` instead, avoiding a thread.
+    backends can implement this with a CUDA event, avoiding a thread.
     """
 
     def done(self) -> bool: ...
     def result(self, timeout: float | None = None) -> object: ...
-
-
-class StreamCompletion:
-    """IOCompletion backed by a CUDA event — no host thread required."""
-
-    __slots__ = ("_event",)
-
-    def __init__(self, event: torch.Event):
-        self._event = event
-
-    def done(self) -> bool:
-        return self._event.query()
-
-    def result(self, timeout: float | None = None) -> None:
-        self._event.synchronize()
 
 
 @dataclass

@@ -8,7 +8,7 @@ import numpy as np
 
 from vllm.v1.kv_offload.base import DevicePointers, make_offload_key
 from vllm.v1.kv_offload.file_mapper import FileMapper
-from vllm.v1.kv_offload.fs.worker import FSOffloadingWorker
+from vllm.v1.kv_offload.fs.worker import FileOp, FSOffloadingWorker
 
 
 def _keys(n: int):
@@ -42,7 +42,7 @@ class RecordingFSWorker(FSOffloadingWorker):
             dtype="float16",
         )
         super().__init__(file_mapper=mapper, block_size_factor=block_size_factor)
-        self.recorded: list[tuple[str, list[tuple[int, int, int]]]] = []
+        self.recorded: list[tuple[str, list[FileOp]]] = []
 
     def submit_io(self, file_ops, is_store, ready_event):
         self.recorded.extend(file_ops)
@@ -89,8 +89,8 @@ def test_offset_within_single_file(monkeypatch):
     _, ops = worker.recorded[0]
     assert len(ops) == 2
     # file offsets should be at positions 1 and 2, not 0 and 1
-    assert ops[0][2] == 1 * block_size
-    assert ops[1][2] == 2 * block_size
+    assert ops[0].file_offset == 1 * block_size
+    assert ops[1].file_offset == 2 * block_size
 
 
 def test_offset_spanning_two_files(monkeypatch):
@@ -119,10 +119,10 @@ def test_offset_spanning_two_files(monkeypatch):
     # First file: 1 block at file position 2
     _, ops0 = worker.recorded[0]
     assert len(ops0) == 1
-    assert ops0[0][2] == 2 * block_size
+    assert ops0[0].file_offset == 2 * block_size
 
     # Second file: 2 blocks at file positions 0,1
     _, ops1 = worker.recorded[1]
     assert len(ops1) == 2
-    assert ops1[0][2] == 0 * block_size
-    assert ops1[1][2] == 1 * block_size
+    assert ops1[0].file_offset == 0 * block_size
+    assert ops1[1].file_offset == 1 * block_size
