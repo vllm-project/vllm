@@ -331,6 +331,12 @@ class ParallelConfig:
     device and distributed initialization but before model loading, and
     `destroy_worker_extension(self)`, called (best-effort) before the worker
     shuts down."""
+    pp_group_cls: str = ""
+    """The full name of a `GroupCoordinator` subclass used for the pipeline
+    parallel group instead of `GroupCoordinator`. It is constructed with the
+    same arguments and lets an out-of-tree plugin provide its own transport
+    for the tensors passed between pipeline stages (e.g. by overriding
+    `isend_tensor_dict` / `irecv_tensor_dict`). Empty uses the default."""
     master_addr: str = "127.0.0.1"
     """distributed master address for multi-node distributed 
     inference when distributed_executor_backend is mp."""
@@ -1032,6 +1038,7 @@ class ParallelConfig:
             "distributed_executor_backend",
             "worker_cls",
             "worker_extension_cls",
+            "pp_group_cls",
             "_api_process_count",
             "_api_process_rank",
             # NUMA binding is per-rank host-side memory locality; it does
