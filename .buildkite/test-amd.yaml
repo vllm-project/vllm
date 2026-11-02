@@ -4373,6 +4373,7 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s
+      kernels/attention/test_minimax_m3_nvfp4_index.py
       kernels/test_apply_repetition_penalties.py
       kernels/test_awq_int4_to_int8.py
       kernels/test_bf16_skinny_gemm.py
