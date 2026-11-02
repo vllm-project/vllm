@@ -381,7 +381,6 @@ def tiny_model(checkpoints):
         ensure_model_parallel_initialized,
         init_distributed_environment,
     )
-    from vllm.model_executor.layers.rotary_embedding import _ROPE_DICT
     from vllm.model_executor.model_loader.dummy_loader import DummyModelLoader
     from vllm.model_executor.model_loader.utils import process_weights_after_loading
     from vllm.models.muse_spark.amd.multimodal import MuseSparkForConditionalGeneration
@@ -409,9 +408,6 @@ def tiny_model(checkpoints):
             )
             ensure_model_parallel_initialized(1, 1)
             init_workspace_manager(device)
-            # get_rope caches by shape, not device: a CPU cache that an
-            # earlier test built with the same shape would land here.
-            _ROPE_DICT.clear()
             with set_default_torch_dtype(torch.bfloat16), device:
                 lm = MuseSparkForConditionalGeneration(vllm_config=vllm_config)
             model_config = vllm_config.model_config
@@ -434,7 +430,6 @@ def tiny_model(checkpoints):
                 "swa": SlidingWindowSpec(**kv, sliding_window=2048),
             }
             yield TinyModel(lm, vllm_config, dims, before, specs)
-        _ROPE_DICT.clear()
         cleanup_dist_env_and_memory()
 
 
