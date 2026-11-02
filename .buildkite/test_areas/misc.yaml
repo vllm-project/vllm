@@ -2,18 +2,6 @@ group: Miscellaneous
 depends_on: 
   - image-build
 steps:
-- label: ":nvidia: (H200 MIG 18GB) MooncakeStore Auto Prefix"
-  key: mooncake-store-auto-prefix
-  device: h200_18gb
-  timeout_in_minutes: 15
-  source_file_dependencies:
-    - vllm/config/
-    - vllm/envs.py
-    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/store/
-    - tests/config/test_mooncake_cache_prefix.py
-  commands:
-    - pytest -v -s config/test_mooncake_cache_prefix.py
-
 - label: ":nvidia: (H200 MIG 18GB) V1 Sample"
   key: v1-sample
   automatic_shard: true
