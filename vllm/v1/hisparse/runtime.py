@@ -782,6 +782,25 @@ class HiSparseRuntime:
     def host_cache(self) -> torch.Tensor:
         return self._host_cache
 
+    def unbind_cache(self) -> None:
+        """Restore the unbound state without unregistering the host pool."""
+        self.cache_ops = None
+        self.host_pool = None
+        self.request_state_indices = None
+        self.resident_source_index = -1
+        self._layer_ready_event = None
+        self._swap_staged = False
+        self._swap_step = 0
+        for name in (
+            "hot",
+            "hot_backing",
+            "hot_block_table",
+            "_host_cache",
+            "registered_host_pool",
+        ):
+            if hasattr(self, name):
+                delattr(self, name)
+
     def bind_hot_cache(
         self,
         raw_tensor: torch.Tensor,
@@ -804,6 +823,8 @@ class HiSparseRuntime:
         )
         self.hot_backing = raw_tensor
         self.hot_block_table = block_table
+        if self.is_group_leader:
+            self.reset_hot_state()
 
     def bind_source_cache(
         self,
@@ -1208,6 +1229,24 @@ class HiSparseCacheHandle:
         # Speculator layers write their rows after the target forward.
         self.draft_layer = False
         self.index_group_caches: list[HiSparseCacheHandle] = [self]
+
+    def unbind_cache(self) -> None:
+        """Detach KV storage and per-binding metadata, retaining the index group."""
+        self.view = None
+        self.residency = None
+        self.block_table = None
+        self.source_block_table = None
+        self.slot_mapping = None
+        self.req_id_per_token = None
+        self.mirror_slot_mapping = None
+        self.submit_layer_mirror = None
+        self.dummy_batch = False
+        self.decode_batch = False
+        self.all_context_pages_resident = True
+        self.num_actual_tokens = 0
+        self.num_decode_tokens = 0
+        self.host_mirror_required = False
+        self.runtime.unbind_cache()
 
     def prepare_group_for_batch(self, attn_metadata: Any | None) -> None:
         assert self.runtime.is_group_leader

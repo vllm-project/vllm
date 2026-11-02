@@ -488,39 +488,53 @@ class _FakeSharedHostRegion:
         self.cleanup_calls += 1
 
 
-def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
+def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache():
     """The real KV cache must reuse the profiling host pool, not pin it again."""
-    pinned = torch.empty(8, dtype=torch.int8)
-    allocate_pinned = MagicMock(return_value=(pinned, pinned))
-    monkeypatch.setattr(
-        hisparse_runtime_module, "allocate_pinned_host_pool", allocate_pinned
+    from vllm.config import DeviceConfig, VllmConfig
+    from vllm.platforms import current_platform
+    from vllm.v1.hisparse.runtime import (
+        HiSparseCacheHandle,
+        HiSparseRuntime,
+        ResolvedHiSparseConfig,
+        release_pinned_state,
     )
-    monkeypatch.setattr(
-        hisparse_runtime_module, "check_hisparse_host_memory", lambda size: None
-    )
-    vllm_config = SimpleNamespace(instance_id="profiling-reuse")
-    kv_cache_config = SimpleNamespace(hisparse_shared_host_pool=False)
-    pool = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
-    backing = pool.allocate(8)
-    runtime = SimpleNamespace(
-        _host_cache=backing,
-        registered_host_pool=pinned,
-        hot_backing=object(),
-        host_pool=pool,
-    )
-    forward_context = {
-        "layer": SimpleNamespace(hisparse_cache=SimpleNamespace(runtime=runtime))
-    }
 
-    attn_utils_module.release_hisparse_profiling_cache(forward_context)
+    config = VllmConfig(device_config=DeviceConfig(device=current_platform.device_type))
+    kv_config = KVCacheConfig(num_blocks=1, kv_cache_groups=[], kv_cache_tensors=[])
+    pool = attn_utils_module.get_hisparse_host_pool(config, kv_config)
+    backing = pool.allocate(4096)
+    assert pool.registered is not None
+    registered_pointer = pool.registered.data_ptr()
+    runtime = HiSparseRuntime(
+        config=ResolvedHiSparseConfig(top_k=4, device_buffer_size=5, max_union_rows=5),
+        max_num_reqs=2,
+        row_width=8,
+        kv_dtype=torch.float32,
+        device=current_platform.device_type,
+    )
+    cache = HiSparseCacheHandle(runtime)
+    layer = torch.nn.Module()
+    layer.hisparse_cache = cache
+    try:
+        runtime.bind_source_cache(
+            backing.view(torch.float32).view(-1, 64, 8),
+            registered_host_pool=pool.registered,
+        )
+        runtime.host_pool = pool
+        attn_utils_module.release_hisparse_profiling_cache({"layer": layer})
 
-    assert not hasattr(runtime, "_host_cache")
-    assert runtime.host_pool is None
-    reused = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
-    assert reused is pool
-    assert reused.allocate(8) is backing
-    allocate_pinned.assert_called_once_with(8)
-    hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
+        assert not hasattr(runtime, "_host_cache")
+        assert runtime.host_pool is None
+        reused = attn_utils_module.get_hisparse_host_pool(config, kv_config)
+        assert reused is pool
+        assert reused.allocate(4096) is backing
+        assert reused.registered is not None
+        assert reused.registered.data_ptr() == registered_pointer
+    finally:
+        torch.accelerator.synchronize()
+        cache.unbind_cache()
+        release_pinned_state([], pool.pinned, pool.shared_region)
+        hisparse_runtime_module.drop_hisparse_host_pool(config)
 
 
 @pytest.mark.parametrize("failure_phase", ["allocation", "views", "binding", "buffers"])

@@ -170,13 +170,13 @@ def _get_hisparse_cache(
 
 def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
     """Detach the profiling caches but keep the host pool for the real KV cache."""
-    runtimes = {
-        id(cache.runtime): cache.runtime
+    caches = {
+        id(cache): cache
         for layer in forward_context.values()
         if (cache := getattr(layer, "hisparse_cache", None)) is not None
-        and hasattr(cache.runtime, "_host_cache")
     }
-    release_pinned_state(list(runtimes.values()), [])
+    for cache in caches.values():
+        cache.unbind_cache()
 
 
 def bind_hisparse_kv_caches(

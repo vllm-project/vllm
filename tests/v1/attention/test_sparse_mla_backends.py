@@ -2357,6 +2357,161 @@ def _make_hisparse_cache_handle(
     return HiSparseCacheHandle(runtime)
 
 
+@requires_hisparse_ops
+def test_hisparse_profiling_releases_device_storage_and_reuses_host_pool():
+    """Live model handles must not retain the throwaway profiling KV slab."""
+    import gc
+    import weakref
+
+    from vllm.config import DeviceConfig, VllmConfig
+    from vllm.v1.hisparse.binding import release_hisparse_profiling_cache
+    from vllm.v1.hisparse.runtime import (
+        drop_hisparse_host_pool,
+        get_hisparse_host_pool,
+        release_pinned_state,
+    )
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+
+    config = VllmConfig(device_config=DeviceConfig(device=DEVICE_TYPE))
+    kv_config = KVCacheConfig(num_blocks=1, kv_cache_groups=[], kv_cache_tensors=[])
+    pool = get_hisparse_host_pool(config, kv_config)
+    host = pool.allocate(4096)
+    assert pool.registered is not None
+    assert pool.backing is not None
+    host_pointer = host.data_ptr()
+    registered_pointer = pool.registered.data_ptr()
+    runtime = _make_hisparse_runtime()
+    caches = [HiSparseCacheHandle(runtime)]
+    caches.append(
+        HiSparseCacheHandle(_make_hisparse_runtime(index_group=runtime.index_group))
+    )
+    layers = [torch.nn.Module(), torch.nn.Module()]
+    for layer, cache in zip(layers, caches):
+        layer.hisparse_cache = cache
+    context = {str(i): layer for i, layer in enumerate(layers)}
+    context["alias"] = layers[0]
+    views: list[weakref.ReferenceType[torch.Tensor]] = []
+
+    def bind(backing):
+        page_bytes = 64 * 8 * 4
+        for index, cache in enumerate(caches):
+            block_table = torch.zeros((2, 1), dtype=torch.int32, device=DEVICE_TYPE)
+            cache.runtime.bind_hot_cache(
+                backing,
+                byte_offset=index * page_bytes,
+                block_stride=2 * page_bytes,
+                num_blocks=backing.numel() // (2 * page_bytes),
+                block_size=64,
+                block_table=block_table,
+            )
+            cache.bind_cache(
+                backing,
+                byte_offset=index * page_bytes,
+                block_stride=2 * page_bytes,
+                num_blocks=backing.numel() // (2 * page_bytes),
+                block_size=64,
+                block_table=block_table,
+                slot_mapping=torch.zeros(4, dtype=torch.int64, device=DEVICE_TYPE),
+            )
+            cache.residency = torch.zeros_like(block_table)
+            cache.source_block_table = torch.zeros_like(block_table)
+            cache.mirror_slot_mapping = torch.zeros_like(cache.slot_mapping)
+            cache.req_id_per_token = torch.zeros(
+                4, dtype=torch.int32, device=DEVICE_TYPE
+            )
+            cache.runtime.bind_source_cache(
+                host.view(torch.float32).view(-1, 64, 8),
+                registered_host_pool=pool.registered,
+            )
+            cache.runtime.host_pool = pool
+            assert cache.view is not None
+            views.extend(
+                weakref.ref(tensor)
+                for tensor in (
+                    cache.view.cache,
+                    cache.view.attention_cache,
+                    cache.runtime.hot.cache,
+                    cache.runtime.hot.attention_cache,
+                    cache.block_table,
+                    cache.residency,
+                    cache.source_block_table,
+                    cache.slot_mapping,
+                    cache.mirror_slot_mapping,
+                    cache.req_id_per_token,
+                )
+            )
+
+    graph = None
+    try:
+        backing = torch.zeros(2**20, dtype=torch.int8, device=DEVICE_TYPE)
+        torch.accelerator.synchronize()
+        before = torch.accelerator.memory_allocated()
+        profiling_backing = torch.empty(
+            64 * 2**20, dtype=torch.int8, device=DEVICE_TYPE
+        )
+        profiling_pointer = profiling_backing.data_ptr()
+        bind(profiling_backing)
+        runtime.index_group.device_global_indices.fill_(7)
+        del profiling_backing
+        torch.accelerator.synchronize()
+        bound = torch.accelerator.memory_allocated()
+        release_hisparse_profiling_cache(context)
+        release_hisparse_profiling_cache(context)
+        gc.collect()
+        torch.accelerator.synchronize()
+        assert all(reference() is None for reference in views)
+        assert bound - torch.accelerator.memory_allocated() >= 64 * 2**20
+        assert torch.accelerator.memory_allocated() <= before
+        assert all(cache.view is None for cache in caches)
+        assert not hasattr(runtime, "hot")
+        assert get_hisparse_host_pool(config, kv_config) is pool
+        assert pool.backing.data_ptr() == host_pointer
+        assert pool.registered.data_ptr() == registered_pointer
+        assert len(pool.pinned) == 1
+
+        assert backing.data_ptr() != profiling_pointer
+        bind(backing)
+        assert torch.all(runtime.index_group.device_global_indices == -1)
+        indices = torch.arange(4, dtype=torch.int32, device=DEVICE_TYPE).view(1, 4)
+        counts = torch.tensor([4], dtype=torch.int32, device=DEVICE_TYPE)
+
+        def gather():
+            for cache in caches:
+                cache.runtime.cache_ops.hisparse_gather_compact(
+                    cache.runtime.host_cache,
+                    cache.runtime.hot.cache,
+                    indices,
+                    indices,
+                    counts,
+                )
+
+        gather()
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            gather()
+        for value in (3.0, 9.0):
+            torch.accelerator.synchronize()
+            host.view(torch.float32).fill_(value)
+            graph.replay()
+            torch.accelerator.synchronize()
+            for cache in caches:
+                assert cache.view is not None
+                torch.testing.assert_close(
+                    cache.view.cache[0, :4],
+                    torch.full((4, 8), value, device=DEVICE_TYPE),
+                    rtol=0,
+                    atol=0,
+                )
+    finally:
+        if graph is not None:
+            graph.reset()
+        torch.accelerator.synchronize()
+        release_hisparse_profiling_cache(context)
+        release_pinned_state([], pool.pinned, pool.shared_region)
+        drop_hisparse_host_pool(config)
+
+
 def _valid_rows(num_rows: int) -> torch.Tensor:
     return torch.tensor([num_rows], dtype=torch.int32, device=DEVICE_TYPE)
 
