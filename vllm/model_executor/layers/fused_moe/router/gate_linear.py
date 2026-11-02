@@ -300,6 +300,19 @@ class GateLinear(ReplicatedLinear):
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and current_platform.is_device_capability_family(100)
+            and self.is_unquantized
+            and self._router_gemm_no_bias
+            and self.out_dtype == torch.float32
+            and x.dtype == self.weight.dtype == torch.bfloat16
+        ):
+            from vllm.model_executor.kernels.linear.cute_dsl.batch_invariant import (
+                bf16_fixed_mm,
+            )
+
+            return self._return(bf16_fixed_mm(x, self.weight))
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, bf16 in, fp32 out,
         # any dims w/ K divisible by 8)
         if (

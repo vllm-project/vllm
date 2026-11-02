@@ -5,7 +5,9 @@ from typing import TYPE_CHECKING, ClassVar, cast
 
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
+from vllm.config.cache import CacheDType
 from vllm.forward_context import get_forward_context
 from vllm.models.deepseek_v4.nvidia.ops.o_proj import compute_fp8_einsum_recipe
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
@@ -28,6 +30,7 @@ from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import AttentionCGSupport, max_decode_query_len
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekSparseSWABackend
 from vllm.v1.attention.ops.flashmla import (
+    FlashMLASchedMeta,
     flash_mla_sparse_fwd,
     flash_mla_with_kvcache,
 )
@@ -53,11 +56,25 @@ class DeepseekSparseSWAFlashMLAMetadataBuilder(DeepseekV41SparseSWAMetadataBuild
         # not graph-safe.
         return max_decode_query_len(vllm_config)
 
+    @classmethod
+    def get_cudagraph_support(cls, vllm_config, kv_cache_spec):
+        if envs.VLLM_BATCH_INVARIANT:
+            # BI decode rows (including spec-decode verify rows) have
+            # fixed-shape, device-side metadata; mixed batches stay in eager
+            # breaks.
+            return AttentionCGSupport.UNIFORM_BATCH
+        return super().get_cudagraph_support(vllm_config, kv_cache_spec)
+
 
 class DeepseekSparseSWAFlashMLABackend(DeepseekSparseSWABackend):
     @classmethod
     def supports_pcp(cls) -> bool:
         return True
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """SM100 proof: test_ds41_flashmla_swa_bi_batch_chunk_pd_graph."""
+        return current_platform.is_device_capability_family(100)
 
     @staticmethod
     def get_builder_cls() -> type[DeepseekSparseSWAFlashMLAMetadataBuilder]:
@@ -69,6 +86,8 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
     backend_cls = DeepseekV4FlashMLABackend
     swa_backend_cls = DeepseekSparseSWAFlashMLABackend
+    # The unsplit decode kernel launches one CTA per row along grid.y.
+    BI_MAX_ROWS_PER_LAUNCH: ClassVar[int] = 65535
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -85,6 +104,14 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             and self.n_local_heads in (8, 16, 32)
             else self.padded_heads
         )
+
+    @property
+    def packed_kv_cache_dtype(self) -> CacheDType:
+        # BI keeps the default (mega) NVFP4 compressed-cache contract, which
+        # the decode kernel reads, so --kv-cache-dtype auto must not drift.
+        if envs.VLLM_BATCH_INVARIANT:
+            return "nvfp4_ds_mla"
+        return super().packed_kv_cache_dtype
 
     def _o_proj(self, attn_out: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
         return dsv41_o_proj(self, attn_out, positions)
@@ -175,6 +202,22 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
 
         # Split prefill and decode
         num_decode_tokens = swa_metadata.num_decode_tokens
+
+        # DSpark draft rows are non-causal (wider SWA width); they are proposals
+        # checked by the target, so they keep the regular paths.
+        if (
+            envs.VLLM_BATCH_INVARIANT
+            and swa_metadata.decode_swa_width == self.window_size
+        ):
+            num_tokens = num_decode_tokens + swa_metadata.num_prefill_tokens
+            self._forward_bi(
+                q=q[:num_tokens],
+                compressed_k_cache=self_kv_cache,
+                attn_metadata=flashmla_metadata,
+                swa_metadata=swa_metadata,
+                output=output[:num_tokens],
+            )
+            return
 
         if swa_metadata.num_prefill_tokens > 0:
             self._forward_prefill(
@@ -277,6 +320,101 @@ class DeepseekV4FlashMLAAttention(DeepseekV4Attention):
             extra_topk_length=topk_lens,
             out=output.unsqueeze(1),
         )
+
+    def _forward_bi(
+        self,
+        q: torch.Tensor,
+        compressed_k_cache: torch.Tensor | None,  # None for SWA-only layers
+        attn_metadata: DeepseekV4FlashMLAMetadata | None,
+        swa_metadata: "DeepseekSparseSWAMetadata",
+        output: torch.Tensor,
+    ) -> None:
+        """Run every causal row, decode or prefill, through the unsplit
+        sparse decode kernel on the quantized caches.
+
+        Each row gets one CTA that reads only that row's query, slot lists and
+        lengths, and ``sparse_paged_indices`` derives those from the row's
+        (request, position) alone. So a token's output bits do not depend on
+        the batch, on chunking, or on whether it is decoded or refed as a
+        prompt token.
+        """
+        from vllm.model_executor.kernels.batch_invariant import (
+            sparse_paged_indices,
+        )
+
+        num_tokens = q.shape[0]
+        if num_tokens == 0:
+            return
+        swa_only = self.compress_ratio == 0
+        assert self.topk_indices_buffer is not None
+        top_k = 0 if swa_only else self.topk_indices_buffer.shape[-1]
+        window = self.window_size
+        indices, swa_lens, extra_lens = current_workspace_manager().get_simultaneous(
+            ((num_tokens, window + top_k), torch.int32),
+            ((num_tokens,), torch.int32),
+            ((num_tokens,), torch.int32),
+        )
+        swa_indices = indices[:, :window]
+        extra_indices = None if swa_only else indices[:, window:]
+        extra_cache = compressed_table = None
+        compressed_block_size = 1
+        if not swa_only:
+            assert attn_metadata is not None and compressed_k_cache is not None
+            extra_cache = compressed_k_cache.unsqueeze(-2)
+            compressed_table = attn_metadata.block_table
+            compressed_block_size = attn_metadata.block_size // self.compress_ratio
+        assert swa_metadata.token_to_req_indices is not None
+        assert swa_metadata.is_valid_token is not None
+        assert swa_metadata.query_start_loc is not None
+        assert swa_metadata.seq_lens is not None
+        assert swa_metadata.replay_start is not None
+        sparse_paged_indices(
+            None if swa_only else self.topk_indices_buffer,
+            swa_metadata.token_to_req_indices,
+            swa_metadata.is_valid_token,
+            swa_metadata.query_start_loc,
+            swa_metadata.seq_lens,
+            swa_metadata.replay_start,
+            compressed_table,
+            compressed_block_size,
+            swa_metadata.block_table,
+            swa_metadata.block_size,
+            0,
+            num_tokens,
+            window,
+            self.compress_ratio,
+            top_k,
+            swa_indices,
+            swa_lens,
+            extra_indices,
+            None if swa_only else extra_lens,
+        )
+        swa_cache = self.swa_cache_layer.kv_cache.unsqueeze(-2)
+        rows = self.BI_MAX_ROWS_PER_LAUNCH
+        for start in range(0, num_tokens, rows):
+            end = min(start + rows, num_tokens)
+            extra_rows = extra_rows_lens = None
+            if extra_indices is not None:
+                extra_rows = extra_indices[start:end].unsqueeze(1)
+                extra_rows_lens = extra_lens[start:end]
+            flash_mla_with_kvcache(
+                q=q[start:end].unsqueeze(1),
+                k_cache=swa_cache,
+                block_table=None,
+                head_dim_v=512,
+                tile_scheduler_metadata=FlashMLASchedMeta(),
+                cache_seqlens=None,
+                is_fp8_kvcache=True,
+                indices=swa_indices[start:end].unsqueeze(1),
+                topk_length=swa_lens[start:end],
+                softmax_scale=self.scale,
+                attn_sink=self.attn_sink,
+                extra_k_cache=extra_cache,
+                extra_indices_in_kvcache=extra_rows,
+                extra_topk_length=extra_rows_lens,
+                out=output[start:end].unsqueeze(1),
+                enable_batch_invariant=True,
+            )
 
     def _forward_prefill(
         self,
