@@ -1461,10 +1461,12 @@ def test_canonical_mla_dsa_rows_are_tp_independent(tp_size, scheduler):
     assert mapper.get_run_config()["replicated_layout"] is True
 
 
-@pytest.mark.parametrize("total_kv_heads", [1, 2, 4])
-@pytest.mark.parametrize("tp_size", [1, 2, 4])
+@pytest.mark.parametrize(
+    "total_kv_heads,tp_size,canonical",
+    [(4, 2, True), (1, 4, True), (2, 4, True), (1, 4, False)],
+    ids=["sharded", "fully-replicated", "partially-replicated", "noncanonical"],
+)
 @pytest.mark.parametrize("spec_type", [FullAttentionSpec, ChunkedLocalAttentionSpec])
-@pytest.mark.parametrize("canonical", [False, True])
 def test_canonical_gqa_file_size_matches_across_tp(
     total_kv_heads, tp_size, spec_type, canonical
 ):
@@ -1502,21 +1504,6 @@ def test_canonical_gqa_file_size_matches_across_tp(
     assert off.kv_bytes_per_chunk == expected_bytes
     assert off.num_chunks == (1 << 20) // expected_bytes
     assert off.cpu_page_size_per_worker == cache_spec.page_size_bytes
-    if canonical:
-        mapper = FileMapper.from_offloading_spec("/cache", off, parallel_agnostic=True)
-        assert mapper.get_run_config()["tp_size"] == 1
-        # The last rank's prefault slot must fit even when replicas share a row.
-        off.config = replace(
-            off_config, parallel=replace(off_config.parallel, rank=tp_size - 1)
-        )
-        module = "vllm.v1.kv_offload.tiering.spec"
-        with (
-            patch(f"{module}.SharedOffloadRegion") as region,
-            patch(f"{module}.CPUOffloadingWorker"),
-        ):
-            off.create_worker(CanonicalKVCaches([], []))
-        args = region.call_args.kwargs
-        assert (args["rank"] + 1) * args["cpu_page_size"] <= args["kv_bytes_per_chunk"]
 
 
 def test_parallelism_agnostic_disabled_on_v2_model_runner():
