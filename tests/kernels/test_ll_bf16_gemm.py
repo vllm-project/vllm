@@ -381,7 +381,9 @@ def test_cudagraph_input_update():
 # =================================================================
 
 
-def _make_gate_linear(monkeypatch, *, params_dtype, out_dtype=torch.float32):
+def _make_gate_linear(
+    monkeypatch, *, params_dtype, out_dtype=torch.float32, input_size=2048
+):
     monkeypatch.setattr(
         "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank",
         lambda: 0,
@@ -406,7 +408,7 @@ def _make_gate_linear(monkeypatch, *, params_dtype, out_dtype=torch.float32):
         lambda: True,
     )
     return GateLinear(
-        input_size=2048,
+        input_size=input_size,
         output_size=64,
         bias=False,
         out_dtype=out_dtype,
@@ -414,17 +416,30 @@ def _make_gate_linear(monkeypatch, *, params_dtype, out_dtype=torch.float32):
     ).cuda()
 
 
-def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
-    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16)
+@pytest.mark.parametrize(
+    "out_dtype,expected_dtype",
+    [
+        pytest.param(torch.float32, torch.float32, id="fp32_out"),
+        pytest.param(torch.bfloat16, torch.bfloat16, id="bf16_out"),
+        pytest.param(None, torch.bfloat16, id="default_out"),
+    ],
+)
+def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(
+    monkeypatch, out_dtype, expected_dtype
+):
+    gate = _make_gate_linear(
+        monkeypatch, params_dtype=torch.bfloat16, out_dtype=out_dtype
+    )
+    assert gate.allow_ll_bf16_gemm
     x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
     calls = []
 
-    def fake_ll_bf16_gemm(hidden_states, router_weight):
-        calls.append((hidden_states, router_weight))
+    def fake_ll_bf16_gemm(hidden_states, router_weight, output_dtype=torch.float32):
+        calls.append((hidden_states, router_weight, output_dtype))
         return torch.full(
             (hidden_states.shape[0], router_weight.shape[0]),
             1.0,
-            dtype=torch.float32,
+            dtype=output_dtype,
             device=hidden_states.device,
         )
 
@@ -435,10 +450,36 @@ def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
     out, bias = gate(x)
     assert bias is None
     assert out.shape == (4, 64)
-    assert out.dtype == torch.float32
+    assert out.dtype == expected_dtype
     assert len(calls) == 1
     assert calls[0][0] is x
     assert calls[0][1] is gate.weight
+    assert calls[0][2] == expected_dtype
+
+
+@pytest.mark.parametrize("M", [1, 2, 4, 8, 16])
+@pytest.mark.parametrize("mode", ["default", "explicit", "set_later"])
+def test_gate_linear_bf16_out_matches_linear(monkeypatch, M, mode):
+    # No kernel fake: the real ll_bf16_gemm with a bf16 epilogue stands in for
+    # F.linear on a bf16 router (Qwen MoE family), so its logits must match
+    # cuBLAS to bf16 rounding, however the bf16 output was requested.
+    out_dtype = torch.bfloat16 if mode == "explicit" else None
+    gate = _make_gate_linear(
+        monkeypatch, params_dtype=torch.bfloat16, out_dtype=out_dtype
+    )
+    if mode == "set_later":
+        gate.set_out_dtype(torch.bfloat16)
+    assert gate.allow_ll_bf16_gemm
+    assert gate.ll_bf16_out_dtype == torch.bfloat16
+    torch.manual_seed(0)
+    with torch.no_grad():
+        gate.weight.normal_(std=0.02)
+    x = torch.randn(M, 2048, dtype=torch.bfloat16, device="cuda")
+    out, bias = gate(x)
+    assert bias is None
+    assert out.dtype == torch.bfloat16
+    ref = F.linear(x, gate.weight)
+    torch.testing.assert_close(out, ref, rtol=1e-2, atol=1e-3)
 
 
 def test_gate_linear_fp32_weight_falls_back(monkeypatch):
@@ -446,7 +487,7 @@ def test_gate_linear_fp32_weight_falls_back(monkeypatch):
     assert not gate.allow_ll_bf16_gemm
     x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
 
-    def fail_ll_bf16_gemm(hidden_states, router_weight):
+    def fail_ll_bf16_gemm(hidden_states, router_weight, output_dtype=torch.float32):
         raise AssertionError("ll_bf16_gemm should not run for fp32 weights")
 
     monkeypatch.setattr(
@@ -462,7 +503,7 @@ def test_gate_linear_non_bf16_activation_falls_back(monkeypatch):
     gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16)
     x = torch.randn(4, 2048, dtype=torch.float16, device="cuda")
 
-    def fail_ll_bf16_gemm(hidden_states, router_weight):
+    def fail_ll_bf16_gemm(hidden_states, router_weight, output_dtype=torch.float32):
         raise AssertionError("ll_bf16_gemm should not run for non-bf16 activations")
 
     monkeypatch.setattr(
@@ -474,16 +515,33 @@ def test_gate_linear_non_bf16_activation_falls_back(monkeypatch):
     assert out.dtype == torch.float32
 
 
-def test_gate_linear_set_out_dtype_enables_ll_bf16(monkeypatch):
+def test_gate_linear_set_out_dtype_fp32_keeps_ll_bf16(monkeypatch):
     gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16, out_dtype=None)
-    assert not gate.allow_ll_bf16_gemm
+    assert gate.allow_ll_bf16_gemm
     gate.set_out_dtype(torch.float32)
     assert gate.allow_ll_bf16_gemm
 
 
-def test_gate_linear_non_fp32_out_dtype_disables_ll_bf16(monkeypatch):
+def test_gate_linear_set_out_dtype_bf16_keeps_ll_bf16(monkeypatch):
     gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16, out_dtype=None)
+    assert gate.allow_ll_bf16_gemm
     gate.set_out_dtype(torch.bfloat16)
+    assert gate.allow_ll_bf16_gemm
+
+
+def test_gate_linear_k_not_multiple_of_8_disables_ll_bf16(monkeypatch):
+    # The kernel reads K in vectors of 8; such a gate must take the fallback
+    # instead of raising inside forward.
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16, input_size=2052)
+    assert not gate.allow_ll_bf16_gemm
+    x = torch.randn(4, 2052, dtype=torch.bfloat16, device="cuda")
+    out, _ = gate(x)
+    assert out.shape == (4, 64)
+
+
+def test_gate_linear_fp16_out_dtype_disables_ll_bf16(monkeypatch):
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16, out_dtype=None)
+    gate.set_out_dtype(torch.float16)
     assert not gate.allow_ll_bf16_gemm
 
 
@@ -491,7 +549,7 @@ def test_gate_linear_m_gt_16_falls_back(monkeypatch):
     gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16)
     x = torch.randn(17, 2048, dtype=torch.bfloat16, device="cuda")
 
-    def fail_ll_bf16_gemm(hidden_states, router_weight):
+    def fail_ll_bf16_gemm(hidden_states, router_weight, output_dtype=torch.float32):
         raise AssertionError("ll_bf16_gemm should not run for M > 16")
 
     monkeypatch.setattr(

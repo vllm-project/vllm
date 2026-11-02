@@ -101,10 +101,11 @@ def _warmup_flashinfer_attention(worker: "Worker") -> None:
 
 def _ll_bf16_router_shapes_from_model(
     model: torch.nn.Module,
-) -> tuple[tuple[int, int], ...]:
+) -> dict[torch.dtype, tuple[tuple[int, int], ...]]:
+    """(K, E) router shapes per output dtype that tier 1 of GateLinear emits."""
     from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 
-    shapes: set[tuple[int, int]] = set()
+    shapes: dict[torch.dtype, set[tuple[int, int]]] = {}
     for module in model.modules():
         if not isinstance(module, GateLinear):
             continue
@@ -115,8 +116,9 @@ def _ll_bf16_router_shapes_from_model(
             continue
         n, k = weight.shape
         if k % 8 == 0:
-            shapes.add((int(k), int(n)))
-    return tuple(sorted(shapes))
+            out_dtype = getattr(module, "ll_bf16_out_dtype", torch.float32)
+            shapes.setdefault(out_dtype, set()).add((int(k), int(n)))
+    return {dtype: tuple(sorted(s)) for dtype, s in shapes.items()}
 
 
 def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
@@ -124,24 +126,35 @@ def _warmup_ll_bf16_router_gemm(model: torch.nn.Module) -> None:
         is_available as is_ll_bf16_gemm_available,
     )
     from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+        ll_bf16_gemm_c1_pdl_kernel,
         ll_bf16_gemm_kernel,
     )
 
     if not is_ll_bf16_gemm_available():
         return
 
-    shapes = _ll_bf16_router_shapes_from_model(model)
-    if not shapes:
+    shapes_by_dtype = _ll_bf16_router_shapes_from_model(model)
+    if not shapes_by_dtype:
         logger.debug_once(
             "Skipping ll_bf16 router GEMM warmup: no bf16 GateLinear shapes found."
         )
         return
 
-    logger.info_once("Warming up ll_bf16 router GEMM kernels for shapes: %s.", shapes)
-    ll_bf16_gemm_kernel.warmup(
-        shapes=shapes,
-        m_values=_LL_BF16_WARMUP_M_RANGE,
-    )
+    for out_dtype, shapes in shapes_by_dtype.items():
+        logger.info_once(
+            "Warming up ll_bf16 router GEMM kernels for shapes: %s (%s out).",
+            shapes,
+            out_dtype,
+        )
+        # ll_bf16_gemm picks the PDL weight-prefetch instance at M == 1.
+        ll_bf16_gemm_c1_pdl_kernel.warmup(
+            shapes=shapes, m_values=[1], output_dtype=out_dtype
+        )
+        ll_bf16_gemm_kernel.warmup(
+            shapes=shapes,
+            m_values=[m for m in _LL_BF16_WARMUP_M_RANGE if m > 1],
+            output_dtype=out_dtype,
+        )
 
 
 def _warmup_skinny_gemm(model: torch.nn.Module) -> None:
