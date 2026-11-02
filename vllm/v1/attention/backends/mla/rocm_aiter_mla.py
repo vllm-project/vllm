@@ -2154,7 +2154,7 @@ def _expand_page_indices_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_reqs"])
 def _build_decode_indptr_kernel(
     seq_lens,
     query_start_loc,
