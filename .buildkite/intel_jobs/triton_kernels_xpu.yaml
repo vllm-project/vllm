@@ -587,3 +587,622 @@ steps:
   - >-
     bash .buildkite/scripts/hardware_ci/run-intel-test.sh
     'pytest tests/kernels/attention/test_lightning_attn.py::test_linear_decode_forward_triton -v || true'
+- label: R11
+  key: r11
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - PackSeqTritonKernel.kernel
+  - UnpackSeqTritonKernel.kernel
+  source_file_dependencies:
+  - tests/kernels/attention/test_pack_unpack_triton.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/attention/test_pack_unpack_triton.py -v || true'
+- label: R12
+  key: r12
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _fused_embed_eh_norm_kernel
+  - _fused_embed_norm_kernel
+  - _fused_eh_norm_kernel
+  source_file_dependencies:
+  - tests/kernels/core/test_fused_embed_norm.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/core/test_fused_embed_norm.py -v || true'
+- label: FusedQKVRMSNormKernel.kernel
+  key: fusedqkvrmsnormkernel-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - FusedQKVRMSNormKernel.kernel
+  source_file_dependencies:
+  - tests/kernels/core/test_fused_q_kv_rmsnorm.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/core/test_fused_q_kv_rmsnorm.py -v || true'
+- label: R13
+  key: r13
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _minimax_qk_var_kernel
+  - _minimax_rms_apply_kernel
+  source_file_dependencies:
+  - tests/kernels/core/test_minimax_reduce_rms.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/core/test_minimax_reduce_rms.py -v || true'
+- label: _bilinear_pos_embed_kernel
+  key: bilinear-pos-embed-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _bilinear_pos_embed_kernel
+  source_file_dependencies:
+  - tests/kernels/core/test_vit_bilinear_pos_embed.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/core/test_vit_bilinear_pos_embed.py -v || true'
+- label: _memcpy_u64_tiled
+  key: memcpy-u64-tiled
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _memcpy_u64_tiled
+  source_file_dependencies:
+  - tests/kernels/mamba/test_memcpy_u64_tiled.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/mamba/test_memcpy_u64_tiled.py -v || true'
+- label: _eplb_map_and_record_i32_kernel
+  key: eplb-map-and-record-i32-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _eplb_map_and_record_i32_kernel
+  source_file_dependencies:
+  - tests/kernels/moe/test_routing.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/moe/test_routing.py -v || true'
+- label: _dequant_gather_kernel
+  key: dequant-gather-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _dequant_gather_kernel
+  source_file_dependencies:
+  - tests/kernels/quantization/test_quantized_embedding.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/quantization/test_quantized_embedding.py -v || true'
+- label: _fused_qk_rmsnorm_rope_gate_kernel
+  key: fused-qk-rmsnorm-rope-gate-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _fused_qk_rmsnorm_rope_gate_kernel
+  source_file_dependencies:
+  - tests/kernels/test_fused_qk_norm_rope_gate.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/kernels/test_fused_qk_norm_rope_gate.py -v || true'
+- label: _seq_metadata_kernel
+  key: seq-metadata-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _seq_metadata_kernel
+  source_file_dependencies:
+  - tests/models/inkling/test_sconv_metadata.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/models/inkling/test_sconv_metadata.py -v || true'
+- label: R14
+  key: r14
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _fused_mtp_input_kernel
+  - _attn_res_kernel
+  source_file_dependencies:
+  - tests/models/kimi_k3/test_attn_res.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/models/kimi_k3/test_attn_res.py -v || true'
+- label: _dcp_a2a_pack_send_kernel
+  key: dcp-a2a-pack-send-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _dcp_a2a_pack_send_kernel
+  source_file_dependencies:
+  - tests/v1/attention/test_dcp_a2a_pack_mask.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/attention/test_dcp_a2a_pack_mask.py -v || true'
+- label: _prepare_dflash_inputs_kernel
+  key: prepare-dflash-inputs-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _prepare_dflash_inputs_kernel
+  source_file_dependencies:
+  - tests/v1/spec_decode/test_dflash_prepare_inputs.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/spec_decode/test_dflash_prepare_inputs.py -v || true'
+- label: R15
+  key: r15
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _ngram_finalize_kernel
+  - _ngram_scan_kernel
+  source_file_dependencies:
+  - tests/v1/spec_decode/test_ngram_gpu.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/spec_decode/test_ngram_gpu.py -v || true'
+- label: _bad_words_kernel
+  key: bad-words-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _bad_words_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_gpu_bad_words.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_gpu_bad_words.py -v || true'
+- label: R16
+  key: r16
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _apply_write_kernel
+  - _thinking_budget_kernel
+  - _update_committed_marker_cache_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_gpu_thinking_budget.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_gpu_thinking_budget.py -v || true'
+- label: R17
+  key: r17
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _build_shard_plan_kernel
+  - _pack_logprobs_kernel
+  - _pack_sampler_output_kernel
+  - _unpack_gathered_output_kernel
+  - _unpack_logprobs_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_gpu_batch_shard.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_gpu_batch_shard.py -v || true'
+- label: _gumbel_sample_kernel
+  key: gumbel-sample-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _gumbel_sample_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_gpu_gumbel_sample.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_gpu_gumbel_sample.py -v || true'
+- label: _philox_gumbel_kernel
+  key: philox-gumbel-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _philox_gumbel_kernel
+  source_file_dependencies:
+  - tests/watermarking/test_gumbel.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/watermarking/test_gumbel.py -v || true'
+- label: _dcp_local_seq_lens_kernel
+  key: dcp-local-seq-lens-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _dcp_local_seq_lens_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_gpu_input_batch_v2.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_gpu_input_batch_v2.py -v || true'
+- label: _compute_slot_mappings_kernel
+  key: compute-slot-mappings-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _compute_slot_mappings_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_gpu_kpool_tail_slot_mapping.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_gpu_kpool_tail_slot_mapping.py -v || true'
+- label: _bias_kernel
+  key: bias-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _bias_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_gpu_logit_bias.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_gpu_logit_bias.py -v || true'
+- label: R18
+  key: r18
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _ranks_kernel
+  - _topk_log_softmax_kernel
+  - _compact_sampling_mask_kernel
+  - _flatten_sampled_kernel
+  - _compute_local_logits_stats_kernel
+  - _insert_resampled_kernel
+  - _rejection_kernel
+  - _resample_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_gpu_rejection_sampler_chunking.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_gpu_rejection_sampler_chunking.py -v || true'
+- label: _trace_replay_kernel
+  key: trace-replay-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _trace_replay_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_gpu_trace_replay.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_gpu_trace_replay.py -v || true'
+- label: _zero_kv_blocks_kernel
+  key: zero-kv-blocks-kernel
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _zero_kv_blocks_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_kv_block_zeroer.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_kv_block_zeroer.py -v || true'
+- label: R19
+  key: r19
+  device: intel_gpu
+  timeout_in_minutes: 85
+  optional: true
+  working_dir: .
+  no_plugin: true
+  env:
+    REGISTRY: public.ecr.aws/q9t5s3a7
+    REPO: vllm-ci-test-repo
+    VLLM_TEST_DEVICE: xpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  _raw_old_commands:
+  - _fill_num_accepted_kernel
+  - _scatter_num_accepted_kernel
+  - _postprocess_recoverssm_align_kernel
+  source_file_dependencies:
+  - tests/v1/worker/test_mamba_hybrid_model_state.py
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pytest tests/v1/worker/test_mamba_hybrid_model_state.py -v || true'
