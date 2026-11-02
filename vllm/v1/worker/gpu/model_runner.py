@@ -177,6 +177,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import (
 )
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
+from vllm.v1.worker.gpu.tensor_dump import TensorDumper
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
@@ -211,6 +212,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.observability_config = vllm_config.observability_config
         self.jit_warmup_registry = JitWarmupRegistry(vllm_config)
+        self.tensor_dumper: TensorDumper | None = None
 
         self.device = device
         self.dtype = self.model_config.dtype
@@ -2123,7 +2125,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                 else:
                     # Eager (NONE): call the raw model directly.
-                    model_output = self.model(**model_inputs)
+                    with self.tensor_dumper_capture(input_batch, dummy_run):
+                        model_output = self.model(**model_inputs)
 
         self.kv_connector.finish_forward()
 
@@ -2430,10 +2433,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch.query_start_loc,
         )
 
+    def init_tensor_dumper(self) -> None:
+        config = self.vllm_config.tensor_dump_config
+        if config.output_dir is not None:
+            self.tensor_dumper = TensorDumper(config, self.get_model())
+
+    def tensor_dumper_capture(
+        self, input_batch: InputBatch, dummy_run: bool
+    ) -> AbstractContextManager:
+        if not dummy_run and self.tensor_dumper is not None:
+            return self.tensor_dumper.capture(input_batch)
+        return nullcontext()
+
     def shutdown(self) -> None:
         """Release GPU tensors (model weights, KV caches, workspace) so that
         memory is reclaimable when running in the same process."""
         torch.accelerator.synchronize()
+        if self.tensor_dumper is not None:
+            self.tensor_dumper.close()
         if current_platform.is_rocm():
             # RCCL's ncclCommAbort waits for live graphs that captured the comm:
             # https://github.com/ROCm/rocm-systems/issues/13018

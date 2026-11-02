@@ -1119,6 +1119,9 @@ class Worker(WorkerBase):
         # compilations that would cause latency spikes during inference.
         self._maybe_activate_jit_monitor()
 
+        if self.use_v2_model_runner:
+            cast("GPUModelRunnerV2", self.model_runner).init_tensor_dumper()
+
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
         freeze_gc_heap()
@@ -1492,6 +1495,12 @@ class Worker(WorkerBase):
 
     def pin_lora(self, lora_id: int) -> bool:
         return self.model_runner.pin_lora(lora_id)
+
+    def dumper_control(self, action: str, body: dict | None = None) -> dict:
+        dumper = getattr(self.model_runner, "tensor_dumper", None)
+        if dumper is None:
+            raise RuntimeError("Dumper was not enabled at startup.")
+        return dumper.control(action, body)
 
     def check_health(self) -> None:
         # worker will always be healthy as long as it's running.
