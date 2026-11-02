@@ -566,12 +566,15 @@ def allocate_kv_cache(
     device: torch.device,
     layout: KVCacheLayout,
     kernel_block_sizes: list[int] | None = None,
+    host_pinned: bool = False,
 ) -> dict[str, torch.Tensor]:
     """Allocate the KV cache and view it as ``[B, H, N, C]`` per layer.
 
     Every KVCacheTensor places its layers in the same backing allocation: layer ``l`` of
     block ``b`` starts at ``offset + l * layer_stride + b * block_stride``. Cache
     groups overlay each other, so tensors may address the same bytes.
+    With ``host_pinned`` the backing allocation is host-pinned memory (see
+    CacheConfig.kv_cache_host_pinned).
     """
     if not kv_cache_config.kv_cache_tensors:
         return {}
@@ -593,7 +596,10 @@ def allocate_kv_cache(
         buf_size = ((raw_size + page_size - 1) // page_size) * page_size
     else:
         buf_size = raw_size
-    buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
+    if host_pinned:
+        buf = torch.ops._C.alloc_host_pinned_tensor(buf_size)
+    else:
+        buf = torch.zeros(buf_size, dtype=torch.int8, device=device)
 
     kv_caches: dict[str, torch.Tensor] = {}
     for tensor in kv_cache_config.kv_cache_tensors:

@@ -73,6 +73,7 @@ class NixlBaseConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
         self.engine_id: EngineId = engine_id
         self.kv_cache_config = kv_cache_config
+        self._reqs_to_release: list[ReqId] = []
         self.side_channel_host = envs.VLLM_NIXL_SIDE_CHANNEL_HOST
         self.side_channel_port = (
             envs.VLLM_NIXL_SIDE_CHANNEL_PORT
@@ -503,6 +504,8 @@ class NixlBaseConnectorScheduler:
             self._build_save_meta(meta, scheduler_output)
 
         meta.reqs_to_send = self._reqs_need_send
+        meta.reqs_to_release = self._reqs_to_release
+        self._reqs_to_release = []
         # Clock reference for reqs_to_send: deadlines above are in this
         # process's perf_counter domain; workers (possibly on other nodes,
         # where perf_counter has a different epoch) rebase against this.

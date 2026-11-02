@@ -275,6 +275,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
+        # D side with a host-pinned KV cache: finished requests whose blocks
+        # the worker releases once the GPU work in flight has completed.
+        self.reqs_to_release: list[ReqId] = []
         # The scheduler process's time.perf_counter() when this metadata was
         # built. reqs_to_send deadlines are stamped with the scheduler's
         # clock, which is NOT comparable across processes (perf_counter is
