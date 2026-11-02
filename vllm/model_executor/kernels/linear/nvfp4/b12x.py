@@ -6,6 +6,7 @@ from __future__ import annotations
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.b12x import B12xWarmupUnit
@@ -145,12 +146,40 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         super().process_weights_after_loading(layer)
         blockscaled = _import_b12x_blockscaled()
         assert blockscaled is not None
-        layer.b12x_nvfp4_packed_weight = blockscaled.pack_weight(
+        packed = blockscaled.pack_weight(
             layer.weight,
             layer.weight_scale,
             recipe="nvfp4",
             global_scale=layer.weight_global_scale,
         )
+        layer.b12x_nvfp4_packed_weight = packed
+        # Declare every serving shape now. An undeclared token count is
+        # prepared on first use, and that preparation evicts kernels other
+        # layers compiled earlier in the same forward, which then fails CUDA
+        # graph capture.
+        config = get_current_vllm_config()
+        capture_sizes = config.compilation_config.cudagraph_capture_sizes or []
+        capacity = max(
+            config.scheduler_config.max_num_batched_tokens,
+            config.scheduler_config.max_num_scheduled_tokens or 0,
+            *capture_sizes,
+        )
+        query = blockscaled.BlockscaledQuery(
+            recipe="nvfp4",
+            num_tokens=capacity,
+            in_features=packed.in_features,
+            padded_in_features=packed.padded_in_features,
+            out_features=packed.out_features,
+            activation_mode="a16",
+            global_scale_kind=packed.global_scale_kind,
+        )
+        # A weight reload keeps the prepared plan when the shapes are unchanged.
+        if getattr(layer, "b12x_nvfp4_plan_query", None) != query:
+            layer.b12x_nvfp4_plan = blockscaled.plan_regimes(
+                query,
+                exact_m=tuple(sorted({m for m in capture_sizes if 0 < m < capacity})),
+            )
+            layer.b12x_nvfp4_plan_query = query
 
     def get_b12x_warmup_unit(
         self,
@@ -158,8 +187,10 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
         token_counts: tuple[int, ...],
         output_dtype: torch.dtype,
     ) -> B12xWarmupUnit:
+        plan = layer.b12x_nvfp4_plan
+
         def compile() -> None:
-            for tokens in token_counts:
+            for tokens in sorted(set(token_counts) | set(plan.token_counts)):
                 source = torch.zeros(
                     (tokens, layer.weight.shape[1] * 2),
                     dtype=output_dtype,
@@ -169,12 +200,8 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
 
         return B12xWarmupUnit(
             name="NVFP4 W4A16",
-            key=(
-                type(self),
-                layer.weight.device,
-                tuple(layer.weight.shape),
-                output_dtype,
-            ),
+            # Every layer owns a plan that must be prepared before capture.
+            key=(type(self), plan.handle, output_dtype),
             compile=compile,
         )
 
@@ -188,11 +215,29 @@ class B12xNvFp4W4A16LinearKernel(B12xNvFp4LinearKernel):
             raise ValueError(f"b12x NVFP4 W4A16 requires BF16 input, got {x.dtype}")
         blockscaled = _import_b12x_blockscaled()
         assert blockscaled is not None
-        output = blockscaled.mm(
-            x.reshape(-1, x.shape[-1]).contiguous(),
-            layer.b12x_nvfp4_packed_weight,
-            required_mode="a16",
-        )
+        x_2d = x.reshape(-1, x.shape[-1]).contiguous()
+        # Rows beyond the planned capacity (e.g. an encoder batch) run in
+        # capacity-sized chunks; an unplanned call would prepare on first use.
+        capacity = layer.b12x_nvfp4_plan_query.num_tokens
+        if x_2d.shape[0] <= capacity:
+            output = blockscaled.mm(
+                x_2d,
+                layer.b12x_nvfp4_packed_weight,
+                plan=layer.b12x_nvfp4_plan,
+                required_mode="a16",
+            )
+        else:
+            output = torch.cat(
+                [
+                    blockscaled.mm(
+                        chunk,
+                        layer.b12x_nvfp4_packed_weight,
+                        plan=layer.b12x_nvfp4_plan,
+                        required_mode="a16",
+                    )
+                    for chunk in x_2d.split(capacity)
+                ]
+            )
         if bias is not None:
             output = output + bias
         return output.view(*x.shape[:-1], layer.weight.shape[0])

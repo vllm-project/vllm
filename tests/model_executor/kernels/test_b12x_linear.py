@@ -862,11 +862,20 @@ def test_b12x_nvfp4_apply_calls_native_blockscaled_gemm(monkeypatch) -> None:
     assert kwargs == {"out_dtype": torch.bfloat16}
 
 
-def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
+def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(
+    monkeypatch, default_vllm_config
+):
     import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
 
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = []
     calls = []
-    packed_weight = object()
+    plans = []
+    packed_weight = types.SimpleNamespace(
+        in_features=128,
+        padded_in_features=128,
+        out_features=48,
+        global_scale_kind="multiplier",
+    )
 
     def pack_weight(weight, scale, *, recipe, global_scale):
         assert weight is layer.weight
@@ -875,8 +884,13 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
         assert global_scale is layer.weight_global_scale
         return packed_weight
 
-    def mm(source, weight, *, required_mode):
+    def plan_regimes(query, *, exact_m):
+        plans.append(types.SimpleNamespace(handle=len(plans), token_counts=exact_m))
+        return plans[-1]
+
+    def mm(source, weight, *, plan, required_mode):
         assert weight is packed_weight
+        assert plan is plans[-1]
         assert required_mode == "a16"
         assert source.dtype == torch.bfloat16
         assert source.is_contiguous()
@@ -890,7 +904,12 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
     monkeypatch.setattr(
         b12x_mod,
         "_import_b12x_blockscaled",
-        lambda: types.SimpleNamespace(pack_weight=pack_weight, mm=mm),
+        lambda: types.SimpleNamespace(
+            pack_weight=pack_weight,
+            mm=mm,
+            plan_regimes=plan_regimes,
+            BlockscaledQuery=types.SimpleNamespace,
+        ),
     )
     monkeypatch.setattr(
         b12x_mod,
@@ -908,6 +927,9 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
     kernel = object.__new__(B12xNvFp4W4A16LinearKernel)
     kernel.process_weights_after_loading(layer)
     assert layer.b12x_warmup_provider is kernel
+    # A reload with unchanged shapes keeps the prepared plan.
+    kernel.process_weights_after_loading(layer)
+    assert len(plans) == 1
     kernel.get_b12x_warmup_unit(layer, (1, 8), torch.bfloat16).compile()
     assert [source.shape[0] for source in calls] == [1, 8]
 
@@ -919,21 +941,8 @@ def test_b12x_nvfp4_w4a16_uses_weight_only_scale_and_a16_dispatch(monkeypatch):
         kernel.apply_weights(layer, x.float())
 
 
-@pytest.mark.parametrize("m,n,k", [(2, 136, 96), (17, 256, 256)])
-@torch.inference_mode()
-def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
-    monkeypatch, default_vllm_config, m, n, k
-) -> None:
-    import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
-
-    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
-    if not supported:
-        pytest.skip(reason)
-
-    def reject_activation_quantization(*args, **kwargs):
-        pytest.fail("W4A16 must not quantize activations")
-
-    monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
+def _nvfp4_w4a16_layer(n, k):
+    """A random NVFP4 W4A16 layer and its decoded fp32 weight."""
     torch.manual_seed(17)
     codes = torch.randint(0, 16, (n, k), device="cuda")
     scales = (2.0 ** torch.randint(-2, 2, (n, k // 16), device="cuda")).to(
@@ -952,6 +961,67 @@ def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
         device="cuda",
     )
     decoded = lut[codes] * scales.float().repeat_interleave(16, dim=1) * 0.125
+    return layer, decoded
+
+
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_does_not_prepare_after_first_call(
+    monkeypatch, default_vllm_config
+) -> None:
+    """Every serving token count is planned at load time.
+
+    A b12x preparation evicts programs no prepared plan retains, including
+    routed-MoE kernels compiled earlier in the same forward, which then fails
+    CUDA graph capture. Only the first (profile run) call may prepare.
+    """
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+    import b12x.preparation.session as session
+
+    default_vllm_config.compilation_config.cudagraph_capture_sizes = [1, 2, 4, 8]
+    k = 256
+    layer, decoded = _nvfp4_w4a16_layer(256, k)
+    kernel = B12xNvFp4W4A16LinearKernel(None)
+    kernel.process_weights_after_loading(layer)
+    scheduler = default_vllm_config.scheduler_config
+    capacity = max(
+        scheduler.max_num_batched_tokens, scheduler.max_num_scheduled_tokens or 0, 8
+    )
+    source = torch.zeros(capacity, k, device="cuda", dtype=torch.bfloat16)
+    kernel.apply_weights(layer, source)
+
+    prepared = []
+    prepare_default = session.prepare_default
+    monkeypatch.setattr(
+        session,
+        "prepare_default",
+        lambda request: prepared.append(request) or prepare_default(request),
+    )
+    for m in (8, 4, 2, 1, 3, 40, capacity + 5):
+        x = torch.randn(m, k, device="cuda", dtype=torch.bfloat16)
+        expected = (x.double() @ decoded.double().T).bfloat16()
+        actual = kernel.apply_weights(layer, x)
+        torch.testing.assert_close(actual, expected, atol=0.005, rtol=0.01)
+    assert not prepared
+
+
+@pytest.mark.parametrize("m,n,k", [(2, 136, 96), (17, 256, 256)])
+@torch.inference_mode()
+def test_b12x_nvfp4_w4a16_preserves_bf16_activations_under_graph_replay(
+    monkeypatch, default_vllm_config, m, n, k
+) -> None:
+    import vllm.model_executor.kernels.linear.nvfp4.b12x as b12x_mod
+
+    supported, reason = B12xNvFp4W4A16LinearKernel.is_supported()
+    if not supported:
+        pytest.skip(reason)
+
+    def reject_activation_quantization(*args, **kwargs):
+        pytest.fail("W4A16 must not quantize activations")
+
+    monkeypatch.setattr(b12x_mod, "scaled_fp4_quant", reject_activation_quantization)
+    layer, decoded = _nvfp4_w4a16_layer(n, k)
     x_storage = torch.randn(1, m, k * 2, device="cuda", dtype=torch.bfloat16)
     x = x_storage[..., ::2]
     bias = torch.randn(n, device="cuda", dtype=torch.bfloat16)
