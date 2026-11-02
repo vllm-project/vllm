@@ -4,7 +4,7 @@
 
 Each head's K and V are two slots of one 8704 B page (``mxfp4_pages``). The
 top-k block ids the indexer wrote are turned into one page table row per query
-token, and ``pa_decode_mxfp4`` attends each row as a length-1 sequence with the
+token, and ``pa_decode`` (MXFP4 K/V) attends each row as a length-1 sequence with the
 query as e4m3.
 """
 
@@ -39,7 +39,7 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionLayer
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheLayout
 
-# Query heads per KV head one pa_decode_mxfp4 tile serves.
+# Query heads per KV head one pa_decode MXFP4 tile serves.
 MAX_GROUP_SIZE = 16
 
 
@@ -105,28 +105,29 @@ def mxfp4_sparse_attend(
     scale: float,
 ) -> None:
     """Attend each row to its selected pages as a length-1 sequence."""
-    from aiter.ops.flydsl.pa_decode_mxfp4 import pa_decode_mxfp4
+    from aiter.ops.flydsl.pa_decode import pa_decode
 
     pages = kv_cache.view(kv_cache.shape[0], 2, PAGE_BYTES)
     k_data, k_scale = mxfp4_page_views(pages[:, :1])
     v_data, v_scale = mxfp4_page_views(pages[:, 1:])
-    pa_decode_mxfp4(
+    pa_decode(
         out,
         q,
         k_data,
-        k_scale,
         v_data,
-        v_scale,
         sparse_ctx,
         sparse_bt,
         scale,
-        max_partitions=1,
+        1,
+        key_scale=k_scale,
+        value_scale=v_scale,
+        work_plan=None,
         max_context_length=sparse_bt.shape[1] * PAGE_TOKENS,
     )
 
 
 class MiniMaxM3SparseRocmMxfp4Impl(MiniMaxM3SparseImpl):
-    """``pa_decode_mxfp4`` over the pages each query token's top-k selects."""
+    """``pa_decode`` over the pages each query token's top-k selects."""
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

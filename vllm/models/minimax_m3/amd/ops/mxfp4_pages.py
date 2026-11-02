@@ -9,7 +9,7 @@ followed by one e8m0 scale per 32 elements::
     [128 tokens x 64 B data][128 tokens x 4 B scale]  = 8704 B = 128 x 68 B
 
 There is no global scale. This is the page AITER's ``fused_qknorm_idxrqknorm``
-writes and its FlyDSL scorers and ``pa_decode_mxfp4`` read.
+writes and its FlyDSL scorers and ``pa_decode`` (MXFP4 K/V) read.
 """
 
 import torch
@@ -29,7 +29,7 @@ def mxfp4_page_views(pages: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     The views are ``[..., 128, 64]`` and ``[..., 128, 4]`` and keep the leading
     dims and their strides, so ``[pages, heads, 8704]`` becomes the
     ``[pages, heads, 128, 64]`` / ``[pages, heads, 128, 4]`` pair
-    ``pa_decode_mxfp4`` takes and ``[pages, 8704]`` the ``[pages, 128, 64]`` /
+    ``pa_decode`` takes and ``[pages, 8704]`` the ``[pages, 128, 64]`` /
     ``[pages, 128, 4]`` pair the index scorers take.
     """
     if pages.dtype != torch.uint8 or pages.shape[-1] != PAGE_BYTES:

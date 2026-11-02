@@ -50,7 +50,7 @@ def rocm_mxfp4_aiter_unavailable_reason() -> str | None:
         return "needs VLLM_ROCM_USE_AITER=1"
     try:
         from aiter.ops import flydsl
-        from aiter.ops.flydsl.pa_decode_mxfp4 import pa_decode_mxfp4  # noqa: F401
+        from aiter.ops.flydsl.pa_decode import pa_decode  # noqa: F401
 
         for name in (
             "minimax_m3_index_score_fp4_flydsl",
