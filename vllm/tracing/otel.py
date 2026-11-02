@@ -57,6 +57,26 @@ def is_otel_available() -> bool:
     return _IS_OTEL_AVAILABLE
 
 
+@functools.cache
+def _cached_tracer(name: str, provider: Any) -> Tracer:
+    return provider.get_tracer(name)
+
+
+def _get_tracer(name: str) -> Tracer:
+    """Return a tracer for `name`, reusing it across calls.
+
+    `trace.get_tracer()` is called on every request (span), but
+    opentelemetry-sdk 1.40.0 builds a new `Tracer` per call and each one
+    registers meters with the global MeterProvider. Without a configured
+    MeterProvider, the default proxy provider keeps every meter forever, so
+    the API server leaks a few objects per request and gen-2 GC pauses grow
+    until the event loop stalls (open-telemetry/opentelemetry-python#5016,
+    fixed in 1.41.0). Caching per provider keeps this bounded on any SDK
+    version, and a new provider (e.g. in a child process) gets a new tracer.
+    """
+    return _cached_tracer(name, trace.get_tracer_provider())
+
+
 def init_otel_tracer(
     instrumenting_module_name: str,
     otlp_traces_endpoint: str,
@@ -146,7 +166,7 @@ def instrument_otel(func, span_name, attributes, record_exception):
 
     @functools.wraps(func)
     async def async_wrapper(*args, **kwargs):
-        tracer = trace.get_tracer(module_name)
+        tracer = _get_tracer(module_name)
         ctx = _get_smart_context()
         with (
             tracer.start_as_current_span(
@@ -161,7 +181,7 @@ def instrument_otel(func, span_name, attributes, record_exception):
 
     @functools.wraps(func)
     def sync_wrapper(*args, **kwargs):
-        tracer = trace.get_tracer(module_name)
+        tracer = _get_tracer(module_name)
         ctx = _get_smart_context()
         with (
             tracer.start_as_current_span(
@@ -189,7 +209,7 @@ def manual_instrument_otel(
     if not _IS_OTEL_AVAILABLE:
         return
 
-    tracer = trace.get_tracer(__name__)
+    tracer = _get_tracer(__name__)
     # Use provided context, or fall back to smart context detection
     ctx = context if context is not None else _get_smart_context()
 
