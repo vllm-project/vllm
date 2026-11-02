@@ -36,6 +36,7 @@ from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
     is_flashmla_mega_attn_supported,
 )
 from vllm.platforms import current_platform
+from vllm.v1.kv_cache_interface import MLAAttentionSpec
 
 HEAD_DIM, ROPE_DIM = 512, 64
 NOPE_DIM = HEAD_DIM - ROPE_DIM
@@ -550,13 +551,15 @@ def test_dispatch_rule(
 
 
 @pytest.mark.parametrize("extra_record", [NVFP4_RECORD, FP8_RECORD])
-@pytest.mark.parametrize("extra_block", [64, 128])
+@pytest.mark.parametrize("compress_ratio", [1, 2])
 def test_warmup_key_matches_launch(
-    monkeypatch: pytest.MonkeyPatch, extra_record: int, extra_block: int
+    monkeypatch: pytest.MonkeyPatch, extra_record: int, compress_ratio: int
 ):
-    """``bind_kv_cache`` registers the compile key a decode step launches.
+    """The key a layer registers at construction is the key its decode launches.
 
-    Any other key would compile at its first use, after the JIT warmup.
+    The compressed cache is shaped as the model runner binds it: the manager's
+    blocks viewed as this backend's kernel blocks. Any other key would compile
+    at its first use, after the JIT warmup.
     """
     swapab = _swapab_module()
     registered: list[dict[str, int]] = []
@@ -572,14 +575,24 @@ def test_warmup_key_matches_launch(
         lambda self, launch_spec, inputs: launched.append(launch_spec[0]),
     )
 
-    layer = _cpu_layer(16, compress_ratio=1)
-    layer.is_kv_source = True
-    layer._use_swapab = layer._swapab_jit_warmup = True
-    # [num_blocks, 1, page, record], as the model runner binds it.
-    layer.bind_kv_cache(torch.zeros(2, 1, extra_block, extra_record, dtype=torch.uint8))
+    layer = _cpu_layer(16, compress_ratio)
+    layer.compressed_bytes_per_token = extra_record
+    layer._use_swapab = True
+    layer._register_swapab_warmup()
+
+    (kernel_block,) = layer.backend_cls.get_supported_kernel_block_sizes()
+    spec = MLAAttentionSpec(
+        block_size=2 * kernel_block,
+        num_kv_heads=1,
+        head_size=HEAD_DIM,
+        dtype=torch.uint8,
+        tokens_per_state=compress_ratio,
+        state_content_bytes=extra_record,
+    )
+    page = spec.get_num_kernel_states(kernel_block)
     num_tokens = 3
     compressed = (
-        layer._compressed_kv_cache().unsqueeze(-2),
+        torch.zeros(2, page, 1, extra_record, dtype=torch.uint8),
         torch.zeros(num_tokens, EXTRA_WIDTH, dtype=torch.int32),
         torch.zeros(num_tokens, dtype=torch.int32),
     )
