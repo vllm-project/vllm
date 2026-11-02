@@ -89,6 +89,11 @@ class SchedulerConfig:
     queued and running requests. Only applies when
     long_prefill_token_threshold is nonzero."""
 
+    long_prefill_token_threshold_defer: bool = Field(default=False)
+    """Instead of capping long prefills, let them take turns, one per step,
+    after the waiting requests with the leftover budget if that is at least
+    long_prefill_token_threshold. Only applies when that is nonzero."""
+
     max_num_queued_reqs: int | None = Field(default=None, ge=0)
     """Maximum number of requests that can be in-flight (waiting or running)
     at the same time, or None for no limit. When the limit is reached, new
