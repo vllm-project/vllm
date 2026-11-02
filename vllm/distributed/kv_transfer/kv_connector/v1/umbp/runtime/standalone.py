@@ -57,6 +57,8 @@ class _DaemonTransferPool(Executor):
     """
 
     def __init__(self, max_workers: int, thread_name_prefix: str) -> None:
+        if max_workers <= 0:
+            raise ValueError("max_workers must be greater than 0")
         self._work: queue.SimpleQueue[tuple[Future, Callable[[], Any]] | None] = (
             queue.SimpleQueue()
         )
@@ -103,7 +105,10 @@ class _DaemonTransferPool(Executor):
                     except queue.Empty:
                         break
                     if item is not None:
+                        # wait() counts a cancelled future as done only once
+                        # it is notified, which _run() never gets to do here.
                         item[0].cancel()
+                        item[0].set_running_or_notify_cancel()
             for _ in self._threads:
                 self._work.put(None)
         if wait:
@@ -139,7 +144,7 @@ def _resolve_standalone_options(config: UMBPRuntimeConfig) -> dict[str, Any]:
     if not isinstance(endpoint, str) or not endpoint:
         raise ValueError("standalone UMBP requires endpoint")
     normalize_endpoint(endpoint)
-    for name in ("startup_timeout_ms", "lookup_timeout_ms"):
+    for name in ("startup_timeout_ms", "lookup_timeout_ms", "num_workers"):
         if name in options and (type(options[name]) is not int or options[name] <= 0):
             raise ValueError(f"{name} must be a positive integer")
     server_options = sorted(
