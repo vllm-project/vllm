@@ -46,6 +46,50 @@ _INT64_MIN = -(2**63)
 _INT64_MAX = 2**63 - 1
 
 
+class HiddenStateCaptureRequest(OpenAIBaseModel):
+    start: int = Field(ge=0, strict=True)
+    end: int = Field(gt=0, strict=True)
+    collection_id: str
+    min_rows: int = Field(default=1, ge=1, strict=True)
+    aux_layer_ids: list[int] = Field(default_factory=list)
+    hidden_layout: Literal["final", "aux_final", "dflash_aux"] | None = None
+    logprob_topk: int = Field(default=0, ge=0, strict=True)
+
+    @model_validator(mode="after")
+    def validate_window(self) -> "HiddenStateCaptureRequest":
+        if self.end <= self.start or self.min_rows > self.end - self.start:
+            raise ValueError("Invalid hidden-state capture window or min_rows")
+        return self
+
+
+class CaptureTensor(OpenAIBaseModel):
+    data: str = Field(description="Base64-encoded contiguous CPU tensor bytes.")
+    dtype: str
+    shape: list[int]
+
+
+class HiddenStateCaptureResponse(OpenAIBaseModel):
+    hidden_states: CaptureTensor
+    hidden_positions: list[int]
+    hidden_position_start: int
+    hidden_position_end: int
+    hidden_window_start: int
+    hidden_window_end: int
+    hidden_layout: str
+    layer_ids: list[int]
+    includes_final_layer: bool
+    request_id: str
+    collection_id: str
+    copied_bytes: int
+    copy_ms: float = Field(
+        description="CPU allocation and asynchronous-copy submission time "
+        "in milliseconds; "
+        "not completed GPU-to-CPU transfer time."
+    )
+    logprobs: CaptureTensor | None = None
+    logprob_token_ids: CaptureTensor | None = None
+
+
 class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
@@ -57,6 +101,7 @@ class CompletionRequest(OpenAIBaseModel):
         | list[str]
         | None
     ) = None
+    hidden_state_capture: HiddenStateCaptureRequest | None = None
     echo: bool | None = False
     frequency_penalty: float | None = None
     logit_bias: dict[str, float] | None = None
@@ -398,6 +443,11 @@ class CompletionRequest(OpenAIBaseModel):
             )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.hidden_state_capture is not None:
+            extra_args = dict(extra_args)
+            extra_args["hidden_state_capture"] = self.hidden_state_capture.model_dump(
+                exclude_none=True
+            )
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
@@ -434,6 +484,16 @@ class CompletionRequest(OpenAIBaseModel):
             thinking_token_budget=self.thinking_token_budget,
             routed_experts_prompt_start=self.routed_experts_prompt_start,
         )
+
+    @model_validator(mode="after")
+    def validate_hidden_capture_mode(self) -> "CompletionRequest":
+        if self.hidden_state_capture is not None and (
+            self.stream or self.use_beam_search or self.n != 1
+        ):
+            raise ValueError(
+                "hidden_state_capture requires stream=false, use_beam_search=false, n=1"
+            )
+        return self
 
     @model_validator(mode="before")
     @classmethod
@@ -673,6 +733,8 @@ class CompletionLogProbs(OpenAIBaseModel):
 
 
 class CompletionResponseChoice(OpenAIBaseModel):
+    hidden_state_capture: HiddenStateCaptureResponse | None = None
+    hidden_capture_skip_reason: str | None = None
     index: int
     text: str
     logprobs: CompletionLogProbs | None = None

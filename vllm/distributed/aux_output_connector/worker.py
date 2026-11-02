@@ -17,6 +17,10 @@ from vllm.distributed.aux_output_connector.connector import (
     AuxOutputConnectorMetadata,
     AuxRequestOutput,
 )
+from vllm.distributed.aux_output_connector.hidden_states import (
+    HiddenStateWorker,
+    PendingHiddenOutput,
+)
 from vllm.distributed.aux_output_connector.routed_experts import (
     RoutedExpertsBuffer,
     materialize_routed_experts,
@@ -55,7 +59,7 @@ class _WorkerRequestState:
 class PendingAuxOutput:
     """Own one step's R3 snapshot until its asynchronous copy is consumed."""
 
-    connector: AuxOutputWorkerConnector
+    connector: RoutedExpertsWorkerConnector
     request_ids: list[str]
     token_starts: np.ndarray
     query_start_loc: np.ndarray
@@ -80,7 +84,7 @@ class PendingAuxOutput:
         return self.connector.process_output(self)
 
 
-class AuxOutputWorkerConnector:
+class RoutedExpertsWorkerConnector:
     """Own capture, request tails, and backend resources on the output worker."""
 
     def __init__(
@@ -407,6 +411,83 @@ class AuxOutputWorkerConnector:
                     self._store.close()
                 finally:
                     self._store = None
+
+
+class PendingCombinedAuxOutput:
+    def __init__(
+        self, routed: PendingAuxOutput | None, hidden: PendingHiddenOutput | None
+    ) -> None:
+        self.routed = routed
+        self.hidden = hidden
+
+    def enqueue_cpu_copy(
+        self, num_sampled: np.ndarray, num_rejected: np.ndarray
+    ) -> None:
+        if self.routed is not None:
+            self.routed.enqueue_cpu_copy(num_sampled, num_rejected)
+        if self.hidden is not None:
+            self.hidden.enqueue_cpu_copy()
+
+    def process_output(self) -> dict[str, AuxRequestOutput]:
+        outputs = {} if self.routed is None else self.routed.process_output()
+        if self.hidden is not None:
+            for request_id, chunk in self.hidden.chunks.items():
+                outputs.setdefault(request_id, AuxRequestOutput()).hidden_chunk = chunk
+            for request_id, error in self.hidden.errors.items():
+                outputs.setdefault(request_id, AuxRequestOutput()).hidden_error = error
+        return outputs
+
+
+class AuxOutputWorkerConnector:
+    """Compose windowed hidden capture with optional routed-experts output."""
+
+    def __init__(self, *, vllm_config: VllmConfig, model: torch.nn.Module) -> None:
+        self._routing = (
+            RoutedExpertsWorkerConnector(vllm_config=vllm_config, model=model)
+            if vllm_config.aux_output_config.enable_return_routed_experts
+            else None
+        )
+        self._hidden = (
+            HiddenStateWorker(model, vllm_config)
+            if vllm_config.aux_output_config.enable_hidden_states
+            and get_tp_group().is_first_rank
+            else None
+        )
+
+    def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
+        if self._routing is not None:
+            self._routing.initialize_output_storage(kv_cache_config)
+
+    def begin_step(self, metadata: AuxOutputConnectorMetadata | None) -> None:
+        if self._hidden is not None and metadata is not None:
+            self._hidden.begin_step(metadata)
+        if self._routing:
+            self._routing.begin_step(metadata)
+
+    def prepare_hidden_output(
+        self,
+        batch: InputBatch,
+        hidden_states: torch.Tensor,
+        aux_hidden_states: list[torch.Tensor] | None,
+        logits: torch.Tensor | None,
+    ) -> None:
+        if self._hidden is not None:
+            self._hidden.prepare(batch, hidden_states, aux_hidden_states, logits)
+
+    def prepare_output(
+        self, input_batch: InputBatch
+    ) -> PendingCombinedAuxOutput | None:
+        routed = self._routing.prepare_output(input_batch) if self._routing else None
+        hidden = None if self._hidden is None else self._hidden.pending
+        if routed is None and hidden is None:
+            return None
+        return PendingCombinedAuxOutput(routed, hidden)
+
+    def close(self) -> None:
+        if self._hidden is not None:
+            self._hidden.close()
+        if self._routing:
+            self._routing.close()
 
 
 def get_aux_output_connector(
