@@ -5,8 +5,10 @@
 Run with VLLM_TEST_CUDA_PROCESS_CHECKPOINT=1. The driver must expose CUDA
 process checkpoint APIs. Override VLLM_TEST_MODEL and VLLM_TEST_SLEEP_CYCLES
 for larger-model validation; this test requires enough RAM for weight backups.
-The selected model must support batch invariance. Hybrid GDN models require
-separate paired accuracy evaluation because that mode is unsupported for GDN.
+Hybrid GDN (mamba-family) models do not support VLLM_BATCH_INVARIANT and
+their batched generation is not run-to-run reproducible; for such models this
+test automatically switches to per-request (batch-size-1) generation, which is
+deterministic, and compares token ids per request.
 """
 
 import os
@@ -61,7 +63,6 @@ def test_process_checkpoint_preserves_outputs_and_graphs(tp, transport, monkeypa
         "VLLM_USE_V2_MODEL_RUNNER": "1",
         "VLLM_WORKER_MULTIPROC_METHOD": "spawn",
         "VLLM_ALLOW_INSECURE_SERIALIZATION": "1",  # Test observation RPC only.
-        "VLLM_BATCH_INVARIANT": "1",
         "NCCL_P2P_DISABLE": "1" if transport == "shm" else "0",
         "NCCL_SHM_DISABLE": "0" if transport == "shm" else "1",
         "NCCL_IB_DISABLE": "1",
@@ -75,8 +76,17 @@ def test_process_checkpoint_preserves_outputs_and_graphs(tp, transport, monkeypa
     }
     for key, value in config.items():
         monkeypatch.setenv(key, value)
+    model = os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
+    # Hybrid GDN models reject VLLM_BATCH_INVARIANT at startup and their
+    # batched generation is not run-to-run reproducible, so compare
+    # per-request (batch-size-1) outputs instead.
+    from vllm.config import ModelConfig
+
+    per_request = ModelConfig(model=model).is_hybrid
+    if not per_request:
+        monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     llm = LLM(
-        os.environ.get("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+        model,
         dtype="bfloat16",
         tensor_parallel_size=tp,
         distributed_executor_backend=(
@@ -97,12 +107,17 @@ def test_process_checkpoint_preserves_outputs_and_graphs(tp, transport, monkeypa
     try:
         params = SamplingParams(temperature=0, max_tokens=32, ignore_eos=True)
 
+        prompts = ["The capital of France is", "Compute 7 times 8:"]
+
         def generate():
-            outputs = llm.generate(
-                ["The capital of France is", "Compute 7 times 8:"],
-                params,
-                use_tqdm=False,
-            )
+            if per_request:
+                return [
+                    llm.generate([prompt], params, use_tqdm=False)[0]
+                    .outputs[0]
+                    .token_ids
+                    for prompt in prompts
+                ]
+            outputs = llm.generate(prompts, params, use_tqdm=False)
             return [output.outputs[0].token_ids for output in outputs]
 
         reference = generate()
