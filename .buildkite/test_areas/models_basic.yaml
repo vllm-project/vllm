@@ -12,11 +12,15 @@ steps:
   - tests/models/test_initialization.py
   - tests/models/registry.py
   - tests/models/test_beam_construction.py
+  - tests/models/test_beam_numerics.py
+  - tests/models/test_beam_weight_mapping.py
+  - tests/v1/spec_decode/test_dflash2.py
   commands:
     # Run a subset of model initialization tests
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
-    # Exercise Beam construction and generation without a checkpoint download.
-    - pytest -v -s models/test_beam_construction.py
+    # Exercise the active Beam backend without downloading a checkpoint.
+    - pytest -v -s models/test_beam_construction.py models/test_beam_weight_mapping.py models/test_beam_numerics.py
+    - pytest -v -s v1/spec_decode/test_dflash2.py -k "beam_conv_residual_norm or grouped_conv_triton_matches_reference or beam_fused_candidate_edges"
   mirror:
     amd:
       label: ":amd: (MI355 DPX) Basic Models (Initialization)"
