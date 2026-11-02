@@ -266,6 +266,107 @@ if current_platform.is_rocm():
         _BK256_STAGES = 2
 
 
+# gfx950 tiles for 16 < M <= 256 (decode batches carrying draft tokens, small
+# prefill chunks) with local N > 1280: (BLOCK_M, BLOCK_N, preferred BLOCK_K,
+# num_warps, num_stages) per M bucket and local-N bucket (<= 1536, <= 1792, <= 2560,
+# <= 3072, <= 6144, wider), for K >= 1024. Graph-tuned on MiniMax-M3.1-Flash
+# TP2/TP4 linears on MI355X. The 1792-wide bucket also covers V4.1 wqa/wkv
+# (N=1792, K=5120), where a narrow N tile avoids a regression at M=64.
+_GFX950_MID_M_BUCKETS = (32, 48, 64, 96, 128, 192, 256)
+_GFX950_MID_N_BUCKETS = (1536, 1792, 2560, 3072, 6144)
+_GFX950_MID_M_TILES = {
+    32: (
+        (16, 16, 1024, 2, 3),
+        (32, 16, 1024, 2, 3),
+        (32, 16, 1024, 2, 3),
+        (32, 16, 1024, 2, 3),
+        (32, 32, 512, 2, 3),
+        (32, 16, 512, 2, 2),
+    ),
+    48: (
+        (32, 16, 1024, 2, 3),
+        (32, 16, 1024, 2, 2),
+        # M3.1 TP4 qkv (N=2560, K=6144) and V4.1 wo_a (2048, 4096)
+        # retain the narrow tile through M=48.
+        (16, 16, 1024, 2, 2),
+        (32, 32, 512, 2, 3),
+        (64, 32, 512, 2, 3),
+        (64, 64, 512, 4, 2),
+    ),
+    64: (
+        (32, 16, 1024, 2, 3),
+        (32, 16, 1024, 2, 2),
+        (32, 32, 512, 2, 3),
+        (32, 32, 512, 2, 3),
+        (64, 32, 512, 2, 3),
+        (64, 64, 512, 4, 2),
+    ),
+    96: (
+        (32, 32, 512, 2, 3),
+        (64, 32, 512, 2, 3),
+        (64, 32, 512, 2, 3),
+        (64, 32, 512, 2, 3),
+        (64, 64, 512, 4, 2),
+        (64, 64, 256, 4, 2),
+    ),
+    128: (
+        (32, 32, 512, 2, 3),
+        (64, 32, 512, 2, 3),
+        (64, 32, 512, 2, 3),
+        (64, 32, 512, 2, 3),
+        (64, 64, 512, 4, 2),
+        (64, 64, 256, 4, 2),
+    ),
+    192: (
+        (64, 32, 512, 2, 3),
+        (64, 64, 512, 4, 2),
+        (64, 64, 512, 4, 2),
+        (64, 64, 512, 4, 2),
+        (64, 64, 256, 4, 2),
+        (64, 64, 256, 4, 2),
+    ),
+    256: (
+        (64, 32, 512, 2, 3),
+        (64, 64, 512, 4, 2),
+        (64, 64, 512, 4, 2),
+        (64, 64, 512, 4, 2),
+        (64, 64, 256, 4, 2),
+        (64, 64, 512, 4, 2),
+    ),
+}
+# The same for short K (< 1024, e.g. a shared-expert down projection).
+_GFX950_MID_M_SHORT_K_TILES = {
+    32: (32, 16, 256, 2, 3),
+    48: (64, 32, 256, 4, 3),
+    64: (64, 32, 256, 4, 3),
+    96: (64, 64, 256, 4, 3),
+    128: (64, 64, 256, 4, 3),
+    192: (64, 32, 256, 2, 2),
+    256: (64, 32, 256, 2, 2),
+}
+
+
+def _gfx950_mid_m_cfg(M, N, K):
+    m_bucket = next(b for b in _GFX950_MID_M_BUCKETS if b >= M)
+    if K < 1024:
+        block_m, block_n, block_k, num_warps, num_stages = _GFX950_MID_M_SHORT_K_TILES[
+            m_bucket
+        ]
+    else:
+        n_idx = next(
+            (i for i, b in enumerate(_GFX950_MID_N_BUCKETS) if b >= N),
+            len(_GFX950_MID_N_BUCKETS),
+        )
+        block_m, block_n, block_k, num_warps, num_stages = _GFX950_MID_M_TILES[
+            m_bucket
+        ][n_idx]
+    # The K-loop is unmasked: shrink BLOCK_K until it divides K (the entry
+    # requires K % 128 == 0).
+    while block_k > 128 and K % block_k:
+        block_k //= 2
+    return block_m, block_n, block_k, num_warps, num_stages
+
+
 def _select_cfg(M, N, K):
     """(BLOCK_M, BLOCK_N, BLOCK_K, num_warps, num_stages) — graph-tuned on gfx950.
 
@@ -282,6 +383,8 @@ def _select_cfg(M, N, K):
             return 16, 16, 1024, 2, 3
         if K == 768 and N == 6144:
             return 16, 16, 256, 2, 3
+    if _ON_GFX950 and 16 < M <= 256 and N > 1280:
+        return _gfx950_mid_m_cfg(M, N, K)
     if M <= 64:
         # decode (M in {1,32,64}): tiny-M GEMV is weight-BW + GPU-OCCUPANCY bound. The
         # lever is NARROW BLOCK_N=16 (maximize N-tiles so more CUs stream the weight in
