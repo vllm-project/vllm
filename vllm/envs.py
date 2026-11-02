@@ -304,6 +304,10 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
     VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
     VLLM_DBO_COMM_SMS: int = 20
+    VLLM_DBO_TP_QUICK_REDUCE: bool = False
+    VLLM_DBO_TP_DMA_AR: bool = False
+    VLLM_DBO_TP_DMA_AR_MAX_MB: int = 256
+    VLLM_DBO_TP_DMA_AR_LAYOUT: Literal["ipc", "peer"] = "ipc"
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
@@ -2144,6 +2148,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
             and __import__("torch").version.hip is not None
             else "20",
         )
+    ),
+    # Under dual batch overlap with pure TP, run a microbatch's TP all-reduce
+    # through QuickReduce on the comm stream when the payload is in its window,
+    # instead of the per-microbatch NCCL/RCCL communicator (ROCm).
+    "VLLM_DBO_TP_QUICK_REDUCE": lambda: bool(
+        int(os.getenv("VLLM_DBO_TP_QUICK_REDUCE", "0"))
+    ),
+    # Under dual batch overlap with pure TP at TP2, run a microbatch's TP
+    # all-reduce as a one-shot INT4 all-reduce over the SDMA copy engines
+    # (ROCm), which needs no CUs while the other microbatch computes. Payloads up
+    # to VLLM_DBO_TP_DMA_AR_MAX_MB MiB; VLLM_DBO_TP_DMA_AR_LAYOUT picks where the
+    # receive buffers live ("ipc": own GPU, "peer": the peer's GPU).
+    "VLLM_DBO_TP_DMA_AR": lambda: bool(int(os.getenv("VLLM_DBO_TP_DMA_AR", "0"))),
+    "VLLM_DBO_TP_DMA_AR_MAX_MB": lambda: int(
+        os.getenv("VLLM_DBO_TP_DMA_AR_MAX_MB", "256")
+    ),
+    "VLLM_DBO_TP_DMA_AR_LAYOUT": env_with_choices(
+        "VLLM_DBO_TP_DMA_AR_LAYOUT", "ipc", ["ipc", "peer"]
     ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
