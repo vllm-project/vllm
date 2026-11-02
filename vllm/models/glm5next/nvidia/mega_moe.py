@@ -17,7 +17,6 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 
 # (local expert id, shard id); the fused shared expert has expert id None.
 Shard = tuple[int | None, str]
-_SHARED_PROJ_SHARDS = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
 
 
 def requant_block_fp8_to_ue8m0(
@@ -47,9 +46,7 @@ def requant_block_fp8_to_ue8m0(
 
 
 def _shared_shard_id(name: str) -> str:
-    """Shard id of shared-expert checkpoint tensor ``name``."""
-    proj = name.rpartition(".shared_experts.")[2].partition(".")[0]
-    return _SHARED_PROJ_SHARDS[proj]
+    return "w1" if ".gate_proj." in name else "w3" if ".up_proj." in name else "w2"
 
 
 class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
