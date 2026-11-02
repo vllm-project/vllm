@@ -33,8 +33,6 @@ TopLogprobsParam: TypeAlias = Annotated[
     BeforeValidator(lambda v: 0 if v is None else v, json_schema_input_type=int | None),
 ]
 
-MMPayload: TypeAlias = Literal["tensors", "none"]
-
 _CACHE_SALT_FORBIDDEN_CHARS = frozenset("@/\\\x00")
 _MAX_CACHE_SALT_LENGTH = 128
 

@@ -10,9 +10,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 import vllm.envs as envs
 from vllm.entrypoints.generate.base.protocol import (
-    MMPayload,
     resolve_return_mm_kwargs_alias,
 )
+from vllm.inputs.mm_features.specs import MMPayload
 
 
 class AnthropicError(BaseModel):
