@@ -4,7 +4,7 @@ meta:
   provider: "Google"
   description: "Google's unified multimodal Gemma 4 dense model (31B) with native text, image, and audio, plus thinking mode and tool-use protocol."
   date_added: 2026-04-02
-  date_updated: 2026-09-09
+  date_updated: 2026-10-30
   tasks:
     - multimodal
     - text
@@ -22,7 +22,7 @@ meta:
 
 model:
   model_id: "google/gemma-4-31B-it"
-  min_vllm_version: "0.19.1"
+  min_vllm_version: "0.29.0"
   architecture: dense
   parameter_count: "31B"
   active_parameters: "31B"
@@ -87,6 +87,13 @@ features:
         args:
           - "--speculative-config"
           - '{"model": "RedHatAI/gemma-4-31B-it-speculator.eagle3", "num_speculative_tokens": 3, "method": "eagle3"}'
+      dflash2:
+        label: "DFlash2 (RedHatAI)"
+        description: "RedHatAI DFlash2 draft with 7 tokens. The card's deployment was tested on vLLM 0.29.0 with target TP4 and draft TP4."
+        variants: [default]
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/gemma-4-31B-it-speculator.dflash2","num_speculative_tokens":7,"draft_tensor_parallel_size":4,"method":"dflash"}'
 opt_in_features:
   - text_only
   - spec_decoding
@@ -415,6 +422,8 @@ guide: |
   > **Note:** MTP speculative decoding for Gemma 4 is only available on the vLLM nightly build — it has not yet landed in a stable release. Install via the nightly wheel (`uv pip install -U vllm --pre --extra-index-url https://wheels.vllm.ai/nightly/cu129 …`) or use the `vllm/vllm-openai:gemma4-0505-cu129` / `vllm/vllm-openai:gemma4-0505-cu130` images above; the standard `:latest` stable tag does not include this feature.
 
   ## References
+
+  - [RedHatAI DFlash2 speculator](https://huggingface.co/RedHatAI/gemma-4-31B-it-speculator.dflash2)
 
   - [Model card](https://huggingface.co/google/gemma-4-31B-it)
   - [FP8 variant](https://huggingface.co/RedHatAI/gemma-4-31B-it-FP8-dynamic)
