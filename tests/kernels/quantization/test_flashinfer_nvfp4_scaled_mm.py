@@ -13,7 +13,10 @@ from nvfp4_utils import (
 )
 
 from vllm import _custom_ops as ops
-from vllm.model_executor.kernels.linear.nvfp4 import NvFp4LinearLayerConfig
+from vllm.model_executor.kernels.linear.nvfp4 import (
+    NvFp4LinearKernel,
+    NvFp4LinearLayerConfig,
+)
 from vllm.model_executor.kernels.linear.nvfp4.cutlass import CutlassNvFp4LinearKernel
 from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
     FlashInferB12xNvFp4LinearKernel,
@@ -87,7 +90,7 @@ CUDA_DEVICES = ["cuda:0"]
 @torch.inference_mode()
 def test_flashinfer_nvfp4_preserves_quantized_input_shape(
     token_shape: tuple[int, ...],
-    kernel_cls,
+    kernel_cls: type[NvFp4LinearKernel],
     hidden_size: int,
     output_size: int,
 ) -> None:
@@ -115,8 +118,8 @@ def test_flashinfer_nvfp4_preserves_quantized_input_shape(
     layer = torch.nn.Module()
     layer.input_size_per_partition = hidden_size
     layer.output_size_per_partition = output_size
-    layer.weight = torch.nn.Parameter(weight_fp4, requires_grad=False)
-    layer.weight_scale = torch.nn.Parameter(weight_blockscale, requires_grad=False)
+    layer.weight = weight_fp4
+    layer.weight_scale = weight_blockscale
     layer.input_global_scale_inv = input_scale
     layer.alpha = (input_scale * weight_scale).reciprocal()
     kernel = kernel_cls(NvFp4LinearLayerConfig())
