@@ -121,7 +121,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
         self.last_token_indices.zero_()
         assert self.cudagraph_manager is not None
         if self.cudagraph_manager.use_breakable_cg:
-            num_layers = self.draft_model_config.hf_config.num_nextn_predict_layers
+            num_layers = self.speculative_config.num_mtp_modules()
             self.cudagraph_manager.init_breakable_cg_runner(
                 self.model,
                 key_fn=lambda **kwargs: kwargs["spec_step_idx"] % num_layers,
@@ -214,6 +214,7 @@ class MultiModuleMTPSpeculator(DraftModelSpeculator):
             dp_rank=self.dp_rank,
             need_eager=is_profile,
             dp_sync_state=dp_sync_state,
+            parallel_config=self.vllm_config.parallel_config,
         )
         num_tokens_across_dp = (
             batch_sync.num_tokens_across_dp if batch_sync is not None else None
