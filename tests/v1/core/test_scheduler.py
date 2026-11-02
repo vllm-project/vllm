@@ -9095,7 +9095,7 @@ def test_admit_stream_async_routes_stream_to_calling_client():
     assert request.client_index == 3
 
 
-@pytest.mark.parametrize("change", ["structured", "embeds", "mm_offset"])
+@pytest.mark.parametrize("change", ["structured", "embeds", "mm_offset", "mm_overrun"])
 def test_unsupported_stream_input_refused_before_preprocessing(change):
     from vllm.exceptions import VLLMValidationError
     from vllm.sampling_params import StructuredOutputsParams
@@ -9104,6 +9104,7 @@ def test_unsupported_stream_input_refused_before_preprocessing(change):
 
     core = _stream_core()
     core.mm_receiver_cache = None
+    core.prefix_hash_config = None
     manager = StructuredOutputManager(core.scheduler.vllm_config)
     core.structured_output_manager = manager
     assert _admit_stream(core).accepted
@@ -9116,12 +9117,15 @@ def test_unsupported_stream_input_refused_before_preprocessing(change):
         )
     elif change == "embeds":
         payload.prompt_embeds = torch.zeros(3, 4)
-    else:
+    elif change == "mm_offset":
         payload.mm_features = _stream_mm_chunk(offset=3).mm_features
+    else:
+        payload.mm_features = _stream_mm_chunk(offset=0, length=4).mm_features
     with pytest.raises(VLLMValidationError, match="stream input"):
         core.preprocess_add_request(payload)
-    # A refused update must not select or initialize a grammar backend.
-    assert manager.backend is None and manager.backend_name is None
+    if change == "structured":
+        # A refused update must not select or initialize a grammar backend.
+        assert manager.backend is None and manager.backend_name is None
     assert core.scheduler.stream_admissions.sessions["stream"].status == "never_fed"
 
 
@@ -10208,12 +10212,12 @@ def test_stream_continuation_queued_while_running_keeps_slot_priority():
     assert blocked.status == RequestStatus.WAITING
 
 
-def _stream_mm_chunk(offset):
+def _stream_mm_chunk(offset, length=1):
     chunk = _stream_chunk()
     chunk.mm_features = [
         MultiModalFeatureSpec(
             data=MultiModalKwargsItem.dummy(),
-            mm_position=PlaceholderRange(offset=offset, length=1),
+            mm_position=PlaceholderRange(offset=offset, length=length),
             identifier="image",
             modality="image",
         )
@@ -10221,9 +10225,17 @@ def _stream_mm_chunk(offset):
     return chunk
 
 
+# Placements a three-token replacement prompt cannot hold: one starts past its
+# end, the other starts inside it but runs past the end.
+_MISPLACED_MM = pytest.mark.parametrize(
+    ("offset", "length"), [(5, 1), (0, 4)], ids=["starts_outside", "overruns_end"]
+)
+
+
+@_MISPLACED_MM
 @pytest.mark.parametrize("while_running", [False, True])
 def test_invalid_multimodal_update_is_rejected_without_ending_session(
-    while_running,
+    while_running, offset, length
 ):
     """A multimodal position outside the replacement prompt is a correlated
     rejection; the session, its slot and its deadline are untouched."""
@@ -10238,7 +10250,7 @@ def test_invalid_multimodal_update_is_rejected_without_ending_session(
         step = scheduler.schedule()
     record = dataclasses.replace(admissions.sessions["stream"])
     deadline = admissions.next_deadline()
-    bad = _stream_mm_chunk(offset=5)
+    bad = _stream_mm_chunk(offset, length)
     bad.client_index = 3
     scheduler.add_request(bad)
     client, rejection = scheduler.state_error_outputs[-1]
@@ -10259,9 +10271,31 @@ def test_invalid_multimodal_update_is_rejected_without_ending_session(
     assert scheduler.schedule().num_scheduled_tokens == {"stream": 3}
 
 
+def test_encoder_decoder_stream_input_may_outrun_its_prompt():
+    """An encoder-decoder item is encoder input at position 0, not a span of
+    the decoder prompt, so its length is not bounded by the prompt; only the
+    start position is checked."""
+    core = _stream_core()
+    scheduler = core.scheduler
+    scheduler.is_encoder_decoder = True
+    assert _admit_stream(core).accepted
+    scheduler.add_request(_stream_mm_chunk(offset=0, length=4))
+    assert not scheduler.state_error_outputs
+    session = scheduler.requests["stream"]
+    assert session.status == RequestStatus.WAITING
+    assert session.mm_features[0].mm_position.length == 4
+    assert scheduler.stream_admissions.sessions["stream"].status == "live"
+    bad = _stream_mm_chunk(offset=5)
+    scheduler.add_request(bad)
+    assert scheduler.state_error_outputs[-1][1].stream_output.rejection == (
+        "validation_error"
+    )
+
+
+@_MISPLACED_MM
 @pytest.mark.parametrize("while_running", [False, True])
 def test_invalid_multimodal_continuation_of_ordinary_stream_is_rejected(
-    while_running,
+    while_running, offset, length
 ):
     """A resumable request that was never admitted replaces its prompt the
     same way; a misplaced position is refused before replacement or queueing."""
@@ -10280,7 +10314,7 @@ def test_invalid_multimodal_continuation_of_ordinary_stream_is_rejected(
         prompt_token_ids=[1, 2, 3],
         sampling_params=req.sampling_params,
         pooling_params=None,
-        mm_features=_stream_mm_chunk(offset=5).mm_features,
+        mm_features=_stream_mm_chunk(offset, length).mm_features,
         resumable=True,
     )
     bad.client_index = 3
@@ -10305,7 +10339,10 @@ def test_invalid_multimodal_continuation_of_ordinary_stream_is_rejected(
     assert scheduler.schedule().num_scheduled_tokens == {req.request_id: 3}
 
 
-def test_ordinary_stream_invalid_continuation_rejected_through_engine_core():
+@_MISPLACED_MM
+def test_ordinary_stream_invalid_continuation_rejected_through_engine_core(
+    offset, length
+):
     """Through preprocessing and EngineCore.add_request, a never-admitted
     stream's misplaced continuation is a correlated rejection: no terminal
     output, the parked session stays live, and the next valid input runs."""
@@ -10332,7 +10369,7 @@ def test_ordinary_stream_invalid_continuation_rejected_through_engine_core():
 
     bad = _stream_request("plain")
     bad.prompt_token_ids = [1, 2, 3]
-    bad.mm_features = _stream_mm_chunk(offset=5).mm_features
+    bad.mm_features = _stream_mm_chunk(offset, length).mm_features
     bad.client_index = 3
     send(bad)
     client, rejection = scheduler.state_error_outputs[-1]

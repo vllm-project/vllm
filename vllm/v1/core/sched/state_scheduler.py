@@ -164,11 +164,11 @@ class StateScheduler(Scheduler):
             RequestStatus.FINISHED_STOPPED,
         ):
             raise ValueError("state stream replacement requires a legal park")
-        # add_request refuses misplaced positions before a continuation is
+        # add_request refuses misplaced multimodal items before a continuation is
         # applied or queued, for admitted and ordinary streams alike; the only
         # callers are add_request and the queue it fills, so this cannot fail.
-        assert not StreamAdmissions.misplaced_multimodal_input(update), (
-            "multimodal position is outside replacement prompt"
+        assert not self.stream_admissions.misplaced_multimodal_input(update), (
+            "multimodal item is outside replacement prompt"
         )
         prompt = list(update.prompt_token_ids or ())
         self.encoder_cache_manager.free(session)

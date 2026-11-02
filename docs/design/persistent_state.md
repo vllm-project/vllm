@@ -43,8 +43,8 @@ A model declares its state by constructing a
 - A resumable request parks for its next input only when a turn stops on EOS.
   Any other stop (length, stop token or string) ends the stream. Each new input
   replaces the request's prompt; the state carries the history. Multimodal
-  positions are relative to the input's own prompt, and an input that places
-  one outside it is refused before it is applied or queued.
+  positions are relative to the input's own prompt, and an input with an item
+  outside it is refused before it is applied or queued.
 
 [examples/features/persistent_state/state_slot_lifecycle.py](../../examples/features/persistent_state/state_slot_lifecycle.py)
 walks one stream through admission, a scheduled step, parking, the release
@@ -113,7 +113,8 @@ setting `input_closed=True`, or sending a non-resumable update, closes input.
 Inputs must keep the admission's restrictions and carry token IDs only (no
 prompt embeddings); the engine refuses others before preprocessing. Multimodal
 positions are relative to the input's own prompt, since each input replaces it;
-a position outside that prompt is refused as `validation_error`. Rejected
+an item that starts outside that prompt, or (for a decoder-only model) does
+not end inside it, is refused as `validation_error`. Rejected
 updates are reported on `EngineCoreOutput.stream_output` without ending the
 session, and leave its slot and deadline unchanged. This holds for
 `EngineCore` and `EngineCoreClient` consumers. The output processor that

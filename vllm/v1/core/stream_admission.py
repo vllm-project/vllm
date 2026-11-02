@@ -154,19 +154,27 @@ class StreamAdmissions:
             or StreamAdmissions._unsupported_params(request.sampling_params)
         )
 
-    @staticmethod
     def misplaced_multimodal_input(
-        request: EngineCoreRequest | Request | StreamingUpdate,
+        self, request: EngineCoreRequest | Request | StreamingUpdate
     ) -> bool:
-        """Whether a multimodal position falls outside the input's own prompt.
+        """Whether a multimodal item falls outside the input's own prompt.
 
         Each stream input replaces the prompt, so positions are relative to it.
+        A decoder-only item must fit within the prompt, or the scheduler could
+        never cover it whole. An encoder-decoder item is encoder input whose
+        length is independent of the decoder prompt, so only its start counts.
         """
         num_tokens = len(request.prompt_token_ids or ())
-        return any(
-            not 0 <= feature.mm_position.offset < num_tokens
-            for feature in request.mm_features or ()
-        )
+        for feature in request.mm_features or ():
+            position = feature.mm_position
+            if not 0 <= position.offset < num_tokens:
+                return True
+            if (
+                not self.scheduler.is_encoder_decoder
+                and position.offset + position.length > num_tokens
+            ):
+                return True
+        return False
 
     @staticmethod
     def _unsupported_params(params: SamplingParams | None) -> bool:
