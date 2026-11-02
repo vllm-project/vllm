@@ -82,13 +82,7 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
     """
 
     default_activation_quant_key = kMxfp4Dynamic
-
-    @classmethod
-    def resolve_activation_quant_key(
-        cls, activation_quant_key: "QuantKey | None", explicit: bool
-    ) -> "QuantKey | None":
-        """MXFP4 honors an explicit activation override, `null` (BF16) too."""
-        return activation_quant_key
+    accepts_activation_override = True
 
     def __init__(self, activation_quant_key: "QuantKey | None"):
         super().__init__(activation_quant_key)
@@ -154,13 +148,7 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     mxfp4_backend: Mxfp4MoeBackend
     experts_cls: "type[mk.FusedMoEExperts] | None"
     default_activation_quant_key = kMxfp4Dynamic
-
-    @classmethod
-    def resolve_activation_quant_key(
-        cls, activation_quant_key: "QuantKey | None", explicit: bool
-    ) -> "QuantKey | None":
-        """MXFP4 honors an explicit activation override, `null` (BF16) too."""
-        return activation_quant_key
+    accepts_activation_override = True
 
     def __init__(
         self,

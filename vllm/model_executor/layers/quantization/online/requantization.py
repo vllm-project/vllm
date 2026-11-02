@@ -36,6 +36,8 @@ class OnlineRequantizationMixin:
     """Shared lifecycle for converting serialized weights before quantization."""
 
     default_activation_quant_key: QuantKey | None
+    # Only the MXFP4 online methods honor an activation override for now.
+    accepts_activation_override: bool = False
 
     @classmethod
     def resolve_activation_quant_key(
@@ -44,7 +46,7 @@ class OnlineRequantizationMixin:
         """Final activation key for a requested (or default) key."""
         # TODO: this should be removed and handled by oracles once oracles are
         # refactored.
-        if explicit:
+        if explicit and not cls.accepts_activation_override:
             raise NotImplementedError(
                 f"activation override is not supported for online {cls.__name__}"
             )
@@ -53,14 +55,13 @@ class OnlineRequantizationMixin:
 
     def __init__(self, *args, activation_quant_key: QuantKey | None, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        # A direct caller may only pass a key this class resolves for itself;
-        # only MXFP4 overrides `resolve_activation_quant_key` to accept more.
+        # A direct caller may only pass a key this class resolves for itself.
         default_key = self.resolve_activation_quant_key(
             self.default_activation_quant_key, explicit=False
         )
-        if activation_quant_key != default_key:
-            self.resolve_activation_quant_key(activation_quant_key, explicit=True)
-        self.activation_quant_key = activation_quant_key
+        self.activation_quant_key = self.resolve_activation_quant_key(
+            activation_quant_key, explicit=activation_quant_key != default_key
+        )
         self.requantization_source: QuantizeMethodBase | None = None
         self.requantization_source_parameters: dict[str, torch.nn.Parameter] = {}
 
