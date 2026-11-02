@@ -4799,13 +4799,19 @@ async fn engine_request_errors_map_to_http_status() {
         message: "Invalid structured outputs: Grammar error: bad".to_string(),
         retryable: false,
     };
-    for (error, status, error_type) in [
+    for (error, status, openai_error_type, anthropic_error_type) in [
         (
             paused,
             StatusCode::SERVICE_UNAVAILABLE,
             "ServiceUnavailableError",
+            "overloaded_error",
         ),
-        (invalid, StatusCode::BAD_REQUEST, "BadRequestError"),
+        (
+            invalid,
+            StatusCode::BAD_REQUEST,
+            "BadRequestError",
+            "invalid_request_error",
+        ),
         (
             RequestError {
                 code: "unknown".into(),
@@ -4814,6 +4820,7 @@ async fn engine_request_errors_map_to_http_status() {
             },
             StatusCode::INTERNAL_SERVER_ERROR,
             "InternalServerError",
+            "api_error",
         ),
     ] {
         let cases = [
@@ -4876,19 +4883,14 @@ async fn engine_request_errors_map_to_http_status() {
             engine_task.await.expect("mock engine task");
             let text = String::from_utf8(body.to_vec()).expect("utf8 body");
             if uri == "/v1/messages" {
-                let expected = match error_type {
-                    "ServiceUnavailableError" => "overloaded_error",
-                    "BadRequestError" => "invalid_request_error",
-                    _ => "api_error",
-                };
                 let body: serde_json::Value = serde_json::from_str(&text).unwrap();
                 assert_eq!(
                     body,
-                    json!({"type": "error", "error": {"type": expected, "message": error.message}})
+                    json!({"type": "error", "error": {"type": anthropic_error_type, "message": error.message}})
                 );
             } else {
                 assert!(
-                    text.contains(&format!("\"type\":\"{error_type}\""))
+                    text.contains(&format!("\"type\":\"{openai_error_type}\""))
                         && text.contains(&format!("\"code\":{}", status.as_u16()))
                         && text.contains(&error.message),
                     "{uri} {request}: {text}"
