@@ -709,6 +709,24 @@ class VllmConfig:
         return 1 + self.num_speculative_tokens
 
     @property
+    def pp_microbatch_enabled(self) -> bool:
+        return (
+            self.use_v2_model_runner
+            and self.parallel_config.pipeline_parallel_size > 1
+            and (not current_platform.is_xpu() or envs.VLLM_XPU_PP_MICROBATCH)
+        )
+
+    @property
+    def max_num_scheduled_decodes(self) -> int:
+        """Per-step established-decode limit, excluding prompt work."""
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        if not self.pp_microbatch_enabled:
+            return max_num_seqs
+        max_active = self.scheduler_config.max_num_active_seqs or max_num_seqs
+        pp_size = self.parallel_config.pipeline_parallel_size
+        return (max_active + pp_size - 1) // pp_size
+
+    @property
     def use_cumem_cudagraph_pool(self) -> bool:
         """Whether CUDA graphs go to the cuMem pool that sleep offloads."""
         from vllm.platforms import current_platform
