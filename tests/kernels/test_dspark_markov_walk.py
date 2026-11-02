@@ -232,4 +232,5 @@ def test_rejects_unsupported_heads():
     assert unsupported_reason(w1, w2[:, :128], 7) is not None
     assert unsupported_reason(w1[:2048], w2, 7) is not None
     assert unsupported_reason(w1, w2, 17) is not None
+    assert unsupported_reason(w1, w2.to(torch.float8_e4m3fn), 7) is not None
     assert STATE_NUMEL == 16 + 2 * 16 * 64 * 16

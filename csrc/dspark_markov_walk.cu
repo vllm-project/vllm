@@ -54,10 +54,10 @@
 //   sees exactly the distribution a sampled token was drawn from.
 // * Each step ends with one global argmax per request: every CTA folds its
 //   best (order-preserving fp32 value, inverted row) key into a {key, count}
-//   pair with atomicMax and a release add, then polls the pair. Ties go to
-//   the smallest row, as torch.argmax. The pairs of a call alternate between
-//   two sets by call parity, so nothing needs a memset between CUDA graph
-//   replays.
+//   pair with atomicMax and a release add, polls the count with acquire, then
+//   reads the key. Ties go to the smallest row, as torch.argmax. The pairs of
+//   a call alternate between two sets by call parity, so nothing needs a memset
+//   between CUDA graph replays.
 // * Sampling is exact up to floating-point error: inside each 8-row item the
 //   row is drawn by inverse CDF, across items by Gumbel-max on the item's
 //   log2 mass. The noise is Philox keyed by the request's seed and counted by
@@ -120,11 +120,10 @@ __device__ __forceinline__ u64 ld_relaxed(const u64* p) {
                : "memory");
   return v;
 }
-// {key, count} in one 16-B load
-__device__ __forceinline__ ulonglong2 ld_relaxed_v2(const u64* p) {
-  ulonglong2 v;
-  asm volatile("ld.relaxed.gpu.global.v2.u64 {%0, %1}, [%2];"
-               : "=l"(v.x), "=l"(v.y)
+__device__ __forceinline__ u64 ld_acquire(const u64* p) {
+  u64 v;
+  asm volatile("ld.acquire.gpu.global.u64 %0, [%1];"
+               : "=l"(v)
                : "l"(p)
                : "memory");
   return v;
@@ -683,13 +682,16 @@ __global__ void __launch_bounds__(kThreads, 1) markov_walk_kernel(
       }
       // both requests of a lane polled in the same round trip
       const u64 n = gridDim.x;
-      ulonglong2 v0 = make_ulonglong2(0, lane < nb ? 0 : n);
-      ulonglong2 v1 = make_ulonglong2(0, lane + 32 < nb ? 0 : n);
+      u64 c0 = lane < nb ? 0 : n;
+      u64 c1 = lane + 32 < nb ? 0 : n;
       do {
-        if (v0.y < n) v0 = ld_relaxed_v2(pair(k, lane));
-        if (v1.y < n) v1 = ld_relaxed_v2(pair(k, lane + 32));
-      } while (v0.y < n || v1.y < n);
-      const u64 key[2] = {v0.x, v1.x};
+        if (c0 < n) c0 = ld_acquire(pair(k, lane) + 1);
+        if (c1 < n) c1 = ld_acquire(pair(k, lane + 32) + 1);
+      } while (c0 < n || c1 < n);
+      // the acquires order every CTA's atomicMax before these loads
+      const u64 key[2] = {
+          lane < nb ? ld_relaxed(pair(k, lane)) : 0ull,
+          lane + 32 < nb ? ld_relaxed(pair(k, lane + 32)) : 0ull};
 #pragma unroll
       for (int qd = 0; qd < 2; ++qd) {
         const int bq = lane + 32 * qd;

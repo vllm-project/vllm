@@ -20,6 +20,8 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 MARKOV_RANK = 256
+# FP8 heads keep separate scales, so their stored values are not the weights.
+WEIGHT_DTYPES = (torch.bfloat16, torch.float16, torch.float32)
 MAX_STEPS = 16
 MAX_REQS = 64
 TILE_ROWS = 64
@@ -54,7 +56,7 @@ def unsupported_reason(
         return f"it needs a rank-{MARKOV_RANK} Markov head"
     if w1.shape != w2.shape:
         return "it needs a full-vocabulary draft (no draft-to-target map)"
-    if not w2.dtype.is_floating_point or not w1.dtype.is_floating_point:
+    if w2.dtype not in WEIGHT_DTYPES or w1.dtype not in WEIGHT_DTYPES:
         return "it needs an unquantized Markov projection"
     if w2.shape[0] % 8 != 0:
         return "it needs a vocabulary size divisible by 8"
