@@ -125,7 +125,12 @@ class RealtimeConnection:
                     / 32768.0
                 )
 
-                if len(audio_array) / 1024**2 > self._max_audio_filesize_mb:
+                # A limit of 0 disables the filesize check, per
+                # docs/usage/security.md.
+                if (
+                    self._max_audio_filesize_mb > 0
+                    and len(audio_array) / 1024**2 > self._max_audio_filesize_mb
+                ):
                     raise VLLMValidationError(
                         "Maximum file size exceeded",
                         parameter="audio_filesize_mb",

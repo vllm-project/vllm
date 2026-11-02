@@ -84,6 +84,40 @@ def test_audio_base64_rejects_before_decode(monkeypatch: pytest.MonkeyPatch):
     decode.assert_not_called()
 
 
+def test_audio_filesize_limit_zero_disables_size_checks(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """VLLM_MAX_AUDIO_CLIP_FILESIZE_MB=0 disables the encoded-size checks.
+
+    Per docs/usage/security.md, setting the limit to 0 disables it, so
+    bytes, base64, and file inputs must all reach the decoder.
+    """
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 0)
+
+    assert AudioMediaIO().get_max_bytes() is None
+
+    wav = tmp_path / "clip.wav"
+    wav.write_bytes(b"\x00" * 1024)
+
+    with patch(
+        "vllm.multimodal.media.audio.load_audio", return_value=(None, 0.0)
+    ) as decode:
+        AudioMediaIO().load_bytes(b"x")
+        AudioMediaIO().load_base64("audio/wav", "eA==")
+        AudioMediaIO().load_file(wav)
+
+    assert decode.call_count == 3
+
+
+def test_audio_filesize_limit_positive_still_enforced(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A positive limit still reports through get_max_bytes()."""
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
+
+    assert AudioMediaIO().get_max_bytes() == MiB_bytes
+
+
 def test_audio_load_bytes_rejects_oversized(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 1)
 
@@ -193,5 +227,26 @@ async def test_audio_connector_threads_byte_limit_to_http_reader(
     connector = MediaConnector(  # type: ignore[arg-type]
         connection=_Connection(), download_budget=budget
     )
+    with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
+        await connector.fetch_audio_async("https://example.test/audio")
+
+
+@pytest.mark.asyncio
+async def test_audio_connector_threads_none_limit_when_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A disabled limit reaches the HTTP reader as max_bytes=None.
+
+    vllm.connections treats None as "no audio-specific limit" while the
+    global media download cap still applies.
+    """
+    monkeypatch.setattr(envs, "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB", 0)
+
+    class _Connection:
+        async def async_get_bytes(self, _url: str, **kwargs):
+            assert kwargs["max_bytes"] is None
+            raise VLLMValidationError("Maximum file size exceeded")
+
+    connector = MediaConnector(connection=_Connection())
     with pytest.raises(VLLMValidationError, match="Maximum file size exceeded"):
         await connector.fetch_audio_async("https://example.test/audio")
