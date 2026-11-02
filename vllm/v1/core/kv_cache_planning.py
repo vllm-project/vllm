@@ -1597,6 +1597,11 @@ def get_kv_cache_configs(
             vllm_config.parallel_config.decode_context_parallel_size,
         )
 
+    # Every worker receives the scheduler's new_block_ids_to_zero.
+    needs_kv_cache_zeroing = any(cfg.needs_kv_cache_zeroing for cfg in kv_cache_configs)
+    for cfg in kv_cache_configs:
+        cfg.needs_kv_cache_zeroing = needs_kv_cache_zeroing
+
     return kv_cache_configs
 
 

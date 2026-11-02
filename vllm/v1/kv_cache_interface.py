@@ -1559,6 +1559,17 @@ class KVCacheConfig:
     kv_tp_replicas: int = 1
     """Consecutive TP ranks holding identical KV for every layer (1: none)."""
 
+    needs_kv_cache_zeroing: bool = field(init=False)
+    """Whether newly allocated attention blocks must be zeroed before use.
+
+    Resolved across workers before scheduler projection and worker initialization.
+    """
+
+    def __post_init__(self) -> None:
+        self.needs_kv_cache_zeroing = (
+            self.has_mamba_layers or self.has_mixed_precision_kv_cache
+        )
+
     @cached_property
     def transfer_group_ids(self) -> tuple[int, ...]:
         """IDs of cache groups that participate in external KV transfer."""
@@ -1648,14 +1659,3 @@ class KVCacheConfig:
                 if isinstance(spec, AttentionSpec)
             )
         return len(kv_cache_precisions) > 1
-
-    @property
-    def needs_kv_cache_zeroing(self) -> bool:
-        """Whether newly allocated KV cache blocks must be zeroed before use.
-
-        Required for Mamba layers, whose state is read before it is fully written
-        (#35219), and for mixed-precision caches, where a block reused across
-        groups can be reinterpreted under a different precision and decode stale
-        bytes to NaN/Inf. Uniform-precision caches skip zeroing.
-        """
-        return self.has_mamba_layers or self.has_mixed_precision_kv_cache

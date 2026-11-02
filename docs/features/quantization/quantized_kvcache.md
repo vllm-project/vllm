@@ -56,6 +56,8 @@ vllm serve <model> \
   --kv-cache-dtype-skip-layers 0 1 23
 ```
 
+When skipped layers create a mixed-precision KV cache, vLLM automatically clears newly allocated attention blocks before use. With pipeline parallelism, this behavior is coordinated across all stages, including stages whose local KV cache uses only one precision.
+
 Programmatic usage:
 
 ```python

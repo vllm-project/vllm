@@ -418,3 +418,36 @@ def test_tp_multimodal_generation(
         method="generate",
         is_multimodal=True,
     )
+
+
+@create_new_process_for_each_test()
+def test_pp_mixed_precision_kv_cache():
+    """A mixed first PP stage must not send zeroing work to an unprepared stage."""
+    common_args = [
+        "--dtype",
+        "bfloat16",
+        "--kv-cache-dtype",
+        "fp8",
+        "--kv-cache-dtype-skip-layers",
+        "0",
+        "--load-format",
+        "safetensors",
+        "--max-model-len",
+        "512",
+        "--max-num-seqs",
+        "8",
+        "--kv-cache-memory-bytes",
+        "64M",
+        "--enforce-eager",
+        "--distributed-executor-backend",
+        "mp",
+    ]
+    env = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    compare_two_settings(
+        "Qwen/Qwen3-0.6B",
+        [*common_args, "--pipeline-parallel-size", "2"],
+        common_args,
+        env,
+        env,
+        method="generate_close",
+    )
