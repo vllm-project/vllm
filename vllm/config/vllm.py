@@ -1228,6 +1228,55 @@ class VllmConfig:
                         f"{connector_name}; PD auxiliary output is not supported."
                     )
 
+    def _verify_direct_reload_compat(self) -> None:
+        """Reject configurations that direct weight reload cannot support."""
+        # not `direct_reload_enabled()`: importing it would load the model
+        # loaders into every process that builds a config
+        if envs.VLLM_RELOAD_MODE != "direct":
+            return
+        from vllm.model_executor.layers.quantization.online.base import (
+            OnlineQuantizationConfig,
+        )
+
+        offload = self.offload_config
+        if (
+            offload.offload_backend != "auto"
+            or offload.prefetch.offload_group_size > 0
+            or offload.uva.cpu_offload_gb > 0
+        ):
+            # CPU/UVA offload gives parameters new storage on every post-load
+            # processing; prefetch offload shares one buffer between layers
+            raise ValueError("Direct reload does not support weight offloading.")
+        model_config = self.model_config
+        if model_config is not None and model_config.quantization == "torchao":
+            # its load_weights runs a layerwise reload, and its post-load
+            # processing replaces the weight parameter
+            raise ValueError("Direct reload does not support torchao quantization.")
+        if isinstance(self.quant_config, OnlineQuantizationConfig) or (
+            getattr(self.quant_config, "online_quantization_config", None) is not None
+        ):
+            # `finish` clears the guard that keeps online quantization from
+            # quantizing its already-quantized bytes again
+            raise ValueError("Direct reload does not support online quantization.")
+        if self.lora_config is not None:
+            # LoRA wraps layers after cold start; their wrappers forward
+            # `quant_method`, so a rerun would process each base layer twice
+            raise ValueError("Direct reload does not support LoRA.")
+        spec = self.speculative_config
+        if spec is not None and spec.draft_lm_head_quantization is not None:
+            # after `begin` the draft's quantized lm_head is a view of the target
+            # lm_head's storage: post-load processing would write it there
+            raise ValueError(
+                "Direct reload does not support draft_lm_head_quantization."
+            )
+        transfer = self.weight_transfer_config
+        if transfer is not None and transfer.backend == "sharded_rdt":
+            # its replay plan is baked by a layerwise (meta) dry run
+            raise ValueError(
+                "Direct reload does not support the sharded_rdt weight-transfer "
+                "backend. Use VLLM_RELOAD_MODE=layerwise or another backend."
+            )
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -1524,6 +1573,11 @@ class VllmConfig:
         self.parallel_config.set_dcp_defaults()
 
         if self.model_config is not None:
+            # Normalize EPLB num_redundant_experts before verification.
+            self.parallel_config.compute_eplb_num_redundant_experts(
+                self.model_config.get_num_experts()
+            )
+
             self.model_config.verify_with_parallel_config(self.parallel_config)
             self.model_config.verify_dual_chunk_attention_config(self.load_config)
 
@@ -1584,6 +1638,7 @@ class VllmConfig:
             self.quant_config = VllmConfig._get_quantization_config(
                 self.model_config, self.load_config
             )
+        self._verify_direct_reload_compat()
 
         # "dummy" reads no weights at all, and the sharded formats read a vLLM
         # state dict, which stores tied word embeddings under the lm_head only.
@@ -2083,6 +2138,7 @@ class VllmConfig:
             self._validate_v2_model_runner()
         else:
             self._validate_v1_model_runner()
+        self._resolve_extensible_kv_cache()
 
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
@@ -3117,9 +3173,76 @@ class VllmConfig:
 
         return unsupported
 
+    def _resolve_extensible_kv_cache(self) -> None:
+        """Settle `enable_extensible_kv_cache`: on where supported if unset, an
+        error if explicitly requested where unsupported.
+
+        Runs once per model: configs derived for sub-models (`with_hf_config`)
+        may pick a different runner, and must not revisit the decision.
+        """
+        from vllm.platforms import current_platform
+
+        cache_config = self.cache_config
+        if cache_config._extensible_kv_cache_resolved:
+            return
+        cache_config._extensible_kv_cache_resolved = True
+        requested = cache_config.enable_extensible_kv_cache
+        unsupported = None
+        if not current_platform.is_cuda_alike():
+            unsupported = "it is only supported on CUDA and ROCm"
+        elif cache_config.kv_cache_memory_bytes is not None:
+            unsupported = (
+                "it sizes the KV cache from measured memory, which "
+                "kv_cache_memory_bytes overrides"
+            )
+        elif cache_config.num_gpu_blocks_override is not None:
+            unsupported = (
+                "it sizes the KV cache from measured memory, which "
+                "num_gpu_blocks_override overrides"
+            )
+        elif not self.use_v2_model_runner:
+            unsupported = "it requires the V2 model runner"
+        elif self.attention_config.hisparse_config is not None:
+            unsupported = "HiSparse allocates its KV cache itself"
+        elif self.parallel_config.enable_elastic_ep:
+            unsupported = (
+                "elastic EP scale-up skips warmup and reuses the profiled KV "
+                "cache size, so no measurement would size the cache"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("LMCacheMPConnector")
+        ):
+            unsupported = (
+                "LMCacheMPConnector shares the KV cache through legacy CUDA IPC, "
+                "which cannot export driver-mapped memory"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.uses_custom_mem_pool()
+        ):
+            unsupported = (
+                "custom_mem_pool allocates the KV cache from a connector's "
+                "memory pool, which a driver-mapped cache cannot use"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and current_platform.is_rocm()
+            and self.kv_transfer_config.registers_kv_cache_memory()
+        ):
+            # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
+            # hsa_amd_portable_export_dmabuf accepts VMM ranges.
+            unsupported = (
+                "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
+                "which the NIXL, Mooncake and MoRIIO connectors require"
+            )
+        if requested is None:
+            cache_config.enable_extensible_kv_cache = unsupported is None
+        elif requested and unsupported is not None:
+            raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
+
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
-
         if self.attention_config.hisparse_config is not None:
             unsupported.append("HiSparse")
 
