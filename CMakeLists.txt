@@ -135,6 +135,23 @@ else()
 endif()
 
 #
+# Linux shared-memory queue control (CPU C11, no Torch/CUDA link dependency).
+# Keep this above the device-specific branches for CPU-only builds too.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|aarch64|arm64)$")
+  enable_language(C)
+  define_extension_target(
+    _asa_shmwait
+    DESTINATION vllm
+    LANGUAGE C
+    SOURCES csrc/asa_shmwait.c
+    NO_TORCH
+    USE_SABI 3.11
+    WITH_SOABI)
+  set_target_properties(_asa_shmwait PROPERTIES
+    C_STANDARD 11 C_STANDARD_REQUIRED ON C_VISIBILITY_PRESET hidden)
+endif()
+
 # spinloop extension (pure CXX; must stay above the non-CUDA device branch so
 # CPU builds define the target before the early return)
 # This extension requires SABI 3.11 since it relies on Py_buffer support.

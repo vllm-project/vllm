@@ -18,6 +18,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm.distributed.device_communicators import shm_broadcast, shm_tensor_arena
 from vllm.distributed.device_communicators.shm_broadcast import (
     MessageQueue,
@@ -33,6 +34,13 @@ from vllm.distributed.device_communicators.shm_tensor_arena import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
+
+
+@pytest.fixture
+def stock_wait_backend(monkeypatch):
+    """Keep tests of stock notification internals on the explicit opt-out."""
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ASA_SHM_WAIT", "stock")
 
 
 def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
@@ -184,6 +192,16 @@ def test_shm_broadcast():
     distributed_run(worker_fn, 4)
 
 
+@pytest.mark.parametrize("start_method", ["fork", "spawn"])
+def test_futex_shm_broadcast(monkeypatch, start_method):
+    """Exercise the same real process-group payload test with futex controls."""
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ASA_SHM_WAIT", "futex")
+    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "128")
+    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "0")
+    distributed_run(worker_fn, 4, mp_context=mp.get_context(start_method))
+
+
 @worker_fn_wrapper
 def worker_fn_test_shutdown_busy():
     rank = dist.get_rank()
@@ -220,6 +238,7 @@ def worker_fn_test_shutdown_busy():
     dist.barrier()
 
 
+@pytest.mark.usefixtures("stock_wait_backend")
 def test_message_queue_shutdown_busy(caplog_vllm):
     distributed_run(worker_fn_test_shutdown_busy, 4)
     print(caplog_vllm.text)
@@ -261,6 +280,7 @@ def worker_fn_test_shutdown_idle():
     dist.barrier()
 
 
+@pytest.mark.usefixtures("stock_wait_backend")
 def test_message_queue_shutdown_idle():
     distributed_run(worker_fn_test_shutdown_idle, 4)
 
@@ -317,6 +337,7 @@ def worker_fn_test_idle_to_busy():
     print(f"torch distributed passed the test! Rank {rank}")
 
 
+@pytest.mark.usefixtures("stock_wait_backend")
 def test_message_queue_idle_wake():
     distributed_run(worker_fn_test_idle_to_busy, 4)
 
@@ -375,6 +396,7 @@ def worker_fn_test_busy_to_idle():
     print(f"torch distributed passed the test! Rank {rank}")
 
 
+@pytest.mark.usefixtures("stock_wait_backend")
 def test_message_queue_busy_to_idle():
     distributed_run(worker_fn_test_busy_to_idle, 4)
 
@@ -589,6 +611,7 @@ def test_reader_timeout_caps_indefinite_waits(should_warn):
         assert timeout.timeout_ms() == 7
 
 
+@pytest.mark.usefixtures("stock_wait_backend")
 def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
     writer = MessageQueue(
         n_reader=1,
@@ -668,6 +691,7 @@ def test_reader_rechecks_shm_after_idle_wait_timeout_without_notify():
             socket.close(linger=0)
 
 
+@pytest.mark.usefixtures("stock_wait_backend")
 def test_busy_reader_consumes_write_notifications():
     """A reader that never goes idle must still service its notify socket,
     otherwise libzmq queues a command per notification and memory grows with
@@ -801,6 +825,281 @@ def test_readable_does_not_wait_on_remote_socket():
     reader.remote_socket.poll.return_value = 0
     assert MessageQueue.readable(reader) is False
     reader.remote_socket.poll.assert_called_once_with(timeout=0)
+
+
+@pytest.fixture
+def futex_queue_pair(monkeypatch, request):
+    readers, spin_ns, stride = request.param
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ASA_SHM_WAIT", "futex")
+    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", str(spin_ns))
+    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", str(stride))
+    writer = MessageQueue(
+        n_reader=readers,
+        n_local_reader=readers,
+        max_chunk_bytes=1024 * 1024,
+        max_chunks=1,
+    )
+    assert writer.export_handle().event_handle[3:5] == (stride, spin_ns)
+    local = [
+        MessageQueue.create_from_handle(writer.export_handle(), rank=rank)
+        for rank in range(readers)
+    ]
+    try:
+        writer.wait_until_ready()
+        for reader in local:
+            reader.wait_until_ready()
+        yield writer, local
+    finally:
+        for reader in local:
+            reader.shutdown()
+        writer.shutdown()
+
+
+@pytest.mark.parametrize(
+    "futex_queue_pair", [(1, 0, 128), (1, 1_000_000, 16)], indirect=True
+)
+def test_futex_shutdown_interrupts_reader(futex_queue_pair):
+    """Shutdown cancels an acquire at either supported spin-policy boundary."""
+    _, (reader,) = futex_queue_pair
+    started = threading.Event()
+    result = {}
+
+    def consume():
+        started.set()
+        try:
+            result["value"] = reader.dequeue(timeout=5, indefinite=True)
+        except Exception as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=consume, daemon=True)
+    thread.start()
+    try:
+        assert started.wait(timeout=5)
+        reader.shutdown()
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        assert isinstance(result.get("error"), RuntimeError)
+        assert "cancelled" in str(result["error"])
+    finally:
+        reader.shutdown()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "futex_queue_pair",
+    [(1, 0, 128), (1, 1_000_000, 16), (2, 0, 16), (2, 1_000_000, 128)],
+    indirect=True,
+)
+def test_futex_wakes_all_readers_across_ring_reuse(futex_queue_pair):
+    """Every reader receives each publication after a one-slot ring wraps."""
+    writer, readers = futex_queue_pair
+    started = [threading.Event() for _ in readers]
+    values: list[list[dict[str, int]]] = [[] for _ in readers]
+    errors = []
+
+    def consume(rank):
+        started[rank].set()
+        try:
+            for _ in range(3):
+                values[rank].append(readers[rank].dequeue(timeout=5, indefinite=True))
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [
+        threading.Thread(target=consume, args=(rank,), daemon=True)
+        for rank in range(len(readers))
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        assert all(event.wait(timeout=5) for event in started)
+        for value in range(3):
+            writer.enqueue({"value": value}, timeout=5)
+        for thread in threads:
+            thread.join(timeout=5)
+        assert not any(thread.is_alive() for thread in threads)
+        assert not errors
+        assert values == [[{"value": i} for i in range(3)] for _ in readers]
+    finally:
+        for reader in readers:
+            reader.shutdown()
+        for thread in threads:
+            thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    "futex_queue_pair", [(1, 0, 128), (1, 1_000_000, 16)], indirect=True
+)
+def test_futex_consumer_exception_allows_next_publication(futex_queue_pair):
+    """A failed consumer releases capacity without inspecting legacy flags."""
+    writer, (reader,) = futex_queue_pair
+    writer.enqueue({"value": "first"}, timeout=5)
+    with (
+        pytest.raises(RuntimeError, match="consumer failed"),
+        reader.acquire_read(timeout=5),
+    ):
+        raise RuntimeError("consumer failed")
+    writer.enqueue({"value": "second"}, timeout=5)
+    assert reader.dequeue(timeout=5) == {"value": "second"}
+
+
+@pytest.mark.parametrize(
+    "futex_queue_pair", [(1, 0, 128), (1, 1_000_000, 16)], indirect=True
+)
+def test_futex_producer_exception_does_not_publish(futex_queue_pair):
+    """An aborted write leaves no message and does not consume ring capacity."""
+    writer, (reader,) = futex_queue_pair
+    with (
+        pytest.raises(RuntimeError, match="producer failed"),
+        writer.acquire_write(timeout=0) as buf,
+    ):
+        buf[0] = 123
+        raise RuntimeError("producer failed")
+    with pytest.raises(TimeoutError):
+        reader.dequeue(timeout=0, indefinite=True)
+    writer.enqueue({"value": "next"}, timeout=5)
+    assert reader.dequeue(timeout=5) == {"value": "next"}
+
+
+@pytest.mark.parametrize(
+    "futex_queue_pair", [(1, 0, 128), (1, 1_000_000, 16)], indirect=True
+)
+def test_futex_timeout_preserves_next_publication(futex_queue_pair):
+    """A finite empty-queue timeout must not poison the next acquire."""
+    writer, (reader,) = futex_queue_pair
+    with pytest.raises(TimeoutError):
+        reader.dequeue(timeout=0.01, indefinite=True)
+    writer.enqueue({"value": "after timeout"}, timeout=5)
+    assert reader.dequeue(timeout=5) == {"value": "after timeout"}
+
+
+@pytest.mark.parametrize(
+    "selection", [None, "futex", "stock"], ids=["default", "explicit", "opt-out"]
+)
+def test_writer_handle_preserves_policy_for_attaching_reader(monkeypatch, selection):
+    """An attaching reader follows its writer, not its own environment."""
+    envs.disable_envs_cache()
+    if selection is None:
+        monkeypatch.delenv("VLLM_ASA_SHM_WAIT", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_ASA_SHM_WAIT", selection)
+    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "16")
+    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "1000000")
+    writer = MessageQueue(1, 1, max_chunk_bytes=1024, max_chunks=1)
+    handle = writer.export_handle()
+    if selection == "stock":
+        assert handle.event_handle is None
+    else:
+        assert handle.event_handle[3:] == (16, 1_000_000, 1)
+    monkeypatch.setenv(
+        "VLLM_ASA_SHM_WAIT", "futex" if selection == "stock" else "stock"
+    )
+    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "128")
+    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "0")
+    reader = MessageQueue.create_from_handle(handle, rank=0)
+    assert (reader._event_queue is not None) is (selection != "stock")
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        for value in range(3):
+            writer.enqueue(value, timeout=5)
+            assert reader.dequeue(timeout=5) == value
+    finally:
+        reader.shutdown()
+        writer.shutdown()
+
+
+@pytest.mark.parametrize(
+    "nbytes, arena, readonly",
+    [
+        pytest.param(8192, False, False, id="inline-tensor"),
+        pytest.param(1024 * 1024, False, False, id="shm-oob-tensor"),
+        pytest.param(2 * 1024 * 1024, False, False, id="overflow-tensor"),
+        pytest.param(8 * 1024 * 1024, True, False, id="tensor-arena"),
+        pytest.param(1024 * 1024, False, True, id="readonly-numpy"),
+    ],
+)
+def test_futex_payload_survives_ring_reuse(monkeypatch, nbytes, arena, readonly):
+    """Real payloads retain their values without intercepting serialization."""
+    envs.disable_envs_cache()
+    monkeypatch.setenv("VLLM_ASA_SHM_WAIT", "futex")
+    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "128")
+    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "0")
+    writer = MessageQueue(
+        1,
+        1,
+        max_chunk_bytes=2 * 1024 * 1024,
+        max_chunks=1,
+        enable_shm_tensor_arena=arena,
+    )
+    handle = writer.export_handle()
+    assert (handle.tensor_arena_handle is not None) is arena
+    reader = MessageQueue.create_from_handle(handle, rank=0)
+    array = np.full(nbytes // 2, 17, dtype=np.uint16)
+    array.flags.writeable = not readonly
+    payload = array if readonly else torch.from_numpy(array)
+    try:
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+        writer.enqueue(payload, timeout=5)
+        received = reader.dequeue(timeout=5)
+        assert type(received) is type(payload)
+        assert received.dtype == payload.dtype
+        if readonly:
+            assert not received.flags.writeable
+        np.testing.assert_array_equal(received, array)
+        for value in range(4):
+            writer.enqueue(torch.full((4096,), value), timeout=5)
+            replacement = reader.dequeue(timeout=5)
+            assert torch.equal(replacement, torch.full((4096,), value))
+            np.testing.assert_array_equal(received, array)
+        if not readonly:
+            received[0] = 42
+            assert array[0] == 17
+    finally:
+        reader.shutdown()
+        writer.shutdown()
+
+
+@pytest.mark.parametrize("n_local_reader", [0, 1], ids=["remote-only", "mixed"])
+@pytest.mark.parametrize("selection", [None, "futex"], ids=["default", "explicit"])
+def test_futex_preserves_remote_payload_transport(
+    monkeypatch, n_local_reader, selection
+):
+    """Futex controls local slots only; remote readers still receive bytes."""
+    envs.disable_envs_cache()
+    if selection is None:
+        monkeypatch.delenv("VLLM_ASA_SHM_WAIT", raising=False)
+    else:
+        monkeypatch.setenv("VLLM_ASA_SHM_WAIT", selection)
+    monkeypatch.setenv("VLLM_ASA_SHM_READER_STRIDE", "128")
+    monkeypatch.setenv("VLLM_ASA_SHM_SPIN_NS", "0")
+    n_reader = n_local_reader + 1
+    writer = MessageQueue(
+        n_reader,
+        n_local_reader,
+        max_chunk_bytes=1024,
+        max_chunks=1,
+        connect_ip="127.0.0.1",
+    )
+    handle = writer.export_handle()
+    assert (handle.event_handle is not None) is bool(n_local_reader)
+    readers = [
+        MessageQueue.create_from_handle(handle, rank=rank) for rank in range(n_reader)
+    ]
+    try:
+        writer.wait_until_ready()
+        for reader in readers:
+            reader.wait_until_ready()
+        for payload in (b"small", bytes(range(256)) * 16):
+            writer.enqueue(payload, timeout=5)
+            for reader in readers:
+                assert reader.dequeue(timeout=5) == payload
+    finally:
+        for reader in readers:
+            reader.shutdown()
+        writer.shutdown()
 
 
 def test_reader_in_reference_cycle_is_collected_without_blocking():

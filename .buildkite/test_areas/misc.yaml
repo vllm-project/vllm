@@ -833,6 +833,9 @@ steps:
   - vllm/utils/
   - vllm/v1/
   - vllm/version.py
+  - .buildkite/test_areas/misc.yaml
+  - csrc/asa_shmwait.c
+  - CMakeLists.txt
   - cmake/utils.cmake
   - cmake/hipify.py
   - tests/test_uvicorn_logging.py
@@ -862,6 +865,10 @@ steps:
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
   - tests/standalone_tests/test_precompiled_wheel.py
+  - tests/standalone_tests/test_shared_memory.py
+  - vllm/distributed/device_communicators/shm_utils.py
+  - vllm/distributed/device_communicators/asa_event_queue.py
+  - vllm/distributed/device_communicators/shm_broadcast.py
   - setup.py
   - tests/reasoning
   - tools/pre_commit/check_test_tethering.py
@@ -887,6 +894,10 @@ steps:
   device: cpu-small
   commands:
   - pytest -v -s -m 'cpu_test' multimodal
+  - >-
+    pytest -v -s
+    standalone_tests/test_precompiled_wheel.py
+    standalone_tests/test_shared_memory.py
   - pytest -v -s config
   - pytest -v -s tools/test_check_test_tethering.py
   - pytest -v -s tools/test_check_agent_files.py
