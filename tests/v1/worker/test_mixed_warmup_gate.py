@@ -39,12 +39,18 @@ def test_mixed_warmup_disables_watermarking():
         max_num_reqs=2,
         kv_cache_config=SimpleNamespace(
             kv_cache_groups=[
-                SimpleNamespace(kv_cache_spec=SimpleNamespace(block_size=16))
+                SimpleNamespace(
+                    kv_cache_spec=SimpleNamespace(block_size=16, dcp_sharded=False)
+                )
             ],
             num_blocks=128,
         ),
-        vllm_config=SimpleNamespace(num_lookahead_tokens=0),
+        vllm_config=SimpleNamespace(
+            num_lookahead_tokens=0,
+            parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+        ),
         max_model_len=128,
+        model_config=SimpleNamespace(get_vocab_size=lambda: 64),
         num_speculative_steps=0,
         model_state=SimpleNamespace(max_encoder_len=0),
         kv_connector=SimpleNamespace(set_disabled=lambda disabled: None),
