@@ -5,9 +5,10 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
+
+import regex as re
 
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,

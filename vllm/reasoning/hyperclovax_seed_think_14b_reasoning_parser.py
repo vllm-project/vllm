@@ -5,9 +5,10 @@
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+
+import regex as re
 
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
@@ -274,7 +275,7 @@ class HyperCLOVAXSeedThink14BReasoningParser(ReasoningParser):
                 )
             )
 
-        payload = {"tool_calls": tool_calls}
+        payload: dict[str, Any] = {"tool_calls": tool_calls}
         if reasoning:
             payload["reasoning"] = reasoning
         return DeltaMessage(**payload)
@@ -470,7 +471,7 @@ class HyperCLOVAXSeedThink14BReasoningParser(ReasoningParser):
             self.has_emitted_reasoning_text = True
         return self._delta(reasoning=delta_text)
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         if self.is_delaying_assistant_handoff:
             return False
 
@@ -492,7 +493,8 @@ class HyperCLOVAXSeedThink14BReasoningParser(ReasoningParser):
             self._is_streaming_skip_reasoning()
             and prompt_end_len > 0
             and len(input_ids) >= prompt_end_len
-            and input_ids[-prompt_end_len:] == self.non_reasoning_prompt_end_tokens
+            and list(input_ids[-prompt_end_len:])
+            == self.non_reasoning_prompt_end_tokens
         ):
             return True
 
@@ -502,7 +504,7 @@ class HyperCLOVAXSeedThink14BReasoningParser(ReasoningParser):
             if (
                 think_end_len > 0
                 and len(input_ids) >= think_end_len
-                and input_ids[-think_end_len:] == think_end_tokens
+                and list(input_ids[-think_end_len:]) == think_end_tokens
             ):
                 return True
 
