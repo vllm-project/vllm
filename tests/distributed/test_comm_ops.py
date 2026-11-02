@@ -399,12 +399,14 @@ def test_cuda_communicator_resume_retries_failed_restore(
 @pytest.mark.parametrize(
     ("backend", "capability", "world_size", "nodes", "expected"),
     [
-        ("mnnvl", 103, 4, 1, 80 * flashinfer_all_reduce.MiB - 1),
-        ("mnnvl", 103, 8, 2, 64 * flashinfer_all_reduce.MiB - 1),
-        ("mnnvl", 103, 16, 4, 8 * flashinfer_all_reduce.MiB - 1),
+        ("mnnvl", 100, 8, 1, 128 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 100, 8, 2, 128 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 103, 4, 1, 80 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 103, 8, 2, 128 * flashinfer_all_reduce.MiB),
+        ("mnnvl", 103, 16, 4, 8 * flashinfer_all_reduce.MiB),
         ("mnnvl", 103, 2, 1, None),
         ("mnnvl", 103, 12, 3, None),
-        ("mnnvl", 103, 8, 1, 64 * flashinfer_all_reduce.MiB - 1),
+        ("mnnvl", 103, 8, 1, 128 * flashinfer_all_reduce.MiB),
         ("trtllm", 103, 8, 2, None),
         ("mnnvl", 90, 8, 2, None),
     ],
@@ -432,9 +434,12 @@ def test_flashinfer_standalone_size_tuning(
     )
 
 
-@pytest.mark.parametrize(("enabled", "expected"), [(True, 4681), (False, 128)])
+@pytest.mark.parametrize(
+    ("enabled", "hidden_dim", "expected"),
+    [(True, 7168, 9362), (True, 4096, 16384), (False, 4096, 128)],
+)
 def test_flashinfer_standalone_workspace_size(
-    monkeypatch: pytest.MonkeyPatch, enabled: bool, expected: int
+    monkeypatch: pytest.MonkeyPatch, enabled: bool, hidden_dim: int, expected: int
 ) -> None:
     create_workspace = Mock(return_value=Mock(backend="mnnvl"))
     monkeypatch.setattr(
@@ -450,11 +455,13 @@ def test_flashinfer_standalone_workspace_size(
     monkeypatch.setattr(
         flashinfer_all_reduce,
         "_get_tuned_standalone_max_size",
-        Mock(return_value=64 * flashinfer_all_reduce.MiB - 1),
+        Mock(return_value=128 * flashinfer_all_reduce.MiB),
     )
     monkeypatch.setattr(flashinfer_all_reduce, "_create_workspace", create_workspace)
 
-    flashinfer_all_reduce.get_fi_ar_workspace(8, 0, 128, 7168, torch.bfloat16, Mock())
+    flashinfer_all_reduce.get_fi_ar_workspace(
+        8, 0, 128, hidden_dim, torch.bfloat16, Mock()
+    )
 
     assert create_workspace.call_args.args[3] == expected
 
@@ -462,8 +469,8 @@ def test_flashinfer_standalone_workspace_size(
 @pytest.mark.parametrize(
     ("node_count", "is_blackwell", "expected"),
     [
-        (1, False, ("trtllm", False)),
-        (1, True, ("trtllm", False)),
+        (1, False, ("mnnvl", True)),
+        (1, True, ("mnnvl", True)),
         (2, False, (None, False)),
         (2, True, ("mnnvl", False)),
     ],

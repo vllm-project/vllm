@@ -51,6 +51,7 @@ def _run(block_table, cu_num_tokens, kernel_block_size, out_len, device):
         block_table.stride(0),
         block_table.stride(1),
         cu_num_tokens,
+        cu_num_tokens[1:] - cu_num_tokens[:-1],
         KERNEL_BLOCK_SIZE=kernel_block_size,
         BLOCK_SIZE=1024,
     )
@@ -109,6 +110,7 @@ def test_ragged_batch_leaves_other_rows_untouched():
         bt.stride(0),
         bt.stride(1),
         cu,
+        cu[1:] - cu[:-1],
         KERNEL_BLOCK_SIZE=kbs,
         BLOCK_SIZE=1024,
     )
@@ -153,6 +155,7 @@ def test_over_provisioned_chunks_do_not_change_result():
             bt.stride(0),
             bt.stride(1),
             cu,
+            cu[1:] - cu[:-1],
             KERNEL_BLOCK_SIZE=kbs,
             BLOCK_SIZE=1024,
         )

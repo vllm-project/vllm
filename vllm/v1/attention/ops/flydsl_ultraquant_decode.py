@@ -15,6 +15,7 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.triton_utils import triton
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
 
 logger = init_logger(__name__)
 
@@ -22,15 +23,12 @@ _FLYDSL_AVAILABLE: bool | None = None
 _ULTRAQUANT_MOD: Any = None
 _FLYC: Any = None
 _FX: Any = None
-_TYPING_T: Any = None
-_CC: Any = None
-_IR: Any = None
 
 
 def is_ultraquant_flydsl_available() -> bool:
     """Return whether the gfx950 UltraQuant FlyDSL kernel can be loaded."""
     global _FLYDSL_AVAILABLE, _ULTRAQUANT_MOD
-    global _FLYC, _FX, _TYPING_T, _CC, _IR
+    global _FLYC, _FX
     if _FLYDSL_AVAILABLE is not None:
         return _FLYDSL_AVAILABLE
     try:
@@ -42,9 +40,6 @@ def is_ultraquant_flydsl_available() -> bool:
 
         import flydsl.compiler as flyc
         import flydsl.expr as fx
-        from flydsl._mlir import ir
-        from flydsl.compiler.kernel_function import CompilationContext
-        from flydsl.expr.typing import T
 
         from vllm.v1.attention.ops.flydsl_kernels import (
             ultraquant_decode_hd256 as ultraquant_mod,
@@ -52,9 +47,6 @@ def is_ultraquant_flydsl_available() -> bool:
 
         _FLYC = flyc
         _FX = fx
-        _TYPING_T = T
-        _CC = CompilationContext
-        _IR = ir
         _ULTRAQUANT_MOD = ultraquant_mod
         _FLYDSL_AVAILABLE = True
         logger.info_once("FlyDSL UltraQuant D=256 decode is available")
@@ -368,12 +360,8 @@ def _get_kernel(
         stride_q_seq=stride_q_seq,
         stride_q_head=stride_q_head,
     )
-    allocator = kmod.allocator
     flyc = _FLYC
     fx = _FX
-    T = _TYPING_T
-    CompilationContext = _CC
-    ir_mod = _IR
 
     @flyc.jit
     def _launch(
@@ -390,17 +378,8 @@ def _get_kernel(
         gz: fx.Int32,  # type: ignore[name-defined]
         stream: fx.Stream,  # type: ignore[name-defined]
     ):
-        allocator.finalized = False
-        ctx = CompilationContext.get_current()
-        with ir_mod.InsertionPoint(ctx.gpu_module_body):
-            allocator.finalize()
-        from flydsl.expr import arith
-
-        grid_x = arith.index_cast(T.index, gx.ir_value())
-        grid_y = arith.index_cast(T.index, gy.ir_value())
-        grid_z = arith.index_cast(T.index, gz.ir_value())
         kfn(out, es, ml, q, kvc, cents, bt, sl).launch(
-            grid=(grid_x, grid_y, grid_z),
+            grid=(gx, gy, gz),
             block=(kmod.BLOCK_THREADS, 1, 1),
             stream=stream,
         )
@@ -661,10 +640,6 @@ def flydsl_ultraquant_decode_attention(
     # partition overhead. Measured end-to-end (graphs on, TP=8, uniform 75k,
     # median ITL vs kv8): cap512 vs cap256 -> C4 +9.0%->+4.9%, C8 +6.6%->+2.5%
     # (better), C16 +2.8%->+4.3% (worse). So use 512 at low batch, 256 at high.
-    # This is only SAFE because the build-local-allocator fix in
-    # ultraquant_decode_hd256.py lets the two num_partitions variants (256 & 512)
-    # coexist across CUDA-graph batch buckets without the @flyc.jit
-    # "global 'allocator' changed since first compile" drift crash.
     MAX_PARTITIONS = 512 if B <= 8 else 256
     required_num_partitions = (
         sizing_max_seq_len + kv_compute_block - 1
@@ -799,7 +774,8 @@ def flydsl_ultraquant_decode_attention(
             num_partitions * tile_groups_per_partition * kv_compute_block,
             worst_case_max_seq_len,
         )
-    launch(
+    _run_compiled(
+        launch,
         segm_out,
         segm_sum,
         segm_max,
