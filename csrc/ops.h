@@ -757,13 +757,15 @@ void hisparse_resolve_residency(
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block);
+    int64_t resident_block_size, int64_t resident_null_block,
+    std::optional<torch::stable::Tensor> const& num_valid_rows);
 
 void hisparse_invalidate_written_slots(
-    torch::stable::Tensor& device_global_indices,
+    torch::stable::Tensor const& device_global_indices_ptrs,
     torch::stable::Tensor const& request_state_indices,
     torch::stable::Tensor const& req_id_per_token,
-    torch::stable::Tensor const& written_slots);
+    torch::stable::Tensor const& written_slots, int64_t num_state_rows,
+    int64_t region_stride);
 
 void hisparse_gather_plan(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
@@ -882,3 +884,12 @@ void ngram_compute_n_gram_ids(
     torch::stable::Tensor& exclusive_req_len_sums,
     torch::stable::Tensor& ne_token_table, torch::stable::Tensor& row_indices,
     torch::stable::Tensor& column_starts, torch::stable::Tensor& n_gram_ids);
+
+void fused_mqa_topk_prefill(
+    torch::stable::Tensor q, torch::stable::Tensor k,
+    torch::stable::Tensor scales, torch::stable::Tensor weights,
+    torch::stable::Tensor starts, torch::stable::Tensor ends,
+    torch::stable::Tensor out, torch::stable::Tensor counter,
+    torch::stable::Tensor values, torch::stable::Tensor indices,
+    torch::stable::Tensor retained, torch::stable::Tensor retained_indices,
+    torch::stable::Tensor counts, torch::stable::Tensor defer);

@@ -229,8 +229,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     not driven by the engine, so this tier sets ``tolerates_off_thread_polling``
     to be serviced from that thread too; without it a peer's lookup or fetch
     waits for a step boundary, which on a saturated rank can be seconds.
-    ``has_pending_work()`` keeps the engine ticking so the control transport
-    and existing sessions are polled even when no requests are scheduled.
+
+    ``has_pending_work()`` reports peer-originated work, not idle polling,
+    so a peer-only engine can pause and shut down. The tiering manager keeps
+    the engine ticking when the tier-poll thread is off or another secondary
+    tier exists.
     """
 
     cache_hit_source: ClassVar[CacheHitSource] = CacheHitSource.P2P
@@ -659,11 +662,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
 
     @override
     def has_pending_work(self) -> bool:
-        # The engine tick is the only driver of _control.poll() and
-        # session.poll(); without it we miss new peer connects and
-        # inbound fetch messages on existing sessions. Keep the engine
-        # ticking for the lifetime of this manager.
-        return True
+        # Idle polling is excluded, or the engine could never go idle; the
+        # tiering manager keeps it ticking when the tier-poll thread is off.
+        return bool(
+            self._finished_jobs
+            or self._failed_serve_ctxs
+            or self._unbound_stores
+            or any(s.has_pending_work for s in self._sessions.values())
+        )
 
     @override
     def drain_jobs(self) -> None:
