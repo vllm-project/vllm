@@ -1627,7 +1627,7 @@ class NixlBaseConnectorWorker:
         # A shared packed row may transfer whole only if every page in it is
         # replicated across TP ranks: MLA without SSM state. Head-sharded
         # attention or SSM state (e.g. Qwen3.8-Flash-Next) must stay split.
-        packed_storage = (
+        replicated_shared_storage = (
             _share_storage_and_block_stride(list(xfer_buffers.values()))
             and self.use_mla
             and not self._has_mamba
@@ -1758,7 +1758,7 @@ class NixlBaseConnectorWorker:
                 packed_mla = (
                     self._has_packed_cache
                     and not self._has_mamba
-                    and packed_storage
+                    and replicated_shared_storage
                     and storage_is_block_major
                     and is_mla_region
                 )
@@ -1780,10 +1780,13 @@ class NixlBaseConnectorWorker:
                     packed_member_layouts[layer_name] = (offset, physical_page_size)
                 elif storage_is_block_major and (
                     not page_contiguous
-                    and ((packed_storage and is_mla_region) or not self._is_csa_linear)
+                    and (
+                        (replicated_shared_storage and is_mla_region)
+                        or not self._is_csa_linear
+                    )
                 ):
-                    # TODO(Lucas): handle TP slicing for packed_storage; for now
-                    # restrict to MLA (DSv4) where kv is replicated.
+                    # TODO(Lucas): handle TP slicing for head-sharded shared
+                    # storage; for now restrict to MLA (DSv4) where kv is replicated.
                     # The complete storage row is one block stride. Dividing the
                     # registered length instead would fold the padding tail in.
                     storage_block_len = block_stride
@@ -2903,13 +2906,16 @@ class NixlBaseConnectorWorker:
             )
 
         # NVFP4 pages store all heads' data before all heads' scales, so a
-        # head's bytes are not a contiguous slice of the page.
+        # head's bytes are not a contiguous slice of the page, unless the
+        # backend lays out the page by KV head.
         if (
             not self.use_mla
             and self.transfer_topo.local_physical_heads
             != max(1, self.transfer_topo.total_num_kv_heads // remote_tp_size)
             and any(
-                isinstance(spec, AttentionSpec) and spec.kv_quant_mode.is_nvfp4
+                isinstance(spec, AttentionSpec)
+                and spec.kv_quant_mode.is_nvfp4
+                and not spec.kv_head_major_slots
                 for spec in self._layer_specs.values()
             )
         ):
