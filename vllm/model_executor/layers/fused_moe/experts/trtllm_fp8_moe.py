@@ -68,6 +68,15 @@ class TrtLlmFp8ExpertsBase(TrtLlmExpertsBase):
     interfaces.
     """
 
+    kept_constants: tuple[str, ...] = (
+        "_g1_alphas",
+        "_g2_alphas",
+        "_g1_scale_c",
+        "gemm1_alpha",
+        "gemm1_beta",
+        "gemm1_clamp_limit",
+    )
+
     @staticmethod
     def is_supported_config(
         cls: type[mk.FusedMoEExperts],
