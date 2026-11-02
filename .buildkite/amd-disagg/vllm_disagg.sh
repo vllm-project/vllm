@@ -327,8 +327,8 @@ EOF
 }
 
 # Build the EP-mode (WIDE_EP_MODE=1) serve command into the global CMD array.
-# DP + expert parallel; masters expose the API server, children join headless.
-# Every MoRIIO node gets KV transfer.
+# DP + expert parallel; masters expose the API server + KV transfer, children
+# join headless.
 build_ep_cmd() {
     #   prefill -> mori_high_throughput  (paired with --enforce-eager in models.yaml)
     #   decode  -> mori_low_latency      (paired with CUDA graphs in models.yaml)
