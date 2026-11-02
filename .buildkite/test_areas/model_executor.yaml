@@ -2,6 +2,25 @@ group: Model Executor
 depends_on: 
   - image-build
 steps:
+- label: ":nvidia: (L4) FastSafetensors Loader"
+  key: fastsafetensors-loader
+  device: l4
+  num_devices: 1
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/model_loader/default_loader.py
+  - vllm/model_executor/model_loader/weight_utils.py
+  - tests/model_executor/model_loader/fastsafetensors_loader
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - export PYTHONFAULTHANDLER=1
+  - >-
+    pytest -v -s
+    model_executor/model_loader/fastsafetensors_loader/test_weight_utils.py
+    model_executor/model_loader/fastsafetensors_loader/test_fastsafetensors_loader.py
+    --timeout=900 --timeout-method=thread
+
 # Disabled until the apt packages installation is locked.
 # - label: ":nvidia: (H200 MIG 35GB) Model Executor"
 #   device: h200_35gb

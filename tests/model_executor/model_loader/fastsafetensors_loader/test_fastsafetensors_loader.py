@@ -22,7 +22,14 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95, seed=0)
     not current_platform.is_cuda_alike(),
     reason="fastsafetensors requires NVIDIA/AMD GPUs",
 )
-def test_model_loader_download_files(vllm_runner):
-    with vllm_runner(test_model, load_format="fastsafetensors") as llm:
+@pytest.mark.parametrize("nogds", [None, True, False])
+def test_model_loader_download_files(vllm_runner, nogds):
+    """Exercise mode selection through LLM with real weights, not loader spies."""
+    extra_config = {} if nogds is None else {"fastsafetensors_nogds": nogds}
+    with vllm_runner(
+        test_model,
+        load_format="fastsafetensors",
+        model_loader_extra_config=extra_config,
+    ) as llm:
         deserialized_outputs = llm.generate(prompts, sampling_params)
         assert deserialized_outputs
