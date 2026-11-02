@@ -4,7 +4,7 @@ meta:
   provider: "GLM (Z-AI)"
   description: "GLM-5.3-Flash is a 320B-total / 18B-active multimodal MoE with hybrid KDA and sparse MLA attention, native FP8 weights, MTP, and a 1M-token context window."
   date_added: 2026-08-27
-  date_updated: 2026-10-19
+  date_updated: 2026-10-30
   tasks:
     - text
     - multimodal
@@ -53,7 +53,7 @@ features:
       - "--reasoning-parser"
       - "glm47"
   spec_decoding:
-    description: "Built-in MTP or an external DFlash2 drafter. Pick one method — only that --speculative-config is emitted."
+    description: "Built-in MTP, an external DFlash2 drafter, or the preview RedHatAI DSpark draft. Pick one method — only that --speculative-config is emitted."
     default_mode: mtp
     modes:
       mtp:
@@ -70,6 +70,17 @@ features:
         args:
           - "--speculative-config"
           - '{"method":"dflash","model":"incoai/GLM-5.3-Flash-DFlash2","num_speculative_tokens":7}'
+      dspark_preview:
+        label: "DSpark Preview (RedHatAI)"
+        description: "Preview RedHatAI DSpark draft with 8 tokens. The card reports testing on vLLM 0.28.1rc1 plus Speculators 0.7.0.dev174 and does not claim compatibility with an unmodified stable build."
+        variants: [default]
+        args:
+          - "--max-model-len"
+          - "16384"
+          - "--kv-cache-dtype"
+          - "fp8"
+          - "--speculative-config"
+          - '{"model":"RedHatAI/GLM-5.3-Flash-speculator.dspark-preview","num_speculative_tokens":8,"method":"dspark"}'
 
 opt_in_features:
   - spec_decoding
@@ -530,6 +541,7 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/zai-org/GLM-5.3-Flash)
+  - [RedHatAI DSpark preview speculator](https://huggingface.co/RedHatAI/GLM-5.3-Flash-speculator.dspark-preview)
   - [vLLM](https://github.com/vllm-project/vllm)
   - [ROCm MTP sparse-MLA fix](https://github.com/vllm-project/vllm/pull/55239)
   - **FlashInfer:** 0.6.17 or newer is required for NoPE sparse MLA
