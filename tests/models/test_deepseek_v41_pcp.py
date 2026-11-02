@@ -86,9 +86,7 @@ def test_replay_kv_publishes_all_pcp_owners(pcp_size, monkeypatch):
         attention_module, "get_pcp_group", lambda: SimpleNamespace(all_gather=gather)
     )
     insert = Mock()
-    monkeypatch.setattr(
-        torch.ops._C, "fused_deepseek_v4_kv_rope_insert", insert, raising=False
-    )
+    monkeypatch.setattr(attention_module, "fused_deepseek_v4_kv_rope_insert", insert)
     compressor, indexer = Mock(return_value=latent), Mock(owns_k=True)
     rotary = SimpleNamespace(cos_sin_cache=torch.empty(0))
     layer = SimpleNamespace(

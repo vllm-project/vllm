@@ -629,7 +629,11 @@ def _check_layer(rank: int, tp: int, device) -> None:
         )  # fmt: skip
         q = ops.gemm_a8w8_blockscale(qr8, w["wq_b"], qrs, w["wq_b_s"], [128, 128], bf)
         swa2d = swa_v.view(swa_v.shape[0], -1)
-        q_roped = torch.ops._C.fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
+        from vllm.model_executor.kernels.attention.fused_deepseek_v4_qnorm_rope_kv_insert_dispatch import (  # noqa: E501
+            fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert,
+        )
+
+        q_roped = fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert(
             q.view(M, H, HEAD_DIM), kvn, swa2d, s["slot_mapping"], s["positions"],
             cos_sin, H, eps, SWA_BLOCK, True, False, True, False,
         )  # fmt: skip
