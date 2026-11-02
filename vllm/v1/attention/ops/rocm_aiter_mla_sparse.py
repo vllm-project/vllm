@@ -623,6 +623,111 @@ def _fp8_paged_mqa_logits_decode_kernel(
         tl.store(logits_ptr + row * stride_logits_row + pos, s, mask=mask_pos)
 
 
+@triton.jit
+def _fp8_paged_mqa_logits_decode_balanced_kernel(
+    q_ptr,
+    kv_val_ptr,
+    kv_scale_ptr,
+    weights_ptr,
+    ctx_lens_ptr,
+    block_tables_ptr,
+    logits_ptr,
+    stride_q_b,
+    stride_q_n,
+    stride_q_h,
+    stride_w_row,
+    stride_kvblk_fp8,
+    stride_kvblk_f32,
+    scale_region_off,
+    stride_bt_b,
+    stride_logits_row,
+    max_blocks,
+    max_model_len,
+    rows_total,
+    batch_size,
+    NUM_HEADS: tl.constexpr,
+    HEAD_SIZE: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    BLOCK_KV: tl.constexpr,
+    NEXT_N: tl.constexpr,
+    CTX_PER_ROW: tl.constexpr,
+    BLOCK_B: tl.constexpr,
+):
+    tl.static_assert(HEAD_SIZE % 4 == 0)
+    rows = tl.arange(0, BLOCK_B)
+    b_idx = rows // NEXT_N
+    n_idx = rows % NEXT_N
+    if CTX_PER_ROW:
+        seq = tl.load(ctx_lens_ptr + rows, mask=rows < rows_total, other=0)
+    else:
+        seq = tl.load(ctx_lens_ptr + b_idx, mask=b_idx < batch_size, other=0)
+        seq = seq - NEXT_N + n_idx + 1
+    seq = tl.minimum(tl.maximum(seq, 0), max_model_len)
+    seq = tl.where(rows < rows_total, seq, 0)
+    tiles = tl.cdiv(seq, BLOCK_KV).to(tl.int64)
+    total = tl.sum(tiles, 0)
+    pid = tl.program_id(0).to(tl.int64)
+    nprog = tl.num_programs(0).to(tl.int64)
+    start = pid * total // nprog
+    end = (pid + 1) * total // nprog
+    csum = tl.cumsum(tiles, 0)
+    row = tl.sum((csum <= start).to(tl.int32), 0)
+    row_base = tl.sum(tl.where(rows < row, tiles, 0), 0)
+    t = start
+    h = tl.arange(0, NUM_HEADS)
+    d = tl.arange(0, HEAD_SIZE)
+    kv_col = tl.arange(0, BLOCK_KV)
+    while t < end:
+        b = row // NEXT_N
+        n = row % NEXT_N
+        if CTX_PER_ROW:
+            n_vis = tl.load(ctx_lens_ptr + row)
+        else:
+            n_vis = tl.load(ctx_lens_ptr + b) - NEXT_N + n + 1
+        n_vis = tl.minimum(tl.maximum(n_vis, 0), max_model_len)
+        row_tiles = tl.cdiv(n_vis, BLOCK_KV)
+        row_end = row_base + row_tiles
+        stop = tl.minimum(row_end, end)
+        q = tl.load(
+            q_ptr
+            + b * stride_q_b
+            + n * stride_q_n
+            + h[:, None] * stride_q_h
+            + d[None, :]
+        )
+        w = tl.load(weights_ptr + row * stride_w_row + h).to(tl.float32)
+        for tile in range(t, stop):
+            kv_start = (tile - row_base) * BLOCK_KV
+            pos = kv_start + kv_col
+            logical_blk = kv_start // BLOCK_SIZE
+            blk_ok = logical_blk < max_blocks
+            mask_pos = (pos < n_vis) & blk_ok
+            page = tl.load(
+                block_tables_ptr + b * stride_bt_b + logical_blk,
+                mask=blk_ok,
+                other=0,
+            ).to(tl.int64)
+            pos_in_blk = pos - logical_blk * BLOCK_SIZE
+            val_off = (
+                page * stride_kvblk_fp8 + pos_in_blk[:, None] * HEAD_SIZE + d[None, :]
+            )
+            kv = tl.load(kv_val_ptr + val_off, mask=mask_pos[:, None], other=0.0)
+            sc = tl.load(
+                kv_scale_ptr + page * stride_kvblk_f32 + scale_region_off + pos_in_blk,
+                mask=mask_pos,
+                other=0.0,
+            )
+            s = tl.dot(kv, tl.trans(q))
+            s = tl.maximum(s, 0.0)
+            s = s * w[None, :]
+            s = tl.sum(s, axis=1)
+            s = s * sc
+            tl.store(logits_ptr + row * stride_logits_row + pos, s, mask=mask_pos)
+        t = stop
+        row += 1
+        row_base = row_end
+
+
 def rocm_fp8_paged_mqa_logits_triton(
     q_fp8: torch.Tensor,
     kv_cache_fp8: torch.Tensor,
@@ -630,6 +735,7 @@ def rocm_fp8_paged_mqa_logits_triton(
     context_lens: torch.Tensor,
     block_tables: torch.Tensor,
     max_model_len: int,
+    balanced: bool | None = None,
 ) -> torch.Tensor:
     """Triton paged MQA-logits for decode and MTP; matches the torch ref but
     has no host sync, so it is safe to capture under a full CUDA graph."""
@@ -659,6 +765,43 @@ def rocm_fp8_paged_mqa_logits_triton(
     # device CU count (304 on gfx942, 256 on gfx950) rather than a gfx950-sized
     # constant. All terms are static at launch, so the grid stays CUDA-graph-safe.
     rows = batch_size * next_n
+    if balanced is None:
+        balanced = envs.VLLM_ROCM_DSV41_BALANCED_DECODE_INDEXER
+    if balanced and 0 < rows <= 4096:
+        _fp8_paged_mqa_logits_decode_balanced_kernel[(
+            max(1, _decode_cu_count()) * 8,
+        )](
+            q_fp8,
+            kv_val,
+            kv_scale,
+            weights,
+            cl,
+            block_tables,
+            out_logits,
+            q_fp8.stride(0),
+            q_fp8.stride(1),
+            q_fp8.stride(2),
+            weights.stride(0),
+            kv_val.stride(0),
+            kv_scale.stride(0),
+            (block_size * head_size) // 4,
+            block_tables.stride(0),
+            out_logits.stride(0),
+            max_blocks,
+            max_model_len,
+            rows,
+            batch_size,
+            NUM_HEADS=num_heads,
+            HEAD_SIZE=head_size,
+            BLOCK_SIZE=block_size,
+            BLOCK_KV=BLOCK_KV,
+            NEXT_N=next_n,
+            CTX_PER_ROW=ctx_per_row,
+            BLOCK_B=triton.next_power_of_2(rows),
+            num_warps=4,
+            num_stages=1,
+        )
+        return out_logits
     tiles_cap = (max_model_len + BLOCK_KV - 1) // BLOCK_KV
     N_SPLITS = max(1, min(max(1, _decode_cu_count()), tiles_cap, 1024 // rows))
     _fp8_paged_mqa_logits_decode_kernel[(rows, N_SPLITS)](
