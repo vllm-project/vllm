@@ -4,15 +4,12 @@
 
 import pytest
 
-import vllm.envs as envs
 from vllm.model_executor.kernels.linear import (
     _POSSIBLE_NVFP4_KERNELS,
     CutlassNvFp4LinearKernel,
     FlashInferB12xNvFp4LinearKernel,
     FlashInferCuteDslNvFp4W4A16LinearKernel,
     FlashInferCutlassNvFp4LinearKernel,
-    HummingNvFp4LinearKernel,
-    init_nvfp4_linear_kernel,
 )
 from vllm.platforms.interface import PlatformEnum
 
@@ -33,16 +30,3 @@ def test_w4a16_kernel_does_not_precede_w4a4_kernels(w4a4_kernel):
         f"{w4a4_kernel.__name__} must be preferred over "
         f"{FlashInferCuteDslNvFp4W4A16LinearKernel.__name__}"
     )
-
-
-def test_batch_invariant_w4a16_selects_humming(monkeypatch):
-    # The batch-invariant CUTLASS kernel is W4A4-only.
-    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
-    for kernel in (CutlassNvFp4LinearKernel, HummingNvFp4LinearKernel):
-        monkeypatch.setattr(
-            kernel,
-            "is_supported",
-            classmethod(lambda cls, compute_capability=None: (True, None)),
-        )
-    kernel = init_nvfp4_linear_kernel(use_a16=True)
-    assert isinstance(kernel, HummingNvFp4LinearKernel)

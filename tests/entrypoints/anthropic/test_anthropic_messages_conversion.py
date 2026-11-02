@@ -405,6 +405,37 @@ class TestToolResultContent:
             "https://example.com/img2.jpg",
         ]
 
+    def test_tool_result_with_tool_references(self):
+        """A tool_result with tool_reference items stays one tool message, with
+        the references first, so templates pair one result with one call."""
+        request = self._make_tool_result_request(
+            [
+                {"type": "text", "text": "2 tools found"},
+                {"type": "tool_reference", "tool_name": "get_weather"},
+                {"type": "tool_reference", "tool_name": "get_time"},
+                {
+                    "type": "image",
+                    "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": "AAAA",
+                    },
+                },
+            ]
+        )
+        result = _convert(request)
+
+        assert [m["role"] for m in result.messages] == ["assistant", "tool", "user"]
+        assert result.messages[1] == {
+            "role": "tool",
+            "tool_call_id": "call_001",
+            "content": [
+                {"type": "tool_reference", "name": "get_weather"},
+                {"type": "tool_reference", "name": "get_time"},
+                {"type": "text", "text": "2 tools found"},
+            ],
+        }
+
     def test_tool_result_none_content(self):
         request = self._make_tool_result_request(None)
         result = _convert(request)
