@@ -91,6 +91,16 @@ _IDLE_REAP_HEADROOM = 8
 _RECONNECT_MIN_BACKOFF_S = 1.0
 _RECONNECT_MAX_BACKOFF_S = 60.0
 
+# With group_peers_by_host, how long a host whose peer went down gets no
+# new outbound sessions. Matches the ZMQ heartbeat timeout, the time a dead
+# port takes to be detected on its own.
+_HOST_QUARANTINE_S = 10.0
+
+
+def _host_of(peer_id: str) -> str:
+    """The host part of a ``host:port`` peer_id."""
+    return peer_id.rpartition(":")[0]
+
 
 def _remote_prefiller_params(kv_params: dict | None) -> dict | None:
     """Return the ``remote_prefiller`` sub-dict, or None if absent.
@@ -249,6 +259,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         backends: list[str] | None = None,
         num_threads: int = 4,
         unbound_store_timeout_s: float = _UNBOUND_STORE_TIMEOUT_S,
+        group_peers_by_host: bool = False,
         **kwargs: Any,
     ) -> None:
         """Initialize the P2P secondary tier manager.
@@ -291,6 +302,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 ``_reap_unbound_stores`` drops them. Raise it for
                 deployments whose prefills outlast the default; the blocks
                 keep primary-tier slots pinned for the whole window.
+            group_peers_by_host: Treat every port on a peer's host as one
+                failure domain, as for the DP ranks of one pod. When a
+                session dies, the sessions to the host's other ports are
+                torn down too and the host gets no new outbound sessions
+                for ``_HOST_QUARANTINE_S``. Leave off when independent
+                instances share a host.
             **kwargs: Reserved for future tier-specific options.
 
         Raises:
@@ -414,6 +431,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # of reaped sessions that may still be writing; see _poll_retained.
         self._retained: dict[int, tuple[str, frozenset[int], float]] = {}
         self._retained_force_released = 0
+        self._group_peers_by_host = bool(group_peers_by_host)
+        # host → monotonic time until which it gets no new outbound session.
+        self._quarantined_hosts: dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # SecondaryTierManager interface
@@ -759,6 +779,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return session
         if self._reconnect_wait(peer_id) > 0 or self._retained_peer(peer_id):
             return None
+        if self._quarantined_hosts.get(_host_of(peer_id), 0.0) > time.monotonic():
+            return None
 
         max_peers = envs.VLLM_P2P_MAX_PEERS
         if len(self._sessions) >= max_peers:
@@ -875,7 +897,24 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 dead.append(pid)
         if dead is None:
             return
-        for pid in dead:
+        # With group_peers_by_host: every other session to a dead peer's host,
+        # mapped to that peer. Its loads fail now instead of at their load
+        # timeout, and the host gets no new outbound sessions for a while.
+        siblings: dict[str, str] = {}
+        if self._group_peers_by_host:
+            now = time.monotonic()
+            self._quarantined_hosts = {
+                h: t for h, t in self._quarantined_hosts.items() if t > now
+            }
+            dead_hosts = {_host_of(pid): pid for pid in dead}
+            for host in dead_hosts:
+                self._quarantined_hosts[host] = now + _HOST_QUARANTINE_S
+            siblings = {
+                pid: dead_hosts[_host_of(pid)]
+                for pid in self._sessions
+                if pid not in dead and _host_of(pid) in dead_hosts
+            }
+        for pid in dead + list(siblings):
             session = self._sessions.pop(pid)
             # Purge any kv_request_id → session entries pointing at this
             # session so subsequent submit_stores fall back to the unbound
@@ -908,11 +947,17 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 backoff = self._schedule_reconnect_backoff(pid)
                 if backoff:
                     fault_info += f"; reconnect backoff {backoff:.0f}s"
+            reason = session.death_reason
+            if pid in siblings:
+                reason = (
+                    f"{siblings[pid]} on the same host is down; "
+                    f"failed {len(close_result.failed_jobs)} load(s)"
+                )
             logger.warning(
                 "P2P %s: peer %s down (%s)%s",
                 self._local_id,
                 pid,
-                session.death_reason,
+                reason,
                 fault_info,
             )
 

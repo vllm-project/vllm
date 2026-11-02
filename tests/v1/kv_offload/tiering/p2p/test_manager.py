@@ -147,6 +147,8 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._failed_serve_ctxs = []
     mgr._retained = {}
     mgr._retained_force_released = 0
+    mgr._group_peers_by_host = False
+    mgr._quarantined_hosts = {}
     return mgr
 
 
@@ -2908,6 +2910,83 @@ class TestReconnectBackoff:
         assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
         assert conn.close_calls == 1
         assert self.PEER not in mgr._sessions
+
+
+class TestGroupPeersByHost:
+    """With group_peers_by_host, a dead peer takes down the sessions to the
+    other ports on its host (the DP ranks of one pod): their loads fail now
+    instead of at the load timeout, and new requests naming the host prefill
+    locally for _HOST_QUARANTINE_S (#56828)."""
+
+    def _reap(self, monkeypatch, group: bool = True):
+        warnings: list[str] = []
+        monkeypatch.setattr(
+            manager_module.logger,
+            "warning",
+            lambda msg, *args, **_: warnings.append(msg % args),
+        )
+        monkeypatch.setattr(
+            manager_module,
+            "P2PSession",
+            lambda *, peer_id, **_: _FakeSession(peer_id=peer_id),
+        )
+        mgr = _make_manager()
+        mgr._group_peers_by_host = group
+        connected: list[str] = []
+
+        def connect(pid: str) -> _RecordingConn:
+            connected.append(pid)
+            return _RecordingConn(pid)
+
+        mgr._control = SimpleNamespace(  # type: ignore[assignment]
+            connect=connect
+        )
+        removed: list[str] = []
+        mgr._data = SimpleNamespace(  # type: ignore[assignment]
+            remove_remote_peer=removed.append, block_len=1
+        )
+        for i, (pid, alive) in enumerate(
+            [("10.0.0.1:7777", False), ("10.0.0.1:7778", True), ("10.0.0.2:7777", True)]
+        ):
+            mgr._sessions[pid] = _FakeSession(  # type: ignore[assignment]
+                peer_id=pid, alive=alive, close_jobs=[i], close_req_ids=[f"r{i}"]
+            )
+        mgr._reap_dead_sessions()
+        return mgr, connected, removed, warnings
+
+    def test_dead_peer_fails_loads_to_other_ports_on_its_host(self, monkeypatch):
+        mgr, _, removed, warnings = self._reap(monkeypatch)
+
+        assert {r.job_id for r in mgr._finished_jobs if not r.success} == {0, 1}
+        assert mgr._failed_req_ids == {"r0", "r1"}
+        assert set(mgr._sessions) == {"10.0.0.2:7777"}
+        assert sorted(removed) == ["10.0.0.1:7777", "10.0.0.1:7778"]
+        assert (
+            "10.0.0.1:7777 on the same host is down; failed 1 load(s)" in (warnings[-1])
+        )
+
+    def test_new_request_to_quarantined_host_prefills_locally(self, monkeypatch):
+        mgr, connected, _, _ = self._reap(monkeypatch)
+        ctx = _req_context(_remote_prefiller_kv_params("10.0.0.1", 7779, "r3"))
+
+        mgr.on_new_request(ctx)
+        assert connected == []
+        assert mgr.lookup(OffloadKey(b"k"), ctx) == LookupResult.MISS
+
+        later = time.monotonic() + manager_module._HOST_QUARANTINE_S
+        monkeypatch.setattr(manager_module.time, "monotonic", lambda: later)
+        mgr.on_new_request(
+            _req_context(_remote_prefiller_kv_params("10.0.0.1", 7779, "r4"))
+        )
+        assert connected == ["10.0.0.1:7779"]
+
+    def test_off_by_default(self, monkeypatch):
+        mgr, connected, _, _ = self._reap(monkeypatch, group=False)
+
+        assert {r.job_id for r in mgr._finished_jobs} == {0}
+        assert set(mgr._sessions) == {"10.0.0.1:7778", "10.0.0.2:7777"}
+        mgr.on_new_request(_req_context(_remote_prefiller_kv_params("10.0.0.1", 7779)))
+        assert connected == ["10.0.0.1:7779"]
 
 
 # ---------------------------------------------------------------------------
