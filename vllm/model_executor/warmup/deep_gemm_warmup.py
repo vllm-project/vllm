@@ -28,6 +28,7 @@ from vllm.model_executor.layers.fused_moe.experts.deep_gemm_moe import DeepGemmE
 from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
+from vllm.platforms import current_platform
 from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     _import_deep_gemm,
@@ -254,11 +255,16 @@ def _get_grouped_gemm_params(
 
     cases_by_shape: dict[tuple[int, int], torch.Tensor] = {}
     for request_m in request_m_values:
+        _dyn_align = block_m
+        if current_platform.is_device_capability_family(120):
+            _dyn_expected = -(-(request_m * num_topk) // max(num_experts, 1))
+            if _dyn_expected <= 64 and _dyn_align > 64:
+                _dyn_align = 64
         M_sum, align_used = compute_aligned_M_and_alignment(
             M=request_m,
             num_topk=num_topk,
             local_num_experts=num_experts,
-            alignment=block_m,
+            alignment=_dyn_align,
             expert_tokens_meta=None,
         )
         if (M_sum, align_used) in cases_by_shape:

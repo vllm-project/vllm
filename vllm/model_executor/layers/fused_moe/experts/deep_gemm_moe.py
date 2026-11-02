@@ -347,11 +347,19 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
         assert w2.size(1) == K
 
+        # SM120: dynamic per-group BLOCK_M (must match deepgemm_moe_permute).
+        _dyn_align = get_mk_alignment_for_contiguous_layout()[0]
+        if current_platform.is_device_capability_family(120):
+            _dyn_expected = -(
+                -(topk_ids.size(0) * topk_ids.size(1)) // max(local_num_experts, 1)
+            )
+            if _dyn_expected <= 64 and _dyn_align > 64:
+                _dyn_align = 64
         M_sum, _ = compute_aligned_M_and_alignment(
             M=topk_ids.size(0),
             num_topk=topk_ids.size(1),
             local_num_experts=local_num_experts,
-            alignment=get_mk_alignment_for_contiguous_layout()[0],
+            alignment=_dyn_align,
             expert_tokens_meta=expert_tokens_meta,
         )
 
@@ -630,11 +638,19 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        # SM120: dynamic per-group BLOCK_M (must match deepgemm_moe_permute).
+        _dyn_align = get_mk_alignment_for_contiguous_layout()[0]
+        if current_platform.is_device_capability_family(120):
+            _dyn_expected = -(
+                -(topk_ids.size(0) * topk_ids.size(1)) // max(local_num_experts, 1)
+            )
+            if _dyn_expected <= 64 and _dyn_align > 64:
+                _dyn_align = 64
         M_sum, _ = compute_aligned_M_and_alignment(
             M=topk_ids.size(0),
             num_topk=topk_ids.size(1),
             local_num_experts=local_num_experts,
-            alignment=get_mk_alignment_for_contiguous_layout()[0],
+            alignment=_dyn_align,
             expert_tokens_meta=expert_tokens_meta,
         )
 
