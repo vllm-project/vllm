@@ -175,6 +175,9 @@ class Request:
         # decoupled from prompt_logprobs_dropped so the recompute forcing can
         # persist while the directive is sent once.
         self.redo_prompt_logprobs_sent = False
+        # Complete prompt logprobs were included in an EngineCoreOutput.
+        # Recomputing them after reset would append a duplicate block.
+        self.prompt_logprobs_emitted = False
 
         # Tokens of steps whose output is not yet processed (async scheduling
         # and PP run ahead of the GPU); `num_computed_tokens` counts them

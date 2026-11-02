@@ -1551,6 +1551,7 @@ class Scheduler(SchedulerInterface):
                     # runner's new-request path; drop any stale redo marker.
                     request.prompt_logprobs_dropped = False
                     request.redo_prompt_logprobs_sent = False
+                    request.prompt_logprobs_emitted = False
                     scheduled_new_reqs.append(request)
                 elif request.status == RequestStatus.PREEMPTED:
                     scheduled_resumed_reqs.append(request)
@@ -1825,6 +1826,7 @@ class Scheduler(SchedulerInterface):
             drop_stale_output
             and request.sampling_params is not None
             and request.sampling_params.prompt_logprobs is not None
+            and not request.prompt_logprobs_emitted
         ):
             # Arm the redo before any stale output returns. An active reset can
             # resume immediately, and a prefix hit on that first resume would
@@ -2535,6 +2537,8 @@ class Scheduler(SchedulerInterface):
                 # request no longer needs to recompute its whole prompt.
                 request.prompt_logprobs_dropped = False
                 request.redo_prompt_logprobs_sent = False
+                if should_emit_output:
+                    request.prompt_logprobs_emitted = True
             if should_emit_output:
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(

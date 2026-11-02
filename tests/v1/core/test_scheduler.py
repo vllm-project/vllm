@@ -2470,6 +2470,44 @@ def test_reset_arms_redo_before_mid_prefill_output_returns():
     assert request.request_id in cached.redo_prompt_logprobs_req_ids
 
 
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+@pytest.mark.parametrize("async_scheduling", [False, True])
+def test_reset_does_not_recompute_emitted_prompt_logprobs(
+    use_v2_model_runner, async_scheduling
+):
+    """A completed prefill already delivered its prompt logprobs to the
+    output processor. Recomputing them after reset appends a second N - 1
+    rows to the original N rows (#61547)."""
+    scheduler = create_scheduler(
+        enable_prefix_caching=True,
+        async_scheduling=async_scheduling,
+        use_v2_model_runner=use_v2_model_runner,
+    )
+    request = create_requests(num_requests=1, prompt_logprobs=5)[0]
+    scheduler.add_request(request)
+    scheduler_output = scheduler.schedule()
+
+    scheduler.update_from_output(
+        scheduler_output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[1000]],
+            logprobs=None,
+            prompt_logprobs_dict={request.request_id: Mock()},
+            pooler_output=[],
+        ),
+    )
+
+    # No prefill output is in flight now. Its prompt logprobs have already been
+    # emitted, so a reset must not produce a duplicate block on the next resume.
+    scheduler.reset_prefix_cache(reset_running_requests=True)
+    assert not request.prompt_logprobs_dropped
+    assert not request.redo_prompt_logprobs_sent
+    cached = scheduler.schedule().scheduled_cached_reqs
+    assert request.request_id not in cached.redo_prompt_logprobs_req_ids
+
+
 def test_preemption_without_prompt_logprobs_does_not_arm_redo():
     scheduler = create_scheduler(
         enable_prefix_caching=True, async_scheduling=True, use_v2_model_runner=False
