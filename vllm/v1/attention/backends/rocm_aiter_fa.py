@@ -566,14 +566,15 @@ class AiterFlashAttentionMetadataBuilder(
         assert self._swa_seq_lens is not None and self._swa_block_offsets is not None
         window = self.aot_sliding_window[0] + 1
         lens = seq_lens[:num_decodes]
-        first_block = torch.clamp(lens - window, min=0) // self.block_size
-        index = (first_block.to(torch.int64)[:, None] + self._swa_block_offsets).clamp_(
+        first_block = (lens - window).clamp_(min=0) // self.block_size
+        # int64 offsets promote the sum, so the gather index needs no cast copy
+        index = (self._swa_block_offsets + first_block[:, None]).clamp_(
             max=block_table.shape[1] - 1
         )
         swa_block_table = self._swa_block_table[:num_decodes]
         torch.gather(block_table[:num_decodes], 1, index, out=swa_block_table)
         swa_seq_lens = self._swa_seq_lens[:num_decodes]
-        swa_seq_lens.copy_(lens - first_block * self.block_size)
+        torch.sub(lens, first_block, alpha=self.block_size, out=swa_seq_lens)
         return (
             swa_block_table,
             swa_seq_lens,
