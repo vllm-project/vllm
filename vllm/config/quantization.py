@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from dataclasses import field
 from typing import Annotated, Any, cast
 
@@ -52,11 +53,8 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "int4_per_group_32": kInt4Static32,
 }
 
-# Ambiguous format names select the appropriate dynamic/static behavior
-# for either activation (dynamic) or weight (static).
-# Explicit ``*_static`` and ``*_dynamic`` names above retain
-# their field-independent meanings.
-# TODO: possibly deprecate the ``*_static`` and ``*_dynamic`` variants.
+# Ambiguous format names select the dynamic behavior for activations and the
+# static one for weights; `*_static`/`*_dynamic` names stay field-independent.
 _WEIGHT_QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp8": kMxfp8Static,
     "mxfp4": kMxfp4Static,
@@ -127,11 +125,7 @@ class QuantSpec:
         return v
 
     def __post_init__(self) -> None:
-        """We need a way to distinguish cases where `activation` is set by the
-        user or is a default `None`, as `_ONLINE_SHORTHANDS` do not hold the
-        default activation quant key, but may be overridden by users, including
-        to `null`.
-        """
+        """Record the explicitly set fields; unset ones become `None`."""
         fields_set = set()
         for field_name in ("weight", "activation"):
             if getattr(self, field_name) is _UNSET:
@@ -141,7 +135,15 @@ class QuantSpec:
         self.fields_set = frozenset(fields_set)
 
     def __str__(self) -> str:
-        return str(quant_key_name(self.weight))
+        """The spec as configured, e.g. `mxfp4` or
+        `{"weight":"mxfp4","activation":null}`."""
+        if "activation" not in self.fields_set:
+            return str(quant_key_name(self.weight))
+        spec = {
+            "weight": quant_key_name(self.weight),
+            "activation": quant_key_name(self.activation),
+        }
+        return json.dumps(spec, separators=(",", ":"))
 
 
 @config
@@ -177,7 +179,6 @@ class QuantizationConfigArgs:
         if not isinstance(v, str):
             return v
 
-        # e.g. `--quantization-config.moe mxfp4`
         field_name = info.field_name
         assert field_name is not None
         if v in _ONLINE_SHORTHANDS:
@@ -334,23 +335,12 @@ def resolve_quantization_config(
         base_spec: QuantSpec | None,
         override_spec: QuantSpec | None,
     ) -> QuantSpec | None:
-        if override_spec is None:
-            return base_spec
-        if base_spec is None:
-            return override_spec
-
-        weight = (
-            override_spec.weight
-            if "weight" in override_spec.fields_set
-            else base_spec.weight
+        if base_spec is None or override_spec is None:
+            return override_spec or base_spec
+        return QuantSpec(
+            **{name: getattr(base_spec, name) for name in base_spec.fields_set}
+            | {name: getattr(override_spec, name) for name in override_spec.fields_set}
         )
-
-        if "activation" in override_spec.fields_set:
-            return QuantSpec(weight=weight, activation=override_spec.activation)
-        if "activation" in base_spec.fields_set:
-            return QuantSpec(weight=weight, activation=base_spec.activation)
-
-        return QuantSpec(weight=weight)
 
     return QuantizationConfigArgs(
         linear=merge_spec(base.linear, quantization_config.linear),

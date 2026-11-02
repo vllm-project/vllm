@@ -247,7 +247,6 @@ from vllm.model_executor.layers.quantization.utils.humming import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Static,
-    kMxfp8Dynamic,
 )
 from vllm.platforms import PlatformEnum, current_platform
 
@@ -960,19 +959,10 @@ def choose_mp_linear_kernel(
 
 
 def init_mxfp8_linear_kernel(
-    *,
-    weight_shape: tuple[int, int],
-    bmm_batch_size: int | None = None,
-    activation_quant_key: QuantKey | None = None,
+    *, weight_shape: tuple[int, int], bmm_batch_size: int | None = None
 ) -> Mxfp8LinearKernel:
     """Select and instantiate the best MXFP8 linear kernel for the
     current platform and `(N, K)` weight shape."""
-    if activation_quant_key not in (None, kMxfp8Dynamic):
-        raise NotImplementedError(
-            "MXFP8 linear oracle does not implement activation key override "
-            f"yet, got activation_quant_key={activation_quant_key}. "
-            "Please open an issue."
-        )
     config = Mxfp8LinearLayerConfig(
         weight_shape=weight_shape,
         bmm_batch_size=bmm_batch_size,

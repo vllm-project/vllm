@@ -26,6 +26,9 @@ from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp4Dynamic,
+)
 from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import current_platform
@@ -81,7 +84,7 @@ def _online_linear():
     layer.input_size = layer.input_size_per_partition = SIZE
     layer.output_size = layer.output_size_per_partition = SIZE
     layer.params_dtype = torch.bfloat16
-    method = Mxfp4OnlineLinearMethod()
+    method = Mxfp4OnlineLinearMethod(activation_quant_key=kMxfp4Dynamic)
     method.create_weights(
         layer,
         input_size_per_partition=SIZE,
@@ -109,7 +112,9 @@ def _moe(quant_config: QuantizationConfig | None):
 
 def _online_moe():
     layer, _ = _moe(None)
-    method = Mxfp4OnlineMoEMethod(moe=layer.moe_config)
+    method = Mxfp4OnlineMoEMethod(
+        moe=layer.moe_config, activation_quant_key=kMxfp4Dynamic
+    )
     method.create_weights(
         layer=layer,
         num_experts=8,

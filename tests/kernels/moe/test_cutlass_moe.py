@@ -496,9 +496,7 @@ def test_cutlass_mxfp4_oracle_matches_direct_kernel(monkeypatch, workspace_init)
     if not CutlassExpertsMxfp4._supports_current_device():
         pytest.skip("CUTLASS mxfp4 MoE is not supported on this GPU")
     monkeypatch.setattr(
-        mxfp4_oracle.MoEKernelOracle,
-        "get_user_moe_activation_override",
-        staticmethod(lambda: (None, False)),
+        mxfp4_oracle, "_user_moe_activation_override", lambda: (None, False)
     )
 
     set_random_seed(7)

@@ -95,8 +95,9 @@ class Nvfp4OnlineMoEMethod(OnlineMoEMethodBase):
 
     def __init__(
         self,
+        *,
         moe: FusedMoEConfig,
-        activation_quant_key: "QuantKey | None" = kNvfp4DynamicToken,
+        activation_quant_key: "QuantKey | None",
     ):
         if not current_platform.is_device_capability_family(100):
             raise ValueError(

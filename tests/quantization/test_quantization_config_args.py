@@ -40,14 +40,8 @@ def test_args_resolve_ambiguous_strings_by_field():
     args = QuantizationConfigArgs(moe={"weight": "mxfp8", "activation": "mxfp8"})
     assert args.moe == QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic)
 
-    assert QuantSpec(weight="mxfp8").weight is kMxfp8Static
-    args = QuantizationConfigArgs(moe=QuantSpec(weight="mxfp8"))
-    assert args.moe is not None
-    assert args.moe.weight is kMxfp8Static
-
     args = QuantizationConfigArgs(moe={"weight": "mxfp4", "activation": "mxfp4"})
     assert args.moe == QuantSpec(weight=kMxfp4Static, activation=kMxfp4Dynamic)
-    assert QuantSpec(weight="mxfp4").weight is kMxfp4Static
 
 
 def test_quant_spec_resolves_string_to_quant_key():
@@ -120,9 +114,7 @@ def test_args_string_shorthand_missing_slot_raises():
 )
 def test_args_accepts_dict_form(activation, expected):
     args = quant_config_args(moe={"activation": activation})
-    assert args.moe is not None
-    assert args.moe.weight is None
-    assert args.moe.activation is expected
+    assert args.moe == QuantSpec(activation=expected)
     assert args.linear is None
 
 
@@ -181,9 +173,7 @@ def test_resolve_activation_override(quantization, activation, expected):
     )
     assert args is not None
     assert args.linear is None
-    assert args.moe is not None
-    assert args.moe.weight is None
-    assert args.moe.activation is expected
+    assert args.moe == QuantSpec(activation=expected)
 
 
 def test_resolve_merges_explicit_over_shorthand():
@@ -204,6 +194,7 @@ def test_resolve_preserves_explicit_null_activation():
         "fp8_per_tensor",
         {"linear": {"activation": None}},
     )
+    assert args is not None
     assert args.linear == QuantSpec(
         weight=kFp8StaticTensorSym,
         activation=None,

@@ -83,10 +83,14 @@ class Mxfp4OnlineLinearMethod(OnlineLinearBase):
 
     default_activation_quant_key = kMxfp4Dynamic
 
-    def __init__(
-        self,
-        activation_quant_key: "QuantKey | None" = kMxfp4Dynamic,
-    ):
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: "QuantKey | None", explicit: bool
+    ) -> "QuantKey | None":
+        """MXFP4 honors an explicit activation override, `null` (BF16) too."""
+        return activation_quant_key
+
+    def __init__(self, activation_quant_key: "QuantKey | None"):
         super().__init__(activation_quant_key)
         self.kernel = init_mxfp4_linear_kernel(
             activation_quant_key=self.activation_quant_key
@@ -151,10 +155,18 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
     experts_cls: "type[mk.FusedMoEExperts] | None"
     default_activation_quant_key = kMxfp4Dynamic
 
+    @classmethod
+    def resolve_activation_quant_key(
+        cls, activation_quant_key: "QuantKey | None", explicit: bool
+    ) -> "QuantKey | None":
+        """MXFP4 honors an explicit activation override, `null` (BF16) too."""
+        return activation_quant_key
+
     def __init__(
         self,
+        *,
         moe: FusedMoEConfig,
-        activation_quant_key: "QuantKey | None" = kMxfp4Dynamic,
+        activation_quant_key: "QuantKey | None",
     ):
         super().__init__(moe=moe, activation_quant_key=activation_quant_key)
         self.weight_block_size: list[int] = [1, MXFP4_BLOCK_SIZE]

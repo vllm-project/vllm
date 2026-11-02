@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import json
 from collections.abc import Callable, Mapping
 from enum import Enum
 from types import MappingProxyType
@@ -13,7 +12,6 @@ from vllm.config.quantization import (
     _ONLINE_SHORTHANDS,
     QuantizationConfigArgs,
     QuantSpec,
-    quant_key_name,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
@@ -281,17 +279,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
 
     def resolve_quant_method_cls(
         self, layer_cls: type[torch.nn.Module], prefix: str
-    ) -> (
-        tuple[
-            OnlineQuantizationSource,
-            str,
-            str | None,
-            QuantSpec,
-            type,
-            QuantKey | None,
-        ]
-        | None
-    ):
+    ) -> tuple[OnlineQuantizationSource, str, str | None, QuantSpec, type] | None:
         """Resolve quantization metadata and method class without instantiating it.
 
         Args:
@@ -299,9 +287,10 @@ class OnlineQuantizationConfig(QuantizationConfig):
             prefix: Fully qualified layer name.
 
         Returns:
-            A tuple of source, quantization key string, target pattern, spec,
-            method class, and activation quantization key. Returns None when
-            online quantization does not apply to the layer.
+            A tuple of source, quantization key string, target pattern, spec
+            with its resolved activation key, and method class. Returns None
+            when online quantization does not apply to the layer. The returned
+            spec's `fields_set` is not user input.
 
         """
         quant_spec: QuantSpec | None
@@ -347,11 +336,14 @@ class OnlineQuantizationConfig(QuantizationConfig):
             assert issubclass(quant_method_cls, OnlineLinearBase)
 
         explicit = "activation" in quant_spec.fields_set
-        activation_quant_key = quant_method_cls.resolve_activation_quant_key(
-            quant_spec.activation
-            if explicit
-            else quant_method_cls.default_activation_quant_key,
-            explicit=explicit,
+        quant_spec = QuantSpec(
+            weight=quant_spec.weight,
+            activation=quant_method_cls.resolve_activation_quant_key(
+                quant_spec.activation
+                if explicit
+                else quant_method_cls.default_activation_quant_key,
+                explicit=explicit,
+            ),
         )
 
         return (
@@ -360,7 +352,6 @@ class OnlineQuantizationConfig(QuantizationConfig):
             target_pattern,
             quant_spec,
             quant_method_cls,
-            activation_quant_key,
         )
 
     def _resolve_targets_quant_method_metadata(
@@ -415,10 +406,7 @@ class OnlineQuantizationConfig(QuantizationConfig):
             )
         else:
             quant_spec = target
-            target_config: dict[str, str | None] = {"weight": str(quant_spec)}
-            if "activation" in quant_spec.fields_set:
-                target_config["activation"] = quant_key_name(quant_spec.activation)
-            quant_key_str = json.dumps(target_config, separators=(",", ":"))
+            quant_key_str = str(quant_spec)
         if issubclass(layer_cls, LinearBase):
             table = _ONLINE_LINEAR_METHODS
         elif issubclass(layer_cls, RoutedExperts):
@@ -458,9 +446,8 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 source,
                 quant_key_str,
                 target_pattern,
-                _,
+                quant_spec,
                 quant_method_cls,
-                activation_quant_key,
             ) = resolved
             self.quantized_layers[prefix] = (
                 source.value,
@@ -471,11 +458,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 assert issubclass(quant_method_cls, OnlineMoEMethodBase)
                 return quant_method_cls(
                     moe=layer.moe_config,
-                    activation_quant_key=activation_quant_key,
+                    activation_quant_key=quant_spec.activation,
                 )
 
             assert issubclass(quant_method_cls, OnlineLinearBase)
-            return quant_method_cls(activation_quant_key=activation_quant_key)
+            return quant_method_cls(activation_quant_key=quant_spec.activation)
 
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()

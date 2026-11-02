@@ -405,9 +405,7 @@ def test_explicit_b12x_mxfp4_selection(
 ) -> None:
     monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
     monkeypatch.setattr(
-        mxfp4_oracle.MoEKernelOracle,
-        "get_user_moe_activation_override",
-        staticmethod(lambda: (None, False)),
+        mxfp4_oracle, "_user_moe_activation_override", lambda: (None, False)
     )
     monkeypatch.setattr(
         mxfp4_oracle.envs,
@@ -431,9 +429,7 @@ def test_explicit_b12x_mxfp4_force_a16_uses_a16_contract(
 ) -> None:
     monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
     monkeypatch.setattr(
-        mxfp4_oracle.MoEKernelOracle,
-        "get_user_moe_activation_override",
-        staticmethod(lambda: (None, False)),
+        mxfp4_oracle, "_user_moe_activation_override", lambda: (None, False)
     )
     monkeypatch.setattr(
         mxfp4_oracle.envs,
@@ -563,9 +559,7 @@ def test_b12x_mxfp4_falls_back_to_a16(
 ) -> None:
     monkeypatch.setattr(B12xExperts, "_supports_current_device", lambda: True)
     monkeypatch.setattr(
-        mxfp4_oracle.MoEKernelOracle,
-        "get_user_moe_activation_override",
-        staticmethod(lambda: (None, False)),
+        mxfp4_oracle, "_user_moe_activation_override", lambda: (None, False)
     )
     monkeypatch.setattr(
         mxfp4_oracle.envs,

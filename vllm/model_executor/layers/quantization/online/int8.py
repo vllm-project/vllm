@@ -41,8 +41,9 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
 
     def __init__(
         self,
+        *,
         moe: FusedMoEConfig,
-        activation_quant_key: "QuantKey | None" = kInt8DynamicTokenSym,
+        activation_quant_key: "QuantKey | None",
     ):
         super().__init__(moe, activation_quant_key=activation_quant_key)
         self.int8_backend, self.experts_cls = select_int8_moe_backend(

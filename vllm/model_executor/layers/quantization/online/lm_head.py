@@ -20,10 +20,7 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
     FLOAT4_E2M1_MAX,
     ref_nvfp4_quant,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-    weight_amax,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import weight_amax
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     UnquantizedEmbeddingMethod,
@@ -71,9 +68,6 @@ class _LMHeadNvfp4Method(OnlineLinearBase):
 
     default_activation_quant_key = None
 
-    def __init__(self, activation_quant_key: QuantKey | None = None):
-        super().__init__(activation_quant_key)
-
     def process_weights_after_loading(self, layer: Module) -> None:
         packed, scales, global_scale = _quantize_nvfp4(layer.weight)
         replace_parameter(layer, "weight", packed)
@@ -110,6 +104,7 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
     # only the model dtype while the model itself is being built.
     dtype = lm_head.weight.dtype
     with set_default_torch_dtype(dtype):
+        method_cls = _LM_HEAD_METHODS[quantization]
         head = ParallelLMHead(
             lm_head.num_embeddings,
             lm_head.embedding_dim,
@@ -118,7 +113,7 @@ def _quantize_copy(lm_head: ParallelLMHead, quantization: str) -> ParallelLMHead
             padding_size=lm_head.padding_size,
             prefix=lm_head.prefix,
             disable_tp=lm_head.disable_tp,
-            quant_method=_LM_HEAD_METHODS[quantization](),
+            quant_method=method_cls(method_cls.default_activation_quant_key),
         )
     # Never loaded: a new param sharing the source storage, never a copy of it.
     head.weight = torch.nn.Parameter(lm_head.weight.data, requires_grad=False)
