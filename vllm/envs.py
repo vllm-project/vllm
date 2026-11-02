@@ -147,6 +147,9 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_MOE_A4W4_DSV4: bool | None = None
     VLLM_ROCM_USE_AITER_MOE_SITUV2: Literal["auto", "a4w4", "a8w4", "a16w4"] = "auto"
+    VLLM_ROCM_TP_MEGA_MOE_ACT_DTYPE: Literal["fp8", "fp4"] = "fp8"
+    VLLM_ROCM_TP_MEGA_MOE_COMM_DTYPE: Literal["bf16", "fp8"] = "bf16"
+    VLLM_ROCM_TP_MEGA_MOE_AR_GATHER: Literal["bf16", "fp8", "auto"] = "bf16"
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_AITER_MLA_ASM_PADDING: Literal["auto", "gluon", "asm"] = "auto"
@@ -1340,6 +1343,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "auto",
         ["auto", "a4w4", "a8w4", "a16w4", "0", "1"],
         case_sensitive=False,
+    ),
+    "VLLM_ROCM_TP_MEGA_MOE_ACT_DTYPE": env_with_choices(
+        "VLLM_ROCM_TP_MEGA_MOE_ACT_DTYPE", "fp8", ["fp8", "fp4"]
+    ),
+    "VLLM_ROCM_TP_MEGA_MOE_COMM_DTYPE": env_with_choices(
+        "VLLM_ROCM_TP_MEGA_MOE_COMM_DTYPE", "bf16", ["bf16", "fp8"]
+    ),
+    "VLLM_ROCM_TP_MEGA_MOE_AR_GATHER": env_with_choices(
+        "VLLM_ROCM_TP_MEGA_MOE_AR_GATHER", "bf16", ["bf16", "fp8", "auto"]
     ),
     # Opt-in switch for a4w4 (FP4 activation) MoE on DeepSeek V4.1, AITER
     # MXFP4 backend. Default is a8w4 (FP8); set to "1" to enable a4w4
