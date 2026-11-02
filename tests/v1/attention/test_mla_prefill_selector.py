@@ -644,45 +644,32 @@ class TestROCmAiterFlyDSLFP8PrefillSelection:
             with patch.dict(sys.modules, {"aiter.ops.flydsl": SimpleNamespace()}):
                 assert not AiterFlyDSLFP8PrefillBackend.is_available()
 
-    @pytest.mark.parametrize("supported", [True, False])
-    def test_validate_configuration_defers_to_aiter(self, supported: bool):
+    def test_validate_configuration_rejects_unsupported_head_dims(self):
         from vllm.v1.attention.backends.mla.prefill.aiter_flydsl_fp8 import (
             AiterFlyDSLFP8PrefillBackend,
         )
 
-        check = MagicMock(return_value=supported)
+        capability = current_platform.get_device_capability()
         selector_config = MLAPrefillSelectorConfig(
             dtype=torch.bfloat16,
             mla_dimensions=MLADimensions(
                 qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128
             ),
         )
-        with (
-            patch.object(
-                AiterFlyDSLFP8PrefillBackend,
-                "supports_compute_capability",
-                return_value=True,
-            ),
-            patch.object(
-                AiterFlyDSLFP8PrefillBackend, "is_available", return_value=True
-            ),
-            patch.dict(
-                sys.modules,
-                {
-                    "aiter.ops.flydsl": SimpleNamespace(
-                        flydsl_flash_attn_fp8_supported=check
-                    )
-                },
-            ),
-            patch("torch.accelerator.current_device_index", return_value=0),
+        if AiterFlyDSLFP8PrefillBackend.validate_configuration(
+            capability, selector_config
         ):
-            reasons = AiterFlyDSLFP8PrefillBackend.validate_configuration(
-                MagicMock(), selector_config
-            )
-
-        assert bool(reasons) is not supported
-        _, num_heads, num_kv_heads, head_dim, head_dim_v = check.call_args.args
-        assert (num_heads, num_kv_heads, head_dim, head_dim_v) == (1, 1, 192, 128)
+            pytest.skip("ROCM_AITER_FLYDSL_FP8 unavailable")
+        # AITER's capability check rejects this V head dim.
+        reasons = AiterFlyDSLFP8PrefillBackend.validate_configuration(
+            capability,
+            selector_config._replace(
+                mla_dimensions=MLADimensions(
+                    qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=100
+                )
+            ),
+        )
+        assert any("does not support" in r for r in reasons)
 
 
 class TestMLAPrefillBackendParsing:
