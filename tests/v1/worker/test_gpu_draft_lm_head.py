@@ -120,6 +120,7 @@ def _draft_update_worker(vllm_config, drafter: torch.nn.Module, **engine) -> Wor
     )
     worker.model_runner = SimpleNamespace(get_draft_model=lambda: drafter)
     worker._weight_update_active = False
+    worker._incomplete_weight_updates = set()
     worker._kv_cache_reclaimable = False
     worker._weight_update_kv_cache_loan = ExitStack()
     worker._set_draft_weight_update_target = lambda: None  # type: ignore[method-assign]
