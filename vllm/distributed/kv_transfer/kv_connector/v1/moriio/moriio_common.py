@@ -256,6 +256,39 @@ def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
     return global_dp_rank // dp_size_local if dp_size_local else 0
 
 
+def fill_remote_pod_from_config(
+    kv_transfer_params: dict[str, Any],
+    extra_config: dict,
+    is_producer: bool,
+) -> None:
+    """Copy Wide-EP peer hosts from the serve config when the router omitted them.
+
+    ``remote_hosts`` / ``remote_dp_size_local`` on ``kv_connector_extra_config``
+    name the other role's nodes, master first. Rank ``r`` is on
+    ``remote_hosts[r // remote_dp_size_local]``. Router-supplied values win.
+    On decode, the engine that holds the request sends the notify.
+    """
+    hosts = extra_config.get("remote_hosts")
+    if isinstance(hosts, str):
+        hosts = [h.strip() for h in hosts.split(",") if h.strip()]
+    try:
+        dp_local = int(extra_config.get("remote_dp_size_local") or 0)
+    except (TypeError, ValueError):
+        return
+    if not hosts or dp_local <= 0 or kv_transfer_params.get("remote_hosts"):
+        return
+    kv_transfer_params["remote_hosts"] = [str(h) for h in hosts]
+    if not kv_transfer_params.get("remote_dp_size_local"):
+        kv_transfer_params["remote_dp_size_local"] = dp_local
+    if (
+        not is_producer
+        and "remote_dp_rank" in kv_transfer_params
+        and "is_request_leader" not in kv_transfer_params
+        and not kv_transfer_params.get("remote_dp_rank_override")
+    ):
+        kv_transfer_params["is_request_leader"] = True
+
+
 def resolve_host_ip(extra_config: dict) -> str:
     """The IP this MoRIIO process advertises for KV transfer.
 

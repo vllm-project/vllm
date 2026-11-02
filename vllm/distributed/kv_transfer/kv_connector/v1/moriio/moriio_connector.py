@@ -47,6 +47,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     TransferError,
     TransferId,
     WriteTask,
+    fill_remote_pod_from_config,
     fold_local_rank,
     get_moriio_mode,
     get_peer_zmq_from_request_id,
@@ -978,6 +979,11 @@ class MoRIIOConnectorScheduler:
         )
 
     def _release_write_prefill_blocks(self, request_id: ReqId, params: dict[str, Any]):
+        fill_remote_pod_from_config(
+            params,
+            self.kv_transfer_config.kv_connector_extra_config,
+            self.is_producer,
+        )
         transfer_id = params.get("transfer_id")
         if transfer_id is None:
             logger.warning(
@@ -1004,9 +1010,16 @@ class MoRIIOConnectorScheduler:
                 )
                 return
 
+        dp_local = int(params.get("remote_dp_size_local", 0) or 0)
+        remote_hosts = params.get("remote_hosts") or []
+        if dp_local > 0 and remote_hosts:
+            pod_idx = pod_index(remote_dp_rank, dp_local)
+            if 0 <= pod_idx < len(remote_hosts):
+                remote_host = remote_hosts[pod_idx]
+        local_dp_rank = fold_local_rank(remote_dp_rank, dp_local)
         remote_notify_port = int(remote_notify_port)
         for tp_index in range(get_moriio_peer_tp_size(params, self.tp_size)):
-            target_port = remote_notify_port + get_port_offset(remote_dp_rank, tp_index)
+            target_port = remote_notify_port + get_port_offset(local_dp_rank, tp_index)
             self._send_transfer_release(transfer_id, remote_host, target_port)
 
     def update_state_after_alloc(
@@ -1055,6 +1068,11 @@ class MoRIIOConnectorScheduler:
         # without a sidecar wire-protocol change.
         transfer_id = params.get("transfer_id") or f"sidecar-{request.request_id}"
         params.setdefault("transfer_id", transfer_id)
+        fill_remote_pod_from_config(
+            params,
+            self.kv_transfer_config.kv_connector_extra_config,
+            self.is_producer,
+        )
         request_id = request.request_id
         self.map_request_id(request_id, transfer_id)
         if params.get("do_remote_decode") and self.mode == MoRIIOMode.WRITE:
