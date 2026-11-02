@@ -640,6 +640,8 @@ def test_sparse_backend_decode_correctness(
     v_head_dim: int,
     monkeypatch,
     block_stride_rows: int | None = None,
+    topk_tokens: int = 128,
+    force_mqa: bool = False,
 ):
     if qk_rope_head_dim == 0 and (
         backend_cls != FlashMLASparseBackend
@@ -714,7 +716,6 @@ def test_sparse_backend_decode_correctness(
 
     kv_lora_rank = 512
     head_size = kv_lora_rank + qk_rope_head_dim
-    topk_tokens = 128
 
     max_seqlen = max(batch_spec.seq_lens)
     total_cache_tokens = sum(batch_spec.seq_lens)
@@ -736,7 +737,7 @@ def test_sparse_backend_decode_correctness(
     # query token. ROCm normally routes short prefills to dense MHA, whose
     # output intentionally differs from that sparse reference. Keep this test
     # on the sparse-MQA path; dense-prefill routing has dedicated ROCm tests.
-    if current_platform.is_rocm():
+    if current_platform.is_rocm() or force_mqa:
         vllm_config.attention_config.sparse_mla_force_mqa = True
     model_config = vllm_config.model_config
     model_config.hf_text_config = SimpleNamespace(
@@ -1109,6 +1110,59 @@ def test_sparse_mla_packed_stride(
         *head_dims,
         monkeypatch,
         block_stride_rows=block_stride_rows,
+    )
+
+
+# GLM-5.3 attention: 64 heads, qk 192 + 64, v 256, 2048 index slots.
+GLM53_BATCH_SPECS = {
+    "glm53_decode_mixed8": BatchSpec(
+        seq_lens=[1, 2047, 2048, 2049, 4096, 16384, 63, 65], query_lens=[1] * 8
+    ),
+    "glm53_chunked_prefill": BatchSpec(
+        seq_lens=[2049, 4096, 300], query_lens=[1, 256, 300]
+    ),
+}
+
+
+@pytest.mark.parametrize(
+    "batch_name,force_mqa",
+    [
+        ("glm53_decode_mixed8", False),
+        ("glm53_chunked_prefill", False),
+        ("glm53_chunked_prefill", True),
+    ],
+)
+@pytest.mark.parametrize("kv_cache_dtype", ["fp8_ds_mla", "auto"])
+def test_sparse_backend_decode_correctness_glm53_topk2048(
+    default_vllm_config,
+    dist_init,
+    workspace_init,
+    monkeypatch,
+    batch_name,
+    kv_cache_dtype,
+    force_mqa,
+):
+    monkeypatch.setitem(
+        SPARSE_BACKEND_BATCH_SPECS, batch_name, GLM53_BATCH_SPECS[batch_name]
+    )
+    test_sparse_backend_decode_correctness(
+        default_vllm_config,
+        dist_init,
+        FlashMLASparseBackend,
+        batch_name,
+        kv_cache_dtype,
+        1,
+        64,
+        workspace_init,
+        1.0,
+        1.0,
+        64,
+        192,
+        64,
+        256,
+        monkeypatch,
+        topk_tokens=2048,
+        force_mqa=force_mqa,
     )
 
 
