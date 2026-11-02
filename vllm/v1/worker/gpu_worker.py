@@ -30,7 +30,6 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
-from vllm.distributed.aux_output_connector.worker import get_aux_output_connector
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
@@ -68,6 +67,7 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
     share_source_lm_heads,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader.reload.direct import direct_reload_enabled
 from vllm.model_executor.model_loader.weight_checksum import (
     compute_tensor_digests,
     zero_weights,
@@ -124,7 +124,9 @@ def _num_workspace_lanes(vllm_config: VllmConfig, use_v2_model_runner: bool) -> 
     spec_config = vllm_config.speculative_config
     return (
         2
-        if use_v2_model_runner and spec_config is not None and spec_config.use_dspark()
+        if use_v2_model_runner
+        and spec_config is not None
+        and spec_config.uses_separate_workspace_lane
         else 1
     )
 
@@ -205,7 +207,11 @@ class Worker(WorkerBase):
         is_driver_worker: bool = False,
     ):
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
-        if self.use_v2_model_runner and not HAS_TRITON:
+        if (
+            self.use_v2_model_runner
+            and not HAS_TRITON
+            and not current_platform.uses_standalone_cpu_model_runner()
+        ):
             raise ValueError("Model Runner V2 requires Triton.")
 
         super().__init__(
@@ -517,6 +523,13 @@ class Worker(WorkerBase):
             # Set random seed.
             set_random_seed(self.model_config.seed)
 
+            # Initialize shared locality resources before weight loading and capture.
+            from vllm.distributed.localization import (
+                maybe_init_localized_resources,
+            )
+
+            self.localized_resources = maybe_init_localized_resources(self.device)
+
             # cuBLAS(Lt) asks CUDA for its handle memory directly. When torch's own
             # cudaMalloc fails, torch frees its unused cache and retries, but a cuBLAS
             # request never triggers that because torch doesn't see it. Profiling can
@@ -593,17 +606,6 @@ class Worker(WorkerBase):
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
     def load_model(self, *, load_dummy_weights: bool = False) -> None:
-        use_aux_output = (
-            self.use_v2_model_runner and self.vllm_config.aux_output_config.enabled
-        )
-        model_runner = cast("GPUModelRunnerV2", self.model_runner)
-        if use_aux_output and model_runner.aux_output_connector is not None:
-            raise RuntimeError(
-                "The auxiliary-output connector is already initialized for this "
-                "model runner; reloading the model would invalidate its capture "
-                "bindings"
-            )
-
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
@@ -611,24 +613,6 @@ class Worker(WorkerBase):
             self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
             self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
-
-        if use_aux_output:
-            # Capture must exist before KV-cache profiling and outside the
-            # weights pool, so weight discard/reload cannot invalidate it.
-            connector = get_aux_output_connector(self.vllm_config)
-            try:
-                connector.initialize_capturers(model_runner.get_model())
-            except BaseException:
-                try:
-                    connector.close()
-                except Exception:
-                    logger.warning(
-                        "Failed to close the auxiliary-output connector after "
-                        "capture initialization failed",
-                        exc_info=True,
-                    )
-                raise
-            model_runner.aux_output_connector = connector
 
         if has_ec_transfer():
             get_ec_transfer().start_worker_services()
@@ -729,15 +713,17 @@ class Worker(WorkerBase):
         ):
             self.model_runner.profile_run(randomize_inputs=self.randomize_dummy_inputs)
 
-        # Profile CUDA graph memory if graphs will be captured.
+        # Profile CUDA graph memory if graphs will be captured. The V2 runner
+        # decides itself, since encoder graphs don't depend on cudagraph_mode.
         # ROCm is included: #44825 moved the profiler to
         # torch.accelerator.get_memory_info (reliable on ROCm, as used by
         # the AMD-CI mem tests), and graph_pool_handle resolves to the same
         # torch.cuda handle the live capture path already uses on ROCm.
         cudagraph_memory_estimate = 0
-        if (
-            current_platform.is_cuda_alike() or current_platform.is_xpu()
-        ) and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+        if (current_platform.is_cuda_alike() or current_platform.is_xpu()) and (
+            self.use_v2_model_runner
+            or self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
+        ):
             cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Respect the opt-in flag as originally designed.
@@ -1646,13 +1632,17 @@ class Worker(WorkerBase):
                     local_update_info = update_info
                 self.weight_transfer_engine.update_weights(local_update_info)
             except BaseException:
-                self._weight_update_active = False
-                self.weight_transfer_engine.reset_weight_update_target()
-                if self._weight_update_is_draft and (
-                    (draft_model := self.get_draft_model()) is not None
-                ):
-                    restore_quantized_lm_heads(draft_model, refresh=False)
+                self._end_weight_update(refresh=False)
                 raise
+
+    def _end_weight_update(self, refresh: bool) -> None:
+        assert self.weight_transfer_engine is not None
+        self._weight_update_active = False
+        self.weight_transfer_engine.reset_weight_update_target()
+        if self._weight_update_is_draft and (
+            (draft_model := self.get_draft_model()) is not None
+        ):
+            restore_quantized_lm_heads(draft_model, refresh=refresh)
 
     def finish_weight_update(self) -> None:
         """Finish the current weight update session."""
@@ -1665,13 +1655,15 @@ class Worker(WorkerBase):
             )
 
         with set_current_vllm_config(self.vllm_config):
-            self.weight_transfer_engine.finish_weight_update()
-            self.weight_transfer_engine.reset_weight_update_target()
-            self._weight_update_active = False
-            if self._weight_update_is_draft and (
-                (draft_model := self.get_draft_model()) is not None
-            ):
-                restore_quantized_lm_heads(draft_model)
+            try:
+                self.weight_transfer_engine.finish_weight_update()
+            except BaseException:
+                if direct_reload_enabled():
+                    # a failed direct finish cannot be retried: end the
+                    # session so that a new full update can start
+                    self._end_weight_update(refresh=False)
+                raise
+            self._end_weight_update(refresh=True)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:

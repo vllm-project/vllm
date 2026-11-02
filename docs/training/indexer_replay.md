@@ -59,12 +59,14 @@ accepted-token cursors, prefix restoration and finish lifecycle. Model identity,
 source layers and TopK width identify the SHM namespace. R3-only storage keeps
 its existing format.
 
-GPUWorker initializes and binds both capturers after leaving the weights memory
-pool and before KV-cache memory profiling. The Connector owns their buffers and
-bindings; SHM storage is initialized separately after KV capacity is resolved.
-Capture buffers therefore participate in automatic KV budgeting and stay outside
-the weights pool during weight reload or sleep. Explicit KV memory budgets remain
-manual. Shutdown releases captured graphs before unbinding and freeing capture.
+The V2 model runner creates the Connector in `profile_run()`. Its constructor
+allocates and binds both capturers before the profiling forward pass, so the
+persistent device buffers and Indexer snapshot pool enter automatic KV budgeting.
+Real KV initialization reuses the Connector and calls `initialize_output_storage()`
+after KV capacity is resolved; only the output TP rank creates SHM storage.
+Initialization paths that skip profiling retain main's Connector fallback.
+Capture buffers stay outside the weights pool. Explicit KV memory budgets remain
+manual. Shutdown releases captured graphs before unbinding Indexer capture.
 
 Indexer storage is `4 * num_indexer_sources * index_topk` bytes/token. The
 record adds the byte widths of all enabled artifacts, including routed experts.

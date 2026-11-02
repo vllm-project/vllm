@@ -160,16 +160,15 @@ def test_capturer_rejects_models_without_explicit_capture_support(capture_config
         IndexerCapturer(torch.nn.Linear(2, 2), capture_config)
 
 
-def test_connector_owns_indexer_capture_before_storage(capture_config, dist_init):
+def test_connector_binds_indexer_at_construction_before_storage(
+    capture_config, dist_init
+):
     """Early capture works without SHM and connector close removes its sink."""
     capture_config.aux_output_config.enable_return_indexer_topk = True
     source = CaptureSource(2)
-    connector = AuxOutputWorkerConnector(capture_config)
     assert source.indexer_capture is None
+    connector = AuxOutputWorkerConnector(vllm_config=capture_config, model=source)
     try:
-        connector.initialize_capturers(source)
-        with pytest.raises(RuntimeError, match="already initialized"):
-            connector.initialize_capturers(source)
         rows = torch.tensor([[7, 1], [3, -1]], dtype=torch.int32)
         source(rows)
         assert source.indexer_capture is not None

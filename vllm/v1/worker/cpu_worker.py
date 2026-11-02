@@ -7,7 +7,6 @@ import vllm.v1.worker.cpu.shm  # noqa # isort: skip
 import math
 import os
 import sys
-from typing import TYPE_CHECKING, cast
 
 import psutil
 import torch
@@ -26,9 +25,6 @@ from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.worker.cpu_model_runner import CPUModelRunner
 from vllm.v1.worker.gpu_worker import Worker, init_worker_distributed_environment
 from vllm.v1.worker.worker_base import CompilationTimes
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
 logger = init_logger(__name__)
 
@@ -153,13 +149,22 @@ class CPUWorker(Worker):
 
         # Construct the model runner
         if self.use_v2_model_runner:
-            from vllm.v1.worker.cpu.model_runner import (
-                CPUModelRunner as CPUModelRunnerV2,
-            )
+            if current_platform.uses_standalone_cpu_model_runner():
+                from vllm.v1.worker.cpu.standalone_model_runner import (
+                    StandaloneCPUModelRunner,
+                )
 
-            self.model_runner: CPUModelRunner = CPUModelRunnerV2(  # type: ignore
-                self.vllm_config, self.device
-            )
+                self.model_runner: CPUModelRunner = StandaloneCPUModelRunner(  # type: ignore
+                    self.vllm_config, self.device
+                )
+            else:
+                from vllm.v1.worker.cpu.model_runner import (
+                    CPUModelRunner as CPUModelRunnerV2,
+                )
+
+                self.model_runner = CPUModelRunnerV2(  # type: ignore
+                    self.vllm_config, self.device
+                )
         else:
             self.model_runner = CPUModelRunner(self.vllm_config, torch.device("cpu"))
 
@@ -271,10 +276,13 @@ class CPUWorker(Worker):
         # their Triton JIT lands in the first request's TTFT.
         kernel_config = self.vllm_config.kernel_config
         if self.use_v2_model_runner and kernel_config.enable_jit_warmup:
-            from vllm.v1.worker.gpu.warmup import warmup_kernels
+            if current_platform.uses_standalone_cpu_model_runner():
+                from vllm.v1.worker.cpu.warmup import warmup_kernels
+            else:
+                from vllm.v1.worker.gpu.warmup import warmup_kernels
 
             warmup_kernels(
-                cast("GPUModelRunner", self.model_runner),
+                self.model_runner,
                 self.execute_model,
                 self.sample_tokens,
             )

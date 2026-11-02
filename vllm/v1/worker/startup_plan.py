@@ -35,7 +35,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# AuxOutput capture buffers now enter the profiled window outside the weights pool.
 PLAN_SCHEMA_VERSION = 2
 
 

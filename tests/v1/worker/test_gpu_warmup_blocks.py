@@ -90,6 +90,7 @@ def _make_runner(
         num_speculative_steps=num_spec_steps,
         speculative_config=SimpleNamespace() if num_spec_steps else None,
         adaptive_verification=None,
+        speculator=None,
         rejection_sampler=None,
         decode_query_len=num_spec_steps + 1,
         is_pooling_model=False,
@@ -369,7 +370,7 @@ def test_num_lookahead_tokens_per_method(
     object.__setattr__(
         speculative_config,
         "draft_model_config",
-        SimpleNamespace(hf_config=hf_config),
+        SimpleNamespace(hf_config=hf_config, architectures=[]),
     )
 
     config = _config_without_post_init(speculative_config)

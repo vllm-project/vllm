@@ -56,8 +56,12 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.logger import init_logger
 from vllm.renderers.chat_utils import ChatTemplateContentFormatOption
 from vllm.renderers.hf import HfRenderer, resolve_chat_template
-from vllm.renderers.inputs.preprocess import extract_prompt_components
+from vllm.renderers.inputs.preprocess import (
+    extract_prompt_components,
+    parse_dec_only_prompt,
+)
 from vllm.renderers.online_renderer import OnlineRenderer
+from vllm.renderers.params import ChatParams
 
 logger = init_logger(__name__)
 
@@ -273,8 +277,10 @@ class AnthropicServingMessages(OpenAIServingChat):
         """
         renderer = online_renderer.renderer
         tool_variants: tuple[list[dict[str, Any]] | None, ...] = (None, [])
-        if not isinstance(renderer, HfRenderer) or renderer.tokenizer is None:
-            merge = cls._detect_merge_inline_system(online_renderer.chat_template)
+        if renderer.tokenizer is None:
+            merge = True
+        elif not isinstance(renderer, HfRenderer):
+            merge = not cls._renderer_keeps_inline_system(online_renderer)
         else:
             merge = any(
                 cls._detect_merge_inline_system(
@@ -288,13 +294,18 @@ class AnthropicServingMessages(OpenAIServingChat):
                 for tools in tool_variants
             )
         if merge:
+            hint = (
+                " Pass a --chat-template that accepts non-leading system "
+                "messages to avoid this."
+                if isinstance(renderer, HfRenderer)
+                else ""
+            )
             logger.warning_once(
                 "The chat template requires system-first ordering, so inline "
                 "system messages in /v1/messages requests (e.g. Claude Code's "
                 "per-turn reminders) are merged into the leading system prompt. "
                 "Each new one changes the prompt prefix, so the rest of the "
-                "conversation misses the prefix cache. Pass a --chat-template "
-                "that accepts non-leading system messages to avoid this."
+                "conversation misses the prefix cache." + hint
             )
         return merge
 
@@ -324,8 +335,59 @@ class AnthropicServingMessages(OpenAIServingChat):
                 add_generation_prompt=False,
             )
             return False
-        except jinja2.TemplateError:
+        except Exception:
+            # Non-TemplateError failures (e.g. TypeError from filters on
+            # undefined variables) must not abort server startup.
             return True
+
+    @staticmethod
+    def _renderer_keeps_inline_system(online_renderer: OnlineRenderer) -> bool:
+        """Probe a non-jinja renderer (e.g. DeepSeek V4.1's encoder).
+
+        Inline system messages must render in order as distinct system turns,
+        and a trailing one must still be followed by the generation prompt.
+        DeepSeek V4 appends their text to the user turn, V3.2 puts it after the
+        generation prompt, and Mistral moves it into the last user turn.
+        """
+        markers = ("SYSA", "USRA", "SYSB", "USRB")
+        messages: list[Any] = [
+            {"role": role, "content": marker}
+            for role, marker in zip(("system", "user") * 2, markers)
+        ]
+        renderer = online_renderer.renderer
+        params = ChatParams(
+            chat_template=online_renderer.chat_template,
+            chat_template_content_format=online_renderer.chat_template_content_format,
+            chat_template_kwargs={"add_generation_prompt": True},
+        ).with_defaults(online_renderer.default_chat_template_kwargs)
+
+        def render(msgs: list[Any]) -> str:
+            _, prompt = renderer.render_messages(msgs, params)
+            text, token_ids, _ = extract_prompt_components(
+                renderer.model_config, parse_dec_only_prompt(prompt)
+            )
+            if text is None:
+                text = renderer.get_tokenizer().decode(token_ids or [])
+            return text
+
+        def separator(text: str) -> str:
+            return text[text.find(markers[1]) + len(markers[1]) : text.find(markers[2])]
+
+        try:
+            full = render(messages)
+            trailing = render(messages[:3])
+            as_user = render([*messages[:2], {**messages[2], "role": "user"}])
+        except Exception:
+            logger.debug("Inline system probe failed", exc_info=True)
+            return False
+        positions = [full.find(marker) for marker in markers]
+        if -1 in positions or positions != sorted(positions):
+            return False
+        system_separator = separator(full)
+        if not system_separator.strip() or system_separator == separator(as_user):
+            return False
+        generation_prompt = full[positions[-1] + len(markers[-1]) :]
+        return trailing.endswith(markers[2] + generation_prompt)
 
     @staticmethod
     def _convert_image_source_to_url(source: dict[str, Any]) -> str:
