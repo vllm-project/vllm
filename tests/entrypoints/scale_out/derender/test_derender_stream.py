@@ -112,6 +112,15 @@ def _merge_fake_deltas(
     return accumulated
 
 
+class _FakeToolParser:
+    """Tool parser slot filler so `tool_choice="auto"` keeps tool calls."""
+
+    engine_based_streaming = True
+
+    def __init__(self, tokenizer, tools):
+        pass
+
+
 class _FakeParser(Parser):
     """Deterministic `Parser` stub for unit testing the replay/merge/pin
     mechanics of `OnlineDerenderer._derender_chat_stream_parsed` in
@@ -131,6 +140,8 @@ class _FakeParser(Parser):
       it happened.
     - Anything else emits nothing.
     """
+
+    tool_parser_cls = _FakeToolParser  # type: ignore[assignment]
 
     TOOL_START = 9
     TOOL_ARG = 10
@@ -306,6 +317,7 @@ def parsed_derenderer(tokenizer):
         request_logger=None,
         chat_template=None,
         chat_template_content_format="string",
+        enable_auto_tools=True,
     )
     dr.parser = _FakeParser
     return dr
@@ -345,7 +357,7 @@ def test_non_streaming_derender_initializes_parser_prefix(
         tools=_WEATHER_TOOLS,
     )
 
-    choices = derenderer._derender_chat(response, request)
+    choices, _ = derenderer._derender_chat(response, request)
 
     parser.set_prompt_token_ids.assert_called_once_with([11, 12])
     assert choices[0].message.tool_calls[0].function.name == "tool"
@@ -409,7 +421,7 @@ async def test_parsed_derender_leaves_out_stop_token_like_engine(
             response = GenerateTokensResponse(
                 request_id="test", prompt_token_ids=[11, 12], choices=[choice]
             )
-            return derenderer._derender_chat(response, request)[0].message.content
+            return derenderer._derender_chat(response, request)[0][0].message.content
 
         # Same decode window and seeding; "length" never drops a token.
         expected = batch_content(
@@ -743,7 +755,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         prompt_ids, output_ids, expected = leading_space_ids
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -761,7 +773,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         prompt_ids, output_ids, expected = leading_space_ids
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -780,7 +792,7 @@ class TestPromptSeededLeadingSpace:
     ):
         prompt_ids, output_ids, expected = leading_space_ids
         wrong_ids = tokenizer.encode("a different prompt", add_special_tokens=False)
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -799,7 +811,7 @@ class TestPromptSeededLeadingSpace:
         self, derenderer, leading_space_ids
     ):
         _, output_ids, _ = leading_space_ids
-        choices = await derenderer.derender_chat(
+        choices, _ = await derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="t",
                 choices=[
@@ -1590,7 +1602,10 @@ class TestDerenderChatStreamParsed:
                     ids, logprobs=_generate_logprobs(ids)
                 ),
                 state=state,
-                chat_request=_chat_request(),
+                chat_request=_chat_request(
+                    tools=[{"type": "function", "function": {"name": "get_weather"}}],
+                    tool_choice="auto",
+                ),
                 prompt_token_ids=[1, 2],
             )
             choice = chunk.choices[0]
@@ -1887,7 +1902,7 @@ class TestDerenderChatStreamHarmony:
         reasoning = "".join(d.reasoning or "" for d in deltas)
         content = "".join(d.content or "" for d in deltas)
 
-        batch_choices = await harmony_derenderer.derender_chat(
+        batch_choices, _ = await harmony_derenderer.derender_chat(
             GenerateTokensResponse(
                 request_id="test-harmony-batch",
                 choices=[
