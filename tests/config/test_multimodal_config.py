@@ -107,6 +107,44 @@ def test_mm_encoder_attn_dtype_hash_updates(tmp_path):
     assert fp8_hash != fp8_static_hash
 
 
+@pytest.mark.parametrize(
+    "overrides", [{"mm_encoder_tp_mode": "data"}, {"mm_device_do_normalize": False}]
+)
+def test_mm_hash_tracks_encoder_graph_fields(overrides):
+    assert (
+        MultiModalConfig(**overrides).compute_hash()
+        != MultiModalConfig().compute_hash()
+    )
+
+
+def test_mm_hash_ignores_non_graph_fields(tmp_path):
+    """fp8 base so mm_encoder_fp8_scale_save_path passes validation."""
+    base = MultiModalConfig(mm_encoder_attn_dtype="fp8")
+    changed = MultiModalConfig(
+        mm_encoder_attn_dtype="fp8",
+        language_model_only=True,
+        limit_per_prompt={"image": 2},
+        enable_mm_embeds=True,
+        media_io_kwargs={"video": {"num_frames": 8}},
+        mm_processor_kwargs={"num_crops": 4},
+        mm_processor_cache_gb=8.0,
+        mm_processor_cache_type="shm",
+        mm_hasher_algorithm="sha256",
+        mm_shm_cache_max_object_size_mb=256,
+        mm_encoder_only=True,
+        mm_encoder_fp8_scale_save_path=str(tmp_path / "out.json"),
+        mm_encoder_fp8_scale_save_margin=2.0,
+        interleave_mm_strings=True,
+        skip_mm_profiling=True,
+        video_pruning_rate=0.5,
+        video_pruning_method="vidcom2",
+        mm_tensor_ipc="torch_shm",
+        allow_missing_mm_embeddings=True,
+        mm_ipc_gpu_memory_gb=1.0,
+    )
+    assert changed.compute_hash() == base.compute_hash()
+
+
 _MULTIMODAL_MODEL = "llava-hf/llava-1.5-7b-hf"
 _TEXT_ONLY_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 
