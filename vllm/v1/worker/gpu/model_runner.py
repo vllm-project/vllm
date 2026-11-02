@@ -56,7 +56,10 @@ from vllm.model_executor.layers.quantization.online.lm_head import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.model_executor.model_loader.reload.inplace import reload_weights
-from vllm.model_executor.models.interfaces import requires_raw_input_tokens
+from vllm.model_executor.models.interfaces import (
+    requires_raw_input_tokens,
+    supports_fp32_logits_gather,
+)
 from vllm.model_executor.offloader import (
     create_offloader,
     get_offloader,
@@ -197,6 +200,16 @@ from vllm.v1.worker.utils import (
 from vllm.v1.worker.workspace import lock_workspace, use_workspace_lane
 
 logger = init_logger(__name__)
+
+
+def fp32_gather_logits_processors(model: nn.Module) -> list[LogitsProcessor]:
+    """The logits processors whose TP gather may write FP32 logits for the
+    sampler: all of ``model``'s if it opts in with `SupportsFP32LogitsGather`
+    (its ``compute_logits`` returns their output unchanged), otherwise none,
+    so that the gather keeps the head dtype and the sampler copies to FP32."""
+    if not supports_fp32_logits_gather(model):
+        return []
+    return [m for m in model.modules() if isinstance(m, LogitsProcessor)]
 
 
 class GPUModelRunner(LoRAModelRunnerMixin):
@@ -348,7 +361,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.rejection_sampler: RejectionSampler | None = None
         # The target model's logits processors, whose TP gather can write the
         # FP32 logits the stock samplers would otherwise copy (see
-        # _compute_logits). None when a custom sampler is used.
+        # _compute_logits). Empty unless the model opts in, None when a
+        # custom sampler is used.
         self.fp32_logits_processors: list[LogitsProcessor] | None = None
         self.batch_sharder: BatchSharder | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
@@ -530,9 +544,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.vllm_config._check_supports_watermarking(custom_sampler=True)
                 self.sampler, self.rejection_sampler = custom
             else:
-                self.fp32_logits_processors = [
-                    m for m in self.model.modules() if isinstance(m, LogitsProcessor)
-                ]
+                self.fp32_logits_processors = fp32_gather_logits_processors(self.model)
                 if self.speculative_config is not None:
                     self.rejection_sampler = RejectionSampler(
                         self.sampler,
@@ -1795,7 +1807,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         """The target logits of ``sample_hidden_states``.
 
         When the sampler would copy the logits to FP32 and may process them in
-        place, the TP gather writes FP32 itself (exact) and the copy is saved.
+        place, and the model opts in (see `fp32_gather_logits_processors`),
+        the TP gather writes FP32 itself (exact) and the copy is saved.
         """
         sampler = self.sampler
         processors = self.fp32_logits_processors
