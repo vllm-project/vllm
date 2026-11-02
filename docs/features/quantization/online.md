@@ -258,7 +258,7 @@ llm = LLM(
             # fnmatch: quantize all MoE experts
             "*mlp.experts*": "mxfp4",
             # spec form: MXFP4 experts with BF16 (unquantized) activations
-            "*shared_experts*": {"weight": "mxfp4", "activation": None},
+            "*shared_expert*": {"weight": "mxfp4", "activation": None},
         },
     },
 )

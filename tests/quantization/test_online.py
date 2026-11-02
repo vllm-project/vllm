@@ -1902,6 +1902,22 @@ def test_nvfp4_one_sided_rejects_unsupported_input_dtype(input_dtype: torch.dtyp
             id="mxfp4_null_activation_override",
         ),
         pytest.param(
+            GRANITE_MODEL_NAME,
+            "online",
+            {
+                "targets": {
+                    "*experts*": {
+                        "weight": "mxfp4",
+                        "activation": "mxfp8",
+                    },
+                },
+            },
+            UnquantizedLinearMethod,
+            Mxfp4OnlineMoEMethod,
+            {},
+            id="targets_activation_override",
+        ),
+        pytest.param(
             "mgoin/Qwen3-0.6B-MXFP8",
             None,
             {"linear": "fp8_per_channel"},
