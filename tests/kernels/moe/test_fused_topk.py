@@ -8,6 +8,7 @@ Run `pytest tests/kernels/moe/test_fused_topk.py`.
 import pytest
 import torch
 
+import vllm._custom_ops as ops
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -275,3 +276,60 @@ def test_fused_topk_bias_nan_inf_clamp(
             f"Row {row} has non-finite weights {topk_weights[row].tolist()} "
             f"(bad_value={bad_value}, scoring_func={scoring_func})"
         )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is skipped on non-CUDA platform.",
+)
+@pytest.mark.parametrize("num_tokens", [1, 33, 2048])
+@pytest.mark.parametrize("num_experts", [128, 384, 512])
+@pytest.mark.parametrize("topk", [1, 10, 32])
+@pytest.mark.parametrize("scoring_func", ["softmax", "sigmoid"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("ties", [False, True])
+def test_topk_without_bias_matches_zero_bias(
+    num_tokens: int,
+    num_experts: int,
+    topk: int,
+    scoring_func: str,
+    dtype: torch.dtype,
+    ties: bool,
+):
+    """Without a correction bias, rows owned by a full warp select with
+    redux.sync on SM80+. An all-zero bias keeps the original selection loop
+    with the same scores, so both launches must match bit for bit, including
+    lowest-index tie breaking and NaN/Inf rows.
+    """
+    torch.manual_seed(0)
+    if ties:
+        gating_output = torch.randint(-2, 3, (num_tokens, num_experts)).to(dtype)
+        gating_output[0] = 1.0
+        if num_tokens > 1:
+            gating_output[1] = float("nan")
+            gating_output[2] = float("inf")
+    else:
+        gating_output = torch.randn((num_tokens, num_experts), dtype=dtype)
+    gating_output = gating_output.cuda()
+    zero_bias = torch.zeros(num_experts, dtype=torch.float32, device="cuda")
+    topk_func = ops.topk_softmax if scoring_func == "softmax" else ops.topk_sigmoid
+
+    outputs = []
+    for bias in (None, zero_bias):
+        topk_weights = torch.empty(
+            (num_tokens, topk), dtype=torch.float32, device="cuda"
+        )
+        topk_ids = torch.empty((num_tokens, topk), dtype=torch.int32, device="cuda")
+        token_expert_indices = torch.empty_like(topk_ids)
+        topk_func(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize=True,
+            e_score_correction_bias=bias,
+        )
+        outputs.append((topk_weights.view(torch.int32), topk_ids, token_expert_indices))
+
+    for out, ref in zip(*outputs):
+        torch.testing.assert_close(out, ref, atol=0, rtol=0)
