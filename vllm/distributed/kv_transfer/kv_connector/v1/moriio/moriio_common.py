@@ -248,7 +248,7 @@ def get_port_offset(
 
 
 def get_pp_port_stride(tp_size: int, dp_size: int) -> int:
-    return max(tp_size, 1) * max(dp_size, 1)
+    return tp_size * dp_size
 
 
 def get_peer_notify_ports(
@@ -263,8 +263,8 @@ def get_peer_notify_ports(
     return [
         base_port
         + get_port_offset(dp_rank, tp_rank, pp_rank=pp_rank, pp_stride=pp_stride)
-        for pp_rank in range(max(pp_size, 1))
-        for tp_rank in range(max(tp_size, 1))
+        for pp_rank in range(pp_size)
+        for tp_rank in range(tp_size)
     ]
 
 

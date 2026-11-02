@@ -40,6 +40,7 @@ def _producer(global_dp_rank: int, dp_size: int, dp_size_local: int):
                 data_parallel_size=dp_size,
                 data_parallel_size_local=dp_size_local,
                 tensor_parallel_size=1,
+                pipeline_parallel_size=1,
             )
         ),
     )

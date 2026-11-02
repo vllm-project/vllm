@@ -166,60 +166,7 @@ The number of KV heads must be a multiple or a divisor of each TP size. Blocks a
 
 In WRITE mode the prefill instance can run with `--pipeline-parallel-size` greater than 1, for example `--tensor-parallel-size 1 --pipeline-parallel-size 4` against a decode instance with `--tensor-parallel-size 4`. Each pipeline stage writes the layers it holds into the decode blocks, and a decode rank starts decoding only after every stage has reported its writes. The prefill instance advertises its pipeline size to the proxy, and the reference proxy (`moriio_toy_proxy_server.py`) forwards it to the decode instance as `remote_pp_size` in `kv_transfer_params`; a custom router must do the same.
 
-Pipeline parallelism is supported only on a prefill instance (`kv_producer`) in WRITE mode with a layer-outermost KV cache layout (the default unless an attention backend requires a block-outermost one). A pipeline-parallel decode or `kv_both` instance, READ mode, and a block-outermost layout fail at startup.
-
-### Example: pipeline-parallel prefill on one node
-
-DeepSeek-V2-Lite-Chat with a prefill instance on GPUs 0-1 (`--tensor-parallel-size 1 --pipeline-parallel-size 2`) and a decode instance on GPUs 2-3 (`--tensor-parallel-size 2`), over the xGMI backend. Start the reference proxy first, as in [Proxy server](#proxy-server).
-
-```bash
-# Prefill instance (GPUs 0-1)
-export VLLM_ROCM_USE_AITER=1
-export HIP_VISIBLE_DEVICES=0,1
-export MORI_IO_XGMI_SCATTER_GATHER_THRESHOLD=0
-
-vllm serve deepseek-ai/DeepSeek-V2-Lite-Chat \
-  --tensor-parallel-size 1 --pipeline-parallel-size 2 \
-  --port 20005 \
-  --block-size 64 \
-  --kv-transfer-config '{
-    "kv_connector": "MoRIIOConnector",
-    "kv_role": "kv_producer",
-    "kv_connector_extra_config": {
-      "backend": "xgmi",
-      "proxy_ip": "127.0.0.1",
-      "proxy_ping_port": "36367",
-      "http_port": "20005",
-      "handshake_port": "6301",
-      "notify_port": "6105"
-    }
-  }'
-```
-
-```bash
-# Decode instance (GPUs 2-3)
-export VLLM_ROCM_USE_AITER=1
-export HIP_VISIBLE_DEVICES=2,3
-
-vllm serve deepseek-ai/DeepSeek-V2-Lite-Chat \
-  --tensor-parallel-size 2 \
-  --port 40005 \
-  --block-size 64 \
-  --kv-transfer-config '{
-    "kv_connector": "MoRIIOConnector",
-    "kv_role": "kv_consumer",
-    "kv_connector_extra_config": {
-      "backend": "xgmi",
-      "proxy_ip": "127.0.0.1",
-      "proxy_ping_port": "36367",
-      "http_port": "40005",
-      "handshake_port": "7301",
-      "notify_port": "7501"
-    }
-  }'
-```
-
-Both instances use the same block size and KV cache dtype. The prefill stages bind handshake ports 6301-6302 and notify ports 6105-6106. `MORI_IO_XGMI_SCATTER_GATHER_THRESHOLD=0` makes MoRI use its scatter-gather copy path for every write; with its default xGMI copy path, a completion wait can last the full `transfer_timeout`.
+Pipeline parallelism is supported only on a prefill instance (`kv_producer`) in WRITE mode with a layer-outermost KV cache layout (the default unless an attention backend requires a block-outermost one). A pipeline-parallel decode or `kv_both` instance, READ mode, and a block-outermost layout fail at startup. All pipeline stages must run on one node, since the decode instance sends every stage's allocation to the one host the prefill instance advertises. A prefill instance over several nodes (`--nnodes` greater than 1) fails at startup.
 
 !!! note
     GLM-5 (`GlmMoeDsaForCausalLM`) layers reuse the sparse-attention top-k selection of the nearest earlier layer that runs the indexer, so a pipeline stage must start on a layer that runs its own indexer (for GLM-5.2: layers 0, 1, 2, 6, 10, ..., 74). vLLM's default split of the 78 layers at pipeline size 4 (19, 20, 20, 19) does not; set `VLLM_PP_LAYER_PARTITION=22,20,20,16`.

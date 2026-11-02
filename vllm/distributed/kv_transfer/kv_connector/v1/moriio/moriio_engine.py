@@ -110,8 +110,6 @@ class MoRIIOWriter:
         self._scheduled_layers: dict[TransferId, set[str]] = defaultdict(set)
         self._sealed_writes: dict[TransferId, int] = {}
         self._defer_timeout = worker.moriio_config.defer_timeout
-        self._pp_rank = worker.pp_rank
-        self._pp_size = worker.pp_size
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -629,7 +627,7 @@ class MoRIIOWriter:
 
         # Send completion notification
         for (remote_ip, remote_port), num_writers in notify_targets.items():
-            num_writers *= self._pp_size
+            num_writers *= self.worker.pp_size
             self.worker.moriio_wrapper.send_notify(
                 transfer_id,
                 remote_ip,
@@ -639,7 +637,7 @@ class MoRIIOWriter:
                 message_fields=(
                     {
                         "num_writers": num_writers,
-                        "sender": [self._pp_rank, self.worker.tp_rank],
+                        "sender": [self.worker.pp_rank, self.worker.tp_rank],
                     }
                     if num_writers != 1
                     else None

@@ -215,6 +215,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker.tp_rank = tp_rank
+    worker.pp_rank, worker.pp_size = 0, 1
     worker.world_size = tp_size
     worker.use_mla = layers[0].kind == "mla"
     worker._has_mamba = any(layer.kind == "mamba" for layer in layers)

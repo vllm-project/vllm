@@ -70,7 +70,9 @@ def _fake_worker(
     )
     wrapper._mark_transfer_terminal_locked = lambda transfer_id: None
     wrapper._is_transfer_terminal_locked = lambda transfer_id: False
-    worker = SimpleNamespace(moriio_wrapper=wrapper, tp_rank=tp_rank)
+    worker = SimpleNamespace(
+        moriio_wrapper=wrapper, tp_rank=tp_rank, pp_rank=0, pp_size=1
+    )
     if set_remote_dp_size_local is not None:
         worker.remote_dp_size_local = set_remote_dp_size_local
     return worker

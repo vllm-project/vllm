@@ -537,7 +537,9 @@ def test_write_completion_notifies_once_after_all_sealed_writes_finish():
     request_info.completion_notify_port = 7002
     request_info.completion_remote_ip = "127.0.0.1"
     wrapper.done_remote_allocate_req_dict["xfer"] = request_info
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2))
+    writer = make_moriio_writer(
+        SimpleNamespace(moriio_wrapper=wrapper, tp_rank=2, pp_rank=0, pp_size=1)
+    )
     writer._scheduled_writes["xfer"] = 2
     writer._scheduled_layers["xfer"] = {"dense0", "indexer"}
     writer._sealed_writes["xfer"] = 2

@@ -1301,10 +1301,11 @@ def test_pipeline_stage_has_its_own_engine_and_ports(mock_parallel_groups, pp_ra
     vllm_config = _pp_producer_config(pp_size=4)
     with (
         set_current_vllm_config(vllm_config),
-        patch(
-            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common."
-            "get_pipeline_model_parallel_rank",
-            return_value=pp_rank,
+        patch.multiple(
+            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common",
+            get_pipeline_model_parallel_rank=MagicMock(return_value=pp_rank),
+            # mock_parallel_groups reports a TP size of 0; each stage here is TP1.
+            get_tensor_model_parallel_world_size=MagicMock(return_value=1),
         ),
     ):
         worker = FakeMoRIIOConnectorWorker(vllm_config, "engine0", hand_shake_latency=0)
@@ -1325,6 +1326,20 @@ def test_pipeline_parallel_only_on_a_write_producer(role, read_mode):
     with (
         set_current_vllm_config(vllm_config),
         pytest.raises(NotImplementedError, match="pipeline_parallel_size > 1"),
+    ):
+        MoRIIOConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_test_kv_cache_config()
+        )
+
+
+def test_pipeline_parallel_producer_runs_on_one_node():
+    """The decode reaches every stage at the one host the instance advertises."""
+    vllm_config = create_vllm_config(role="kv_producer")
+    vllm_config.parallel_config.pipeline_parallel_size = 2
+    vllm_config.parallel_config.nnodes = 2
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(NotImplementedError, match="one node"),
     ):
         MoRIIOConnector(
             vllm_config, KVConnectorRole.SCHEDULER, _make_test_kv_cache_config()

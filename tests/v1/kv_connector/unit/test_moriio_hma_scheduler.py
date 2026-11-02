@@ -158,6 +158,7 @@ def _gate_vllm_config(
         num_speculative_tokens=num_speculative_tokens,
         parallel_config=SimpleNamespace(
             tensor_parallel_size=1,
+            pipeline_parallel_size=1,
             decode_context_parallel_size=dcp_size,
             data_parallel_rank=0,
             data_parallel_size_local=1,

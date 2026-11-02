@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
 )
+from vllm.v1.request import RequestStatus
 
 from .utils import make_moriio_writer
 
@@ -147,6 +148,64 @@ def test_decode_sends_its_allocation_to_every_prefill_stage(pp_size, tp_size):
     )
     assert all(n["block_notify_list"] == [5, 6, 7] for n in scheduler.notified)
     assert all(n["transfer_id"] == "tA" for n in scheduler.notified)
+
+
+def _prefill_scheduler(pp_size: int, tp_size: int) -> SimpleNamespace:
+    """The prefill-side state request_finished reads."""
+    scheduler = SimpleNamespace(
+        is_producer=True,
+        _is_hma_required=False,
+        _has_mamba=False,
+        blocks_per_sw=[0],
+        _global_dp_rank=0,
+        engine_id="prefill",
+        host_ip="10.0.0.1",
+        handshake_port=HANDSHAKE_PORT,
+        side_notify_port=NOTIFY_PORT,
+        vllm_config=SimpleNamespace(
+            parallel_config=SimpleNamespace(
+                data_parallel_size=1,
+                data_parallel_size_local=1,
+                tensor_parallel_size=tp_size,
+                pipeline_parallel_size=pp_size,
+            )
+        ),
+    )
+    scheduler.get_exchange_clipped_blocks = (
+        MoRIIOConnectorScheduler.get_exchange_clipped_blocks.__get__(scheduler)
+    )
+    return scheduler
+
+
+@pytest.mark.parametrize(("pp_size", "tp_size"), [(4, 1), (2, 2)])
+def test_decode_reaches_every_stage_with_the_params_the_prefill_returns(
+    pp_size, tp_size
+):
+    """A router may forward the prefill's returned kv_transfer_params as is."""
+    prefill = _prefill_scheduler(pp_size, tp_size)
+    finished = SimpleNamespace(
+        request_id="req",
+        kv_transfer_params={"do_remote_decode": True, "transfer_id": "tA"},
+        status=RequestStatus.FINISHED_LENGTH_CAPPED,
+    )
+    _, params = MoRIIOConnectorScheduler.request_finished(
+        prefill,  # type: ignore[arg-type]
+        finished,  # type: ignore[arg-type]
+        block_ids=[],
+    )
+    assert params is not None
+    assert params["pp_size"] == pp_size
+
+    scheduler = _decode_scheduler()
+    scheduler.update_state_after_alloc(
+        SimpleNamespace(request_id="req", kv_transfer_params=params),
+        SimpleNamespace(get_block_ids=lambda: ([5, 6, 7],)),
+        num_external_tokens=40,
+    )
+
+    assert sorted(n["port"] for n in scheduler.notified) == sorted(
+        _prefill_stage_ports(pp_size, tp_size)
+    )
 
 
 @pytest.mark.parametrize(
@@ -348,8 +407,11 @@ def _write_done_fields(pp_rank: int, pp_size: int) -> list:
             message_fields
         ),
     )
-    writer = make_moriio_writer(SimpleNamespace(moriio_wrapper=wrapper, tp_rank=0))
-    writer._pp_rank, writer._pp_size = pp_rank, pp_size
+    writer = make_moriio_writer(
+        SimpleNamespace(
+            moriio_wrapper=wrapper, tp_rank=0, pp_rank=pp_rank, pp_size=pp_size
+        )
+    )
     info = RemoteAllocInfo(
         block_ids=[[7]],
         writes_done=1,

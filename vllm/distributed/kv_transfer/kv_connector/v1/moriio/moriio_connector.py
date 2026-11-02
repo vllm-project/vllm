@@ -313,7 +313,8 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
             + str(self.kv_transfer_config.kv_connector_extra_config["handshake_port"])
         )
         self.mode = get_moriio_mode(self.kv_transfer_config)
-        if vllm_config.parallel_config.pipeline_parallel_size > 1 and (
+        parallel_config = vllm_config.parallel_config
+        if parallel_config.pipeline_parallel_size > 1 and (
             self.mode != MoRIIOMode.WRITE
             or self.kv_transfer_config.kv_role != "kv_producer"
         ):
@@ -321,6 +322,17 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
                 "MoRIIOConnector supports pipeline_parallel_size > 1 only on "
                 "the producer in WRITE mode, got kv_role="
                 f"{self.kv_transfer_config.kv_role!r} in {self.mode.value} mode"
+            )
+        if (
+            parallel_config.pipeline_parallel_size > 1
+            and parallel_config.nnodes_within_dp > 1
+        ):
+            # The decode sends every stage's allocation and release to the one
+            # host this instance advertises.
+            raise NotImplementedError(
+                "MoRIIOConnector with pipeline_parallel_size > 1 requires all "
+                "pipeline stages on one node, got "
+                f"{parallel_config.nnodes_within_dp} nodes"
             )
         self._transfers_mamba_state = any(
             group.enable_kv_transfer and isinstance(group.kv_cache_spec, MambaSpec)
@@ -1670,6 +1682,7 @@ class MoRIIOConnectorScheduler:
                 self.vllm_config.parallel_config.data_parallel_size_local
             ),
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            pp_size=self.vllm_config.parallel_config.pipeline_parallel_size,
             transfer_id=params["transfer_id"],
         )
 
