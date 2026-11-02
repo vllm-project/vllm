@@ -110,7 +110,7 @@ class _InProcessKernelTransferEngine(
 
 
 def _check_xpu_moe_reload(worker):
-    """Reload through the worker and replay a graph holding derived weights."""
+    """Reload through the worker and replay a graph holding model parameters."""
     import torch
 
     from vllm.forward_context import set_forward_context
@@ -119,6 +119,7 @@ def _check_xpu_moe_reload(worker):
 
     model = worker.model_runner.get_model()
     block = next(m for m in model.modules() if isinstance(m, Qwen3_5SparseMoeBlock))
+    assert block._xpu_moe_shared_fused_plan is not None, "Prepare before graph capture"
     config = worker.vllm_config
     x = torch.ones(1, block.gate.input_size, dtype=torch.float16, device=worker.device)
     stream = torch.xpu.Stream(device=worker.device)
@@ -139,6 +140,7 @@ def _check_xpu_moe_reload(worker):
         torch.xpu.synchronize()
         before = output.clone()
         weight = block.shared_expert.down_proj.weight
+        assert plan.shared_w2 is weight
         name = next(n for n, p in model.named_parameters() if p is weight)
         original = weight.clone()
         try:
@@ -165,7 +167,7 @@ def _check_xpu_moe_reload(worker):
 
 
 def _check_xpu_moe_weight_updates(worker):
-    """Target and draft update sessions refresh the selected graph's copies."""
+    """Target and draft update sessions update the selected graph's parameters."""
     from vllm.config import WeightTransferConfig
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock

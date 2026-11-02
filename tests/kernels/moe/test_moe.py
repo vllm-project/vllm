@@ -216,6 +216,7 @@ def test_xpu_qwen3_5_native_shared_expert_decode(xpu_qwen3_5_moe, num_tokens):
 @pytest.mark.parametrize(
     "xpu_qwen3_5_moe,num_tokens",
     [
+        ((torch.float16, True), 0),
         ((torch.float16, True), 9),
         ((torch.bfloat16, True), 9),
         *(((torch.float16, False), m) for m in (1, 2, 4, 8, 9)),
@@ -256,7 +257,7 @@ def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe, monkeypatch):
 @pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
 def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch):
     """Repeated eligible decode falls back without repeated import failures."""
-    from vllm.models.qwen3_5.xpu.model import _XpuMoESharedFusion
+    from vllm.models.qwen3_5.xpu.specialized_decode.moe import MoEStep
 
     monkeypatch.setitem(
         sys.modules, "vllm_xpu_kernels.moe_shared_fused_interface", None
@@ -265,7 +266,7 @@ def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch
 
     def trace(frame, event, arg):
         nonlocal failures
-        if frame.f_code is not _XpuMoESharedFusion.get_plan.__code__:
+        if frame.f_code is not MoEStep.__init__.__code__:
             return None
         if event == "exception" and issubclass(arg[0], ImportError):
             failures += 1
@@ -286,7 +287,7 @@ def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch
     "xpu_qwen3_5_moe", [(torch.float16, True), (torch.bfloat16, True)], indirect=True
 )
 def test_xpu_qwen3_5_checkpoint_then_kernel_scale_reload(xpu_qwen3_5_moe):
-    """Kernel scale updates survive refresh after checkpoint processing."""
+    """Kernel scale updates reach the same parameters after checkpoint processing."""
     from vllm.forward_context import set_forward_context
     from vllm.model_executor.model_loader.reload import (
         finalize_layerwise_reload,
@@ -318,7 +319,6 @@ def test_xpu_qwen3_5_checkpoint_then_kernel_scale_reload(xpu_qwen3_5_moe):
                 param = routed.get_parameter(name)
                 param.weight_loader(param, weight, name, shard, expert_id)
         finalize_layerwise_reload(routed, config.model_config)
-        block.refresh_fused_weights()
 
         updates = [
             (name, torch.zeros_like(param))
@@ -327,7 +327,6 @@ def test_xpu_qwen3_5_checkpoint_then_kernel_scale_reload(xpu_qwen3_5_moe):
         ]
         assert len(updates) == 2
         reload_weights(config, block, updates, None, is_checkpoint_format=False)
-        block.refresh_fused_weights()
         for name, expected in updates:
             torch.testing.assert_close(
                 block.get_parameter(name), expected, rtol=0, atol=0
@@ -338,6 +337,66 @@ def test_xpu_qwen3_5_checkpoint_then_kernel_scale_reload(xpu_qwen3_5_moe):
         assert not torch.equal(actual, before)
         assert block._xpu_moe_shared_fused_plan is plan
         assert [plan.w13_scales.data_ptr(), plan.w2_scales.data_ptr()] == scale_ptrs
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
+def test_xpu_qwen3_5_shared_weight_checkpoint_reload_graph(xpu_qwen3_5_moe):
+    """Checkpoint processing preserves the shared parameter a graph reads."""
+    from vllm.forward_context import set_forward_context
+    from vllm.model_executor.model_loader.reload import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+    )
+    from vllm.model_executor.model_loader.reload.inplace import reload_weights
+    from vllm.model_executor.models.qwen3_next import Qwen3NextSparseMoeBlock
+
+    block, config, _ = xpu_qwen3_5_moe
+    x = torch.ones(1, 128, dtype=torch.float16, device=DEVICE_TYPE)
+    with torch.inference_mode(), set_forward_context(None, config):
+        block(x)
+        layer = block.shared_expert.down_proj
+        weight = layer.weight
+        original, scale = weight.clone(), layer.weight_scale.clone()
+        plan = block._xpu_moe_shared_fused_plan
+        assert plan is not None and plan.shared_w2 is weight
+        weight_ptr = weight.data_ptr()
+        stream = torch.xpu.Stream()
+        stream.wait_stream(torch.xpu.current_stream())
+        with torch.xpu.stream(stream):
+            block(x)
+        stream.synchronize()
+        graph = torch.xpu.XPUGraph()
+        with torch.xpu.graph(graph, stream=stream):
+            output = block(x)
+        graph.replay()
+        torch.xpu.synchronize()
+        before = output.clone()
+        try:
+            initialize_layerwise_reload(layer)
+            checkpoint = torch.zeros_like(original.t().contiguous())
+            layer.weight.weight_loader(layer.weight, checkpoint)
+            layer.weight_scale.weight_loader(
+                layer.weight_scale, scale.reshape(layer.weight_scale.shape)
+            )
+            finalize_layerwise_reload(layer, config.model_config)
+            assert layer.weight is weight and weight.data_ptr() == weight_ptr
+            expected = Qwen3NextSparseMoeBlock.forward(block, x)
+            graph.replay()
+            torch.xpu.synchronize()
+            torch.testing.assert_close(output, expected, rtol=1e-2, atol=1e-2)
+            assert not torch.equal(output, before)
+        finally:
+            reload_weights(
+                config,
+                block,
+                [("shared_expert.down_proj.weight", original)],
+                None,
+                is_checkpoint_format=False,
+            )
+        graph.replay()
+        torch.xpu.synchronize()
+        torch.testing.assert_close(output, before, rtol=0, atol=0)
 
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")

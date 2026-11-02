@@ -44,14 +44,6 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.kernels.linear.scaled_mm.xpu import XPUW8A16FP8LinearKernel
-from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
-from vllm.model_executor.layers.fused_moe.experts.xpu_moe import XPUExpertsFp8
-from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
-    ZeroExpertRouter,
-)
-from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm as Qwen3_5RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -115,220 +107,21 @@ from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 
+from .specialized_decode.hooks import initialize_specialized_decode
+from .specialized_decode.moe import MoEStep
+
 if TYPE_CHECKING:
-    from vllm_xpu_kernels.moe_shared_fused_interface import XpuMoESharedFusedDecode
+    from vllm_xpu_kernels.moe_shared_fused_interface import XpuFusedMoeWithSharedExpert
 
 logger = init_logger(__name__)
 
 
-class _XpuMoESharedFusion:
-    """Prepare native weights once; refresh derived copies without recapture."""
-
-    def __init__(self, block: "Qwen3_5SparseMoeBlock"):
-        self.plan: XpuMoESharedFusedDecode | None = None
-        self._weights = self._get_weights(block)
-        self.dtype: torch.dtype | None = None
-        self.hidden_dim = self.top_k = 0
-        if self._weights is not None:
-            config = cast(MoERunner, block.experts).moe_config
-            self.dtype = config.in_dtype
-            self.hidden_dim = config.hidden_dim
-            self.top_k = config.experts_per_token
-
-    @staticmethod
-    def _get_weights(
-        block: "Qwen3_5SparseMoeBlock",
-    ) -> tuple[torch.Tensor, ...] | None:
-        runner, shared = block.experts, block.shared_expert
-        if not isinstance(runner, MoERunner) or shared is None:
-            return None
-        config = runner.moe_config
-        parallel = config.moe_parallel_config
-        if (
-            block.is_sequence_parallel
-            or block.replicate_shared_expert
-            or block.is_fused_shared_expert_enabled
-            or runner.routed_input_transform is not None
-            or runner.routed_output_transform is not None
-            or runner.enable_dbo
-            or isinstance(runner.router, ZeroExpertRouter)
-            or runner.activation != MoEActivation.SILU
-            or runner.routed_scaling_factor != 1.0
-            or runner.routed_experts.apply_router_weight_on_input
-            or config.has_bias
-            or config.is_lora_enabled
-            or parallel.enable_eplb
-            or parallel.use_ep
-            or parallel.ep_size != 1
-            or runner.expert_map is not None
-            or parallel.dp_size != 1
-            or parallel.pcp_size != 1
-            or parallel.is_sequence_parallel
-            or not isinstance(shared.act_fn, SiluAndMul)
-        ):
-            return None
-        if any(
-            layer.bias is not None
-            for layer in (
-                shared.gate_up_proj,
-                shared.down_proj,
-                block.shared_expert_gate,
-            )
-        ):
-            return None
-        kernel = runner.routed_experts.quant_method.moe_kernel
-        experts = kernel.fused_experts if kernel is not None else None
-        if not isinstance(experts, XPUExpertsFp8):
-            return None
-        gu, down, gate = (
-            shared.gate_up_proj,
-            shared.down_proj,
-            block.shared_expert_gate,
-        )
-        # The fused shared projections retain FP16/BF16 activations.
-        if not all(
-            isinstance(
-                getattr(layer.quant_method, "fp8_linear", None),
-                XPUW8A16FP8LinearKernel,
-            )
-            for layer in (gu, down)
-        ):
-            return None
-        s13 = runner.routed_experts.w13_weight_scale
-        s2 = runner.routed_experts.w2_weight_scale
-        shared_s13 = getattr(gu, "weight_scale", None)
-        shared_s2 = getattr(down, "weight_scale", None)
-        if s13 is None or s2 is None or shared_s13 is None or shared_s2 is None:
-            return None
-        w13, w2 = runner.routed_experts.w13_weight, runner.routed_experts.w2_weight
-        if not (
-            w13.dtype
-            == w2.dtype
-            == gu.weight.dtype
-            == down.weight.dtype
-            == torch.float8_e4m3fn
-            and s13.shape == s2.shape == (w13.shape[0],)
-            and shared_s13.numel() == shared_s2.numel() == 1
-            and gate.weight.dtype == runner.moe_config.in_dtype
-            and gu.weight.shape == w13.shape[1:]
-            and down.weight.shape == w2.shape[1:]
-            and w2.shape[0] == w13.shape[0]
-            and w13.shape[2] == 2 * w2.shape[1]
-            and w2.shape[2] == w13.shape[1]
-            and 0 < runner.moe_config.experts_per_token <= w13.shape[0] <= 512
-            and gate.weight.numel() == w13.shape[1]
-        ):
-            return None
-        matrices = (w13, w2, gu.weight, down.weight)
-        scales = (s13, s2, shared_s13, shared_s2)
-        weights = (*matrices, *scales, gate.weight)
-        if not all(t.device == w13.device for t in weights):
-            return None
-        # The provider copies transposed shared linears once, before capture.
-        if any(t.is_contiguous() and t.data_ptr() % 64 for t in matrices):
-            return None
-        if (gate.weight.is_contiguous() and gate.weight.data_ptr() % 32) or any(
-            t.dtype != torch.float32 for t in scales
-        ):
-            return None
-        return weights
-
-    def get_plan(self, x: torch.Tensor) -> "XpuMoESharedFusedDecode | None":
-        if (
-            self._weights is None
-            or x.device.type != "xpu"
-            or x.ndim != 2
-            or not 1 <= x.shape[0] <= 8
-            or x.shape[1] != self.hidden_dim
-            or x.dtype != self.dtype
-            or not x.is_contiguous()
-            or x.data_ptr() % 64
-        ):
-            return None
-        try:
-            from vllm_xpu_kernels.moe_shared_fused_interface import (
-                XpuMoESharedFusedDecode,
-                supports,
-            )
-        except ImportError:
-            self._weights = None
-            return None
-        if not supports(
-            x.dtype,
-            self._weights[0].dtype,
-            x.shape[0],
-            self.top_k,
-            self.hidden_dim,
-            self._weights[1].shape[1],
-        ):
-            return None
-        if self.plan is None:
-            w13, w2, shared_w13, shared_w2, s13, s2, shared_s13, shared_s2, gate = (
-                self._weights
-            )
-            self.plan = XpuMoESharedFusedDecode(
-                w13=w13,
-                w13_scales=s13,
-                w2=w2,
-                w2_scales=s2,
-                shared_w13=shared_w13,
-                shared_w13_scale=shared_s13,
-                shared_w2=shared_w2,
-                shared_w2_scale=shared_s2,
-                shared_gate=gate,
-                top_k=self.top_k,
-            )
-        return self.plan
-
-    @torch.no_grad()
-    def refresh(self, block: "Qwen3_5SparseMoeBlock") -> None:
-        weights = self._get_weights(block)
-        plan = self.plan
-        assert plan is not None
-        if weights is None:
-            raise RuntimeError(
-                "Reload changed fused MoE support; recapture is required"
-            )
-        targets = (
-            plan.w13,
-            plan.w2,
-            plan.shared_w13,
-            plan.shared_w2,
-            plan.w13_scales,
-            plan.w2_scales,
-            plan.shared_w13_scale,
-            plan.shared_w2_scale,
-            plan.shared_gate,
-        )
-        for index, (source, target) in enumerate(zip(weights, targets)):
-            if (
-                source.numel() != target.numel()
-                or source.dtype != target.dtype
-                or source.device != target.device
-                or (index < 4 and source.shape != target.shape)
-            ):
-                raise RuntimeError(
-                    "Reload changed fused MoE weight metadata; recapture is required"
-                )
-        for source, target in zip(weights, targets):
-            if source.data_ptr() != target.data_ptr():
-                target.copy_(source.reshape(target.shape))
-        self._weights = weights
-
-
 class Qwen3_5SparseMoeBlock(Qwen3NextSparseMoeBlock):
-    _fusion: _XpuMoESharedFusion | None = None
+    _decode: MoEStep | None = None
 
     @property
-    def _xpu_moe_shared_fused_plan(self) -> "XpuMoESharedFusedDecode | None":
-        return self._fusion.plan if self._fusion is not None else None
-
-    def refresh_fused_weights(self) -> None:
-        """Called after weight processing, before any captured graph replays."""
-        if self._fusion is not None and self._fusion.plan is not None:
-            self._fusion.refresh(self)
-        else:
-            self._fusion = None
+    def _xpu_moe_shared_fused_plan(self) -> "XpuFusedMoeWithSharedExpert | None":
+        return self._decode.plan if self._decode is not None else None
 
     def forward(
         self,
@@ -337,28 +130,11 @@ class Qwen3_5SparseMoeBlock(Qwen3NextSparseMoeBlock):
     ) -> torch.Tensor:
         if already_sequence_parallel:
             return super().forward(hidden_states, already_sequence_parallel)
-        if self._fusion is None:
-            self._fusion = _XpuMoESharedFusion(self)
-        plan = self._fusion.get_plan(hidden_states)
-        if plan is None:
+        if self._decode is None:
+            self._decode = MoEStep(self)
+        output = self._decode.run(hidden_states)
+        if output is None:
             return super().forward(hidden_states, already_sequence_parallel)
-        runner = cast(MoERunner, self.experts)
-        router_logits, _ = self.gate(hidden_states)
-        topk_weights, topk_ids = runner.router.select_experts(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            topk_indices_dtype=runner.routed_experts.quant_method.topk_indices_dtype,
-            input_ids=None,
-        )
-        output = plan.forward(
-            torch.empty_like(hidden_states),
-            hidden_states,
-            topk_weights.to(torch.float32).contiguous(),
-            topk_ids.contiguous(),
-        )
-        # Both routed and shared outputs are rank-local partials.
-        if self.tp_size > 1 and not runner.moe_config.skip_final_all_reduce:
-            output = tensor_model_parallel_all_reduce(output)
         return output
 
 
@@ -622,6 +398,9 @@ class Qwen3_5ForCausalLMBase(
     SupportsMRoPE,
     SupportsPP,
 ):
+    def process_weights_after_loading(self) -> None:
+        initialize_specialized_decode(self)
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -790,6 +569,9 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
+    def process_weights_after_loading(self) -> None:
+        initialize_specialized_decode(self.language_model)
+
     supports_multimodal_pruning = True
 
     hf_to_vllm_mapper = (
