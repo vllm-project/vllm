@@ -8,6 +8,7 @@ using fake transport and session objects.
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from concurrent.futures import Future
@@ -39,6 +40,7 @@ from vllm.v1.kv_offload.tiering.manager import (
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
     _RECONNECT_MAX_BACKOFF_S,
+    _RETAINED_HOLD_CAP_S,
     _UNBOUND_STORE_TIMEOUT_S,
     P2PSecondaryTierManager,
     _annotate_req_context,
@@ -50,7 +52,11 @@ from vllm.v1.kv_offload.tiering.p2p.session import (
     StoreResult,
 )
 from vllm.v1.kv_offload.tiering.p2p.session.client import _LOOKUP_TIMEOUT_S
-from vllm.v1.kv_offload.tiering.p2p.session.protocol import TYPE_KEY, DisconnectMsg
+from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
+    TYPE_KEY,
+    ConnectMsg,
+    DisconnectMsg,
+)
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -139,7 +145,41 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._reaped_stores = {}
     mgr._unbound_store_timeout_s = _UNBOUND_STORE_TIMEOUT_S
     mgr._failed_serve_ctxs = []
+    mgr._retained = {}
+    mgr._retained_force_released = 0
     return mgr
+
+
+def _attach_fake_transports(mgr: P2PSecondaryTierManager) -> None:
+    """Give a stubbed manager inert control/data transports.
+
+    The shipped configuration runs the tier-poll thread, which drives
+    _poll_once() -> _control.poll()/session.poll() and shutdown()'s
+    _control.close()/_data.close(). A stub built with __new__ has none.
+    """
+
+    class _Control:
+        def poll(self):
+            return []
+
+        def close(self) -> None:
+            pass
+
+    class _Data:
+        def remove_remote_peer(self, pid):
+            pass
+
+        def cancel(self, ids, mode="immediate"):
+            return []
+
+        def poll(self, peer_id=None):
+            return SimpleNamespace(done=[], failed=[])
+
+        def close(self) -> None:
+            pass
+
+    mgr._control = _Control()
+    mgr._data = _Data()
 
 
 def _init_offloading_spec() -> SimpleNamespace:
@@ -602,6 +642,79 @@ class TestPromotionLatency:
         assert len(observations[("1:p2p", "success")]) == 1
 
 
+def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch):
+    """A timed-out P2P load fails at once but keeps its primary chunk out of
+    the free pool: the peer may still be writing it. The AbortAck frees it."""
+    from tests.v1.kv_offload.tiering.p2p.test_sessions import (
+        FakeConnection,
+        FakeDataTransport,
+        _activate,
+    )
+    from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
+    from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
+    from vllm.v1.kv_offload.tiering.p2p.session import client as client_module
+    from vllm.v1.kv_offload.tiering.p2p.session.client import _PD_LOAD_TIMEOUT_S
+    from vllm.v1.kv_offload.tiering.p2p.session.protocol import AbortAckMsg
+
+    now = [1000.0]
+    monkeypatch.setattr(client_module.time, "monotonic", lambda: now[0])
+    peer = "10.0.0.1:8000"
+    p2p_tier = _make_manager()
+    p2p_tier._control = SimpleNamespace(poll=lambda: [])  # type: ignore[assignment]
+    region = _mock_mmap_region(4)
+    primary = CPUPrimaryTierOffloadingManager(num_chunks=4, mmap_region=region)
+    tiering = TieringOffloadingManager(
+        primary_tier=primary,
+        secondary_tiers=[p2p_tier],
+        tier_poll_interval_s=0.0,
+    )
+    conn = FakeConnection(peer_id=peer)
+    session = P2PSession(
+        peer_id=peer,
+        local_id=p2p_tier._local_id,
+        transport=FakeDataTransport(),
+        local_block_len=4096,
+        local_hash_seed="0",
+        conn=conn,
+    )
+    _activate(session, conn, peer_id=peer)
+    p2p_tier._sessions[peer] = session
+
+    key = OffloadKey(b"remote-block")
+    ctx = _req_context(_remote_prefiller_kv_params())
+    prepared = primary.prepare_write([key], ctx)
+    assert prepared is not None
+    assert isinstance(prepared.store_spec, CPULoadStoreSpec)
+    job = TransferJob(
+        job_id=7,
+        keys=[key],
+        chunk_ids=prepared.store_spec.chunk_ids,
+        is_promotion=True,
+        req_context=ctx,
+    )
+    tiering._register_job(job, tier_idx=0)
+    p2p_tier.submit_load(job)
+    free_before = primary._get_num_free_chunks()
+
+    now[0] += _PD_LOAD_TIMEOUT_S + 1.0
+    tiering._process_finished_jobs()
+    assert 7 not in tiering._jobs
+    assert primary.lookup(key, ctx) is LookupResult.MISS
+    assert primary.num_deferred_release_chunks == 1
+    assert primary._get_num_free_chunks() == free_before
+
+    conn.enqueue(
+        {
+            TYPE_KEY: AbortAckMsg.TYPE,
+            AbortAckMsg.KV_REQUEST_ID: "req-1",
+            AbortAckMsg.ROUND_SEQ: 0,
+        }
+    )
+    tiering._process_finished_jobs()
+    assert primary.num_deferred_release_chunks == 0
+    assert primary._get_num_free_chunks() == free_before + 1
+
+
 # ---------------------------------------------------------------------------
 # Tests for on_request_finished
 # ---------------------------------------------------------------------------
@@ -727,6 +840,7 @@ class _FakeSession:
         close_stores: list[int] | None = None,
         close_failed_serves: list[ReqContext] | None = None,
         last_activity_at: float | None = None,
+        close_retained: dict[int, frozenset[int]] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -741,6 +855,7 @@ class _FakeSession:
         self._close_req_ids = close_req_ids or []
         self._close_stores = close_stores or []
         self._close_failed_serves = close_failed_serves or []
+        self._close_retained = close_retained or {}
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
@@ -788,6 +903,7 @@ class _FakeSession:
             failed_req_ids=self._close_req_ids,
             failed_stores=self._close_stores,
             failed_serves=self._close_failed_serves,
+            retained=self._close_retained,
         )
 
 
@@ -923,24 +1039,174 @@ class TestGetFinished:
 
 
 class TestHasPendingWork:
-    """has_pending_work() must always return True so the engine keeps
-    ticking the offload pipeline — that's the only thread driving
-    _control.poll() (incoming peer connects) and session.poll()
-    (incoming fetch messages on existing sessions)."""
+    """has_pending_work() reports peer-originated work that still needs a step.
 
-    def test_returns_true_unconditionally_to_keep_engine_ticking(self):
-        """Even with no sessions and no jobs, has_pending_work() returns
-        True so the engine keeps calling get_finished_jobs(), which is
-        what drives _control.poll() for inbound peer connects."""
+    Idle peer polling is left to the tier-poll thread, so a quiescent tier must
+    report False and let pause and graceful shutdown observe an idle engine.
+    The tiering manager adds the keep-alive itself when no thread services the
+    tier.
+    """
+
+    def test_idle_manager_reports_no_pending_work(self):
+        """With no sessions and no jobs, the tier is idle."""
         mgr = _make_manager()
+        assert mgr.has_pending_work() is False
+
+    def test_connected_idle_session_is_not_pending_work(self):
+        """An idle connected session is not work: polling it is the
+        tier-poll thread's job, not a reason to keep the engine stepping."""
+        mgr = _make_manager()
+        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1", connected=True)
+        assert mgr.has_pending_work() is False
+
+    def test_session_with_outstanding_transfer_is_pending_work(self):
+        """A session with an in-flight load keeps the engine stepping until
+        the transfer is drained."""
+        mgr = _make_manager()
+        session = _FakeSession(peer_id="peer:1", connected=True)
+        session._client._inbound[1] = object()
+        mgr._sessions["peer:1"] = session
         assert mgr.has_pending_work() is True
 
-    def test_returns_true_even_when_sessions_present(self):
-        """The result is the same regardless of session state — there is
-        no 'idle' branch."""
+    def test_finished_jobs_awaiting_handoff_is_pending_work(self):
+        """Results not yet returned by get_finished_jobs() need a step."""
         mgr = _make_manager()
-        mgr._sessions["peer:1"] = _FakeSession(peer_id="peer:1")
+        mgr._finished_jobs.append(JobResult(job_id=1, success=True))
         assert mgr.has_pending_work() is True
+
+    def test_parked_unbound_store_is_pending_work(self):
+        """A parked store still pins primary slots until it is fetched or
+        reaped, so it keeps the engine stepping."""
+        from vllm.v1.kv_offload.tiering.p2p.manager import _UnboundStoreBatch
+
+        mgr = _make_manager()
+        mgr._unbound_stores["req-1"] = [
+            _UnboundStoreBatch(job_id=1, keys=[OffloadKey(b"k")], block_ids=[0])
+        ]
+        assert mgr.has_pending_work() is True
+
+    def test_failed_serve_ctx_awaiting_release_is_pending_work(self):
+        """A synthetic lookup ctx still owing parent.on_request_finished must
+        be flushed on the next serve_external_requests()."""
+        mgr = _make_manager()
+        mgr._failed_serve_ctxs.append(_req_context(kv_params=None))
+        assert mgr.has_pending_work() is True
+
+    @pytest.mark.cpu_test
+    def test_B2_idle_manager_does_not_keep_engine_busy(self):
+        """A quiescent P2P tier must let pause and shutdown observe idle.
+
+        The shipped configuration runs the tier-poll thread, which services
+        idle peers between steps; the tier must not keep EngineCore.has_work()
+        True just for that.
+        """
+        from unittest.mock import MagicMock
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+            OffloadingConnectorScheduler,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+            OffloadingConnector,
+        )
+        from vllm.v1.core.sched.interface import PauseState
+        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.engine.core import EngineCoreProc
+        from vllm.v1.kv_offload.tiering.manager import (
+            CPUPrimaryTierOffloadingManager,
+            TieringOffloadingManager,
+        )
+
+        p2p = _make_manager()
+        _attach_fake_transports(p2p)
+        mmap_region = MagicMock()
+        view = memoryview(np.zeros((1, 16), dtype=np.int8))
+        mmap_region.create_kv_memoryview.return_value = view
+        manager = TieringOffloadingManager(
+            CPUPrimaryTierOffloadingManager(1, mmap_region),
+            [p2p],
+        )
+        try:
+            connector_scheduler = object.__new__(OffloadingConnectorScheduler)
+            connector_scheduler.manager = manager
+            connector_scheduler._jobs = {}
+            connector_scheduler._reset_fence = {}
+            connector = object.__new__(OffloadingConnector)
+            connector.connector_scheduler = connector_scheduler
+            scheduler = object.__new__(Scheduler)
+            scheduler._pause_state = PauseState.PAUSED_NEW
+            scheduler.running = []
+            scheduler.waiting = []
+            scheduler.kv_holding_waiting = []
+            scheduler.num_waiting_for_streaming_input = 0
+            scheduler.finished_req_ids = set()
+            scheduler.requests = {}
+            scheduler.connector = connector
+            scheduler.ec_connector = None
+            core = object.__new__(EngineCoreProc)
+            core.scheduler = scheduler
+            core.engines_running = False
+            core.batch_queue = None
+
+            assert core._pause_complete() is True
+        finally:
+            manager.shutdown()
+
+    @pytest.mark.cpu_test
+    def test_B2_no_poll_thread_keeps_engine_busy(self):
+        """With the tier-poll thread disabled the engine tick is the only
+        driver, so the tiering manager must keep the engine stepping."""
+        from unittest.mock import MagicMock
+
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
+            OffloadingConnectorScheduler,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+            OffloadingConnector,
+        )
+        from vllm.v1.core.sched.interface import PauseState
+        from vllm.v1.core.sched.scheduler import Scheduler
+        from vllm.v1.engine.core import EngineCoreProc
+        from vllm.v1.kv_offload.tiering.manager import (
+            CPUPrimaryTierOffloadingManager,
+            TieringOffloadingManager,
+        )
+
+        p2p = _make_manager()
+        _attach_fake_transports(p2p)
+        mmap_region = MagicMock()
+        view = memoryview(np.zeros((1, 16), dtype=np.int8))
+        mmap_region.create_kv_memoryview.return_value = view
+        manager = TieringOffloadingManager(
+            CPUPrimaryTierOffloadingManager(1, mmap_region),
+            [p2p],
+            tier_poll_interval_s=0,
+        )
+        try:
+            assert manager._tier_poll_thread is None
+            connector_scheduler = object.__new__(OffloadingConnectorScheduler)
+            connector_scheduler.manager = manager
+            connector_scheduler._jobs = {}
+            connector_scheduler._reset_fence = {}
+            connector = object.__new__(OffloadingConnector)
+            connector.connector_scheduler = connector_scheduler
+            scheduler = object.__new__(Scheduler)
+            scheduler._pause_state = PauseState.PAUSED_NEW
+            scheduler.running = []
+            scheduler.waiting = []
+            scheduler.kv_holding_waiting = []
+            scheduler.num_waiting_for_streaming_input = 0
+            scheduler.finished_req_ids = set()
+            scheduler.requests = {}
+            scheduler.connector = connector
+            scheduler.ec_connector = None
+            core = object.__new__(EngineCoreProc)
+            core.scheduler = scheduler
+            core.engines_running = False
+            core.batch_queue = None
+
+            assert core._pause_complete() is False
+        finally:
+            manager.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -1278,6 +1544,20 @@ class TestBidirectionalManager:
         assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
         mgr_a.on_request_finished(ctx)
         assert "req-1" not in mgr_a._failed_req_ids
+
+    def test_lookup_before_handshake_ack_falls_back_to_local_prefill(self):
+        """A probe never waits on a pending handshake: a gone peer would hold
+        it until VLLM_P2P_HANDSHAKE_TIMEOUT_S. The peer gets no lookup."""
+        mgr_a, _ = _build_paired_managers()
+        ctx = _req_context(_remote_kv_source_kv_params("B", 2))
+        mgr_a.on_new_request(ctx)
+        list(mgr_a.get_finished_jobs())
+        assert not mgr_a._sessions["B:2"].ready
+
+        assert mgr_a.lookup(b"key", ctx) == LookupResult.MISS
+        mgr_a.on_schedule_end(ScheduleEndContext(new_req_ids=[], preempted_req_ids=[]))
+        sent = mgr_a._control._inbound_outbound["B:2"]._outbox  # type: ignore[attr-defined]  # _LoopbackControl
+        assert [m[TYPE_KEY] for m in sent] == [ConnectMsg.TYPE]
 
     def test_lookup_expiry_allows_zmq_reconnect(self, lookup_clock):
         """The peer must retire the timed-out session before a new handshake."""
@@ -1653,6 +1933,36 @@ class TestPollOnce:
         assert "req-33" in mgr._failed_req_ids
         assert peer_dead not in mgr._sessions
         assert peer_alive in mgr._sessions
+
+    def test_failed_load_carries_its_deferred_release(self):
+        """A session's deferred release reaches the engine's JobResult, so the
+        TieringManager holds the load's chunks until the event is set."""
+        mgr = _make_manager()
+        peer = "10.0.0.2:9000"
+        release = threading.Event()
+        mgr._sessions[peer] = _FakeSession(  # type: ignore[assignment]
+            peer_id=peer,
+            loads=[
+                LoadResult(
+                    job_id=11,
+                    kv_request_id="req-11",
+                    success=False,
+                    deferred_release=release,
+                )
+            ],
+        )
+
+        class _Ctrl:
+            def poll(self_inner):
+                return []
+
+        mgr._control = _Ctrl()  # type: ignore[assignment]
+        mgr._poll_once()
+
+        (result,) = mgr._finished_jobs
+        assert (result.job_id, result.success) == (11, False)
+        assert result.deferred_release is release
+        assert "req-11" in mgr._failed_req_ids
 
     def test_new_fetch_id_binds_and_replays_unbound_batches(self):
         """When session.poll() reports a kv_request_id whose FetchMsg
@@ -2325,6 +2635,171 @@ class TestIdleSessionEviction:
 # ---------------------------------------------------------------------------
 
 
+class _RetiringFakeData:
+    """Fake DataTransport whose retired transfers stop on demand."""
+
+    def __init__(self) -> None:
+        self.stopped: list[int] = []
+        self.force_released: list[int] = []
+        self.removed: list[str] = []
+
+    def remove_remote_peer(self, pid) -> None:
+        self.removed.append(pid)
+
+    def poll_retired(self) -> list[int]:
+        stopped, self.stopped = self.stopped, []
+        return stopped
+
+    def force_release_retired(self, transfer_ids) -> None:
+        self.force_released.extend(transfer_ids)
+
+
+class TestRetainedTransfers:
+    """A reaped session's still-running transfers keep their source pins
+    until the transport reports them stopped, or the hold cap expires."""
+
+    PEER = "10.0.0.1:8000"
+
+    def _reap(self, retained, close_stores=None):
+        mgr = _make_manager()
+        data = _RetiringFakeData()
+        mgr._data = data  # type: ignore[assignment]
+        mgr._sessions[self.PEER] = _FakeSession(  # type: ignore[assignment]
+            peer_id=self.PEER,
+            alive=False,
+            connected=True,
+            close_stores=close_stores,
+            close_retained=retained,
+        )
+        mgr._reap_dead_sessions()
+        return mgr, data
+
+    def test_reap_holds_pins_until_transfer_stops(self):
+        mgr, data = self._reap({7: frozenset({1})}, close_stores=[2])
+        assert mgr._finished_jobs == [JobResult(job_id=2, success=False)]
+        assert data.removed == [self.PEER]
+
+        mgr._poll_retained()
+        assert mgr._finished_jobs == [JobResult(job_id=2, success=False)]
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert mgr._finished_jobs[-1] == JobResult(job_id=1, success=False)
+        assert mgr._retained == {}
+
+    def test_shared_job_held_until_last_transfer_stops(self):
+        mgr, data = self._reap({7: frozenset({1}), 8: frozenset({1})})
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert mgr._finished_jobs == []
+        data.stopped = [8]
+        mgr._poll_retained()
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+
+    def test_hold_cap_force_releases(self, monkeypatch):
+        now = [1000.0]
+        monkeypatch.setattr(manager_module.time, "monotonic", lambda: now[0])
+        mgr, data = self._reap({7: frozenset({1})})
+
+        now[0] += _RETAINED_HOLD_CAP_S - 1
+        mgr._poll_retained()
+        assert data.force_released == []
+
+        now[0] += 1
+        mgr._poll_retained()
+        assert data.force_released == [7]
+        assert mgr._finished_jobs == [JobResult(job_id=1, success=False)]
+        assert mgr._retained_force_released == 1
+        assert mgr._retained == {}
+
+    def test_idle_eviction_retains_too(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_IDLE_TIMEOUT_S", "10")
+        monkeypatch.setenv("VLLM_P2P_MAX_PEERS", "1")
+        import vllm.envs
+
+        vllm.envs.__dict__.pop("VLLM_P2P_IDLE_TIMEOUT_S", None)
+        vllm.envs.__dict__.pop("VLLM_P2P_MAX_PEERS", None)
+        mgr = _make_manager()
+        mgr._data = _RetiringFakeData()  # type: ignore[assignment]
+        mgr._sessions[self.PEER] = _FakeSession(  # type: ignore[assignment]
+            peer_id=self.PEER,
+            last_activity_at=time.monotonic() - 20,
+            close_retained={7: frozenset({1})},
+        )
+        mgr._reap_idle_sessions()
+        assert self.PEER not in mgr._sessions
+        assert mgr._retained[7][:2] == (self.PEER, frozenset({1}))
+        assert mgr._finished_jobs == []
+
+    def test_shutdown_fails_retained_jobs(self):
+        mgr, _ = self._reap({7: frozenset({1})})
+        mgr._data = _ShutdownFakeData()  # type: ignore[assignment]
+        mgr._control = _ShutdownFakeControl()  # type: ignore[assignment]
+        mgr.shutdown()
+        assert JobResult(job_id=1, success=False) in mgr._finished_jobs
+        assert mgr._retained == {}
+
+    def test_outbound_waits_for_retained_transfers(self):
+        """A new session would load the peer's NIXL agent under the same
+        name while the reaped one's registration still holds it."""
+        mgr, data = self._reap({7: frozenset({1})})
+
+        class NoConnect:
+            def connect(self, peer_id):
+                raise AssertionError("connect() while transfers are retained")
+
+        mgr._control = NoConnect()  # type: ignore[assignment]
+        assert mgr._get_or_create_session(self.PEER) is None
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert not mgr._retained_peer(self.PEER)
+
+    def test_inbound_is_told_to_disconnect_while_retained(self):
+        mgr, data = self._reap({7: frozenset({1})})
+
+        class Conn(_RecordingConn):
+            def __init__(self, peer_id: str) -> None:
+                super().__init__(peer_id)
+                self.sent: list[dict] = []
+
+            def send(self, msg: dict) -> None:
+                self.sent.append(msg)
+
+        conn = Conn(self.PEER)
+        mgr._accept_new_peers([conn])  # type: ignore[list-item]
+        assert conn.sent == [{TYPE_KEY: DisconnectMsg.TYPE}]
+        assert conn.close_calls == 1
+        assert self.PEER not in mgr._sessions
+
+        data.stopped = [7]
+        mgr._poll_retained()
+        assert not mgr._retained_peer(self.PEER)
+
+    def test_other_peers_are_not_held(self):
+        mgr, _ = self._reap({7: frozenset({1})})
+        assert not mgr._retained_peer("10.0.0.2:8000")
+
+    def test_drain_jobs_waits_for_retained_transfers(self, monkeypatch):
+        """reset_cache() asserts every job finished once drain_jobs()
+        returns, so a retained transfer's store jobs must be settled."""
+        mgr, data = self._reap({7: frozenset({1})})
+        mgr._control = _DrainCtrl()  # type: ignore[assignment]
+        polls = [0]
+
+        def poll_retired():
+            polls[0] += 1
+            return [7] if polls[0] == 3 else []
+
+        data.poll_retired = poll_retired  # type: ignore[method-assign]
+        monkeypatch.setattr(manager_module.time, "sleep", lambda s: None)
+        mgr.drain_jobs()
+
+        assert polls[0] == 3
+        assert mgr._retained == {}
+        assert JobResult(job_id=1, success=False) in mgr._finished_jobs
+
+
 class TestReconnectBackoff:
     """A peer whose session ended on a data-plane fault reconnects at once the
     first time; repeats back off from 1 s up to _RECONNECT_MAX_BACKOFF_S."""
@@ -2496,3 +2971,116 @@ def test_held_promotions_answer_peer_lookups_with_miss(monkeypatch):
         assert [job.keys for job in promotions] == [[key]]
     finally:
         tiering.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Idleness while serving peers
+# ---------------------------------------------------------------------------
+
+
+def _producer_with_cpu_hit(
+    key: OffloadKey, tier_poll_interval_s: float | None = None
+) -> tuple[P2PSecondaryTierManager, TieringOffloadingManager]:
+    """A consumer paired with a lone-P2P producer whose CPU tier holds key."""
+    consumer, server = _build_paired_managers()
+    kwargs = {}
+    if tier_poll_interval_s is not None:
+        kwargs["tier_poll_interval_s"] = tier_poll_interval_s
+    tiering = TieringOffloadingManager(
+        primary_tier=CPUPrimaryTierOffloadingManager(
+            num_chunks=4, mmap_region=_mock_mmap_region(4)
+        ),
+        secondary_tiers=[server],
+        **kwargs,
+    )
+    seed_ctx = ReqContext(req_id="seed")
+    with tiering.lock:
+        assert tiering.primary_tier.prepare_store([key], seed_ctx) is not None
+        tiering.primary_tier.complete_store([key], seed_ctx)
+    return consumer, tiering
+
+
+def _peer_hit(
+    consumer: P2PSecondaryTierManager,
+    tiering: TieringOffloadingManager,
+    key: OffloadKey,
+    step_producer: bool,
+) -> ReqContext:
+    """Drive a consumer lookup until the producer pins key as a HIT."""
+    step_end = ScheduleEndContext(new_req_ids=[], preempted_req_ids=[])
+    host, port = "B", 2
+    ctx = ReqContext(
+        req_id="req-peer",
+        kv_transfer_params=_remote_kv_source_kv_params(host, port, "req-peer"),
+    )
+    _annotate_req_context(ctx)
+    consumer.on_new_request(ctx)
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        list(consumer.get_finished_jobs())
+        if step_producer:
+            with tiering.lock:
+                tiering.on_schedule_end(step_end)
+        # A probe before the handshake ack falls back to local prefill (MISS).
+        session = consumer._sessions.get(f"{host}:{port}")
+        if session is not None and session.ready:
+            result = consumer.lookup(key, ctx)
+            if result is LookupResult.HIT:
+                return ctx
+            assert result is LookupResult.RETRY
+            consumer.on_schedule_end(step_end)
+        time.sleep(0.001)
+    raise AssertionError("peer lookup did not reach HIT")
+
+
+class TestIdleWhileServingPeers:
+    @pytest.mark.cpu_test
+    def test_pinned_peer_hit_does_not_block_idleness(self):
+        """A lone-P2P producer with a live tier-poll thread serves a whole peer
+        request without an engine step, so its pin must not count as pending
+        work, and the fetch must still complete and release the pin."""
+        key = OffloadKey(b"cpu-resident")
+        consumer, tiering = _producer_with_cpu_hit(key)
+        try:
+            assert tiering._tier_poll_thread is not None
+            ctx = _peer_hit(consumer, tiering, key, step_producer=False)
+            with tiering.lock:
+                assert tiering._jobs
+                assert tiering.has_pending_work() is False
+
+            consumer.submit_load(
+                TransferJob(
+                    job_id=7,
+                    keys=[key],
+                    chunk_ids=np.array([0]),
+                    is_promotion=True,
+                    req_context=ctx,
+                )
+            )
+            results: list[JobResult] = []
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                results.extend(consumer.get_finished_jobs())
+                with tiering.lock:
+                    if not tiering._jobs and results:
+                        break
+                time.sleep(0.001)
+            assert JobResult(job_id=7, success=True) in results
+            with tiering.lock:
+                assert not tiering._jobs
+        finally:
+            tiering.shutdown()
+
+    @pytest.mark.cpu_test
+    def test_pinned_peer_hit_without_poll_thread_is_pending(self):
+        """With the tier-poll thread disabled only a step completes the
+        fetch, so the engine must keep stepping."""
+        key = OffloadKey(b"cpu-resident")
+        consumer, tiering = _producer_with_cpu_hit(key, tier_poll_interval_s=0)
+        try:
+            assert tiering._tier_poll_thread is None
+            _peer_hit(consumer, tiering, key, step_producer=True)
+            assert tiering._jobs
+            assert tiering.has_pending_work() is True
+        finally:
+            tiering.shutdown()
