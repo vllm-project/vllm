@@ -1219,7 +1219,7 @@ def test_num_hash_lookahead_tokens(
         if num_lookahead > 1 or method == "dspark":
             speculative_config.draft_model_config = ModelConfig(
                 model="facebook/opt-125m",
-                hf_overrides={"num_nextn_predict_layers": num_lookahead},
+                hf_overrides={"n_predict": num_lookahead},
             )
             speculative_config.draft_parallel_config = ParallelConfig()
     vllm_config = VllmConfig(

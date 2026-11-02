@@ -192,7 +192,7 @@ def set_mtp_config(
 ) -> None:
     """Configure test MTP without loading a separate draft model."""
     assert config.model_config is not None
-    config.model_config.hf_config.num_nextn_predict_layers = num_lookahead
+    config.model_config.hf_config.n_predict = num_lookahead
     spec = SpeculativeConfig(
         model="ngram",
         num_speculative_tokens=num_lookahead,
