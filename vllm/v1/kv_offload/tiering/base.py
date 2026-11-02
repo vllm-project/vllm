@@ -69,6 +69,7 @@ class TieringOffloadingMetrics:
     PROMOTION_LATENCY = "vllm:kv_offload_tiering_promotion_latency_seconds"
     DEFERRED_RELEASE_CHUNKS = "vllm:kv_offload_tiering_deferred_release_chunks"
     DEFERRED_RELEASE_HOLD = "vllm:kv_offload_tiering_deferred_release_hold_seconds"
+    CHECKSUM_FAILURES = "vllm:kv_offload_tiering_checksum_failures"
 
 
 @dataclass
@@ -103,6 +104,8 @@ class JobResult:
     # I/O can no longer touch those chunks; the manager applies the release on
     # its own polling path.
     deferred_release: threading.Event | None = None
+    # Set only by tiers that define CHECKSUM_FAILURES in build_metric_definitions.
+    checksum_failed: bool = False
 
 
 class ParentManager(ABC):
