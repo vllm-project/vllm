@@ -94,6 +94,8 @@ For best results, we recommend ensuring that the expected output format / schema
 To use a named function, you need to define the functions in the `tools` parameter of the chat completion request, and
 specify the `name` of one of the tools in the `tool_choice` parameter of the chat completion request.
 
+A named tool choice returns exactly one call to that tool, as in the OpenAI API: if the model emits more calls, only the first is kept.
+
 In the Responses API, `tool_choice={"type": "function", "name": "..."}` can select a function inside a namespace by its full `namespace__function` name or by its local name. Names are matched literally first, so a plain function named `other__add` never stands in for `add`. A local name defined in more than one namespace must be selected by its full name.
 
 ## Required Function Calling
@@ -580,7 +582,7 @@ The model writes tool calls as a pythonic list between special tokens:
 
 Flags: `--tool-call-parser lfm2 --enable-auto-tool-choice`. Add `--reasoning-parser qwen3` for checkpoints that think before answering (e.g. `LiquidAI/LFM2.5-2.6B`, `LiquidAI/LFM2.5-1.2B-Thinking`), so reasoning stays out of `content` and `required`/named calls are constrained only after `</think>`.
 
-The parser supports `auto`, `required`, and named tools. Required and named calls are constrained to this native block rather than to a JSON tool-call list. The grammar fixes the name of the first call only, and arguments are not checked against the tool's parameter schema.
+The parser supports `auto`, `required`, and named tools. Required and named calls are constrained to this native block rather than to a JSON tool-call list. The grammar fixes the name of the first call only (a named tool choice keeps just that call), and arguments are not checked against the tool's parameter schema. Tool names that are not Python identifiers, such as `get-weather` or `import`, are supported.
 
 ### Olmo 3 Models (`olmo3`)
 

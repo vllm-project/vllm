@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import TypeVar
 
+from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
+
 from vllm.entrypoints.generate.base.protocol import DeltaMessage, FunctionCall
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
@@ -23,8 +25,13 @@ def maybe_filter_parallel_tool_calls(
     item: _ToolCallsContainerT,
     request: ChatCompletionRequest | ResponsesRequest,
 ) -> _ToolCallsContainerT:
-    """Filter to first tool call only when parallel_tool_calls is explicitly False."""
-    if request.parallel_tool_calls is not False:
+    """Keep only the first tool call when parallel_tool_calls is explicitly
+    False or tool_choice names a tool, which calls exactly that tool once."""
+    named = isinstance(
+        request.tool_choice,
+        (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction, ToolChoiceCustom),
+    )
+    if request.parallel_tool_calls is not False and not named:
         return item
 
     if isinstance(item, list):

@@ -721,6 +721,28 @@ def test_hyphenated_name_in_string_argument_with_many_tools(
     )
 
 
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize("name", ["import", "class", "lambda", "None", "fs.import"])
+def test_keyword_tool_names(name: str, streaming: bool, lfm2_tokenizer: TokenizerLike):
+    """Python keywords are identifiers but cannot be called by name, so
+    `import(path='a')` only parses once the name is aliased."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("lfm2")(lfm2_tokenizer)
+
+    _, tool_calls = run_tool_extraction(
+        tool_parser,
+        _wrap(f"{name}(path='a'), search_contacts(note='then, {name}(b)')"),
+        request=_request_with_tools(name, "search_contacts"),
+        streaming=streaming,
+    )
+
+    assert [tool_call.function for tool_call in tool_calls] == [
+        FunctionCall(name=name, arguments='{"path": "a"}'),
+        FunctionCall(
+            name="search_contacts", arguments=f'{{"note": "then, {name}(b)"}}'
+        ),
+    ]
+
+
 def test_adjust_request_disables_skip_special_tokens(
     lfm2_tokenizer: TokenizerLike,
 ):

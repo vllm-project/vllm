@@ -96,10 +96,23 @@ def test_generates_missing_tool_call_id():
     assert fields.tool_calls[0].id
 
 
-def test_parallel_tool_calls_false_keeps_first():
-    request = _request(tools=TOOLS, tool_choice="auto", parallel_tool_calls=False)
+@pytest.mark.parametrize(
+    ("tool_choice", "parallel_tool_calls", "expected"),
+    [
+        ("auto", False, ["a"]),
+        ({"type": "function", "function": {"name": "get_weather"}}, None, ["a"]),
+        ("auto", None, ["a", "b"]),
+        ("required", None, ["a", "b"]),
+    ],
+)
+def test_single_call_requests_keep_first(tool_choice, parallel_tool_calls, expected):
+    """`parallel_tool_calls=False` and a named tool choice (exactly one call
+    to that tool) keep only the first call when the parser returns more."""
+    request = _request(
+        tools=TOOLS, tool_choice=tool_choice, parallel_tool_calls=parallel_tool_calls
+    )
     fields = _assemble(request, calls=_calls("a", "b"))
-    assert [tc.id for tc in fields.tool_calls] == ["a"]
+    assert [tc.id for tc in fields.tool_calls] == expected
 
 
 @pytest.mark.parametrize("include_reasoning", [True, False])
