@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from vllm.config import SpeculativeConfig, VllmConfig
 from vllm.logger import init_logger
-from vllm.utils.extensible_tensor import granule_aligned_blocks
+from vllm.utils.extensible_tensor import granule_block_alignment
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
@@ -1782,7 +1782,18 @@ def granule_aligned_kv_cache_blocks(
         for kv_cache_config in kv_cache_configs
         for tensor in kv_cache_config.kv_cache_tensors
     }
-    return granule_aligned_blocks(num_blocks, strides, commit_granule)
+    alignment = granule_block_alignment(strides, commit_granule)
+    # Zero blocks is a plain memory shortage, left to the usual diagnostics.
+    if 0 < num_blocks < alignment:
+        raise ValueError(
+            f"Only {num_blocks} KV cache blocks fit, but the KV connector "
+            f"registers each KV cache segment for RDMA, which needs a multiple "
+            f"of {alignment} blocks (block strides {sorted(strides)} bytes, "
+            f"commit granule {commit_granule} bytes). Use a device with more "
+            "memory or disable the extensible KV cache with "
+            "--no-enable-extensible-kv-cache."
+        )
+    return num_blocks // alignment * alignment
 
 
 def align_extensible_kv_cache_capacity(

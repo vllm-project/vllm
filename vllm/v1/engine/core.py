@@ -379,10 +379,16 @@ class EngineCore:
         # With an extensible KV cache, `num_blocks` is the reserved capacity
         # until the post-warmup measurement below.
         extensible = vllm_config.cache_config.enable_extensible_kv_cache
-        # A KV connector may register each committed segment for RDMA, which
-        # cannot span physical chunks: keep segment bounds granule-aligned.
+        # A connector that registers each committed segment for RDMA, which
+        # cannot span physical chunks, needs segment bounds granule-aligned.
         commit_granule: int | None = None
-        if extensible and kv_cache_groups and vllm_config.kv_transfer_config:
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if (
+            extensible
+            and kv_cache_groups
+            and kv_transfer_config is not None
+            and kv_transfer_config.registers_kv_cache_memory()
+        ):
             commit_granule = max(self.collective_rpc("kv_cache_commit_granule"))
             align_extensible_kv_cache_capacity(
                 vllm_config, kv_cache_configs, scheduler_kv_cache_config, commit_granule

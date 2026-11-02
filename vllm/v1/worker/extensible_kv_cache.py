@@ -409,7 +409,10 @@ def extend_kv_cache(
         )
     kv_cache.commit(
         num_blocks,
-        defragment=runner.vllm_config.kv_transfer_config is not None,
+        defragment=(
+            runner.vllm_config.kv_transfer_config is not None
+            and runner.vllm_config.kv_transfer_config.registers_kv_cache_memory()
+        ),
         shrink=True,
     )
     runner.kv_cache_config.num_blocks = kv_cache.num_committed_blocks
@@ -513,7 +516,11 @@ def measure_kv_cache_blocks(
         getattr(vllm_config.parallel_config, "_api_process_count", 1),
     )
     num_blocks = kv_cache.blocks_within(
-        kv_cache_bytes, aligned=vllm_config.kv_transfer_config is not None
+        kv_cache_bytes,
+        aligned=(
+            vllm_config.kv_transfer_config is not None
+            and vllm_config.kv_transfer_config.registers_kv_cache_memory()
+        ),
     )
     # Torch may grow into what stays free once the cache is extended, less the
     # memory kept for multimodal IPC and for allocations outside torch.

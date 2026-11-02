@@ -2264,3 +2264,27 @@ def test_extensible_kv_cache_granule_alignment_under_connector():
         )
         == blocks_per_granule + 5
     )
+
+
+def test_extensible_kv_cache_granule_alignment_below_one_unit():
+    """When fewer blocks fit than one granule alignment unit, aligning would
+    leave no KV cache: raise naming the alignment instead of shrinking to 0."""
+    spec = new_kv_cache_spec()
+    granule = 2 << 20
+    blocks_per_granule = granule // spec.page_size_bytes
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(max_model_len=spec.block_size * 4)
+    )
+    vllm_config.cache_config.kv_cache_layout = "LBNHC"
+    groups = [KVCacheGroupSpec(["layer.0", "layer.1"], spec)]
+    capacity = blocks_per_granule - 1
+    config = kv_cache_planning.get_kv_cache_config_from_groups(
+        vllm_config, groups, available_memory=2 * spec.page_size_bytes * capacity
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([config])
+
+    with pytest.raises(ValueError, match=f"multiple of {blocks_per_granule} blocks"):
+        kv_cache_planning.align_extensible_kv_cache_capacity(
+            vllm_config, [config], scheduler_config, granule
+        )
+    assert config.num_blocks == capacity
