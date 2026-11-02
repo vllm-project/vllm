@@ -139,19 +139,6 @@ class AuxOutputWorkerConnector:
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
 
-    def allocate_profile_snapshots(self) -> list[torch.Tensor]:
-        """Reserve the peak in-flight Indexer snapshot memory during profiling."""
-        if self._indexer is None or not get_tp_group().is_first_rank:
-            return []
-        # prepare_output constructs the next snapshot before taking the lock
-        # that drains completed outputs, so async execution can overlap one more.
-        num_snapshots = self._max_concurrent_batches + int(
-            self._vllm_config.scheduler_config.async_scheduling
-        )
-        return [
-            torch.empty_like(self._indexer.device_buffer) for _ in range(num_snapshots)
-        ]
-
     def _close_capture(self) -> None:
         """Release both capturers; safe to call on a partially built connector."""
         for name in ("_routed_experts_capturer", "_indexer"):

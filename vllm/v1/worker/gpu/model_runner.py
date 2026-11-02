@@ -1055,13 +1055,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def profile_run(self, randomize_inputs: bool = False) -> None:
-        aux_output_snapshots: list[torch.Tensor] = []
         if self.vllm_config.aux_output_config.enabled:
             self.aux_output_connector = get_aux_output_connector(
                 self.model, self.vllm_config
-            )
-            aux_output_snapshots = (
-                self.aux_output_connector.allocate_profile_snapshots()
             )
         if self.supports_mm_inputs and self.is_first_pp_rank:
             mm_config = self.model_config.multimodal_config
@@ -1090,7 +1086,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._dummy_pooler_run(hidden_states)
 
         torch.accelerator.synchronize()
-        del hidden_states, sample_hidden_states, aux_output_snapshots
+        del hidden_states, sample_hidden_states
         self.reset_encoder_cache()
         gc.collect()
 
