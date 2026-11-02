@@ -270,16 +270,20 @@ def fill_remote_pod_from_config(
     """
     hosts = extra_config.get("remote_hosts")
     if isinstance(hosts, str):
-        hosts = [h.strip() for h in hosts.split(",") if h.strip()]
+        hosts = hosts.split(",")
+    if not isinstance(hosts, list):
+        return
+    hosts = [str(h).strip() for h in hosts if str(h).strip()]
     try:
         dp_local = int(extra_config.get("remote_dp_size_local") or 0)
     except (TypeError, ValueError):
         return
+    # Our per-pod size only pairs with hosts we supplied: a router host list
+    # combined with our dp_local would map rank 12 onto the master's rank 4.
     if not hosts or dp_local <= 0 or kv_transfer_params.get("remote_hosts"):
         return
-    kv_transfer_params["remote_hosts"] = [str(h) for h in hosts]
-    if not kv_transfer_params.get("remote_dp_size_local"):
-        kv_transfer_params["remote_dp_size_local"] = dp_local
+    kv_transfer_params["remote_hosts"] = hosts
+    kv_transfer_params["remote_dp_size_local"] = dp_local
     if (
         not is_producer
         and "remote_dp_rank" in kv_transfer_params

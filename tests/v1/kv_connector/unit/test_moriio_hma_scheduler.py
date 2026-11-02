@@ -66,6 +66,8 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
 
     def __init__(self, **attrs):
         self.mode = MoRIIOMode.READ
+        self.is_producer = False
+        self.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
         self._mamba_group_ids: list[int] = []
         self._attn_group_ids: list[int] = [0]
         self._attn_group_is_state: list[bool] = [False]

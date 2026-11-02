@@ -1010,7 +1010,10 @@ class MoRIIOConnectorScheduler:
                 )
                 return
 
-        dp_local = int(params.get("remote_dp_size_local", 0) or 0)
+        try:
+            dp_local = int(params.get("remote_dp_size_local", 0) or 0)
+        except (TypeError, ValueError):
+            dp_local = 0
         remote_hosts = params.get("remote_hosts") or []
         if dp_local > 0 and remote_hosts:
             pod_idx = pod_index(remote_dp_rank, dp_local)
