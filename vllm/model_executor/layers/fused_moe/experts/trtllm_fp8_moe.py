@@ -281,6 +281,10 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         import flashinfer
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
+        # Prepare already applied the routing weight before quantization.
+        if apply_router_weight_on_input:
+            topk_weights = torch.ones_like(topk_weights)
+
         topk_ids = topk_ids.to(dtype=torch.int32)
 
         if a1q_scale is None:

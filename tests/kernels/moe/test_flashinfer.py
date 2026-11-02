@@ -50,6 +50,8 @@ from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    _shuffle_deepseek_fp8_moe_weights,
+    _shuffle_mxfp8_moe_weights,
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
@@ -809,6 +811,87 @@ def _make_mxfp8_moe_weights(
         torch.randn(e, k, n, device="cuda", dtype=torch.bfloat16) / 10
     )
     return w1, w2, w1_scale, w2_scale
+
+
+@pytest.mark.parametrize("block_shape", [[128, 128], [1, 32]], ids=["block", "mxfp8"])
+@pytest.mark.parametrize("m", [1, 16])
+@pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="Requires TRTLLM-Gen FP8 MoE (SM100)",
+)
+def test_trtllm_fp8_input_router_weight_applied_once(
+    m: int, block_shape: list[int], workspace_init
+):
+    """Input weighting equals prescaling before activation and FP8 quantization."""
+    e, n, k = 32, 256, 256
+    set_random_seed(11)
+    with set_current_vllm_config(vllm_config):
+        if block_shape == [1, 32]:
+            w1, w2, s1, s2 = _make_mxfp8_moe_weights(e, n, k)
+        else:
+            (_, w1, s1, _), (_, w2, s2, _) = make_test_weights(
+                e, n, k, quant_dtype=torch.float8_e4m3fn, block_shape=block_shape
+            )
+        w1, s1 = swap_w13_to_w31(w1), swap_w13_to_w31(s1)
+        if block_shape == [1, 32]:
+            w1, w2, s1, s2 = _shuffle_mxfp8_moe_weights(w1, w2, s1, s2, True)
+        else:
+            w1, w2 = _shuffle_deepseek_fp8_moe_weights(w1, w2)
+        quant_config = make_fp8_moe_quant_config(
+            Fp8MoeBackend.FLASHINFER_TRTLLM,
+            s1,
+            s2,
+            a1_scale=None,
+            a2_scale=None,
+            block_shape=block_shape,
+        )
+        config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=1,
+            hidden_dim=k,
+            intermediate_size=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=MoEActivation.SILU,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            routing_method=RoutingMethodType.TopK,
+            max_num_tokens=m,
+        )
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=config, quant_config=quant_config, allow_new_interface=True
+            ),
+            TrtLlmFp8ExpertsModular(moe_config=config, quant_config=quant_config),
+        )
+        a = torch.randn(m, k, device="cuda", dtype=torch.bfloat16) / 10
+        weights = torch.full((m, 1), 0.5, device="cuda", dtype=torch.float32)
+        ids = torch.arange(m, device="cuda", dtype=torch.int32).view(m, 1) % e
+
+        def apply(x: torch.Tensor, w: torch.Tensor, on_input: bool) -> torch.Tensor:
+            output = kernel.apply(
+                hidden_states=x,
+                w1=w1,
+                w2=w2,
+                topk_weights=w,
+                topk_ids=ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=on_input,
+            )
+            assert isinstance(output, torch.Tensor)
+            return output.clone()
+
+        ones = torch.ones_like(weights)
+        weight = weights.to(a.dtype)
+        torch.testing.assert_close(
+            apply(a, weights, False), apply(a, ones, False) * weight, atol=0, rtol=0
+        )
+        expected = apply(a * weight, ones, False)
+        assert torch.isfinite(expected).all() and torch.count_nonzero(expected) > 0
+        torch.testing.assert_close(apply(a, weights, True), expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("block_shape", [[128, 128], [1, 32]], ids=["block", "mxfp8"])
