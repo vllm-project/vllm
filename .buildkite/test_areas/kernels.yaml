@@ -509,6 +509,7 @@ steps:
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_fp8_support.py
       - pytest -v -s tests/kernels/attention/test_rocm_aiter_mla_op_registration.py
       - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py::test_dsv41_adaptive_mla_swa_metadata_graph_replay
+      - pytest -v -s tests/kernels/attention/test_rocm_triton_attn_dsv4.py -k "wo_a_bmm or wo_b_takes_wo_a_mxfp8_gate"
 
 - label: ":nvidia: (L4) Quantization Kernels Shard %N"
   key: kernels-quantization-test
