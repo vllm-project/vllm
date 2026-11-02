@@ -90,7 +90,7 @@ def test_jacobi_is_deterministic(topc: int):
 
     first, no_logits = head.jacobi_refine_greedy(base, h, anchor, tok_am1, 4)
     second, logits = head.jacobi_refine_greedy(
-        base, h, anchor, tok_am1, 4, with_logits=True
+        base, h, anchor, tok_am1, 4, return_logits=True
     )
     assert first.shape == (2, B - 1)
     assert torch.equal(first, second)

@@ -96,7 +96,7 @@ class XPressSpeculator(DFlashSpeculator):
             anchor_ids,
             tok_am1,
             self.num_jacobi_passes,
-            with_logits=self.acceptance_estimator is not None,
+            return_logits=self.acceptance_estimator is not None,
         )
         self.draft_tokens[:num_reqs, : self.num_speculative_steps] = draft
         if logits is not None:
