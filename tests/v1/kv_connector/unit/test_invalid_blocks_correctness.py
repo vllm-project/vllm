@@ -289,6 +289,8 @@ def test_sync_fail_invalid_blocks_evicted(fail_scheduler: Scheduler):
     assert conn_stats.queries == num_prompt_tokens
     assert conn_stats.hits == num_external_computed_tokens
 
+    assert stats.num_kv_load_failed_reqs == 1
+
 
 def test_async_recompute_blocks_not_cached_when_invalid(
     recompute_scheduler: Scheduler,
@@ -408,6 +410,8 @@ def test_async_recompute_blocks_not_cached_when_invalid(
     assert conn_stats.requests == 1
     assert conn_stats.queries == num_prompt_tokens
     assert conn_stats.hits == num_external_computed_tokens
+
+    assert stats.num_kv_load_failed_reqs == 1
 
     # now simulate async transfer completing
     model_runner_output_2 = create_model_runner_output(

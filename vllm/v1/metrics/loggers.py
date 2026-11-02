@@ -590,6 +590,22 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     gauge_kv_fetch_by_stage, per_engine_labelvalues_with_stage
                 )
 
+        self.kv_load_failure_metrics_enabled = kv_transfer_config is not None
+        if self.kv_load_failure_metrics_enabled:
+            counter_kv_load_failed_requests = self._counter_cls(
+                name="vllm:kv_load_failed_requests",
+                documentation=(
+                    "Requests affected by a failed external KV cache load, "
+                    "including requests that share an invalid prefix block. "
+                    "Under kv_load_failure_policy=recompute they are "
+                    "rescheduled; under fail they finish with an error."
+                ),
+                labelnames=labelnames,
+            )
+            self.counter_kv_load_failed_requests = create_metric_per_engine(
+                counter_kv_load_failed_requests, per_engine_labelvalues
+            )
+
         gauge_engine_sleep_state = self._gauge_cls(
             name="vllm:engine_sleep_state",
             documentation=(
@@ -1161,6 +1177,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             for stage, gauges in self.gauge_kv_fetch_by_stage.items():
                 gauges[engine_idx].set(
                     scheduler_stats.num_kv_fetch_reqs_by_stage.get(stage, 0)
+                )
+            if self.kv_load_failure_metrics_enabled:
+                self.counter_kv_load_failed_requests[engine_idx].inc(
+                    scheduler_stats.num_kv_load_failed_reqs
                 )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
 
