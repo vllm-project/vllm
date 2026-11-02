@@ -7,6 +7,7 @@ import torch
 import vllm._custom_ops as ops
 from tests.kernels.quant_utils import per_block_cast_to_int8
 from tests.kernels.quantization.nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
+from vllm.lora.layers.base import BaseLayerWithLoRA
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -17,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.expert_map_manager import ExpertMapManager
 from vllm.model_executor.layers.fused_moe.experts.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
@@ -33,7 +35,9 @@ from vllm.model_executor.layers.fused_moe.moe_permute_unpermute import moe_unper
 from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
     BatchedPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.model_executor.layers.quantization.utils.fp8_utils import is_fp8
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
@@ -675,3 +679,121 @@ def mxfp4_w_layouts(mx_axis: int, num_warps: int = 8):
         mx_axis=mx_axis, num_warps=num_warps
     )
     return w, w_opts, s, s_opts
+
+
+def make_routed_experts(
+    num_experts: int,
+    hidden_size: int,
+    intermediate_size: int,
+    tp: tuple[int, int] = (1, 0),
+    ep: tuple[int, int] = (1, 0),
+    placement: str = "linear",
+    num_redundant_experts: int = 0,
+    dtype: torch.dtype = torch.float32,
+    layer_name: str = "model.layers.0.mlp.experts",
+):
+    """An unquantized CPU `RoutedExperts` whose parallel config fakes the
+    (size, rank) of expert TP and EP; needs a current vLLM config."""
+    enable_eplb = num_redundant_experts > 0
+    parallel_config = FusedMoEParallelConfig(
+        tp_size=tp[0],
+        tp_rank=tp[1],
+        pcp_size=1,
+        pcp_rank=0,
+        dp_size=1,
+        dp_rank=0,
+        ep_size=ep[0],
+        ep_rank=ep[1],
+        sp_size=1,
+        use_ep=ep[0] > 1,
+        all2all_backend="allgather_reducescatter",
+        enable_eplb=enable_eplb,
+    )
+    expert_map_manager = ExpertMapManager(
+        max_num_batched_tokens=16,
+        top_k=2,
+        global_num_experts=num_experts + num_redundant_experts,
+        num_redundant_experts=num_redundant_experts,
+        num_expert_group=2,
+        moe_parallel_config=parallel_config,
+        placement_strategy=placement,
+        enable_eplb=enable_eplb,
+    )
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts + num_redundant_experts,
+        experts_per_token=2,
+        hidden_dim=hidden_size,
+        intermediate_size=intermediate_size,
+        num_local_experts=expert_map_manager.local_num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=parallel_config,
+        activation=MoEActivation.SILU,
+        in_dtype=dtype,
+        device="cpu",
+        routing_method=RoutingMethodType.TopK,
+        max_num_tokens=16,
+    )
+    return RoutedExperts(layer_name, dtype, moe_config, None, expert_map_manager)
+
+
+def routed_expert_checkpoint(
+    num_experts: int,
+    hidden_size: int,
+    intermediate_size: int,
+    fused: bool,
+    suffix: str = "weight",
+    seed: int = 0,
+) -> list[tuple[str, torch.Tensor]]:
+    """Random gated routed experts, named relative to the MoE layer's
+    `experts`: per expert (`E.{gate,up,down}_proj.<suffix>`) or in the
+    transformers v5 fused form (`gate_up_proj` [E, 2I, H], `down_proj`
+    [E, H, I]). Both forms hold the same values for the same seed."""
+    generator = torch.Generator().manual_seed(seed)
+    shape = (num_experts, intermediate_size, hidden_size)
+    gate = torch.randn(shape, generator=generator)
+    up = torch.randn(shape, generator=generator)
+    down = torch.randn(num_experts, hidden_size, intermediate_size, generator=generator)
+    if fused:
+        return [("gate_up_proj", torch.cat([gate, up], dim=1)), ("down_proj", down)]
+    return [
+        (f"{e}.{proj}_proj.{suffix}", tensor[e])
+        for e in range(num_experts)
+        for proj, tensor in (("gate", gate), ("up", up), ("down", down))
+    ]
+
+
+class _LoRAWrappedMoE(BaseLayerWithLoRA):
+    def __init__(self, base_layer: MoERunner):
+        torch.nn.Module.__init__(self)
+        self.base_layer = base_layer
+        base_layer.routed_experts.lora_base_layer_prefix = "base_layer."
+
+
+def fake_moe_layer(
+    num_experts: int,
+    hidden_size: int,
+    intermediate_size: int,
+    tp: tuple[int, int] = (1, 0),
+    ep: tuple[int, int] = (1, 0),
+    lora: bool = False,
+) -> torch.nn.Module:
+    """A decoder layer stand-in for model loader tests: `mlp.experts` is a
+    `MoERunner` (optionally LoRA-wrapped) around a real CPU `RoutedExperts`
+    whose params are filled with -7, and `mlp.gate.weight` is the router."""
+    experts = make_routed_experts(
+        num_experts, hidden_size, intermediate_size, tp=tp, ep=ep
+    )
+    for param in experts.parameters():
+        param.data.fill_(-7.0)
+    runner = object.__new__(MoERunner)
+    torch.nn.Module.__init__(runner)
+    runner.routed_experts = experts
+    mlp = torch.nn.Module()
+    mlp.experts = _LoRAWrappedMoE(runner) if lora else runner
+    mlp.gate = torch.nn.Module()
+    mlp.gate.weight = torch.nn.Parameter(
+        torch.zeros(num_experts, hidden_size), requires_grad=False
+    )
+    layer = torch.nn.Module()
+    layer.mlp = mlp
+    return layer

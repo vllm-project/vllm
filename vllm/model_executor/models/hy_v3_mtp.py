@@ -32,9 +32,7 @@ from torch import nn
 from transformers import PreTrainedConfig
 
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
+from vllm.model_executor.layers.fused_moe import load_routed_experts_weight
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -57,16 +55,6 @@ from .utils import (
     is_pp_missing_parameter,
     maybe_prefix,
 )
-
-
-def _is_moe(config: PreTrainedConfig) -> bool:
-    return bool(
-        getattr(config, "num_experts", None)
-        and (
-            (isinstance(config.num_experts, int) and config.num_experts > 1)
-            or (isinstance(config.num_experts, list) and max(config.num_experts) > 1)
-        )
-    )
 
 
 def _get_cla_factor(config: PreTrainedConfig) -> int:
@@ -307,17 +295,6 @@ class HYV3MTP(nn.Module):
             ),
         ]
 
-        if _is_moe(self.config):
-            expert_params_mapping = fused_moe_make_expert_params_mapping(
-                self,
-                ckpt_gate_proj_name="gate_proj",
-                ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="up_proj",
-                num_experts=self.config.num_experts,
-            )
-        else:
-            expert_params_mapping = []
-
         params_dict = dict(self.named_parameters())
 
         # V3 shared weights mapping:
@@ -425,38 +402,20 @@ class HYV3MTP(nn.Module):
             else:
                 if name.endswith(".bias") and name not in params_dict:
                     continue
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if is_pp_missing_parameter(name, self):
-                        continue
+                if load_routed_experts_weight(self, name, loaded_weight) is not None:
+                    continue
+                if is_pp_missing_parameter(name, self):
+                    continue
 
-                    if "mlp.gate.wg." in name:
-                        name = name.replace("wg.", "")
-                    # V3 checkpoint: mlp.router.gate -> mlp.gate
-                    if "mlp.router.gate." in name:
-                        name = name.replace("router.gate.", "gate.")
+                if "mlp.gate.wg." in name:
+                    name = name.replace("wg.", "")
+                # V3 checkpoint: mlp.router.gate -> mlp.gate
+                if "mlp.router.gate." in name:
+                    name = name.replace("router.gate.", "gate.")
 
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """Rewrite spec layer weight names to match vLLM module structure."""

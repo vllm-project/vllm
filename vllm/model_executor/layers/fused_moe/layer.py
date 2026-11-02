@@ -475,6 +475,51 @@ def FusedMoEFactory(
     return runner
 
 
+def load_routed_experts_weight(
+    model: torch.nn.Module, name: str, loaded_weight: torch.Tensor
+) -> set[str] | None:
+    """Load one routed-expert checkpoint tensor through its MoE layer's
+    ``RoutedExperts.load_expert_weight``, for models that hand-roll
+    ``load_weights``.
+
+    ``name`` is relative to ``model`` and lies under a MoE layer's
+    ``experts`` prefix, in either form: per expert
+    (``...experts.E.gate_proj.weight``) or stacked (``...experts.gate_up_proj``).
+    A LoRA-wrapped MoE layer is unwrapped; its checkpoint names carry
+    ``base_layer.`` as ``make_expert_params_mapping`` expects.
+
+    Returns:
+        The loaded parameter names relative to ``model`` (empty when no expert
+        of the tensor is on this rank), or None when ``name`` is not under a
+        MoE layer of ``model`` (e.g. a PP-missing layer) or matches no entry of
+        its expert mapping, so the caller loads it another way or fails as it
+        would for any unknown name.
+
+    """
+    from vllm.lora.layers.base import BaseLayerWithLoRA
+
+    index = name.find(".experts.")
+    if index < 0:
+        return None
+    prefix = name[: index + len(".experts")]
+    try:
+        runner = model.get_submodule(prefix)
+    except AttributeError:
+        return None
+    param_prefix = prefix
+    if isinstance(runner, BaseLayerWithLoRA):
+        runner = runner.base_layer
+        param_prefix = f"{prefix}.base_layer"
+    if not isinstance(runner, MoERunner):
+        return None
+    loaded = runner.routed_experts.load_expert_weight(
+        name[len(prefix) + 1 :], loaded_weight
+    )
+    if loaded is None:
+        return None
+    return {f"{param_prefix}.routed_experts.{param}" for param in loaded}
+
+
 def fused_moe_make_expert_params_mapping(
     model: torch.nn.Module,
     ckpt_gate_proj_name: str,

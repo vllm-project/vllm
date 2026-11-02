@@ -83,6 +83,7 @@ steps:
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
   - tests/models/test_muse_spark_rocm_mono.py
+  - tests/models/test_hy_v3_expert_loading.py
   commands:
     - >-
       pytest -v -s
@@ -101,6 +102,7 @@ steps:
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
       models/test_muse_spark_rocm_mono.py
+      models/test_hy_v3_expert_loading.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"

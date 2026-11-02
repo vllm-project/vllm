@@ -10,6 +10,7 @@ correctly handles this mismatch.
 """
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 import torch
@@ -467,6 +468,17 @@ class TestUnquantizedTrtLlmPrePadding:
         assert intermediate == expected
 
 
+def _fake_routed_experts() -> Any:
+    """A bare RoutedExperts; tests set the attributes its loading reads."""
+    experts = object.__new__(RoutedExperts)
+    torch.nn.Module.__init__(experts)
+    experts.shared_expert_online_loader = None
+    experts.lora_base_layer_prefix = ""
+    experts.expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
+    experts._expert_mapping_cache = None
+    return experts
+
+
 class TestLoadWeightsExpertBias:
     """Some quantized exports (e.g. GPTQ, llm-compressor NVFP4) materialize
     all-zero per-expert `.bias` tensors for models whose experts have no bias
@@ -478,9 +490,8 @@ class TestLoadWeightsExpertBias:
     NUM_EXPERTS = 2
 
     def _make_experts(self, has_bias: bool) -> torch.nn.Module:
-        experts = torch.nn.Module()
+        experts = _fake_routed_experts()
         experts.layer_name = "model.layers.0.mlp.experts"
-        experts.shared_expert_online_loader = None
         experts.moe_config = make_dummy_moe_config(num_experts=self.NUM_EXPERTS)
         mapping = RoutedExperts.build_expert_params_mapping(
             "gate_proj",
@@ -572,13 +583,13 @@ class TestLoadWeightsExpertMapping:
         layer_name="model.layers.0.mlp.experts",
         is_gated=True,
     ):
-        experts = torch.nn.Module()
+        experts = _fake_routed_experts()
         experts.layer_name = layer_name
-        experts.shared_expert_online_loader = None
-        experts.moe_config = SimpleNamespace(is_act_and_mul=is_gated)
+        experts.moe_config = SimpleNamespace(
+            is_act_and_mul=is_gated, num_experts=16, num_logical_experts=16
+        )
         experts.get_expert_mapping = lambda **_: mapping
         experts.is_fused_checkpoint_transposed = transposed
-        experts._orient_fused_weight = RoutedExperts._orient_fused_weight
         calls = []
 
         def weight_loader(param, loaded_weight, shard_id, expert_id, **_):

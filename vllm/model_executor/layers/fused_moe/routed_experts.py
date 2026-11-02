@@ -5,6 +5,7 @@ from collections.abc import Callable, Iterable
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, cast, overload
 
+import regex as re
 import torch
 
 from vllm.distributed.eplb.eplb_state import EplbState
@@ -39,15 +40,16 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# (param_name, weight_name, expert_id, shard_id)
+ExpertMapping = list[tuple[str, str, int, str]]
 
-def _index_expert_mapping(
-    mapping: list[tuple[str, str, int, str]],
-) -> dict[str, list[tuple[str, str, int, str]]]:
+
+def _index_expert_mapping(mapping: ExpertMapping) -> dict[str, ExpertMapping]:
     """Index by logical checkpoint ID, preserving entry order and EPLB replicas.
 
     An empty index keeps the full scan for unsupported mapping names.
     """
-    mapping_by_expert: dict[str, list[tuple[str, str, int, str]]] = {}
+    mapping_by_expert: dict[str, ExpertMapping] = {}
     for entry in mapping:
         prefix, _, suffix = entry[1].partition(".")
         expert_key, sep, _ = suffix.partition(".")
@@ -236,6 +238,9 @@ class RoutedExperts(PluggableLayer):
             loader.create_staging(self, params_dtype, weight_loader=self.weight_loader)
 
         self.lora_base_layer_prefix = ""
+        self._expert_mapping_cache: (
+            tuple[tuple, ExpertMapping, dict[str, ExpertMapping]] | None
+        ) = None
 
     # TODO(bnell): Temporary hack. Get rid of this.
     def _replace_quant_method(self, quant_method: FusedMoEMethodBase):
@@ -661,6 +666,142 @@ class RoutedExperts(PluggableLayer):
         # _to_scalar's reshape(()) would reject the size-2 weight_shape.
         param_data[expert_id] = loaded_weight
 
+    def _loading_quant_method(self) -> FusedMoEMethodBase:
+        """The quant method whose checkpoint format the loaders follow."""
+        from vllm.model_executor.layers.quantization.online.moe_base import (
+            OnlineMoEMethodBase,
+        )
+
+        base_quant_method = self.quant_method
+
+        # In case online MOE re-quantization is used, loading is handled
+        # by the original quant method.
+        if (
+            isinstance(base_quant_method, OnlineMoEMethodBase)
+            and base_quant_method.requantization_source is not None
+        ):
+            assert isinstance(
+                base_quant_method.requantization_source, FusedMoEMethodBase
+            )
+            base_quant_method = base_quant_method.requantization_source
+        return base_quant_method
+
+    def _fused_expert_slots(self, num_ckpt_experts: int) -> list[tuple[int, int]]:
+        """(physical expert id, index into the stacked tensor) for every slot a
+        stacked ``[E, ...]`` checkpoint tensor fills, EPLB replicas included."""
+        num_logical = self.moe_config.num_logical_experts
+        if num_ckpt_experts != num_logical:
+            # Not one entry per logical expert (e.g. fused shared experts
+            # appended): index by physical id, as the per-expert names do.
+            return [(index, index) for index in range(num_ckpt_experts)]
+        physical_to_logical = EplbState.build_initial_global_physical_to_logical_map(
+            num_logical, self.moe_config.num_experts - num_logical
+        )
+        return list(enumerate(physical_to_logical))
+
+    def _covers_fused_load(
+        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, weight_name: str
+    ) -> bool:
+        """Whether ``weight_loader`` would only narrow and copy each expert of
+        this stacked tensor, i.e. take the model weight or GROUP/BLOCK scale
+        branch (see ``weight_loader``), so ``_load_fused_experts`` may load it.
+
+        Copies across devices are excluded: one strided multi-expert copy
+        needs full-size temporaries, the per-expert copies don't.
+        """
+        loader = getattr(param, "weight_loader", None)
+        if (
+            getattr(loader, "__func__", None) is not RoutedExperts.weight_loader
+            or getattr(loader, "__self__", None) is not self
+            or loaded_weight.device != param.device
+            or getattr(param, "is_transposed", False)
+            or self.shared_expert_online_loader is not None
+            or loaded_weight.shape[0]
+            > self.moe_config.num_experts
+            + self.expert_map_manager.num_fused_shared_experts
+            or (self.quant_config and self.quant_config.get_name()) == "gpt_oss_mxfp4"
+            or "ModelOpt" in self._loading_quant_method().__class__.__name__
+            or any(
+                key in weight_name for key in ("bias", "input_scale", "weight_shape")
+            )
+        ):
+            return False
+        if any(key in weight_name for key in ("scale", "zero", "offset")):
+            return getattr(param, "quant_method", None) in (
+                FusedMoeWeightScaleSupported.GROUP.value,
+                FusedMoeWeightScaleSupported.BLOCK.value,
+            )
+        return "weight" in weight_name
+
+    def _load_fused_experts(
+        self,
+        param: torch.nn.Parameter,
+        loaded_weight: torch.Tensor,
+        weight_name: str,
+        shard_id: str,
+    ) -> bool:
+        """Load one shard of a stacked ``[E, ...]`` checkpoint tensor that
+        ``_covers_fused_load`` accepts, with one ``narrow`` + ``copy_`` per run
+        of slots consecutive both on this rank and in the tensor (one run for
+        linear EP placement, plus one per run of EPLB replicas).
+
+        Each run goes through the same ``_load_model_weight_or_group_weight_scale``
+        call as the per-expert ``weight_loader`` calls, with the expert dim
+        kept, so the bytes written are the same. Returns whether any slot is
+        local to this rank.
+        """
+        is_scale = any(key in weight_name for key in ("scale", "zero", "offset"))
+
+        # [local start, checkpoint start, length]
+        runs: list[list[int]] = []
+        for physical_id, index in self._fused_expert_slots(loaded_weight.shape[0]):
+            local_id = self._map_global_expert_id_to_local_expert_id(physical_id)
+            if local_id < 0:
+                continue
+            if (
+                runs
+                and runs[-1][0] + runs[-1][2] == local_id
+                and runs[-1][1] + runs[-1][2] == index
+            ):
+                runs[-1][2] += 1
+            else:
+                runs.append([local_id, index, 1])
+
+        shard_dim = {"w1": 1, "w2": 2, "w3": 1}[shard_id]
+        for local_start, index, length in runs:
+            loaded = loaded_weight.narrow(0, index, length)
+            if is_scale:
+                loaded = self._refine_block_scale(param, loaded)
+            self._load_model_weight_or_group_weight_scale(
+                shard_dim=shard_dim,
+                expert_data=param.data.narrow(0, local_start, length),
+                shard_id=shard_id,
+                loaded_weight=loaded,
+                tp_rank=self.moe_config.tp_rank,
+                is_scale=is_scale,
+            )
+        return bool(runs)
+
+    def _refine_block_scale(
+        self, param: torch.nn.Parameter, loaded_weight: torch.Tensor
+    ) -> torch.Tensor:
+        """FP8 block scales are stored per (block_n, block_k) tile of the
+        unsharded weight, while the TP-sharded parameters use a refined block
+        grid (see Fp8MoEMethod). Upsample the scales to the refined grid
+        (lossless: the refined block divides the checkpoint block) so per-rank
+        slicing stays exact. Dim -2 is the weight's N dim, dim -1 is K; works
+        for one expert and for a stack of experts."""
+        refine = getattr(self._loading_quant_method(), "weight_scale_refine", None)
+        if (
+            getattr(param, "quant_method", None)
+            != FusedMoeWeightScaleSupported.BLOCK.value
+            or refine is None
+        ):
+            return loaded_weight
+        return loaded_weight.repeat_interleave(refine[0], dim=-2).repeat_interleave(
+            refine[1], dim=-1
+        )
+
     @overload
     def weight_loader(
         self,
@@ -704,23 +845,7 @@ class RoutedExperts(PluggableLayer):
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
-        from vllm.model_executor.layers.quantization.online.moe_base import (
-            OnlineMoEMethodBase,
-        )
-
-        base_quant_method = self.quant_method
-
-        # In case online MOE re-quantization is used, loading is handled
-        # by the original quant method.
-        if (
-            isinstance(base_quant_method, OnlineMoEMethodBase)
-            and base_quant_method.requantization_source is not None
-        ):
-            assert isinstance(
-                base_quant_method.requantization_source, FusedMoEMethodBase
-            )
-            base_quant_method = base_quant_method.requantization_source
-
+        base_quant_method = self._loading_quant_method()
         quant_method_name = base_quant_method.__class__.__name__
         global_expert_id = expert_id
         num_global_experts = (
@@ -804,6 +929,9 @@ class RoutedExperts(PluggableLayer):
 
         expert_data = param.data if full_load else param.data[expert_id]
 
+        # The branches below that only narrow and copy (model weights,
+        # GROUP/BLOCK scales) are mirrored for stacked tensors by
+        # `_covers_fused_load`; keep it in sync when adding a branch.
         if "bias" in weight_name:
             self._loaded_expert_biases.add(weight_name.rsplit(".", 1)[-1])
             if shard_id == "w2":
@@ -944,20 +1072,7 @@ class RoutedExperts(PluggableLayer):
                 FusedMoeWeightScaleSupported.GROUP.value,
                 FusedMoeWeightScaleSupported.BLOCK.value,
             ]:
-                scale_refine = getattr(base_quant_method, "weight_scale_refine", None)
-                if (
-                    quant_method == FusedMoeWeightScaleSupported.BLOCK.value
-                    and scale_refine is not None
-                ):
-                    # FP8 block scales are stored per (block_n, block_k) tile
-                    # of the unsharded weight, while the TP-sharded parameters
-                    # use a refined block grid (see Fp8MoEMethod). Upsample the
-                    # scales to the refined grid (lossless: the refined block
-                    # divides the checkpoint block) so per-rank slicing stays
-                    # exact. Dim -2 is the weight's N dim, dim -1 is K.
-                    loaded_weight = loaded_weight.repeat_interleave(
-                        scale_refine[0], dim=-2
-                    ).repeat_interleave(scale_refine[1], dim=-1)
+                loaded_weight = self._refine_block_scale(param, loaded_weight)
                 self._load_model_weight_or_group_weight_scale(
                     shard_id=shard_id,
                     shard_dim=shard_dim,
@@ -1004,109 +1119,152 @@ class RoutedExperts(PluggableLayer):
     def load_weights(
         self, weights: Iterable[tuple[str, torch.Tensor]]
     ) -> Iterable[str]:
-        expert_mapping = self.get_expert_mapping(include_fused=True)
-        mapping_by_expert = _index_expert_mapping(expert_mapping)
-
         for expert_name, loaded_weight in weights:
-            qual_name = f"{self.layer_name}.{expert_name}"
-            expert_key = qual_name.partition("experts.")[2].partition(".")[0]
-            named_expert = (
-                mapping_by_expert.get(expert_key)
-                if qual_name.count("experts.") == 1
-                else None
-            )
-            # Encoded per-expert [N, K / block_size, bytes_per_block] weights
-            # have the same rank as fused [E, N, K] weights. An explicit expert
-            # name identifies the per-expert layout without treating N as E.
-            is_fused = loaded_weight.dim() == 3 and named_expert is None
-            # Fused tensors and ambiguous names keep the full mapping.
-            candidates = expert_mapping
-            if not is_fused and qual_name.count("experts.") == 1:
-                candidates = named_expert or expert_mapping
-
-            matched = False
-            for param_name, weight_name, expert_id, shard_id in candidates:
-                if weight_name not in qual_name:
-                    if matched and is_fused:
-                        # Fused tensors use the first contiguous run of matches.
-                        break
-                    continue
-                matched = True
-                is_per_expert_fused_w13 = (
-                    not is_fused
-                    and shard_id in {"w1", "w3"}
-                    and any(
-                        f".{fused_name}." in qual_name
-                        for fused_name in ("gate_up_proj", "w13")
-                    )
+            loaded = self.load_expert_weight(expert_name, loaded_weight)
+            if loaded is None:
+                logger.warning_once(
+                    "Checkpoint tensors named like %r match no routed-expert "
+                    "mapping entry of %s and are not loaded",
+                    re.sub(r"\d+", "N", f"{self.layer_name}.{expert_name}"),
+                    type(self).__name__,
                 )
-                weight_name = qual_name.replace(weight_name, param_name)
-                param_name = weight_name.removeprefix(f"{self.layer_name}.")
-                if self.shared_expert_online_loader is not None:
-                    param_name = self.shared_expert_online_loader.redirect_param_name(
-                        param_name, shard_id, expert_id
-                    )
-                param = getattr(self, param_name, None)
-                if param is None:
-                    if param_name.endswith(("w13_bias", "w2_bias")):
-                        continue
-                    raise AttributeError(
-                        f"Layer {self.layer_name} has no parameter {param_name!r} "
-                        f"for checkpoint weight {qual_name!r}"
-                    )
-                if is_fused:
-                    quant_method = getattr(param, "quant_method", None)
-                    # Block scales share the weight's two-dimensional layout.
-                    # Other quantization metadata can use independent layouts.
-                    uses_weight_layout = (
-                        "scale" not in weight_name
-                        or quant_method == FusedMoeWeightScaleSupported.BLOCK.value
-                    )
-                    # w1 and w3 share one fused tensor; use a local copy so the
-                    # transpose below doesn't mutate loaded_weight across
-                    # iterations (else w3 is transposed twice and wrongly chunked)
-                    fused_weight = self._orient_fused_weight(
-                        loaded_weight,
-                        self.is_fused_checkpoint_transposed and uses_weight_layout,
-                    )
-                    if shard_id in {"w1", "w3"} and self.moe_config.is_act_and_mul:
-                        # Repurpose expert_id for deconcatenating w1 and w3
-                        experts_shard = fused_weight.chunk(2, dim=1)[expert_id]
-                    else:
-                        experts_shard = fused_weight
-                    start = 0
-                elif is_per_expert_fused_w13:
-                    shard_index = 0 if shard_id == "w1" else 1
-                    experts_shard = loaded_weight.chunk(2, dim=0)[
-                        shard_index
-                    ].unsqueeze(0)
-                    start = expert_id
-                else:
-                    # loaded_weight is a single expert weight, so we add a dummy expert
-                    # dimension to unify the loading logic with the fused case
-                    experts_shard = loaded_weight.unsqueeze(0)
-                    start = expert_id
+                continue
+            yield from loaded
 
-                # Unified loading logic for fused and non-fused experts
-                loaded_experts = experts_shard.unbind()
-                for expert_id, loaded_expert in enumerate(loaded_experts, start=start):
-                    success = param.weight_loader(
-                        param=param,
-                        loaded_weight=loaded_expert,
-                        weight_name=weight_name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                        return_success=True,
+    def load_expert_weight(
+        self, expert_name: str, loaded_weight: torch.Tensor
+    ) -> list[str] | None:
+        """Load one checkpoint tensor, named relative to this layer.
+
+        Returns:
+            The names of the parameters written (may repeat; empty when no
+            expert of the tensor is on this rank), or None when the name
+            matches no entry of the expert mapping.
+
+        """
+        expert_mapping, mapping_by_expert = self._indexed_expert_mapping()
+        loaded_names: list[str] = []
+        qual_name = f"{self.layer_name}.{expert_name}"
+        expert_key = qual_name.partition("experts.")[2].partition(".")[0]
+        named_expert = (
+            mapping_by_expert.get(expert_key)
+            if qual_name.count("experts.") == 1
+            else None
+        )
+        # Encoded per-expert [N, K / block_size, bytes_per_block] weights
+        # have the same rank as fused [E, N, K] weights. An explicit expert
+        # name identifies the per-expert layout without treating N as E.
+        is_fused = loaded_weight.dim() == 3 and named_expert is None
+        # Fused tensors and ambiguous names keep the full mapping.
+        candidates = expert_mapping
+        if not is_fused and qual_name.count("experts.") == 1:
+            candidates = named_expert or expert_mapping
+
+        matched = False
+        for param_name, weight_name, expert_id, shard_id in candidates:
+            if weight_name not in qual_name:
+                if matched and is_fused:
+                    # Fused tensors use the first contiguous run of matches.
+                    break
+                continue
+            matched = True
+            is_per_expert_fused_w13 = (
+                not is_fused
+                and shard_id in {"w1", "w3"}
+                and any(
+                    f".{fused_name}." in qual_name
+                    for fused_name in ("gate_up_proj", "w13")
+                )
+            )
+            weight_name = qual_name.replace(weight_name, param_name)
+            param_name = weight_name.removeprefix(f"{self.layer_name}.")
+            if self.shared_expert_online_loader is not None:
+                param_name = self.shared_expert_online_loader.redirect_param_name(
+                    param_name, shard_id, expert_id
+                )
+            param = getattr(self, param_name, None)
+            if param is None:
+                if param_name.endswith(("w13_bias", "w2_bias")):
+                    continue
+                raise AttributeError(
+                    f"Layer {self.layer_name} has no parameter {param_name!r} "
+                    f"for checkpoint weight {qual_name!r}"
+                )
+            if is_fused:
+                quant_method = getattr(param, "quant_method", None)
+                # Block scales share the weight's two-dimensional layout.
+                # Other quantization metadata can use independent layouts.
+                uses_weight_layout = (
+                    "scale" not in weight_name
+                    or quant_method == FusedMoeWeightScaleSupported.BLOCK.value
+                )
+                # w1 and w3 share one fused tensor; use a local copy so the
+                # transpose below doesn't mutate loaded_weight across
+                # iterations (else w3 is transposed twice and wrongly chunked)
+                fused_weight = self._orient_fused_weight(
+                    loaded_weight,
+                    self.is_fused_checkpoint_transposed and uses_weight_layout,
+                )
+                if shard_id in {"w1", "w3"} and self.moe_config.is_act_and_mul:
+                    # Repurpose expert_id for deconcatenating w1 and w3
+                    experts_shard = fused_weight.chunk(2, dim=1)[expert_id]
+                else:
+                    experts_shard = fused_weight
+                if self._covers_fused_load(param, experts_shard, weight_name):
+                    if self._load_fused_experts(
+                        param, experts_shard, weight_name, shard_id
+                    ):
+                        loaded_names.append(param_name)
+                    continue
+                slots = self._fused_expert_slots(experts_shard.shape[0])
+            elif is_per_expert_fused_w13:
+                shard_index = 0 if shard_id == "w1" else 1
+                experts_shard = loaded_weight.chunk(2, dim=0)[shard_index].unsqueeze(0)
+                slots = [(expert_id, 0)]
+            else:
+                # loaded_weight is a single expert weight, so we add a dummy expert
+                # dimension to unify the loading logic with the fused case
+                experts_shard = loaded_weight.unsqueeze(0)
+                slots = [(expert_id, 0)]
+
+            # Unified loading logic for fused and non-fused experts
+            for expert_id, index in slots:
+                success = param.weight_loader(
+                    param=param,
+                    loaded_weight=experts_shard[index],
+                    weight_name=weight_name,
+                    shard_id=shard_id,
+                    expert_id=expert_id,
+                    return_success=True,
+                )
+                if success:
+                    logger.debug(
+                        "Loaded expert %d of shard %s into %s for layer %s",
+                        expert_id,
+                        shard_id,
+                        param_name,
+                        self.layer_name,
                     )
-                    if success:
-                        logger.debug(
-                            "Loaded expert %d of shard %s into %s for layer %s",
-                            expert_id,
-                            shard_id,
-                            param_name,
-                            self.layer_name,
-                        )
-                        yield param_name
+                    loaded_names.append(param_name)
+        return loaded_names if matched else None
+
+    def _indexed_expert_mapping(
+        self,
+    ) -> tuple[ExpertMapping, dict[str, ExpertMapping]]:
+        """The ``load_weights`` mapping and its index, cached so that loaders
+        calling ``load_expert_weight`` once per checkpoint tensor stay cheap."""
+        key = (
+            self.lora_base_layer_prefix,
+            self.moe_config.num_experts,
+            self.moe_config.num_logical_experts,
+            self.expert_map_manager.num_fused_shared_experts,
+        )
+        cached = self._expert_mapping_cache
+        if cached is None or cached[0] != key:
+            mapping = self.get_expert_mapping(include_fused=True)
+            cached = (key, mapping, _index_expert_mapping(mapping))
+            self._expert_mapping_cache = cached
+        return cached[1], cached[2]
 
     def get_expert_mapping(
         self,

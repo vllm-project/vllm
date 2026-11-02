@@ -24,8 +24,7 @@
 # limitations under the License.
 """Inference-only HY model compatible with HuggingFace weights."""
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 from itertools import islice
 from typing import Any
 
@@ -47,6 +46,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
+    load_routed_experts_weight,
 )
 from vllm.model_executor.layers.hpc import HpcRopeNorm, QkNormPolicy
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -567,7 +567,6 @@ class HYV3Model(nn.Module, MixtureOfExperts):
             (".gate_up_proj", ".up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
-        expert_params_mapping = self.get_expert_mapping()
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
@@ -604,46 +603,18 @@ class HYV3Model(nn.Module, MixtureOfExperts):
 
             if name.endswith(".bias") and name not in params_dict:
                 continue
-            is_expert_weight = False
-            for mapping in expert_params_mapping:
-                param_name, weight_name, expert_id, shard_id = mapping
-                if weight_name not in name:
-                    continue
-                is_expert_weight = True
-                name_mapped = name.replace(weight_name, param_name)
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name_mapped, self):
-                    continue
+            expert_params = load_routed_experts_weight(self, name, loaded_weight)
+            if expert_params is not None:
+                loaded_params.update(expert_params)
+                continue
+            if is_pp_missing_parameter(name, self):
+                continue
+            if "router.gate." in name:
+                name = name.replace("router.", "")
 
-                param = params_dict[name_mapped]
-                weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-                success = weight_loader(
-                    param,
-                    loaded_weight,
-                    name_mapped,
-                    shard_id=shard_id,
-                    expert_id=expert_id,
-                    return_success=True,
-                )
-                if success:
-                    name = name_mapped
-                    break
-            else:
-                if is_expert_weight:
-                    # We've checked that this is an expert weight
-                    # However it's not mapped locally to this rank
-                    # So we simply skip it
-                    continue
-                if name is None:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if "router.gate." in name:
-                    name = name.replace("router.", "")
-
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
+            param = params_dict[name]
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
         return loaded_params
