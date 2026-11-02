@@ -42,6 +42,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_gather,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -95,7 +96,6 @@ from .utils import (
 )
 from .vision import (
     get_load_balance_assignment,
-    is_vit_use_data_parallel,
 )
 
 if TYPE_CHECKING:
@@ -1104,8 +1104,9 @@ class Gemma4ForConditionalGeneration(
         self._enable_mm_lora = bool(
             lora_config is not None and lora_config.enable_tower_connector_lora
         )
-        self.use_data_parallel = is_vit_use_data_parallel(
-            config.vision_config.num_attention_heads
+        self.use_data_parallel = bool(
+            multimodal_config is not None
+            and getattr(multimodal_config, "mm_encoder_tp_mode", None) == "data"
         )
 
         # Apply the dimension check independently because the vision and audio
@@ -1328,7 +1329,6 @@ class Gemma4ForConditionalGeneration(
         if total_items == 0:
             return []
 
-        per_item_out_tokens = [spec.output_tokens for spec in item_specs]
         per_item_input_sizes = [spec.input_size for spec in item_specs]
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -1343,13 +1343,26 @@ class Gemma4ForConditionalGeneration(
             cum_images_per_rank[tp_rank] : cum_images_per_rank[tp_rank + 1]
         ]
 
-        local_mm_kwargs = self.select_encoder_cudagraph_items(mm_kwargs, local_indices)
-        local_outputs = process_fn(local_mm_kwargs)
+        if len(local_indices) == 0:
+            local_outputs = []
+        else:
+            local_mm_kwargs = self.select_encoder_cudagraph_items(
+                mm_kwargs, local_indices
+            )
+            local_outputs = process_fn(local_mm_kwargs)
+
+        device = next(self.parameters()).device
+        local_len_tensor = torch.zeros(total_items, dtype=torch.int64, device=device)
+        for idx, output in zip(local_indices, local_outputs):
+            local_len_tensor[idx] = output.shape[0]
+        actual_item_lens = tensor_model_parallel_all_reduce(
+            local_len_tensor
+        ).tolist()
 
         hidden_size = self.config.text_config.hidden_size
         max_output_tokens_per_rank = max(
             sum(
-                per_item_out_tokens[i]
+                actual_item_lens[i]
                 for i in image_rank_assignment[
                     cum_images_per_rank[r] : cum_images_per_rank[r + 1]
                 ]
@@ -1357,12 +1370,22 @@ class Gemma4ForConditionalGeneration(
             for r in range(tp_size)
         )
 
+        if max_output_tokens_per_rank == 0:
+            return [
+                torch.empty(
+                    (0, hidden_size),
+                    device=device,
+                    dtype=self.model_dtype,
+                )
+                for _ in range(total_items)
+            ]
+
         if len(local_outputs) > 0:
             local_concat = torch.cat(local_outputs, dim=0)
         else:
             local_concat = torch.empty(
                 (0, hidden_size),
-                device=next(self.parameters()).device,
+                device=device,
                 dtype=self.model_dtype,
             )
 
@@ -1371,7 +1394,7 @@ class Gemma4ForConditionalGeneration(
             padding = torch.empty(
                 (max_output_tokens_per_rank - current_len, hidden_size),
                 dtype=self.model_dtype,
-                device=local_concat.device,
+                device=device,
             )
             local_padded = torch.cat([local_concat, padding], dim=0)
         else:
@@ -1384,8 +1407,10 @@ class Gemma4ForConditionalGeneration(
         for rank in range(tp_size):
             start = rank * max_output_tokens_per_rank
             rank_count = images_per_rank[rank]
-            rank_indices = image_rank_assignment[current_idx : current_idx + rank_count]
-            rank_tokens = sum(per_item_out_tokens[i] for i in rank_indices)
+            rank_indices = image_rank_assignment[
+                current_idx : current_idx + rank_count
+            ]
+            rank_tokens = sum(actual_item_lens[i] for i in rank_indices)
             current_idx += rank_count
             rank_outputs.append(gathered[start : start + rank_tokens])
 
@@ -1394,11 +1419,13 @@ class Gemma4ForConditionalGeneration(
         for rank in range(tp_size):
             count = images_per_rank[rank]
             if count > 0:
-                rank_items = image_rank_assignment[current_idx : current_idx + count]
+                rank_items = image_rank_assignment[
+                    current_idx : current_idx + count
+                ]
                 scatter_output_slices(
                     rank_outputs[rank],
                     rank_items,
-                    per_item_out_tokens,
+                    actual_item_lens,
                     result,
                 )
                 current_idx += count
@@ -1426,15 +1453,23 @@ class Gemma4ForConditionalGeneration(
         self,
         image_input: Gemma4ImageInputs,
     ) -> list[torch.Tensor]:
-        if self.use_data_parallel and get_tensor_model_parallel_world_size() > 1:
+        if (
+            getattr(self, "use_data_parallel", False)
+            and not getattr(self, "_enable_mm_lora", False)
+            and get_tensor_model_parallel_world_size() > 1
+        ):
             raw_kwargs = {
                 "pixel_values": image_input["pixel_values"],
                 "pixel_position_ids": image_input["pixel_position_ids"],
             }
             return self._dp_execute_and_gather(
                 raw_kwargs,
-                lambda local_kwargs: self._process_image_input_local(
-                    Gemma4ImagePixelInputs(**local_kwargs)
+                lambda local_kwargs: (
+                    []
+                    if len(local_kwargs.get("pixel_values", [])) == 0
+                    else self._process_image_input_local(
+                        Gemma4ImagePixelInputs(**local_kwargs)
+                    )
                 ),
             )
         return self._process_image_input_local(image_input)
@@ -1600,7 +1635,11 @@ class Gemma4ForConditionalGeneration(
         self,
         video_input: Gemma4VideoInputs,
     ) -> list[torch.Tensor]:
-        if self.use_data_parallel and get_tensor_model_parallel_world_size() > 1:
+        if (
+            getattr(self, "use_data_parallel", False)
+            and not getattr(self, "_enable_mm_lora", False)
+            and get_tensor_model_parallel_world_size() > 1
+        ):
             raw_kwargs = {
                 "pixel_values_videos": video_input["pixel_values_videos"],
                 "pixel_position_ids_videos": video_input["pixel_position_ids_videos"],
@@ -1608,8 +1647,12 @@ class Gemma4ForConditionalGeneration(
             }
             return self._dp_execute_and_gather(
                 raw_kwargs,
-                lambda local_kwargs: self._process_video_input_local(
-                    Gemma4VideoInputs(**local_kwargs)
+                lambda local_kwargs: (
+                    []
+                    if len(local_kwargs.get("pixel_values_videos", [])) == 0
+                    else self._process_video_input_local(
+                        Gemma4VideoInputs(**local_kwargs)
+                    )
                 ),
             )
         return self._process_video_input_local(video_input)
@@ -2230,11 +2273,11 @@ class Gemma4ForConditionalGeneration(
         if modality == "image":
             image_input = self._parse_and_validate_image_input(**mm_kwargs)
             assert image_input is not None
-            embeddings = self._process_image_input(image_input)
+            embeddings = self._process_image_input_local(image_input)
         elif modality == "video":
             video_input = self._parse_and_validate_video_input(**mm_kwargs)
             assert video_input is not None
-            embeddings = self._process_video_input(video_input)
+            embeddings = self._process_video_input_local(video_input)
         else:
             raise ValueError(f"Unsupported modality: {modality}")
 
