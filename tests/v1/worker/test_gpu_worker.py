@@ -45,6 +45,33 @@ def test_worker_initializes_external_weight_accounting_before_device_setup():
         assert not worker._external_weights.changed
 
 
+@pytest.mark.parametrize("free_memory", [100, 91])
+def test_disabling_extensible_cache_rechecks_worker_memory_budget(free_memory):
+    """Switching sizing modes uses the worker's accounting and capacity checks."""
+    from vllm.config import VllmConfig
+    from vllm.utils.mem_utils import MemorySnapshot
+
+    worker = gpu_worker.Worker(
+        VllmConfig(), local_rank=0, rank=0, distributed_init_method="env://"
+    )
+    worker.cache_config.enable_extensible_kv_cache = True
+    worker.init_snapshot = MemorySnapshot(
+        total_memory=100,
+        free_memory=free_memory,
+        device="cpu",
+        auto_measure=False,
+    )
+    if free_memory < 92:
+        with pytest.raises(
+            ValueError, match="less than desired GPU memory utilization"
+        ):
+            worker.disable_extensible_kv_cache()
+    else:
+        worker.disable_extensible_kv_cache()
+        assert worker.requested_memory == 92
+    assert not worker.cache_config.enable_extensible_kv_cache
+
+
 def test_sleep_preservation_restores_private_draft_not_shared_target():
     target = torch.nn.Linear(2, 2, bias=False)
     draft = torch.nn.Module()
