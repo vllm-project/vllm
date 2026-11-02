@@ -128,6 +128,20 @@ class SupportsHMA(ABC):
         """
         raise NotImplementedError
 
+    def request_finished_all_groups_with_generations(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        block_identities: tuple[list[tuple[int, int] | None], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Finish hook with identities scoped by session, group and pool.
+
+        Existing connectors retain their behavior. Generation-aware connectors
+        override this method and reject stale identities before accepting
+        asynchronous ownership.
+        """
+        return self.request_finished_all_groups(request, block_ids)
+
 
 def supports_hma(connector: Any) -> bool:
     if isinstance(connector, type):
@@ -649,6 +663,20 @@ class KVConnectorBase_V1(ABC):
         """
         return False, None
 
+    def request_finished_with_generations(
+        self,
+        request: "Request",
+        block_ids: list[int],
+        block_identities: list[tuple[int, int] | None],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Finish hook with identities scoped by session, group and pool.
+
+        Existing connectors retain their behavior. Generation-aware connectors
+        override this method and reject stale identities before accepting
+        asynchronous ownership.
+        """
+        return self.request_finished(request, block_ids)
+
     def register_finished_partial_tail(
         self,
         request: "Request",
@@ -661,6 +689,18 @@ class KVConnectorBase_V1(ABC):
         and the request's blocks must remain alive until ``get_finished()``.
         """
         return False
+
+    def register_finished_partial_tail_with_generations(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+        block_identities: tuple[list[tuple[int, int] | None], ...],
+        partial_tail_offloads: list[tuple[int, int, int]],
+    ) -> bool:
+        """Partial-tail hook with session/group/pool-scoped identities."""
+        return self.register_finished_partial_tail(
+            request, block_ids, partial_tail_offloads
+        )
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """Take the KV cache events from the connector.
