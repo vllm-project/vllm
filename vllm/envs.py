@@ -2167,10 +2167,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DISABLE_DSV4_MEGAMOE_SHARED_EXPERT_FUSION", "0"))
     ),
     # DeepSeek-V4.1 MXFP8 linear GEMMs with at least this many input rows use
-    # cuBLASLt (torch._scaled_mm) instead of FlashInfer CuTe-DSL on SM100 when
-    # the linear backend is "auto". Output width must be divisible by 16.
+    # cuBLASLt (torch._scaled_mm) instead of FlashInfer CuTe-DSL on SM100/SM103
+    # when the linear backend is "auto". Output width must be divisible by 16.
     # Below 8192 rows, tuned CuTe-DSL is faster on most GB300 shapes.
-    # 0 keeps CuTe-DSL for every GEMM.
+    # 0 or a negative value keeps CuTe-DSL for every GEMM.
     "VLLM_DSV41_MXFP8_CUBLASLT_MIN_M": lambda: int(
         os.getenv("VLLM_DSV41_MXFP8_CUBLASLT_MIN_M", "8192")
     ),

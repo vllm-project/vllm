@@ -241,7 +241,11 @@ class DeepseekV4FP8Config(Fp8Config):
             rows, cols = self.weight_block_size
             spec = QuantSpec(weight=kMxfp8Static, activation=kMxfp8Dynamic)
             ctx = CkptCtx(scale_block_size=(rows, cols))
-            if current_platform.is_cuda() and envs.VLLM_DSV41_MXFP8_CUBLASLT_MIN_M:
+            if (
+                current_platform.is_cuda()
+                and envs.VLLM_DSV41_MXFP8_CUBLASLT_MIN_M > 0
+                and any(current_platform.is_device_capability(c) for c in (100, 103))
+            ):
                 from .nvidia.ops.mxfp8_linear import DeepseekV41Mxfp8LinearMethod
 
                 return DeepseekV41Mxfp8LinearMethod(spec, ctx)
