@@ -560,6 +560,7 @@ class DraftModelSpeculator(BaseSpeculator):
 
         logits = self.compute_draft_logits(hidden_states, spec_step_idx)
         if draft_logits is not None and self.draft_watermarker is not None:
+            draft_logits.lse_filled = False
             sampled = self.draft_watermarker.sample(
                 logits,
                 idx_mapping,
@@ -574,6 +575,9 @@ class DraftModelSpeculator(BaseSpeculator):
                 num_steps=num_steps,
             )
         elif draft_logits is not None:
+            # Record each draft's log-sum-exp as it is cached, so verification
+            # does not reduce the draft logits again.
+            draft_logits.lse_filled = True
             sampled = gumbel_sample(
                 logits,
                 idx_mapping,
@@ -586,6 +590,7 @@ class DraftModelSpeculator(BaseSpeculator):
                 logits_cache_col=draft_step,
                 use_fp64=self.use_fp64_gumbel,
                 logits_cache_row_mapping=draft_logits.row_mapping,
+                logits_cache_lse=draft_logits.lse,
             )
         else:
             sampled = greedy_argmax(logits)

@@ -885,6 +885,9 @@ class PCPManager:
             logits = draft_logits.values[idx_mapping]
             pcp_group.broadcast(logits, src=0)
             draft_logits.values[idx_mapping] = logits
+            lse = draft_logits.lse[idx_mapping]
+            pcp_group.broadcast(lse, src=0)
+            draft_logits.lse[idx_mapping] = lse
 
     def restore_for_sampling(
         self, hidden_states: torch.Tensor, aux_hidden_states: list[torch.Tensor] | None

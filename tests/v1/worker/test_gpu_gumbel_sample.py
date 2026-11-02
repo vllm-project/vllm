@@ -460,6 +460,56 @@ def test_logits_cache_stores_input_logits_bitwise(
     )
 
 
+@pytest.mark.parametrize("per_token_col", [False, True])
+def test_logits_cache_lse_matches_cached_logits(per_token_col: bool):
+    """With logits_cache_lse, each cached draft's log-sum-exp of logits / T lands
+    at the logits' (row, col), padding rows are left alone, and the sampled
+    tokens do not change."""
+    torch.manual_seed(0)
+    num_reqs, vocab_size, num_steps = 8, 4099, 3
+    logits = torch.randn(num_reqs, vocab_size, device=DEVICE, dtype=torch.bfloat16)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    idx_mapping[-1] = -1  # a CUDA graph padding row
+    temp = torch.tensor(
+        [0.0, 0.1, 0.5, 1.0, 1.5, 2.0, 0.7, 1.0], dtype=torch.float32, device=DEVICE
+    )
+    seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+    pos = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+    if per_token_col:
+        cols = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE) % num_steps
+    else:
+        cols = torch.tensor(1, dtype=torch.int32, device=DEVICE).expand(num_reqs)
+
+    def sample(lse: torch.Tensor | None) -> torch.Tensor:
+        cache = torch.zeros(
+            num_reqs, num_steps, vocab_size, device=DEVICE, dtype=logits.dtype
+        )
+        return gumbel_sample(
+            logits,
+            idx_mapping,
+            temp,
+            seed,
+            pos,
+            apply_temperature=True,
+            is_drafting=True,
+            logits_cache=cache,
+            logits_cache_col=cols if per_token_col else cols[0],
+            logits_cache_lse=lse,
+        )
+
+    lse = torch.full((num_reqs, num_steps), float("nan"), device=DEVICE).double()
+    assert torch.equal(sample(lse), sample(None))
+
+    rows = torch.arange(num_reqs, device=DEVICE)
+    written = lse[rows, cols.long()]
+    expected = (logits.float() / temp[:, None]).double().logsumexp(-1)
+    sampled_rows = (temp != 0) & (idx_mapping >= 0)
+    torch.testing.assert_close(
+        written[sampled_rows], expected[sampled_rows], rtol=0, atol=1e-5
+    )
+    assert written[-1].isnan(), "a padding row must not be written"
+
+
 @pytest.mark.parametrize("extra_cache_cols", [0, 1])
 def test_logits_cache_columns_stay_separate_across_steps(extra_cache_cols: int):
     """Each drafting step must land in its own cache column.

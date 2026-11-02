@@ -2029,3 +2029,48 @@ def test_precomputed_target_lse_matches_stats_pass(
     torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
     valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
     torch.testing.assert_close(sampled[valid], expected_sampled[valid], rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("temperature", [0.0, 0.73, 1.0])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_draft_lse_from_drafter_matches_stats_pass(
+    temperature: float, use_block_verification: bool
+):
+    """A draft log-sum-exp the drafter recorded in DraftLogitsCache (lse_filled)
+    must sample what the stats pass's own draft reduction samples."""
+    torch.manual_seed(13)
+    device = "cuda"
+    vocab_size = 2 * 8192 + 5
+    num_trials = 64
+    K = 3
+
+    inputs = _build_rejection_sample_inputs(
+        torch.randn(vocab_size, device=device),
+        torch.randn(vocab_size, device=device),
+        K,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    values = inputs.pop("draft_logits")
+
+    def run(lse_filled: bool) -> tuple[torch.Tensor, torch.Tensor]:
+        cache = DraftLogitsCache(
+            num_trials, K, vocab_size, dtype=values.dtype, fill=0.0, device=device
+        )
+        cache.values.copy_(values)
+        if temperature > 0:
+            cache.lse.copy_((values.double() / temperature).logsumexp(-1))
+        cache.lse_filled = lse_filled
+        return rejection_sample(
+            draft_logits_cache=cache,
+            **inputs,
+            num_speculative_steps=K,
+            use_block_verification=use_block_verification,
+        )
+
+    expected_sampled, expected_num_sampled = run(False)
+    sampled, num_sampled = run(True)
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
+    torch.testing.assert_close(sampled[valid], expected_sampled[valid], rtol=0, atol=0)

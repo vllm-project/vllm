@@ -302,11 +302,16 @@ def _gumbel_sample_kernel(
     pos_ptr,
     temp_ptr,
     vocab_size,
+    # [num_tokens, num_blocks]
+    lse_local_max_ptr,
+    lse_local_sumexp_ptr,
+    lse_local_stride,
     BLOCK_SIZE: tl.constexpr,
     IS_DRAFTING: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
     USE_FP64: tl.constexpr,
     PER_TOKEN_COL: tl.constexpr,
+    CACHE_LSE: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
@@ -345,6 +350,78 @@ def _gumbel_sample_kernel(
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
 
+    if CACHE_LSE:
+        # The block's max and sum of exp of the cached logits / T, scaled
+        # exactly as the rejection sampler scales them when it reloads them.
+        req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
+        temp = tl.load(temp_ptr + req_state_idx, mask=req_state_idx >= 0, other=0.0)
+        temp = tl.where(temp == 0.0, 1.0, temp.to(tl.float32))
+        scaled = (
+            tl.load(
+                logits_cache_source_ptr
+                + token_idx * logits_cache_source_stride
+                + block,
+                mask=mask,
+                other=float("-inf"),
+            ).to(tl.float32)
+            / temp
+        )
+        block_max = tl.max(scaled, axis=0)
+        block_sumexp = tl.where(
+            block_max > float("-inf"), tl.sum(tl.exp(scaled - block_max)), 0.0
+        )
+        tl.store(
+            lse_local_max_ptr + token_idx * lse_local_stride + block_idx, block_max
+        )
+        tl.store(
+            lse_local_sumexp_ptr + token_idx * lse_local_stride + block_idx,
+            block_sumexp,
+        )
+
+
+@triton.jit
+def _cache_draft_lse_kernel(
+    # [num_rows, num_cols]
+    lse_ptr,
+    lse_stride,
+    # [num_tokens, num_blocks]
+    lse_local_max_ptr,
+    lse_local_sumexp_ptr,
+    lse_local_stride,
+    expanded_idx_mapping_ptr,
+    logits_cache_col_ptr,
+    logits_cache_row_mapping_ptr,
+    num_blocks,
+    PADDED_NUM_BLOCKS: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr,
+):
+    token_idx = tl.program_id(0).to(tl.int64)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
+    row = draft_logits_row(req_state_idx, logits_cache_row_mapping_ptr)
+    if (req_state_idx < 0) | (row < 0):
+        return
+    if PER_TOKEN_COL:
+        col = tl.load(logits_cache_col_ptr + token_idx)
+    else:
+        col = tl.load(logits_cache_col_ptr)
+    blocks = tl.arange(0, PADDED_NUM_BLOCKS)
+    mask = blocks < num_blocks
+    maxes = tl.load(
+        lse_local_max_ptr + token_idx * lse_local_stride + blocks,
+        mask=mask,
+        other=float("-inf"),
+    )
+    sumexps = tl.load(
+        lse_local_sumexp_ptr + token_idx * lse_local_stride + blocks,
+        mask=mask,
+        other=0.0,
+    )
+    # Combined in fp64, as the rejection sampler combines its own partials.
+    global_max = tl.max(maxes, axis=0)
+    terms = (sumexps * tl.exp(maxes - global_max)).to(tl.float64)
+    lse = global_max.to(tl.float64) + tl.log(tl.sum(terms, axis=0))
+    tl.store(lse_ptr + row * lse_stride + col, lse)
+
 
 def gumbel_sample(
     logits: torch.Tensor,  # [num_tokens, vocab_size]
@@ -359,6 +436,7 @@ def gumbel_sample(
     use_fp64: bool = False,
     logits_cache_source: torch.Tensor | None = None,
     logits_cache_row_mapping: torch.Tensor | None = None,  # [max_num_reqs]
+    logits_cache_lse: torch.Tensor | None = None,  # [max_num_reqs, num_cols] fp64
 ) -> torch.Tensor:
     # Enforce contiguity on non-strided input tensors
     expanded_idx_mapping = expanded_idx_mapping.contiguous()
@@ -383,8 +461,10 @@ def gumbel_sample(
             f"than the sampled logits ({vocab_size}). Cached logits would be "
             "truncated."
         )
-    elif logits_cache_source is not None:
-        raise ValueError("logits_cache_source requires logits_cache")
+    elif logits_cache_source is not None or logits_cache_lse is not None:
+        raise ValueError(
+            "logits_cache_source and logits_cache_lse require logits_cache"
+        )
     if logits_cache_source is not None and logits_cache_source.stride(-1) != 1:
         logits_cache_source = logits_cache_source.contiguous()
     BLOCK_SIZE = 1024
@@ -393,6 +473,10 @@ def gumbel_sample(
     local_max_dtype = torch.float64 if use_fp64 else torch.float32
     local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
     per_token_col = logits_cache_col is not None and logits_cache_col.dim() > 0
+    lse_local_max = lse_local_sumexp = None
+    if logits_cache_lse is not None:
+        lse_local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float32)
+        lse_local_sumexp = torch.empty_like(lse_local_max)
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),
@@ -412,12 +496,33 @@ def gumbel_sample(
         pos,
         temperature,
         vocab_size,
+        lse_local_max,
+        lse_local_sumexp,
+        num_blocks,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_DRAFTING=is_drafting,
         APPLY_TEMPERATURE=apply_temperature,
         USE_FP64=use_fp64,
         PER_TOKEN_COL=per_token_col,
+        CACHE_LSE=logits_cache_lse is not None,
     )
+    if logits_cache_lse is not None:
+        assert logits_cache is not None
+        assert logits_cache_lse.dtype == torch.float64
+        assert logits_cache_lse.shape == logits_cache.shape[:2]
+        _cache_draft_lse_kernel[(num_tokens,)](
+            logits_cache_lse,
+            logits_cache_lse.stride(0),
+            lse_local_max,
+            lse_local_sumexp,
+            num_blocks,
+            expanded_idx_mapping,
+            logits_cache_col,
+            logits_cache_row_mapping,
+            num_blocks,
+            PADDED_NUM_BLOCKS=triton.next_power_of_2(num_blocks),
+            PER_TOKEN_COL=per_token_col,
+        )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)
     sampled = local_argmax.gather(dim=-1, index=max_block_idx).view(-1)

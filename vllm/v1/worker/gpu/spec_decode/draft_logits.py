@@ -135,6 +135,13 @@ class DraftLogitsCache:
         self.values = torch.full(
             (num_rows, num_steps, vocab_size), fill, dtype=dtype, device=device
         )
+        # [num_rows, num_steps] fp64 log-sum-exp of values / T, written by the
+        # Gumbel draft sampler alongside values. Verification uses it only while
+        # lse_filled says this round's drafts were all sampled that way.
+        self.lse = torch.full(
+            (num_rows, num_steps), float("nan"), dtype=torch.float64, device=device
+        )
+        self.lse_filled = False
 
     def assign(self, idx_mapping: torch.Tensor, idx_mapping_np: np.ndarray) -> None:
         """Give a sharded cache's rows out by batch position. Call after

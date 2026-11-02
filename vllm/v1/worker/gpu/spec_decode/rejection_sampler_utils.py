@@ -298,11 +298,15 @@ def _compute_local_logits_stats_kernel(
     temp_ptr,
     # [num_logits] fp64, read when HAS_TARGET_LSE
     target_lse_ptr,
+    # [num_rows, num_speculative_steps] fp64, read when HAS_DRAFT_LSE
+    draft_lse_ptr,
+    draft_lse_stride,
     vocab_size,
     num_logits,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
     HAS_TARGET_LSE: tl.constexpr,
+    HAS_DRAFT_LSE: tl.constexpr,
     SCALE_TARGET_LOGITS: tl.constexpr,
     target_topp_thresh_ptr,
     MASK_TARGET_LOGITS: tl.constexpr,
@@ -382,7 +386,25 @@ def _compute_local_logits_stats_kernel(
                 + block_idx,
                 target_sumexp,
             )
-        if HAS_DRAFT_LOGITS:
+        if HAS_DRAFT_LOGITS and HAS_DRAFT_LSE:
+            # The drafter recorded this draft's log-sum-exp: one (lse, 1) partial.
+            draft_row = tl.maximum(
+                draft_logits_row(req_state_idx, draft_logits_row_mapping_ptr), 0
+            )
+            draft_lse = tl.load(
+                draft_lse_ptr + draft_row * draft_lse_stride + draft_step_idx
+            )
+            tl.store(
+                draft_local_max_ptr + logit_idx * draft_local_max_stride + block_idx,
+                tl.where(block_idx == 0, draft_lse, float("-inf")),
+            )
+            tl.store(
+                draft_local_sumexp_ptr
+                + logit_idx * draft_local_sumexp_stride
+                + block_idx,
+                tl.where(block_idx == 0, 1.0, 0.0),
+            )
+        elif HAS_DRAFT_LOGITS:
             # Get local draft max and summed exponentials. draft_logits is
             # stored pre-temperature, so apply scale first.
             draft_logits = (
@@ -1363,8 +1385,20 @@ def rejection_sample(
     target_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
     )
+    # The drafter recorded each draft's log-sum-exp over its whole cached row,
+    # which this pass would otherwise reduce again.
+    draft_lse = None
+    if (
+        draft_logits is not None
+        and draft_logits_cache is not None
+        and draft_logits_cache.lse_filled
+        and draft_logits.size(-1) <= target_logits.shape[-1]
+    ):
+        draft_lse = draft_logits_cache.lse
     draft_local_max = target_logits.new_empty(
-        num_logits, vocab_num_blocks, dtype=torch.float32
+        num_logits,
+        vocab_num_blocks,
+        dtype=torch.float32 if draft_lse is None else torch.float64,
     )
     draft_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
@@ -1390,11 +1424,14 @@ def rejection_sample(
         expanded_local_pos,
         temperature,
         target_lse,
+        draft_lse,
+        draft_lse.stride(0) if draft_lse is not None else 0,
         vocab_size,
         num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
         HAS_TARGET_LSE=target_lse is not None,
+        HAS_DRAFT_LSE=draft_lse is not None,
         SCALE_TARGET_LOGITS=scale_target_logits,
         target_topp_thresh_ptr=target_topp_thresh,
         MASK_TARGET_LOGITS=target_topp_thresh is not None,
