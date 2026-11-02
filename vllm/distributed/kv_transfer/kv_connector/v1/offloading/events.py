@@ -502,17 +502,20 @@ class OffloadingEventsTracker:
                 (event.medium, event.ownership), 1 << len(self._residency_bits)
             )
         for key in event.keys:
-            meta = (
-                self._metadata_for(event.req_context, key)
-                if self.self_describing_enabled and event.req_context is not None
-                else None
-            )
-            saved_meta = self._pending_event_metadata.get(key)
-            # Temporary fallback for partial tails and request-less stores.
-            # Remove it when those paths use request context as well.
-            meta = meta if meta is not None else saved_meta
-            if saved_meta is not None and event.removal_expected:
-                saved_meta.active_residencies |= residency_bit
+            meta = self._pending_event_metadata.get(key)
+            if (
+                meta is None
+                and self.self_describing_enabled
+                and event.req_context is not None
+            ):
+                meta = self._metadata_for(event.req_context, key)
+                if meta is not None and event.removal_expected:
+                    # Temporary: keep the payload for block-granular removals.
+                    # Remove this when removals switch to chunk keys.
+                    meta.active_residencies = 0
+                    self._pending_event_metadata[key] = meta
+            if meta is not None and event.removal_expected:
+                meta.active_residencies |= residency_bit
             if meta is None:
                 if self.self_describing_enabled:
                     # Expected for unsupported shapes; warn once only.

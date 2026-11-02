@@ -355,7 +355,8 @@ def test_take_events_forwards_locality_to_remove():
     assert events[0].locality == "LOCAL"
 
 
-def test_store_uses_request_context_and_removal_uses_saved_metadata():
+@pytest.mark.parametrize("record_snapshot", [False, True])
+def test_store_uses_snapshot_or_request_context_for_removal(record_snapshot):
     block_hashes = [_hash(i) for i in range(4)]
     request = Request(
         request_id="request",
@@ -370,9 +371,10 @@ def test_store_uses_request_context_and_removal_uses_saved_metadata():
     context.set_offload_key_position(key, 8)
     tracker = _tracker()
     tracker.on_new_request(context, request, (group_config,))
-    tracker.record_store(request, group_config, 0, key)
-    # The request context must win over an existing snapshot.
-    tracker._pending_event_metadata[key].token_ids = ()
+    if record_snapshot:
+        tracker.record_store(request, group_config, 0, key)
+        # Reuse the existing snapshot instead of rebuilding from the request.
+        tracker._pending_event_metadata[key].token_ids = ()
 
     [stored] = tracker.take_events(
         [
@@ -387,14 +389,16 @@ def test_store_uses_request_context_and_removal_uses_saved_metadata():
     )
     assert isinstance(stored, BlockStored)
     assert stored.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
-    assert stored.token_ids == list(range(1, 9))
+    assert stored.token_ids == ([] if record_snapshot else list(range(1, 9)))
     assert stored.block_size == 4
+    assert key in tracker._pending_event_metadata
 
     [removed] = tracker.take_events(
         [OffloadingEvent(keys=[key], medium=Medium.CPU, removed=True)]
     )
     assert isinstance(removed, BlockRemoved)
     assert removed.block_hashes == [_wire_hash(h) for h in block_hashes[:2]]
+    assert key not in tracker._pending_event_metadata
 
 
 def test_mamba_store_uses_request_context():
@@ -796,7 +800,10 @@ def test_pending_promotion_captures_payload_before_inventory(history, success):
         assert event.block_hashes == [_wire_hash(_hash(0))]
 
     primary.complete_store([key], ctx, success=success)
-    events = list(tracker.take_events(primary.take_events()))
+    raw_events = list(primary.take_events())
+    if success:
+        assert raw_events[0].removal_expected
+    events = list(tracker.take_events(raw_events))
     if success:
         assert primary.lookup(key, ctx) is LookupResult.HIT
         assert len(events) == 1 and isinstance(events[0], BlockStored)
