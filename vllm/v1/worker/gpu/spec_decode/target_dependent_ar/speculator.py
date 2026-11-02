@@ -92,7 +92,9 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.vllm_config.get_decode_cudagraph_query_lens(
+                self.num_speculative_steps + 1
+            ),
             # Draft prefill shares the target's padded attention metadata.
             varlen_decode=self.enable_adaptive_verification,
         )
@@ -105,7 +107,13 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
 
         # Initialize cudagraph manager for draft decodes (draft positions > 0).
         self.decode_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config, self.device, cudagraph_mode, decode_query_len=1
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            decode_query_lens={1: self.max_num_reqs},
+            decode_request_sizes=(
+                self.vllm_config.get_draft_decode_cudagraph_request_sizes()
+            ),
         )
 
     def capture(self) -> None:
