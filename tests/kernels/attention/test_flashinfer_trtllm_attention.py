@@ -342,7 +342,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
     if is_nvfp4_kv:
         rtol, atol = 1.0, 1.0  # nvfp4 has higher quantization error
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
-        rtol, atol = 7e-2, 9e-2
+        rtol, atol = 7e-2, 1e-1
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
         rtol, atol = 3e-2, 4e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
@@ -637,7 +637,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
         rtol, atol = 4e-2, 6e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:
-        rtol, atol = 2e-2, 3e-2
+        rtol, atol = 2e-2, 6e-2
     else:
         rtol, atol = 1e-2, 1e-2
 

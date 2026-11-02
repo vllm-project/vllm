@@ -164,6 +164,9 @@ pub struct CompletionRequest {
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 
+    /// List of bad words to avoid during generation
+    pub bad_words: Option<Vec<String>>,
+
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
@@ -206,7 +209,7 @@ pub struct CompletionRequest {
     pub return_token_ids: Option<bool>,
 
     /// Include the weight-version spans that sampled each choice's output
-    /// tokens. Not supported yet.
+    /// tokens.
     pub return_weight_versions: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
@@ -274,7 +277,7 @@ pub(super) struct CompletionChoice {
     /// Always `None`.
     /// TODO: return routed experts when `--enable-return-routed-experts` is set.
     pub routed_experts: Option<String>,
-    /// Always `None` until `return_weight_versions` is supported.
+    /// Contiguous weight-version spans over output-token indexes.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
@@ -287,6 +290,8 @@ pub(super) struct CompletionStreamResponse {
     pub choices: Vec<CompletionStreamChoice>,
     pub usage: Option<Usage>,
     pub metrics: Option<StreamPerRequestMetrics>,
+    /// Set only on the chunk carrying the finish reason.
+    pub kv_transfer_params: Option<Value>,
 }
 
 impl CompletionStreamResponse {
@@ -297,6 +302,7 @@ impl CompletionStreamResponse {
             choices: Vec::new(),
             usage: None,
             metrics: None,
+            kv_transfer_params: None,
         }
     }
 }
@@ -312,6 +318,8 @@ pub(super) struct CompletionStreamChoice {
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
     pub prompt_token_ids: Option<Vec<u32>>,
+    /// Set on the final chunk only; covers the whole output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
