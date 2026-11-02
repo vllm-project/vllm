@@ -15,6 +15,7 @@ from typing import (
     NewType,
     TypeAlias,
     TypeVar,
+    cast,
     overload,
 )
 
@@ -39,6 +40,7 @@ from vllm.v1.utils import tensor_data
 if TYPE_CHECKING:
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.single_type_kv_cache_manager import SingleTypeKVCacheManager
+    from vllm.v1.engine import EngineCoreRequest, PrefixHashConfig
 
 
 # BlockHash represents the hash of a single KV-cache block used for
@@ -1034,6 +1036,28 @@ def get_request_block_hasher(
         return new_block_hashes
 
     return request_block_hasher
+
+
+def frontend_block_hashes(
+    request: "EngineCoreRequest", prefix_hash_config: "PrefixHashConfig | None"
+) -> list[BlockHash] | None:
+    """Return the frontend's prompt block hashes, unless their count doesn't
+    match the prompt, in which case the engine hashes the prompt itself."""
+    block_hashes = request.block_hashes
+    if block_hashes is None:
+        return None
+    prompt_len = len(request.prompt_token_ids) if request.prompt_token_ids else 0
+    # The engine hashes a block once its lookahead tokens exist too.
+    if prefix_hash_config is None or len(block_hashes) != (
+        max(prompt_len - prefix_hash_config.num_lookahead_tokens, 0)
+        // prefix_hash_config.hash_block_size
+    ):
+        logger.warning_once(
+            "Ignoring frontend-computed prompt block hashes that don't match the "
+            "engine's prefix hash config; hashing prompts in the engine instead."
+        )
+        return None
+    return cast(list[BlockHash], block_hashes)
 
 
 def generate_lookahead_block_hash_extra_keys(
