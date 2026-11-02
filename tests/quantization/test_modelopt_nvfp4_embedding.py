@@ -1,37 +1,85 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
 import torch
 
+from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.quantization.modelopt import (
+    ModelOptMixedPrecisionConfig,
     ModelOptNvFp4EmbeddingMethod,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
     break_fp4_bytes,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    VocabParallelEmbedding,
+)
 
 
-def test_nvfp4_embedding_matches_reference_dequant():
-    torch.manual_seed(0)
-    vocab, hidden = 37, 64
-    layer = torch.nn.Module()
-    method = ModelOptNvFp4EmbeddingMethod()
-    method.create_weights(layer, hidden, [vocab], hidden, vocab, torch.bfloat16)
-    assert layer.weight.shape == (vocab, hidden // 2)
-    assert layer.weight_scale.shape == (vocab, hidden // 16)
-
-    layer.weight.data.copy_(torch.randint(0, 256, (vocab, hidden // 2)))
-    layer.weight_scale.data.copy_(
-        torch.rand(vocab, hidden // 16).mul(4).to(torch.float8_e4m3fn)
+def _mixed_precision_config() -> ModelOptMixedPrecisionConfig:
+    return ModelOptMixedPrecisionConfig.from_config(
+        {
+            "quantization": {
+                "quant_algo": "MIXED_PRECISION",
+                "kv_cache_quant_algo": None,
+                "exclude_modules": [],
+                "group_size": 16,
+                "quantized_layers": {
+                    "model.embed_tokens": {
+                        "quant_algo": "W4A16_NVFP4",
+                        "group_size": 16,
+                    }
+                },
+            }
+        }
     )
-    layer.weight_scale_2.data.fill_(0.03)
-    method.process_weights_after_loading(layer)
+
+
+def test_nvfp4_embedding_matches_reference_dequant(dist_init):
+    torch.manual_seed(0)
+    # The layer pads the vocabulary, so a size that is not a multiple of the
+    # padding also covers the loader's narrowing.
+    vocab, hidden = 37, 64
+    layer = VocabParallelEmbedding(
+        vocab,
+        hidden,
+        params_dtype=torch.bfloat16,
+        quant_config=_mixed_precision_config(),
+        prefix="model.embed_tokens",
+    )
+    assert isinstance(layer.quant_method, ModelOptNvFp4EmbeddingMethod)
+
+    weight = torch.randint(0, 256, (vocab, hidden // 2), dtype=torch.uint8)
+    scale = torch.rand(vocab, hidden // 16).mul(4).to(torch.float8_e4m3fn)
+    # ModelOpt checkpoints store the global scale as a 0-dim tensor.
+    global_scale = torch.tensor(0.03)
+    for name, value in (
+        ("weight", weight),
+        ("weight_scale", scale),
+        ("weight_scale_2", global_scale),
+    ):
+        layer.weight_loader(getattr(layer, name), value)
+    layer.quant_method.process_weights_after_loading(layer)
 
     ids = torch.tensor([[0, 5, 36], [5, 5, 1]])
-    out = method.embedding(layer, ids)
+    table = break_fp4_bytes(weight, torch.float32).view(vocab, -1, 16)
+    table = table * (scale.float() * global_scale).unsqueeze(-1)
+    expected = table.view(vocab, hidden)[ids].to(torch.bfloat16)
+    torch.testing.assert_close(layer(ids), expected, rtol=0, atol=0)
 
-    table = break_fp4_bytes(layer.weight.data, torch.float32).view(vocab, -1, 16)
-    table = table * (layer.weight_scale.data.float() * 0.03).unsqueeze(-1)
-    ref = table.view(vocab, hidden)[ids].to(torch.bfloat16)
-    assert out.shape == (2, 3, hidden) and out.dtype == torch.bfloat16
-    torch.testing.assert_close(out, ref, rtol=0, atol=0)
+
+def test_nvfp4_embedding_rejects_tied_lm_head(dist_init):
+    # OPT ties its word embeddings to the LM head, which would read packed bytes.
+    vllm_config = VllmConfig(model_config=ModelConfig("facebook/opt-125m"))
+    with (
+        set_current_vllm_config(vllm_config),
+        pytest.raises(ValueError, match="cannot be tied"),
+    ):
+        VocabParallelEmbedding(
+            64,
+            64,
+            params_dtype=torch.bfloat16,
+            quant_config=_mixed_precision_config(),
+            prefix="model.embed_tokens",
+        )
