@@ -31,11 +31,11 @@ docker run --rm --gpus all \
 
 ## Persist the compile cache across containers
 
-Mounting the Hugging Face cache keeps model weights across containers, but each
-new container still starts with an empty `VLLM_CACHE_ROOT` (default
-`~/.cache/vllm`) and recompiles the model's `torch.compile` artifacts. Mount a
-named volume at that path to reuse the inductor, Triton, and AOT artifacts from
-the second container onward:
+Mounting the Hugging Face cache keeps model weights across containers, but does
+not persist vLLM's compilation cache. Mount a named volume at `VLLM_CACHE_ROOT`
+(default `~/.cache/vllm`) to reuse Inductor and AOT artifacts across starts.
+Check the effective Triton cache path separately: depending on the compiler
+path and `TRITON_CACHE_DIR`, it can live outside this tree.
 
 ```bash
 docker run --rm --gpus all \

@@ -37,8 +37,9 @@ startup log, then stop the server cleanly before copying the directory. Warming
 requires a GPU runtime; an ordinary `docker build` does not supply one.
 Generation and image building can run on different hosts, keeping the target
 platform fixed; a multi-platform image digest alone does not pin architecture.
-Transfer the cache with its permissions and timestamps preserved, for example
-with `cp -a` or tar.
+Transfer the cache with POSIX file modes and timestamps preserved, for example
+using tar. If `cp -a` fails to preserve filesystem metadata, use tar without ACL
+restoration and verify the extracted modes and timestamps before baking.
 
 Stage the complete `torch_compile_cache/` subtree, including AOT artifacts if
 enabled, preserving its layout under `VLLM_CACHE_ROOT`. Do not copy the entire
