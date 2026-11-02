@@ -13,7 +13,7 @@ import pickle
 import runpy
 import threading
 import time
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from functools import cached_property
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -51,7 +51,10 @@ from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferInitInfo,
     IPCWeightTransferUpdateInfo,
 )
-from vllm.distributed.weight_transfer.nccl_common import run_trainer_rendezvous
+from vllm.distributed.weight_transfer.nccl_common import (
+    run_trainer_rendezvous,
+    uid_init_process_group,
+)
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerInitInfo,
     NCCLTrainerWeightTransferEngine,
@@ -397,6 +400,13 @@ def test_nccl_receive_weights_without_init_raises():
 
     with pytest.raises(RuntimeError, match="not initialized"):
         engine.receive_weights(update_info)
+
+
+def test_nccl_disabled_communicator_raises(monkeypatch):
+    """A disabled PyNccl communicator would turn every broadcast into a no-op."""
+    monkeypatch.setenv("VLLM_DISABLE_PYNCCL", "1")
+    with pytest.raises(RuntimeError, match="would be a no-op"):
+        uid_init_process_group(b"\x00" * 128, rank=0, world_size=2, device=0)
 
 
 def test_sparse_nccl_receive_weights_without_init_raises():
@@ -2611,7 +2621,9 @@ def mx_worker(mx_client, monkeypatch):
     worker.vllm_config = worker.weight_transfer_engine.vllm_config
     worker._weight_update_active = False
     worker._weight_update_is_draft = False
-    worker.model_runner = MagicMock()
+    worker._kv_cache_reclaimable = False
+    worker._weight_update_kv_cache_loan = ExitStack()
+    worker.model_runner = MagicMock(extensible_kv_cache=None)
     return worker
 
 
