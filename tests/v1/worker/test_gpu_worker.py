@@ -816,6 +816,7 @@ def _weight_update_worker(
     worker.vllm_config = None
     worker.model_runner = runner
     worker._kv_cache_reclaimable = reclaimable
+    worker._asleep_tags = set()
     return worker
 
 
@@ -925,6 +926,7 @@ def test_discarding_the_kv_cache_releases_an_extensible_one(
     worker = SimpleNamespace(
         model_runner=SimpleNamespace(extensible_kv_cache=kv_cache),
         sleep_mode_backend=SimpleNamespace(discard=lambda tags: log.append("pool")),
+        _asleep_tags=set(),
     )
     Worker.discard(worker, ("kv_cache",))
     assert log == ["release", "pool"]
