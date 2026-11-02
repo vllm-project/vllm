@@ -197,6 +197,47 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
     return amdsmi_get_gpu_memory_total(handle, AmdSmiMemoryType.VRAM)
 
 
+@with_amdsmi_context
+def _query_is_fully_connected_from_amdsmi(physical_device_ids: list[int]) -> bool:
+    handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
+    for i, handle in enumerate(handles):
+        for j, peer_handle in enumerate(handles):
+            if i < j:
+                try:
+                    link_type = amdsmi_topo_get_link_type(handle, peer_handle)
+                    # type is 2 for XGMI
+                    if link_type["hops"] != 1 or link_type["type"] != 2:
+                        return False
+                except AmdSmiException as error:
+                    logger.error("AMD 1 hop XGMI detection failed.", exc_info=error)
+                    return False
+    return True
+
+
+@with_amdsmi_context
+def _query_device_name_from_amdsmi(physical_device_id: int) -> str:
+    handle = amdsmi_get_processor_handles()[physical_device_id]
+    asic_info = amdsmi_get_gpu_asic_info(handle)
+    asic_info_device_id: str = asic_info["device_id"]
+    if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
+        return _ROCM_DEVICE_ID_NAME_MAP[asic_info_device_id]
+    return asic_info["market_name"]
+
+
+@with_amdsmi_context
+def _query_device_uuid_from_amdsmi(device_id: int) -> str:
+    try:
+        device = amdsmi_get_processor_handles()[device_id]
+    except AmdSmiException as error:
+        logger.error("amdsmi device query failed ", exc_info=error)
+        return ""
+    try:
+        return amdsmi_get_gpu_device_uuid(device)
+    except AmdSmiException as error:
+        logger.error("amdsmi device uuid query failed ", exc_info=error)
+        return ""
+
+
 def _get_gcn_arch() -> str:
     """Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
     Called once at module level; result stored in _GCN_ARCH.
@@ -1045,48 +1086,35 @@ class RocmPlatform(Platform):
         return DeviceCapability(major=major, minor=minor)
 
     @classmethod
-    @with_amdsmi_context
     def is_fully_connected(cls, physical_device_ids: list[int]) -> bool:
         """Query if the set of gpus are fully connected by xgmi (1 hop)."""
-        handles = [amdsmi_get_processor_handles()[i] for i in physical_device_ids]
-        for i, handle in enumerate(handles):
-            for j, peer_handle in enumerate(handles):
-                if i < j:
-                    try:
-                        link_type = amdsmi_topo_get_link_type(handle, peer_handle)
-                        # type is 2 for XGMI
-                        if link_type["hops"] != 1 or link_type["type"] != 2:
-                            return False
-                    except AmdSmiException as error:
-                        logger.error("AMD 1 hop XGMI detection failed.", exc_info=error)
-                        return False
-        return True
+        try:
+            return _query_is_fully_connected_from_amdsmi(physical_device_ids)
+        except Exception as e:
+            logger.debug("Failed to query XGMI topology via amdsmi: %s", e)
+            return False
 
     @classmethod
-    @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_name(cls, device_id: int = 0) -> str:
-        physical_device_id = cls.device_id_to_physical_device_id(device_id)
-        handle = amdsmi_get_processor_handles()[physical_device_id]
-        asic_info = amdsmi_get_gpu_asic_info(handle)
-        asic_info_device_id: str = asic_info["device_id"]
-        if asic_info_device_id in _ROCM_DEVICE_ID_NAME_MAP:
-            return _ROCM_DEVICE_ID_NAME_MAP[asic_info_device_id]
-        return asic_info["market_name"]
+        try:
+            physical_device_id = cls.device_id_to_physical_device_id(device_id)
+            return _query_device_name_from_amdsmi(physical_device_id)
+        except Exception as e:
+            logger.debug("Failed to get device name via amdsmi: %s", e)
+            logger.warning_once(
+                "Failed to get device name via amdsmi, falling back to "
+                "torch.cuda. This will initialize CUDA."
+            )
+            return torch.cuda.get_device_name(device_id)
 
     @classmethod
-    @with_amdsmi_context
     def get_device_uuid(cls, device_id: int = 0) -> str:
         try:
-            device = amdsmi_get_processor_handles()[device_id]
-        except AmdSmiException as error:
-            logger.error("amdsmi device query failed ", exc_info=error)
-            return ""
-        try:
-            device_uuid = amdsmi_get_gpu_device_uuid(device)
-        except AmdSmiException as error:
-            logger.error("amdsmi device uuid query failed ", exc_info=error)
-        return device_uuid
+            return _query_device_uuid_from_amdsmi(device_id)
+        except Exception as e:
+            logger.debug("Failed to get device uuid via amdsmi: %s", e)
+            return f"rocm:{device_id}"
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:

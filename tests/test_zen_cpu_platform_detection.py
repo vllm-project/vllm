@@ -143,6 +143,27 @@ def test_platform_plugin_failure_is_logged(caplog_vllm):
     assert "RuntimeError: plugin exploded" in caplog_vllm.text
 
 
+def test_rocm_platform_falls_back_when_amdsmi_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from vllm.platforms import rocm as rocm_module
+    from vllm.platforms.rocm import RocmPlatform
+
+    def _raise_amdsmi() -> None:
+        raise RuntimeError("AmdSmiLibraryException(34)")
+
+    monkeypatch.setattr(rocm_module, "amdsmi_init", _raise_amdsmi)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_name", lambda device_id=0: "AMD Radeon RX 9060 XT"
+    )
+    RocmPlatform.get_device_name.cache_clear()
+
+    assert RocmPlatform.get_device_name(0) == "AMD Radeon RX 9060 XT"
+    assert RocmPlatform.get_device_uuid(0) == "rocm:0"
+    assert not RocmPlatform.is_fully_connected([0, 1])
+
+
+
 @pytest.mark.parametrize("fp16_supported", [True, False])
 def test_zen_cpu_supported_dtypes_track_fp16_capability(fp16_supported):
     from vllm.platforms.zen_cpu import ZenCpuPlatform
