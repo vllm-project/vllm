@@ -2061,6 +2061,95 @@ async def test_decode_heartbeat_reaches_every_paired_prefill_worker():
         worker.shutdown()
 
 
+@pytest.mark.cpu_test
+@pytest.mark.asyncio
+async def test_decode_heartbeats_coalesce_while_bootstrap_is_pending():
+    """A slow bootstrap must not fan out stale renewals when it completes."""
+    config = _make_worker_vllm_config(
+        "kv_consumer", kv_connector_extra_config={"kv_lease_duration": 30}
+    )
+    query_started = asyncio.Event()
+    release_query = asyncio.Event()
+    release_reply = asyncio.Event()
+    sent: asyncio.Queue[MooncakeLeaseHeartbeat] = asyncio.Queue()
+    workers = {
+        "0": {
+            "engine_id": "p-engine",
+            "worker_addr": {"0": {"0": "tcp://prefill:1234"}},
+        }
+    }
+
+    async def query(url):
+        query_started.set()
+        await release_query.wait()
+        return httpx.Response(200, json=workers, request=httpx.Request("GET", url))
+
+    async def send(payload):
+        sent.put_nowait(msgspec.msgpack.decode(payload, type=MooncakeLeaseHeartbeat))
+
+    async def recv():
+        await release_reply.wait()
+        return msgspec.msgpack.encode(
+            MooncakeXferResponse(status=MooncakeXferResponseStatus.FINISH)
+        )
+
+    with (
+        set_current_vllm_config(config),
+        patch_worker_dependencies() as mocks,
+        patch.object(mooncake_connector.httpx, "AsyncClient") as bootstrap_client,
+        patch.object(torch.accelerator, "current_device_index", return_value=0),
+        patch.object(mooncake_connector.current_platform, "set_device"),
+    ):
+        worker = MooncakeConnector(
+            config, KVConnectorRole.WORKER, _make_test_kv_cache_config()
+        ).connector_worker
+        assert worker is not None
+        client = bootstrap_client.return_value.__aenter__.return_value
+        client.get.side_effect = query
+        sock = mocks["mock_socket_object"]
+        sock.send.side_effect = send
+        sock.recv.side_effect = recv
+
+        async def submit(ids):
+            await worker._send_lease_heartbeats(
+                {"p-engine": LeaseHeartbeat("http://prefill:8998", ids)}
+            )
+
+        try:
+            await submit(["active"])
+            await asyncio.wait_for(query_started.wait(), 5)
+            for i in range(20):
+                await submit(["active", f"new-{i}"])
+            release_query.set()
+            first = await asyncio.wait_for(sent.get(), 5)
+            assert first.lease_transfer_ids == ["active"]
+            # Drain callbacks already scheduled by bootstrap completion, without
+            # advancing time or completing the first network request.
+            barrier = asyncio.Event()
+            asyncio.get_running_loop().call_soon(barrier.set)
+            await barrier.wait()
+            assert sent.qsize() == 0, "overlapping heartbeat sockets for one engine"
+            release_reply.set()
+            latest = await asyncio.wait_for(sent.get(), 5)
+            assert latest.lease_transfer_ids == ["active", "new-19"]
+        finally:
+            release_query.set()
+            release_reply.set()
+            tasks = [
+                task
+                for task in asyncio.all_tasks()
+                if task is not asyncio.current_task()
+                and getattr(task.get_coro(), "__qualname__", "").startswith(
+                    (
+                        "MooncakeConnectorWorker._send_lease_heartbeat",
+                        "MooncakeConnectorWorker._drain_lease_heartbeat",
+                    )
+                )
+            ]
+            await asyncio.gather(*tasks)
+            worker.shutdown()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kv_lease_duration", [30, None])
 async def test_prefill_side_channel_renews_leases(kv_lease_duration):
