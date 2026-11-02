@@ -71,6 +71,17 @@ class ECCPUConnector(ECConnectorBase):
         return ECCPUScheduler(vllm_config)
 
     # Worker-side forwarders.
+    def start_save_caches(
+        self, encoder_cache: dict[str, torch.Tensor] | None = None, **kwargs
+    ) -> None:
+        if encoder_cache is None:
+            return
+        metadata = self._get_connector_metadata()
+        assert isinstance(metadata, ECCPUConnectorMetadata)
+        for mm_hash in metadata.saves:
+            if mm_hash in encoder_cache:
+                self.save_caches(encoder_cache, mm_hash)
+
     def start_load_caches(
         self, encoder_cache: dict[str, torch.Tensor], **kwargs
     ) -> None:
@@ -111,6 +122,10 @@ class ECCPUConnector(ECConnectorBase):
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         assert self.connector_scheduler is not None
         self.connector_scheduler.update_state_after_alloc(request, index)
+
+    def update_state_after_cache_hit(self, request: "Request", index: int) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.update_state_after_cache_hit(request, index)
 
     def build_connector_meta(
         self, scheduler_output: "SchedulerOutput"

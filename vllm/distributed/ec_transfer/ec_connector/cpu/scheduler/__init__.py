@@ -515,10 +515,9 @@ class ECCPUScheduler:
         block_size = self._region.block_size_bytes
         return (size_bytes + block_size - 1) // block_size
 
-    def update_state_after_alloc(self, request: "Request", index: int) -> None:
+    def _prepare_save(self, request: "Request", index: int) -> None:
         feature = request.mm_features[index]
         mm_hash = feature.identifier
-
         if self._is_producer and self._cache.get(mm_hash) is None:
             shape = (
                 feature.mm_position.get_num_embeds(),
@@ -528,6 +527,13 @@ class ECCPUScheduler:
             if entry is not None:
                 self._pending_saves[mm_hash] = list(entry.block_ids)
 
+    def update_state_after_cache_hit(self, request: "Request", index: int) -> None:
+        self._prepare_save(request, index)
+
+    def update_state_after_alloc(self, request: "Request", index: int) -> None:
+        self._prepare_save(request, index)
+        feature = request.mm_features[index]
+        mm_hash = feature.identifier
         if self._is_consumer and mm_hash not in self._pending_loads:
             entry = self._cache.get(mm_hash)
             if entry is not None and entry.ready:

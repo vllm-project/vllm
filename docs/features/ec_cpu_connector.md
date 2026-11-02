@@ -26,6 +26,7 @@ vllm serve <model> --ec-transfer-config '{
 - `ec_role="ec_both"`: the same process offloads to and reloads from the CPU tier.
 - The tier is one mmap region (`/dev/shm/vllm_ec_{instance_id}_dp{dp_rank}.mmap`) shared by every TP/PCP worker of the instance; only TP rank 0 / PCP rank 0 writes on save, since all ranks hold identical encoder output.
 - Entries are keyed by `mm_hash`; `EmbeddingCache` evicts ready+unpinned entries FIFO when space is needed.
+- The runner cache and CPU tier can evict independently. When a producer reuses a runner-cached output that is missing from the CPU tier, it reserves CPU blocks and saves the existing tensor again without rerunning the encoder. The worker reports save completion through the normal ready-notification path. If no CPU blocks are available, the existing missing-entry behavior still applies.
 - Each batched save/load runs on a pooled CUDA stream; completion is reported to the scheduler once the transfer's end event fires (`ECCPUWorker.build_connector_worker_meta` → `ECCPUScheduler.update_connector_output`), which marks saved entries ready and unpins loaded ones.
 - The region is unlinked from `/dev/shm` in `shutdown()`.
 
