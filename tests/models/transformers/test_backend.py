@@ -19,7 +19,10 @@ from transformers import AutoConfig, AutoModel, PreTrainedConfig
 from vllm.config import ModelConfig, VllmConfig
 from vllm.model_executor.models.interfaces import SupportsMultiModal
 from vllm.model_executor.models.transformers.base import Base
-from vllm.model_executor.models.transformers.causal import find_output_head
+from vllm.model_executor.models.transformers.causal import (
+    probe_output_head,
+    to_output_head,
+)
 from vllm.model_executor.models.transformers.fusers import AttentionFuser
 from vllm.model_executor.models.transformers.fusers.attention import VLLM_ATTN_IMPL
 from vllm.model_executor.models.transformers.multimodal import MultiModalMixin
@@ -830,81 +833,54 @@ def build_causal_lm(model_type: str, arch: str, device: str, **overrides):
 
 
 OUTPUT_HEADS = [
-    # (model_type, arch, overrides, embeddings, scale, soft_cap, has_transform)
-    ("llama", "LlamaForCausalLM", {}, "lm_head", 1.0, None, False),
-    ("gemma2", "Gemma2ForCausalLM", {}, "lm_head", 1.0, 30.0, False),
-    ("cohere", "CohereForCausalLM", {}, "lm_head", 0.0625, None, False),
+    # (model_type, arch, overrides, renames of the output embeddings)
+    ("llama", "LlamaForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
+    # Soft caps the logits
+    ("gemma2", "Gemma2ForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
+    # Multiplies the logits by `logit_scale`
+    ("cohere", "CohereForCausalLM", {}, {"lm_head.weight": "lm_head.weight"}),
     # Divides the logits by `logits_scaling`
     (
         "granite",
         "GraniteForCausalLM",
         {"logits_scaling": 4.0},
-        "lm_head",
-        0.25,
-        None,
-        False,
+        {"lm_head.weight": "lm_head.weight"},
     ),
-    # Multiplies the logits by `logits_scaling`, so config names cannot be trusted
+    # Multiplies the logits by `logits_scaling`
     (
         "hyperclovax",
         "HyperCLOVAXForCausalLM",
         {"logits_scaling": 0.125},
-        "lm_head",
-        0.125,
-        None,
-        False,
+        {"lm_head.weight": "lm_head.weight"},
     ),
     # dense -> act -> norm in `lm_head`, then the biased output embeddings `decoder`
     (
         "modernbert-decoder",
         "ModernBertDecoderForCausalLM",
         {},
-        "decoder",
-        1.0,
-        None,
-        True,
+        {"decoder.weight": "lm_head.weight", "decoder.bias": "lm_head.bias"},
     ),
-    # The output embeddings are nested inside the module which transforms first
+    # The output embeddings are nested inside the module which transforms first,
+    # whose `bias` aliases theirs
     (
         "roberta",
         "RobertaForCausalLM",
         {"is_decoder": True},
-        "lm_head.decoder",
-        1.0,
-        None,
-        True,
+        {
+            "lm_head.decoder.weight": "lm_head.weight",
+            "lm_head.decoder.bias": "lm_head.bias",
+            "lm_head.bias": "lm_head.bias",
+        },
     ),
 ]
 
 
-@pytest.mark.parametrize(
-    ("model_type", "arch", "overrides", "embeddings", "scale", "soft_cap", "transform"),
-    OUTPUT_HEADS,
-)
-def test_output_head_is_found(
-    model_type, arch, overrides, embeddings, scale, soft_cap, transform
-):
-    """The output head is read from the traced forward, not guessed from names."""
-    model = build_causal_lm(model_type, arch, "meta", **overrides)
-    output_head = find_output_head(model)
-
-    assert output_head is not None
-    assert output_head.embeddings is model.get_submodule(embeddings)
-    assert output_head.scale == pytest.approx(scale)
-    assert output_head.soft_cap == soft_cap
-    assert (output_head.transform is not None) is transform
-    assert output_head.renames[f"{embeddings}.weight"] == "lm_head.weight"
-
-
-@pytest.mark.parametrize(
-    ("model_type", "arch", "overrides"), [case[:3] for case in OUTPUT_HEADS]
-)
-def test_output_head_reproduces_logits(model_type, arch, overrides):
-    """The transform, output embeddings, soft cap and scale give the HF logits."""
+@pytest.mark.parametrize(("model_type", "arch", "overrides", "renames"), OUTPUT_HEADS)
+def test_output_head_reproduces_logits(model_type, arch, overrides, renames):
+    """Everything after the base model, with the output embeddings swapped for a
+    projection, gives the HF logits from the base model's hidden states."""
     torch.manual_seed(0)
     model = build_causal_lm(model_type, arch, "cpu", **overrides).eval()
-    output_head = find_output_head(model)
-    assert output_head is not None
     hidden_states = torch.randn(1, 3, model.config.hidden_size)
 
     def replace_hidden_states(module, args, output):
@@ -915,28 +891,33 @@ def test_output_head_reproduces_logits(model_type, arch, overrides):
     with torch.no_grad():
         expected = model(input_ids=torch.zeros(1, 3, dtype=torch.long)).logits
 
-        x = hidden_states
-        if output_head.transform is not None:
-            x = output_head.transform(x)
-        logits = output_head.embeddings(x)
-        if output_head.soft_cap is not None:
-            logits = torch.tanh(logits / output_head.soft_cap) * output_head.soft_cap
-        logits = logits * output_head.scale
+        embeddings = model.get_output_embeddings()
+        output_head = to_output_head(model, type(model.base_model), embeddings)
+        assert output_head is not None
+        assert output_head[0] is embeddings
+        assert output_head[1] == renames
+        assert not any(p is embeddings.weight for p in model.parameters())
+        logits = model(inputs_embeds=hidden_states).logits
 
     torch.testing.assert_close(logits, expected)
 
 
-def test_output_head_is_found_with_compiled_base_model(monkeypatch):
-    """VLLM's `support_torch_compile` overrides the base model's `__call__`, which
-    must not make the trace descend into the base model."""
-    model = build_causal_lm("granite", "GraniteForCausalLM", "meta", logits_scaling=4.0)
-    monkeypatch.setattr(
-        type(model.model), "__call__", lambda self, *a, **kw: self.forward(*a, **kw)
-    )
-    output_head = find_output_head(model)
+@pytest.mark.parametrize(("model_type", "arch", "overrides", "renames"), OUTPUT_HEADS)
+def test_only_projection_is_detected(model_type, arch, overrides, renames):
+    """Only heads which apply nothing but their output embeddings are skipped."""
+    model = build_causal_lm(model_type, arch, "meta", **overrides)
+    embeddings = model.get_output_embeddings()
+    assert to_output_head(model, type(model.base_model), embeddings) is not None
+    only_projection = probe_output_head(model, model.config.hidden_size)
+    assert only_projection is (arch == "LlamaForCausalLM")
 
-    assert output_head is not None
-    assert output_head.scale == pytest.approx(0.25)
+
+def test_output_head_calling_base_model_submodule():
+    """OPT calls its base model's decoder directly, which the stub also serves."""
+    model = build_causal_lm("opt", "OPTForCausalLM", "meta", ffn_dim=128)
+    embeddings = model.get_output_embeddings()
+    assert to_output_head(model, type(model.base_model), embeddings) is not None
+    assert probe_output_head(model, model.config.hidden_size)
 
 
 def test_transformers_model_class_honours_remote_code_config(monkeypatch):
