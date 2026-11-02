@@ -123,7 +123,7 @@ By default, each worker copies its own GPU page to the CPU tier unchanged, so an
 
 Direct layouts use topology-specific filesystem and object-store keys and P2P compatibility fields. Changing TP changes the order of each rank's local layers in the stored block, so matching block sizes alone does not make the bytes compatible. Same-topology reuse remains supported. Supported replicated MLA layouts, whose ranks hold identical KV bytes, retain their shared identity.
 
-Existing head-sharded direct caches from Model Runner V1 (MRV1) that previously used a topology-independent namespace become cold after upgrading, even with the same TP size. Their filesystem entries and object-store objects are not deleted. Direct caches that were already topology-specific, and certified canonical or replicated layouts, retain their namespaces.
+Existing head-sharded direct caches from Model Runner V1 (MRV1, `VLLM_USE_V2_MODEL_RUNNER=0`) that previously used a topology-independent namespace become cold after upgrading, even with the same TP size. Their filesystem entries and object-store objects are not deleted. Direct caches that were already topology-specific, and certified canonical or replicated layouts, retain their namespaces.
 
 With `"canonical_layout": true`, workers instead convert their local pages into one common representation, the canonical page: the block's complete KV (every KV head and every token), with each worker writing its slice into a fixed position. The format is versioned and doesn't depend on how a particular engine splits the KV across its workers.
 

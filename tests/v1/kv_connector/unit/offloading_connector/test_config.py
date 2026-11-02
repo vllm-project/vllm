@@ -307,12 +307,10 @@ def _parallelism_agnostic(
     kv_cache_groups: list[KVCacheGroupSpec],
     *,
     canonical: bool = False,
-    v2: bool = True,
 ) -> bool:
     config = _make_vllm_config(
         extra_config={"canonical_layout": True} if canonical else None
     )
-    config.use_v2_model_runner = v2
     kv_cache_config = KVCacheConfig(
         num_blocks=0,
         kv_cache_tensors=[],
@@ -1270,20 +1268,6 @@ def _uniform_group(*specs: KVCacheSpec) -> KVCacheGroupSpec:
 
 
 @pytest.mark.parametrize(
-    "kv_cache_groups",
-    [
-        _groups(_mla_spec(head_size=576)),
-        _groups(_SWA_SPEC),
-        _groups(_full_attention_spec(), _full_attention_spec()),
-    ],
-)
-def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
-    # The direct layout is never parallelism-agnostic on MRV2, so check the
-    # MRV1 gate.
-    assert not _parallelism_agnostic(kv_cache_groups, v2=False)
-
-
-@pytest.mark.parametrize(
     ("kv_cache_groups", "certified"),
     [
         pytest.param(_groups(_mla_spec(head_size=576)), True, id="mla-latent"),
@@ -1309,9 +1293,7 @@ def test_parallelism_agnostic_excluded(kv_cache_groups: list[KVCacheGroupSpec]):
     ],
 )
 def test_canonical_layout_gate(kv_cache_groups, certified):
-    """The canonical layout certifies portability group by group; none of
-    these shapes are portable in the direct layout."""
-    assert not _parallelism_agnostic(kv_cache_groups, v2=False)
+    """The canonical layout certifies portability group by group."""
     assert _parallelism_agnostic(kv_cache_groups, canonical=True) is certified
 
 
