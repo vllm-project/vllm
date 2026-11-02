@@ -13,6 +13,7 @@ import openai
 import pytest
 import pytest_asyncio
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
@@ -97,6 +98,10 @@ async def test_reasoning_tokens_in_usage(client: openai.AsyncOpenAI):
 
 
 @pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not serve /v1/chat/completions/batch",
+)
 async def test_batch_reasoning_tokens_in_usage(server: RemoteOpenAIServer):
     """The batch endpoint reports hidden reasoning in usage like single chats."""
     async with httpx.AsyncClient() as http_client:
