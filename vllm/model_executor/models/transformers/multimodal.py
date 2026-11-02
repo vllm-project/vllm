@@ -23,6 +23,7 @@ from contextlib import ExitStack, contextmanager
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
+import regex as re
 import torch
 import transformers
 
@@ -673,6 +674,9 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             return
         if len({len(audio) for audio in audios}) == 1:
             return
+        if self.info._fuses_audio_into_video:
+            # An audio processed by itself has no video to be folded into
+            mm_kwargs = {**mm_kwargs, "use_audio_in_video": False}
 
         alone = [
             self.info.ctx.call_hf_processor(
@@ -897,11 +901,32 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         if has_mm_data := any(hf_data.values()):
             hf_data = {**hf_data, "return_text_replacement_offsets": True}
 
+        hf_processor = self.info.get_hf_processor(**hf_kwargs)
+        call_kwargs = hf_kwargs
+        if use_audio_in_video:
+            # Transformers renamed this to `load_audio_from_video`, which takes the
+            # source of each audio in placeholder order
+            placeholders = re.findall(
+                f"{re.escape(hf_processor.audio_token)}"
+                f"|{re.escape(hf_processor.video_token)}",
+                prompt_text,
+            )
+            video_indices = iter(range(len(placeholders)))
+            call_kwargs = {
+                **hf_kwargs,
+                "use_audio_in_video": False,
+                "load_audio_from_video": True,
+                "audio_from_video_indices": [
+                    next(video_indices) if token == hf_processor.video_token else None
+                    for token in placeholders
+                ],
+            }
+
         try:
             hf_inputs = self.info.ctx.call_hf_processor(
-                self.info.get_hf_processor(**hf_kwargs),
+                hf_processor,
                 dict(text=prompt_text, **hf_data),
-                hf_kwargs,
+                call_kwargs,
             )
         except ValueError:
             if any(hf_data.values()):
