@@ -33,6 +33,7 @@ from vllm.v1.attention.ops.cp_common import (
     direct_cp_enabled,
     direct_cp_multicast_enabled,
 )
+from vllm.v1.attention.ops.mla_dcp_context import _gather_context_rows
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 logger = init_logger(__name__)
@@ -1010,6 +1011,13 @@ def dcp_a2a_lse_reduce(
     )
 
 
+def get_dcp_context_workspace_dtype(vllm_config: VllmConfig) -> torch.dtype:
+    """The dtype of the MLA chunked-context workspace under DCP."""
+    if vllm_config.cache_config.cache_dtype == "fp8_ds_mla":
+        return torch.bfloat16
+    return vllm_config.model_config.dtype
+
+
 def get_dcp_workspace_max_num_tokens(vllm_config: VllmConfig) -> int:
     scheduler_config = vllm_config.scheduler_config
     # num_speculative_tokens also counts a diffusion canvas.
@@ -1485,6 +1493,15 @@ class MLADCPManager:
                 num_heads=num_heads,
                 head_dim=output_head_dim,
                 is_base_e=is_lse_base_on_e,
+            )
+        if vllm_config.kernel_config.enable_jit_warmup:
+            # The row gather of the chunked-context loop, for every MLA layer
+            # under DCP. The query head holds the latent and rope parts and the
+            # output head the latent part.
+            _gather_context_rows.register_warmup(
+                dtype=get_dcp_context_workspace_dtype(vllm_config),
+                kv_lora_rank=output_head_dim,
+                rope_dim=query_head_dim - output_head_dim,
             )
         self.query_gather = (
             None

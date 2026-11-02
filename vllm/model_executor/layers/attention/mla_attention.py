@@ -293,8 +293,12 @@ from vllm.v1.attention.backends.utils import (
     get_num_attention_heads_from_layers,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.dcp import MLADCPManager
+from vllm.v1.attention.ops.dcp import (
+    MLADCPManager,
+    get_dcp_context_workspace_dtype,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.mla_dcp_context import gather_dcp_context_rows
 from vllm.v1.attention.ops.pcp import (
     finalize_mla_pcp_decode,
     maybe_gather_mla_latent_cache_inputs,
@@ -1659,6 +1663,10 @@ class MLACommonPrefillMetadata:
         padded_local_token_to_seq: torch.Tensor | None = None
         num_local_context_tokens: int = 0
         local_starts: list[int] | None = None
+        # Row of the all-gathered DCP workspace of each context token of the
+        # chunk: request by request, and within a request rank 0's rows, then
+        # rank 1's, and so on (not token order).
+        context_row_indices: torch.Tensor | None = None
 
         @property
         def num_requests(self) -> int:
@@ -2133,6 +2141,8 @@ def build_mla_chunked_context_metadata(
     padded_local_token_to_seq_parts: list[np.ndarray] = []
     local_starts_per_chunk: list[list[int]] = []
     local_seq_lens_per_chunk: list[list[int]] = []
+    run_first_rows_parts: list[np.ndarray] = []
+    run_lens_parts: list[np.ndarray] = []
     layouts: list[tuple[slice, slice, slice, slice]] = []
 
     request_offset = boundary_offset = token_offset = local_token_offset = 0
@@ -2183,6 +2193,26 @@ def build_mla_chunked_context_metadata(
             num_local_tokens = sum(local_seq_lens)
             # The gather takes per-rank local offsets under DCP.
             starts_flat.extend(local_starts)
+            # The all-gather stacks the ranks' local rows, so rank r's padded
+            # rows of a request start at row r * num_local_tokens plus the
+            # padded rows of the requests before it. The context rows are a
+            # run at the start of them; the rest is padding.
+            assert local_context_lens_allranks is not None
+            context_lens_allranks = np.asarray(
+                local_context_lens_allranks[plan.request_start : plan.request_end]
+            )
+            padded_lens = np.asarray(local_seq_lens)
+            run_lens = np.clip(
+                context_lens_allranks - np.asarray(local_starts)[:, None],
+                0,
+                padded_lens[:, None],
+            )
+            # Each request's runs cover exactly its context rows in the chunk.
+            assert (run_lens.sum(axis=1) == np.asarray(plan.seq_lens)).all()
+            rank_rows = np.arange(dcp_world_size) * num_local_tokens
+            first_rows = (np.cumsum(padded_lens) - padded_lens)[:, None] + rank_rows
+            run_first_rows_parts.append(first_rows.ravel())
+            run_lens_parts.append(run_lens.ravel())
         else:
             starts_flat.extend(plan.starts)
         assert num_local_tokens <= row_budget
@@ -2217,10 +2247,25 @@ def build_mla_chunked_context_metadata(
         padded_local_cu_seq_lens = async_tensor_h2d(
             padded_local_cu_seq_lens_flat, device=device, dtype=torch.int32
         )
-        padded_local_token_to_seq = async_tensor_h2d(
-            np.concatenate(padded_local_token_to_seq_parts),
+        # Context token t of a run, counted over all chunks, sits in
+        # all-gathered row t + offset. The runs share the token-to-seq
+        # transfer and are expanded on the device. The row indices are
+        # int64: the gather measured faster with them than with int32.
+        local_token_to_seq = np.concatenate(padded_local_token_to_seq_parts)
+        run_lens = np.concatenate(run_lens_parts)
+        run_offsets = np.concatenate(run_first_rows_parts) - (
+            np.cumsum(run_lens) - run_lens
+        )
+        padded_local_token_to_seq, run_offsets_gpu, run_lens_gpu = async_tensor_h2d(
+            np.concatenate([local_token_to_seq, run_offsets, run_lens]),
             device=device,
             dtype=torch.int32,
+        ).split([local_token_to_seq.size, run_lens.size, run_lens.size])
+        context_row_indices = torch.arange(
+            token_offset, dtype=torch.int64, device=device
+        )
+        context_row_indices += torch.repeat_interleave(
+            run_offsets_gpu, run_lens_gpu, output_size=token_offset
         )
 
     chunks: list[MLACommonPrefillMetadata.ContextChunk] = []
@@ -2261,6 +2306,7 @@ def build_mla_chunked_context_metadata(
                 local_token_slice
             ]
             chunk.local_starts = local_starts_per_chunk[index]
+            chunk.context_row_indices = context_row_indices[token_slice]
         chunks.append(chunk)
 
     return MLACommonPrefillMetadata.ChunkedContextMetadata(
@@ -2474,9 +2520,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                     + self.chunked_prefill_workspace_size // self.dcp_world_size,
                     self.mla_dims.kv_lora_rank + self.mla_dims.qk_rope_head_dim,
                 ),
-                dtype=torch.bfloat16
-                if use_packed_fp8_cache
-                else self.model_config.dtype,
+                dtype=get_dcp_context_workspace_dtype(vllm_config),
                 device=device,
             )
             self.dcp_manager = getattr(attention_layer, "dcp_manager", None)
@@ -2727,80 +2771,6 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         )
 
         return attn_metadata  # type: ignore[return-value]
-
-
-def reorg_kvcache(
-    allgatered_kv_c_normed: torch.Tensor,
-    allgatered_k_pe: torch.Tensor,
-    padded_local_chunk_seq_lens_lst: list[int],
-    local_context_lens_allranks: list[list[int]],
-    local_starts: list[int],
-    sum_seq_len: int,
-    max_seq_len: int,
-    toks: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reorg and unpad kvcache after cp local gather to tp layout for attn kernel.
-    e.g.
-    allgatered_kv_c_normed = [T0_0, T0_1, T0_2, T0_3, T1_0, T1_1, ...,
-                              T0_4, T0_5, pad, pad, T1_2, pad, ...]
-    -> reorganized_kv_c_normed = [T0_0, T0_1, T0_2, T0_3, T0_4, T0_5,
-                                  T1_0, T1_1, T1_2, ...]
-
-    Args:
-        allgatered_kv_c_normed: all-gathered, padded latent KV cache.
-        allgatered_k_pe: all-gathered, padded RoPE key cache.
-        padded_local_chunk_seq_lens_lst: local chunk context lengths
-            under current CP rank.
-        local_context_lens_allranks: local context lengths on each CP rank.
-        local_starts: per-request local offset into the context this chunk
-            starts at.
-        sum_seq_len: the sum of cp_chunk_seq_lens_lst.
-        max_seq_len: the max value of cp_chunk_seq_lens_lst.
-        toks: the number of tokens for local gather cache.
-
-    """
-    kv_c_segments = []
-    k_pe_segments = []
-    src_token_idx = 0
-    max_seq_len_check = 0
-    for padded_local_chunk_seq_len, local_context_lens, local_start in zip(
-        padded_local_chunk_seq_lens_lst, local_context_lens_allranks, local_starts
-    ):
-        cur_seq_len = 0
-        for rank, local_context_len in enumerate(local_context_lens):
-            # Note(qcs): We split the context into multiple chunks,
-            # depending on the size of the workspace.
-            # local_context in dcp0:   |-----------------|
-            # local_context in dcp1:   |--------------|
-            # n*padded_local_chunk:    |-----|-----|-----|
-            # local_chunk_len in dcp1: |-----|-----|--|
-            # so we need update the last chunk length in dcp1.
-            local_chunk_len = min(
-                max(0, local_context_len - local_start),
-                padded_local_chunk_seq_len,
-            )
-            if local_chunk_len != 0:
-                kv_c_segment = allgatered_kv_c_normed[
-                    rank * toks + src_token_idx : rank * toks
-                    + src_token_idx
-                    + local_chunk_len
-                ]
-                k_pe_segment = allgatered_k_pe[
-                    rank * toks + src_token_idx : rank * toks
-                    + src_token_idx
-                    + local_chunk_len
-                ]
-                kv_c_segments.append(kv_c_segment)
-                k_pe_segments.append(k_pe_segment)
-                cur_seq_len += local_chunk_len
-        max_seq_len_check = max(max_seq_len_check, cur_seq_len)
-        src_token_idx += padded_local_chunk_seq_len
-    reorganized_kv_c_normed = torch.cat(kv_c_segments, dim=0)
-    reorganized_k_pe = torch.cat(k_pe_segments, dim=0)
-    assert reorganized_kv_c_normed.shape[0] == sum_seq_len
-    assert reorganized_k_pe.shape[0] == sum_seq_len
-    assert max_seq_len_check == max_seq_len
-    return reorganized_kv_c_normed, reorganized_k_pe
 
 
 def neutralize_empty_context_partials(
@@ -3118,11 +3088,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         workspace = chunked_context.workspace
 
         for chunk in chunked_context.chunks:
-            assert chunk.padded_local_seq_lens is not None
-            assert chunk.local_context_lens_allranks is not None
             assert chunk.padded_local_cu_seq_lens is not None
             assert chunk.padded_local_token_to_seq is not None
-            assert chunk.local_starts is not None
+            assert chunk.context_row_indices is not None
 
             toks = chunk.num_local_context_tokens
             padded_local_cu_seq_lens = chunk.padded_local_cu_seq_lens
@@ -3176,19 +3144,9 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                 cur_allgather_kvcache.shape[-1]
                 == self.kv_lora_rank + self.qk_rope_head_dim
             )
-            allgatered_kv_c_normed, allgatered_k_pe = cur_allgather_kvcache.unsqueeze(
-                1
-            ).split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
-
-            kv_c_normed, k_pe = reorg_kvcache(
-                allgatered_kv_c_normed,
-                allgatered_k_pe,
-                padded_local_chunk_seq_lens_lst=chunk.padded_local_seq_lens,
-                local_context_lens_allranks=chunk.local_context_lens_allranks,
-                local_starts=chunk.local_starts,
-                sum_seq_len=chunk.num_context_tokens,
-                max_seq_len=chunk.max_seq_len,
-                toks=toks,
+            # Drop the DCP padding and order the rows by the chunk's row indices.
+            kv_c_normed, k_pe = gather_dcp_context_rows(
+                cur_allgather_kvcache, chunk.context_row_indices, self.kv_lora_rank
             )
             if kv_b_proj_input_dtype is not None:
                 kv_c_normed = kv_c_normed.to(kv_b_proj_input_dtype)
