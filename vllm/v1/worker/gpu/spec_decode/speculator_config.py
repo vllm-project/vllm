@@ -110,6 +110,12 @@ class SpeculatorConfig:
         return False
 
     @property
+    def uses_post_norm_final_aux(self) -> bool:
+        """Whether a requested final aux layer means the target's post-final-norm
+        output rather than the pre-norm residual the in-loop capture records."""
+        return False
+
+    @property
     def num_lookahead_tokens(self) -> int:
         """See `VllmConfig.num_lookahead_tokens`."""
         return 0

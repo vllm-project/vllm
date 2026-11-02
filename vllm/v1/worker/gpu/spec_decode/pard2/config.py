@@ -102,6 +102,11 @@ class Pard2SpeculatorConfig(DraftModelSpeculatorConfig):
         return True
 
     @property
+    def uses_post_norm_final_aux(self) -> bool:
+        # PARD-2's -1 layer is HF's post-final-norm hidden_states[-1].
+        return True
+
+    @property
     def num_lookahead_tokens(self) -> int:
         # All K draft tokens are new query positions.
         return self.num_speculative_tokens

@@ -299,8 +299,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Speculative decoding.
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
-        # PARD-2 fuses the target's final (-1) layer, whose aux capture is the
-        # PRE-final-norm residual; when True, swap it for the POST-norm output.
+        # The aux capture of the final layer is the PRE-final-norm residual;
+        # when True, swap it for the POST-norm output the drafter expects.
         self._swap_final_aux_to_post_norm = False
         if self.speculative_config is not None:
             if self.is_last_pp_rank:
@@ -419,14 +419,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 set_eagle3_aux_hidden_state_layers(
                     self.model, self.speculative_config, self.use_pp
                 )
-                # PARD-2's -1 layer is HF's post-final-norm hidden_states[-1].
-                # Only PARD-2-style drafters request the final layer, so this
-                # never fires for EAGLE3/DFlash/DSpark.
+                # Only drafters that ask for the final layer need the swap, so
+                # this never fires for EAGLE3/DFlash/DSpark.
                 aux_layers = (
                     get_eagle3_aux_layers_from_config(self.speculative_config) or ()
                 )
                 self._swap_final_aux_to_post_norm = (
-                    self.speculative_config.method == "pard2"
+                    self.speculative_config.speculator_config.uses_post_norm_final_aux
                     and self.model_config.hf_text_config.num_hidden_layers in aux_layers
                 )
                 if self.pp_handler is not None:
@@ -2164,8 +2163,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states, aux_hidden_states = model_output
                 if self._swap_final_aux_to_post_norm and aux_hidden_states:
                     # The in-loop capture records the final layer's PRE-norm
-                    # residual; PARD-2 was trained on the post-norm value, which
-                    # is what the model returns as hidden_states.
+                    # residual, but the post-norm value is what the model
+                    # returns as hidden_states.
                     aux_hidden_states[-1] = hidden_states
             else:
                 assert isinstance(model_output, torch.Tensor)
