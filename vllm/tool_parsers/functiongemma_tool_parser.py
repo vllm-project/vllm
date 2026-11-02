@@ -25,6 +25,109 @@ from vllm.tool_parsers.abstract_tool_parser import Tool, ToolParser
 
 logger = init_logger(__name__)
 
+_ESCAPE = "<escape>"
+_BARE_LITERALS = {"true": True, "false": False, "null": None, "None": None}
+
+
+class _IncompleteValue(Exception):
+    """The argument text ends before the value does."""
+
+
+class _MalformedValue(Exception):
+    """A delimiter appears where a value or key should start."""
+
+
+def _skip_whitespace(text: str, pos: int) -> int:
+    while pos < len(text) and text[pos] in " \n":
+        pos += 1
+    return pos
+
+
+def _decode_escaped(raw: str):
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _decode_bare(raw: str):
+    raw = raw.strip()
+    if raw in _BARE_LITERALS:
+        return _BARE_LITERALS[raw]
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return raw
+
+
+def _parse_value(text: str, pos: int, partial: bool) -> tuple[object, int]:
+    """Parse one value at ``pos`` and return it with the position after it.
+
+    Raises:
+        _IncompleteValue: ``text`` ends inside the value. A bare scalar at the
+            end of a ``partial`` string counts as incomplete, since more digits
+            or letters may still follow.
+        _MalformedValue: a delimiter stands where the value should start.
+
+    """
+    pos = _skip_whitespace(text, pos)
+    if text.startswith(_ESCAPE, pos):
+        start = pos + len(_ESCAPE)
+        end = text.find(_ESCAPE, start)
+        if end < 0:
+            raise _IncompleteValue
+        return _decode_escaped(text[start:end]), end + len(_ESCAPE)
+    if text.startswith("{", pos):
+        return _parse_object(text, pos + 1, partial)
+    if text.startswith("[", pos):
+        return _parse_array(text, pos + 1, partial)
+    end = pos
+    while end < len(text) and text[end] not in ",}]":
+        end += 1
+    if end == pos:
+        raise _MalformedValue
+    if end == len(text) and partial:
+        raise _IncompleteValue
+    return _decode_bare(text[pos:end]), end
+
+
+def _parse_object(text: str, pos: int, partial: bool) -> tuple[dict, int]:
+    obj: dict = {}
+    while True:
+        pos = _skip_whitespace(text, pos)
+        if pos >= len(text):
+            raise _IncompleteValue
+        if text[pos] == "}":
+            return obj, pos + 1
+        if text[pos] == "]":
+            raise _MalformedValue
+        if text[pos] == ",":
+            pos += 1
+            continue
+        colon = text.find(":", pos)
+        if colon < 0:
+            raise _IncompleteValue
+        key = text[pos:colon].strip()
+        value, pos = _parse_value(text, colon + 1, partial)
+        obj[key] = value
+
+
+def _parse_array(text: str, pos: int, partial: bool) -> tuple[list, int]:
+    items: list = []
+    while True:
+        pos = _skip_whitespace(text, pos)
+        if pos >= len(text):
+            raise _IncompleteValue
+        if text[pos] == "]":
+            return items, pos + 1
+        if text[pos] == "}":
+            raise _MalformedValue
+        if text[pos] == ",":
+            pos += 1
+            continue
+        value, pos = _parse_value(text, pos, partial)
+        items.append(value)
+
 
 class FunctionGemmaToolParser(ToolParser):
     """Tool parser for Google's FunctionGemma model (google/functiongemma-270m-it).
@@ -43,10 +146,6 @@ class FunctionGemmaToolParser(ToolParser):
         r"|<start_function_call>call:(\w+)\{(.*)",
         re.DOTALL,
     )
-    arg_regex: re.Pattern = re.compile(
-        r"(\w+):<escape>(.*?)<escape>",
-        re.DOTALL,
-    )
 
     def __init__(self, tokenizer: TokenizerLike, tools: list[Tool] | None = None):
         super().__init__(tokenizer, tools)
@@ -58,20 +157,32 @@ class FunctionGemmaToolParser(ToolParser):
         self.streamed_args_for_tool: list[str] = []
         self.buffered_delta_text = ""
 
-    def _parse_arguments(self, args_str: str) -> dict:
-        """Parse FunctionGemma argument string into a dictionary."""
+    def _parse_arguments(self, args_str: str, partial: bool = False) -> dict:
+        """Parse a FunctionGemma argument string into a dictionary.
+
+        The chat template writes strings as ``<escape>text<escape>`` and
+        everything else bare: ``true``/``false``, numbers, ``[item,...]`` and
+        ``{key:value,...}`` with bare keys. With ``partial`` the string is a
+        streaming prefix: parsing stops at the first incomplete value and the
+        complete arguments before it are returned.
+        """
         arguments: dict = {}
-        if not args_str:
-            return arguments
-
-        matches = self.arg_regex.findall(args_str)
-        for key, value in matches:
+        pos = 0
+        while pos < len(args_str):
+            if args_str[pos] in ", \n":
+                pos += 1
+                continue
+            colon = args_str.find(":", pos)
+            if colon < 0:
+                break
+            key = args_str[pos:colon].strip()
+            if not key:
+                break
             try:
-                parsed_value = json.loads(value)
-                arguments[key] = parsed_value
-            except json.JSONDecodeError:
-                arguments[key] = value
-
+                value, pos = _parse_value(args_str, colon + 1, partial)
+            except (_IncompleteValue, _MalformedValue):
+                break
+            arguments[key] = value
         return arguments
 
     def adjust_request(
@@ -143,6 +254,46 @@ class FunctionGemmaToolParser(ToolParser):
                 tools_called=False, tool_calls=[], content=model_output
             )
 
+    def _stream_arguments(self, args: dict, final: bool) -> DeltaMessage | None:
+        """Stream the part of the arguments JSON not sent yet.
+
+        Arguments only grow by appended keys, so their JSON is prefix-stable
+        except for the closing brace, which is held back until ``final``.
+        """
+        self.prev_tool_call_arr[self.current_tool_id]["arguments"] = args
+        args_json = json.dumps(args, ensure_ascii=False)
+        if not final:
+            args_json = args_json[:-1]
+        prev_streamed = self.streamed_args_for_tool[self.current_tool_id]
+        if len(args_json) <= len(prev_streamed):
+            return None
+        diff = args_json[len(prev_streamed) :]
+        self.streamed_args_for_tool[self.current_tool_id] = args_json
+        return DeltaMessage(
+            tool_calls=[
+                DeltaToolCall(
+                    index=self.current_tool_id,
+                    function=DeltaFunctionCall(arguments=diff).model_dump(
+                        exclude_none=True
+                    ),
+                )
+            ]
+        )
+
+    def _close_tool_call(self, current_text: str) -> DeltaMessage | None:
+        """Stream what is left of the current call, including its closing brace."""
+        if not 0 <= self.current_tool_id < len(self.prev_tool_call_arr):
+            return None
+        all_calls = self.tool_call_regex.findall(current_text)
+        args = {}
+        if self.current_tool_id < len(all_calls):
+            match = all_calls[self.current_tool_id]
+            if match[0]:
+                args = self._parse_arguments(match[1])
+        if args or self.current_tool_name_sent:
+            return self._stream_arguments(args, final=True)
+        return None
+
     def _buffer_delta_text(self, delta_text: str) -> str:
         """Buffer incoming delta text to handle multi-token special sequences."""
         potential_start = "<start_function_call>"
@@ -192,12 +343,17 @@ class FunctionGemmaToolParser(ToolParser):
 
             # Starting a new function call
             if start_count > prev_start_count and start_count > end_count:
+                closing = (
+                    self._close_tool_call(current_text)
+                    if end_count > prev_end_count
+                    else None
+                )
                 self.current_tool_id += 1
                 self.current_tool_name_sent = False
                 self.streamed_args_for_tool.append("")
                 self.prev_tool_call_arr.append({})
                 logger.debug("Starting new tool call %d", self.current_tool_id)
-                return None
+                return closing
 
             # In the middle of a function call
             if start_count > end_count:
@@ -235,74 +391,17 @@ class FunctionGemmaToolParser(ToolParser):
                             )
 
                         if self.current_tool_name_sent and args_part:
-                            current_args = self._parse_arguments(args_part)
+                            current_args = self._parse_arguments(
+                                args_part, partial=True
+                            )
                             if current_args:
-                                current_args_json = json.dumps(
-                                    current_args, ensure_ascii=False
-                                )
-                                prev_streamed = self.streamed_args_for_tool[
-                                    self.current_tool_id
-                                ]
-
-                                if len(current_args_json) > len(prev_streamed):
-                                    diff = current_args_json[len(prev_streamed) :]
-                                    self.streamed_args_for_tool[
-                                        self.current_tool_id
-                                    ] = current_args_json
-                                    self.prev_tool_call_arr[self.current_tool_id][
-                                        "arguments"
-                                    ] = current_args
-
-                                    return DeltaMessage(
-                                        tool_calls=[
-                                            DeltaToolCall(
-                                                index=self.current_tool_id,
-                                                function=DeltaFunctionCall(
-                                                    arguments=diff
-                                                ).model_dump(exclude_none=True),
-                                            )
-                                        ]
-                                    )
+                                return self._stream_arguments(current_args, final=False)
 
                 return None
 
             # Function call just ended
             if end_count > prev_end_count:
-                if self.current_tool_id >= 0 and self.current_tool_id < len(
-                    self.prev_tool_call_arr
-                ):
-                    all_calls = self.tool_call_regex.findall(current_text)
-                    args = {}
-                    if self.current_tool_id < len(all_calls):
-                        match = all_calls[self.current_tool_id]
-                        if match[0]:
-                            args_str = match[1]
-                            args = self._parse_arguments(args_str)
-                            self.prev_tool_call_arr[self.current_tool_id][
-                                "arguments"
-                            ] = args
-
-                    if args:
-                        args_json = json.dumps(args, ensure_ascii=False)
-                        prev_streamed = self.streamed_args_for_tool[
-                            self.current_tool_id
-                        ]
-                        if len(args_json) > len(prev_streamed):
-                            diff = args_json[len(prev_streamed) :]
-                            self.streamed_args_for_tool[self.current_tool_id] = (
-                                args_json
-                            )
-                            return DeltaMessage(
-                                tool_calls=[
-                                    DeltaToolCall(
-                                        index=self.current_tool_id,
-                                        function=DeltaFunctionCall(
-                                            arguments=diff
-                                        ).model_dump(exclude_none=True),
-                                    )
-                                ]
-                            )
-                return None
+                return self._close_tool_call(current_text)
 
             if delta_text:
                 return DeltaMessage(content=delta_text)
