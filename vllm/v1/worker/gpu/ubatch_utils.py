@@ -28,11 +28,11 @@ from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.model_states.interface import ModelState
-from vllm.v1.worker.ubatch_utils import (
+from vllm.v1.worker.gpu.ubatch_common import (
     UBatchSlice,
     UBatchSlices,
+    compute_ubatch_slices,
     create_sm_control_context,
-    maybe_create_ubatch_slices,
 )
 from vllm.v1.worker.ubatching import make_ubatch_contexts
 from vllm.v1.worker.utils import AttentionGroup
@@ -54,43 +54,15 @@ class UBatchState(NamedTuple):
 def create_ubatch_slices(
     input_batch: InputBatch, num_ubatches: int, uniform_token_count: int | None = None
 ) -> UBatchSlices:
-    """Split a DP-padded batch into the slices its microbatches run on.
-
-    Splitting at the midpoint of the DP-padded token count leaves the trailing
-    microbatch anywhere from full to entirely inside the padding. Clamping its
-    request slice onto the last request leaves it holding that request with
-    zero query tokens -- the shape a straddling request already takes -- so it
-    stays well-formed with no work to do, like a dummy run.
-
-    A uniform batch of multi-token queries (spec decode verification) is split
-    on a request boundary instead, so each microbatch stays a uniform decode.
-    `uniform_token_count` must be agreed across DP ranks.
-    """
-    split_point = None
-    if uniform_token_count is not None and uniform_token_count > 1:
-        num_tokens = input_batch.num_tokens_after_padding
-        reqs_per_ubatch = num_tokens // (uniform_token_count * num_ubatches)
-        if reqs_per_ubatch > 0:
-            split_point = reqs_per_ubatch * uniform_token_count
-    _, ubatch_slices = maybe_create_ubatch_slices(
-        True,
+    """Split a DP-padded batch into microbatches; see `compute_ubatch_slices`."""
+    return compute_ubatch_slices(
         input_batch.num_scheduled_tokens,
-        input_batch.num_tokens_after_padding,
+        input_batch.num_reqs,
         input_batch.num_reqs_after_padding,
+        input_batch.num_tokens_after_padding,
         num_ubatches,
-        split_point=split_point,
+        uniform_token_count,
     )
-    assert ubatch_slices is not None
-    return [
-        UBatchSlice(
-            slice(
-                min(s.request_slice.start, input_batch.num_reqs - 1),
-                min(s.request_slice.stop, input_batch.num_reqs_after_padding),
-            ),
-            s.token_slice,
-        )
-        for s in ubatch_slices
-    ]
 
 
 def _slice_input_batch(

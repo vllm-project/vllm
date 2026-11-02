@@ -2,15 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Dual batch overlap (DBO) in the V2 model runner.
 
-The V2 runner slices the batch *before* building attention metadata, where V1
-builds metadata for the whole batch and slices it afterwards. Both must describe
-the same microbatches, so the main test here pins V2's slicing against V1's
-`split_attn_metadata`. The rest covers the decision to microbatch and the
-threaded execution of the microbatches.
+The V2 runner slices the batch *before* building attention metadata. The main
+test here pins each microbatch's sliced inputs to known layouts. The rest covers
+the decision to microbatch and the threaded execution of the microbatches.
 """
 
 import threading
-from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
@@ -20,7 +17,6 @@ import numpy as np
 import pytest
 import torch
 
-from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
@@ -34,7 +30,6 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker import gpu_ubatch_wrapper as legacy_gpu_ubatch_wrapper
 from vllm.v1.worker.gpu import cp_utils as gpu_cp_utils
 from vllm.v1.worker.gpu import cudagraph_utils, dp_utils
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -43,6 +38,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.ubatch_common import UBatchSlice
 from vllm.v1.worker.gpu.ubatch_utils import (
     UBatchRunner,
     UBatchState,
@@ -50,11 +46,6 @@ from vllm.v1.worker.gpu.ubatch_utils import (
     create_ubatch_slices,
     merge_ubatch_outputs,
     slice_model_inputs,
-)
-from vllm.v1.worker.ubatch_utils import (
-    UBatchSlice,
-    maybe_create_ubatch_slices,
-    split_attn_metadata,
 )
 from vllm.v1.worker.ubatching import (
     dbo_current_ubatch_id,
@@ -152,65 +143,82 @@ BATCHES = {
     "trailing_prefill_spans_boundary": ([2, 20], [64, 300]),
 }
 
+# Per microbatch: (request_slice, token_slice, query_start_loc, seq_lens). A
+# request split across microbatches keeps only the tokens each one owns, and
+# the first part's seq_len stops at its last owned token.
+EXPECTED_UBATCHES = {
+    "uniform_decode": [
+        ((0, 4), (0, 4), [0, 1, 2, 3, 4], [128, 132, 136, 140]),
+        ((4, 8), (4, 8), [0, 1, 2, 3, 4], [144, 148, 152, 156]),
+    ],
+    "split_request": [
+        ((0, 3), (0, 7), [0, 1, 2, 7], [64, 96, 507]),
+        ((2, 5), (7, 14), [0, 5, 6, 7], [512, 32, 48]),
+    ],
+    "aligned_prefills": [
+        ((0, 2), (0, 8), [0, 6, 8], [6, 130]),
+        ((2, 4), (8, 16), [0, 4, 8], [260, 4]),
+    ],
+    "split_first_and_last": [
+        ((0, 2), (0, 7), [0, 3, 7], [70, 295]),
+        ((1, 3), (7, 15), [0, 5, 8], [300, 41]),
+    ],
+    "trailing_prefill_spans_boundary": [
+        ((0, 2), (0, 11), [0, 2, 11], [64, 289]),
+        ((1, 2), (11, 22), [0, 11], [300]),
+    ],
+}
+
 
 @pytest.mark.parametrize("batch_name", list(BATCHES))
-def test_slicing_matches_v1_split_attn_metadata(batch_name: str):
-    """V2's pre-sliced inputs describe the same microbatches as V1's."""
+def test_slicing_truncates_requests_at_microbatch_boundaries(batch_name: str):
+    """Each microbatch sees only its own tokens of the requests it holds."""
     query_lens, seq_lens = BATCHES[batch_name]
-    num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
-    num_tokens = int(num_scheduled_tokens.sum())
-
-    ubatch_slices, _ = maybe_create_ubatch_slices(
-        True, num_scheduled_tokens, num_tokens, len(query_lens), num_ubatches=2
-    )
-    assert ubatch_slices is not None
-
-    v1_metadata = create_common_attn_metadata(
-        BatchSpec(seq_lens=seq_lens, query_lens=query_lens),
-        block_size=16,
-        device=torch.device("cpu"),
-    )
-    v1_ubatches = split_attn_metadata(ubatch_slices, v1_metadata)
-
     buffers = _make_buffers()
     ubatch_buffers = _make_ubatch_buffers()
     input_batch = _make_input_batch(query_lens, seq_lens, buffers)
 
-    for i, (ubatch_slice, v1_ubatch) in enumerate(zip(ubatch_slices, v1_ubatches)):
-        v2_ubatch = _slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
+    ubatch_slices = create_ubatch_slices(input_batch, num_ubatches=2)
 
-        assert v2_ubatch.num_reqs == v1_ubatch.num_reqs
-        assert v2_ubatch.num_tokens == v1_ubatch.num_actual_tokens
-        assert int(v2_ubatch.num_scheduled_tokens.max()) == v1_ubatch.max_query_len
-        torch.testing.assert_close(v2_ubatch.query_start_loc, v1_ubatch.query_start_loc)
-        torch.testing.assert_close(v2_ubatch.seq_lens, v1_ubatch.seq_lens)
-        torch.testing.assert_close(
-            torch.from_numpy(v2_ubatch.query_start_loc_np),
-            v1_ubatch.query_start_loc_cpu,
+    expected_ubatches = EXPECTED_UBATCHES[batch_name]
+    assert len(ubatch_slices) == len(expected_ubatches)
+    for i, (ubatch_slice, expected) in enumerate(zip(ubatch_slices, expected_ubatches)):
+        request_bounds, token_bounds, query_start_loc, ubatch_seq_lens = expected
+        assert ubatch_slice == UBatchSlice(slice(*request_bounds), slice(*token_bounds))
+        # numpy scalars leaking into the bounds break Triton specialization.
+        for bound in (
+            ubatch_slice.request_slice.start,
+            ubatch_slice.request_slice.stop,
+            ubatch_slice.token_slice.start,
+            ubatch_slice.token_slice.stop,
+        ):
+            assert type(bound) is int
+
+        ubatch = _slice_input_batch(input_batch, ubatch_slice, *ubatch_buffers[i])
+        expected_query_start_loc = torch.tensor(query_start_loc, dtype=torch.int32)
+        expected_seq_lens = torch.tensor(ubatch_seq_lens, dtype=torch.int32)
+
+        assert ubatch.num_reqs == len(ubatch_seq_lens)
+        assert ubatch.num_tokens == query_start_loc[-1]
+        assert int(ubatch.num_scheduled_tokens.max()) == max(
+            b - a for a, b in zip(query_start_loc, query_start_loc[1:])
         )
-        # `prepare_attn` derives max_seq_len from the upper bound. Compare the
-        # bound itself rather than V1's max_seq_len: V1 floors it with the full
-        # batch's max_seq_len to keep the value CUDA-graph capture installed,
-        # which V2 gets from `prepare_attn(for_capture=True)` instead.
+        torch.testing.assert_close(ubatch.query_start_loc, expected_query_start_loc)
         torch.testing.assert_close(
-            v2_ubatch.seq_lens_cpu_upper_bound, v1_ubatch.seq_lens_cpu_upper_bound
+            torch.from_numpy(ubatch.query_start_loc_np), expected_query_start_loc
         )
+        torch.testing.assert_close(ubatch.seq_lens, expected_seq_lens)
+        # `prepare_attn` derives max_seq_len from this bound.
+        torch.testing.assert_close(ubatch.seq_lens_cpu_upper_bound, expected_seq_lens)
 
 
 def test_microbatches_do_not_share_buffers():
     """Both microbatches are live at once, so their buffers must be distinct."""
     query_lens, seq_lens = BATCHES["split_request"]
-    num_scheduled_tokens = np.array(query_lens, dtype=np.int32)
-    num_tokens = int(num_scheduled_tokens.sum())
-
-    ubatch_slices, _ = maybe_create_ubatch_slices(
-        True, num_scheduled_tokens, num_tokens, len(query_lens), num_ubatches=2
-    )
-    assert ubatch_slices is not None
-
     buffers = _make_buffers()
     ubatch_buffers = _make_ubatch_buffers()
     input_batch = _make_input_batch(query_lens, seq_lens, buffers)
+    ubatch_slices = create_ubatch_slices(input_batch, num_ubatches=2)
 
     first = _slice_input_batch(input_batch, ubatch_slices[0], *ubatch_buffers[0])
     first_query_start_loc = first.query_start_loc.clone()
@@ -433,94 +441,6 @@ def test_slice_model_inputs_handles_mrope_positions():
     torch.testing.assert_close(sliced["positions"], torch.arange(24).view(3, 8)[:, 4:8])
     assert sliced["inputs_embeds"] is None
     assert sliced["intermediate_tensors"] is None
-
-
-@pytest.mark.parametrize(
-    ("cudagraph_runtime_mode", "execution_method"),
-    [
-        (CUDAGraphMode.FULL, "_capture_ubatches"),
-        (CUDAGraphMode.NONE, "_run_ubatches"),
-    ],
-)
-def test_legacy_ubatch_contexts_slice_padding_mask(
-    cudagraph_runtime_mode: CUDAGraphMode, execution_method: str
-):
-    """Replacement contexts preserve each microbatch's padding rows."""
-    ubatch_slices = [
-        UBatchSlice(slice(0, 2), slice(0, 3)),
-        UBatchSlice(slice(2, 4), slice(3, 6)),
-    ]
-    is_padding = torch.tensor([False, True, False, True, False, True])
-    forward_context = SimpleNamespace(
-        batch_descriptor=object(),
-        ubatch_slices=ubatch_slices,
-        cudagraph_runtime_mode=cudagraph_runtime_mode,
-        attn_metadata=[{}, {}],
-        slot_mapping={},
-        dp_metadata=object(),
-        is_padding=is_padding,
-    )
-
-    wrapper = object.__new__(legacy_gpu_ubatch_wrapper.UBatchWrapper)
-    wrapper.vllm_config = SimpleNamespace(
-        parallel_config=SimpleNamespace(data_parallel_size=2)
-    )
-    wrapper.comm_stream = object()
-    wrapper.ready_barrier = object()
-    wrapper.cudagraphs = {}
-    wrapper.sm_control = nullcontext()
-    wrapper.runnable = object()
-
-    def make_contexts(*, forward_contexts, **kwargs):
-        return [
-            SimpleNamespace(id=i, forward_context=context)
-            for i, context in enumerate(forward_contexts)
-        ]
-
-    def create_context(attn_metadata, vllm_config, **kwargs):
-        return SimpleNamespace(attn_metadata=attn_metadata, **kwargs)
-
-    model_inputs = {
-        "input_ids": torch.arange(6),
-        "positions": torch.arange(6),
-        "inputs_embeds": None,
-        "intermediate_tensors": None,
-    }
-    expected = object()
-    with (
-        patch.object(
-            legacy_gpu_ubatch_wrapper,
-            "get_forward_context",
-            return_value=forward_context,
-        ),
-        patch.object(
-            legacy_gpu_ubatch_wrapper.torch.cuda,
-            "current_stream",
-            return_value=object(),
-        ),
-        patch.object(
-            legacy_gpu_ubatch_wrapper.DPMetadata, "make", return_value=object()
-        ),
-        patch.object(
-            legacy_gpu_ubatch_wrapper,
-            "create_forward_context",
-            side_effect=create_context,
-        ),
-        patch.object(
-            legacy_gpu_ubatch_wrapper,
-            "make_ubatch_contexts",
-            side_effect=make_contexts,
-        ),
-        patch.object(wrapper, execution_method, return_value=expected) as execute,
-    ):
-        result = wrapper(**model_inputs)
-
-    assert result is expected
-    contexts = [
-        metadata.context.forward_context for metadata in execute.call_args.args[0]
-    ]
-    torch.testing.assert_close(contexts[0].is_padding, is_padding[:3])
-    torch.testing.assert_close(contexts[1].is_padding, is_padding[3:])
 
 
 def _make_dbo_config() -> VllmConfig:
