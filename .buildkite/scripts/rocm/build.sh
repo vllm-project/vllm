@@ -13,6 +13,8 @@
 #   ci       Build and push this build's per-commit test image.
 #   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #   release-base  Only the release stack and runtime (a serialized step, so one run builds a new key).
+#   prebuild Only the stack, from main with the stack inputs of an approved PR merged into main
+#            (ROCM_PREBUILD_PR/SHA). ci-infra runs it on the trusted queue; main reuses it if Ks matches.
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base
@@ -63,6 +65,29 @@ case $STACK in
   rocm) SDF=docker/Dockerfile.rocm_base ;;
   *) echo "Unknown stack: $STACK" >&2; exit 2 ;;
 esac
+
+# prebuild: everything but the two stack inputs stays main's, this script and the bake file included.
+if [[ $MODE == prebuild ]]; then
+  [[ $REPO == "$TRUSTED" ]] || { echo "prebuild only pushes to $TRUSTED" >&2; exit 2; }
+  git fetch -q origin +refs/heads/main:refs/rocm-prebuild/main \
+    "+refs/pull/${ROCM_PREBUILD_PR:?}/head:refs/rocm-prebuild/pr"
+  [[ $(git rev-parse refs/rocm-prebuild/pr) == "${ROCM_PREBUILD_SHA:?}" ]] \
+    || { echo "#$ROCM_PREBUILD_PR moved past the approved $ROCM_PREBUILD_SHA" >&2; exit 1; }
+  [[ $(git rev-parse --is-shallow-repository) == false ]] || git fetch -q --unshallow origin
+  mb=$(git merge-base refs/rocm-prebuild/main "$ROCM_PREBUILD_SHA")
+  for f in "$SDF" tools/vllm-rocm/therock_wheels.py; do   # each as merged into current main
+    git show "$mb:$f" > "$f.base" 2>/dev/null || : > "$f.base"   # not there yet: empty
+    git show "$ROCM_PREBUILD_SHA:$f" > "$f.pr" 2>/dev/null || : > "$f.pr"
+    git show "refs/rocm-prebuild/main:$f" > "$f"
+    git merge-file "$f" "$f.base" "$f.pr" \
+      || { echo "$f of #$ROCM_PREBUILD_PR does not merge cleanly into main" >&2; exit 1; }
+    rm "$f.base" "$f.pr"
+  done
+  git add -- "$SDF" tools/vllm-rocm/therock_wheels.py
+  git -c user.name=vllm-ci -c user.email=noreply@vllm.ai commit -q --allow-empty \
+    -m "ROCm stack pre-build for #$ROCM_PREBUILD_PR"
+  BUILDKITE_COMMIT=$(git rev-parse HEAD)
+fi
 
 # ---------------------------------------------------------------------------
 # BuildKit builder
@@ -289,6 +314,10 @@ case $MODE in
         echo "ROCm kernel symbol map export or upload failed; continuing without it" >&2
       fi
     fi
+    ;;
+
+  prebuild)
+    ensure base "stack-$STACK-$Ks" -wheels
     ;;
 
   release|release-base)
