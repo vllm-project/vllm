@@ -47,9 +47,11 @@ def should_shard(
 ) -> bool:
     """Whether this forward runs with a token-sharded residual stream.
 
-    The residual stream is padded to a multiple of the TP size, so every step
-    above the threshold shards; otherwise the unsharded path's larger
-    activations would exceed the profiled peak.
+    The residual stream is padded to a multiple of the TP size, so every eager
+    step at or above the threshold shards; otherwise the unsharded path's
+    larger activations would exceed the profiled peak. CUDA-graph capture and
+    specialized-decode steps (checked by the caller) never shard; both are far
+    smaller than the profile run.
 
     ``routing_observed`` (routed-experts capture or EPLB load recording) keeps
     it off: routing runs on each rank's token shard only, so those would see

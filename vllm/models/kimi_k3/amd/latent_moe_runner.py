@@ -67,9 +67,12 @@ class ROCmLatentMoERunner(MoERunner):
 
     @property
     def token_shardable(self) -> bool:
-        """Whether ``forward`` supports ``token_sharded=True``."""
+        """Whether ``forward`` supports ``token_sharded=True``. Monolithic
+        kernels route from ``router_logits`` themselves, so they cannot take the
+        all-gathered top-k."""
         return (
             self._tail_shardable
+            and not self.is_monolithic
             and not self._fused_output_is_reduced
             and not self.moe_config.skip_final_all_reduce
             and not isinstance(self.router, ZeroExpertRouter)
