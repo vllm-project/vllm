@@ -1061,8 +1061,13 @@ def _fused_moe_lora_kernel(
         # Shrink path - load hidden states based on order defined in
         # 'sorted_token_ids_ptr' then store them in c_ptr in this same sorted order
         tl.static_assert(a_desc is None, "a_desc must be none")
+        # Clamp the a row index to a safe range. Padded positions in
+        # sorted_token_ids carry sentinels (>= num_valid_tokens) that would
+        # compute out-of-bounds addresses. The load below is masked, so it
+        # already returns zeros there; clamping keeps the address in bounds.
+        safe_a_rows = tl.where(token_mask, offs_token // token_mapping_factor, 0)
         a_ptrs = cur_a_ptr + (
-            offs_token[:, None] // token_mapping_factor * stride_am
+            safe_a_rows[:, None] * stride_am
             + offs_k[None, :] * stride_ak
         )
 
