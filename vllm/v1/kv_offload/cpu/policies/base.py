@@ -50,6 +50,10 @@ class CachePolicy(ABC):
     decisions (which chunk to evict). LRU and ARC differ in both dimensions —
     ARC's ghost lists and target_t1_size live at the intersection of storage
     and eviction, so they cannot be separated cleanly.
+
+    The manager passes ``cache_capacity`` and, to a policy whose constructor
+    declares it, ``mamba_group_ids``: the KV cache group indices of Mamba
+    groups, whose chunks each hold one state snapshot.
     """
 
     def __init__(self, cache_capacity: int) -> None:

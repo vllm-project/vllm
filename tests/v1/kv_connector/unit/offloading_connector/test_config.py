@@ -813,6 +813,26 @@ def test_model_config_carries_the_longest_request():
     assert offloading_config.model.max_model_len == 32768
 
 
+@pytest.mark.parametrize(
+    "spec_kind,is_mamba", [("attention", (False, True)), ("mamba", (True, True))]
+)
+def test_flags_mamba_groups(spec_kind, is_mamba):
+    """A uniform-type group of Mamba layers is a Mamba group too; the CPU
+    tier's mamba_aware_lru policy relies on the flag."""
+    kv_cache_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["layer0", "layer1"], _uniform_spec(spec_kind)),
+            KVCacheGroupSpec(["mamba_layer"], _mamba_spec()),
+        ],
+    )
+
+    offloading_config = build_offloading_config(_make_vllm_config(), kv_cache_config)
+
+    assert tuple(group.is_mamba for group in offloading_config.groups) == is_mamba
+
+
 def test_preserves_data_parallel_config():
     config = _make_vllm_config()
     config.parallel_config.data_parallel_index = 2

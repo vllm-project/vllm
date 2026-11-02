@@ -19,6 +19,8 @@ class OffloadingGroupConfig:
     # Chunks of this group the tier keeps for one request, or None when
     # attention reaches back without a bound (a full layer).
     sliding_window_size_in_chunks: int | None = None
+    # True for Mamba groups, whose blocks each hold one state snapshot.
+    is_mamba: bool = False
 
 
 @dataclass(frozen=True)

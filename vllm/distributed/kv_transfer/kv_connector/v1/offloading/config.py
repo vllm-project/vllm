@@ -15,11 +15,13 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupRole,
     KVCacheSpec,
+    KVCacheSpecKind,
     MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
+    get_kv_cache_spec_kind,
     iter_layer_specs,
 )
 from vllm.v1.kv_offload.config import (
@@ -165,6 +167,9 @@ def build_offloading_config(
             sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
                 next(iter(iter_layer_specs(group.kv_cache_spec))),
                 tokens_per_block * blocks_per_chunk,
+            ),
+            is_mamba=(
+                get_kv_cache_spec_kind(group.kv_cache_spec) is KVCacheSpecKind.MAMBA
             ),
         )
         for (group_id, group), tokens_per_block in zip(
