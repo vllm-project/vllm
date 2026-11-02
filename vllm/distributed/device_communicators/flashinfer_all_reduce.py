@@ -13,6 +13,7 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.config import get_current_vllm_config_or_none
 from vllm.config.compilation import PassConfig
 from vllm.distributed.device_communicators.all_reduce_utils import (
     FI_MNNVL_ALLREDUCE_MAX_SIZE_MB,
@@ -154,6 +155,22 @@ def _resolve_fi_ar_backend(group: ProcessGroup) -> tuple[str | None, bool]:
         return backend, False
 
     node_count = _node_count(group)
+    config = get_current_vllm_config_or_none()
+    # TODO: drop once FlashInfer ships flashinfer-ai/flashinfer#7782.
+    if config is not None and config.attention_config.hisparse_config is not None:
+        if node_count == 1:
+            logger.info_once(
+                "Using flashinfer allreduce backend trtllm: the mnnvl fused "
+                "all-reduce + RMSNorm can crash with HiSparse (vllm#64327)."
+            )
+            return "trtllm", False
+        logger.warning_once(
+            "FlashInfer allreduce is disabled: the mnnvl fused all-reduce "
+            "+ RMSNorm can crash with HiSparse (vllm#64327), and trtllm does not "
+            "support multi-node process groups."
+        )
+        return None, False
+
     if node_count == 1:
         # MNNVL decodes faster than TRTLLM on single-node NVSwitch systems
         # (about 3-5% throughput at TP4/TP8 on H200 and B200). Fall back to
