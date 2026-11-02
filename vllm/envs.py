@@ -59,6 +59,7 @@ if TYPE_CHECKING:
     VLLM_CPU_INT4_W4A8: bool = True
     VLLM_XLA_CACHE_PATH: str = os.path.join(VLLM_CACHE_ROOT, "xla_cache")
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
+    VLLM_USE_FUSED_MQA_TOPK: bool = True
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_XPU_PP_MICROBATCH: bool = True
@@ -121,6 +122,7 @@ if TYPE_CHECKING:
     VLLM_USE_BYTECODE_HOOK: bool = True
     VLLM_FORCE_AOT_LOAD: bool = False
     VLLM_USE_MEGA_AOT_ARTIFACT: bool = False
+    VLLM_COMPILE_ON_ONE_RANK: bool = False
     VLLM_USE_TRITON_AWQ: bool = False
     VLLM_FASTSAFETENSORS_QUEUE_SIZE: int = 0
     VLLM_TRITON_FORCE_FIRST_CONFIG: bool = False
@@ -241,8 +243,8 @@ if TYPE_CHECKING:
     VLLM_P2P_HANDSHAKE_TIMEOUT_S: int = 30
     VLLM_P2P_IDLE_TIMEOUT_S: int = 300
     VLLM_P2P_TRANSFER_STALL_TIMEOUT_S: float = 20.0
-    VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
-    VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
+    VLLM_EC_SIDE_CHANNEL_HOST: str = ""
+    VLLM_EC_SIDE_CHANNEL_PORT: int = 0
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
@@ -295,6 +297,8 @@ if TYPE_CHECKING:
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
     VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE: bool = False
+    VLLM_MORI_EP_V2: bool | None = None
+    VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD: int = 256
     VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL: bool = False
     VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE: bool = True
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
@@ -320,6 +324,7 @@ if TYPE_CHECKING:
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
+    VLLM_RELOAD_MODE: Literal["layerwise", "direct"] = "layerwise"
     VLLM_KV_OFFLOAD_MAX_BATCH_DESCRIPTORS: int = 0
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
@@ -402,6 +407,18 @@ def use_mega_aot_artifact():
     )
 
     return os.environ.get("VLLM_USE_MEGA_AOT_ARTIFACT", default_value) == "1"
+
+
+def compile_on_one_rank() -> bool:
+    from vllm.platforms import current_platform
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.14.0.dev"):
+        return False
+    # Inductor implements the mode for CUDA/ROCm and XPU only.
+    if not (current_platform.is_cuda_alike() or current_platform.is_xpu()):
+        return False
+    return os.environ.get("VLLM_COMPILE_ON_ONE_RANK", "0") == "1"
 
 
 def env_with_choices(
@@ -809,6 +826,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # without re-splitting graph modules. This reduces overhead during model
     # loading by using reconstruct_serializable_fn_from_mega_artifact.
     "VLLM_USE_MEGA_AOT_ARTIFACT": use_mega_aot_artifact,
+    # Compile with torch's compile-on-one-rank mode, which resolves the device
+    # at run time instead of baking the compile-time index into the cached
+    # code, so a compile cache can be reused on any device index (e.g. across
+    # --device-ids). Off by default. Requires torch >= 2.14 on CUDA/ROCm or
+    # XPU; not yet compatible with use_inductor_graph_partition or
+    # debug_dump_path.
+    "VLLM_COMPILE_ON_ONE_RANK": compile_on_one_rank,
     # local rank of the process in the distributed setting, used to determine
     # the GPU device id
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
@@ -1095,6 +1119,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable SPMD mode for TPU backend.
     "VLLM_XLA_USE_SPMD": lambda: bool(int(os.getenv("VLLM_XLA_USE_SPMD", "0"))),
+    # Use the single-launch fused FP8 MQA-logits + top-k kernel for the sparse
+    # MLA indexer prefill chunks it supports on SM100-family GPUs (see
+    # use_fused_mqa_topk / fused_mqa_topk_chunk); other chunks take the dense
+    # path. Default: on (set to 0 for the dense path).
+    "VLLM_USE_FUSED_MQA_TOPK": lambda: bool(
+        int(os.getenv("VLLM_USE_FUSED_MQA_TOPK", "1"))
+    ),
     # Maximum size (in MB) for logits tensor in sparse MLA indexer prefill chunks.
     # Bounds the [M, N] float32 logits tensor to prevent CUDA OOM.
     # Default: 512 MB
@@ -1644,7 +1675,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Skip cudagraph/DP padding tokens in the MoE path by forcing their expert
     # ids to -1 so the dispatch and experts drop them. Requires a MoE kernel that
-    # treats topk_id == -1 as a skip sentinel
+    # treats topk_id == -1 as a skip sentinel. Supported CUDA grouped routers
+    # fuse this into routing; the existing backend opt-in is still required.
     "VLLM_MOE_SKIP_PADDING": lambda: bool(int(os.getenv("VLLM_MOE_SKIP_PADDING", "1"))),
     # Step5 SP dense/shared MLPs: opt into TP-sharded weights with AG/RS
     # instead of replicated weights and local-token computation.
@@ -1784,15 +1816,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_P2P_TRANSFER_STALL_TIMEOUT_S": lambda: float(
         os.getenv("VLLM_P2P_TRANSFER_STALL_TIMEOUT_S", "20")
     ),
-    # IP address used for the EC connector's ZMQ side channel
-    # (producer ROUTER bind, consumer DEALER dial).
-    "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv(
-        "VLLM_EC_SIDE_CHANNEL_HOST", "localhost"
-    ),
-    # Port for the EC connector's ZMQ side channel; advertised to peers
-    # via `ec_transfer_params.peer_port` on the producer's response.
+    # Optional EC control address override; otherwise use get_ip().
+    "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv("VLLM_EC_SIDE_CHANNEL_HOST", ""),
+    # EC control base port plus DP index. Zero requests an OS-assigned port.
     "VLLM_EC_SIDE_CHANNEL_PORT": lambda: int(
-        os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "5601")
+        os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "0")
     ),
     # Per-request timeout (seconds) when a prefiller worker registers with
     # the Mooncake bootstrap server.
@@ -2076,6 +2104,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_HIGH_THROUGHPUT_FORCE_INTRA_NODE", "0"))
     ),
+    # MoRI EPv2 for --all2all-backend mori. Unset prefers EPv2 and falls back to
+    # EPv1 where EPv2 is unsupported; 1 forces EPv2; 0 selects EPv1.
+    "VLLM_MORI_EP_V2": lambda: maybe_convert_bool(os.getenv("VLLM_MORI_EP_V2")),
+    # With --all2all-backend mori on MoRI EPv1 across nodes, use InterNodeV1LL
+    # when the per-rank token budget is at most this, else InterNodeV1.
+    "VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD": lambda: int(
+        os.getenv("VLLM_MORI_DISPATCH_INTER_KERNEL_SWITCH_THRESHOLD", "256")
+    ),
     # Allow DeepEP to use MNNVL (multi-node nvlink) for internode_ll kernel,
     # turn this for better latency on GB200 like system
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
@@ -2217,6 +2253,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
+    ),
+    # How weight updates reload the model: "layerwise" rebuilds each layer
+    # from the checkpoint tensors; "direct" writes them into the live
+    # tensors and reruns post-load processing in place.
+    "VLLM_RELOAD_MODE": env_with_choices(
+        "VLLM_RELOAD_MODE", "layerwise", ["layerwise", "direct"]
     ),
     # Max descriptors per CPU-KV-offload batch-memcpy call. 0 = platform default
     # (ROCm chunks at 8192, since hipMemcpyBatchAsync faults above that on
@@ -2489,6 +2531,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CPU_MOE_PREPACK",
         "VLLM_ZENTORCH_WEIGHT_PREPACK",
         "VLLM_TEST_FORCE_LOAD_FORMAT",
+        "VLLM_RELOAD_MODE",
         "VLLM_ENABLE_CUDA_COMPATIBILITY",
         "VLLM_CUDA_COMPATIBILITY_PATH",
         "VLLM_SKIP_MODEL_NAME_VALIDATION",
