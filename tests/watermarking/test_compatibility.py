@@ -401,6 +401,7 @@ def _preprocess_in_engine_core(
     core.vllm_config.watermark_config = watermark_config
     core.mm_receiver_cache = None
     core.request_block_hasher = None
+    core.prefix_hash_config = None
     request = _engine_core_request(params)
     core.preprocess_add_request(request)
     return request.sampling_params
