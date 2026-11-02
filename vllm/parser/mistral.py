@@ -396,8 +396,7 @@ class MistralParser(ParserEngine):
             or any_so_non_supported_active
             or response_format_non_supported_active
         ):
-            # MistralTokenizer keeps [TOOL_CALLS]/[ARGS]/[THINK] with
-            # skip_special_tokens=True, and its byte fallback needs it.
+            # MistralTokenizer keeps the parser's special tokens when skipping.
             if not is_mistral_tokenizer(self.model_tokenizer):
                 request = super().adjust_request(request)
             # Inject a guided JSON schema for pre-v11 required/named tool choice
