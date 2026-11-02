@@ -359,3 +359,45 @@ def test_tokens_response_echoes_output_mode_without_text():
     ).model_dump()
     assert dumped["output_mode"] == "tokens"
     assert "text" not in dumped["choices"][0]
+
+
+def test_abort_requests_validates_request_body():
+    from argparse import Namespace
+
+    from fastapi import FastAPI
+    from starlette.testclient import TestClient
+
+    from vllm.entrypoints.scale_out.token_in_token_out.api_router import router
+    from vllm.entrypoints.serve.exception_handling.register import (
+        init_exception_handler,
+    )
+
+    aborted: list[str | list[str]] = []
+
+    class DummyEngineClient:
+        async def abort(self, request_ids: str | list[str]) -> None:
+            aborted.append(request_ids)
+
+    app = FastAPI()
+    app.state.args = Namespace(log_error_stack=False)
+    app.state.engine_client = DummyEngineClient()
+    app.include_router(router)
+    init_exception_handler(app)
+    client = TestClient(app)
+    url = "/inference/v1/abort_requests"
+
+    for body in (["req-1"], {}, {"request_ids": 123}, {"request_ids": [1]}):
+        resp = client.post(url, json=body)
+        assert resp.status_code == 400, body
+        error = resp.json()["error"]
+        assert error["code"] == 400
+        assert error["type"] == "Bad Request"
+
+    resp = client.post(url, json={"request_ids": ["req-1"]})
+    assert resp.status_code == 200
+    resp = client.post(url, json={"request_ids": "req-2"})
+    assert resp.status_code == 200
+    # Clients that send no Content-Type are still accepted.
+    resp = client.post(url, content=b'{"request_ids": ["req-3"]}')
+    assert resp.status_code == 200
+    assert aborted == [["req-1"], "req-2", ["req-3"]]

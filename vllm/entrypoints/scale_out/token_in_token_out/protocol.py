@@ -662,6 +662,12 @@ GenerateStreamResponse: TypeAlias = Annotated[
 ]
 
 
+class AbortRequestsRequest(BaseModel):
+    """Request for the /inference/v1/abort_requests endpoint."""
+
+    request_ids: str | list[str]
+
+
 class DerenderChatRequest(BaseModel):
     """Request for the /v1/chat/completions/derender endpoint (non-streaming).
 
