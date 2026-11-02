@@ -926,6 +926,7 @@ class ParserEngine(Parser):
             stripped = content_str.strip()
             if stripped:
                 self._content_has_nonws = True
+                content_str = content_str.lstrip()
             elif self._tool_slots:
                 if self._drop_ws_only_content_before_tools:
                     content_str = ""
