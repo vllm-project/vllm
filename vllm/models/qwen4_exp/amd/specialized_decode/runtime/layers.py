@@ -34,10 +34,21 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.grid import (
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange
 from vllm.platforms import current_platform
 
-# Debugging: with this set, every launch is built with ``LayerBuild.trace`` and
-# CTA 0 stamps the clock at each of its phase ends into ``Launcher.trace``
-# ([layers, layer.TRACE_WORDS] int64, s_memrealtime ticks at 100 MHz; the
-# phase names are ``layer.PHASES[key]``). Off: no stamps are compiled.
+# Profiling: set True in the worker before the model is built (for example on
+# import of a ``--worker-extension-cls`` module) to build every launch with
+# ``LayerBuild.trace``: CTA 0 stamps the clock at each of its phase ends into
+# ``Launcher.trace`` ([layers, layer.TRACE_WORDS] int64, s_memrealtime ticks at
+# 100 MHz; the phase names are ``layer.phase_names(key)``). Off: no stamps are
+# compiled.
+TRACE = False
+
+
+def allreduce_codec() -> str:
+    """The TP exchange's line codec: QuickReduce's INT4 codec when the
+    deployment asks QuickReduce for INT4 (or INT3) all-reduces
+    (``VLLM_ROCM_QUICK_REDUCE_QUANTIZATION``), else exact bf16 lines."""
+    level = envs.VLLM_ROCM_QUICK_REDUCE_QUANTIZATION
+    return "int4" if level in ("INT4", "INT3") else "bf16"
 
 
 def _hc_args(hc, prefix: str) -> dict:
@@ -81,8 +92,8 @@ class Launcher:
         self.slots = (base, base + 4 * SLOT_WORDS)
         self.folds = base + 4 * FOLD_BASE
         self.rip = experts_rip(next(ly.mlp for ly in model.layers))
-        self.traced = envs.VLLM_QWEN4_EXP_DECODE_TRACE
-        self.allreduce = envs.VLLM_QWEN4_EXP_DECODE_ALLREDUCE
+        self.traced = TRACE
+        self.allreduce = allreduce_codec()
         self.trace = torch.zeros(
             len(model.layers) * K.TRACE_WORDS, dtype=torch.int64, device=dev
         )

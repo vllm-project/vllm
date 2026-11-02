@@ -1017,3 +1017,24 @@ def test_moe(harness, rows, routing, codec):
         assert marked > 0
     if routing == "hot":
         assert marked == rows * SLOTS
+
+
+@pytest.mark.parametrize(
+    "level, codec",
+    [
+        ("INT4", "int4"),
+        ("INT3", "int4"),
+        ("INT6", "bf16"),
+        ("FP", "bf16"),
+        ("NONE", "bf16"),
+    ],
+)
+def test_allreduce_codec_follows_quickreduce(monkeypatch, level, codec):
+    """The TP exchange quantizes as the deployment's QuickReduce setting asks
+    (INT4 lines for INT4 and INT3), and is exact otherwise."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.runtime.layers import (
+        allreduce_codec,
+    )
+
+    monkeypatch.setenv("VLLM_ROCM_QUICK_REDUCE_QUANTIZATION", level)
+    assert allreduce_codec() == codec

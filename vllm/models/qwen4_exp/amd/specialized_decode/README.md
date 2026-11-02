@@ -73,15 +73,17 @@ intermediate with AITER's scale rule, bf16 GDN projection outputs and core
 output. The online-MXFP4 dense projections run W4A16 (the weights decoded to
 bf16 in registers; stock quantizes the activations to MXFP4 too).
 
-The TP all-reduces are exact bf16 sums in rank order by default, as stock's
-custom all-reduce at decode sizes (QuickReduce's minimum message size is
-1 MB; a 128-row partial is 655 KB). `VLLM_QWEN4_EXP_DECODE_ALLREDUCE=int4`
-sends QuickReduce's INT4 codec instead (16-column groups, the group's signed
-extremum mapped to -8, here with a bf16 scale so small partials do not flush
-to zero): 3.2x fewer bytes on the link; every rank decodes every rank's copy,
-its own included, so the ranks still agree. At TP2 a two-stage
-(reduce-scatter + all-gather) exchange moves the same bytes as this one-shot
-one and adds a round trip, so the lines stay one-shot.
+The TP all-reduces follow the deployment's QuickReduce setting
+(`VLLM_ROCM_QUICK_REDUCE_QUANTIZATION`, which already quantizes the prefill
+all-reduces): with `INT4` (or `INT3`) they send QuickReduce's INT4 codec
+(16-column groups, the group's signed extremum mapped to -8, here with a bf16
+scale so small partials do not flush to zero), 3.2x fewer bytes on the link;
+otherwise they are exact bf16 sums in rank order, as stock's custom
+all-reduce at decode sizes. Every rank decodes every rank's copy, its own
+included, so the ranks agree. The lines are one-shot: each rank quantizes
+its partial once, where QuickReduce's two-shot all-reduce quantizes twice
+(the scattered partials, then the reduced shard); at TP2 two-shot would move
+the same bytes and add a round trip.
 
 ## Failure
 
@@ -104,8 +106,10 @@ together every 16 steps.
   gated delta net (`gdn`), the MoE (`moe`), MXFP4 activations (`mx`), the TP
   exchange (`exchange`).
 
-`VLLM_QWEN4_EXP_DECODE_TRACE=1` builds every launch with per-phase clock
-stamps (`Launcher.trace`, `wide.layer.phase_names`) for profiling.
+For profiling, `runtime.layers.TRACE = True` (set in the worker before the
+model is built, for example by a `--worker-extension-cls` module) builds
+every launch with per-phase clock stamps (`Launcher.trace`,
+`wide.layer.phase_names`).
 
 ## Toolchain
 
