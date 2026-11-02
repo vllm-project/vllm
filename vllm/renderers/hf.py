@@ -932,6 +932,10 @@ def safe_apply_chat_template(
     # handle must not vanish from the prompt. Custom roles still render
     # when the template emits their content. A non-standard role is HTTP
     # 400; a standard role the template ignores is logged and kept.
+    # Reuse the text already rendered for this request. Tokenized calls
+    # pass the id list, and the checker renders one text baseline only
+    # when a non-standard role still has to be probed.
+    rendered_text = plain if isinstance(plain, str) else None
     assert_chat_template_rendered_messages(
         conversation,
         chat_template,
@@ -942,6 +946,7 @@ def safe_apply_chat_template(
             tokenize=False,
             **resolved_kwargs,
         ),
+        rendered=rendered_text,
     )
 
     return plain
