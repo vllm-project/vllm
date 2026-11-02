@@ -33,6 +33,12 @@ def chunk_gated_delta_rule_fwd(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     core_attn_out: torch.Tensor | None = None,
+    state_cache: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
 ):
     g = chunk_local_cumsum(
         g, chunk_size=FLA_CHUNK_SIZE, cu_seqlens=cu_seqlens, chunk_indices=chunk_indices
@@ -68,6 +74,12 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
+        state_cache=state_cache,
+        state_indices=state_indices,
+        has_initial_state=has_initial_state,
+        checkpoint_state=checkpoint_state,
+        checkpoint_offsets=checkpoint_offsets,
+        checkpoint_state_indices=checkpoint_state_indices,
     )
     o = chunk_fwd_o(
         q=q,
@@ -105,6 +117,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
         core_attn_out: torch.Tensor | None = None,
+        state_kwargs: dict[str, torch.Tensor | None] | None = None,
     ):
         if use_qk_l2norm_in_kernel:
             q = l2norm_fwd(q)
@@ -123,6 +136,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             core_attn_out=core_attn_out,
+            **(state_kwargs or {}),
         )
         ctx.scale = scale
         ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
@@ -149,6 +163,12 @@ def chunk_gated_delta_rule(
     chunk_offsets: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     core_attn_out: torch.Tensor | None = None,
+    state_cache: torch.Tensor | None = None,
+    state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
+    checkpoint_state: torch.Tensor | None = None,
+    checkpoint_offsets: torch.Tensor | None = None,
+    checkpoint_state_indices: torch.Tensor | None = None,
 ):
     r"""
     Args:
@@ -174,6 +194,14 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.Tensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
+        state_cache (Optional[torch.Tensor]):
+            Paged recurrent state of shape `[slots, H, V, K]`, read and written in place
+            through `state_indices` and `has_initial_state` instead of `initial_state`
+            and `output_final_state`. Rows may be strided apart.
+        checkpoint_state (Optional[torch.Tensor]):
+            Destination of the states after `checkpoint_offsets` tokens of each sequence,
+            optionally at rows `checkpoint_state_indices`. See
+            `chunk_gated_delta_rule_fwd_h` for all six paged-state arguments.
     Returns:
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]`.
@@ -227,6 +255,16 @@ def chunk_gated_delta_rule(
             )
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    # Passed as a dict so input_guard leaves the tensors alone: it would replace
+    # a strided cache view with a contiguous copy, losing the in-place writes.
+    state_kwargs = {
+        "state_cache": state_cache,
+        "state_indices": state_indices,
+        "has_initial_state": has_initial_state,
+        "checkpoint_state": checkpoint_state,
+        "checkpoint_offsets": checkpoint_offsets,
+        "checkpoint_state_indices": checkpoint_state_indices,
+    }
     o, final_state = ChunkGatedDeltaRuleFunction.apply(
         q,
         k,
@@ -241,5 +279,6 @@ def chunk_gated_delta_rule(
         chunk_offsets,
         use_qk_l2norm_in_kernel,
         core_attn_out,
+        state_kwargs,
     )
     return o, final_state

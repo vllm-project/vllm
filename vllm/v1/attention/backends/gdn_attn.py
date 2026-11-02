@@ -552,6 +552,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc = non_spec_query_start_loc
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
+            # A block-table column; the Triton/FLA prefill reads it densely, so
+            # copy it once here rather than in every layer.
+            assert prefill_state_indices is not None
+            prefill_state_indices = prefill_state_indices.contiguous()
 
             if self.gdn_prefill_backend == "aiter_flydsl":
                 # AITER carries its own reusable varlen metadata and has no use
