@@ -455,12 +455,15 @@ def test_read_completion_waits_for_every_posted_read():
 
 
 @pytest.mark.parametrize(
-    ("has_mamba", "expected_invalid"),
-    [(False, {1, 2}), (True, set())],
+    ("has_mamba", "single_group", "expected_invalid"),
+    [(False, True, {1, 2}), (True, True, set()), (False, False, set())],
 )
-def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid):
+def test_failed_read_reports_blocks_only_for_one_group(
+    has_mamba, single_group, expected_invalid
+):
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = single_group
     worker._recving_local_blocks = {"req": [1, 2]}
     worker._invalid_block_ids = set()
 
@@ -469,7 +472,10 @@ def test_failed_read_reports_blocks_only_without_hma(has_mamba, expected_invalid
     assert worker.get_block_ids_with_load_errors() == expected_invalid
 
 
-def test_hybrid_step_barrier_fails_closed():
+@pytest.mark.parametrize(
+    ("has_mamba", "single_group"), [(True, False), (True, True), (False, False)]
+)
+def test_unrecoverable_step_barrier_fails_closed(has_mamba, single_group):
     class FailingWrapper:
         def waiting_for_transfer_complete(self, _statuses, fail_fast=True):
             raise TransferError("failed")
@@ -478,7 +484,8 @@ def test_hybrid_step_barrier_fails_closed():
             pass
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
-    worker._has_mamba = True
+    worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = single_group
     worker._reads_issued_this_step = [_ReadStatus("failed")]
     worker.moriio_wrapper = FailingWrapper()
 
@@ -500,6 +507,7 @@ def test_step_barrier_awaits_every_read_before_forward():
     attn, indexer, mtp_attn = object(), object(), object()
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
+    worker._single_kv_cache_group = True
     worker._reads_issued_this_step = [attn, indexer, mtp_attn]
     worker.moriio_wrapper = RecordingWrapper()
 
@@ -532,6 +540,7 @@ def test_step_barrier_without_mamba_does_not_raise_on_failure():
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
+    worker._single_kv_cache_group = True
     worker._reads_issued_this_step = [_ReadStatus("failed")]
     worker.moriio_wrapper = FailingWrapper()
 
@@ -595,6 +604,7 @@ def _worker_with_failed_and_pending_read(has_mamba, pending_b, monkeypatch):
     failed_a = _ReadStatus("failed")
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = True
     worker.world_size = 1
     worker.moriio_config = SimpleNamespace(recv_abort_timeout=600.0)
     worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=object(), transfer_timeout=5.0)
@@ -642,6 +652,7 @@ def test_hybrid_step_barrier_failure_does_not_wait(monkeypatch, fake_clock):
 def test_step_barrier_timeout_fails_closed_while_reads_in_flight(has_mamba, fake_clock):
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = True
     worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=object(), transfer_timeout=0.05)
     worker._reads_issued_this_step = [_PolledStatus(), _PolledStatus()]
 
@@ -661,6 +672,7 @@ def test_step_barrier_native_timeout_fails_closed_while_reads_in_flight(has_mamb
     )
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = has_mamba
+    worker._single_kv_cache_group = True
     worker.moriio_wrapper = MoRIIOWrapper(moriio_engine=engine, transfer_timeout=0.05)
     worker._reads_issued_this_step = [_PolledStatus(), _PolledStatus()]
 
@@ -683,6 +695,7 @@ def test_step_barrier_noop_when_no_reads_posted():
 
     worker = MoRIIOConnectorWorker.__new__(MoRIIOConnectorWorker)
     worker._has_mamba = False
+    worker._single_kv_cache_group = True
     worker._reads_issued_this_step = []
     worker.moriio_wrapper = RecordingWrapper()
 

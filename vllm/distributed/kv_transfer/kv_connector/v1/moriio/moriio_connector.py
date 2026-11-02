@@ -1816,6 +1816,7 @@ class MoRIIOConnectorWorker:
         # we transfer by layer, but store by kv cache group
         self.layer_to_group = dict(kv_cache_config.transfer_group_index_by_layer)
         self._transfer_layer_names = set(self.layer_to_group)
+        self._single_kv_cache_group = len(kv_cache_config.kv_cache_groups) == 1
         attn_transfer_group_ids, mamba_transfer_group_ids = _split_kv_cache_group_kinds(
             kv_cache_config
         )
@@ -3039,10 +3040,9 @@ class MoRIIOConnectorWorker:
 
         A READ still in flight when the wait gives up fails the step in both
         modes: RDMA may still write into its blocks, so the forward must not
-        consume them. If every READ is terminal, attention-only failures are
-        reported via get_block_ids_with_load_errors. Hybrid failures are
-        re-raised because the scheduler's recovery path does not support
-        multiple cache groups.
+        consume them. If every READ is terminal, failures are reported via
+        get_block_ids_with_load_errors when there is one KV cache group, and
+        re-raised otherwise, as the scheduler cannot recover them.
         """
         statuses = self._reads_issued_this_step
         self._reads_issued_this_step = []
@@ -3050,7 +3050,7 @@ class MoRIIOConnectorWorker:
             return
         try:
             self.moriio_wrapper.waiting_for_transfer_complete(
-                statuses, fail_fast=self._has_mamba
+                statuses, fail_fast=not self._block_load_errors_supported
             )
         except TransferError:
             in_flight = sum(not (s.Succeeded() or s.Failed()) for s in statuses)
@@ -3062,10 +3062,10 @@ class MoRIIOConnectorWorker:
                     len(statuses),
                 )
                 raise
-            if self._has_mamba:
+            if not self._block_load_errors_supported:
                 logger.exception(
-                    "MoRIIO hybrid READ failed before the forward; aborting "
-                    "because HMA load-error recovery is unsupported."
+                    "MoRIIO READ failed before the forward; aborting because "
+                    "load-error recovery needs a single KV cache group."
                 )
                 raise
             logger.exception(
@@ -3073,15 +3073,23 @@ class MoRIIOConnectorWorker:
                 "to transfer cleanup."
             )
 
-    def _record_failed_recv(self, req_id: ReqId) -> None:
-        """Hand a failed attention-only read to scheduler recovery.
+    @property
+    def _block_load_errors_supported(self) -> bool:
+        """Whether the scheduler can recover a read failure from block IDs.
 
-        The scheduler's invalid-block recovery currently assumes exactly one
-        KV cache group. Reporting IDs for a hybrid request would crash it while
-        unpacking the request's groups, so match NIXL and keep HMA failures out
-        of this API until scheduler recovery carries group identity.
+        Block IDs are only unique within a KV cache group, and a partially
+        valid recurrent state cannot be resumed.
         """
-        if self._has_mamba:
+        return self._single_kv_cache_group and not self._has_mamba
+
+    def _record_failed_recv(self, req_id: ReqId) -> None:
+        """Hand a failed read to scheduler recovery.
+
+        The scheduler's invalid-block recovery requires exactly one KV cache
+        group and raises otherwise. Multi-group failures are raised before the
+        forward instead, in _await_reads_issued_this_step.
+        """
+        if not self._block_load_errors_supported:
             return
         self._invalid_block_ids.update(self._recving_local_blocks.get(req_id, ()))
 
@@ -3207,8 +3215,9 @@ class MoRIIOConnectorWorker:
         the collective (raising early would hang the peers still waiting for it).
         Every worker reaches the all-reduce(MIN) vote, so every worker agrees on
         which engines failed. A failed engine is returned rather than raised so
-        only its requests fail; the next step retries the missing ranks. Hybrid
-        models still raise, as the scheduler cannot recover their load errors.
+        only its requests fail; the next step retries the missing ranks. With
+        several KV cache groups it still raises, as the scheduler cannot
+        recover their load errors.
 
         Returns:
             Remote engines whose handshake failed on at least one TP worker.
@@ -3316,11 +3325,11 @@ class MoRIIOConnectorWorker:
             vote = torch.tensor([1 if all_ok else 0], device="cpu", dtype=torch.int32)
             dist.all_reduce(vote, group=self.tp_group.cpu_group, op=dist.ReduceOp.MIN)
             if int(vote.item()) == 0:
-                if self._has_mamba:
+                if not self._block_load_errors_supported:
                     raise HandshakeError(
                         f"Eager MoRIIO handshake failed for {remote_engine_id} "
-                        "on at least one TP rank; HMA load-error recovery is "
-                        "unsupported"
+                        "on at least one TP rank; load-error recovery needs a "
+                        "single KV cache group"
                     )
                 failed.add(remote_engine_id)
                 continue
