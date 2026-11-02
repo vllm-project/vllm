@@ -171,9 +171,8 @@ def test_routed_experts_loads_per_expert_biases():
         )
         expert_map_manager = SimpleNamespace(num_fused_shared_experts=0)
         _get_hidden_dim = staticmethod(RoutedExperts._get_hidden_dim)
-        _narrow_expert_data_for_padding = staticmethod(
-            RoutedExperts._narrow_expert_data_for_padding
-        )
+        _split_padding = staticmethod(RoutedExperts._split_padding)
+        _narrow_and_mark_padding = RoutedExperts._narrow_and_mark_padding
         _load_w13 = RoutedExperts._load_w13
         _loaded_expert_biases = set()
 

@@ -84,6 +84,8 @@ class QuantizeMethodBase(ABC):
         """Process the weight after loading.
 
         This can be used for example, to transpose weights for computation.
+        Callers outside model loading and reload must call
+        `vllm.model_executor.utils.fill_padding(layer)` first.
         """
         return
 

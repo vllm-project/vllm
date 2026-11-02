@@ -14,8 +14,10 @@ from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
 from vllm.model_executor.utils import (
+    fill_padding,
     get_live_param,
     kernel_parameters,
+    mark_padding,
     move_parameter,
     replace_parameter,
     retire_parameter,
@@ -422,3 +424,23 @@ def test_transposed_kept_param_keeps_checkpoint_dims(single_rank_tp: None) -> No
     assert layer.weight is weight
     assert torch.equal(weight, torch.arange(6.0).view(2, 3).t())
     assert (weight.input_dim, weight.output_dim) == (1, 0)
+
+
+def test_padding_records_only_the_latest_load() -> None:
+    """Another loader may split a parameter differently: a fill writes only the
+    padding the latest load left out, never data an earlier load called padding."""
+    layer = torch.nn.Module()
+    for name in ("w", "v"):
+        layer.register_parameter(
+            name, torch.nn.Parameter(torch.zeros(8), requires_grad=False)
+        )
+    mark_padding(layer, "w", layer.w.data[4:], 0)
+    mark_padding(layer, "v", layer.v.data[4:], 0)
+    fill_padding(layer)
+
+    layer.w.data.fill_(7)  # a load that writes 6 elements of w and all of v
+    layer.v.data.fill_(7)
+    mark_padding(layer, "w", layer.w.data[6:], 0)
+    fill_padding(layer)
+    assert layer.w.tolist() == [7] * 6 + [0] * 2
+    assert layer.v.tolist() == [7] * 8

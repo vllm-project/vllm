@@ -68,6 +68,64 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
+def mark_padding(
+    layer: torch.nn.Module, name: str, region: torch.Tensor, value: float
+) -> None:
+    """Record that ``region``, a view of ``layer.<name>`` left out by a loader,
+    holds padding; `fill_padding` writes it before the next post-load processing.
+
+    Loaders record padding instead of writing it, so post-load processing sees
+    the same padding on every load: a reload may load into storage holding
+    stale bytes (uninitialized layerwise tensors, or post-processed bytes when
+    loading in place). A region of one expert (``param[e]``) is recorded for
+    every expert. Records live on the layer, which outlives the parameter
+    tensors across reloads, and hold only the latest load's regions: another
+    loader may split the same parameter differently.
+    """
+    param = getattr(layer, name)
+    offset = region.storage_offset() - param.storage_offset()
+    shape, stride = tuple(region.shape), tuple(region.stride())
+    assert region.ndim in (param.ndim, param.ndim - 1), (name, shape)
+    if region.ndim < param.ndim:  # one expert: param[e]
+        offset %= param.stride(0)
+        shape, stride = (param.shape[0], *shape), (param.stride(0), *stride)
+    layout = (tuple(param.shape), tuple(param.stride()), param.dtype)
+    layouts = layer.__dict__.setdefault("_padding_layouts", {})
+    regions = layer.__dict__.setdefault("_padding_regions", {})
+    marked = layer.__dict__.setdefault("_padding_marked", set())
+    if name not in marked or layouts[name] != layout:  # new load or layout
+        marked.add(name)
+        layouts[name] = layout
+        regions[name] = {}
+    regions[name][(offset, shape, stride)] = value
+
+
+def fill_padding(module: torch.nn.Module) -> None:
+    """Write the padding recorded by `mark_padding` since the last fill, in
+    checkpoint layout, before post-load processing reads it.
+
+    Code that loads weights and then runs ``process_weights_after_loading`` on
+    a layer itself must call this on the layer in between, as cold start and
+    layerwise reload do."""
+    marked = module.__dict__.pop("_padding_marked", None)
+    if not marked:
+        return
+    # keep only this load's records: earlier loads may have split differently
+    module._padding_regions = {
+        n: r for n, r in module._padding_regions.items() if n in marked
+    }
+    for name, regions in module._padding_regions.items():
+        param = getattr(module, name, None)
+        if param is None:  # released by post-load processing
+            continue
+        data = param.data
+        layout = (tuple(data.shape), tuple(data.stride()), data.dtype)
+        if layout != module._padding_layouts[name]:
+            continue  # already post-processed
+        for (offset, shape, stride), value in regions.items():
+            data.as_strided(shape, stride, data.storage_offset() + offset).fill_(value)
+
+
 def _extent(t: torch.Tensor) -> int:
     """Number of elements spanned by ``t`` in its storage."""
     if t.numel() == 0:

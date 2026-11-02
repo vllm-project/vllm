@@ -200,26 +200,51 @@ class OAIAttention(nn.Module):
 class GptOssRoutedExperts(RoutedExperts):
     """Load one GPT-OSS expert at a time without assembling the global stack."""
 
-    @staticmethod
-    def _narrow_for_rank(
-        loaded_weight: torch.Tensor,
-        dim: int,
-        rank: int,
-        size: int,
-    ) -> torch.Tensor:
-        start = rank * size
-        available = loaded_weight.shape[dim] - start
-        return loaded_weight.narrow(dim, start, min(size, max(available, 0)))
+    def _narrow_for_rank(self, loaded_weight: torch.Tensor, dim: int) -> torch.Tensor:
+        """This rank's part of the intermediate dimension ``dim`` of one expert,
+        split as the full-checkpoint loaders split it (MXFP4: in whole blocks),
+        whatever padding the parameter has: a reload may mix both loaders."""
+        moe = self.moe_config
+        tp_size = moe.moe_parallel_config.tp_size
+        tp_rank = moe.moe_parallel_config.tp_rank
+        mx = getattr(self.quant_method, "weight_dtype", "") in (
+            "gpt_oss_mxfp4",
+            "mxfp4",
+        )
+        blocks = moe.intermediate_size // (OCP_MX_BLOCK_SIZE if mx else 1)
+        per_rank = cdiv(blocks, tp_size)
+        length = loaded_weight.shape[dim]
+        start = min(tp_rank * per_rank, blocks) * length // blocks
+        end = min((tp_rank + 1) * per_rank, blocks) * length // blocks
+        return loaded_weight.narrow(dim, start, end - start)
 
-    @staticmethod
-    def _copy_to_expert(expert_data: torch.Tensor, loaded_weight: torch.Tensor) -> None:
+    def _param_of(self, t: torch.Tensor) -> torch.nn.Parameter | None:
+        """The parameter of this layer that ``t`` views, if any."""
+        if t.is_meta:  # a dry run: nothing is recorded
+            return None
+        ptr = t.untyped_storage().data_ptr()
+        params = self.parameters(recurse=False)
+        return next((p for p in params if p.untyped_storage().data_ptr() == ptr), None)
+
+    def _copy_to_expert(
+        self, expert_data: torch.Tensor, loaded_weight: torch.Tensor
+    ) -> None:
+        """Copy into the leading slice of ``expert_data`` (one expert, or the
+        whole stack), recording the padding past it for `fill_padding`."""
         if expert_data.numel() == loaded_weight.numel() == 1:
             expert_data.copy_(loaded_weight.reshape(()))
             return
         while loaded_weight.ndim > expert_data.ndim and loaded_weight.shape[-1] == 1:
             loaded_weight = loaded_weight.squeeze(-1)
-        slices = tuple(slice(0, size) for size in loaded_weight.shape)
-        expert_data[slices].copy_(loaded_weight)
+        ndim = loaded_weight.ndim
+        expert_data = self._narrow_and_mark_padding(
+            self._param_of(expert_data),
+            expert_data,
+            loaded_weight,
+            hidden_dim=max(ndim - 2, 0),
+            shard_dim=ndim - 1 if ndim > 1 else None,
+        )
+        expert_data.copy_(loaded_weight)
 
     def _load_expert_bias(
         self,
@@ -229,9 +254,7 @@ class GptOssRoutedExperts(RoutedExperts):
     ) -> None:
         tp_rank = self.moe_config.moe_parallel_config.tp_rank
         if shard_id == "gpt_oss_w13":
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, 0, tp_rank, expert_data.shape[0]
-            )
+            loaded_weight = self._narrow_for_rank(loaded_weight, 0)
         elif tp_rank != 0:
             loaded_weight = torch.zeros_like(loaded_weight)
         self._copy_to_expert(expert_data, loaded_weight)
@@ -242,17 +265,11 @@ class GptOssRoutedExperts(RoutedExperts):
         loaded_weight: torch.Tensor,
         shard_id: str,
     ) -> None:
-        tp_rank = self.moe_config.moe_parallel_config.tp_rank
         if shard_id == "gpt_oss_w13":
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, 1, tp_rank, expert_data.shape[0]
-            )
-            loaded_weight = loaded_weight.t().contiguous()
+            loaded_weight = self._narrow_for_rank(loaded_weight, 1)
         else:
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, 0, tp_rank, expert_data.shape[1]
-            )
-            loaded_weight = loaded_weight.t().contiguous()
+            loaded_weight = self._narrow_for_rank(loaded_weight, 0)
+        loaded_weight = loaded_weight.t().contiguous()
         self._copy_to_expert(expert_data, loaded_weight)
 
     def _load_packed_expert(
@@ -262,7 +279,6 @@ class GptOssRoutedExperts(RoutedExperts):
         weight_name: str,
         shard_id: str,
     ) -> None:
-        tp_rank = self.moe_config.moe_parallel_config.tp_rank
         is_w13 = shard_id == "gpt_oss_w13"
         is_weight = weight_name.endswith(("_weight", "_weight_packed"))
         is_partitioned_scale = weight_name.endswith("_weight_scale")
@@ -270,14 +286,8 @@ class GptOssRoutedExperts(RoutedExperts):
         if is_weight:
             loaded_weight = loaded_weight.reshape(loaded_weight.shape[0], -1)
 
-        if is_w13 and (is_weight or is_partitioned_scale):
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, 0, tp_rank, expert_data.shape[0]
-            )
-        elif not is_w13 and (is_weight or is_partitioned_scale):
-            loaded_weight = self._narrow_for_rank(
-                loaded_weight, -1, tp_rank, expert_data.shape[-1]
-            )
+        if is_weight or is_partitioned_scale:
+            loaded_weight = self._narrow_for_rank(loaded_weight, 0 if is_w13 else -1)
 
         self._copy_to_expert(expert_data, loaded_weight)
 
@@ -763,6 +773,15 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 pcp_rank=get_pcp_group().rank_in_group,
             )
 
+        def _copy_to_expert(
+            fused_name: str, expert_id: int | None, loaded_weight: torch.Tensor
+        ) -> None:
+            experts = self.get_submodule(fused_name.rpartition(".")[0])
+            data = params_dict[fused_name].data
+            experts._copy_to_expert(
+                data if expert_id is None else data[expert_id], loaded_weight
+            )
+
         def _is_mxfp4(weight_dtype: str | None) -> bool:
             """Return True for any MXFP4 weight-dtype variant.
 
@@ -933,11 +952,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # weight loaders without added complexity, so just do the
                 # direct load here.
                 assert fused_name is not None
-                param = params_dict[fused_name]
-                expert_data = param.data[expert_id]
-                dim1 = sliced_weight.shape[0]
-                dim2 = sliced_weight.shape[1]
-                expert_data.data[:dim1, :dim2].copy_(sliced_weight)
+                _copy_to_expert(fused_name, expert_id, sliced_weight)
                 loaded_params.add(fused_name)
                 continue
 
@@ -1063,10 +1078,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
                 # weight loaders without added complexity, so just do the
                 # direct load here.
                 assert fused_name is not None
-                param = params_dict[fused_name]
-                expert_data = param.data[expert_id]
-                dim1 = sliced_weight.shape[0]
-                expert_data.data[:dim1].copy_(sliced_weight)
+                _copy_to_expert(fused_name, expert_id, sliced_weight)
                 loaded_params.add(fused_name)
                 continue
 

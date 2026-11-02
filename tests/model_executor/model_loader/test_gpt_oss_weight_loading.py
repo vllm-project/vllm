@@ -10,6 +10,7 @@ from vllm.model_executor.models.gpt_oss import (
     GptOssModel,
     GptOssRoutedExperts,
 )
+from vllm.model_executor.utils import fill_padding
 
 
 class _TestExperts(GptOssRoutedExperts):
@@ -19,13 +20,15 @@ class _TestExperts(GptOssRoutedExperts):
         shape: tuple[int, ...],
         *,
         tp_rank: int = 0,
+        intermediate_size: int = 4,
         quant_method_name: str = "TestQuantMethod",
         weight_dtype: str = "",
         dtype: torch.dtype = torch.float32,
     ) -> None:
         torch.nn.Module.__init__(self)
         self.moe_config = SimpleNamespace(
-            moe_parallel_config=SimpleNamespace(tp_size=2, tp_rank=tp_rank)
+            moe_parallel_config=SimpleNamespace(tp_size=2, tp_rank=tp_rank),
+            intermediate_size=intermediate_size,
         )
         self.quant_method = type(
             quant_method_name, (), {"weight_dtype": weight_dtype}
@@ -83,6 +86,18 @@ def test_streamed_expert_resolves_wrapped_parameter(base_layer_prefix: str) -> N
     assert torch.count_nonzero(experts.w13_weight[0]) == 0
 
 
+def test_streamed_expert_padding_is_filled_before_post_processing() -> None:
+    experts = _TestExperts("w2_bias", (2, 5))
+    experts.w2_bias.data.fill_(7)  # storage holding other bytes, as on a reload
+
+    assert _load(experts, "w2_bias", torch.ones(3), "gpt_oss_w2")
+    assert torch.all(experts.w2_bias[0, 3:] == 7)  # left to the fill
+    fill_padding(experts)
+    assert torch.equal(experts.w2_bias[0], torch.tensor([1.0, 1, 1, 0, 0]))
+    # recorded for every expert
+    assert torch.equal(experts.w2_bias[1], torch.tensor([7.0, 7, 7, 0, 0]))
+
+
 def test_streamed_expert_skips_non_local_expert() -> None:
     experts = _TestExperts("w2_bias", (2, 3))
 
@@ -132,6 +147,7 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
             "w13_weight",
             (2, 4, 4),
             tp_rank=1,
+            intermediate_size=128,
             weight_dtype="gpt_oss_mxfp4",
             dtype=torch.uint8,
         )
@@ -150,3 +166,78 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
 
     assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
     assert torch.equal(experts.w13_weight[0], expected)
+
+
+def test_streamed_mxfp4_expert_splits_like_the_checkpoint_loader() -> None:
+    """A reload may mix the per-expert and full-checkpoint loaders, so the
+    per-expert one splits in whole MXFP4 blocks as the full one does, not by the
+    padded size (here 64 rows per rank padded to 96)."""
+    experts = _TestExperts(
+        "w13_weight",
+        (2, 192, 4),
+        tp_rank=1,
+        intermediate_size=128,
+        weight_dtype="gpt_oss_mxfp4",
+        dtype=torch.uint8,
+    )
+    loaded_weight = torch.arange(1024).to(torch.uint8).reshape(256, 2, 2)
+
+    assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
+    fill_padding(experts)
+    assert torch.equal(experts.w13_weight[0, :128], loaded_weight.reshape(256, 4)[128:])
+    assert torch.count_nonzero(experts.w13_weight[:, 128:]) == 0
+
+
+@pytest.mark.parametrize("per_expert", [True, False])
+def test_quark_expert_padding_is_filled_before_post_processing(
+    monkeypatch: pytest.MonkeyPatch, per_expert: bool
+) -> None:
+    import vllm.model_executor.models.gpt_oss as gpt_oss
+
+    group = SimpleNamespace(world_size=1, rank_in_group=0)
+    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(gpt_oss, "get_dp_group", lambda: group)
+    monkeypatch.setattr(gpt_oss, "get_pcp_group", lambda: group)
+    monkeypatch.setattr(gpt_oss, "is_pp_missing_parameter", lambda *_: False)
+
+    # intermediate 32 -> 40 and hidden 6 -> 8, as Quark MXFP4 pads on ROCm
+    routed = _TestExperts("w13_weight", (2, 80, 8))
+    routed.register_parameter(
+        "w2_bias", torch.nn.Parameter(torch.zeros(2, 8), requires_grad=False)
+    )
+    experts = torch.nn.Module()
+    experts._quant_method = SimpleNamespace(weight_dtype="mxfp4")
+    experts.routed_experts = routed
+    layer = torch.nn.Module()
+    layer.mlp = torch.nn.Module()
+    layer.mlp.experts = experts
+    model = torch.nn.Module()
+    model.layers = torch.nn.ModuleList([layer])
+    model.config = SimpleNamespace(num_local_experts=2, intermediate_size=32)
+    model.parallel_config = SimpleNamespace(enable_expert_parallel=False)
+    model.get_expert_mapping = lambda: []
+    for param in routed.parameters():
+        param.data.fill_(7)  # storage holding other bytes, as on a reload
+
+    w13 = torch.randn(2, 64, 6)
+    w2_bias = torch.randn(2, 6)
+    if per_expert:
+        weights = [
+            (f"layers.0.mlp.experts.{e}.{name}", w[e])
+            for e in range(2)
+            for name, w in (("w13_weight", w13), ("w2_bias", w2_bias))
+        ]
+    else:
+        weights = [
+            ("layers.0.mlp.experts.w13_weight", w13),
+            ("layers.0.mlp.experts.w2_bias", w2_bias),
+        ]
+    GptOssModel._load_weights_quark(model, 2, 0, weights, [])
+    assert torch.all(routed.w13_weight[:, 64:] == 7)  # left to the fill
+
+    fill_padding(routed)
+    assert torch.equal(routed.w13_weight[:, :64, :6], w13)
+    assert torch.equal(routed.w2_bias[:, :6], w2_bias)
+    for padding in (routed.w13_weight[:, 64:], routed.w13_weight[..., 6:]):
+        assert torch.all(padding == 0)
+    assert torch.all(routed.w2_bias[:, 6:] == 0)

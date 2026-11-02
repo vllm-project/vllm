@@ -35,7 +35,7 @@ from vllm.model_executor.model_loader.weight_cache.utils import (
 from vllm.model_executor.model_loader.weight_tying import maybe_retie_word_embeddings
 from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 from vllm.model_executor.models.interfaces import SupportsQuant
-from vllm.model_executor.utils import is_weights_pre_processed
+from vllm.model_executor.utils import fill_padding, is_weights_pre_processed
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -158,6 +158,9 @@ def process_weights_after_loading(
     )
 
     maybe_retie_word_embeddings(model, model_config)
+
+    for module in model.modules():
+        fill_padding(module)
 
     if direct_reload_enabled():
         record_checkpoint_layout(model)  # cold start only; reloads reuse it
