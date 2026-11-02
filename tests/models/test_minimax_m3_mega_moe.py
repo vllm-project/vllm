@@ -105,6 +105,7 @@ def _load_checkpoint(moe, tensors: dict[str, torch.Tensor]) -> None:
         name = name.replace(weight_name, param_name)
         param = getattr(experts, name.rpartition(".")[2])
         param.weight_loader(param, tensor, name, shard_id=shard_id, expert_id=expert_id)
+    experts.process_weights_after_loading()
 
 
 def _mega_moe_block(num_experts=8, top_k=2, hidden_size=512, intermediate_size=256):
