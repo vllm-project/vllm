@@ -2140,6 +2140,7 @@ class VllmConfig:
             self._validate_v1_model_runner()
 
         self._validate_profiler_config()
+        self._validate_cudagraph_launch_mode()
         self._validate_batch_sharded_sampling()
         self._validate_adaptive_verification()
 
@@ -3382,6 +3383,34 @@ class VllmConfig:
             unsupported.append("dual batch overlap with encoder only models")
 
         return unsupported
+
+    def _validate_cudagraph_launch_mode(self) -> None:
+        if self.compilation_config.cudagraph_launch_mode != "device":
+            return
+        # Both draw from PyTorch's CUDA generator inside the captured graphs.
+        rng_users = []
+        if self.mamba_config.enable_stochastic_rounding:
+            rng_users.append("--enable-mamba-cache-stochastic-rounding")
+        if envs.VLLM_MOE_ROUTING_SIMULATION_STRATEGY:
+            rng_users.append("VLLM_MOE_ROUTING_SIMULATION_STRATEGY")
+        if rng_users:
+            raise ValueError(
+                "cudagraph_launch_mode='device' skips PyTorch's per-replay RNG "
+                "setup, which the captured graphs need for "
+                f"{' and '.join(rng_users)}. Use cudagraph_launch_mode='host'."
+            )
+
+        from vllm.platforms import current_platform
+
+        if not current_platform.is_cuda():
+            raise ValueError("cudagraph_launch_mode='device' requires NVIDIA CUDA.")
+        try:
+            from cuda.bindings import driver  # noqa: F401
+        except ImportError as e:
+            raise ValueError(
+                "cudagraph_launch_mode='device' requires the cuda-bindings "
+                "package (pip install cuda-bindings)."
+            ) from e
 
     def _validate_profiler_config(self) -> None:
         if self.profiler_config.profiler != "proton":

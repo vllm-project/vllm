@@ -10,6 +10,7 @@ from typing import Any
 import torch
 
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.cudagraph_launch import new_cuda_graph
 from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.distributed.device_communicators.pynccl_allocator import set_graph_pool_id
 from vllm.forward_context import (
@@ -180,7 +181,7 @@ class UBatchWrapper:
 
             # Capture the cudagraph
             cudagraph_metadata = CUDAGraphMetaData(
-                cudagraph=torch.cuda.CUDAGraph(),
+                cudagraph=new_cuda_graph(self.compilation_config.cudagraph_launch_mode),
                 ubatch_metadata=ubatch_metadata,
             )
             if self.graph_pool is not None:

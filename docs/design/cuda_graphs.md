@@ -221,6 +221,16 @@ outputs = model.generate(
 )
 ```
 
+### Device-launch instantiation of CUDA Graphs
+
+`cudagraph_launch_mode="device"` is a workaround to try when host-launched CUDA graph replays hang with no error, for example one rank idles while its peers wait in the next collective (see [pytorch/pytorch#196133](https://github.com/pytorch/pytorch/issues/196133)). If a driver update resolves the hang on your system, prefer that. The option is off by default and is not a performance optimization. With `-cc.cudagraph_launch_mode=device`, vLLM instantiates the CUDA graphs it captures for the model forward pass with `CUDA_GRAPH_INSTANTIATE_FLAG_DEVICE_LAUNCH` and uploads them at capture time; replays are still launched from the host. It requires NVIDIA CUDA and the `cuda-bindings` package, which PyTorch's CUDA wheels install on Linux.
+
+* Performance can change in either direction, depending on the model and parallel setup; each replay takes a few microseconds longer to launch. Measure with and without the option before keeping it on.
+* Encoder CUDA graphs (`cudagraph_mm_encoder`), model-specific helper graphs and graphs captured by other libraries keep PyTorch's instantiation.
+* A graph the driver cannot instantiate this way keeps PyTorch's instantiation, so this option does not apply to it; vLLM logs a warning with the driver's reason and, after capture, how many graphs on each rank kept PyTorch's instantiation. This happens when captured NCCL collectives contain event nodes, as they can with NCCL's default settings. [`NCCL_GRAPH_MIXING_SUPPORT=0`](https://docs.nvidia.com/deeplearning/nccl/user-guide/docs/env.html#nccl-graph-mixing-support) removes them, but vLLM does not set it: with that setting, NCCL does not support a non-captured collective (such as the tensor-parallel logits all-gather) while a graph launch on the same communicator is outstanding.
+* Random numbers drawn from PyTorch's CUDA generator inside a captured graph use an undefined seed and offset: they ignore `--seed` and repeat on every replay. vLLM's sampling is not affected; `--enable-mamba-cache-stochastic-rounding` and `VLLM_MOE_ROUTING_SIMULATION_STRATEGY` are rejected in this mode.
+* Executable graphs are allocated at capture time, so CUDA graph memory profiling accounts for them when sizing the KV cache.
+
 ### Piecewise compilation and full graph custom passes (attention fusion)
 
 Unfortunately, some custom compile passes have to see the whole graph to be effective and hence aren't compatible with piecewise compilation. This includes `AttnQuantFusionPass`. As a short-term solution, we automatically disable piecewise compilation (by setting `splitting_ops=[]`) when attention fusion is enabled. We use CUDA Graph modes `FULL` or `FULL_DECODE_ONLY` (depending on backend support). However, this leads to another optimization incompatibility and confusing performance tradeoffs.

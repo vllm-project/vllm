@@ -21,6 +21,11 @@ class CompilationCounter:
     num_gpu_runner_capture_triggers: int = 0
     # Number of CUDAGraphs captured
     num_cudagraph_captured: int = 0
+    # cudagraph_launch_mode="device": graphs instantiated for device launch, and
+    # graphs that kept host launch because the driver refused device launch
+    # (both include captures that memory profiling later discards)
+    num_cudagraph_device_launched: int = 0
+    num_cudagraph_host_launch_fallbacks: int = 0
     # InductorAdapter.compile calls
     num_inductor_compiles: int = 0
     # EagerAdapter.compile calls
