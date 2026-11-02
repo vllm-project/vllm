@@ -249,3 +249,25 @@ def test_regex_timeout_handling(streaming: bool, default_tokenizer: TokenizerLik
         assert content == fake_problematic_input
         assert len(tool_calls) == 0
         mock_regex.match.assert_called_once()
+
+
+@pytest.mark.parametrize("streaming", [True, False])
+def test_leading_underscore_identifiers(
+    streaming: bool, default_tokenizer: TokenizerLike
+):
+    """Leading-underscore names are valid Python and JSON Schema names."""
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("olmo3")(
+        default_tokenizer
+    )
+
+    content, tool_calls = run_tool_extraction(
+        tool_parser,
+        "<function_calls>_lookup(_id='abc', limit=5)</function_calls>",
+        streaming=streaming,
+    )
+
+    assert content is None
+    assert len(tool_calls) == 1
+    assert tool_calls[0].function == FunctionCall(
+        name="_lookup", arguments='{"_id": "abc", "limit": 5}'
+    )
