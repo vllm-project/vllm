@@ -1239,7 +1239,13 @@ class TieringOffloadingManager(OffloadingManager):
             New OffloadingEvents collected by each tier since the last call.
 
         """
-        yield from self.primary_tier.take_events()
+        publish_primary = not any(
+            getattr(tier, "suppresses_primary_events", False)
+            for tier in self.secondary_tiers
+        )
+        for event in self.primary_tier.take_events():
+            if publish_primary:
+                yield event
         for tier in self.secondary_tiers:
             yield from tier.take_events()
 
