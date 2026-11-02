@@ -114,18 +114,20 @@ def test_fused_input_projection_uses_one_mm_and_returns_expected_tuple(
         lambda self, hidden: qr_kv,
     )
 
+    from aiter.tuned_gemm import tgemm
+
     mm_calls: list[tuple[torch.Tensor, torch.Tensor, torch.dtype | None]] = []
 
-    def cpu_mm_with_out_dtype(
+    def cpu_tgemm_mm(
         left: torch.Tensor,
-        right: torch.Tensor,
+        weight: torch.Tensor,
         *,
-        out_dtype: torch.dtype | None = None,
+        otype: torch.dtype | None = None,
     ) -> torch.Tensor:
-        mm_calls.append((left, right, out_dtype))
-        return torch.matmul(left, right).to(out_dtype)
+        mm_calls.append((left, weight, otype))
+        return torch.matmul(left, weight.t()).to(otype)
 
-    monkeypatch.setattr(torch, "mm", cpu_mm_with_out_dtype)
+    monkeypatch.setattr(tgemm, "mm", cpu_tgemm_mm)
 
     qr_out, kv_score, indexer_kv_score, indexer_weights = (
         attention._run_parallel_input_projections(hidden_states)
