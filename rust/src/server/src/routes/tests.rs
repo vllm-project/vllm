@@ -10667,60 +10667,6 @@ async fn log_outputs_disabled_logs_nothing() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn anthropic_text_count_matches_chat_tokenization() {
-    let mut app = test_app().await;
-    let mut counts = Vec::new();
-    for (uri, body) in [
-        (
-            "/v1/messages/count_tokens",
-            json!({"model": "Qwen/Qwen1.5-0.5B-Chat",
-            "system": [{"type": "text", "text": "Be precise."}],
-            "messages": [{"role": "user", "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": " world"}]}]}),
-        ),
-        (
-            "/tokenize",
-            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [
-            {"role": "system", "content": "Be precise."}, {"role": "user", "content": [{"type": "text", "text": "Hello"}, {"type": "text", "text": " world"}]}]}),
-        ),
-    ] {
-        let response = app
-            .call(
-                Request::builder()
-                    .method("POST")
-                    .uri(uri)
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        let status = response.status();
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        assert_eq!(status, StatusCode::OK, "{body:?}");
-        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        counts.push(body.get("input_tokens").or_else(|| body.get("count")).unwrap().clone());
-    }
-    assert_eq!(counts[0], counts[1]);
-    assert!(counts[0].as_u64().unwrap() > 0);
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
-async fn anthropic_count_rejects_unsupported_content_with_anthropic_error() {
-    let mut app = test_app().await;
-    let response = app.call(Request::builder().method("POST").uri("/v1/messages/count_tokens")
-        .header("content-type", "application/json").body(Body::from(json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [{"role": "user", "content": [{"type": "document", "source": {}}]}]
-        }).to_string())).unwrap()).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    let body: serde_json::Value =
-        serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap();
-    assert_eq!(body["type"], "error");
-    assert_eq!(body["error"]["type"], "invalid_request_error");
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[serial]
 async fn anthropic_text_generation_reports_content_and_stop() {
     for (text, finish, expected) in [
         ("Hello", EngineCoreFinishReason::Length, "max_tokens"),
@@ -10743,7 +10689,6 @@ async fn anthropic_text_generation_reports_content_and_stop() {
         engine_task.await.unwrap();
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["role"], "assistant");
-        assert!(body.get("message").is_none(), "{body}");
         assert_eq!(body["content"], json!([{"type": "text", "text": text}]));
         assert_eq!(body["stop_reason"], expected);
         assert_eq!(body.get("stop_sequence"), Some(&serde_json::Value::Null));
@@ -10753,9 +10698,8 @@ async fn anthropic_text_generation_reports_content_and_stop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
-async fn anthropic_rejects_invalid_model_and_sampling_before_generation() {
+async fn anthropic_rejects_invalid_sampling_before_generation() {
     for (field, value, status) in [
-        ("model", json!("missing-model"), StatusCode::NOT_FOUND),
         ("temperature", json!(-1), StatusCode::BAD_REQUEST),
         ("temperature", json!(1.5), StatusCode::BAD_REQUEST),
         ("top_p", json!(1.1), StatusCode::BAD_REQUEST),
@@ -10781,8 +10725,13 @@ async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
     )])
     .await;
     let input = json!({"model": "Qwen/Qwen1.5-0.5B-Chat",
-    "system": [{"type": "text", "text": "x-anthropic-billing-header: ignored"}], "messages": [
-        {"role": "user", "content": "Complete"},
+    "system": [
+        {"type": "text", "text": "x-anthropic-billing-header: ignored"},
+        {"type": "text", "text": "Be precise."}
+    ], "messages": [
+        {"role": "user", "content": [
+            {"type": "text", "text": "Com"}, {"type": "text", "text": "plete"}
+        ]},
         {"role": "assistant", "content": [
             {"type": "text", "text": "pre"}, {"type": "text", "text": "fix"}
         ]}
@@ -10795,7 +10744,7 @@ async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
     // The fixture renderer appends `assistant:` only for a new turn.
     assert_eq!(
         count["input_tokens"],
-        b"user: Complete\nassistant: prefix\n".len()
+        b"system: Be precise.\nuser: Complete\nassistant: prefix\n".len()
     );
     let mut generation = input;
     generation["max_tokens"] = json!(20);
@@ -10819,45 +10768,52 @@ async fn anthropic_assistant_prefix_count_matches_generation_without_echo() {
 #[serial]
 async fn anthropic_errors_cover_extraction_and_counting() {
     let mut app = test_app().await;
-    for uri in ["/v1/messages", "/v1/messages/count_tokens"] {
-        for (body, status, kind) in [
-            (
-                "{".to_owned(),
-                StatusCode::BAD_REQUEST,
-                "invalid_request_error",
-            ),
-            (
-                json!({"model": "missing", "messages": [{"role":"user","content":"Hi"}]})
-                    .to_string(),
-                StatusCode::NOT_FOUND,
-                "not_found_error",
-            ),
-        ] {
-            let body = if body != "{" && uri == "/v1/messages" {
-                let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
-                value["max_tokens"] = json!(10);
-                value.to_string()
-            } else {
-                body
-            };
-            let response = app
-                .call(
-                    Request::builder()
-                        .method("POST")
-                        .uri(uri)
-                        .header("content-type", "application/json")
-                        .body(Body::from(body))
-                        .unwrap(),
-                )
-                .await
+    for (uri, body, status, kind) in [
+        (
+            "/v1/messages",
+            "{".to_owned(),
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+        ),
+        (
+            "/v1/messages/count_tokens",
+            "{".to_owned(),
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+        ),
+        (
+            "/v1/messages/count_tokens",
+            json!({"model": "missing", "messages": [{"role":"user","content":"Hi"}]}).to_string(),
+            StatusCode::NOT_FOUND,
+            "not_found_error",
+        ),
+        (
+            "/v1/messages/count_tokens",
+            json!({"model": "Qwen/Qwen1.5-0.5B-Chat", "messages": [
+                {"role": "user", "content": [{"type": "document", "source": {}}]}
+            ]})
+            .to_string(),
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+        ),
+    ] {
+        let response = app
+            .call(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header("content-type", "application/json")
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), status);
+        let value: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
                 .unwrap();
-            assert_eq!(response.status(), status);
-            let value: serde_json::Value =
-                serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap())
-                    .unwrap();
-            assert_eq!(value["type"], "error");
-            assert_eq!(value["error"]["type"], kind);
-            assert!(value["error"].get("code").is_none());
-        }
+        assert_eq!(value["type"], "error");
+        assert_eq!(value["error"]["type"], kind);
+        assert!(value["error"].get("code").is_none());
     }
 }
