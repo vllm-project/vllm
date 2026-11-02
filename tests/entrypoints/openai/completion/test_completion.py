@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from contextlib import suppress
 from typing import Any
 
@@ -18,7 +19,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tokenizers import get_tokenizer
 
 # any model with a chat template should work here
-MODEL_NAME = "Qwen/Qwen3-0.6B"
+MODEL_NAME = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
 
 
 @pytest.fixture(scope="module")

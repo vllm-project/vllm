@@ -36,7 +36,15 @@ class HiddenCaptureReferenceExtension:
     @torch.no_grad()
     def capture_reference_logits(self, states):
         states = torch.tensor(states, device="cuda", dtype=torch.bfloat16)
-        logits = self.model_runner.model.compute_logits(states).float()
+        model = self.model_runner.model
+        logits = model.compute_logits(states).float()
+        contract = self.model_runner.aux_output_connector._hidden.logits_contract
+        rebuilt = torch.nn.functional.linear(states, model.lm_head.weight)
+        if contract["soft_cap"] is not None:
+            cap = contract["soft_cap"]
+            rebuilt = cap * torch.tanh(rebuilt / cap)
+        rebuilt = rebuilt[:, : contract["vocab_size"]] * contract["logit_scale"]
+        torch.testing.assert_close(rebuilt.float(), logits, atol=0, rtol=0)
         values, ids = logits.log_softmax(-1).topk(16, dim=-1)
         return values.cpu().tolist(), ids.cpu().tolist()
 
@@ -311,7 +319,8 @@ def test_hidden_windows_match_full_capture_and_raw_logits(
         )
 
 
-def test_prompt_capture_spans_chunked_prefill(vllm_runner, monkeypatch):
+@pytest.mark.parametrize("kv_pressure", [False, True])
+def test_prompt_capture_spans_chunked_prefill(vllm_runner, monkeypatch, kv_pressure):
     """Rows from prefill chunks that sample nothing are delivered at the end."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
     monkeypatch.delenv("VLLM_ALLOW_INSECURE_SERIALIZATION", raising=False)
@@ -319,16 +328,21 @@ def test_prompt_capture_spans_chunked_prefill(vllm_runner, monkeypatch):
         os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
         dtype="bfloat16",
         enforce_eager=True,
-        max_model_len=128,
+        max_model_len=96 if kv_pressure else 64,
         max_num_seqs=2,
-        max_num_batched_tokens=16,
+        num_gpu_blocks_override=7 if kv_pressure else None,
+        scheduler_reserve_full_isl=not kv_pressure,
+        disable_log_stats=False,
+        max_num_batched_tokens=2 if kv_pressure else 16,
         enable_chunked_prefill=True,
         async_scheduling=False,
         aux_output_config={"enable_hidden_states": True},
     ) as runner:
         params = SamplingParams(
             temperature=0,
-            max_tokens=1,
+            max_tokens=48 if kv_pressure else 1,
+            min_tokens=48 if kv_pressure else 1,
+            ignore_eos=True,
             extra_args={
                 "hidden_state_capture": {
                     "start": 2,
@@ -340,8 +354,23 @@ def test_prompt_capture_spans_chunked_prefill(vllm_runner, monkeypatch):
             },
         )
         prompt = {"prompt_token_ids": list(range(100, 148))}
-        for output in runner.llm.generate([prompt] * 2, params, use_tqdm=False):
+        prompts = (
+            [prompt, {"prompt_token_ids": list(range(200, 248))}]
+            if kv_pressure
+            else [prompt] * 2
+        )
+        for output in runner.llm.generate(prompts, params, use_tqdm=False):
             result = hidden_result(output)
             assert skip_reason(output) is None
             np.testing.assert_array_equal(result.hidden_positions, np.arange(2, 47))
             assert torch.isfinite(result.hidden_states).all()
+
+        if kv_pressure:
+            assert (
+                sum(
+                    m.value
+                    for m in runner.llm.get_metrics()
+                    if m.name == "vllm:num_preemptions"
+                )
+                > 0
+            )
