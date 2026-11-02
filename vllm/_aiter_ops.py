@@ -2211,6 +2211,7 @@ class rocm_aiter_ops:
     # Chunk length the AITER FlyDSL K5 prefill kernels are compiled for.
     GDN_FLYDSL_CHUNK_SIZE = 64
     _CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
+    _QUICK_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_QUICK_REDUCE
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
@@ -2242,6 +2243,7 @@ class rocm_aiter_ops:
         """
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._CUSTOM_ALL_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_CUSTOM_AR
+        cls._QUICK_REDUCE_ENABLED = envs.VLLM_ROCM_USE_AITER_QUICK_REDUCE
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
@@ -2456,13 +2458,19 @@ class rocm_aiter_ops:
     def is_flydsl_quick_reduce_available(cls) -> bool:
         """Whether AITER's FlyDSL INT4 QuickReduce can run here.
 
-        It runs AITER kernels, so VLLM_ROCM_USE_AITER remains the one switch
-        that turns it off. AITER's QuickAllReduceInt4 supports gfx942 and
-        gfx950 only (CDNA 3 and 4); `> 2` would also admit gfx1250.
+        It runs AITER kernels, so it needs VLLM_ROCM_USE_AITER;
+        VLLM_ROCM_USE_AITER_QUICK_REDUCE=0 keeps INT4 QuickReduce on vLLM's
+        HIP kernels while the rest of AITER stays on. AITER's
+        QuickAllReduceInt4 supports gfx942 and gfx950 only (CDNA 3 and 4);
+        `> 2` would also admit gfx1250.
         """
         from vllm.platforms.rocm import get_cdna_version
 
-        return cls._AITER_ENABLED and get_cdna_version() in (3, 4)
+        return (
+            cls._AITER_ENABLED
+            and cls._QUICK_REDUCE_ENABLED
+            and get_cdna_version() in (3, 4)
+        )
 
     @staticmethod
     def create_flydsl_quick_all_reduce_int4(
