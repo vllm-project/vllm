@@ -4,7 +4,7 @@
 ``y_r [rows, HIDDEN]`` (bf16) lands in every rank's mailbox, and a reader sums
 the ranks' copies in rank order, so every rank holds the same bf16 sum.
 
-After FlyTape's line exchange: a partial is stored as lines ordered by
+Lines: a partial is stored as lines ordered by
 (column group, token block): group ``g`` is columns ``64 g .. 64 g + 63`` (one
 row group of the output GEMM, whose last arriving unit pushes it), a line
 eight tokens of one group. Lane ``l`` of the wave that writes a line holds

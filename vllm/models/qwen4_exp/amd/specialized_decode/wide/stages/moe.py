@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The sparse MoE block (``Qwen4ExpSparseMoeBlock`` with the shared expert
-fused as routed expert ``EXPERTS``) as grid phases, after FlyTape's
-expert-major W4A4 MoE (``blocks/moe``: ``ExpertSchedule``, ``FusedExpert``).
+fused as routed expert ``EXPERTS``) as grid phases: an expert-major W4A4
+MoE whose units stream one expert's weights each.
 
 - ``router``: ``logits = x @ [W_gate; w_shared_gate].T`` (bf16) in K slices.
 - ``route``: a wave a row sums the slices in order and rounds to bf16 (the
@@ -72,7 +72,7 @@ UP_TILES = RI // (WAVES * TILE)  # a wave's 16-row tiles of each of gate and up
 DOWN_TILES = HIDDEN // (WAVES * TILE)  # a wave's 16-row output tiles
 DOWN_BLOCK = 4  # output tiles a down block shares its activation operands over
 STAGE_STRIDE = 4 * TILE + 4  # f32 words a staged output row: 64 columns, 4 pad
-DEPTH = 3  # K steps of loads in flight at the MFMAs (FlyTape: 3 beats 6 at B128)
+DEPTH = 3  # K steps of loads in flight at the MFMAs (3 beat 6 at 128 rows)
 XGROUPS = HIDDEN // mx.GROUP  # 80 scale groups an input row
 AGROUPS = RI // mx.GROUP  # 10 an intermediate row
 PER = EXPERTS // 64  # a lane's experts in ``route``

@@ -5,10 +5,10 @@ decode on one rank) as grid phases over every row of the step.
 
 - ``proj``: ``[q | k | v | z] = x @ W_qkvz.T`` (MXFP4) in two K slices a
   64-row group, folded by the group's last arriving unit, whose epilogue runs
-  the causal conv on ``q | k | v`` with its state update (after FlyTape's
-  ``gdn_proj``): ``silu(w0 s0 + w1 s1 + w2 s2 + w3 x)``, new state ``[s1, s2,
-  x]``, ``x`` the projection rounded to bf16 (the stock GEMM's output); ``z``
-  is stored as is. The ``[b | a]`` rows (bf16 ``W_ba``) are one-chunk units
+  the causal conv on ``q | k | v`` with its state update:
+  ``silu(w0 s0 + w1 s1 + w2 s2 + w3 x)``, new state ``[s1, s2, x]``, ``x``
+  the projection rounded to bf16 (the stock GEMM's output); ``z`` is stored
+  as is. The ``[b | a]`` rows (bf16 ``W_ba``) are one-chunk units
   whose partials the recurrence sums.
 - ``recur``: a unit is (row, key head), a CTA: the key head's three value
   heads in turn, each the gated delta rule on its 128 x 128 fp32 state in
@@ -422,8 +422,8 @@ def stage_unit(g, w, b, lds, rows: int, row, kh):
 def _halve(v, lane):
     """Sums over the 32 lanes of a row half (lane bits 0-4) of the 16 values a
     lane holds, one a state row, by halving: at each level a lane keeps half
-    its values and adds its partner's copy of that half (FlyTape's
-    ``wave_sums``), so 16 rows cost 16 exchanges, not 80. Returns the sum of
+    its values and adds its partner's copy of that half, so 16 rows cost
+    16 exchanges, not 80. Returns the sum of
     row ``(lane % 32) // 2``, in both lanes of each pair."""
     # level 1 (lane ^ 16): v_permlane16_swap of (low half, high half) leaves
     # the row-0 lanes' low and the row-1 lanes' high partial pairs in place

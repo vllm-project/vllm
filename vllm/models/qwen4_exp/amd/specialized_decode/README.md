@@ -15,11 +15,11 @@ vLLM's. Steps with fewer rows, prefill and mixed steps run vLLM's forward. The
 kernels are built for the deployment's CUDA graph capture sizes in 32-128
 (multiples of 8).
 
-The design follows FlyTape's batch-128 decode (expert-major fused W4A4 MoE,
-batch-tiled MFMA GEMMs with split-K folded by the last arriver, the line-based
-in-kernel TP exchange, the striped grid barrier) in vLLM's execution model:
-one launch per layer on vLLM's buffers, weights and caches in place, no
-multi-step device loop.
+The kernels are built from an expert-major fused W4A4 MoE, batch-tiled
+MFMA GEMMs with split-K folded by the last arriver, a line-based in-kernel TP
+exchange and a striped grid barrier, in vLLM's execution model: one launch
+per layer on vLLM's buffers, weights and caches in place, no multi-step
+device loop.
 
 ## MoE schedule
 

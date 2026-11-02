@@ -3,7 +3,7 @@
 """A launch's identity and its synchronization: the grid barrier between
 phases and the split-K fold's last-arriver count, both behind a bounded wait.
 
-Grid barrier (after FlyTape's striped grid sync): a CTA adds one to its
+Grid barrier (striped): a CTA adds one to its
 arrival stripe, one of ``STRIPES`` counters on separate 256-byte lines, four
 CTAs a stripe; wave 0's 64 lanes poll every stripe at once, one load each, and
 a ballot says when all reached the barrier's count. The counters are a launch

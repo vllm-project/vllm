@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Batch-tiled GEMMs on the bf16 matrix unit (after FlyTape's ``blocks/tiled``).
+"""Batch-tiled GEMMs on the bf16 matrix unit.
 
 A CTA computes ``C[token, row] = sum_k X[token, k] * W[row, k]`` for 64 x
 ``mtiles`` weight rows (16-row tiles, one a wave per ``mtiles`` step) over a
@@ -55,7 +55,7 @@ SLICES = 4  # MFMA K slices of a chunk
 CHUNK = 128  # K elements a staged step
 ROWS = WAVES * TILE  # weight rows a CTA covers per weight tile step
 XSTRIDE = CHUNK // 2 + 4  # LDS row stride in i32 words: 16 pad bytes stagger the banks
-DEPTH = 2  # chunks of loads in flight (FlyTape: 2 beats 1 and 3 at B128)
+DEPTH = 2  # chunks of loads in flight (2 beat 1 and 3 at 128 rows)
 UNROLL = 4  # K chunks up to which the chunk loop is unrolled
 
 
