@@ -58,6 +58,7 @@ from vllm.v1.kv_offload.base import (
     ScheduleEndContext,
     TierFilter,
     TierMatcher,
+    get_offload_group_idx,
     make_offload_key,
 )
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -170,6 +171,7 @@ class SchedulerOffloadConfig(NamedTuple):
     sync_load_budget_bytes: int = 0
     # KV bytes per token on one worker, summed over the offloaded groups.
     kv_bytes_per_token: int = 0
+    retain_running_prefixes: bool = False
 
     @classmethod
     def from_spec(
@@ -330,6 +332,7 @@ class SchedulerOffloadConfig(NamedTuple):
                 // g.tokens_per_block
                 for g in spec.config.groups
             ),
+            retain_running_prefixes=spec.retain_running_prefixes,
         )
 
 
@@ -379,6 +382,10 @@ class RequestOffloadState:
     # A load for this request failed; all its later lookups, including after
     # preemption, skip the offloaded cache so a faulting load is not retried.
     load_failed: bool = False
+    # Recurrent-state keys retained in the offload tier while the request
+    # runs (retain_running_prefixes), and the token boundary they end on.
+    retained_keys: tuple[OffloadKey, ...] = ()
+    retained_boundary: int = 0
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -666,6 +673,14 @@ class OffloadingConnectorScheduler:
             config.group_idx
             for config in self.config.kv_group_configs
             if config.requires_cow_source
+        )
+        # Recurrent-state groups whose deepest prompt-boundary state a running
+        # request retains in the offload tier (retain_running_prefixes).
+        self._retained_state_groups: frozenset[int] = (
+            self._cow_source_groups
+            if self.config.retain_running_prefixes
+            and self._mamba_align_size is not None
+            else frozenset()
         )
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
@@ -1120,6 +1135,83 @@ class OffloadingConnectorScheduler:
         req_context.set_offload_key_position(key, boundary_tokens)
         return key
 
+    def _retain_deepest_state(
+        self, req_status: RequestOffloadState, keys: Iterable[OffloadKey]
+    ) -> None:
+        """Retain those of the given resident keys that hold the request's
+        recurrent state at the deepest prompt boundary it has reached. A deeper
+        state replaces a shallower one; the request's finish releases it."""
+        req_context = req_status.req_context
+        prompt_end = self._calc_num_offloadable_tokens(
+            req_status, req_status.req.num_prompt_tokens
+        )
+        candidates: dict[int, list[OffloadKey]] = {}
+        for key in keys:
+            if get_offload_group_idx(key) not in self._retained_state_groups:
+                continue
+            position = req_context.get_offload_key_position(key)
+            if (
+                position is not None
+                and req_status.retained_boundary <= position <= prompt_end
+            ):
+                candidates.setdefault(position, []).append(key)
+        if not candidates:
+            return
+        boundary = max(candidates)
+        new_keys = [
+            key for key in candidates[boundary] if key not in req_status.retained_keys
+        ]
+        if not new_keys or not self.manager.retain(new_keys, req_context):
+            return
+        if boundary > req_status.retained_boundary:
+            if req_status.retained_keys:
+                self.manager.release(req_status.retained_keys, req_context)
+            req_status.retained_keys = ()
+            req_status.retained_boundary = boundary
+            self._connector_stats.increase_counter(
+                _ConnectorMetricName.RETENTION_STATES
+            )
+        req_status.retained_keys += tuple(new_keys)
+
+    def _retain_local_hit_state(self, request: Request) -> None:
+        """A request that resumes from the GPU prefix cache alone loads no
+        state from the offload tier: retain the tier's copy of the state it
+        resumes from, if one is resident."""
+        assert self._mamba_align_size is not None
+        req_status = self._req_status[request.request_id]
+        boundary = req_status.num_locally_computed_tokens
+        if boundary == 0 or boundary % self._mamba_align_size:
+            return
+        self._retain_deepest_state(
+            req_status,
+            [
+                self._make_boundary_key(
+                    request, group_idx, boundary, req_status.req_context
+                )
+                for group_idx in self._retained_state_groups
+            ],
+        )
+
+    def _release_retained_state(self, req_status: RequestOffloadState) -> None:
+        assert self._mamba_align_size is not None
+        if req_status.retained_keys:
+            self.manager.release(req_status.retained_keys, req_status.req_context)
+            complete = len(req_status.retained_keys) == len(self._retained_state_groups)
+            retained = "full" if complete else "partial"
+            req_status.retained_keys = ()
+        elif (
+            self._calc_num_offloadable_tokens(
+                req_status, req_status.req.num_prompt_tokens
+            )
+            >= self._mamba_align_size
+        ):
+            retained = "none"
+        else:
+            return
+        self._connector_stats.increase_counter(
+            _ConnectorMetricName.RETENTION_FINISHED_REQUESTS, labelvalues=(retained,)
+        )
+
     def _lookup(
         self,
         req_status: RequestOffloadState,
@@ -1456,6 +1548,8 @@ class OffloadingConnectorScheduler:
             )
 
         if num_external_tokens == 0:
+            if self._retained_state_groups:
+                self._retain_local_hit_state(request)
             return
 
         # prepare_load() below pins keys that get_num_new_matched_tokens()
@@ -1568,6 +1662,8 @@ class OffloadingConnectorScheduler:
                 group_state.next_stored_chunk_idx = num_chunks
 
         src_spec = self.manager.prepare_load(keys_to_load, req_status.req_context)
+        if self._retained_state_groups:
+            self._retain_deepest_state(req_status, keys_to_load)
         dst_spec = GPULoadStoreSpec(
             dst_block_ids, group_sizes=group_sizes, block_indices=block_indices
         )
@@ -1957,6 +2053,19 @@ class OffloadingConnectorScheduler:
                 if req.shared_prefix_boundary:
                     reachable_boundaries += (req.shared_prefix_boundary,)
 
+            # On finish, offer the full-attention chunks below the store cursor
+            # again: those evicted while the request ran are stored again from
+            # its GPU blocks, and the resident ones count as reused. Not for
+            # aborted requests, whose blocks may be unloaded or uncomputed, nor
+            # under a pending load, which forbids stores.
+            reoffer_prompt = (
+                self.config.retain_running_prefixes
+                and req.is_finished()
+                and req.status is not RequestStatus.FINISHED_ABORTED
+                and all(self._jobs[jid].is_store for jid in req_status.transfer_jobs)
+            )
+            reoffered_keys: set[OffloadKey] = set()
+
             for group_config, group_state in zip(
                 self.config.kv_group_configs, req_status.group_states
             ):
@@ -1965,6 +2074,14 @@ class OffloadingConnectorScheduler:
                 )
 
                 start_chunk_idx = group_state.next_stored_chunk_idx
+                if (
+                    reoffer_prompt
+                    and group_config.sliding_window_size_in_chunks is None
+                ):
+                    reoffered_keys.update(
+                        group_state.offload_keys[: min(start_chunk_idx, num_chunks)]
+                    )
+                    start_chunk_idx = 0
                 prompt_horizon_chunks = (
                     prompt_offloadable_tokens // group_config.tokens_per_chunk
                 )
@@ -2095,6 +2212,14 @@ class OffloadingConnectorScheduler:
                 )
                 logger.warning("Request %s: cannot store chunks", req_id)
                 continue
+            if reoffered_keys:
+                num_restored = len(
+                    reoffered_keys.intersection(store_output.keys_to_store)
+                )
+                if num_restored:
+                    self._connector_stats.increase_counter(
+                        _ConnectorMetricName.RETENTION_RESTORED_CHUNKS, num_restored
+                    )
 
             if not store_output.keys_to_store:
                 req_status.advance_stored_idx(num_offloadable_tokens)
@@ -2280,6 +2405,8 @@ class OffloadingConnectorScheduler:
             req_status = self._req_status.get(req_id)
             if req_status is None:
                 continue
+            if self._retained_state_groups:
+                self._release_retained_state(req_status)
             req_status.finished_signaled = True
             self.manager.on_request_finished(req_status.req_context)
             if not req_status.transfer_jobs:
@@ -2404,6 +2531,8 @@ class OffloadingConnectorScheduler:
                     req_status.req_context,
                     success=not job_status.failed,
                 )
+                if self._retained_state_groups and not req_status.finished_signaled:
+                    self._retain_deepest_state(req_status, job_status.keys)
             else:
                 if job_status.failed:
                     logger.warning(
@@ -2563,11 +2692,14 @@ class OffloadingConnectorScheduler:
         self.manager.reset_cache()
 
         # Reset store progress so active requests re-offload from chunk 0.
+        # The reset dropped their retained states along with every chunk.
         for status in self._req_status.values():
             for group_state in status.group_states:
                 group_state.next_stored_chunk_idx = 0
             status.transfer_jobs.clear()
             status.partial_tail_boundary = None
+            status.retained_keys = ()
+            status.retained_boundary = 0
 
         # Discard jobs and save job_counter to be able to discard worker responses
         self._stale_job_threshold = self._job_counter
