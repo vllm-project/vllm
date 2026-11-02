@@ -208,7 +208,6 @@ steps:
   - "!vllm/distributed/kv_transfer/"
   - tests/models/multimodal/generation_ppl_test/
   commands:
-    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     - pytest -v -s models/multimodal/generation_ppl_test/
   mirror:
     amd:
