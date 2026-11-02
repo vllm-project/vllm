@@ -485,6 +485,23 @@ steps:
       models/test_beam_numerics.py
       models/test_cohere2_moe_parallel_block.py
 
+- label: ':amd: (MI355) GLM-5.3-Flash Mono Decode Kernel'
+  key: glm53-flash-mono-decode-kernel-amd
+  dind: false
+  device: mi355_4
+  num_devices: 4
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/
+  depends_on:
+  - image-build-amd
+  source_file_dependencies:
+  - docker/Dockerfile.rocm_base
+  - vllm/models/glm5next/amd/
+  - vllm/models/glm5next/common/model.py
+  - tests/kernels/models/amd/glm5next_mono/
+  commands:
+  - pytest -v -s tests/kernels/models/amd/glm5next_mono/
+
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
   dind: false
