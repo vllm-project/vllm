@@ -1344,10 +1344,10 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
 
 
 class _TestReplaySSMMixer(MambaMixer2):
-    def __init__(self):
+    def __init__(self, backend: MambaBackendEnum = MambaBackendEnum.FLASHINFER):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
-        self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
+        self.mamba_config = MambaConfig(backend=backend)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_query_len = torch.empty(0, dtype=torch.int32)
@@ -1365,9 +1365,12 @@ def _packed_replayssm_cache(num_blocks: int) -> torch.Tensor:
     return torch.full((num_blocks, 1, 1, 80), 0, dtype=torch.int8)
 
 
+@pytest.mark.parametrize(
+    "backend", [MambaBackendEnum.FLASHINFER, MambaBackendEnum.TRITON]
+)
 @pytest.mark.parametrize("layers_only", [False, True])
-def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
-    mixers = [_TestReplaySSMMixer() for _ in range(3)]
+def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only, backend):
+    mixers = [_TestReplaySSMMixer(backend) for _ in range(3)]
     layer_names = [f"layers.{i}.mixer" for i in range(3)]
     ctx = dict(zip(layer_names, mixers))
     # Reverse insertion order: updater must follow layer index, not dict order.
