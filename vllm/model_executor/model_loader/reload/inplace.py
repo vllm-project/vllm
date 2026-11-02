@@ -9,7 +9,8 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.model_loader import get_model_loader, get_model_loader_cls
+from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 
 from .lifecycle import finish_reload, start_reload
 
@@ -35,6 +36,7 @@ def reload_weights(
     weights_iterator: Iterable[tuple[str, torch.Tensor]] | None,
     weights_path: str | None,
     is_checkpoint_format: bool,
+    model_loader: BaseModelLoader | None = None,
 ) -> None:
     """Reload a model's weights in place from a weights iterator or from disk.
 
@@ -50,6 +52,10 @@ def reload_weights(
             provided. Use path of original model if neither is provided.
         is_checkpoint_format: set to False if weights have already been
             processed into kernel format (repacking, renaming, etc.)
+        model_loader: loader that received the sleep/wake hooks, reused so any
+            state it keeps across them sees the reload too. Ignored if
+            `vllm_config.load_config` now selects a different loader class.
+            Defaults to a new loader for `vllm_config.load_config`.
 
     """
     # TODO(@kylesayrs): generalize to all runners and loaders
@@ -70,12 +76,10 @@ def reload_weights(
     counter_before_reloading = time.perf_counter()
 
     # load weights from disk if none are provided
+    reloaded_by_loader = False
     if weights_iterator is None:
-        model_loader = get_model_loader(load_config)
-        if not hasattr(model_loader, "get_all_weights"):
-            raise NotImplementedError(
-                f"Model reloading with `{load_config.load_format}` format"
-            )
+        if not isinstance(model_loader, get_model_loader_cls(load_config)):
+            model_loader = get_model_loader(load_config)
 
         if weights_path is not None:
             # The revision and any object-storage `model_weights` source
@@ -84,12 +88,26 @@ def reload_weights(
             model_config.model = weights_path
             model_config.model_weights = ""
             model_config.revision = None
-        weights_iterator = model_loader.get_all_weights(model_config, model)
-        weights_iterator = cast(Iterable[tuple[str, torch.Tensor]], weights_iterator)
+
+        reloaded_by_loader = model_loader.reload_weights_inplace(
+            vllm_config, model_config, model
+        )
+        if not reloaded_by_loader:
+            if not hasattr(model_loader, "get_all_weights"):
+                raise NotImplementedError(
+                    f"Model reloading with `{load_config.load_format}` format"
+                )
+            weights_iterator = model_loader.get_all_weights(model_config, model)
+            weights_iterator = cast(
+                Iterable[tuple[str, torch.Tensor]], weights_iterator
+            )
 
     # begin loading weights
     logger.info_once("Reloading weights inplace...")
-    if is_checkpoint_format:
+    if reloaded_by_loader:
+        # The loader validates its own weights.
+        loaded_weights = None
+    elif is_checkpoint_format:
         # load weights from checkpoint/ original model format
         device = torch.device(load_config.device or vllm_config.device_config.device)
         start_reload(model)
@@ -102,6 +120,7 @@ def reload_weights(
             "Reloading with `is_checkpoint_format=True` requires that "
             "weights be in kernel format and already sharded",
         )
+        assert weights_iterator is not None
         loaded_weights = set()
         for name, loaded_weight in weights_iterator:
             param = get_parameter_for_reload(model, name)  # TODO: buffers?
