@@ -497,6 +497,8 @@ class TestConnectHandshake:
 
         assert not conn.alive
         assert not any(m[TYPE_KEY] == ConnectAckMsg.TYPE for m in conn._sent)
+        assert conn._sent[-1][TYPE_KEY] == DisconnectMsg.TYPE
+        assert session.data_plane_fault == "peer registration failed: nixl exploded"
 
     def test_failed_ack_send_marks_connection_dead(self):
         """A ConnectAckMsg send that raises marks the connection dead."""
