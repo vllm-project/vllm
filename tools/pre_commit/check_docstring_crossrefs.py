@@ -9,6 +9,7 @@ code spans therefore produce broken cross-references:
     [block][2][16]        # BUG: looks up targets "2" and "16"
     `[block][2][16]`      # OK: code span
     [LLM][vllm.LLM]       # OK: intended cross-reference
+    [int][]               # OK: stdlib cross-reference
 """
 
 import ast
@@ -22,6 +23,8 @@ CODE_SPAN = re.compile(r"(`+).+?\1", re.DOTALL)
 REF_LINK = re.compile(r"\[([^\[\]\n]+)\]\[([^\[\]\n]*)\]")
 # Fully qualified Python paths, e.g. `vllm.LLM` or `torch.Tensor`
 TARGET = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)+")
+# Collapsed `[label][]` may also name a builtin, e.g. `[int][]`
+COLLAPSED_TARGET = re.compile(r"[A-Za-z_]\w*(\.[A-Za-z_]\w*)*")
 
 
 def strip_indented_code(doc: str) -> str:
@@ -62,8 +65,11 @@ def check_file(filepath: str) -> list[str]:
         text = CODE_SPAN.sub("", FENCE.sub("", strip_indented_code(doc)))
         for match in REF_LINK.finditer(text):
             label, target = match.groups()
-            if not TARGET.fullmatch(target or label):
-                violations.append(f"{filepath}:{lineno}: {match.group()}")
+            if target and TARGET.fullmatch(target):
+                continue
+            if not target and COLLAPSED_TARGET.fullmatch(label):
+                continue
+            violations.append(f"{filepath}:{lineno}: {match.group()}")
     return violations
 
 
@@ -77,7 +83,7 @@ def main() -> int:
         print("\n".join(f"   {v}" for v in violations))
         print(
             "   Wrap shapes and indexing in backticks (`[block][2][16]`), or "
-            "use a fully qualified target ([LLM][vllm.LLM])."
+            "use a fully qualified target ([LLM][vllm.LLM], [int][])."
         )
         return 1
     return 0
