@@ -1080,6 +1080,15 @@ class Scheduler(SchedulerInterface):
                     skip_request(request_queue)
                     continue
 
+                if (
+                    request_queue is self.kv_holding_waiting
+                    and not self._holds_kv_blocks(request)
+                ):
+                    # Its async KV load failed with no valid prefix, so
+                    # _update_waiting_for_remote_kv freed its blocks.
+                    self.waiting.prepend_request(request_queue.pop_request())
+                    continue
+
                 if request.num_stale_output_tokens and not request.drop_stale_output:
                     # Deliverable stale output still in flight: resuming now
                     # could resample a position that output later delivers.
@@ -3483,6 +3492,7 @@ class Scheduler(SchedulerInterface):
                 # (Freed blocks are re-recorded for zeroing when
                 # reallocated, so the skipped blocks need no handling.)
                 self.kv_cache_manager.free(request)
+                self._inflight_prefills.discard(request)
 
             self.failed_recving_kv_req_ids.remove(request.request_id)
         else:
