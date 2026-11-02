@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
 
 # (local expert id, shard id); the fused shared expert has expert id None.
 Shard = tuple[int | None, str]
+_SHARED_PROJ_SHARDS = {"gate_proj": "w1", "up_proj": "w3", "down_proj": "w2"}
 
 
 def requant_block_fp8_to_ue8m0(
@@ -38,17 +39,17 @@ def requant_block_fp8_to_ue8m0(
         bytes, ``(n, mn, k / 32)`` uint8.
 
     """
-    assert weight.dtype == torch.float8_e4m3fn, weight.dtype
-    assert scale.dtype == torch.float32, scale.dtype
     n, mn, k = weight.shape
     _, blocks_m, blocks_k = scale.shape
-    assert scale.shape[0] == n and mn % blocks_m == 0 and k % blocks_k == 0, (
-        tuple(weight.shape),
-        tuple(scale.shape),
-    )
     real = weight.to(torch.float32).view(n, blocks_m, -1, blocks_k, k // blocks_k)
     real.mul_(scale[:, :, None, :, None])
     return _mxfp8_e4m3_quantize_torch(real.view(n, mn, k))
+
+
+def _shared_shard_id(name: str) -> str:
+    """Shard id of shared-expert checkpoint tensor ``name``."""
+    proj = name.rpartition(".shared_experts.")[2].partition(".")[0]
+    return _SHARED_PROJ_SHARDS[proj]
 
 
 class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
@@ -60,7 +61,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
     stages its block scale in ``*_weight_scale_inv``. Once a load is complete,
     the model's ``process_weights_after_loading`` calls
     :meth:`requantize_block_fp8`, which rounds every newly loaded shard to the
-    kernel scales in place. A block-FP8 shared expert is fused the same way.
+    kernel scales in place. The shared expert is fused the same way.
     """
 
     def __init__(
@@ -68,31 +69,21 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         vllm_config: VllmConfig,
         *,
         weight_block_size: tuple[int, int],
+        num_shared_experts: int = 0,
         **kwargs,
     ):
-        block_m, block_k = weight_block_size
-        self.weight_block_size = (block_m, block_k)
+        self.weight_block_size = weight_block_size
+        self._num_fused_shared_experts = num_shared_experts
         # Shards whose weight / block scale arrived since the last requantize.
         self._new_weights: set[Shard] = set()
         self._new_scales: set[Shard] = set()
         super().__init__(vllm_config, weight_format=MEGA_MOE_MXFP8, **kwargs)
-        h, i = self.hidden_size, self.intermediate_size
-        if h % block_m or h % block_k or i % block_m or i % block_k:
-            raise ValueError(
-                "GLM-5.3 MegaMoE requires hidden and intermediate sizes that are "
-                f"multiples of the FP8 block size {self.weight_block_size}."
-            )
 
-    def _shared_linear_fits(self, linear: nn.Module, spec: MegaMoEWeightSpec) -> bool:
-        """A block-FP8 linear loads into the routed MXFP8 layout by requantizing."""
-        weight = linear.weight
-        scale = getattr(linear, "weight_scale_inv", None)
-        if spec != self.weight_format.routed or weight.dtype != torch.float8_e4m3fn:
-            return False
-        if weight.dim() != 2 or scale is None or scale.dtype != torch.float32:
-            return False
-        (rows, cols), (block_m, block_k) = weight.shape, self.weight_block_size
-        return tuple(scale.shape) == (rows // block_m, cols // block_k)
+    def _fusable_shared_experts(
+        self, shared_experts: nn.Module | None
+    ) -> tuple[int, MegaMoEWeightSpec | None]:
+        n = self._num_fused_shared_experts
+        return n, self.weight_format.routed if n else None
 
     def _create_weights(self) -> None:
         super()._create_weights()
@@ -115,6 +106,14 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         )
         getattr(self, f"{name}_weight_scale").weight_loader_numel = 0
 
+    @staticmethod
+    def _shard_rows(t: torch.Tensor, shard_id: str) -> torch.Tensor:
+        """Rows of ``t`` (gate rows, then up rows, for w13) that hold ``shard_id``."""
+        if shard_id == "w2":
+            return t
+        half = t.shape[0] // 2
+        return t[:half] if shard_id == "w1" else t[half:]
+
     def weight_loader(
         self,
         param: nn.Parameter,
@@ -129,8 +128,8 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
             param_prefix = "w2_" if shard_id == "w2" else "w13_"
             loaded = bool(local_expert_ids) and param_prefix in weight_name
             for local_expert_id in local_expert_ids if loaded else ():
-                self._stage_block_scale(
-                    param.data[local_expert_id], loaded_weight, shard_id
+                self._shard_rows(param.data[local_expert_id], shard_id).copy_(
+                    loaded_weight
                 )
             new = self._new_scales
         else:
@@ -151,41 +150,24 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
             )
         return loaded if return_success else None
 
-    def _shared_param_name(self, name: str) -> str:
-        param_name = super()._shared_param_name(name)
-        # Block scales go to the staging parameter, not the kernel scale.
-        return param_name + "_inv" if param_name.endswith("_scale") else param_name
+    def load_shared_expert_weight(self, name: str, loaded_weight: torch.Tensor) -> str:
+        """Load one shared-expert checkpoint tensor; return the parameter name."""
+        layer = "shared_l2" if _shared_shard_id(name) == "w2" else "shared_l1"
+        suffix = "weight_scale_inv" if "weight_scale" in name else "weight"
+        param = getattr(self, f"{layer}_{suffix}")
+        param.weight_loader(param, loaded_weight, name)
+        return f"{name.partition('shared_experts.')[0]}experts.{layer}_{suffix}"
 
     def shared_weight_loader(
         self, param: nn.Parameter, loaded_weight: torch.Tensor, weight_name: str
     ) -> None:
-        shard_id = self._shared_shard_id(weight_name)
+        shard_id = _shared_shard_id(weight_name)
         if "weight_scale" in weight_name:
-            self._stage_block_scale(param.data, loaded_weight, shard_id)
+            self._shard_rows(param.data, shard_id).copy_(loaded_weight)
             self._new_scales.add((None, shard_id))
         else:
-            super().shared_weight_loader(param, loaded_weight, weight_name)
+            self._load_weight(param.data, loaded_weight, shard_id, False)
             self._new_weights.add((None, shard_id))
-
-    @staticmethod
-    def _shard_rows(t: torch.Tensor, shard_id: str) -> torch.Tensor:
-        """Rows of ``t`` (gate rows, then up rows, for w13) that hold ``shard_id``."""
-        if shard_id == "w2":
-            return t
-        half = t.shape[0] // 2
-        return t[:half] if shard_id == "w1" else t[half:]
-
-    def _stage_block_scale(
-        self, dst: torch.Tensor, src: torch.Tensor, shard_id: str
-    ) -> None:
-        dst = self._shard_rows(dst, shard_id)
-        if tuple(src.shape) != tuple(dst.shape):
-            raise ValueError(
-                f"{self.prefix}: {shard_id} block scale shape {tuple(src.shape)} "
-                f"does not match {tuple(dst.shape)} for FP8 blocks "
-                f"{self.weight_block_size}"
-            )
-        dst.copy_(src)
 
     @torch.no_grad()
     def requantize_block_fp8(self, chunk: int = 8) -> None:
@@ -241,9 +223,12 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         self, tensors: list[tuple[torch.Tensor, ...]], shard_id: str
     ) -> None:
         """Requantize ``shard_id`` of each kernel-layout weight in place."""
+        # A shard's layout destination is its checkpoint rows; the source is unused.
         raw = torch.stack(
             [
-                self._weight_shard_view(w, shard_id).reshape(-1, w.shape[-1])
+                self._kernel_layout_shard(w, w, shard_id, False)[0].reshape(
+                    -1, w.shape[-1]
+                )
                 for w, _, _ in tensors
             ]
         )

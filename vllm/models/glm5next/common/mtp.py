@@ -39,11 +39,10 @@ from .model import (
     Glm5NextMLAAttention,
     Glm5NextMoE,
     _fused_shared_expert_name,
-    _mega_moe_fused_shared_experts,
     _num_fused_shared_experts,
-    _routed_experts_prefix,
     _try_load_fp8_attn_proj,
     _try_load_fp8_indexer_wk,
+    _use_mega_moe,
     get_sparse_topk_buffer_width,
     get_spec_layer_idx_from_weight_name,
 )
@@ -213,6 +212,7 @@ class Glm5NextMultiTokenPredictor(nn.Module):
 class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
+        self.use_mega_moe = _use_mega_moe(vllm_config)
         self.config = vllm_config.model_config.hf_text_config
         self.quant_config = vllm_config.quant_config
         self.model = Glm5NextMultiTokenPredictor(
@@ -318,7 +318,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts + num_fused_shared,
             num_redundant_experts=self.num_redundant_experts,
-            routed_experts_prefix=_routed_experts_prefix(self.moe_mlp_layers),
+            routed_experts_prefix="" if self.use_mega_moe else "routed_experts",
         )
 
         params_dict = dict(self.named_parameters())
@@ -342,10 +342,10 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
             if spec_layer is None:
                 continue
             name = self._rewrite_spec_layer_name(spec_layer, name)
-            mega_experts = _mega_moe_fused_shared_experts(self, name)
-            if mega_experts is not None:
+            if self.use_mega_moe and ".shared_experts." in name:
+                mlp = self.get_submodule(name.partition(".shared_experts.")[0])
                 loaded_params.add(
-                    mega_experts.load_shared_expert_weight(name, loaded_weight)
+                    mlp.experts.load_shared_expert_weight(name, loaded_weight)
                 )
                 continue
             # Only parse the layer index when FSE is enabled.

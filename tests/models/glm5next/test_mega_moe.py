@@ -8,10 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
-    DeepGemmMegaMoEExperts,
-    MegaMoEActivation,
-)
+from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import MegaMoEActivation
 from vllm.model_executor.model_loader.reload import (
     finish_reload,
     record_metadata_for_reloading,
@@ -38,9 +35,6 @@ def sm100_mega_moe_layout(monkeypatch):
         "vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe."
         "check_deep_gemm_mega_moe_supported",
         lambda *args: None,
-    )
-    monkeypatch.setattr(
-        DeepGemmMegaMoEExperts, "_kernel_fuses_shared_experts", lambda self, spec: True
     )
 
 
@@ -74,19 +68,6 @@ def test_requant_is_exact_for_power_of_two_block_scales():
     assert torch.equal(_dequant_ue8m0(requant, sf), _dequant_block(weight, scale))
 
 
-def _shared_mlp():
-    def linear(n, k):
-        return SimpleNamespace(
-            weight=torch.empty(n, k, dtype=FP8),
-            weight_scale_inv=torch.empty(n // BLOCK[0], k // BLOCK[1]),
-        )
-
-    return SimpleNamespace(
-        gate_up_proj=linear(2 * INTER, HIDDEN),
-        down_proj=linear(HIDDEN, INTER),
-    )
-
-
 def _experts() -> Glm5NextMegaMoEExperts:
     vllm_config = SimpleNamespace(
         scheduler_config=SimpleNamespace(max_num_batched_tokens=64),
@@ -102,7 +83,7 @@ def _experts() -> Glm5NextMegaMoEExperts:
         intermediate_size=INTER,
         weight_block_size=BLOCK,
         activation=MegaMoEActivation("swiglu", clamp=10.0),
-        shared_experts=_shared_mlp(),
+        num_shared_experts=1,
         prefix="model.layers.3.mlp.experts",
     )
 
@@ -174,12 +155,11 @@ def _reference_mega_moe_layout(w13, s13, w2, s2):
 
 
 def _expected_routed(ckpt):
-    local = LOCAL_EXPERTS
     w13, s13 = requant_block_fp8_to_ue8m0(
-        ckpt["w13_weight"][local], ckpt["w13_weight_scale_inv"][local]
+        ckpt["w13_weight"][LOCAL_EXPERTS], ckpt["w13_weight_scale_inv"][LOCAL_EXPERTS]
     )
     w2, s2 = requant_block_fp8_to_ue8m0(
-        ckpt["w2_weight"][local], ckpt["w2_weight_scale_inv"][local]
+        ckpt["w2_weight"][LOCAL_EXPERTS], ckpt["w2_weight_scale_inv"][LOCAL_EXPERTS]
     )
     return _reference_mega_moe_layout(w13, s13, w2, s2)
 
