@@ -39,6 +39,7 @@ If other strategies don't solve the problem, it's likely that the vLLM instance 
 - `export CUDA_LAUNCH_BLOCKING=1` to identify which CUDA kernel is causing the problem.
 - `export NCCL_DEBUG=TRACE` to turn on more logging for NCCL.
 - `export VLLM_TRACE_FUNCTION=1` to record all function calls for inspection in the log files to tell which function crashes or hangs. (WARNING: This flag will slow down the token generation by **over 100x**. Do not use unless absolutely needed.)
+- `export VLLM_LOG_MODEL_INSPECTION=1` to log a transformers-style view of the loaded model, including the quantization method and the kernel/backend resolved for each layer.
 
 ## Breakpoints
 
