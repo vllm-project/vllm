@@ -8,6 +8,7 @@ happen during model execution.
 import json
 import sys
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -378,6 +379,17 @@ def _flashinfer_deferred_moe_token_counts(
     return tuple(dict.fromkeys(token_counts))
 
 
+def _flashinfer_moe_uses_all2all(runner: "GPUModelRunner") -> bool:
+    """Return whether any MoE layer dispatches tokens across ranks."""
+    from vllm.model_executor.layers.fused_moe import MoERunner
+
+    return any(
+        isinstance(module, MoERunner)
+        and module.moe_config.moe_parallel_config.use_all2all_kernels
+        for module in runner.get_model().modules()
+    )
+
+
 def _flashinfer_autotune_token_counts(runner: "GPUModelRunner") -> tuple[int, ...]:
     max_tokens = runner.scheduler_config.max_num_batched_tokens
     # Tune the widest bucket set first so bounded passes reuse its configs.
@@ -392,6 +404,7 @@ def _run_flashinfer_autotune_dummy_runs(
     import vllm.utils.flashinfer as fi_utils
     from vllm.models.deepseek_v41.attention import autotune_indexer_wq_b
 
+    max_tokens = runner.scheduler_config.max_num_batched_tokens
     dummy_run_kwargs = {"skip_attn": True} if skip_attn else {}
     for num_tokens in _flashinfer_autotune_token_counts(runner):
         # The drafter may use more tokens than this pass in the same dummy run.
@@ -409,17 +422,39 @@ def _run_flashinfer_autotune_dummy_runs(
                 max_tuning_tokens, num_draft_reqs * num_query_per_req
             )
 
-        tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
-            max_tuning_tokens
-        )
+        # The tuner stores a profile under the override's bucket, but serving
+        # looks it up with the op's own mapper, which rounds M off the hybrid
+        # grid up (e.g. 21504 -> 32768). With an off-grid max M, an override
+        # would leave serving's top bucket untuned, so tune the full-size pass
+        # with each op's own buckets. Bounded or drafter-widened passes keep
+        # the override; on the grid it maps like the ops do. With all2all
+        # dispatch the ops build their buckets from each rank's own token
+        # count, but FlashInfer all-reduces every tactic's timing across the
+        # tune group, so every rank must profile the same buckets: keep the
+        # override there.
+        tuning_buckets = None
+        if (
+            num_tokens < max_tokens
+            or max_tuning_tokens > num_tokens
+            or fi_utils.flashinfer_map_to_hybrid_bucket_uncapped(num_tokens)
+            == num_tokens
+            or _flashinfer_moe_uses_all2all(runner)
+        ):
+            tuning_buckets = fi_utils.flashinfer_get_hybrid_num_tokens_buckets(
+                max_tuning_tokens
+            )
         logger.info(
             "Running FlashInfer autotune with %d tokens and token buckets %s.",
             num_tokens,
-            tuning_buckets,
+            "chosen by each op" if tuning_buckets is None else tuning_buckets,
         )
-        # Round M up to match serving-time bucket selection for non-bucket M.
-        # See https://github.com/flashinfer-ai/flashinfer/issues/5450
-        with fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True):
+        # With an override, round M up to match serving-time bucket selection
+        # for non-bucket M. See https://github.com/flashinfer-ai/flashinfer/issues/5450
+        with (
+            nullcontext()
+            if tuning_buckets is None
+            else fi_utils.autotune(tuning_buckets=tuning_buckets, round_up=True)
+        ):
             runner._dummy_run(
                 num_tokens=num_tokens,
                 skip_eplb=True,
