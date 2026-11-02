@@ -106,17 +106,6 @@ class KVQuantMode(IntEnum):
         """True for the UltraQuant 4-bit KV-cache format."""
         return self == KVQuantMode.ULTRAQUANT_4BIT
 
-    @property
-    def is_custom_mode(self) -> bool:
-        """True when a platform backend fully self-manages kernel dispatch.
-
-        The attention selector should defer to the backend's own kernel
-        selection rather than a generic per-token-head / fp8 / turboquant
-        path. Distinct from NONE (which means non-quantized): CUSTOM is
-        quantized, just with no generic kernel mode.
-        """
-        return self == KVQuantMode.CUSTOM
-
 
 def get_kv_quant_mode(kv_cache_dtype: str) -> KVQuantMode:
     """Map a ``kv_cache_dtype`` string to a :class:`KVQuantMode`."""
