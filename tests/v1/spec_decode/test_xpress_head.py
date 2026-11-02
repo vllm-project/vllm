@@ -55,16 +55,19 @@ def test_fused_buffers_refilled_in_place():
     head = _head()
     head.fold_from_raw_(torch.randn(R, B, B, dtype=torch.float64) * 0.3)
     head.process_weights_after_loading()
-    ptrs = {k: v.data_ptr() for k, v in head._fused_buf.items()}
+    buf = head._fused_buf
+    assert buf is not None
+    ptrs = {k: v.data_ptr() for k, v in buf.items()}
 
     with torch.no_grad():
         head.mlp_down.weight.mul_(-2)
     head.fold_from_raw_(torch.randn(R, B, B, dtype=torch.float64) * 0.3)
     head.process_weights_after_loading()
 
-    assert {k: v.data_ptr() for k, v in head._fused_buf.items()} == ptrs
-    torch.testing.assert_close(head._fused_buf["wd_t"], head.mlp_down.weight.t())
-    torch.testing.assert_close(head._fused_buf["mix_kjc"], head.mix_L.permute(1, 2, 0))
+    assert head._fused_buf is buf
+    assert {k: v.data_ptr() for k, v in buf.items()} == ptrs
+    torch.testing.assert_close(buf["wd_t"], head.mlp_down.weight.t())
+    torch.testing.assert_close(buf["mix_kjc"], head.mix_L.permute(1, 2, 0))
 
 
 # Greedy refine has no sampling, so repeated calls must agree exactly. The fused
