@@ -18,6 +18,8 @@ Tests cover the new behaviors added by the bi-directional KV transfer PR:
    - Cache MISS first turn falls back to local prefill
    - Partial remote coverage: P pulls partial, computes the rest
    - _remote_blocks_processed flag persists across reschedules
+   - A request that is looked up again after its pull (failed pull, or
+     preemption with the pulled blocks evicted) prefills locally
 
 P-node flags: do_remote_prefill=False (prefill locally),
 do_remote_decode=True (don't decode locally, send KV to D).
@@ -931,6 +933,113 @@ def test_remote_blocks_processed_flag_persists():
     mro.kv_connector_output = KVConnectorOutput(finished_sending={req_id})
     scheduler.update_from_output(so, mro)
     assert_scheduler_empty(scheduler)
+
+
+def _assert_prefills_locally(scheduler, req):
+    """After its one pull attempt, the request must be scheduled locally,
+    not wait for a read that is never issued."""
+    so = scheduler.schedule()
+    meta = so.kv_connector_metadata
+    assert isinstance(meta, NixlConnectorMetadata)
+    assert req.request_id not in meta.reqs_to_recv
+    assert req.request_id in so.num_scheduled_tokens, (
+        f"{req.request_id} is {req.status.name} with no tokens scheduled "
+        "and no read issued"
+    )
+    return so
+
+
+def _finish_and_check_no_leak(scheduler, req, so):
+    for _ in range(4):
+        mro = create_model_runner_output(reqs=[req])
+        if req.num_computed_tokens < req.num_tokens:
+            # Prefill chunk: nothing is sampled yet.
+            mro.sampled_token_ids = [[]]
+        scheduler.update_from_output(so, mro)
+        if req.is_finished():
+            break
+        so = scheduler.schedule()
+    assert req.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    so = scheduler.schedule()
+    scheduler.update_from_output(so, EMPTY_MODEL_RUNNER_OUTPUT)
+    so = scheduler.schedule()
+    mro = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    mro.kv_connector_output = KVConnectorOutput(finished_sending={req.request_id})
+    scheduler.update_from_output(so, mro)
+    assert_scheduler_empty(scheduler)
+
+
+def test_p_node_failed_pull_recomputes_locally():
+    """Edge case 8: with kv_load_failure_policy=recompute, a failed D->P read
+    sends the request back through the connector lookup. The lookup must not
+    offer the remote load again: update_state_after_alloc does not register
+    a second read, so the request would wait in WAITING_FOR_REMOTE_KVS
+    forever, holding its blocks."""
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
+        kv_load_failure_policy="recompute",
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+    BS = vllm_config.cache_config.block_size
+    req = _make_p_node_turn2_request(507, BS, int(BS * 2.5))
+    scheduler.add_request(req)
+    req_id = req.request_id
+
+    so = scheduler.schedule()
+    assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert req_id in so.kv_connector_metadata.reqs_to_recv
+
+    # The read fails, e.g. P declines D's blocks close to their expiry.
+    # The NIXL worker reports it as both finished and failed.
+    blocks = scheduler.kv_cache_manager.get_block_ids(req_id)[0]
+    mro = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    mro.kv_connector_output = KVConnectorOutput(
+        finished_recving={req_id},
+        failed_recving={req_id},
+        invalid_block_ids=set(blocks),
+    )
+    scheduler.update_from_output(so, mro)
+
+    so = _assert_prefills_locally(scheduler, req)
+    _finish_and_check_no_leak(scheduler, req, so)
+
+
+def test_p_node_preempted_after_pull_recomputes_locally():
+    """Edge case 9: a request preempted after a successful pull, whose pulled
+    blocks are then evicted, goes back through the lookup on re-admission.
+    It must prefill locally, as in edge case 8. This holds with the default
+    kv_load_failure_policy=fail."""
+    vllm_config = create_vllm_config(
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG,
+        kv_role="kv_producer",
+    )
+    scheduler = create_scheduler(vllm_config)
+    BS = vllm_config.cache_config.block_size
+    req = _make_p_node_turn2_request(508, BS, BS * 10)
+    scheduler.add_request(req)
+    req_id = req.request_id
+
+    so = scheduler.schedule()
+    assert req_id in so.kv_connector_metadata.reqs_to_recv
+    mro = copy.deepcopy(EMPTY_MODEL_RUNNER_OUTPUT)
+    mro.kv_connector_output = KVConnectorOutput(finished_recving={req_id})
+    scheduler.update_from_output(so, mro)
+
+    # The pull succeeded. Run one prefill chunk of the remaining tokens.
+    so = scheduler.schedule()
+    assert req.status == RequestStatus.RUNNING
+    mro = create_model_runner_output(reqs=[req])
+    mro.sampled_token_ids = [[]]
+    scheduler.update_from_output(so, mro)
+
+    # Preempt it, and evict the pulled blocks from the prefix cache.
+    scheduler.running.remove(req)
+    scheduler._preempt_request(req, 0.0)
+    assert scheduler.kv_cache_manager.reset_prefix_cache()
+
+    so = _assert_prefills_locally(scheduler, req)
+    _finish_and_check_no_leak(scheduler, req, so)
 
 
 # 6. Turn-2 deadline expiry check (P declines reading expired D blocks)

@@ -68,6 +68,7 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             params is not None
             and params.get("do_remote_decode")
             and params.get("remote_block_ids")
+            and not params.get("_remote_blocks_processed")
             and all(
                 p in params
                 for p in (
