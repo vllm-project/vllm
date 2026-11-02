@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3 1.7B dense model with hybrid thinking/non-thinking modes, validated for BF16 serving on Intel Xeon 6."
   date_added: 2026-08-14
-  date_updated: 2026-09-12
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Validated on Intel Xeon 6 (GNR) with BF16 serving"
@@ -12,6 +12,7 @@ meta:
     - "Qwen/Qwen3-4B"
   hardware:
     xeon6: verified
+    h100: supported
 
 model:
   model_id: "Qwen/Qwen3-1.7B"
@@ -44,6 +45,13 @@ variants:
     vram_minimum_gb: 5
     description: "Full precision BF16"
     supported_hardware: [xeon6]
+  redhat_fp8_dynamic:
+    model_id: "RedHatAI/Qwen3-1.7B-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHatAI)"
+    vram_minimum_gb: 3
+    description: "RedHatAI FP8 with static per-channel weights and dynamic per-token activation quantization"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp

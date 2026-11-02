@@ -4,7 +4,7 @@ meta:
   provider: "Qwen"
   description: "Qwen3 8.2B dense model with hybrid thinking/non-thinking modes, validated for BF16 serving on Intel Xeon 6."
   date_added: 2026-08-14
-  date_updated: 2026-09-12
+  date_updated: 2026-10-30
   tasks:
     - text
   performance_headline: "Validated on Intel Xeon 6 (GNR) with BF16 serving"
@@ -13,10 +13,11 @@ meta:
     - "Qwen/Qwen3-32B"
   hardware:
     xeon6: verified
+    h100: supported
 
 model:
   model_id: "Qwen/Qwen3-8B"
-  min_vllm_version: "0.8.5"
+  min_vllm_version: "0.28.0"
   architecture: dense
   parameter_count: "8.2B"
   active_parameters: "8.2B"
@@ -36,6 +37,34 @@ features:
     args:
       - "--reasoning-parser"
       - "qwen3"
+  spec_decoding:
+    description: "RedHatAI EAGLE3, DFlash, DFlash2, and P-EAGLE draft models"
+    default_mode: eagle3
+    modes:
+      eagle3:
+        label: "EAGLE3 (RedHatAI)"
+        description: "RedHatAI EAGLE3 draft model with 3 speculative tokens."
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Qwen3-8B-speculator.eagle3","num_speculative_tokens":3,"method":"eagle3"}'
+      dflash:
+        label: "DFlash (RedHatAI)"
+        description: "RedHatAI DFlash draft model with 15 speculative tokens."
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Qwen3-8B-speculator.dflash","num_speculative_tokens":15,"method":"dflash"}'
+      dflash2:
+        label: "DFlash2 (RedHatAI)"
+        description: "RedHatAI DFlash2 draft model; vLLM selects DFlash2 from the draft architecture using the dflash method."
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Qwen3-8B-speculator.dflash2","num_speculative_tokens":7,"method":"dflash"}'
+      peagle:
+        label: "P-EAGLE (RedHatAI)"
+        description: "RedHatAI P-EAGLE draft model with 7 speculative tokens."
+        args:
+          - "--speculative-config"
+          - '{"model":"RedHatAI/Qwen3-8B-speculator.peagle","num_speculative_tokens":7,"method":"peagle"}'
   long_context:
     description: "YaRN RoPE scaling to the model card's validated 131,072-token context. Static YaRN holds the scaling factor constant regardless of input length, so leave this off unless you actually serve long prompts — it can cost quality below 32K."
     args:
@@ -45,6 +74,7 @@ features:
       - "131072"
 
 opt_in_features:
+  - spec_decoding
   - long_context
 
 variants:
@@ -52,7 +82,31 @@ variants:
     precision: bf16
     vram_minimum_gb: 20
     description: "Full precision BF16"
-    supported_hardware: [xeon6]
+    supported_hardware: [xeon6, h100]
+  redhat_fp8_dynamic:
+    model_id: "RedHatAI/Qwen3-8B-FP8-dynamic"
+    precision: fp8
+    label: "FP8 Dynamic (RedHatAI)"
+    vram_minimum_gb: 10
+    description: "RedHatAI FP8 with static per-channel weights and dynamic per-token activation quantization"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
+    extra_args:
+      - "--kv-cache-dtype"
+      - "fp8"
+  redhat_nvfp4:
+    model_id: "RedHatAI/Qwen3-8B-NVFP4"
+    precision: nvfp4
+    label: "NVFP4 (RedHatAI)"
+    vram_minimum_gb: 5
+    description: "RedHatAI FP4 weight-and-activation quantization for Blackwell GPUs"
+    supported_hardware: [arch:sm100, arch:sm103]
+  redhat_fp8_block:
+    model_id: "RedHatAI/Qwen3-8B-FP8-block"
+    precision: fp8
+    label: "FP8 Block (RedHatAI)"
+    vram_minimum_gb: 10
+    description: "RedHatAI block-quantized FP8 checkpoint"
+    supported_hardware: [arch:sm90, arch:sm100, arch:sm103]
 
 compatible_strategies:
   - single_node_tp
@@ -135,4 +189,11 @@ guide: |
   ## References
 
   - [Model card](https://huggingface.co/Qwen/Qwen3-8B)
+  - [RedHatAI FP8 Dynamic checkpoint](https://huggingface.co/RedHatAI/Qwen3-8B-FP8-dynamic)
+  - [RedHatAI NVFP4 checkpoint](https://huggingface.co/RedHatAI/Qwen3-8B-NVFP4)
+  - [RedHatAI FP8 Block checkpoint](https://huggingface.co/RedHatAI/Qwen3-8B-FP8-block)
+  - [RedHatAI EAGLE3 speculator](https://huggingface.co/RedHatAI/Qwen3-8B-speculator.eagle3)
+  - [RedHatAI DFlash speculator](https://huggingface.co/RedHatAI/Qwen3-8B-speculator.dflash)
+  - [RedHatAI DFlash2 speculator](https://huggingface.co/RedHatAI/Qwen3-8B-speculator.dflash2)
+  - [RedHatAI P-EAGLE speculator](https://huggingface.co/RedHatAI/Qwen3-8B-speculator.peagle)
   - [vLLM CPU installation](https://docs.vllm.ai/en/latest/getting_started/installation/cpu/)
