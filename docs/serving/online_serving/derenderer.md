@@ -8,6 +8,8 @@ This closes the loop for a token-in / token-out engine in disaggregated serving:
 - **Parser parity**: The derenderer reuses vLLM's tool and reasoning parsers, so a disaggregated deployment produces the same `content`/`reasoning`/ `tool_calls` split as a standard `vllm serve` server
 - **Streaming and one-shot parsing**: Non-streaming calls send a complete `GenerateResponse` with all token IDs present and get one-shot parsing. Both endpoints also accept `stream: true`, taking one `GenerateStreamResponse` delta plus a client carried `stream_state` and returning `{chunk, stream_state}`. The chat endpoint's streaming path supports reasoning and tool call parsing while emitting the same `reasoning`/`content`/`tool_calls` deltas the generate streaming path would for the same token IDs (see [Streaming](#streaming))
 
+For clients that already use `GenerateRequest`, `output_mode: "derender"` on `/inference/v1/generate` parses inline and supports `stream: true` with no per-chunk hop (see [Token In Token Out](token_in_token_out.md)).
+
 Both endpoints are hosted by the GPU less rendering server started with [`vllm launch render`](../../cli/launch/render.md), alongside the `/render`
 endpoints.
 
