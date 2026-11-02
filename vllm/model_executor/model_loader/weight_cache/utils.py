@@ -7,7 +7,7 @@ draft is cached, or how a daemon group is named, do not have to import the
 wire format.
 """
 
-from collections.abc import Iterator
+from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -44,7 +44,7 @@ class ExternalWeightMemory:
         return accounting
 
     @contextmanager
-    def track_load(self) -> Iterator[None]:
+    def track_load(self) -> Generator[None, None, None]:
         token = _external_weight_memory.set(self)
         try:
             yield
