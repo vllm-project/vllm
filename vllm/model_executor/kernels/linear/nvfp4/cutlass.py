@@ -27,8 +27,6 @@ from .base import NvFp4LinearKernel, NvFp4LinearLayerConfig
 class CutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via the vLLM CUTLASS kernel."""
 
-    input_quant_backend_name = "cutlass"
-
     def input_quant_key(self) -> QuantKey:
         return kNvfp4Dynamic
 

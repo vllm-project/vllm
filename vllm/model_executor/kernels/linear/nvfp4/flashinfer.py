@@ -108,8 +108,6 @@ class FlashInferCuteDslNvFp4W4A16LinearKernel(NvFp4LinearKernel):
 class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cutedsl backend."""
 
-    input_quant_backend_name = "flashinfer-cutedsl"
-
     def input_quant_key(self) -> QuantKey | None:
         return kNvfp4Dynamic
 
@@ -165,8 +163,6 @@ class FlashInferCuteDslNvFp4LinearKernel(NvFp4LinearKernel):
 
 class FlashInferCutlassNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's CUTLASS wrapper."""
-
-    input_quant_backend_name = "flashinfer-cutlass"
 
     def input_quant_key(self) -> QuantKey | None:
         """This kernel supports dynamic quantization of the input. By
@@ -300,8 +296,6 @@ class FlashInferTrtllmNvFp4LinearKernel(NvFp4LinearKernel):
 class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's cuDNN wrapper."""
 
-    input_quant_backend_name = "flashinfer-cudnn"
-
     def input_quant_key(self) -> QuantKey:
         return kNvfp4Dynamic
 
@@ -355,8 +349,6 @@ class FlashInferCudnnNvFp4LinearKernel(NvFp4LinearKernel):
 
 class FlashInferB12xNvFp4LinearKernel(NvFp4LinearKernel):
     """NVFP4 GEMM via FlashInfer's b12x CuTe DSL warp-level MMA kernel (SM120+)."""
-
-    input_quant_backend_name = "b12x"
 
     def input_quant_key(self) -> QuantKey:
         return kNvfp4Dynamic

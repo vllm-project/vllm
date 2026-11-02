@@ -3,7 +3,6 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
-from typing import ClassVar
 
 import torch
 
@@ -42,8 +41,6 @@ class NvFp4LinearKernel(ABC):
     match for the current hardware.
     """
 
-    input_quant_backend_name: ClassVar[str]
-
     def __init__(self, config: NvFp4LinearLayerConfig) -> None:
         assert self.can_implement(config)[0]
         assert self.is_supported()[0]
@@ -74,7 +71,6 @@ class NvFp4LinearKernel(ABC):
                 x,
                 layer.input_global_scale_inv,
                 is_sf_swizzled_layout=True,
-                backend=self.input_quant_backend_name,
                 padded_n=padded_n,
             )
             return QuantizedActivation(data, scale, x.dtype, x.shape, kNvfp4Dynamic)

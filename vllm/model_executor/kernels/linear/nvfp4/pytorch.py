@@ -29,8 +29,6 @@ class TorchNvFp4LinearKernel(NvFp4LinearKernel):
     including NVGEMM on supported Blackwell systems.
     """
 
-    input_quant_backend_name = "cutlass"
-
     def input_quant_key(self) -> QuantKey:
         return kNvfp4Dynamic
 
