@@ -449,6 +449,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         if isinstance(attn_out, tuple):
             attn_out, lse = attn_out[0], attn_out[1]
 
+        # Upstream flash_attn on ROCm may return a head-major output.
+        # merge_attn_states needs token-major partials, so normalize it here.
+        if attn_out.stride(0) != attn_out.shape[1] * attn_out.stride(1):
+            attn_out = attn_out.contiguous()
+
         # Remain consistent with old `flash_attn_varlen_func` where there
         # is only one output tensor if `return_softmax_lse` is False.
         if return_softmax_lse:

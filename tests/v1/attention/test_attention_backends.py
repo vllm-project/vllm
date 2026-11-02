@@ -865,6 +865,79 @@ def test_causal_backend_correctness(
 
 
 @pytest.mark.skipif(
+    not current_platform.is_device_capability_family(100),
+    reason="FA4 takes FP8 Q/K/V with descales on Blackwell.",
+)
+def test_flash_attn_fa4_unit_fp8_descale_is_exact(default_vllm_config):
+    """FlashAttentionImpl passes FA4 no descale for a per-tensor scale of 1.0,
+    which FA4 reads as exactly 1.0; calibrated scales keep their descale."""
+    from vllm.v1.attention.backends.fa_utils import (
+        flash_attn_varlen_func,
+        is_fa_version_supported,
+    )
+    from vllm.v1.attention.backends.flash_attn import FlashAttentionImpl
+
+    if not is_fa_version_supported(4):
+        pytest.skip("FA4 is not supported.")
+    set_random_seed(0)
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    fp8 = current_platform.fp8_dtype()
+    seq_lens, q_len = [1328, 523, 2011], 3
+    num_heads, num_kv_heads, head_size = 64, 4, 128
+    impl = FlashAttentionImpl(
+        num_heads=num_heads,
+        head_size=head_size,
+        scale=head_size**-0.5,
+        num_kv_heads=num_kv_heads,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="fp8",
+    )
+    assert impl.vllm_flash_attn_version == 4
+
+    q = torch.randn(len(seq_lens) * q_len, num_heads, head_size, device=device)
+    k_cache, v_cache = (
+        torch.randn(64, 128, num_kv_heads, head_size, device=device).to(fp8)
+        for _ in range(2)
+    )
+    block_table = torch.randperm(64, dtype=torch.int32, device=device)[:48]
+
+    def run(descale: torch.Tensor | None) -> torch.Tensor:
+        return flash_attn_varlen_func(
+            q=q.to(fp8),
+            k=k_cache,
+            v=v_cache,
+            cu_seqlens_q=torch.arange(
+                0, q.shape[0] + 1, q_len, dtype=torch.int32, device=device
+            ),
+            seqused_k=torch.tensor(seq_lens, dtype=torch.int32, device=device),
+            max_seqlen_q=q_len,
+            max_seqlen_k=max(seq_lens),
+            softmax_scale=head_size**-0.5,
+            causal=True,
+            block_table=block_table.view(len(seq_lens), -1),
+            fa_version=4,
+            q_descale=descale,
+            k_descale=descale,
+            v_descale=descale,
+        )
+
+    shape = (len(seq_lens), num_kv_heads)
+    unit = torch.ones(1, device=device)
+    assert impl._descale(unit, 1.0, shape) is None
+    expanded = unit.expand(shape)  # What FA4 got for a unit scale before.
+    output = run(impl._descale(unit, 1.0, shape))
+    torch.testing.assert_close(output, run(expanded), atol=0, rtol=0)
+    # Descales are applied when given, so the comparison above is not vacuous.
+    assert not torch.equal(output, run(2 * expanded))
+    # Calibrated and per-head scales (whose float holds the max) keep theirs.
+    calibrated = impl._descale(0.5 * unit, 0.5, shape)
+    assert calibrated is not None and torch.equal(calibrated, 0.5 * expanded)
+    per_head = torch.tensor([1.0, 0.5, 1.0, 0.25], device=device)
+    assert impl._descale(per_head, 1.0, shape) is not None
+
+
+@pytest.mark.skipif(
     AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
     reason="FlashInfer is not available.",
 )
@@ -1024,6 +1097,117 @@ def test_flashinfer_xqa_single_token_decode_preserves_cudagraph_padding(monkeypa
         "out": torch.Size([4, 1, 16]),
         "block_tables": torch.Size([4, 1]),
     }
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+@pytest.mark.parametrize(
+    "global_dtype, checkpoint_dtype, expected",
+    [
+        ("auto", "fp8_e4m3", "fp8_e4m3"),
+        ("auto", "nvfp4", "nvfp4"),
+        ("fp8_e4m3", "nvfp4", "fp8_e4m3"),
+        ("auto", None, "auto"),
+    ],
+)
+def test_flashinfer_resolves_layerwise_cache_dtype(
+    dist_init, global_dtype, checkpoint_dtype, expected
+):
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.model_executor.layers.quantization.fp8 import Fp8Config
+    from vllm.utils.torch_utils import set_default_torch_dtype
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    class LayerwiseKVConfig(Fp8Config):
+        def get_kv_cache_dtype(self, prefix):
+            return {"layer": checkpoint_dtype}.get(prefix)
+
+    config = create_vllm_config(
+        dtype="bfloat16", block_size=64, max_num_seqs=1, max_num_batched_tokens=128
+    )
+    config.cache_config.cache_dtype = global_dtype
+    config.attention_config.backend = AttentionBackendEnum.FLASHINFER
+    quant_config = Fp8Config() if checkpoint_dtype is None else LayerwiseKVConfig()
+    with set_current_vllm_config(config), set_default_torch_dtype(torch.bfloat16):
+        layer = Attention(
+            num_heads=16,
+            head_size=128,
+            scale=128**-0.5,
+            num_kv_heads=8,
+            cache_config=config.cache_config,
+            quant_config=quant_config,
+            prefix="layer",
+        )
+        spec = layer.get_kv_cache_spec(config)
+        assert spec is not None
+        builder = FlashInferMetadataBuilder(
+            spec, ["layer"], config, torch.device(DEVICE_TYPE)
+        )
+
+    assert layer.kv_cache_dtype == expected
+    assert builder.cache_dtype == expected
+    assert config.cache_config.cache_dtype == global_dtype
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_rejects_unresolved_quantized_layer(dist_init):
+    from vllm.v1.attention.backends.flashinfer import FlashInferMetadataBuilder
+
+    config = create_vllm_config(dtype="bfloat16", block_size=64)
+    spec = FullAttentionSpec(
+        block_size=64,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.uint8,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+    with (
+        set_current_vllm_config(config),
+        pytest.raises(ValueError, match="requires a resolved KV cache dtype"),
+    ):
+        FlashInferMetadataBuilder(spec, [], config, torch.device(DEVICE_TYPE))
+
+
+@pytest.mark.parametrize(
+    "cache_dtypes, expected",
+    [
+        ([], None),
+        ([None], None),
+        (["auto"], "auto"),
+        (["fp8_e4m3"], "fp8_e4m3"),
+        (["fp8", "fp8_e4m3"], "fp8_e4m3"),
+        (["nvfp4", "nvfp4_4over6"], "nvfp4"),
+    ],
+)
+def test_runtime_cache_dtype_resolution(monkeypatch, cache_dtypes, expected):
+    from vllm.v1.attention.backends import utils as backend_utils
+
+    layers = {
+        str(index): SimpleNamespace(kv_cache_dtype=dtype)
+        for index, dtype in enumerate(cache_dtypes)
+    }
+    monkeypatch.setattr(backend_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    assert (
+        backend_utils.get_kv_cache_dtype_from_layers(SimpleNamespace(), list(layers))
+        == expected
+    )
+
+
+def test_runtime_cache_dtype_resolution_rejects_incompatible_layers(monkeypatch):
+    from vllm.v1.attention.backends import utils as backend_utils
+
+    layers = {
+        "layer0": SimpleNamespace(kv_cache_dtype="fp8_e4m3"),
+        "layer1": SimpleNamespace(kv_cache_dtype="fp8_e5m2"),
+    }
+    monkeypatch.setattr(backend_utils, "get_layers_from_vllm_config", lambda *_: layers)
+    with pytest.raises(ValueError, match="must share the same KV cache dtype"):
+        backend_utils.get_kv_cache_dtype_from_layers(SimpleNamespace(), list(layers))
 
 
 @pytest.mark.skipif(
