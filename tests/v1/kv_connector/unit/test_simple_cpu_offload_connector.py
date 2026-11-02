@@ -163,10 +163,15 @@ def test_ring_scratch_group_is_accepted_and_never_offloaded() -> None:
         ("SimpleCPUOffloadConnector", True, None, None),
     ],
 )
+@pytest.mark.parametrize("extensible", [False, True])
 def test_engine_queries_offload_blocks_only_when_enabled(
-    monkeypatch, connector, prefix_caching, worker_blocks, expected_blocks
+    monkeypatch, connector, prefix_caching, worker_blocks, expected_blocks, extensible
 ) -> None:
-    """Only active offload queries workers, which must return a block count."""
+    """Only active offload queries workers, which must return a block count.
+
+    An extensible KV cache creates the connector in `extend_kv_cache`, so the
+    query must follow it.
+    """
     config = create_vllm_config(
         kv_connector=connector or "SimpleCPUOffloadConnector",
         kv_role="kv_both",
@@ -179,6 +184,7 @@ def test_engine_queries_offload_blocks_only_when_enabled(
     if connector is None:
         config.kv_transfer_config = None
     config.cache_config.enable_prefix_caching = prefix_caching
+    config.cache_config.enable_extensible_kv_cache = extensible
     kv_config = KVCacheConfig(num_blocks=16, kv_cache_tensors=[], kv_cache_groups=[])
     executor = MagicMock()
     executor.get_kv_cache_specs.return_value = [{}]
@@ -199,3 +205,9 @@ def test_engine_queries_offload_blocks_only_when_enabled(
         expected_blocks is not None
     )
     assert config.cache_config.simple_cpu_offload_num_blocks == expected_blocks
+    calls = [name for name, _, _ in executor.mock_calls]
+    assert ("extend_kv_cache" in calls) == extensible
+    if extensible and expected_blocks is not None:
+        assert calls.index("extend_kv_cache") < calls.index(
+            "get_simple_cpu_offload_num_blocks"
+        )
