@@ -717,7 +717,7 @@ mod tests {
             WireNdArray::from_i32(vec![2, 3, 2], (0..12).collect()).unwrap(),
             WireNdArray::from_i32(vec![1, 3, 2], (100..106).collect()).unwrap(),
         ];
-        let dtype = chunks[0].dtype.clone();
+        let dtype = chunks[0].dtype;
 
         let merged = take_aux_output_rows(&mut chunks, "req", "indexer_topk")
             .unwrap()
