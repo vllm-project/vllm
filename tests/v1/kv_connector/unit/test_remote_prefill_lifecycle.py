@@ -767,6 +767,47 @@ def test_async_loads_both_admitted_when_pool_fits():
         assert req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
 
 
+def test_async_load_margin_capped_at_max_model_len():
+    """An async load that fits the pool is admitted even when a full spec
+    decode step would reach past max_model_len."""
+    block_size = 16
+    vllm_config = create_vllm_config(
+        block_size=block_size,
+        max_model_len=block_size * 15,
+        num_speculative_tokens=16,
+    )
+    # create_vllm_config sets only the scheduler's limit.
+    vllm_config.model_config.max_model_len = block_size * 15
+    # 15 usable blocks. The load needs 14, a spec step would reserve 2 more,
+    # but the request can only grow by 1 before max_model_len.
+    scheduler = create_scheduler(vllm_config, num_blocks=16)
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        num_tokens=block_size * 14 + 8,
+        do_remote_prefill=True,
+        max_tokens=8,
+    )
+    scheduler.add_request(request)
+
+    with patch.object(
+        scheduler.connector,
+        "get_num_new_matched_tokens",
+        return_value=(block_size * 14, True),
+    ):
+        scheduler.schedule()
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+    # The load lands: the request is promoted and scheduled.
+    scheduler.update_from_output(
+        scheduler.schedule(),
+        create_model_runner_output([], finished_recving={request.request_id}),
+    )
+    scheduler_output = scheduler.schedule()
+    assert request.status == RequestStatus.RUNNING
+    assert scheduler_output.num_scheduled_tokens[request.request_id] > 0
+
+
 @pytest.mark.parametrize(
     ("swa_enabled", "block_size", "num_spec_tokens", "num_blocks"),
     [(False, 16, 3, 8), (True, 16, 3, 17), (True, 64, 31, 40)],
