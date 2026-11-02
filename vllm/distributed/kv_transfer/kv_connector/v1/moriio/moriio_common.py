@@ -257,32 +257,17 @@ def pod_index(global_dp_rank: int, dp_size_local: int) -> int:
 
 
 def fill_remote_pod_from_config(
-    kv_transfer_params: dict[str, Any],
-    extra_config: dict,
-    is_producer: bool,
+    params: dict[str, Any], extra_config: dict, is_producer: bool
 ) -> None:
     """Use serve-config peer hosts when the router did not send them."""
     hosts = extra_config.get("remote_hosts")
-    if isinstance(hosts, str):
-        hosts = hosts.split(",")
-    if not isinstance(hosts, list):
+    dp_local = int(extra_config.get("remote_dp_size_local") or 0)
+    if not hosts or not dp_local or params.get("remote_hosts"):
         return
-    hosts = [str(h).strip() for h in hosts if str(h).strip()]
-    try:
-        dp_local = int(extra_config.get("remote_dp_size_local") or 0)
-    except (TypeError, ValueError):
-        return
-    if not hosts or dp_local <= 0 or kv_transfer_params.get("remote_hosts"):
-        return
-    kv_transfer_params["remote_hosts"] = hosts
-    kv_transfer_params["remote_dp_size_local"] = dp_local
-    if (
-        not is_producer
-        and "remote_dp_rank" in kv_transfer_params
-        and "is_request_leader" not in kv_transfer_params
-        and not kv_transfer_params.get("remote_dp_rank_override")
-    ):
-        kv_transfer_params["is_request_leader"] = True
+    params["remote_hosts"] = hosts
+    params["remote_dp_size_local"] = dp_local
+    if not is_producer:
+        params.setdefault("is_request_leader", True)
 
 
 def resolve_host_ip(extra_config: dict) -> str:

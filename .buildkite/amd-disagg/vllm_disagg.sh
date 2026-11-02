@@ -327,7 +327,8 @@ EOF
 }
 
 # Build the EP-mode (WIDE_EP_MODE=1) serve command into the global CMD array.
-# MoRIIO --kv-transfer-config on master and child. NIXL on the master only.
+# DP + expert parallel; masters expose the API server, children join headless.
+# Every MoRIIO node gets KV transfer.
 build_ep_cmd() {
     #   prefill -> mori_high_throughput  (paired with --enforce-eager in models.yaml)
     #   decode  -> mori_low_latency      (paired with CUDA graphs in models.yaml)
@@ -354,16 +355,14 @@ build_ep_cmd() {
         CMD+=(--gpu-memory-utilization 0.75)
     fi
 
-    local kv_cfg="" read_mode_kv peer_hosts
-    if [[ "${KV_CONNECTOR:-}" != Nixl* ]]; then
-        read_mode_kv="$(moriio_read_mode_kv)"
-        if [[ "${ROLE}" == "prefill" ]]; then
-            peer_hosts=$(printf '"%s",' "${IP_ARRAY[@]:xP:yD}")
-        else
-            peer_hosts=$(printf '"%s",' "${IP_ARRAY[@]:0:xP}")
-        fi
-        peer_hosts="[${peer_hosts%,}]"
-        kv_cfg=$(cat <<EOF
+    local kv_cfg read_mode_kv peer_hosts
+    read_mode_kv="$(moriio_read_mode_kv)"
+    if [[ "${ROLE}" == "prefill" ]]; then
+        peer_hosts=$(printf '"%s",' "${IP_ARRAY[@]:xP:yD}")
+    else
+        peer_hosts=$(printf '"%s",' "${IP_ARRAY[@]:0:xP}")
+    fi
+    kv_cfg=$(cat <<EOF
 {
   "kv_connector": "MoRIIOConnector",
   "kv_role": "${KV_ROLE}",
@@ -376,27 +375,21 @@ build_ep_cmd() {
     "local_ping_port": "${LOCAL_PING_PORT}",
     "handshake_port": "${HANDSHAKE_PORT}",
     "notify_port": "${NOTIFY_PORT}",
-    "remote_hosts": ${peer_hosts},
+    "remote_hosts": [${peer_hosts%,}],
     "remote_dp_size_local": ${GPUS_PER_NODE}${read_mode_kv}
   }
 }
 EOF
 )
-    fi
-
     if [[ "${IS_MASTER}" == "1" ]]; then
         CMD+=(--api-server-count="${GPUS_PER_NODE}")
-        if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then
-            kv_cfg="$(nixl_kv_cfg)"
-            CMD+=(--kv-transfer-config "${kv_cfg}")
-        fi
+        if [[ "${KV_CONNECTOR:-}" == Nixl* ]]; then kv_cfg="$(nixl_kv_cfg)"; fi
+        CMD+=(--kv-transfer-config "${kv_cfg}")
         log "role=${ROLE} mode=ep MASTER node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_addr=${DP_MASTER_ADDR} kv_role=${KV_ROLE} all2all=${backend} read_mode=${MORIIO_READ_MODE}"
     else
         CMD+=(--data-parallel-start-rank "${DP_START_RANK}" --headless)
-        log "role=${ROLE} mode=ep CHILD  node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_start_rank=${DP_START_RANK} dp_addr=${DP_MASTER_ADDR} kv_role=${KV_ROLE} all2all=${backend}"
-    fi
-    if [[ "${KV_CONNECTOR:-}" != Nixl* ]]; then
-        CMD+=(--kv-transfer-config "${kv_cfg}")
+        [[ "${KV_CONNECTOR:-}" == Nixl* ]] || CMD+=(--kv-transfer-config "${kv_cfg}")
+        log "role=${ROLE} mode=ep CHILD  node_rank=${NODE_RANK} dp_size=${DP_GROUP_SIZE} dp_start_rank=${DP_START_RANK} dp_addr=${DP_MASTER_ADDR} all2all=${backend}"
     fi
 }
 

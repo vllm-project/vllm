@@ -517,8 +517,6 @@ def test_rank_with_nothing_to_write_does_not_wait_for_a_handshake():
 def test_release_reaches_every_prefill_rank_and_no_other(params, expected_tp_ranks):
     scheduler = MoRIIOConnectorScheduler.__new__(MoRIIOConnectorScheduler)
     scheduler.tp_size = 4
-    scheduler.is_producer = False
-    scheduler.kv_transfer_config = SimpleNamespace(kv_connector_extra_config={})
     sent: list[tuple[str, str, int]] = []
     scheduler._send_transfer_release = (  # type: ignore[method-assign]
         lambda transfer_id, host, port: sent.append((transfer_id, host, port))
