@@ -135,15 +135,25 @@ class VocabMapping:
                 self.intersection_size,
             )
 
+    @staticmethod
+    def _map_ids(ids, id_mapping, unk_token_id):
+        # Prompt-embedding placeholders can be outside the model vocabulary.
+        in_bounds = (ids >= 0) & (ids < id_mapping.shape[0])
+        safe_ids = ids.clamp(0, id_mapping.shape[0] - 1)
+        mapped_ids = id_mapping[safe_ids]
+        return torch.where(in_bounds & (mapped_ids != -1), mapped_ids, unk_token_id).to(
+            ids.dtype
+        )
+
     def map_target_to_draft_ids(self, target_ids):
-        draft_ids = self.target_to_draft_ids[target_ids]  # new tensor; no clone needed
-        draft_ids[draft_ids == -1] = self.draft_unk_token_id
-        return draft_ids.to(target_ids.dtype)
+        return self._map_ids(
+            target_ids, self.target_to_draft_ids, self.draft_unk_token_id
+        )
 
     def map_draft_to_target_ids(self, draft_ids):
-        target_ids = self.draft_to_target_ids[draft_ids]  # new tensor; no clone needed
-        target_ids[target_ids == -1] = self.target_unk_token_id
-        return target_ids.to(draft_ids.dtype)
+        return self._map_ids(
+            draft_ids, self.draft_to_target_ids, self.target_unk_token_id
+        )
 
     def constrain_draft_logits(self, logits):
         # masked_fill returns a new tensor; no clone needed
