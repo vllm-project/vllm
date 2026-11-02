@@ -109,6 +109,20 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     assert captured_scale.data_ptr() == a_scale.data_ptr()
 
 
+def test_naive_block_assignment_fills_no_token_count() -> None:
+    # Low-latency path (num_tokens * top_k * 4 <= num_experts): the kernel
+    # does not read the token count, so no tensor is materialized for it.
+    topk_ids = torch.zeros((2, 4), dtype=torch.int32)
+    config = {"BLOCK_SIZE_M": 16}
+    sorted_ids, expert_ids, count = fused_moe_module._prepare_expert_assignment(
+        topk_ids, config, 2, 4, 256, None
+    )
+
+    assert sorted_ids is None
+    assert expert_ids.data_ptr() == topk_ids.data_ptr()
+    assert count.shape == (1,) and count.data_ptr() == topk_ids.data_ptr()
+
+
 def iterative_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
