@@ -424,6 +424,20 @@ def init_kv_cache(
                 vllm_config.cache_config.get_resolved_kv_cache_layout(),
                 kernel_block_sizes,
             )
+            if any(
+                hasattr(layer, "dynamic_pp_cache_component")
+                for layer in forward_context.values()
+            ):
+                from vllm.v1.worker.pp.cache import prepare_pp_cache
+
+                prepare_pp_cache(
+                    kv_cache_config,
+                    kv_caches,
+                    forward_context,
+                    vllm_config.cache_config.get_resolved_kv_cache_layout(),
+                    kernel_block_sizes,
+                    device,
+                )
     for layer_name, target in get_shared_kv_cache_layers(vllm_config).items():
         kv_caches[layer_name] = kv_caches[target]
     # Dual-attention models (e.g. LongCat-Flash) put two Attention modules per

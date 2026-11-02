@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Per-batch layer boundaries for the experimental two-stage prefill pipeline."""
 
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, fields
 from math import isfinite
@@ -13,6 +13,7 @@ from typing import Any
 HEADER_KEY = "dynamic_pp_header"
 COST_HISTORY_DRIFT_MULTIPLIER = 2
 TIMING_FALLBACK_CONFIRMATION_MULTIPLIER = 2
+DECODE_TIMING_WINDOW_LIMIT = 64
 
 
 def select_pp_moe_layer_names(
@@ -41,6 +42,9 @@ class DynamicPPConfig:
     redundant_layers: int = 2
     initial_offset: int = 0
     adaptive: bool = True
+    allow_mtp_prefill: bool = False
+    allow_mtp_decode: bool = False
+    allow_prefix_caching: bool = False
     low_watermark: int = 0
     high_watermark: int = 2
     cooldown_steps: int = 8
@@ -60,7 +64,18 @@ class DynamicPPConfig:
             raise ValueError(f"Unknown dynamic_pp_config fields: {sorted(unknown)}")
         result = cls(**value)
         for item in fields(cls):
-            expected = bool if item.name in ("enabled", "adaptive") else int
+            expected = (
+                bool
+                if item.name
+                in (
+                    "enabled",
+                    "adaptive",
+                    "allow_mtp_prefill",
+                    "allow_mtp_decode",
+                    "allow_prefix_caching",
+                )
+                else int
+            )
             if type(getattr(result, item.name)) is not expected:
                 raise ValueError(
                     f"dynamic_pp_config.{item.name} must be {expected.__name__}"
@@ -120,15 +135,55 @@ class DynamicPPConfig:
             or parallel.decode_context_parallel_size != 1
         ):
             raise ValueError("Dynamic PP does not yet support context parallelism")
-        if (
-            vllm_config.speculative_config is not None
-            or vllm_config.kv_transfer_config is not None
+        if vllm_config.kv_transfer_config is not None:
+            raise ValueError("Dynamic PP does not yet support KV connectors")
+        speculative = vllm_config.speculative_config
+        if self.allow_mtp_prefill and self.allow_mtp_decode:
+            raise ValueError("Choose either MTP prefill or state-migrating decode")
+        if speculative is not None and not (
+            self.allow_mtp_prefill or self.allow_mtp_decode
         ):
             raise ValueError(
-                "Dynamic PP does not yet support speculation or KV connectors"
+                "Dynamic PP speculation requires allow_mtp_prefill or allow_mtp_decode"
             )
-        if vllm_config.cache_config.enable_prefix_caching:
-            raise ValueError("Dynamic PP prefix caching requires KV replicas")
+        if self.allow_mtp_prefill and (
+            speculative is None
+            or getattr(model.hf_config, "model_type", None) != "deepseek_v4"
+            or speculative.method != "mtp"
+            or speculative.num_speculative_tokens != 1
+            or speculative.enforce_eager is not True
+        ):
+            raise ValueError(
+                "Dynamic PP allow_mtp_prefill requires DeepSeek-V4 with eager "
+                "MTP and exactly one speculative token"
+            )
+        if self.allow_mtp_decode and (
+            speculative is None
+            or getattr(model.hf_config, "model_type", None) != "deepseek_v4"
+            or speculative.method != "mtp"
+            or speculative.num_speculative_tokens != 3
+            or speculative.enforce_eager is not True
+        ):
+            raise ValueError(
+                "Dynamic PP allow_mtp_decode requires DeepSeek-V4 with eager "
+                "MTP and exactly three speculative tokens"
+            )
+        if (
+            vllm_config.cache_config.enable_prefix_caching
+            and not self.allow_prefix_caching
+        ):
+            raise ValueError(
+                "Dynamic PP prefix caching requires KV replicas; "
+                "opt in with allow_prefix_caching"
+            )
+        if self.allow_prefix_caching and (
+            getattr(model.hf_config, "model_type", None) != "deepseek_v4"
+            or vllm_config.attention_config.hisparse_config is not None
+        ):
+            raise ValueError(
+                "Dynamic PP prefix caching requires the DeepSeek-V4 cache adapter "
+                "without HiSparse"
+            )
         if getattr(vllm_config, "lora_config", None) is not None:
             raise ValueError("Dynamic PP does not yet support LoRA")
         if parallel.use_ubatching:
@@ -201,6 +256,12 @@ class PPBoundaryController:
             )
         self.version = 0
         self._samples: deque[PPBalanceSample] = deque(maxlen=config.cooldown_steps)
+        self._retain_shape_windows = (
+            config.allow_mtp_decode or config.allow_prefix_caching
+        )
+        self._decode_windows: OrderedDict[
+            tuple[int, int], tuple[deque[PPBalanceSample], int]
+        ] = OrderedDict()
         self._last_sample_batch = -1
         self._samples_since_change = 0
         self._costs: dict[tuple[int, int, int], tuple[float, float]] = {}
@@ -254,7 +315,19 @@ class PPBoundaryController:
             # Queued old work must not drive the new boundary again.
             if (sample.boundary, sample.version) != (self.boundary, self.version):
                 continue
-            if self._samples and (sample.num_tokens, sample.num_reqs) != (
+            shape = sample.num_tokens, sample.num_reqs
+            if self._retain_shape_windows:
+                previous_shape = (
+                    (self._samples[-1].num_tokens, self._samples[-1].num_reqs)
+                    if self._samples
+                    else None
+                )
+                self._samples, self._samples_since_change = self._decode_windows.pop(
+                    shape, (deque(maxlen=self.config.cooldown_steps), 0)
+                )
+                if shape != previous_shape:
+                    self.feedback_stats.clear()
+            elif self._samples and shape != (
                 self._samples[-1].num_tokens,
                 self._samples[-1].num_reqs,
             ):
@@ -263,6 +336,13 @@ class PPBoundaryController:
                 self.feedback_stats.clear()
             self._samples.append(sample)
             self._samples_since_change += 1
+            if self._retain_shape_windows:
+                self._decode_windows[shape] = (
+                    self._samples,
+                    self._samples_since_change,
+                )
+                if len(self._decode_windows) > DECODE_TIMING_WINDOW_LIMIT:
+                    self._decode_windows.popitem(last=False)
             added = True
         self.feedback_stats.update(
             feedback_version=self.version,
@@ -274,8 +354,7 @@ class PPBoundaryController:
             self.feedback_stats["decision"] = "fixed_boundary"
         elif not feedback_fresh:
             self.feedback_stats["decision"] = "stale_feedback_hold"
-            self._samples.clear()
-            self._samples_since_change = 0
+            self._clear_timing_windows()
             self.feedback_stats["matched_samples"] = 0
             self.feedback_stats["completed_samples_since_change"] = 0
         elif len(self._samples) < self.config.cooldown_steps:
@@ -283,6 +362,11 @@ class PPBoundaryController:
         elif added:
             self._rebalance(queue_depth)
         return PPBoundary(batch_id, self.boundary, self.version)
+
+    def _clear_timing_windows(self) -> None:
+        self._samples.clear()
+        self._samples_since_change = 0
+        self._decode_windows.clear()
 
     def _rebalance(self, queue_depth: int) -> None:
         first = self._samples[-1]
@@ -348,8 +432,7 @@ class PPBoundaryController:
         self.feedback_stats["decision"] = reason
         self.boundary = boundary
         self.version += 1
-        self._samples.clear()
-        self._samples_since_change = 0
+        self._clear_timing_windows()
 
     def accept(self, value: Any, expected_batch_id: int) -> PPBoundary:
         header = PPBoundary.from_wire(value)
@@ -371,6 +454,8 @@ class PPBoundaryController:
         self._last_batch_id = header.batch_id
         self._last_received_version = header.version
         self._last_received_boundary = header.boundary
+        if self._retain_shape_windows and header.version != self.version:
+            self._clear_timing_windows()
         self.boundary = header.boundary
         self.version = header.version
         return header
@@ -468,24 +553,60 @@ class PPStrategyReporter:
         return report
 
 
-def validate_fresh_prefill(scheduler_output: Any) -> None:
+def validate_fresh_prefill(
+    scheduler_output: Any, *, allow_cached_prefix: bool = False
+) -> None:
     """Fail before communication rather than reading unsynchronized history."""
+    if any(scheduler_output.scheduled_spec_decode_tokens.values()):
+        raise ValueError(
+            "Dynamic PP cannot execute speculative verification; "
+            "allow_mtp_prefill only permits drafting after a fresh prefill"
+        )
     cached = scheduler_output.scheduled_cached_reqs
     if cached.req_ids:
         raise ValueError(
             "Dynamic PP requires complete fresh prefills; history needs KV replicas"
         )
     for request in scheduler_output.scheduled_new_reqs:
-        if request.num_computed_tokens:
+        if request.num_computed_tokens and not allow_cached_prefix:
             raise ValueError("Dynamic PP cannot yet consume cached prefix state")
         if request.sampling_params is None or request.sampling_params.max_tokens != 1:
             raise ValueError(
                 "Dynamic PP currently supports prefill with max_tokens=1 only"
             )
         scheduled = scheduler_output.num_scheduled_tokens.get(request.req_id, 0)
-        if request.prompt_token_ids is None or scheduled != len(
-            request.prompt_token_ids
+        computed = request.num_computed_tokens
+        if (
+            request.prompt_token_ids is None
+            or not 0 <= computed < len(request.prompt_token_ids)
+            or scheduled != len(request.prompt_token_ids) - computed
+            or request.mm_features
         ):
             raise ValueError(
                 "Dynamic PP currently requires a complete prompt in one batch"
             )
+
+
+def validate_dynamic_decode(
+    scheduler_output: Any, *, allow_cached_prefix: bool = False
+) -> None:
+    """Allow history only for the separately validated state-handoff runtime."""
+    if any(
+        len(tokens) > 3
+        for tokens in scheduler_output.scheduled_spec_decode_tokens.values()
+    ):
+        raise ValueError("Dynamic PP MTP decode allows at most three draft tokens")
+    if scheduler_output.scheduled_cached_reqs.resumed_req_ids:
+        raise ValueError("Dynamic PP state handoff does not support resumed requests")
+    for request in scheduler_output.scheduled_new_reqs:
+        if request.num_computed_tokens and not allow_cached_prefix:
+            raise ValueError("Dynamic PP state handoff cannot import prefix state")
+        scheduled = scheduler_output.num_scheduled_tokens.get(request.req_id, 0)
+        if (
+            request.prompt_token_ids is None
+            or not 0 <= request.num_computed_tokens < len(request.prompt_token_ids)
+            or scheduled != len(request.prompt_token_ids) - request.num_computed_tokens
+            or request.sampling_params is None
+            or request.mm_features
+        ):
+            raise ValueError("Dynamic PP requires complete text prefills")

@@ -883,6 +883,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             vllm_config.compilation_config.static_all_moe_layers
         )
         self.pp_boundary_controller = None
+        self.pp_cache_components: dict[int, dict[str, typing.Any]] = {}
         if dynamic_pp.enabled:
             pp = get_pp_group()
             self.pp_boundary_controller = PPBoundaryController(
@@ -891,6 +892,27 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 config.num_hidden_layers,
                 minimum_boundary=config.mlp_layer_types.count("hash_moe"),
             )
+            if dynamic_pp.allow_mtp_decode or (
+                dynamic_pp.allow_prefix_caching
+                and vllm_config.cache_config.enable_prefix_caching
+            ):
+                controller = self.pp_boundary_controller
+                for index in range(controller.minimum, controller.maximum):
+                    attn = typing.cast(DeepseekV4Attention, self.layers[index].attn)
+                    components: dict[str, typing.Any] = {"swa": attn.swa_cache_layer}
+                    if attn.compressor is not None:
+                        components.update(
+                            compressed=attn,
+                            compressor=attn.compressor.state_cache,
+                        )
+                    if attn.indexer is not None:
+                        components.update(
+                            indexer=attn.indexer.k_cache,
+                            indexer_compressor=attn.indexer.compressor.state_cache,
+                        )
+                    for key, component in components.items():
+                        component.dynamic_pp_cache_component = (index, key)
+                    self.pp_cache_components[index] = components
         self.has_local_hash_moe = self.start_layer < min(
             self.end_layer, config.mlp_layer_types.count("hash_moe")
         )
@@ -1403,6 +1425,30 @@ class DeepseekV4ForCausalLM(
         if not loaded_start <= start < end <= loaded_end:
             raise ValueError("Dynamic PP execution range exceeds loaded replicas")
         self.model.pp_execution_range = start, end
+
+    def get_dynamic_pp_cache_state(self) -> dict[int, dict[str, torch.Tensor]]:
+        if any(
+            not hasattr(component, "dynamic_pp_cache_raw")
+            for components in self.model.pp_cache_components.values()
+            for component in components.values()
+        ):
+            raise ValueError("Dynamic PP cache state was not allocated")
+        return {
+            index: {
+                key: component.dynamic_pp_cache_raw
+                for key, component in components.items()
+            }
+            for index, components in self.model.pp_cache_components.items()
+        }
+
+    def get_dynamic_pp_cache_layout(self) -> dict:
+        return {
+            index: {
+                key: component.dynamic_pp_cache_layout
+                for key, component in components.items()
+            }
+            for index, components in self.model.pp_cache_components.items()
+        }
 
     def set_moe_parameters(self) -> None:
         collect_moe_layers(

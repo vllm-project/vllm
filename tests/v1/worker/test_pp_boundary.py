@@ -150,6 +150,92 @@ def test_different_workload_sizes_do_not_share_a_cooldown_window():
     assert controller.feedback_stats["matched_samples"] == 1
 
 
+def _choose_decode_shape(controller, batch_id, reqs, pp0_ms=100, pp1_ms=100):
+    return controller.choose(
+        batch_id,
+        0,
+        [
+            PPBalanceSample(
+                batch_id - 1,
+                controller.boundary,
+                controller.version,
+                reqs * 4,
+                reqs,
+                pp0_ms,
+                pp1_ms,
+            )
+        ],
+    )
+
+
+@pytest.mark.parametrize("mode", ["allow_mtp_decode", "allow_prefix_caching"])
+def test_alternating_decode_or_prefix_shapes_accumulate_cooldown(mode):
+    controller = PPBoundaryController(DynamicPPConfig(**{mode: True}), 22, 43)
+    controller.choose(0, 0)
+    for batch in range(1, 15):
+        assert (
+            _choose_decode_shape(
+                controller, batch, 1 if batch % 2 else 7, 200, 100
+            ).boundary
+            == 22
+        )
+    assert _choose_decode_shape(controller, 15, 1, 200, 100).boundary == 21
+    assert controller.version == 1
+
+
+@pytest.mark.parametrize("mode", ["allow_mtp_decode", "allow_prefix_caching"])
+def test_decode_or_prefix_interleaved_shapes_keep_their_own_timing_medians(mode):
+    controller = PPBoundaryController(DynamicPPConfig(**{mode: True}), 22, 43)
+    controller.choose(0, 0)
+    for batch in range(1, 17):
+        reqs, ms = (1, 100) if batch % 2 else (7, 1000)
+        _choose_decode_shape(controller, batch, reqs, ms, ms)
+        if batch >= 15:
+            assert controller.feedback_stats["matched_samples"] == 8
+            assert controller.feedback_stats["pp0_device_ms"] == ms
+            assert controller.feedback_stats["pp1_device_ms"] == ms
+            assert controller.feedback_stats["timing_num_reqs"] == reqs
+            assert controller.feedback_stats["decision"] == "balanced_hold"
+
+
+def test_decode_boundary_change_discards_every_shape_window():
+    controller = PPBoundaryController(DynamicPPConfig(allow_mtp_decode=True), 22, 43)
+    controller.choose(0, 0)
+    for batch in range(1, 8):
+        _choose_decode_shape(controller, batch, 7)
+    for batch in range(8, 16):
+        _choose_decode_shape(controller, batch, 1, 200, 100)
+    assert controller.version == 1 and controller.boundary == 21
+    _choose_decode_shape(controller, 16, 7)
+    assert controller.feedback_stats["matched_samples"] == 1
+    assert controller.feedback_stats["decision"] == "awaiting_completed_samples"
+
+
+def test_decode_expired_feedback_discards_every_shape_window():
+    controller = PPBoundaryController(DynamicPPConfig(allow_mtp_decode=True), 22, 43)
+    controller.choose(0, 0)
+    for batch in range(1, 15):
+        _choose_decode_shape(controller, batch, 1 if batch % 2 else 7)
+    controller.choose(15, 0, feedback_fresh=False)
+    for batch, reqs in ((16, 1), (17, 7)):
+        _choose_decode_shape(controller, batch, reqs)
+        assert controller.feedback_stats["matched_samples"] == 1
+        assert controller.feedback_stats["decision"] == "awaiting_completed_samples"
+
+
+def test_decode_shape_windows_evict_least_recently_used_after_sixty_four():
+    controller = PPBoundaryController(DynamicPPConfig(allow_mtp_decode=True), 22, 43)
+    controller.choose(0, 0)
+    for batch in range(1, 65):
+        _choose_decode_shape(controller, batch, batch)
+    _choose_decode_shape(controller, 65, 1)
+    _choose_decode_shape(controller, 66, 65)
+    _choose_decode_shape(controller, 67, 1)
+    assert controller.feedback_stats["matched_samples"] == 3
+    _choose_decode_shape(controller, 68, 2)
+    assert controller.feedback_stats["matched_samples"] == 1
+
+
 def test_watermark_deadband_does_not_change_the_boundary():
     controller = PPBoundaryController(DynamicPPConfig(cooldown_steps=1), 10, 20)
     for batch_id in range(8):
@@ -296,6 +382,7 @@ def test_receiver_rejects_an_unversioned_boundary_change():
     "values",
     [
         {"enabled": "false"},
+        {"allow_mtp_prefill": 1},
         {"redundant_layers": True},
         {"redundant_layers": 0},
         {"low_watermark": 2, "high_watermark": 2},
@@ -314,6 +401,146 @@ def test_receiver_rejects_an_unversioned_boundary_change():
 def test_invalid_config_is_rejected(values):
     with pytest.raises(ValueError):
         DynamicPPConfig.from_mapping(values)
+
+
+@pytest.fixture
+def mtp_prefill_config(tmp_path, monkeypatch):
+    from transformers import DeepseekV4Config, LlamaConfig
+
+    from vllm.config import (
+        CacheConfig,
+        DeviceConfig,
+        ModelConfig,
+        ParallelConfig,
+        SchedulerConfig,
+        SpeculativeConfig,
+        VllmConfig,
+    )
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "cache"))
+    for name, config in (
+        (
+            "v4",
+            DeepseekV4Config(
+                architectures=["DeepseekV4ForCausalLM"],
+                num_hidden_layers=4,
+                hidden_size=128,
+                num_attention_heads=4,
+                vocab_size=256,
+                num_nextn_predict_layers=1,
+                mlp_layer_types=["moe"] * 4,
+            ),
+        ),
+        ("llama", LlamaConfig(num_hidden_layers=4, hidden_size=128, vocab_size=256)),
+    ):
+        config.save_pretrained(tmp_path / name)
+
+    def build(
+        *,
+        allow=True,
+        decode=None,
+        enabled=True,
+        speculative=True,
+        method="mtp",
+        tokens=1,
+        draft_eager=True,
+        target="v4",
+        prefix=False,
+        allow_prefix=False,
+    ):
+        model = ModelConfig(
+            model=str(tmp_path / target),
+            skip_tokenizer_init=True,
+            enforce_eager=True,
+            max_model_len=256,
+            dtype="float32",
+        )
+        parallel = ParallelConfig(
+            pipeline_parallel_size=2, distributed_executor_backend="mp"
+        )
+        draft = (
+            SpeculativeConfig(
+                model=str(tmp_path / "v4"),
+                method=method,
+                num_speculative_tokens=tokens,
+                enforce_eager=draft_eager,
+                target_model_config=model,
+                target_parallel_config=parallel,
+            )
+            if speculative
+            else None
+        )
+        return VllmConfig(
+            model_config=model,
+            device_config=DeviceConfig(device="cpu"),
+            parallel_config=parallel,
+            scheduler_config=SchedulerConfig(
+                max_model_len=256,
+                is_encoder_decoder=False,
+                max_num_batched_tokens=256,
+                enable_chunked_prefill=False,
+            ),
+            cache_config=CacheConfig(enable_prefix_caching=prefix),
+            speculative_config=draft,
+            additional_config={
+                "pp_send_buffer_size": 2,
+                "dynamic_pp_config": {
+                    "enabled": enabled,
+                    "allow_mtp_prefill": allow,
+                    "allow_prefix_caching": allow_prefix,
+                    **({"allow_mtp_decode": decode} if decode is not None else {}),
+                },
+            },
+        )
+
+    return build
+
+
+def test_mtp_prefill_requires_explicit_opt_in(mtp_prefill_config):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    with pytest.raises(ValueError, match="requires allow_mtp_prefill"):
+        get_pp_config(mtp_prefill_config(allow=False))
+
+
+def test_opt_in_accepts_only_the_fresh_prefill_mtp_configuration(mtp_prefill_config):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    config = mtp_prefill_config()
+    size, dynamic = get_pp_config(config)
+    assert size == 2 and dynamic.enabled and dynamic.allow_mtp_prefill
+    assert config.speculative_config.num_speculative_tokens == 1
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"speculative": False},
+        {"tokens": 2},
+        {"draft_eager": False},
+        {"target": "llama"},
+    ],
+)
+def test_mtp_prefill_opt_in_rejects_unsupported_drafters(mtp_prefill_config, kwargs):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    with pytest.raises(ValueError, match="requires DeepSeek-V4 with eager MTP"):
+        get_pp_config(mtp_prefill_config(**kwargs))
+
+
+def test_ngram_cannot_enter_the_dynamic_pp_mtp_path(mtp_prefill_config):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    with pytest.raises(ValueError, match="allow_mtp_prefill requires DeepSeek-V4"):
+        get_pp_config(mtp_prefill_config(method="ngram"))
+
+
+def test_disabled_dynamic_pp_ignores_the_mtp_opt_in(mtp_prefill_config):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    size, dynamic = get_pp_config(mtp_prefill_config(enabled=False, speculative=False))
+    assert size == 2 and not dynamic.enabled
 
 
 def _fresh_schedule(*, computed=0, scheduled=3, max_tokens=1, cached=False):
@@ -362,6 +589,61 @@ def test_complete_fresh_prefill_is_allowed():
     validate_fresh_prefill(_fresh_schedule())
 
 
+@pytest.mark.parametrize("decode", [False, True])
+def test_prefix_hit_executes_only_the_uncached_suffix(decode):
+    from vllm.v1.worker.pp.boundary import (
+        validate_dynamic_decode,
+        validate_fresh_prefill,
+    )
+
+    validate = validate_dynamic_decode if decode else validate_fresh_prefill
+    # Full logical prefix hit still recomputes the final prompt token.
+    validate(_fresh_schedule(computed=2, scheduled=1), allow_cached_prefix=True)
+    validate(_fresh_schedule(computed=1, scheduled=2), allow_cached_prefix=True)
+    with pytest.raises(ValueError, match="prefix"):
+        validate(_fresh_schedule(computed=2, scheduled=1))
+
+
+@pytest.mark.parametrize(
+    "computed,scheduled", [(-1, 4), (3, 0), (4, 1), (1, 1), (1, 3)]
+)
+def test_prefix_opt_in_still_rejects_partial_or_invalid_suffix(computed, scheduled):
+    from vllm.v1.worker.pp.boundary import (
+        validate_dynamic_decode,
+        validate_fresh_prefill,
+    )
+
+    for validate in (validate_fresh_prefill, validate_dynamic_decode):
+        with pytest.raises(ValueError):
+            validate(
+                _fresh_schedule(computed=computed, scheduled=scheduled),
+                allow_cached_prefix=True,
+            )
+
+
+@pytest.mark.parametrize("decode", [False, True])
+def test_prefix_config_requires_explicit_state_handoff_opt_in(
+    mtp_prefill_config, decode
+):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    options = dict(
+        allow=not decode, decode=decode, tokens=3 if decode else 1, prefix=True
+    )
+    with pytest.raises(ValueError, match="allow_prefix_caching"):
+        get_pp_config(mtp_prefill_config(**options))
+    _, dynamic = get_pp_config(mtp_prefill_config(**options, allow_prefix=True))
+    assert dynamic.allow_prefix_caching
+
+
+def test_mtp_verification_is_rejected_before_communication():
+    from vllm.v1.worker.pp.boundary import validate_fresh_prefill
+
+    schedule = replace(_fresh_schedule(), scheduled_spec_decode_tokens={"request": [4]})
+    with pytest.raises(ValueError, match="cannot execute speculative verification"):
+        validate_fresh_prefill(schedule)
+
+
 @pytest.mark.parametrize(
     "kwargs",
     [dict(computed=1), dict(scheduled=2), dict(max_tokens=2), dict(cached=True)],
@@ -371,3 +653,79 @@ def test_unsynchronized_history_is_rejected_before_communication(kwargs):
 
     with pytest.raises(ValueError):
         validate_fresh_prefill(_fresh_schedule(**kwargs))
+
+
+def test_mtp3_decode_requires_its_separate_state_handoff_opt_in(mtp_prefill_config):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    config = mtp_prefill_config(allow=False, decode=True, tokens=3)
+    size, dynamic = get_pp_config(config)
+    assert size == 2 and dynamic.allow_mtp_decode and not dynamic.allow_mtp_prefill
+    assert dynamic.enabled
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"tokens": 1},
+        {"tokens": 2},
+        {"tokens": 4},
+        {"draft_eager": False},
+        {"speculative": False},
+        {"target": "llama"},
+    ],
+)
+def test_state_handoff_decode_remains_narrowly_guarded(mtp_prefill_config, kwargs):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    options = {"allow": False, "decode": True, "tokens": 3, **kwargs}
+    with pytest.raises(ValueError, match="allow_mtp_decode requires DeepSeek-V4"):
+        get_pp_config(mtp_prefill_config(**options))
+
+
+def test_prefill_and_decode_modes_cannot_be_enabled_together(mtp_prefill_config):
+    from vllm.v1.worker.pp.config import get_pp_config
+
+    with pytest.raises(ValueError, match="Choose either"):
+        get_pp_config(mtp_prefill_config(allow=True, decode=True))
+
+
+def test_state_handoff_accepts_history_but_old_prefill_mode_still_rejects_it():
+    from vllm.v1.worker.pp.boundary import (
+        validate_dynamic_decode,
+        validate_fresh_prefill,
+    )
+
+    fresh = _fresh_schedule(max_tokens=1024)
+    validate_dynamic_decode(fresh)
+    history = replace(
+        _fresh_schedule(cached=True),
+        scheduled_new_reqs=[],
+        scheduled_spec_decode_tokens={"cached": [4, 5, 6]},
+    )
+    validate_dynamic_decode(history)
+    with pytest.raises(ValueError, match="cannot execute speculative verification"):
+        validate_fresh_prefill(history)
+
+
+@pytest.mark.parametrize("failure", ["prefix", "partial", "resume", "draft4"])
+def test_decode_handoff_rejects_unvalidated_imports(failure):
+    from vllm.v1.worker.pp.boundary import validate_dynamic_decode
+
+    schedule = _fresh_schedule(max_tokens=1024)
+    if failure == "prefix":
+        schedule = _fresh_schedule(computed=1, max_tokens=1024)
+    elif failure == "partial":
+        schedule = _fresh_schedule(scheduled=2, max_tokens=1024)
+    elif failure == "resume":
+        schedule = replace(
+            schedule,
+            scheduled_cached_reqs=replace(
+                _fresh_schedule(cached=True).scheduled_cached_reqs,
+                resumed_req_ids={"cached"},
+            ),
+        )
+    else:
+        schedule = replace(schedule, scheduled_spec_decode_tokens={"request": [1] * 4})
+    with pytest.raises(ValueError):
+        validate_dynamic_decode(schedule)

@@ -4,7 +4,7 @@
 
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 import torch
 
@@ -17,6 +17,7 @@ from vllm.v1.worker.pp.boundary import (
     PPBoundary,
     PPBoundaryController,
     PPStrategyReporter,
+    validate_dynamic_decode,
     validate_fresh_prefill,
 )
 from vllm.v1.worker.pp.buffer import PPSendBuffer
@@ -39,6 +40,7 @@ class PPRuntime:
     ):
         size, dynamic = get_pp_config(config)
         self.model = model
+        self.device_module = device_module
         self.pp = pp_group
         self.tp = tp_group
         self.batch_id = 0
@@ -47,6 +49,14 @@ class PPRuntime:
         self.feedback: PPDeviceFeedback | None = None
         self.reporter: PPStrategyReporter | None = None
         self.buffer: PPSendBuffer | None = None
+        self.allow_mtp_decode = dynamic.enabled and dynamic.allow_mtp_decode
+        self.prefix_caching = (
+            dynamic.enabled and config.cache_config.enable_prefix_caching
+        )
+        self.stateful = self.allow_mtp_decode or self.prefix_caching
+        self.state_transfer: Any = None
+        self.control: Any = None
+        self._state_boundary: int | None = None
         if dynamic.enabled:
             if not isinstance(model, SupportsDynamicPP):
                 raise ValueError("This model has no dynamic PP layer-range adapter")
@@ -54,6 +64,19 @@ class PPRuntime:
             self.controller = PPBoundaryController(
                 dynamic, spec.base_boundary, spec.num_layers, spec.minimum_boundary
             )
+            self._state_boundary = self.controller.boundary
+            if self.stateful and not callable(
+                getattr(model, "get_dynamic_pp_cache_state", None)
+            ):
+                raise ValueError(
+                    "Dynamic PP history needs an isolated cache-state adapter"
+                )
+            if self.prefix_caching and not callable(
+                getattr(model, "get_dynamic_pp_cache_layout", None)
+            ):
+                raise ValueError(
+                    "Dynamic PP prefix caching needs a cache-layout adapter"
+                )
             if tp_group.rank_in_group == 0:
                 self.feedback = PPDeviceFeedback(
                     device_module,
@@ -65,9 +88,13 @@ class PPRuntime:
                 self.reporter = PPStrategyReporter(
                     self.controller, pp_group.rank_in_group
                 )
+                if self.stateful:
+                    from vllm.v1.worker.pp.state import PPControlChannel
+
+                    self.control = PPControlChannel(self.feedback.store)
         if size and pp_group.world_size > 1 and not pp_group.is_last_rank:
             self.buffer = PPSendBuffer(size, device_module, metadata_handles=1)
-            template = model.make_empty_intermediate_tensors(
+            template = cast(Any, model).make_empty_intermediate_tensors(
                 config.scheduler_config.max_num_batched_tokens,
                 dtype=config.model_config.dtype,
                 device=device,
@@ -82,7 +109,10 @@ class PPRuntime:
         if not output.total_num_scheduled_tokens:
             return
         if self.controller is not None:
-            validate_fresh_prefill(output)
+            if self.allow_mtp_decode:
+                validate_dynamic_decode(output, allow_cached_prefix=self.prefix_caching)
+            else:
+                validate_fresh_prefill(output, allow_cached_prefix=self.prefix_caching)
             if self.pp.is_first_rank:
                 wire = None
                 if self.feedback is not None:
@@ -97,14 +127,64 @@ class PPRuntime:
                 wire = self.tp.broadcast_object(wire)
                 if self.header is None:
                     self.header = self.controller.accept(wire, self.batch_id)
-        if self.buffer is not None:
+            if self.stateful:
+                # Bound unpublished/unconsumed headers by the output ring. A
+                # completed send implies the consumer already read its header.
+                if self.buffer is not None:
+                    self.buffer.acquire()
+                if self.pp.is_first_rank:
+                    if self.control is not None:
+                        assert self.header is not None
+                        self.control.send(self.header)
+                else:
+                    wire = None
+                    if self.control is not None:
+                        wire = self.control.receive(self.batch_id).to_wire()
+                    wire = self.tp.broadcast_object(wire)
+                    self.header = self.controller.accept(wire, self.batch_id)
+                if self.state_transfer is None:
+                    from vllm.v1.worker.pp.state import PPStateTransfer
+
+                    try:
+                        adapter = cast(Any, self.model)
+                        cache_state = adapter.get_dynamic_pp_cache_state()
+                        cache_layout = (
+                            adapter.get_dynamic_pp_cache_layout()
+                            if self.prefix_caching
+                            else None
+                        )
+                        if self.prefix_caching and not cache_layout:
+                            raise ValueError("Prefix cache layout must not be empty")
+                    except (TypeError, ValueError, RuntimeError):
+                        logger.exception("Dynamic PP cache-state adapter failed")
+                        # Both peers still enter the collective validator. It
+                        # rejects an empty mapping on every stage, avoiding a
+                        # peer waiting alone after a local adapter error.
+                        cache_state = {}
+                        cache_layout = None
+                    self.state_transfer = PPStateTransfer(
+                        self.pp,
+                        self.device_module,
+                        cache_state,
+                        cache_layout=cache_layout,
+                    )
+                assert self._state_boundary is not None
+                assert self.header is not None
+                self.state_transfer.move(
+                    self._state_boundary, self.header.boundary, self.batch_id
+                )
+                self._state_boundary = self.header.boundary
+        if self.buffer is not None and not self.stateful:
             self.buffer.acquire()
 
     def receive_header(self, tensors: dict[str, Any]) -> None:
         if self.controller is not None:
-            self.header = self.controller.accept(
-                tensors.pop(HEADER_KEY, None), self.batch_id
-            )
+            wire = tensors.pop(HEADER_KEY, None)
+            if self.stateful:
+                if self.header is None or PPBoundary.from_wire(wire) != self.header:
+                    raise ValueError("PP activation and cache ownership epochs differ")
+            else:
+                self.header = self.controller.accept(wire, self.batch_id)
 
     def before_forward(self, output: SchedulerOutput) -> None:
         if self.header is None:
@@ -157,6 +237,7 @@ class PPRuntime:
     def stats(self) -> dict[str, Any]:
         return {
             "enabled": self.controller is not None,
+            "prefix_caching": self.prefix_caching,
             "batches": self.batch_id,
             "boundary": self.controller.boundary if self.controller else None,
             "boundary_version": self.controller.version if self.controller else None,
@@ -165,4 +246,7 @@ class PPRuntime:
             if self.buffer
             else 0,
             "device_feedback": self.feedback.stats() if self.feedback else None,
+            "state_transfer": self.state_transfer.stats()
+            if self.state_transfer is not None
+            else None,
         }

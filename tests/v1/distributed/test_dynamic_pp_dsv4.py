@@ -70,3 +70,63 @@ def test_real_dsv4_weights_match_fixed_pipeline(vllm_runner, fixed_outputs, offs
         name_1="fixed PP",
         always_check_logprobs=True,
     )
+
+
+@pytest.mark.parametrize("offset", [-2, 2])
+def test_real_dsv4_cached_suffix_matches_fixed_pipeline(vllm_runner, offset):
+    """Repeated and shared prefixes must hit cache and preserve output logprobs."""
+    params = SamplingParams(temperature=0, seed=7, max_tokens=1, logprobs=5)
+    prompts = [PROMPT, PROMPT + " Explain the role of buffering."]
+
+    def generate(additional):
+        with vllm_runner(
+            MODEL,
+            pipeline_parallel_size=2,
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
+            enforce_eager=True,
+            max_model_len=4096,
+            max_num_batched_tokens=4096,
+            max_num_seqs=1,
+            enable_prefix_caching=True,
+            enable_chunked_prefill=False,
+            kv_cache_memory_bytes=4 << 30,
+            additional_config=additional,
+        ) as runner:
+            runner.model.generate([PROMPT], params)
+            outputs = runner.model.generate(prompts, params)
+            assert all(output.num_cached_tokens > 0 for output in outputs)
+            assert runner.model.reset_prefix_cache()
+            cold = runner.model.generate([PROMPT], params)[0]
+            assert cold.num_cached_tokens == 0
+            stats = runner.model.collective_rpc("get_dynamic_pp_stats")
+            rows = [
+                (
+                    list(output.outputs[0].token_ids),
+                    output.outputs[0].text,
+                    output.outputs[0].logprobs,
+                )
+                for output in [*outputs, cold]
+            ]
+            return rows, stats
+
+    expected, _ = generate({})
+    actual, stats = generate(
+        {
+            "pp_send_buffer_size": 2,
+            "dynamic_pp_config": {
+                "enabled": True,
+                "allow_prefix_caching": True,
+                "initial_offset": offset,
+                "adaptive": False,
+            },
+        }
+    )
+    assert all(row["enabled"] and row["prefix_caching"] for row in stats)
+    check_logprobs_close(
+        outputs_0_lst=actual,
+        outputs_1_lst=expected,
+        name_0="dynamic PP prefix",
+        name_1="fixed PP prefix",
+        always_check_logprobs=True,
+    )
