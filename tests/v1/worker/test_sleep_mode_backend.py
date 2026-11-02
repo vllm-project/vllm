@@ -88,6 +88,32 @@ def test_worker_drives_communicator_suspension(monkeypatch, enable_nccl_comm_sus
     assert calls == expected
 
 
+def test_worker_sleep_tolerates_other_processes_using_device_memory(monkeypatch):
+    """Device-wide free memory can drop during sleep when another process
+    allocates on the same GPU; that must not fail the sleep request."""
+    from types import SimpleNamespace
+
+    from vllm.v1.worker.gpu_worker import Worker
+
+    class Backend:
+        def suspend(self, level: int = 1) -> None:
+            pass
+
+    worker = object.__new__(Worker)
+    worker._sleep_mode_backend = Backend()
+    worker.vllm_config = SimpleNamespace(
+        model_config=SimpleNamespace(enable_nccl_comm_suspend=False)
+    )
+
+    free_bytes = iter([10 << 30, 8 << 30])
+    monkeypatch.setattr("torch.accelerator.synchronize", lambda: None)
+    monkeypatch.setattr(
+        "torch.accelerator.get_memory_info", lambda: (next(free_bytes), 48 << 30)
+    )
+
+    worker.sleep(level=1)
+
+
 def test_unknown_backend_raises():
     with pytest.raises(ValueError, match="Unsupported sleep-mode backend"):
         SleepModeBackendFactory.get_backend_class("does-not-exist")
