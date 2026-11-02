@@ -744,6 +744,19 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             counter_num_preempted_reqs, per_engine_labelvalues
         )
 
+        if vllm_config.scheduler_config.max_priority_preemptions_per_step:
+            counter_num_priority_preemptions = self._counter_cls(
+                name="vllm:num_priority_preemptions",
+                documentation=(
+                    "Cumulative number of running requests preempted for a "
+                    "waiting request of a higher priority."
+                ),
+                labelnames=labelnames,
+            )
+            self.counter_num_priority_preemptions = create_metric_per_engine(
+                counter_num_priority_preemptions, per_engine_labelvalues
+            )
+
         counter_prompt_tokens = self._counter_cls(
             name="vllm:prompt_tokens",
             documentation="Number of prefill tokens processed.",
@@ -1163,6 +1176,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.num_kv_fetch_reqs_by_stage.get(stage, 0)
                 )
             self.gauge_kv_cache_usage[engine_idx].set(scheduler_stats.kv_cache_usage)
+            if self.vllm_config.scheduler_config.max_priority_preemptions_per_step:
+                self.counter_num_priority_preemptions[engine_idx].inc(
+                    scheduler_stats.num_priority_preemptions
+                )
 
             self.counter_prefix_cache_queries[engine_idx].inc(
                 scheduler_stats.prefix_cache_stats.queries
