@@ -3587,7 +3587,8 @@ def topp_cutoffs_lse(
     expanded_idx_mapping: torch.Tensor,
     temperature: torch.Tensor,
     top_p: torch.Tensor,
-    force_fp64: bool = False,
+    cluster_size: int = 0,
+    force_fallback: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Exact top-p cutoffs and kept log-sum-exps of bf16 logits (SM90+).
 
@@ -3599,7 +3600,10 @@ def topp_cutoffs_lse(
         expanded_idx_mapping: [num_rows] int32 request index of each row.
         temperature: [max_num_reqs] fp32; 0 marks a greedy request.
         top_p: [max_num_reqs] fp32.
-        force_fp64: resolve every row with the fp64 path (for testing).
+        cluster_size: CTAs per row (1, 2, 4, 8 or 16); 0 picks the fastest
+            for the batch size and vocabulary.
+        force_fallback: resolve every row with the precise fixed-point path
+            (1) or the fp64 path (2), for testing.
 
     Returns:
         thresh: [num_rows] fp32. Keep logits >= thresh, ties included; -inf keeps
@@ -3608,11 +3612,7 @@ def topp_cutoffs_lse(
             greedy rows.
 
     """
-    num_rows, vocab_size = logits.shape
-    # Each CTA of a cluster counts its slice of the row in u16 bins.
-    cluster_size = next((c for c in (4, 8, 16) if -(-vocab_size // c) <= 65528), None)
-    if cluster_size is None:
-        raise ValueError(f"vocab_size {vocab_size} exceeds 16 * 65528")
+    num_rows = logits.shape[0]
     thresh = torch.empty(num_rows, dtype=torch.float32, device=logits.device)
     lse = torch.empty(num_rows, dtype=torch.float64, device=logits.device)
     torch.ops._C.topp_cutoffs_lse(
@@ -3623,7 +3623,7 @@ def topp_cutoffs_lse(
         thresh,
         lse,
         cluster_size,
-        force_fp64,
+        force_fallback,
     )
     return thresh, lse
 

@@ -4,7 +4,8 @@
 
 The op keeps every token tied with the cutoff, so the reference sorts the row
 and keeps every value at or above the first one whose cumulative probability
-reaches top_p.
+reaches top_p. The op picks how many CTAs share a row from the batch size;
+the tests also force each cluster size, since each takes its own path.
 """
 
 import math
@@ -60,12 +61,17 @@ def _logits(num_rows: int, vocab_size: int) -> torch.Tensor:
 @pytest.mark.parametrize("vocab_size", [32000, 151936, 262144])
 @pytest.mark.parametrize("temperature", [0.7, 1.0])
 @pytest.mark.parametrize("top_p", [0.5, 0.95])
-def test_matches_fp64_reference(vocab_size: int, temperature: float, top_p: float):
+@pytest.mark.parametrize("cluster_size", [0, 1, 2, 4])
+def test_matches_fp64_reference(
+    vocab_size: int, temperature: float, top_p: float, cluster_size: int
+):
+    if cluster_size == 4 and vocab_size > 4 * 65528:
+        pytest.skip("a CTA slice of 4 would overflow its u16 counts")
     torch.manual_seed(0)
     logits = _logits(64, vocab_size)
     idx, temp, p = _params(64, temperature, top_p)
 
-    thresh, lse = ops.topp_cutoffs_lse(logits, idx, temp, p)
+    thresh, lse = ops.topp_cutoffs_lse(logits, idx, temp, p, cluster_size)
     ref_thresh, ref_lse = _reference(logits, temp, p)
 
     torch.testing.assert_close(thresh, ref_thresh, rtol=0, atol=0)
@@ -75,19 +81,43 @@ def test_matches_fp64_reference(vocab_size: int, temperature: float, top_p: floa
     assert (lse >= scaled_max).all()
 
 
-def test_fp64_path_matches_integer_path():
+@pytest.mark.parametrize("cluster_size", [1, 4])
+def test_fallback_paths_match_integer_path(cluster_size: int):
+    """Rows the integer search cannot settle are redone by the precise
+    fixed-point path, then by fp64; forcing either on every row must give the
+    same cutoffs."""
     torch.manual_seed(1)
     logits = _logits(32, 151936)
     idx, temp, p = _params(32, 0.7, 0.9)
 
-    thresh, lse = ops.topp_cutoffs_lse(logits, idx, temp, p)
-    thresh64, lse64 = ops.topp_cutoffs_lse(logits, idx, temp, p, force_fp64=True)
+    thresh, lse = ops.topp_cutoffs_lse(logits, idx, temp, p, cluster_size)
+    for force in (1, 2):
+        thresh_f, lse_f = ops.topp_cutoffs_lse(
+            logits, idx, temp, p, cluster_size, force_fallback=force
+        )
+        torch.testing.assert_close(thresh_f, thresh, rtol=0, atol=0)
+        torch.testing.assert_close(lse_f, lse, rtol=0, atol=1e-6)
 
-    torch.testing.assert_close(thresh64, thresh, rtol=0, atol=0)
-    torch.testing.assert_close(lse64, lse, rtol=0, atol=1e-6)
+
+def test_precise_path_matches_fp64_path():
+    """Flat rows (bf16 Gaussians) put the cutoff among many near-equal masses,
+    where the integer search often defers; the precise path settles them like
+    fp64 does."""
+    torch.manual_seed(3)
+    logits = (torch.randn(64, 151936, device=DEVICE) * 3).to(torch.bfloat16)
+    idx, temp, p = _params(64, 1.0, 0.95)
+
+    precise = ops.topp_cutoffs_lse(logits, idx, temp, p, force_fallback=1)
+    fp64 = ops.topp_cutoffs_lse(logits, idx, temp, p, force_fallback=2)
+    ref_thresh, _ = _reference(logits, temp, p)
+
+    torch.testing.assert_close(precise[0], fp64[0], rtol=0, atol=0)
+    torch.testing.assert_close(precise[0], ref_thresh, rtol=0, atol=0)
+    torch.testing.assert_close(precise[1], fp64[1], rtol=0, atol=1e-12)
 
 
-def test_row_kinds():
+@pytest.mark.parametrize("cluster_size", [0, 1])
+def test_row_kinds(cluster_size: int):
     vocab_size = 20000
     logits = _logits(5, vocab_size)
     logits[3] = float("-inf")  # no finite logit
@@ -97,7 +127,7 @@ def test_row_kinds():
     temp = torch.tensor([0.0, 0.8, 0.8, 1.0, 1.0], device=DEVICE)
     p = torch.tensor([0.9, 1.0, 0.9, 0.9, 0.9], device=DEVICE)
 
-    thresh, lse = ops.topp_cutoffs_lse(logits, idx, temp, p)
+    thresh, lse = ops.topp_cutoffs_lse(logits, idx, temp, p, cluster_size)
     ref_thresh, ref_lse = _reference(logits[1:3], temp[1:3], p[1:3])
 
     assert thresh[0] == float("-inf") and torch.isnan(lse[0])
@@ -140,3 +170,26 @@ def test_strided_rows_match_contiguous():
 
     torch.testing.assert_close(thresh, ref_thresh, rtol=0, atol=0)
     torch.testing.assert_close(lse, ref_lse, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("cluster_size", [1, 2])
+def test_u16_count_wraps(cluster_size: int):
+    """A CTA slice over 65,535 tokens can push one key's u16 count past
+    0xFFFF; the op recounts such slices with every wrap recorded."""
+    torch.manual_seed(4)
+    vocab_size = 202048
+    logits = _logits(4, vocab_size)
+    lo = torch.tensor(1.5, dtype=torch.bfloat16)
+    hi = (lo.view(torch.int16) + 1).view(torch.bfloat16)  # the next key up
+    logits[0, :70000] = lo
+    logits[1, :70000] = lo  # the even key wraps and carries into the odd one
+    logits[1, 70000:140000] = hi
+    logits[2, :131072] = lo  # two wraps of one key
+    logits[3, ::2] = lo
+    idx, temp, p = _params(4, 1.0, 0.9)
+
+    thresh, lse = ops.topp_cutoffs_lse(logits, idx, temp, p, cluster_size)
+    ref_thresh, ref_lse = _reference(logits, temp, p)
+
+    torch.testing.assert_close(thresh, ref_thresh, rtol=0, atol=0)
+    torch.testing.assert_close(lse, ref_lse, rtol=0, atol=1e-6)
