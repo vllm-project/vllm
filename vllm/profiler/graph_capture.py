@@ -1,0 +1,220 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Torch profiler helpers for CUDA/HIP graph capture tracing.
+
+Graph capture is driven by three subsystems (encoder, decoder and speculator)
+that reach the same handful of capture loops by different routes.
+``graph_capture_profiler`` binds one profiler around a subsystem's capture,
+and ``graph_capture_step`` picks that binding up inside whichever capture loop
+ends up running. Capture loops therefore carry no profiler plumbing, and a new
+speculator built on an existing capture loop is traced without further changes.
+"""
+
+from __future__ import annotations
+
+import contextvars
+from collections.abc import Iterator
+from contextlib import AbstractContextManager, contextmanager
+from dataclasses import dataclass
+from typing import Any
+
+import torch
+
+from vllm.config import VllmConfig
+from vllm.distributed.parallel_state import get_world_group
+from vllm.logger import init_logger
+from vllm.profiler.wrapper import (
+    TorchProfilerWrapper,
+    create_worker_profiler,
+    graph_capture_profiler_config,
+)
+
+logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class _CaptureBinding:
+    profiler: AbstractContextManager[Any]
+    label_prefix: str | None
+    # Every rank holds the same value: capture profiling is on and there are
+    # peers to keep in step with (see graph_capture_shape).
+    sync_ranks: bool = False
+
+
+_active_binding: contextvars.ContextVar[_CaptureBinding | None] = (
+    contextvars.ContextVar("vllm_graph_capture_binding", default=None)
+)
+_skip_capture_tracing: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vllm_skip_graph_capture_tracing", default=False
+)
+_shape_open: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "vllm_graph_capture_shape_open", default=False
+)
+
+
+@contextmanager
+def skip_graph_capture_tracing() -> Iterator[None]:
+    """Disable capture tracing for the throwaway memory-estimate capture."""
+    token = _skip_capture_tracing.set(True)
+    try:
+        yield
+    finally:
+        _skip_capture_tracing.reset(token)
+
+
+def make_graph_capture_profiler(
+    vllm_config: VllmConfig,
+    subsystem: str | None = None,
+) -> torch.profiler.profile | None:
+    """Build the one-shot capture profiler, or ``None`` when disabled."""
+    profiler_config = vllm_config.profiler_config
+    local_rank = get_world_group().local_rank
+    if local_rank != 0 or not profiler_config.capture_torch_profiler:
+        logger.info_once(
+            "Rank %d: Torch profiler disabled for GPU graph capture", local_rank
+        )
+        return None
+
+    capture_config = graph_capture_profiler_config(profiler_config)
+    worker_name = f"graph_capture_rank_{local_rank}"
+    if subsystem:
+        worker_name += f"_{subsystem}"
+    wrapper = create_worker_profiler(
+        capture_config, worker_name=worker_name, local_rank=local_rank
+    )
+    assert isinstance(wrapper, TorchProfilerWrapper)
+    # Serving creates wrapper.profiler only when a session starts. Capture
+    # needs the same settings without starting that session.
+    return wrapper.build_profiler()
+
+
+@contextmanager
+def graph_capture_profiler(
+    vllm_config: VllmConfig,
+    subsystem: str | None = None,
+    label_prefix: str | None = None,
+) -> Iterator[None]:
+    """Bind a graph-capture profiler for one subsystem's capture.
+
+    Args:
+        vllm_config: Engine config; used for profiler settings and device type.
+        subsystem: Suffix for the trace file name. ``"encoder"`` writes
+            ``graph_capture_rank_0_encoder.<timestamp>.pt.trace.json.gz``;
+            the main decoder passes ``None`` and keeps the unsuffixed name.
+        label_prefix: Inserted into every annotation recorded inside the
+            block, so that e.g. speculator graphs are labelled
+            ``capture_32_draft_FULL`` rather than reusing the decoder's
+            ``capture_32_FULL``.
+
+    """
+    if _skip_capture_tracing.get() or _active_binding.get() is not None:
+        yield
+        return
+
+    profiler = make_graph_capture_profiler(vllm_config, subsystem)
+    if profiler is None:
+        yield
+        return
+
+    binding = _CaptureBinding(
+        profiler=profiler,
+        label_prefix=label_prefix,
+        sync_ranks=bool(vllm_config.profiler_config.capture_torch_profiler)
+        and get_world_group().world_size > 1,
+    )
+    token = _active_binding.set(binding)
+    try:
+        yield
+    finally:
+        _active_binding.reset(token)
+
+
+def _label(kind: str, num_tokens: int, mode: str, binding: _CaptureBinding) -> str:
+    if binding.label_prefix:
+        return f"{kind}_{num_tokens}_{binding.label_prefix}_{mode}"
+    return f"{kind}_{num_tokens}_{mode}"
+
+
+@contextmanager
+def _profiled(binding: _CaptureBinding) -> Iterator[None]:
+    """Enter the binding's profiler, unless a shape session already holds it."""
+    if _shape_open.get():
+        yield
+        return
+    token = _shape_open.set(True)
+    try:
+        with binding.profiler:
+            yield
+    finally:
+        _shape_open.reset(token)
+
+
+@contextmanager
+def graph_capture_shape() -> Iterator[None]:
+    """Hold one profiler session open across a graph shape's warm-up and capture.
+
+    Without it each ``graph_capture_step`` opens its own session. Inside it,
+    ``graph_capture_warmup`` and ``graph_capture_step`` record into the same
+    session, so a shape's warm-up and capture land in one trace file. Does
+    nothing outside a ``graph_capture_profiler`` block.
+
+    With capture profiling on, every rank also waits for the others before the
+    shape starts. Only rank 0 records the capture, and saving each shape's trace
+    makes it slower than its peers, which otherwise run ahead: over a full
+    capture rank 0 falls minutes behind. A kernel whose ranks wait for each
+    other inside the launch, with a bound, then expires during the warm-up.
+    """
+    binding = _active_binding.get()
+    if binding is None:
+        yield
+        return
+    if binding.sync_ranks and not _shape_open.get():
+        get_world_group().barrier()
+    with _profiled(binding):
+        yield
+
+
+@contextmanager
+def graph_capture_warmup(num_tokens: int, mode: str) -> Iterator[None]:
+    """Profile the eager warm-up that precedes a graph shape's capture.
+
+    Records a ``warmup_{num_tokens}_{mode}`` annotation (with the binding's
+    prefix, as ``graph_capture_step`` does). A captured graph records its
+    launches without running them, so the capture alone carries no kernel
+    names; the warm-up runs the same forward eagerly for the same batch
+    descriptor, so its kernels name the launches the capture records. Use it
+    inside ``graph_capture_shape`` so both land in the same trace. Does nothing
+    outside a ``graph_capture_profiler`` block.
+    """
+    binding = _active_binding.get()
+    if binding is None:
+        yield
+        return
+    with (
+        _profiled(binding),
+        torch.profiler.record_function(_label("warmup", num_tokens, mode, binding)),
+    ):
+        yield
+
+
+@contextmanager
+def graph_capture_step(num_tokens: int, mode: str) -> Iterator[None]:
+    """Profile the capture of a single graph shape.
+
+    Records a ``capture_{num_tokens}_{mode}`` annotation, or
+    ``capture_{num_tokens}_{label_prefix}_{mode}`` when the active binding
+    sets a prefix. Does nothing unless a ``graph_capture_profiler`` block is
+    actively profiling, so capture loops can call this unconditionally. Inside
+    ``graph_capture_shape`` it records into that shape's session instead of
+    opening its own.
+    """
+    binding = _active_binding.get()
+    if binding is None:
+        yield
+        return
+
+    with (
+        _profiled(binding),
+        torch.profiler.record_function(_label("capture", num_tokens, mode, binding)),
+    ):
+        yield
