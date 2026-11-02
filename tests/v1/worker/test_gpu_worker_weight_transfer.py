@@ -264,3 +264,25 @@ def test_missing_engine_raises():
     worker = _make_worker(None)
     with pytest.raises(RuntimeError, match="Weight transfer not configured"):
         Worker.start_weight_update(worker)
+
+
+def test_xpu_worker_refreshes_model_weight_hooks():
+    """Nested non-Qwen modules refresh derived weights through their hooks."""
+    from vllm.v1.worker.xpu_worker import XPUWorker
+
+    class RefreshableLinear(nn.Linear):
+        def __init__(self):
+            super().__init__(2, 2, bias=False)
+            self.register_buffer("fused_weight", self.weight.detach().clone())
+
+        def refresh_fused_weights(self):
+            self.fused_weight.copy_(self.weight)
+
+    first, second = RefreshableLinear(), RefreshableLinear()
+    model = nn.Sequential(nn.Linear(2, 2), nn.Sequential(first, second))
+    with torch.no_grad():
+        first.weight.fill_(3)
+        second.weight.fill_(5)
+    XPUWorker._refresh_fused_moe_weights(model)
+    torch.testing.assert_close(first.fused_weight, first.weight, rtol=0, atol=0)
+    torch.testing.assert_close(second.fused_weight, second.weight, rtol=0, atol=0)
