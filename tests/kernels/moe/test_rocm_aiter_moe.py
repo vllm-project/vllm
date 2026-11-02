@@ -643,6 +643,10 @@ def test_aiter_moe_padding_env_var(
         ("SILU", True, 1, (0, 64), (0, 64)),
         ("SILU", True, 1, (0, 128), (0, 128)),
         ("SILU", True, 2, (0, 64), (0, 64)),
+        # W4A4 SiLU keeps the true intermediate pad (160 stored as 256 at TP4)
+        # for AITER's FLAT 1-stage kernels; the hidden pad is still rounded.
+        ("SILU", True, 4, (0, 96), (0, 96)),
+        ("SILU", True, 1, (192, 96), (128, 96)),
         # gpt-oss W4A16 at TP1 keeps the doubled pad.
         ("SWIGLUOAI", False, 1, (0, 192), (0, 384)),
         # BF16 SiLU at TP1 keeps the doubled pad.
