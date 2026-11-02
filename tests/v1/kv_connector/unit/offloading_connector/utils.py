@@ -45,6 +45,7 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
+    DevicePointers,
     GPULoadStoreSpec,
     LoadStoreSpec,
     LookupResult,
@@ -80,7 +81,8 @@ class MockLoadStoreSpec(LoadStoreSpec):
 
 
 class MockOffloadingWorker(OffloadingWorker):
-    def __init__(self):
+    def __init__(self, gpu_spec_map: dict[int, "GPULoadStoreSpec"]):
+        self._gpu_spec_map = gpu_spec_map
         self.transfer_specs: dict[int, tuple[LoadStoreSpec, LoadStoreSpec]] = {}
         self.completed_transfers: list[TransferResult] = []
         self.waiting_jobs: set[int] = set()
@@ -96,9 +98,10 @@ class MockOffloadingWorker(OffloadingWorker):
         return finished
 
     def submit_store(
-        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+        self, job_id: int, device_ptrs: DevicePointers, dst_spec: LoadStoreSpec
     ) -> bool:
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        gpu_spec = self._gpu_spec_map.pop(id(device_ptrs))
+        self.transfer_specs[job_id] = (gpu_spec, dst_spec)
         self.waiting_jobs.add(job_id)
         return True
 
@@ -106,10 +109,11 @@ class MockOffloadingWorker(OffloadingWorker):
         self,
         job_id: int,
         src_spec: LoadStoreSpec,
-        dst_spec: LoadStoreSpec,
+        device_ptrs: DevicePointers,
         expedited: bool = False,
     ) -> bool:
-        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        gpu_spec = self._gpu_spec_map.pop(id(device_ptrs))
+        self.transfer_specs[job_id] = (src_spec, gpu_spec)
         self.waiting_jobs.add(job_id)
         if self.fail_loads:
             self._failing_jobs.add(job_id)
@@ -144,7 +148,21 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager.get_stats.return_value = None
         self.manager.config_info.return_value = [{}]
         self.manager.on_new_request.return_value = RequestOffloadingContext()
-        self.handler = MockOffloadingWorker()
+
+        self._gpu_spec_map: dict[int, GPULoadStoreSpec] = {}
+        self.handler = MockOffloadingWorker(self._gpu_spec_map)
+
+        import vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker as _cm
+        from vllm.v1.kv_offload.pointer_utils import resolve_device_pointers as _orig
+
+        def _tracking_resolve(
+            device_spec: GPULoadStoreSpec, kv_caches: CanonicalKVCaches
+        ) -> DevicePointers:
+            result = _orig(device_spec, kv_caches)
+            self._gpu_spec_map[id(result)] = device_spec
+            return result
+
+        _cm.resolve_device_pointers = _tracking_resolve
 
     def get_manager(self) -> OffloadingManager:
         return self.manager
