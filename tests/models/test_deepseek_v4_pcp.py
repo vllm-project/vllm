@@ -126,7 +126,9 @@ def _generate(model_path, output_path, pcp, tp=1, ep=False):
     ],
     ids=["pcp", "tp_ep", "mxfp4_tp_ep"],
 )
-def test_pcp_generation_across_compression_boundaries(tmp_path, topologies, expert_dtype):
+def test_pcp_generation_across_compression_boundaries(
+    tmp_path, topologies, expert_dtype
+):
     """Keep attention dimensions with three layers and eight experts."""
     model = tmp_path / "model"
     model.mkdir()
