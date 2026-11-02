@@ -2378,13 +2378,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
-            draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
+            # Drafts aren't used when none were proposed this step (e.g. skip_drafts).
+            pp_handler = self.pp_handler if num_spec_tokens > 0 else None
+            if pp_handler is not None or input_batch.has_structured_output_reqs:
+                draft_tokens = self.req_states.draft_tokens[input_batch.idx_mapping]
+            else:
+                # set_draft_tokens reads only the width; PP needs its own copy.
+                draft_tokens = self.req_states.draft_tokens[: input_batch.num_reqs]
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch, draft_tokens[:, :num_spec_tokens]
             )
-            # Drafts aren't used when none were proposed this step (e.g. skip_drafts).
-            if self.pp_handler is not None and num_spec_tokens > 0:
-                self.pp_handler.broadcast_drafts(draft_tokens)
+            if pp_handler is not None:
+                pp_handler.broadcast_drafts(draft_tokens)
 
         if defer_kv_finalize:
             self.kv_connector.finalize_step()
