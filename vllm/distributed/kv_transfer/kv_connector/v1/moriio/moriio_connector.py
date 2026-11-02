@@ -30,6 +30,12 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorTransferResults,
     SupportsHMA,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
+    KVConnectorPromMetrics,
+    KVConnectorStats,
+    PromMetric,
+    PromMetricT,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
     EngineId,
@@ -89,6 +95,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping impor
     MoRIIOWriteTPMapping,
     WriteTarget,
     compute_write_tp_mapping,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.stats import (
+    MoRIIOKVConnectorStats,
+    MoRIIOPromMetrics,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     MambaConvSplitInfo,
@@ -481,6 +491,35 @@ class MoRIIOConnector(KVConnectorBase_V1, SupportsHMA):
     def get_loaded_kv_cache_group_ids(self, request: "Request") -> tuple[int, ...]:
         return self._kv_cache_config.transfer_group_ids
 
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """Return stats recorded since the last call on this side.
+
+        The worker records transfers and transfer failures; the scheduler
+        records READ-mode KV expiry.
+        """
+        owner = self.connector_worker or self.connector_scheduler
+        if owner is None:
+            return None
+        return owner.get_kv_connector_stats()
+
+    @classmethod
+    def build_kv_connector_stats(
+        cls, data: dict[str, Any] | None = None
+    ) -> KVConnectorStats | None:
+        return MoRIIOKVConnectorStats(data=data or {})
+
+    @classmethod
+    def build_prom_metrics(
+        cls,
+        vllm_config: VllmConfig,
+        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        labelnames: list[str],
+        per_engine_labelvalues: dict[int, list[object]],
+    ) -> KVConnectorPromMetrics:
+        return MoRIIOPromMetrics(
+            vllm_config, metric_types, labelnames, per_engine_labelvalues
+        )
+
     def shutdown(self):
         if self.connector_worker is not None:
             self.connector_worker.shutdown()
@@ -774,6 +813,7 @@ class MoRIIOConnectorScheduler:
         )
         # Buffer for early ACKs that arrive before request_finished.
         self._pending_sent_acks: dict[ReqId, float] = {}
+        self.xfer_stats = MoRIIOKVConnectorStats()
         self.paths: dict[str, zmq.Socket] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
         self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
@@ -1508,6 +1548,11 @@ class MoRIIOConnectorScheduler:
 
         return meta
 
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.xfer_stats.is_empty():
+            return None
+        return self.xfer_stats.clone_and_reset()
+
     def shutdown(self):
         for path, sock in self.paths.items():
             try:
@@ -1748,16 +1793,19 @@ class MoRIIOConnectorScheduler:
         expired = [
             req_id
             for req_id, (deadline, _) in self._deferred_send_deadlines.items()
-            if self.mode == MoRIIOMode.READ and now >= deadline
+            if self.mode == MoRIIOMode.READ and now >= deadline and req_id not in safe
         ]
         if expired:
             safe.update(expired)
+            self.xfer_stats.record_kv_expired_req(len(expired))
             logger.warning(
                 "Reaped %d deferred sends with no finished_sending "
                 "notification after %.0fs. This indicates lost async KV "
-                "completion notifications from the KV connector.",
+                "completion notifications from the KV connector. "
+                "Request ids: %s",
                 len(expired),
                 self._defer_timeout,
+                expired[:8],
             )
 
         # Finalize the requests we are surfacing: drop their deferral/park
@@ -1977,6 +2025,12 @@ class MoRIIOConnectorWorker:
         # Used by _pop_done_transfers to abort transfers whose RDMA
         # completion is lost, instead of hanging forever.
         self._recving_transfers_start: dict[str, float] = {}
+        # [bytes, descriptors] posted per in-flight recv, for xfer_stats.
+        self._recving_transfers_size: defaultdict[ReqId, list[int]] = defaultdict(
+            lambda: [0, 0]
+        )
+        # Written by the main thread and by the MoRIIOWriter thread.
+        self.xfer_stats = MoRIIOKVConnectorStats()
         # Destination attention blocks per in-flight recv. Failed non-HMA reads
         # report these to the scheduler's single-group recovery path.
         self._recving_local_blocks: dict[ReqId, list[int]] = {}
@@ -2956,6 +3010,8 @@ class MoRIIOConnectorWorker:
                 failed_recving.add(mapping[transfer_id])
             while len(pending) > _MAX_UNMATCHED_WRITE_FAILURES:
                 pending.popitem(last=False)
+            if failed_recving:
+                self.xfer_stats.record_failed_transfer(len(failed_recving))
             done_recving |= failed_recving
 
         return KVConnectorTransferResults(
@@ -2963,6 +3019,11 @@ class MoRIIOConnectorWorker:
             finished_recving=done_recving,
             failed_recving=failed_recving,
         )
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        if self.xfer_stats.is_empty():
+            return None
+        return self.xfer_stats.clone_and_reset()
 
     def _pop_done_transfers(self) -> set[str]:
         done_req_ids: set[str] = set()
@@ -2982,28 +3043,45 @@ class MoRIIOConnectorWorker:
                 if statuses and state is TransferBatchState.DONE:
                     host, ports, xfer_id = self._recving_transfers_callback_addr[req_id]
                     done_req_ids.add(xfer_id)
+                    total_bytes, num_descs = self._recving_transfers_size[req_id]
+                    self.xfer_stats.record_transfer(
+                        time.monotonic() - self._recving_transfers_start[req_id],
+                        total_bytes,
+                        num_descs,
+                    )
                     self._send_read_release(xfer_id, host, ports)
                     to_remove.append(req_id)
                 elif state is TransferBatchState.FAILED:
                     failed_status = next(
                         (status for status in statuses if status.Failed()), None
                     )
+                    host, ports, xfer_id = self._recving_transfers_callback_addr[req_id]
                     logger.error(
-                        "RDMA transfer failed for request %s: %s (code=%s). "
+                        "RDMA transfer failed for request %s (transfer %s, "
+                        "prefill %s:%s, %d/%d reads failed): %s (code=%s). "
                         "Notifying prefill to free blocks and recording the "
                         "load error where scheduler recovery is supported.",
                         req_id,
+                        xfer_id,
+                        host,
+                        ",".join(ports),
+                        sum(1 for status in statuses if status.Failed()),
+                        len(statuses),
                         failed_status.Message() if failed_status else "unknown",
                         failed_status.Code() if failed_status else "unknown",
                     )
+                    self.xfer_stats.record_failed_transfer()
                     self._record_failed_recv(req_id)
-                    host, ports, xfer_id = self._recving_transfers_callback_addr[req_id]
                     try:
                         self._send_read_release(xfer_id, host, ports)
                     except Exception:
+                        self.xfer_stats.record_failed_notification()
                         logger.exception(
-                            "Failed to send error notification for request %s",
+                            "Failed to send error notification for request %s "
+                            "to prefill %s:%s",
                             req_id,
+                            host,
+                            ",".join(ports),
                         )
                     to_remove.append(req_id)
                     # Deliberately not in done_req_ids: the decode KV is
@@ -3016,19 +3094,34 @@ class MoRIIOConnectorWorker:
                     # indefinitely on this request.
                     _age = time.monotonic() - self._recving_transfers_start[req_id]
                     if _age > _xfer_timeout:
+                        host, ports, xfer_id = self._recving_transfers_callback_addr[
+                            req_id
+                        ]
                         logger.error(
-                            "RDMA read TIMED OUT for req %s after %.1fs "
+                            "RDMA read TIMED OUT for req %s (transfer %s, "
+                            "prefill %s:%s, %d/%d reads pending) after %.1fs "
                             "(kv_connector_extra_config.recv_abort_timeout=%.0f)",
                             req_id,
+                            xfer_id,
+                            host,
+                            ",".join(ports),
+                            sum(
+                                1
+                                for status in statuses
+                                if not (status.Succeeded() or status.Failed())
+                            ),
+                            len(statuses),
                             _age,
                             _xfer_timeout,
                         )
+                        self.xfer_stats.record_failed_transfer()
                         self._record_failed_recv(req_id)
                         to_remove.append(req_id)
             for req_id in to_remove:
                 del self._recving_transfers[req_id]
                 del self._recving_transfers_callback_addr[req_id]
                 self._recving_transfers_start.pop(req_id, None)
+                self._recving_transfers_size.pop(req_id, None)
                 self._recving_local_blocks.pop(req_id, None)
 
             return done_req_ids
@@ -3968,6 +4061,9 @@ class MoRIIOConnectorWorker:
                 break
             time.sleep(_backoff)
             _backoff = min(_backoff * 2, _SQ_FULL_BACKOFF_MAX_S)
+        size = self._recving_transfers_size[request_id]
+        size[0] += sum(sizes)
+        size[1] += len(sizes)
         return transfer_status
 
     @staticmethod

@@ -41,6 +41,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_layout import (
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
     _rank_heads,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.moriio.stats import (
+    MoRIIOKVConnectorStats,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (
     derive_mamba_conv_split,
 )
@@ -169,6 +172,8 @@ class Rank:
     worker: MoRIIOConnectorWorker
     wrapper: Any = None
     sent: list = field(default_factory=list)
+    # (bytes, descriptors) of each RDMA post the fake transport executed.
+    posted: list[tuple[int, int]] = field(default_factory=list)
 
 
 def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Rank:
@@ -243,6 +248,7 @@ def _build_rank(model, tp_rank, tp_size, layout, hma, state, is_producer) -> Ran
         layer.name: [b""] * meta_counts[layer.name] for layer in layers
     }
     worker._record_slice_layouts(caches)
+    worker.xfer_stats = MoRIIOKVConnectorStats()
     # Built without __init__: there is no engine to shut down.
     worker.shutdown = lambda: None
     return Rank(tp_rank, tp_size, caches, regions, worker)
@@ -291,6 +297,7 @@ def _connect(producer: Rank, consumers: list[Rank], dp_engine: str) -> None:
         return sessions, metadata
 
     def write_remote_data(sizes, local_offsets, remote_offsets, session):
+        producer.posted.append((sum(sizes), len(sizes)))
         for size, local, remote in zip(sizes, local_offsets, remote_offsets):
             session.dst[remote : remote + size] = session.src[local : local + size]
         return "status"
@@ -313,6 +320,18 @@ def _connect(producer: Rank, consumers: list[Rank], dp_engine: str) -> None:
         _is_transfer_terminal_locked=lambda transfer_id: False,
     )
     producer.worker.moriio_wrapper = producer.wrapper
+
+
+def _assert_one_transfer_recorded(rank: Rank) -> None:
+    """The rank's stats hold one transfer covering every post, or nothing."""
+    stats = rank.worker.get_kv_connector_stats()
+    if not rank.posted:
+        assert stats is None
+        return
+    assert isinstance(stats, MoRIIOKVConnectorStats)
+    assert stats.data["bytes_transferred"] == [sum(b for b, _ in rank.posted)]
+    assert stats.data["num_descriptors"] == [sum(n for _, n in rank.posted)]
+    assert stats.data["num_failed_transfers"] == []
 
 
 def _consumer_wrapper() -> MoRIIOWrapper:
@@ -419,6 +438,7 @@ def test_write_lands_every_shard_byte_exact(
         finished.add(producer.tp_rank)
         # Prefill frees its blocks whether or not it had anything to write.
         assert [ack.transfer_id for ack in producer.wrapper.done_req_ids] == ["t"]
+        _assert_one_transfer_recorded(producer)
         for d, consumer in enumerate(consumers):
             done = consumer.wrapper.pop_finished_write_req_ids()
             assert done == (

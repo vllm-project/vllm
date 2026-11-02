@@ -219,11 +219,7 @@ class MoRIIOWriter:
             try:
                 self._execute_write_task(task)
             except Exception:
-                logger.exception(
-                    "Write task failed for request %s, marking done",
-                    task.request_id,
-                )
-                self._mark_request_done(task.transfer_id)
+                self._fail_write_task(task, deferred=False)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
@@ -241,11 +237,7 @@ class MoRIIOWriter:
                 try:
                     self._execute_write_task(task)
                 except Exception:
-                    logger.exception(
-                        "Deferred write task failed for request %s, marking done",
-                        task.request_id,
-                    )
-                    self._mark_request_done(task.transfer_id)
+                    self._fail_write_task(task, deferred=True)
             elif (
                 now - task.enqueue_time > defer_timeout
                 and self.worker.moriio_wrapper.fail_unallocated_write(task.transfer_id)
@@ -256,12 +248,34 @@ class MoRIIOWriter:
 
         self._deferred_tasks = still_deferred
 
+    def _fail_write_task(self, task: WriteTask, deferred: bool) -> None:
+        """Log a WRITE task that raised and free its blocks.
+
+        Must be called from an `except` block.
+        """
+        self.worker.xfer_stats.record_failed_transfer()
+        logger.exception(
+            "%s task failed for request %s (transfer %s, layer %s, "
+            "remote %s:%s), marking done",
+            "Deferred write" if deferred else "Write",
+            task.request_id,
+            task.transfer_id,
+            task.layer_name,
+            task.remote_ip,
+            task.remote_notify_port,
+        )
+        self._mark_request_done(task.transfer_id)
+
     def _notify_write_failed(self, task: WriteTask, age: float) -> None:
         self._clear_transfer_state(task.transfer_id)
+        self.worker.xfer_stats.record_kv_expired_req()
         logger.error(
-            "Deferred write task for request %s timed out after %.1fs waiting "
-            "for remote blocks",
+            "Deferred write task for request %s (transfer %s, remote %s:%s) "
+            "timed out after %.1fs waiting for remote blocks",
             task.request_id,
+            task.transfer_id,
+            task.remote_ip,
+            task.remote_notify_port,
             age,
         )
         # No remote allocation arrived, so the decode DP rank that owns the
@@ -278,9 +292,13 @@ class MoRIIOWriter:
                         message_type="write_failed",
                     )
                 except Exception:
+                    self.worker.xfer_stats.record_failed_notification()
                     logger.exception(
-                        "Failed to notify decode DP rank %d that transfer %s timed out",
+                        "Failed to notify decode DP rank %d at %s:%s that "
+                        "transfer %s timed out",
                         decode_dp_rank,
+                        remote_ip,
+                        remote_port,
                         task.transfer_id,
                     )
 
@@ -380,6 +398,8 @@ class MoRIIOWriter:
         # This event is used to synchronize the kv transfer and computation tasks.
         task.event.synchronize()
 
+        post_start = time.monotonic()
+        posted_bytes = posted_descs = 0
         is_mamba = self.worker._is_mamba_layer(task.layer_name)
         transfer_statuses: list[Any] = []
         for target in self._write_targets(task):
@@ -409,8 +429,15 @@ class MoRIIOWriter:
                 ]
             for plan in plans:
                 transfer_statuses.extend(self._do_layer_write(plan, sessions))
+                posted_bytes += sum(plan.transfer_sizes)
+                posted_descs += len(plan.transfer_sizes)
         with self._write_state_lock:
             request_info.transfer_statuses.extend(transfer_statuses)
+            if posted_descs:
+                if request_info.transfer_start is None:
+                    request_info.transfer_start = post_start
+                request_info.transfer_bytes += posted_bytes
+                request_info.transfer_descs += posted_descs
 
         # Finalize if all layers complete
         self._mark_write_done(task.transfer_id, request_info)
@@ -617,6 +644,9 @@ class MoRIIOWriter:
             transfer_statuses = list(request_info.transfer_statuses)
             request_info.transfer_statuses.clear()
             request_info.completion_notified = True
+            transfer_start = request_info.transfer_start
+            transfer_bytes = request_info.transfer_bytes
+            transfer_descs = request_info.transfer_descs
 
         # Wait for this request's transfers to complete.
         self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
@@ -636,6 +666,10 @@ class MoRIIOWriter:
                 message_fields=(
                     {"num_writers": num_writers} if num_writers != 1 else None
                 ),
+            )
+        if transfer_start is not None:
+            self.worker.xfer_stats.record_transfer(
+                time.monotonic() - transfer_start, transfer_bytes, transfer_descs
             )
         # mark request as done, then we can free the blocks
         with self.worker.moriio_wrapper.lock:
