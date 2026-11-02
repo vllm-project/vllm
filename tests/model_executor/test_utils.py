@@ -17,6 +17,7 @@ from vllm.model_executor.utils import (
     get_live_param,
     kernel_parameters,
     move_parameter,
+    refill_derived,
     replace_parameter,
     retire_parameter,
     set_kernel_parameter,
@@ -422,3 +423,49 @@ def test_transposed_kept_param_keeps_checkpoint_dims(single_rank_tp: None) -> No
     assert layer.weight is weight
     assert torch.equal(weight, torch.arange(6.0).view(2, 3).t())
     assert (weight.input_dim, weight.output_dim) == (1, 0)
+
+
+@pytest.mark.parametrize(
+    "held,shape,in_place",
+    [(True, (2, 3), True), (True, (3, 3), False), (False, (2, 3), False)],
+    ids=["same", "new", "absent"],
+)
+def test_refill_derived(held: bool, shape: tuple[int, int], in_place: bool) -> None:
+    """A tensor derived from the weights (a plain attribute kernels read) is
+    refilled in place when the layout matches, so captured graphs keep its
+    address, and never becomes a parameter."""
+    layer = torch.nn.Module()
+    if held:
+        layer.t = torch.zeros(2, 3)
+    old = getattr(layer, "t", None)
+    new = refill_derived(layer, "t", torch.full(shape, 2.0))
+    assert new is layer.t
+    torch.testing.assert_close(new, torch.full(shape, 2.0))
+    assert (new is old) == in_place
+    assert not dict(layer.named_parameters())
+
+
+def test_mxfp4_lora_experts_keep_mxfp4_constants() -> None:
+    """The LoRA experts keep the MXFP4 SwiGLU constants (the MRO would otherwise
+    resolve the base class's empty tuple) and the bias index, so a rerun's new
+    experts object reads the first one's tensors."""
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+        TrtLlmMxfp4LoRAExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.trtllm_mxfp4_moe import (
+        TrtLlmMxfp4ExpertsBase,
+    )
+
+    names = TrtLlmMxfp4LoRAExperts.kept_constants
+    assert set(TrtLlmMxfp4ExpertsBase.kept_constants) <= set(names)
+    assert "_w13_bias_up_gate_index" in names
+
+    layer = torch.nn.Module()
+    kept = []
+    for _ in range(2):  # every rerun builds new experts
+        experts = object.__new__(TrtLlmMxfp4LoRAExperts)
+        for name in names:
+            setattr(experts, name, torch.rand(4))
+        experts.keep_constants(layer)
+        kept.append([getattr(experts, name) for name in names])
+    assert all(first is second for first, second in zip(*kept))
