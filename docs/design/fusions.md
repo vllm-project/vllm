@@ -26,7 +26,7 @@ or just on the low or high end.
 | [RoPE + KV-Cache Update](#rope--kv-cache-update-fuse_rope_kvcache)             | `fuse_rope_kvcache`          | Rotary embedding → KV cache write              | O2 (ROCm/AITER only)           | 2-4%               | No        | Low          |
 | [QK Norm + RoPE](#qk-norm--rope-enable_qk_norm_rope_fusion)                    | `enable_qk_norm_rope_fusion` | Q/K RMSNorm → rotary embedding                 | Off by default                 | 2-3%               | No        | Low          |
 | [RMSNorm + Quant](#rmsnorm--quantization-fuse_norm_quant)                      | `fuse_norm_quant`            | RMSNorm (+residual add) → FP8/FP4 quant        | O1 (conditional)               | 1-4%               | No        | Always       |
-| [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul activation → FP8/FP4 quant            | O1 (conditional)               | 1-4%               | No        | Always       |
+| [SiLU+Mul + Quant](#silumul--quantization-fuse_act_quant)                      | `fuse_act_quant`             | SiLU+Mul / GELU-tanh+Mul → FP8/FP4 quant       | O1 (conditional)               | 1-4%               | No        | Always       |
 | [RMSNorm + Padding](#rmsnorm--padding-fuse_act_padding)                        | `fuse_act_padding`           | Residual add + RMSNorm → padding               | O1 (ROCm/AITER only)           | TBD                | No        | Always       |
 | [MLA Dual RMSNorm](#mla-dual-rmsnorm-fuse_mla_dual_rms_norm)                   | `fuse_mla_dual_rms_norm`     | Paired Q + KV RMSNorm (+ FP8 quant) → 1 kernel | O1 (ROCm/AITER only)           | 1-2%               | No        | Always       |
 
@@ -44,7 +44,7 @@ The table below lists the quantization schemes supported by each fusion on each 
 | `fuse_rope_kvcache`          | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `enable_qk_norm_rope_fusion` | FP16/BF16                                | FP16/BF16                                | FP16/BF16                                | FP16/BF16     | —                                        |
 | `fuse_norm_quant`            | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | FP8 static, FP8 per-token, FP8 per-group | —             | FP8 static, FP8 per-token, FP8 per-group |
-| `fuse_act_quant`             | FP8 static, NVFP4                        | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
+| `fuse_act_quant`             | FP8 static, NVFP4 (SiLU, GELU-tanh)      | FP8 static, FP8 per-group (128/64)       | FP8 static, FP8 per-group (128/64)       | —             | FP8 per-group                            |
 | `fuse_act_padding`           | —                                        | —                                        | —                                        | —             | FP16/BF16                                |
 | `fuse_mla_dual_rms_norm`     | —                                        | —                                        | —                                        | —             | BF16                                     |
 
@@ -243,6 +243,8 @@ Supported quantization scheme/hardware combinations:
 
 **What it fuses.** Fuses the `silu_and_mul` gate-up projection activation with subsequent quantization into a single kernel,
 avoiding materialization of the full-precision post-activation tensor.
+For NVFP4 the same fusion exists for `gelu_tanh_and_mul` (GeGLU models such as Gemma 2/3/4), wired
+through the manual `maybe_fused_act_quant` producer in the model MLPs rather than a compiler pattern.
 
 Note that AITER fusions are in a separate pass in `vllm.compilation.passes.fusion.rocm_aiter_fusion`.
 
@@ -251,6 +253,7 @@ Supported quantization scheme/hardware combinations:
 - FP8 static per-tensor: CUDA & HIP kernel
 - FP8 dynamic per-group (128/64): CUDA kernel (sm89+, not active when DeepGemm is used on sm100+)
 - NVFP4 dynamic: CUDA sm100+ only with FlashInfer
+- NVFP4 dynamic, GELU-tanh+Mul: CUDA sm100 / sm120, manual fusion only (`gelu_tanh_and_mul_nvfp4_quant`)
 - FP8 per-token-group (128): ROCm AITER only
 
 **Code locations.**

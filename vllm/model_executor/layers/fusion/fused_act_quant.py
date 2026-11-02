@@ -17,7 +17,11 @@ from collections.abc import Callable
 
 import torch
 
-from vllm.model_executor.layers.activation import ReLUSquaredActivation, SiluAndMul
+from vllm.model_executor.layers.activation import (
+    GeluAndMul,
+    ReLUSquaredActivation,
+    SiluAndMul,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     get_input_quant_key,
@@ -98,10 +102,15 @@ def _silu_and_mul_fp8_dynamic_128(
     return _silu_and_mul_fp8_dynamic_block(x, linear, 128, kFp8Dynamic128Sym)
 
 
-def _silu_and_mul_nvfp4_dynamic(
-    x: torch.Tensor, linear: LinearBase
+def _act_and_mul_nvfp4_dynamic(
+    fused_op: Callable, x: torch.Tensor, linear: LinearBase
 ) -> QuantizedActivation:
-    """SiluAndMul + NVFP4 dynamic quantization."""
+    """Gated activation + NVFP4 dynamic quantization through ``fused_op``.
+
+    ``fused_op(result, block_scale, x, input_global_scale_inv)`` is one of the
+    ``*_and_mul_nvfp4_quant`` kernels: act(x[..., :d]) * x[..., d:] quantized
+    to NVFP4 with swizzled block scales.
+    """
     assert x.ndim in (2, 3), f"Input must be 2D or 3D, got {x.shape}"
     d = x.shape[-1] // 2
     out_shape = x.shape[:-1] + (d,)
@@ -131,9 +140,7 @@ def _silu_and_mul_nvfp4_dynamic(
         "input_global_scale_inv is required for NVFP4 quantization"
     )
 
-    torch.ops._C.silu_and_mul_nvfp4_quant(
-        result, block_scale, x, input_global_scale_inv
-    )
+    fused_op(result, block_scale, x, input_global_scale_inv)
 
     return QuantizedActivation(
         data=result.view(out_shape[:-1] + (d // 2,)),
@@ -141,6 +148,38 @@ def _silu_and_mul_nvfp4_dynamic(
         orig_dtype=x.dtype,
         orig_shape=out_shape,
         quant_key=kNvfp4Dynamic,
+    )
+
+
+def _silu_and_mul_nvfp4_dynamic(
+    x: torch.Tensor, linear: LinearBase
+) -> QuantizedActivation:
+    """SiluAndMul + NVFP4 dynamic quantization."""
+    return _act_and_mul_nvfp4_dynamic(torch.ops._C.silu_and_mul_nvfp4_quant, x, linear)
+
+
+def _gelu_tanh_and_mul_nvfp4_dynamic(
+    x: torch.Tensor, linear: LinearBase
+) -> QuantizedActivation:
+    """GeluAndMul(approximate="tanh") + NVFP4 dynamic quantization."""
+    return _act_and_mul_nvfp4_dynamic(
+        torch.ops._C.gelu_tanh_and_mul_nvfp4_quant, x, linear
+    )
+
+
+def _gelu_tanh_and_mul_nvfp4_supported(
+    act_fn: torch.nn.Module,
+    x: torch.Tensor,
+    linear: LinearBase,
+) -> bool:
+    """The fused kernel implements the tanh approximation only and needs
+    d = x.shape[-1] // 2 to be a multiple of 16; anything else keeps the
+    unfused path."""
+    return (
+        isinstance(act_fn, GeluAndMul)
+        and act_fn.approximate == "tanh"
+        and x.ndim == 2
+        and x.shape[-1] % 32 == 0
     )
 
 
@@ -191,6 +230,14 @@ if current_platform.is_cuda_alike():
 # Add NVFP4 if supported (requires SM100+)
 if current_platform.is_cuda() and hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant"):
     _FUSED_ACT_QUANT[(SiluAndMul, kNvfp4Dynamic)] = _silu_and_mul_nvfp4_dynamic
+
+# GeGLU (Gemma 2/3/4) + NVFP4: the kernel only covers approximate="tanh".
+if current_platform.is_cuda() and hasattr(
+    torch.ops._C, "gelu_tanh_and_mul_nvfp4_quant"
+):
+    _GELU_TANH_NVFP4_KEY = (GeluAndMul, kNvfp4Dynamic)
+    _FUSED_ACT_QUANT[_GELU_TANH_NVFP4_KEY] = _gelu_tanh_and_mul_nvfp4_dynamic
+    _FUSED_ACT_QUANT_SUPPORT[_GELU_TANH_NVFP4_KEY] = _gelu_tanh_and_mul_nvfp4_supported
 
 
 def maybe_fused_act_quant(
