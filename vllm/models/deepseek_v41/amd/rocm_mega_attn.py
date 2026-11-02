@@ -5,6 +5,7 @@ from typing import cast
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.models.deepseek_v41.amd.rocm import (
@@ -14,6 +15,7 @@ from vllm.models.deepseek_v41.amd.rocm import (
 )
 from vllm.models.deepseek_v41.sparse_mla import DeepseekV4FlashMLAMetadata
 from vllm.platforms import current_platform
+from vllm.platforms.rocm import on_gfx950
 
 
 class DeepseekV41ROCMAiterMLAMegAttnBackend(DeepseekV41ROCMAiterMLASparseBackend):
@@ -26,11 +28,56 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
     """ROCm mega-attention layer for DeepSeek V4.1.
 
     Q preparation still applies RoPE and uses the ordinary head-major layout.
-    Prefill and decode read ROCm's paged 584-byte cache records directly and
-    fuse sparse attention with inverse RoPE and MXFP8 output.
+    Prefill reads ROCm's paged 584-byte cache records directly and fuses
+    sparse attention with inverse RoPE and MXFP8 output. Decode uses the
+    ordinary ROCm sparse attention path.
     """
 
     backend_cls = DeepseekV41ROCMAiterMLAMegAttnBackend
+
+    @classmethod
+    def is_available_for(cls, vllm_config: VllmConfig) -> bool:
+        """Conservatively select the prefill kernel on MI355X."""
+        if not current_platform.is_rocm() or not on_gfx950():
+            return False
+        if current_platform.get_device_name() not in (
+            "AMD Instinct MI355X",
+            "AMD Instinct MI355X VF",
+        ):
+            return False
+        if not hasattr(torch.ops._rocm_C, "fused_norm_rope_attn_rope_cast_prefill"):
+            return False
+        if vllm_config.model_config.dtype != torch.bfloat16:
+            return False
+        if vllm_config.cache_config.cache_dtype not in ("auto", "fp8", "fp8_ds_mla"):
+            return False
+        if vllm_config.kv_transfer_config is not None:
+            return False
+        parallel_config = vllm_config.parallel_config
+        if (
+            parallel_config.prefill_context_parallel_size != 1
+            or parallel_config.decode_context_parallel_size != 1
+        ):
+            return False
+        config = vllm_config.model_config.hf_config
+        config = getattr(config, "text_config", config)
+        if (
+            getattr(config, "head_dim", None) != 512
+            or getattr(config, "qk_rope_head_dim", None) != 64
+            or (getattr(config, "sliding_window", 0) or 0) <= 0
+        ):
+            return False
+        n_heads = getattr(config, "num_attention_heads", 0) or 0
+        n_groups = getattr(config, "o_groups", 0) or 0
+        tp_size = parallel_config.tensor_parallel_size
+        if n_heads % tp_size or n_groups % tp_size:
+            return False
+        n_local_heads, n_local_groups = n_heads // tp_size, n_groups // tp_size
+        return (
+            0 < n_local_heads <= 65535
+            and n_local_groups > 0
+            and n_local_heads % n_local_groups == 0
+        )
 
     def forward_mqa(
         self,
@@ -78,14 +125,15 @@ class DeepseekV41ROCMAiterMegaAttnAttention(DeepseekV41ROCMAiterMLAAttention):
                 ),
             )
         if swa_metadata.num_decodes > 0:
-            self._forward_decode_mega(
+            self._forward_decode(
                 q=q[:num_decode_tokens],
                 positions=positions[:num_decode_tokens],
                 kv_cache=self_kv_cache,
                 swa_metadata=swa_metadata,
                 attn_metadata=rocm_metadata,
                 swa_only=swa_only,
-                output=(
+                output=None,
+                output_mxfp8=(
                     output.data[:num_decode_tokens],
                     output.scale[:num_decode_tokens],
                 ),

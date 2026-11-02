@@ -61,6 +61,9 @@ from vllm.models.deepseek_v4.amd.model import (
 from vllm.models.deepseek_v4.common.spec_decode import needs_mtp_hidden_buffer
 from vllm.models.deepseek_v41.amd.mono_decode import MonoDecodeLayer
 from vllm.models.deepseek_v41.amd.rocm import DeepseekV41ROCMAiterMLAAttention
+from vllm.models.deepseek_v41.amd.rocm_mega_attn import (
+    DeepseekV41ROCMAiterMegaAttnAttention,
+)
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.sequence import IntermediateTensors
@@ -171,6 +174,8 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
             "and will be removed in a future release. "
             "Use ROCM_FLASHMLA_SPARSE_DSV41 instead."
         )
+    if DeepseekV41ROCMAiterMegaAttnAttention.is_available_for(vllm_config):
+        return DeepseekV41ROCMAiterMegaAttnAttention
     return DeepseekV41ROCMAiterMLAAttention
 
 
