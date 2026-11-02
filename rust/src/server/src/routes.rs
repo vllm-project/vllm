@@ -26,12 +26,12 @@ mod world_size;
 
 use std::sync::Arc;
 
-use axum::extract::DefaultBodyLimit;
-use axum::extract::MatchedPath;
-use axum::http::{Method, StatusCode};
+use axum::extract::{DefaultBodyLimit, MatchedPath, Request};
+use axum::http::{Method, StatusCode, Uri};
 use axum::middleware::{from_fn, from_fn_with_state};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use tower::ServiceExt as _;
 use tower_http::trace::TraceLayer;
 use tracing::{info, warn};
 
@@ -267,6 +267,7 @@ fn build_router_with_options(
 
     let enable_request_id_headers = state.api_server_options.enable_request_id_headers;
     let enable_api_key_auth = state.has_api_keys();
+    let enable_access_log = state.access_log.enabled;
     let mut router = router
         .with_state(state.clone())
         .layer(match state.api_server_options.request_body_limit_bytes {
@@ -293,11 +294,48 @@ fn build_router_with_options(
     // requests are visible, while metrics/load only see authenticated traffic.
     router = router.layer(TraceLayer::new_for_http());
 
+    // Log every response, including rejected and unrouted ones, like Python's
+    // uvicorn access log.
+    if enable_access_log {
+        router = router.layer(from_fn_with_state(state.clone(), middleware::log_access));
+    }
+
     if enable_request_id_headers {
         router = router.layer(from_fn(middleware::set_request_id_header));
     }
 
     router
+}
+
+/// Also serve every route of `router` under `root_path`, like FastAPI's
+/// `root_path`: with `/llm`, both `/llm/v1/models` and `/v1/models` reach
+/// `/v1/models`.
+///
+/// The prefix is stripped before routing, so every layer sees the bare path.
+/// Like Starlette's `get_route_path`, it only matches up to a path segment
+/// boundary: `/llmx/v1/models` keeps its path.
+pub(crate) fn with_root_path(router: Router, root_path: String) -> Router {
+    Router::new().fallback_service(
+        router.map_request(move |request: Request| strip_root_path(request, &root_path)),
+    )
+}
+
+fn strip_root_path(mut request: Request, root_path: &str) -> Request {
+    let uri = request.uri();
+    let path = match uri.path().strip_prefix(root_path) {
+        Some("") => "/",
+        Some(path) if path.starts_with('/') => path,
+        _ => return request,
+    };
+    let path_and_query = match uri.query() {
+        Some(query) => format!("{path}?{query}"),
+        None => path.to_owned(),
+    };
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query =
+        Some(path_and_query.parse().expect("a suffix of a valid path is a valid path"));
+    *request.uri_mut() = Uri::from_parts(parts).expect("only the path changed");
+    request
 }
 
 #[cfg(test)]

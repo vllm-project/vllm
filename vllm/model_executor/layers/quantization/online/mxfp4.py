@@ -235,8 +235,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         ):
             # Triton-based backends: w13/w2 are triton_kernels.tensor.Tensor
             # Store on layer for apply(), scales are PrecisionConfig
-            layer.w13_weight = w13
-            layer.w2_weight = w2
+            layer.w13_weight_triton = w13
+            layer.w2_weight_triton = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
         else:
@@ -269,8 +269,8 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         # AITER_MXFP4_FP8` to read `self.w13_precision_config`/
         # `self.w2_precision_config` instead of `layer.w13_weight_scale`/
         # `layer.w2_weight_scale`. For those backends,
-        # `convert_weight_to_mxfp4_moe_kernel_format` deletes the latter, so
-        # `getattr` below would raise `AttributeError`. This is currently
+        # `convert_weight_to_mxfp4_moe_kernel_format` empties the latter, so
+        # the scales read below would be empty. This is currently
         # unreachable because `activation_quant_key` is hardcoded to
         # `kMxfp4Dynamic`
         # TODO: When supporting online activation quant key override,
@@ -296,18 +296,23 @@ class Mxfp4OnlineMoEMethod(OnlineMoEMethodBase):
         if getattr(layer, "_already_called_process_weights_after_loading", False):
             return
 
-        w13_weight, w2_weight = self.get_weights_for_quantization(layer)
-        self._zero_padding(layer, w13_weight, w2_weight)
-
         if self.mxfp4_backend == Mxfp4MoeBackend.NONE:
+            w13_weight, w2_weight = self.get_weights_for_quantization(layer)
+            self._zero_padding(layer, w13_weight, w2_weight)
             layer._already_called_process_weights_after_loading = True
             return
 
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
-        w13, w13_scale = _quantize_mxfp4_moe_weight(w13_weight)
-        w2, w2_scale = _quantize_mxfp4_moe_weight(w2_weight)
+        def quantize(w13_weight: torch.Tensor, w2_weight: torch.Tensor):
+            self._zero_padding(layer, w13_weight, w2_weight)
+            return (
+                *_quantize_mxfp4_moe_weight(w13_weight),
+                *_quantize_mxfp4_moe_weight(w2_weight),
+            )
+
+        w13, w13_scale, w2, w2_scale = self.quantize_weights(layer, quantize)
 
         self._setup_kernel(
             layer,
