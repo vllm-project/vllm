@@ -12,37 +12,11 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MegaMoEWeightSpec,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
-    _mxfp8_e4m3_quantize_torch,
+    requant_block_fp8_to_ue8m0,
 )
 
 # (local expert id, shard id); the fused shared expert has expert id None.
 Shard = tuple[int | None, str]
-
-
-def requant_block_fp8_to_ue8m0(
-    weight: torch.Tensor, scale: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Requantize block-FP8 weights to E4M3 with one UE8M0 scale per 1x32.
-
-    The SM100 MegaMoE feeds its scales to the block-scaled MMA, so they have to
-    be powers of two, one per row and 32 columns. A checkpoint with float32
-    scales per block (e.g. 128x128) is rounded once more to get there.
-
-    Args:
-        weight: ``(n, mn, k)`` E4M3 values.
-        scale: ``(n, mn / block_m, k / block_k)`` float32 dequantization
-            scales (``real = weight * scale``).
-
-    Returns:
-        ``(weight, sf)``: the requantized E4M3 weights and their UE8M0 scale
-        bytes, ``(n, mn, k / 32)`` uint8.
-
-    """
-    n, mn, k = weight.shape
-    _, blocks_m, blocks_k = scale.shape
-    real = weight.to(torch.float32).view(n, blocks_m, -1, blocks_k, k // blocks_k)
-    real.mul_(scale[:, :, None, :, None])
-    return _mxfp8_e4m3_quantize_torch(real.view(n, mn, k))
 
 
 class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):

@@ -9,16 +9,16 @@ import pytest
 import torch
 
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import MegaMoEActivation
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    requant_block_fp8_to_ue8m0,
+)
 from vllm.model_executor.model_loader.reload import (
     finish_reload,
     record_metadata_for_reloading,
     start_reload,
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
-from vllm.models.glm5next.nvidia.mega_moe import (
-    Glm5NextMegaMoEExperts,
-    requant_block_fp8_to_ue8m0,
-)
+from vllm.models.glm5next.nvidia.mega_moe import Glm5NextMegaMoEExperts
 
 BLOCK = (128, 128)
 HIDDEN, INTER = 256, 128
