@@ -166,6 +166,8 @@ def _bf16_mla_sparse_kernel(
         sink_scale = tl.exp2(e_max - m_final)
         acc *= sink_scale[:, None]
         e_sum = e_sum * sink_scale + tl.exp2(sink2 - m_final)
+        # A row with no valid key and a -inf sink has e_sum == 0; avoid 0/0.
+        e_sum = tl.where(e_sum == 0.0, 1.0, e_sum)
 
     # rescaling
     acc /= e_sum[:, None]
@@ -209,8 +211,13 @@ def triton_bf16_mla_sparse_interface(
         block_dpe: Size of positional embedding portion of dim_qk.
             Set to 0 when q/kv contain only the nope latent (e.g. DSv4
             prefill where RoPE is not split out).
-        attn_sink: Optional per-head sink logit added to the softmax
-            denominator (DSv4). ``-inf`` entries are a no-op.
+        attn_sink: Optional per-head fp32 sink logit added to the softmax
+            denominator (DSv4). It must be on ``q``'s device, contiguous and
+            at least ``num_heads_q`` long (extra padded entries are ignored).
+            ``-inf`` entries are a no-op. The returned ``softmax_lse`` and
+            ``max_logits`` are over the selected keys only and exclude the
+            sink, so do not merge them with other partial results as if they
+            included it.
 
     Returns:
         `out` `[num_tokens, num_heads_q, d_v]`, `max_logits`
@@ -256,8 +263,15 @@ def triton_bf16_mla_sparse_interface(
     )
 
     if attn_sink is not None:
-        assert attn_sink.dtype == torch.float32 and attn_sink.shape[0] >= num_heads_q
-        assert attn_sink.device == q.device and attn_sink.is_contiguous()
+        if attn_sink.dtype != torch.float32:
+            raise TypeError(f"attn_sink must be float32, got {attn_sink.dtype}")
+        if attn_sink.dim() != 1 or attn_sink.shape[0] < num_heads_q:
+            raise ValueError(
+                f"attn_sink must be 1-D with at least {num_heads_q} entries, "
+                f"got shape {tuple(attn_sink.shape)}"
+            )
+        if attn_sink.device != q.device or not attn_sink.is_contiguous():
+            raise ValueError("attn_sink must be contiguous and on q's device")
 
     k = kv
     v = kv[..., :d_v]
