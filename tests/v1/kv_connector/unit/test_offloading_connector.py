@@ -8,6 +8,7 @@ import msgspec
 import msgspec.msgpack
 import prometheus_client
 import pytest
+import torch
 import zmq
 from tqdm import tqdm
 
@@ -19,6 +20,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import MambaSpec
 from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
 
 # The offloaded block size must stay a whole number of GPU blocks.
@@ -396,6 +398,86 @@ def test_cpu_offloading_sliding_window_partial_chunk() -> None:
         _sliding_window_partial_chunk_test(llm)
     finally:
         del llm
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_mamba_packed_layout_cpu_reload(
+    vllm_runner, monkeypatch, enable_pickle
+) -> None:
+    """A real CPU hit must preserve Mamba output probabilities in BLHNC."""
+    monkeypatch.setenv("VLLM_KV_CACHE_LAYOUT", "BLHNC")
+    config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"cpu_bytes_to_use": 32 << 20, "block_size": 16},
+    )
+    with vllm_runner(
+        "state-spaces/mamba-130m-hf",
+        revision="1e76775f628fbf1350fbe4dbb3d971ba64af25a1",
+        dtype="float32",
+        mamba_cache_dtype="float32",
+        mamba_ssm_cache_dtype="float32",
+        max_model_len=128,
+        max_num_batched_tokens=128,
+        max_num_seqs=1,
+        num_gpu_blocks_override=32,
+        gpu_memory_utilization=(4 << 30)
+        / torch.cuda.get_device_properties(0).total_memory,
+        enforce_eager=True,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+        disable_hybrid_kv_cache_manager=False,
+        disable_log_stats=False,
+        block_size=16,
+        kv_transfer_config=config,
+    ) as runner:
+        llm = runner.llm
+
+        def cache_layout(worker):
+            groups = worker.model_runner.kv_cache_config.kv_cache_groups
+            assert all(isinstance(g.kv_cache_spec, MambaSpec) for g in groups)
+            return worker.vllm_config.cache_config.kv_cache_layout
+
+        assert llm.collective_rpc(cache_layout) == ["BLHNC"]
+
+        def transfer_bytes(name: str) -> int:
+            return sum(m.value for m in llm.get_metrics() if m.name == name)
+
+        store_metric = "vllm:kv_offload_store_bytes"
+        load_metric = "vllm:kv_offload_load_bytes"
+        stored_before = transfer_bytes(store_metric)
+        loaded_before = transfer_bytes(load_metric)
+        prompt = TokensPrompt(
+            prompt_token_ids=llm.get_tokenizer().encode(
+                "The cat sat on the mat. " * 20
+            )[:65]
+        )
+        params = SamplingParams(temperature=0, max_tokens=8, logprobs=5)
+        cold = llm.generate([prompt], params, use_tqdm=False)[0]
+        assert cold.num_cached_tokens == 0
+        _wait_for_prefix_cache_reset(llm, reset_connector=False)
+        assert transfer_bytes(store_metric) > stored_before
+        assert transfer_bytes(load_metric) == loaded_before
+        restored = llm.generate([prompt], params, use_tqdm=False)[0]
+        assert transfer_bytes(load_metric) > loaded_before
+        assert restored.num_cached_tokens == 64
+        reference, replay = cold.outputs[0], restored.outputs[0]
+        assert replay.token_ids == reference.token_ids
+        assert reference.logprobs is not None and replay.logprobs is not None
+        reference_probs = [
+            p[token].logprob
+            for token, p in zip(reference.token_ids, reference.logprobs, strict=True)
+        ]
+        replay_probs = [
+            p[token].logprob
+            for token, p in zip(replay.token_ids, replay.logprobs, strict=True)
+        ]
+        torch.testing.assert_close(
+            torch.tensor(replay_probs),
+            torch.tensor(reference_probs),
+            rtol=1.3e-6,
+            atol=1e-5,
+        )
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
