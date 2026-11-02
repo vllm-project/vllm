@@ -1044,10 +1044,7 @@ def test_triton_unified_attn_fp16_input_fp8_output(
 # The non-pow2 case mirrors real models like Phi-3-mini (head_size=96).
 HEAD_SIZES_USE_TD = [128, 256, 96]
 
-# block_size=32 is the performant USE_TD configuration (hoisted TD matches
-# or beats raw-pointer throughput there); block_size=16 remains behind raw
-# but is kept for coverage since TD is opt-in either way.
-BLOCK_SIZES_USE_TD = [16, 32]
+BLOCK_SIZES_USE_TD = [16, 32, 64, 128]
 
 
 def _run_use_td_case(
