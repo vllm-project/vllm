@@ -444,8 +444,9 @@ def prefault_on(monkeypatch: pytest.MonkeyPatch) -> None:
         torch.randn(64, 1024).to(torch.bfloat16),
         torch.randint(0, 256, (64, 1024), dtype=torch.uint8).view(torch.float8_e4m3fn),
         torch.randn(64, 1024).narrow(1, 512, 512),
+        torch.arange(2, dtype=torch.float32)[::2],
     ],
-    ids=["0d", "empty", "bf16", "fp8", "dim1_narrow"],
+    ids=["0d", "empty", "bf16", "fp8", "dim1_narrow", "strided_1elem"],
 )
 def test_copy_weight_prefault_copies_exact_bytes(
     prefault_on: None, src: torch.Tensor
@@ -456,8 +457,9 @@ def test_copy_weight_prefault_copies_exact_bytes(
     """
     dst = torch.empty_like(src, memory_format=torch.contiguous_format)
     copy_weight_(dst, src)
+    expected = src.clone(memory_format=torch.contiguous_format)
     assert torch.equal(
-        dst.reshape(-1).view(torch.uint8), src.reshape(-1).view(torch.uint8)
+        dst.reshape(-1).view(torch.uint8), expected.reshape(-1).view(torch.uint8)
     )
 
 

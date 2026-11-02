@@ -87,11 +87,13 @@ def copy_weight_(dst: torch.Tensor, src: torch.Tensor) -> torch.Tensor:
     takes its page faults inside the driver copy, which is several times slower
     than faulting them on the CPU, so touch one byte per page of `src` first.
     PyTorch already stages non-contiguous and dtype-converting copies through
-    a CPU temporary.
+    a CPU temporary. Sources with at most one element are skipped: they count
+    as contiguous with any stride, which `view(torch.uint8)` rejects.
     """
     if (
         src.device.type == "cpu"
         and src.dtype == dst.dtype
+        and src.numel() > 1
         and src.is_contiguous()
         and _is_integrated_gpu(dst.device)
     ):
