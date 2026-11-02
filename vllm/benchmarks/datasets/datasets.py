@@ -2451,7 +2451,10 @@ class CustomDataset(BenchmarkDataset):
 
         # Load the JSONL file
         if self.dataset_path.endswith(".jsonl"):
-            jsonl_data = pd.read_json(path_or_buf=self.dataset_path, lines=True)
+            # Keep prompts like "00123" as strings instead of inferring numbers.
+            jsonl_data = pd.read_json(
+                path_or_buf=self.dataset_path, lines=True, dtype={"prompt": str}
+            )
 
             # check if the JSONL file has a 'prompt' column
             if "prompt" not in jsonl_data.columns:
