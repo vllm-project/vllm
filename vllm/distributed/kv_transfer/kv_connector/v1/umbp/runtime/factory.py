@@ -29,7 +29,7 @@ class UMBPRuntimeConfig:
             raise ValueError("UMBP requires kv_transfer_config")
         options = dict(transfer_config.kv_connector_extra_config)
         mode = options.get("mode", "embedded")
-        if mode not in {"embedded"}:
+        if mode not in {"embedded", "standalone"}:
             raise ValueError(f"unknown UMBP mode: {mode!r}")
         namespace = options.get("key_namespace", "auto")
         if namespace != "auto" and (not isinstance(namespace, str) or not namespace):
@@ -59,7 +59,7 @@ class UMBPRuntimeFactory:
 
     @classmethod
     def register(cls, mode: str, builder: RuntimeBuilder) -> None:
-        if mode not in {"embedded"}:
+        if mode not in {"embedded", "standalone"}:
             raise ValueError(f"unknown UMBP mode: {mode!r}")
         if mode in cls._builders:
             raise ValueError(f"UMBP runtime mode {mode!r} is already registered")
