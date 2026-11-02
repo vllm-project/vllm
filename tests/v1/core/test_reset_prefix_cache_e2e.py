@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from tests.models.utils import check_logprobs_close
 from vllm import EngineArgs, LLMEngine, SamplingParams
 
 PROMPTS = [
@@ -67,3 +68,63 @@ def test_reset_prefix_cache_e2e(monkeypatch):
             f"preempted_results['preempted_{i}'].outputs[0].text="
             f"{preempted_results['preempted_' + str(i)].outputs[0].text}"
         )
+
+
+def test_mixed_prompt_embeds_cache_history(hf_runner, vllm_runner, monkeypatch):
+    """Changing only the routing mask must not reuse another prompt's KV."""
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    model = "Qwen/Qwen3-0.6B"
+    with hf_runner(model, dtype="half") as hf_model:
+        prompt_embeds = (
+            hf_model.model.get_input_embeddings()
+            .weight[198]
+            .detach()
+            .cpu()
+            .repeat(33, 1)
+        )
+
+    prompt_b = {
+        "prompt_token_ids": [0] * 33,
+        "prompt_embeds": prompt_embeds,
+        "prompt_is_token_ids": [True] * 33,
+    }
+    prompt_a = {**prompt_b, "prompt_is_token_ids": [False] * 32 + [True]}
+    params = SamplingParams(temperature=0, max_tokens=1, logprobs=5)
+
+    with vllm_runner(
+        model,
+        dtype="half",
+        enable_prompt_embeds=True,
+        enable_prefix_caching=True,
+        enable_chunked_prefill=True,
+        enforce_eager=True,
+        block_size=16,
+        max_model_len=256,
+        max_num_seqs=1,
+        gpu_memory_utilization=0.3,
+    ) as vllm_model:
+        llm = vllm_model.llm
+        cold_b = llm.generate([prompt_b], params)[0]
+        assert llm.reset_prefix_cache()
+        cold_a = llm.generate([prompt_a], params)[0]
+        repeated_a = llm.generate([prompt_a], params)[0]
+        after_a = llm.generate([prompt_b], params)[0]
+
+    assert cold_b.num_cached_tokens == cold_a.num_cached_tokens == 0
+    assert repeated_a.num_cached_tokens == 32
+    assert after_a.num_cached_tokens == 0
+    check_logprobs_close(
+        outputs_0_lst=[
+            (list(o.token_ids), o.text, o.logprobs)
+            for result in (cold_b, cold_a)
+            for o in result.outputs
+        ],
+        outputs_1_lst=[
+            (list(o.token_ids), o.text, o.logprobs)
+            for result in (after_a, repeated_a)
+            for o in result.outputs
+        ],
+        name_0="cold",
+        name_1="after_a",
+        always_check_logprobs=True,
+    )
