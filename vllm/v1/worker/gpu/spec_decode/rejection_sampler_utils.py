@@ -44,6 +44,17 @@ def _scale_target_logits(
 
 
 @triton.jit
+def _minus_lse(x, lse):
+    # x - lse in fp32 for fp32 x and an fp64 scalar lse, without per-element
+    # fp64 math (a small fraction of fp32 throughput on some GPUs): lse is split
+    # once into an fp32 pair, and x - hi is exact for tokens near the max, where
+    # the fp64 precision matters.
+    hi = lse.to(tl.float32)
+    lo = (lse - hi.to(tl.float64)).to(tl.float32)
+    return (x - hi) - lo
+
+
+@triton.jit
 def _compute_global_logsumexp(
     local_max_ptr,
     local_max_stride,
@@ -220,7 +231,7 @@ def _compute_global_logprobs_and_logsumexp(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
     )
-    target_log_prob = target_logit.to(tl.float64) - target_lse
+    target_log_prob = _minus_lse(target_logit, target_lse)
     if HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
         draft_logit = (
@@ -246,10 +257,10 @@ def _compute_global_logprobs_and_logsumexp(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
         )
-        draft_log_prob = draft_logit.to(tl.float64) - draft_lse
+        draft_log_prob = _minus_lse(draft_logit, draft_lse)
     else:
         # One-hot draft: q(token) = 1, log_q = 0.
-        draft_log_prob = tl.zeros((), tl.float64)
+        draft_log_prob = tl.zeros((), tl.float32)
         draft_lse = tl.zeros((), tl.float64)
     return target_log_prob, draft_log_prob, target_lse, draft_lse
 
@@ -1068,7 +1079,7 @@ def _resample_kernel(
         )
         target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
-        target_log_probs = scaled_target_logits.to(tl.float64) - target_lse
+        target_log_probs = _minus_lse(scaled_target_logits, target_lse)
         if USE_BLOCK_VERIFICATION:
             # Block residual is:
             #   max(p_tau * M_b(x) - M_s(x), 0) / Z.
@@ -1080,16 +1091,14 @@ def _resample_kernel(
                     tl.float32
                 )
             target_log_probs += log_p_tau
-        draft_log_probs = draft_logits.to(tl.float64) - draft_lse
+        draft_log_probs = _minus_lse(draft_logits, draft_lse)
         # Compute the residual:
         #   r(x) = max(p(x) - q(x), 0)
         # Gumbel sampling needs logits, so we compute it in log space:
         #   log(r(x)) = log(max(exp(log_p(x)) - exp(log_q(x)), 0))
         # The more numerically stable form is:
         #   log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
-        # draft_log_probs/target_log_probs carried the fp64 precision needed
-        # near the global LSE; downcast once combined into a log-ratio.
-        ratio = tl.exp((draft_log_probs - target_log_probs).to(tl.float32))
+        ratio = tl.exp(draft_log_probs - target_log_probs)
         residual_logits = tl.where(
             ratio < 1.0,
             target_log_probs + tldevice.log1p(-ratio),
