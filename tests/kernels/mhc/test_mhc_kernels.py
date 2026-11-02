@@ -1943,22 +1943,20 @@ def test_mhc_fused_post_pre_delayed_aiter_fake_residual_is_contiguous():
     residual = base.permute(0, 2, 1)
     assert residual.shape == (5, 4, 9)
     assert not residual.is_contiguous()
-    residual_out, post, comb, layer_input, pre = (
-        _mhc_fused_post_pre_delayed_aiter_fake(
-            residual,
-            residual,
-            residual,
-            residual,
-            1e-2,
-            1e-3,
-            1e-4,
-            2.0,
-            20,
-            None,
-            residual,
-            residual,
-            residual,
-        )
+    residual_out, post, comb, layer_input, pre = _mhc_fused_post_pre_delayed_aiter_fake(
+        residual,
+        residual,
+        residual,
+        residual,
+        1e-2,
+        1e-3,
+        1e-4,
+        2.0,
+        20,
+        None,
+        residual,
+        residual,
+        residual,
     )
     assert residual_out.is_contiguous()
     assert residual_out.shape == residual.shape
@@ -1976,9 +1974,7 @@ def test_mhc_fused_post_pre_delayed_aiter_fake_residual_is_contiguous():
     ),
     reason="AITER gfx942 mHC seam required",
 )
-@pytest.mark.parametrize(
-    "num_tokens,strided", [(63, False), (64, False), (64, True)]
-)
+@pytest.mark.parametrize("num_tokens,strided", [(63, False), (64, False), (64, True)])
 @pytest.mark.parametrize("carried", [False, True])
 def test_gfx942_mhc_seam_dispatch(
     num_tokens, strided, carried, default_vllm_config, monkeypatch
