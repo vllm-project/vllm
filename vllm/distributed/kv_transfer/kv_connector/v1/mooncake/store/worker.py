@@ -18,7 +18,7 @@ import socket
 import threading
 import time
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import CancelledError, Future, ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar, cast
@@ -2674,6 +2674,27 @@ class LookupKeyServer:
 # ============================================================
 
 
+@dataclasses.dataclass
+class LookupState:
+    future: Future[MooncakeLookupResult]
+    signature: tuple[int, int, bytes]
+    submitted_at: float
+    prefetched: bool
+    generation: int
+    cached_at: float | None = None
+
+
+def _lookup_signature(
+    num_tokens: int, block_hashes: list[BlockHash]
+) -> tuple[int, int, bytes]:
+    # Block hashes form a cumulative chain; its last hash identifies it.
+    return (
+        num_tokens,
+        len(block_hashes),
+        bytes(block_hashes[-1]) if block_hashes else b"",
+    )
+
+
 class LookupKeyClient:
     """ZMQ client for the LookupKey admin channel.
 
@@ -2683,6 +2704,7 @@ class LookupKeyClient:
     """
 
     def __init__(self, vllm_config: VllmConfig):
+        self._closed = threading.Event()
         self.ctx = zmq.Context()  # type: ignore[attr-defined]
         socket_path = get_zmq_rpc_path_lookup(vllm_config)
         self.socket = make_zmq_socket(
@@ -2696,7 +2718,18 @@ class LookupKeyClient:
         self.executor = ThreadPoolExecutor(
             max_workers=1, thread_name_prefix="MooncakeLookupClient"
         )
-        self.futures: dict[str, Future[MooncakeLookupResult]] = {}
+        self._submission_lock = threading.Lock()
+        self._generation = 0
+        # Owned by the scheduler thread. prefetch() runs on the engine-core
+        # input thread and submits under _submission_lock.
+        self._lookups: dict[str, LookupState] = {}
+        assert vllm_config.kv_transfer_config is not None
+        extra_config = vllm_config.kv_transfer_config.kv_connector_extra_config
+        prefetch_limit = extra_config.get("lookup_prefetch_limit", 0)
+        self._prefetch_slots = (
+            threading.BoundedSemaphore(prefetch_limit) if prefetch_limit > 0 else None
+        )
+        self._lookup_ttl_s = extra_config.get("lookup_prefetch_ttl_s", 2.0)
 
     def _lookup(
         self, num_tokens: int, block_hashes: list[BlockHash]
@@ -2709,8 +2742,29 @@ class LookupKeyClient:
             b"".join(block_hashes),
         )
         self.socket.send_multipart(all_frames, copy=False)
-        resp = self.socket.recv()
+        resp = self._recv()
         return decode_lookup_response(resp)
+
+    def _recv(self) -> bytes:
+        while not self._closed.is_set():
+            if self.socket.poll(timeout=100):
+                return self.socket.recv()
+        raise CancelledError("Mooncake lookup client closed")
+
+    def _submit_lookup(
+        self, num_tokens: int, block_hashes: list[BlockHash], *, prefetched: bool
+    ) -> LookupState:
+        # Capture the generation in the same order as lookup/reset RPCs.
+        with self._submission_lock:
+            return LookupState(
+                future=self.executor.submit(
+                    self._lookup, num_tokens, list(block_hashes)
+                ),
+                signature=_lookup_signature(num_tokens, block_hashes),
+                submitted_at=time.monotonic(),
+                prefetched=prefetched,
+                generation=self._generation,
+            )
 
     def lookup(
         self,
@@ -2720,26 +2774,100 @@ class LookupKeyClient:
         non_block: bool = False,
     ) -> MooncakeLookupResult | None:
         """If non_block is True, will return None until the result is ready,
-        so the caller retries on a later step."""
-        future = self.futures.get(req_id)
-        if future is None:
-            future = self.executor.submit(self._lookup, num_tokens, list(block_hashes))
-            self.futures[req_id] = future
-        if non_block and not future.done():
+        then cache it until expiry or discard()."""
+        now = time.monotonic()
+        signature = _lookup_signature(num_tokens, block_hashes)
+        state = self._lookups.get(req_id)
+        if state is not None and (
+            state.generation != self._generation
+            or state.signature != signature
+            or (state.prefetched and now - state.submitted_at > self._lookup_ttl_s)
+            or (
+                state.cached_at is not None
+                and now - state.cached_at > self._lookup_ttl_s
+            )
+        ):
+            self.discard(req_id)
+            state = None
+        if state is None:
+            state = self._submit_lookup(num_tokens, block_hashes, prefetched=False)
+            self._lookups[req_id] = state
+        # Submission-age expiry applies only until the first scheduler probe.
+        state.prefetched = False
+        if non_block and not state.future.done():
             return None
         try:
-            return future.result()
+            result = state.future.result()
         except Exception as e:
-            logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
-            return MooncakeLookupResult(0)
-        finally:
-            del self.futures[req_id]
+            if state.cached_at is None:
+                logger.error("Async Mooncake lookup failed for %s: %s", req_id, e)
+            result = MooncakeLookupResult(0)
+        if non_block:
+            if state.cached_at is None:
+                state.cached_at = time.monotonic()
+        else:
+            self.discard(req_id)
+        return result
+
+    def prefetch(
+        self, num_tokens: int, block_hashes: list[BlockHash]
+    ) -> LookupState | None:
+        """Thread-safe: submit a lookup without registering it. The caller
+        hands the returned state to adopt() on the scheduler thread. At most
+        ``lookup_prefetch_limit`` prefetches are in flight; beyond that,
+        returns None and the scheduler looks up as usual."""
+        slots = self._prefetch_slots
+        if slots is None or not slots.acquire(blocking=False):
+            return None
+        try:
+            state = self._submit_lookup(num_tokens, block_hashes, prefetched=True)
+        except RuntimeError:  # executor shut down
+            slots.release()
+            return None
+        state.future.add_done_callback(lambda _: slots.release())
+        return state
+
+    def peek_hit_length(
+        self,
+        req_id: str,
+        num_tokens: int,
+        block_hashes: list[BlockHash],
+        prefetched: LookupState | None = None,
+    ) -> int | None:
+        """Read a valid, completed lookup without adopting or consuming it."""
+        state = self._lookups.get(req_id, prefetched)
+        if (
+            state is None
+            or state.generation != self._generation
+            or state.signature != _lookup_signature(num_tokens, block_hashes)
+        ):
+            return None
+        now = time.monotonic()
+        if (
+            (state.prefetched and now - state.submitted_at > self._lookup_ttl_s)
+            or (
+                state.cached_at is not None
+                and now - state.cached_at > self._lookup_ttl_s
+            )
+            or not state.future.done()
+            or state.future.cancelled()
+            or state.future.exception() is not None
+        ):
+            return None
+        return state.future.result().hit_length
+
+    def adopt(self, req_id: str, state: LookupState) -> None:
+        """Register a prefetched lookup; a later lookup(req_id) reuses it."""
+        if state.generation != self._generation or req_id in self._lookups:
+            state.future.cancel()
+        else:
+            self._lookups[req_id] = state
 
     def discard(self, req_id: str) -> None:
         """Drop any cached/in-flight lookup for ``req_id`` (e.g. on abort)."""
-        future = self.futures.pop(req_id, None)
-        if future is not None:
-            future.cancel()
+        state = self._lookups.pop(req_id, None)
+        if state is not None:
+            state.future.cancel()
 
     def _reset(self) -> bool:
         """Trigger ``store.remove_all(force=True)`` on worker rank 0.
@@ -2750,15 +2878,32 @@ class LookupKeyClient:
         rollout drain. Returns True on ACK, False on NACK.
         """
         self.socket.send(RESET_MSG)
-        resp = self.socket.recv()
+        resp = self._recv()
         return bytes(resp) == RESP_OK
 
     def reset(self) -> bool:
-        return self.executor.submit(self._reset).result()
+        with self._submission_lock:
+            future = self.executor.submit(self._reset)
+            # Invalidate unadopted handles too, even if the store reset fails
+            # after partially removing keys. Later lookups queue behind reset.
+            self._generation += 1
+        success = future.result()
+        if success:
+            for req_id in list(self._lookups):
+                self.discard(req_id)
+        return success
 
     def close(self):
-        self.executor.shutdown(wait=False, cancel_futures=True)
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        for req_id in list(self._lookups):
+            self.discard(req_id)
+        # Wake a blocked receive, cancel queued (including unadopted) lookups,
+        # then close the socket only after its sole user has exited.
+        self.executor.shutdown(wait=True, cancel_futures=True)
         self.socket.close(linger=0)
+        self.ctx.term()
 
 
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
