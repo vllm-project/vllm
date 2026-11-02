@@ -95,14 +95,35 @@ vllm serve <model> \
   }'
 ```
 
-Secondary tiers are not supported yet on engines whose workers span several nodes; such an engine fails at startup.
+### Multiple Nodes
+
+With secondary tiers enabled, worker rank 0 and the engine core must share
+a node, called the head node. Its CPU region holds the cached KV for all
+workers. Secondary-tier managers read and write this region.
+
+```text
+        other node                            head node
+ +---------------------+           +----------------------------------+
+ | worker r            |           | worker 0          engine core    |
+ |  GPU KV blocks  <---+-- RDMA ---+-> CPU region      (scheduler,    |
+ +---------------------+  (NIXL)   |   chunk: [w0|..|wr|..]  tiers)   |
+                                   +----------------------------------+
+```
+
+- **Where the KV lives:** each chunk row of the head region has one slot per worker. `cpu_bytes_to_use` is allocated there in full; workers on other nodes allocate no host memory for it.
+- **Stores and loads:** a worker on another node writes its GPU blocks to its slot with an RDMA WRITE, and reads them back with an RDMA READ. A store is reported once its bytes are in the head region; loads go ahead of stores.
+- **Failures:** a failed transfer is reported as failed (the store is dropped; the request recomputes, or fails under `kv_load_failure_policy="fail"`). A transfer with no result after `mirror_timeout_s` could still land on a reused chunk, so the engine stops.
+
+Supported: one engine (no data parallelism) with tensor or pipeline parallelism across nodes, the same KV geometry on every worker, NIXL installed, and GPUDirect RDMA between the GPUs and the network (without it, UCX moves the data through host memory at a fraction of the speed). Not supported across nodes: `canonical_layout`, `replicated_layout` and the `kvcr` tier. The fs, obj and p2p tiers store multi-node rows in their own namespace, since rows stored without the remote slots would be incomplete. Set `UCX_NET_DEVICES` to choose the network.
+
+See [Security](../usage/security.md#inter-node-communication) for the network the mirror needs.
 
 ## `kv_connector_extra_config` Reference
 
 | Key | Required | Default | Scope | Notes |
 | --- | --- | --- | --- | --- |
 | `spec_name` | no | `CPUOffloadingSpec` | both | Set to `TieringOffloadingSpec` for multi-tier. |
-| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). |
+| `cpu_bytes_to_use` | yes | — | both | Total bytes of host memory reserved for the CPU tier across all workers (not per-worker). With secondary tiers across nodes, all of it is on the head node (see [Multiple Nodes](#multiple-nodes)). |
 | `block_size` | no | GPU block size | both | Offloaded block size in tokens; must be a multiple of the GPU block size. Mutually exclusive with `blocks_per_chunk`. |
 | `blocks_per_chunk` | no | `1` | both | Offloaded chunk size in GPU blocks; must be > 0. Alternative to `block_size` for models whose KV cache groups have different block sizes. |
 | `eviction_policy` | no | `lru` | both | Primary tier policy: built-in `lru`/`arc`, or a custom `CachePolicy` name (see [Custom Eviction Policies](#custom-eviction-policies)). |
@@ -110,6 +131,7 @@ Secondary tiers are not supported yet on engines whose workers span several node
 | `store_threshold` | no | `0` | single-tier | Min lookups before a block is offloaded. Values ≥ 2 are rejected by `TieringOffloadingSpec`. |
 | `max_tracker_size` | no | `64000` | single-tier | Max entries in the lookup tracker. |
 | `secondary_tiers` | no | `[]` | multi-tier | List of secondary tier configs (see below). |
+| `mirror_timeout_s` | no | `30` | multi-tier | Seconds one CPU region mirror transfer may take when the engine spans several nodes before the engine stops (see [Multiple Nodes](#multiple-nodes)). |
 | `tier_poll_interval_s` | no | `0.001` | multi-tier | Pause between tier-poll rounds for tiers that must be serviced between engine steps (currently `p2p`). See [Threading model](#threading-model). Set to `0` to disable the thread and service those tiers once per engine step instead. |
 | `offload_prompt_only` | no | `true` | both | If `true`, only prompt (prefill) blocks are offloaded; decode blocks are skipped. |
 | `sync_load_budget_bytes` | no | `0` | both | Per-step budget of KV bytes (per GPU) loaded within the same step, so those requests run immediately instead of waiting a step for an async load. Hits that don't fit the remaining budget, or would leave nothing to compute, stay async. `0` disables. |
