@@ -15,6 +15,7 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.gemma4_unified import (
     Gemma4UnifiedForConditionalGeneration,
+    Gemma4UnifiedProcessingInfo,
     Gemma4UnifiedVisionEmbedder,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -81,6 +82,7 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4UnifiedProcessingInfo)
 
     num_soft_tokens = processor.info._compute_num_soft_tokens(
         image_width=image_width,
@@ -171,6 +173,7 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4UnifiedProcessingInfo)
     image = PILImage.new("RGB", (1000, 1000), color="white")
     image_size = image.size
     mm_items = processor.info.parse_mm_data({"image": image})
@@ -315,7 +318,8 @@ class _MockEmbedVision(torch.nn.Module):
         return self.embedding_projection(x)
 
 
-class _MockUnifiedModel:
+class _MockUnifiedModel(Gemma4UnifiedForConditionalGeneration):
+    # Initialize only the modules needed by the borrowed vision methods.
     def __init__(
         self,
         embed_dim: int = 48,
@@ -323,17 +327,13 @@ class _MockUnifiedModel:
         dtype: torch.dtype = torch.float32,
         device: str = "cpu",
     ):
+        torch.nn.Module.__init__(self)
         self.vision_embedder = _build_test_embedder(
             embed_dim=embed_dim, max_pos=max_pos, dtype=dtype, device=device
         )
         self.embed_vision = _MockEmbedVision(
             embed_dim=embed_dim, dtype=dtype, device=device
         )
-
-    _vision_chunk = staticmethod(Gemma4UnifiedForConditionalGeneration._vision_chunk)
-    _embed_vision_patches = Gemma4UnifiedForConditionalGeneration._embed_vision_patches
-    _process_image_input = Gemma4UnifiedForConditionalGeneration._process_image_input
-    _process_video_input = Gemma4UnifiedForConditionalGeneration._process_video_input
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Triton kernel for MuseSpark1x's top-k router, one program per token."""
+"""Fused CUDA and Triton kernels for MuseSpark1x's top-k router."""
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
@@ -114,17 +115,18 @@ def _routing_kernel(
     if HAS_EPS:
         score_sum = score_sum + division_eps
     inv_sum_scaled = route_scale / score_sum
+    weights = scores * inv_sum_scaled
     if is_padding is not None:
         padding = tl.load(is_padding + token_id * is_padding_stride)
         ids = tl.where(padding, -1, ids)
-        inv_sum_scaled = tl.where(padding, 0.0, inv_sum_scaled)
+        weights = tl.where(padding, 0.0, weights)
 
     tl.store(
         topk_ids_ptr + token_id * stride_im + slots * stride_ik, ids, mask=slot_mask
     )
     tl.store(
         topk_weights_ptr + token_id * stride_wm + slots * stride_wk,
-        scores * inv_sum_scaled,
+        weights,
         mask=slot_mask,
     )
 
@@ -185,6 +187,24 @@ def fused_musespark1x_routing(
     )
     weights_view = topk_weights[:num_tokens, :topk]
     ids_view = topk_ids[:num_tokens, :topk]
+
+    if (
+        current_platform.is_cuda()
+        and num_experts == 256
+        and topk == 8
+        and normalization_mode == 0
+    ):
+        ops.muse_spark_routing(
+            weights_view,
+            ids_view,
+            gating_output,
+            bias,
+            router_output_multiplier if router_output_multiplier is not None else 1.0,
+            route_scale,
+            router_score_division_eps if router_score_division_eps is not None else 0.0,
+            is_padding,
+        )
+        return weights_view, ids_view
 
     enable_pdl = current_platform.is_cuda() and current_platform.is_arch_support_pdl()
     _routing_kernel[(num_tokens,)](

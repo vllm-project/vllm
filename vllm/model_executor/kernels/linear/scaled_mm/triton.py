@@ -73,7 +73,6 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
                     i_s_name,
                     torch.nn.Parameter(i_s.max(), requires_grad=False),
                 )
-                setattr(layer, i_zp_name, None)
             else:
                 input_zero_point = getattr(layer, i_zp_name)
 

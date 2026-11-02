@@ -123,6 +123,11 @@ class KVConnectorFactory:
                 logger.error(msg)
                 raise ValueError(msg)
         elif connector_name in cls._registry:
+            if connector_name == "NixlConnector":
+                mode = kv_transfer_config.get_from_extra_config("transfer_mode", "pull")
+                if mode not in ("pull", "push"):
+                    raise ValueError(f"Invalid NixlConnector transfer_mode: {mode!r}")
+                connector_name = f"Nixl{mode.capitalize()}Connector"
             connector_cls = cls._registry[connector_name]()
         else:
             raise ValueError(f"Unsupported connector type: {connector_name}")
@@ -231,6 +236,11 @@ KVConnectorFactory.register_connector(
     "MooncakeStoreConnector",
     "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector",
     "MooncakeStoreConnector",
+)
+KVConnectorFactory.register_connector(
+    "UMBPStoreConnector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.umbp",
+    "UMBPStoreConnector",
 )
 KVConnectorFactory.register_connector(
     "FlexKVConnectorV1",

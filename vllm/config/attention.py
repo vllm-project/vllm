@@ -40,8 +40,10 @@ class AttentionConfig:
     backend: AttentionBackendEnum | None = None
     """Attention backend to use. Use "auto" or None for automatic selection."""
 
-    minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "triton"
-    """Sparse decode kernel used by the MiniMax M3 MSA backend."""
+    minimax_m3_msa_decode_backend: MiniMaxM3MSADecodeBackend = "cutlass"
+    """Sparse decode kernel used by the MiniMax M3 MSA backend. "cutlass" falls
+    back to Triton where the CUTLASS kernel does not support the platform, KV
+    cache dtype, or head layout."""
 
     backend_per_kind: dict[str, AttentionBackendEnum] = field(default_factory=dict)
     """Per-KV-cache-group attention backend overrides, keyed by
@@ -95,7 +97,20 @@ class AttentionConfig:
     model's default (bf16 for MiniMax M3, fp8 for the DeepSeek sparse
     indexer, mxfp4 for DeepSeek-V4 on ROCm CDNA4 with aiter). Quantized
     formats (fp8, mxfp4, nvfp4) require indexer kernel support in the
-    backend."""
+    backend; MiniMax M3 supports nvfp4 on SM100/SM103/SM107 with at most 8
+    decode queries per request."""
+
+    indexer_decode_cp: bool = False
+    """Split the sparse-attention indexer's decode scoring across the
+    tensor-parallel ranks by context instead of by index head: each rank scores
+    a 1/TP slice of the index-K pages for every head and the ranks exchange
+    their local top-k, so each reads 1/TP of the index-K cache per sparse
+    layer. The index-K cache stays replicated, so this is unrelated to
+    `--decode-context-parallel-size`, which shards the KV cache itself; the two
+    cannot be combined. Implemented for the MiniMax M3 NVFP4 indexer, which
+    needs `indexer_kv_dtype="nvfp4"` and TP 4 (one index head per rank); it is
+    ignored with a warning where it does not apply. It pays off from about 4
+    concurrent decodes at 128K context and grows with batch and context."""
 
     indexer_sparse_logits: bool | None = None
     """DeepSeek V4.1 two-level indexer: score only the candidate blocks with
