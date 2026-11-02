@@ -41,6 +41,8 @@ from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.fusion.fused_act_quant import maybe_fused_act_quant
+from vllm.model_executor.layers.fusion.fused_norm_quant import maybe_fused_norm_quant
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -224,7 +226,7 @@ class LlamaAttention(nn.Module):
     def forward(
         self,
         positions: torch.Tensor,
-        hidden_states: torch.Tensor,
+        hidden_states: torch.Tensor | QuantizedActivation,
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
@@ -319,13 +321,25 @@ class LlamaDecoderLayer(nn.Module):
         # Self Attention
         if residual is None:
             residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
+            hidden_states = maybe_fused_norm_quant(
+                self.input_layernorm, hidden_states, self.self_attn.qkv_proj
+            )
         else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states, residual = maybe_fused_norm_quant(
+                self.input_layernorm,
+                hidden_states,
+                self.self_attn.qkv_proj,
+                residual=residual,
+            )
         hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
 
         # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
+        hidden_states, residual = maybe_fused_norm_quant(
+            self.post_attention_layernorm,
+            hidden_states,
+            self.mlp.gate_up_proj,
+            residual=residual,
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 

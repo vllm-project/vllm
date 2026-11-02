@@ -12,13 +12,23 @@ from tests.kernels.quant_utils import (
     native_per_token_group_quant_fp8,
     native_w8a8_block_matmul,
 )
-from tests.kernels.utils import fp8_ulp_distance
-from vllm.config import VllmConfig
+from tests.kernels.utils import (
+    ALL_OPCHECK_TEST_UTILS,
+    DEFAULT_OPCHECK_TEST_UTILS,
+    fp8_ulp_distance,
+    opcheck,
+)
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.kernels.linear.scaled_mm.b12x import (
     B12xFp8BlockScaledMMKernel,
     _run_b12x_fp8_block_scaled_mm,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import cutlass_scaled_mm
+from vllm.model_executor.layers.fusion.fused_norm_quant import (
+    _rms_norm_fp8_dynamic_128,
+)
+from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
     w8a8_triton_block_scaled_mm,
@@ -368,6 +378,144 @@ def test_w8a8_block_fp8_flashinfer_matmul(M, N, K, block_size, out_dtype, seed):
         torch.abs(out.to(torch.bfloat16) - ref_out.to(torch.bfloat16))
     ) / torch.mean(torch.abs(ref_out.to(torch.bfloat16)))
     assert rel_diff < 0.001
+
+
+requires_flashinfer_deepgemm_fp8_input = pytest.mark.skipif(
+    not (
+        current_platform.is_device_capability(90)
+        and has_flashinfer_fp8_blockscale_gemm()
+        and has_deep_gemm()
+    ),
+    reason="FP8-input FlashInfer/DeepGEMM block GEMM requires SM90.",
+)
+
+
+def _random_block_fp8_weight(N: int, K: int) -> tuple[torch.Tensor, torch.Tensor]:
+    return per_block_cast_to_fp8(
+        torch.randn(N, K, dtype=torch.bfloat16), block_size=[128, 128]
+    )
+
+
+def _quantize_like_bf16_input_op(
+    a: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize the way dynamic_flashinfer_deepgemm_blockscale_gemm does
+    internally (FlashInfer below M=32, vLLM above), into the TMA-aligned
+    column-major scale layout the FP8-input op takes."""
+    m, k = a.shape
+    if m >= 32:
+        return per_token_group_quant_fp8(
+            a, 128, column_major_scales=True, tma_aligned_scales=True, use_ue8m0=False
+        )
+    from flashinfer.gemm.gemm_base import get_fp8_blockscale_gemm_runner_sm90
+
+    aligned_m = get_tma_aligned_size(m, 4)
+    a_fp8 = torch.empty_like(a, dtype=torch.float8_e4m3fn)
+    scale = torch.empty(k // 128 * aligned_m, dtype=torch.float32)
+    get_fp8_blockscale_gemm_runner_sm90().fp8_quantize_1x128(a, a_fp8, scale, False)
+    return a_fp8, scale.as_strided((m, k // 128), (1, aligned_m))
+
+
+@requires_flashinfer_deepgemm_fp8_input
+@pytest.mark.parametrize(
+    "M,N", itertools.product([1, 3, 5, 31, 32, 33, 127, 256], [6144, 24576])
+)
+@torch.inference_mode()
+def test_flashinfer_deepgemm_fp8_input_matches_bf16_input(M, N):
+    """Given the activations the BF16-input op quantizes internally, the
+    FP8-input op must reproduce its output exactly on both the swapAB
+    (M < 32) and DeepGEMM (M >= 32) branches."""
+    torch.manual_seed(0)
+    K = 4096
+    a = torch.randn(M, K, dtype=torch.bfloat16)
+    w, w_s = _random_block_fp8_weight(N, K)
+    a_fp8, a_s = _quantize_like_bf16_input_op(a)
+
+    ref = torch.ops.vllm.dynamic_flashinfer_deepgemm_blockscale_gemm(
+        a, w, w_s, 128, False
+    )
+    out = torch.ops.vllm.flashinfer_deepgemm_blockscale_gemm_fp8_input(
+        a_fp8, a_s, w, w_s
+    )
+    torch.testing.assert_close(out, ref, atol=0, rtol=0)
+
+
+@requires_flashinfer_deepgemm_fp8_input
+@pytest.mark.parametrize("batch_shape", [(1, 5), (2, 3), (1, 40), (3, 17)])
+@torch.inference_mode()
+def test_flashinfer_deepgemm_fp8_input_consumes_fused_norm_quant(batch_shape):
+    """The fused RMSNorm + 1x128 quant producer's output, including its 3D
+    scale view, is read with the scales it was produced with."""
+    torch.manual_seed(0)
+    K, N = 4096, 6144
+    with set_current_vllm_config(vllm_config):
+        norm = RMSNorm(K, eps=1e-6).to(torch.bfloat16)
+    x = torch.randn(*batch_shape, K, dtype=torch.bfloat16)
+    w, w_s = _random_block_fp8_weight(N, K)
+
+    qa = _rms_norm_fp8_dynamic_128(norm, x, None, None)
+    assert isinstance(qa, QuantizedActivation)
+    a_fp8, a_s = qa.data.view(-1, K), qa.scale.view(-1, K // 128)
+    out = torch.ops.vllm.flashinfer_deepgemm_blockscale_gemm_fp8_input(
+        a_fp8, a_s, w, w_s
+    )
+
+    ref = native_w8a8_block_matmul(a_fp8, w, a_s, w_s, [128, 128], torch.bfloat16)
+    rel_diff = torch.mean(torch.abs(out.float() - ref.float())) / torch.mean(
+        torch.abs(ref.float())
+    )
+    assert rel_diff < 0.001
+
+
+@requires_flashinfer_deepgemm_fp8_input
+@pytest.mark.parametrize("column_major_scales", [True, False])
+def test_flashinfer_deepgemm_fp8_input_rejects_unaligned_scales(
+    column_major_scales,
+):
+    """Both kernels read scales through a raw pointer, so a scale tensor not in
+    the TMA-aligned column-major layout must raise instead of being misread."""
+    M, N, K = 5, 6144, 4096
+    a_fp8, a_s = per_token_group_quant_fp8(
+        torch.randn(M, K, dtype=torch.bfloat16),
+        128,
+        column_major_scales=column_major_scales,
+        use_ue8m0=False,
+    )
+    w, w_s = _random_block_fp8_weight(N, K)
+    with pytest.raises(ValueError, match="FP8 input scale"):
+        torch.ops.vllm.flashinfer_deepgemm_blockscale_gemm_fp8_input(a_fp8, a_s, w, w_s)
+
+
+@requires_flashinfer_deepgemm_fp8_input
+@pytest.mark.parametrize("M", [5, 64])
+def test_flashinfer_deepgemm_fp8_input_opcheck(M):
+    K, N = 4096, 6144
+    a_fp8, a_s = _quantize_like_bf16_input_op(torch.randn(M, K, dtype=torch.bfloat16))
+    w, w_s = _random_block_fp8_weight(N, K)
+    # opcheck's AOT-dispatch check hands the op densely re-strided inputs,
+    # dropping the round_up(M, 4) scale padding, so it only applies to M % 4 == 0.
+    # torch.compile keeps the padding (see the compiled test below).
+    opcheck(
+        torch.ops.vllm.flashinfer_deepgemm_blockscale_gemm_fp8_input.default,
+        (a_fp8, a_s, w, w_s),
+        test_utils=ALL_OPCHECK_TEST_UTILS if M % 4 == 0 else DEFAULT_OPCHECK_TEST_UTILS,
+    )
+
+
+@requires_flashinfer_deepgemm_fp8_input
+@pytest.mark.parametrize("M", [5, 33])
+@torch.inference_mode()
+def test_flashinfer_deepgemm_fp8_input_compiled_keeps_padded_scales(M):
+    """Under torch.compile the op must still receive the TMA-padded scale
+    strides (needs_exact_strides), on both GEMM branches."""
+    K, N = 4096, 6144
+    a_fp8, a_s = _quantize_like_bf16_input_op(torch.randn(M, K, dtype=torch.bfloat16))
+    w, w_s = _random_block_fp8_weight(N, K)
+    op = torch.ops.vllm.flashinfer_deepgemm_blockscale_gemm_fp8_input
+    compiled = torch.compile(lambda q, s: op(q, s, w, w_s), dynamic=True)
+    torch.testing.assert_close(
+        compiled(a_fp8, a_s), op(a_fp8, a_s, w, w_s), atol=0, rtol=0
+    )
 
 
 @pytest.mark.parametrize(
