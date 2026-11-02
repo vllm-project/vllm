@@ -160,12 +160,9 @@ def test_reference_completion_mismatch_fails(bench):
     assert _score(bench, ret) == 0.0
 
 
-def test_unstructured_request_keeps_parseability_semantics(bench):
-    # Under --structured-output-ratio < 1 the unstructured share was never
-    # asked to follow a schema; grading stays at parseability for them.
-    # xgrammar_bench rows always carry a reference completion, so use one
-    # here and make the response disagree with it: an unstructured row must
-    # still pass on parseability alone.
+def test_unstructured_reference_mismatch_fails(bench):
+    # The ratio-excluded share is not schema-constrained, but a dataset
+    # reference remains the correctness oracle for the prompt.
     ret = [
         {
             "generated": 'here you go: {"anything": "free-form"}',
@@ -174,7 +171,44 @@ def test_unstructured_request_keeps_parseability_semantics(bench):
             "structured": False,
         }
     ]
+    assert _score(bench, ret) == 0.0
+
+
+def test_unstructured_reference_semantic_equality(bench):
+    ret = [
+        {
+            "generated": '{\n  "age": 34,\n  "name": "John Smith"\n}',
+            "expected": '{"name": "John Smith", "age": 34}',
+            "schema": SCHEMA,
+            "structured": False,
+        }
+    ]
     assert _score(bench, ret) == 100.0
+
+
+def test_schema_validation_precedes_reference_equality(bench):
+    # Matching an invalid reference must not bypass the request's schema.
+    ret = [
+        {
+            "generated": '{"name": "John Smith", "age": "thirty-four"}',
+            "expected": '{"name": "John Smith", "age": "thirty-four"}',
+            "schema": SCHEMA,
+            "structured": True,
+        }
+    ]
+    assert _score(bench, ret) == 0.0
+
+
+def test_reference_comparison_distinguishes_bool_from_integer(bench):
+    ret = [
+        {
+            "generated": '{"ok": 1}',
+            "expected": '{"ok": true}',
+            "schema": None,
+            "structured": True,
+        }
+    ]
+    assert _score(bench, ret) == 0.0
 
 
 def test_unparsable_response_fails(bench):

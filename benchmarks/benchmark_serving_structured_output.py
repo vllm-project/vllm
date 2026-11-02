@@ -714,14 +714,24 @@ async def benchmark(
     return result, ret
 
 
+def _json_values_equal(actual, expected):
+    if isinstance(actual, bool) or isinstance(expected, bool):
+        return type(actual) is type(expected) and actual == expected
+    if isinstance(actual, dict) and isinstance(expected, dict):
+        return actual.keys() == expected.keys() and all(
+            _json_values_equal(actual[key], expected[key]) for key in actual
+        )
+    if isinstance(actual, list) and isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _json_values_equal(left, right) for left, right in zip(actual, expected)
+        )
+    return actual == expected
+
+
 def _eval_correctness_json(expected, actual, schema=None, structured=True):
-    # A parseable object is necessary but not sufficient. For a structured
-    # request whose dataset row carries a reference completion the response
-    # must also match it (semantic equality, so key order and whitespace do
-    # not matter); it must also validate against the schema it was given.
-    # The unstructured share under --structured-output-ratio keeps the old
-    # parseability semantics: it was never asked to follow the schema, and
-    # its free-form JSON is not comparable to the reference completion.
+    # Structured output must satisfy its schema even when it matches the
+    # reference. Any dataset reference, including one for a ratio-excluded
+    # request, is then compared without Python's bool/int equivalence.
     import regex as re
 
     match = re.search(r"\{.*\}", actual, re.DOTALL)
@@ -732,12 +742,6 @@ def _eval_correctness_json(expected, actual, schema=None, structured=True):
     except Exception:
         return False
 
-    if structured and expected is not None:
-        try:
-            return actual_obj == json.loads(expected)
-        except Exception:
-            pass  # unreadable reference; fall through to schema validation
-
     if structured and schema is not None:
         if isinstance(schema, str):
             schema = json.loads(schema)
@@ -745,6 +749,13 @@ def _eval_correctness_json(expected, actual, schema=None, structured=True):
             jsonschema.validate(actual_obj, schema)
         except jsonschema.ValidationError:
             return False
+
+    if expected is not None:
+        try:
+            expected_obj = json.loads(expected)
+        except (TypeError, json.JSONDecodeError):
+            return False
+        return _json_values_equal(actual_obj, expected_obj)
 
     return True
 
