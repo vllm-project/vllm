@@ -63,6 +63,7 @@ from vllm.v1.core.kv_cache_utils import (
     make_block_hash_with_group_id,
 )
 from vllm.v1.core.sched.output import (
+    CachedRequestData,
     KVConnectorBlockState,
     NewRequestData,
     SchedulerOutput,
@@ -99,6 +100,7 @@ from vllm.v1.kv_offload.base import (
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
+from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
@@ -6425,3 +6427,238 @@ class TestMambaHybridOffloadServing:
             False,
         ]
         assert self._roundtrip_served_tokens(scheduler) == 16
+
+
+class _BoundedTierManager:
+    """A bounded primary tier in front of an async secondary tier.
+
+    A secondary-tier chunk answers RETRY until the step ends, then is promoted
+    into a free or idle primary-tier chunk on lookup; the promotion lands at
+    the next step end. Primary-tier hits stay pinned until the step ends.
+    """
+
+    def __init__(self, num_chunks: int, secondary: set[OffloadKey]):
+        self.num_chunks = num_chunks
+        self.secondary = secondary
+        self.primary: dict[OffloadKey, bool] = {}  # key -> ready
+        self.pinned: set[OffloadKey] = set()
+        self.resolved: set[OffloadKey] = set()
+        self.requested: set[OffloadKey] = set()
+
+    def _idle(self) -> list[OffloadKey]:
+        return [
+            key
+            for key, ready in self.primary.items()
+            if ready and key not in self.pinned
+        ]
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        if key in self.primary:
+            if not self.primary[key]:
+                return LookupResult.HIT_PENDING
+            self.pinned.add(key)
+            return LookupResult.HIT
+        if key not in self.secondary:
+            return LookupResult.MISS
+        if key not in self.resolved:
+            self.requested.add(key)
+            return LookupResult.RETRY
+        if len(self.primary) == self.num_chunks:
+            idle = self._idle()
+            if not idle:
+                return LookupResult.MISS
+            del self.primary[idle[0]]
+        self.primary[key] = False
+        return LookupResult.HIT_PENDING
+
+    def get_load_capacity(self) -> int:
+        return self.num_chunks - len(self.primary) + len(self._idle())
+
+    def end_step(self) -> None:
+        self.primary = dict.fromkeys(self.primary, True)
+        self.resolved |= self.requested
+        self.requested.clear()
+        self.pinned.clear()
+
+
+def test_hit_larger_than_bounded_tier_loads_every_group_at_one_boundary():
+    """A full-attention group must not take all of a bounded tier.
+
+    The secondary tier holds the whole prompt for the full-attention group and
+    the windows of two sliding-window groups every retention_interval tokens.
+    The primary tier does not fit all of it. Looked up one group after another,
+    the full-attention group's promotions fill the primary tier, the windows
+    miss and nothing loads.
+    """
+    block_size, num_tokens, retention_interval, window = 16, 4096, 256, 64
+    kwargs = dict(
+        block_size=block_size, num_kv_heads=1, head_size=1, dtype=torch.float32
+    )
+    swa_spec = SlidingWindowSpec(**kwargs, sliding_window=window)
+    groups = [KVCacheGroupSpec(["full"], FullAttentionSpec(**kwargs))] + [
+        KVCacheGroupSpec([f"swa{i}"], swa_spec) for i in range(2)
+    ]
+    manager = MagicMock(spec=OffloadingManager)
+    spec = SimpleNamespace(
+        config=SimpleNamespace(
+            groups=tuple(
+                SimpleNamespace(
+                    group_id=i,
+                    tokens_per_block=block_size,
+                    sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
+                        group.kv_cache_spec, block_size
+                    ),
+                )
+                for i, group in enumerate(groups)
+            )
+        ),
+        tokens_per_block=(block_size,) * len(groups),
+        tokens_per_hash=block_size,
+        blocks_per_chunk=1,
+        offload_prompt_only=True,
+        extra_config={},
+        kv_events_config=OffloadingKVEventsConfig(
+            enable_kv_cache_events=False, self_describing_kv_events=False
+        ),
+        get_manager=lambda: manager,
+    )
+    config = SimpleNamespace(
+        speculative_config=None,
+        cache_config=SimpleNamespace(
+            enable_prefix_caching=True,
+            prefix_cache_retention_interval=retention_interval,
+        ),
+        parallel_config=SimpleNamespace(world_size=1, decode_context_parallel_size=1),
+    )
+    sched = OffloadingConnectorScheduler(
+        spec,
+        config,
+        KVCacheConfig(num_blocks=1024, kv_cache_tensors=[], kv_cache_groups=groups),
+    )
+    request = MagicMock()
+    request.request_id = "req"
+    request.kv_transfer_params = None
+    request.num_tokens = request.num_prompt_tokens = num_tokens
+    request.block_hashes = [
+        BlockHash(f"h{i}".encode()) for i in range(num_tokens // block_size)
+    ]
+    request.skip_reading_external_kv = False
+    sched.on_new_request(request)
+    state = sched._req_status["req"]
+    state.update_offload_keys()
+    full_keys, *swa_keys = (group.offload_keys for group in state.group_states)
+    secondary = set(full_keys)
+    window_chunks = window // block_size
+    for keys in swa_keys:
+        for end in range(retention_interval, num_tokens + 1, retention_interval):
+            end_chunk = end // block_size
+            secondary.update(keys[end_chunk - window_chunks - 1 : end_chunk])
+    tier = _BoundedTierManager(num_chunks=200, secondary=secondary)
+    manager.lookup.side_effect = tier.lookup
+    manager.get_load_capacity.side_effect = tier.get_load_capacity
+
+    for _ in range(5):
+        hit, load_async = sched.get_num_new_matched_tokens(request, 0)
+        if hit is not None:
+            break
+        tier.end_step()
+
+    assert hit is not None and hit > 0 and load_async
+    assert hit % retention_interval == 0
+    # The load and both windows at its boundary fit in the primary tier.
+    assert hit // block_size + 2 * (window_chunks + 1) <= tier.num_chunks
+
+
+def _make_staged_two_group_scheduler(
+    windowed: bool, primary_chunks: int
+) -> OffloadingConnectorScheduler:
+    """A full-attention plus full or windowed scheduler over a real tiering
+    manager whose primary tier holds ``primary_chunks`` 4-token chunks."""
+    vllm_config = create_vllm_config(block_size=4)
+    vllm_config.cache_config.prefix_cache_retention_interval = None
+    vllm_config.kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "spec_name": "TieringOffloadingSpec",
+            "cpu_bytes_to_use": primary_chunks
+            * SharedOffloadRegion.BLOCK_SIZE_ALIGNMENT,
+            "secondary_tiers": [{"type": "example"}],
+        },
+    )
+    kwargs = dict(block_size=4, num_kv_heads=1, head_size=1, dtype=torch.float32)
+    other_spec = (
+        SlidingWindowSpec(**kwargs, sliding_window=8)
+        if windowed
+        else FullAttentionSpec(**kwargs)
+    )
+    kv_cache_config = KVCacheConfig(
+        num_blocks=64,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(["full"], FullAttentionSpec(**kwargs)),
+            KVCacheGroupSpec(["other"], other_spec),
+        ],
+    )
+    spec = TieringOffloadingSpec(build_offloading_config(vllm_config, kv_cache_config))
+    assert spec.num_chunks == primary_chunks
+    return OffloadingConnectorScheduler(spec, vllm_config, kv_cache_config)
+
+
+@pytest.mark.parametrize(
+    "windowed, primary_chunks, expected",
+    [
+        (False, 12, 24),
+        # 8 full-attention chunks and the 2-chunk window at token 32.
+        (True, 12, 32),
+        # One chunk per group: a 4-token load needs one chunk of the window
+        # group, not the whole window.
+        (False, 2, 4),
+        (True, 2, 4),
+        # Too small for one chunk per group.
+        (False, 1, 0),
+        (True, 1, 0),
+    ],
+)
+def test_secondary_tier_hit_larger_than_primary_tier_loads_a_prefix(
+    windowed: bool, primary_chunks: int, expected: int
+):
+    """A real tiering manager whose secondary tier holds a hit larger than
+    the primary tier loads the prefix that fits for both groups."""
+    scheduler = _make_staged_two_group_scheduler(windowed, primary_chunks)
+    manager = scheduler.manager
+    secondary = manager.secondary_tiers[0]
+    assert isinstance(secondary, ExampleSecondaryTierManager)
+    try:
+        request = create_request(num_tokens=64, block_size=4)
+        scheduler.on_new_request(request)
+        for group_idx in range(2):
+            secondary.chunks.update(
+                (make_offload_key(block_hash, group_idx), True)
+                for block_hash in request.block_hashes
+            )
+
+        results = []
+        for _ in range(2):
+            results.append(scheduler.get_num_new_matched_tokens(request, 0))
+            scheduler.build_connector_meta(
+                SchedulerOutput(
+                    scheduled_new_reqs=[],
+                    scheduled_cached_reqs=CachedRequestData.make_empty(),
+                    num_scheduled_tokens={},
+                    total_num_scheduled_tokens=0,
+                    scheduled_spec_decode_tokens={},
+                    scheduled_encoder_inputs={},
+                    finished_req_ids=set(),
+                    free_encoder_mm_hashes=[],
+                )
+            )
+    finally:
+        manager.shutdown()
+
+    if expected:
+        # The promotions are pending on the first lookup, then the prefix loads.
+        assert results[0] == (None, False)
+        assert results[1] == (expected, True)
+    else:
+        assert results[0] == (0, False)

@@ -100,6 +100,10 @@ class CPUOffloadingManager(OffloadingManager):
     def _get_num_free_chunks(self) -> int:
         return len(self._free_list) + self._num_chunks - self._num_allocated_chunks
 
+    def get_num_allocatable_chunks(self) -> int:
+        """Chunks a store may still take: free ones and idle cached ones."""
+        return self._get_num_free_chunks() + self._num_evictable_cache_chunks
+
     def _allocate_chunks(self, keys: list[OffloadKey]) -> list[ChunkStatus]:
         num_fresh = min(len(keys), self._num_chunks - self._num_allocated_chunks)
         num_reused = len(keys) - num_fresh

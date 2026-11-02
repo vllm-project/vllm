@@ -324,6 +324,10 @@ class TieringOffloadingManager(OffloadingManager):
         # Outer key: tier index. Inner key: req_context.req_id — the same ReqContext
         # object is reused for all chunk lookups of a given request per engine step.
         self._pending_load_submissions: dict[int, dict[str, PendingPromotion]] = {}
+        # Primary-tier chunks that lookup() found ready this step, pinned until
+        # on_schedule_end() so that nothing evicts a hit before its load is
+        # prepared, such as a promotion the same lookup starts.
+        self._pinned_hits: dict[OffloadKey, ReqContext] = {}
 
         # Gate for once-per-step execution of _maybe_process_finished_jobs().
         # Reset at the end of each step in on_schedule_end().
@@ -743,6 +747,9 @@ class TieringOffloadingManager(OffloadingManager):
             lookup_duration,
         )
         if primary_hit is LookupResult.HIT:
+            if key not in self._pinned_hits:
+                self.primary_tier.prepare_read([key], req_context)
+                self._pinned_hits[key] = req_context
             return LookupResult.HIT
         if primary_hit is LookupResult.HIT_PENDING:
             return LookupResult.HIT_PENDING
@@ -1194,6 +1201,7 @@ class TieringOffloadingManager(OffloadingManager):
         # Reset the per-step gate AFTER serve_external_requests so that
         # lookup() calls within it skip redundant _process_finished_jobs().
         self._processed_jobs_this_step = False
+        self._unpin_hits()
 
         self._flush_pending_promotions()
         # Keys parked by this step's prepare_store cannot have completed yet, so
@@ -1300,6 +1308,8 @@ class TieringOffloadingManager(OffloadingManager):
         for req_id in finished_req_ids:
             del self._req_state[req_id]
         self._processed_jobs_this_step = False
+        # The primary reset dropped the pinned chunks with the rest.
+        self._pinned_hits.clear()
 
         for tier in self.secondary_tiers:
             if tier.bp_detector is not None:
@@ -1309,6 +1319,24 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def on_reset_flushed(self) -> None:
         self._promotions_held = False
+
+    def _unpin_hits(self) -> None:
+        for key, req_context in self._pinned_hits.items():
+            self.primary_tier.complete_read([key], req_context)
+        self._pinned_hits.clear()
+
+    @override
+    def get_load_capacity(self) -> int | None:
+        """Primary-tier chunks a promotion may still take this step.
+
+        Hits that lookup() found are pinned until the step ends, so they no
+        longer count. Without secondary tiers lookup() promotes nothing, so
+        it is None.
+        """
+        if not self.secondary_tiers:
+            return None
+        self._maybe_process_finished_jobs()
+        return self.primary_tier.get_num_allocatable_chunks()
 
     @override
     def get_stats(self) -> OffloadingConnectorStats | None:
