@@ -2,6 +2,8 @@
 
 #include <torch/headeronly/util/shim_utils.h>
 
+#include <cuda_runtime.h>
+
 #include "scaled_mm_c2x.cuh"
 
 /**
@@ -10,6 +12,38 @@
  */
 
 namespace vllm {
+
+// Number of SMs on the current device (cached per device).
+inline int sm89_int8_sm_count() {
+  static int counts[64] = {0};
+  int dev = 0;
+  cudaGetDevice(&dev);
+  if (dev < 0 || dev >= 64) dev = 0;
+  if (counts[dev] == 0) {
+    cudaDeviceGetAttribute(&counts[dev], cudaDevAttrMultiProcessorCount, dev);
+  }
+  return counts[dev];
+}
+
+// For M in (16, 64], the 16-row tiles of sm89_int8_config_M16 launch 2x
+// (vs the M32 config) or 4x (vs M64) as many CTAs. That wins while the extra
+// CTAs fit in the same number of waves (one CTA per SM for these tile sizes)
+// and loses once they spill into extra waves, which depends on the SM count:
+// on an RTX 4090 (128 SMs) small-N layers stay in one wave, on 58-60 SM parts
+// (L4, RTX 4500 Ada) they don't (vLLM #56924, #62128).
+inline bool sm89_int8_use_m16_tiles(uint32_t m, uint32_t n) {
+  if (next_pow_2(n) > 8192) return false;  // M16 switches to a 128-wide N tile
+  uint32_t const sms = static_cast<uint32_t>(sm89_int8_sm_count());
+  uint32_t const n_tiles = (n + 63) / 64;
+  uint32_t const stock_rows = m <= 32 ? 32 : 64;  // M32 / M64 configs
+  uint32_t const w16 = (((m + 15) / 16) * n_tiles + sms - 1) / sms;
+  uint32_t const ws =
+      (((m + stock_rows - 1) / stock_rows) * n_tiles + sms - 1) / sms;
+  if (w16 == ws) return true;
+  // Stock already needs several waves: the finer 16-row grid fills the tail
+  // better, as long as it adds at most half again as many waves.
+  return ws >= 2 && 2 * w16 <= 3 * ws;
+}
 
 template <typename InType, typename OutType,
           template <typename, typename> typename Epilogue>
@@ -337,10 +371,16 @@ inline void cutlass_gemm_sm89_int8_dispatch(torch::stable::Tensor& out,
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 32) {
     // M in (16, 32]
+    if (sm89_int8_use_m16_tiles(m, out.size(1)))
+      return sm89_int8_config_M16::dispatch<InType, OutType, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
     return sm89_int8_config_M32::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 64) {
     // M in (32, 64]
+    if (sm89_int8_use_m16_tiles(m, out.size(1)))
+      return sm89_int8_config_M16::dispatch<InType, OutType, Epilogue>(
+          out, a, b, std::forward<EpilogueArgs>(args)...);
     return sm89_int8_config_M64::dispatch<InType, OutType, Epilogue>(
         out, a, b, std::forward<EpilogueArgs>(args)...);
   } else if (mp2 <= 128) {
