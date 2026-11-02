@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 from collections.abc import Iterable
 from itertools import islice
 
@@ -8,44 +9,114 @@ import torch
 from torch import nn
 from transformers import CohereConfig
 
+import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphCapture
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    CUDAGraphMode,
+    VllmConfig,
+    get_current_vllm_config,
+)
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
+from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoEFactory,
+    GateLinear,
+)
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
-    row_parallel_weight_loader,
-)
-from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.torch_utils import (
+    LayerNameType,
+    _encode_layer_name,
+    _resolve_layer_name,
+    direct_register_custom_op,
+)
 
 from .commandr import LayerNorm
-from .interfaces import SupportsPP, SupportsQuant
+from .interfaces import EagleModelMixin, SupportsEagle3, SupportsPP, SupportsQuant
 from .utils import (
     AutoWeightsLoader,
+    WeightsMapper,
     extract_layer_index,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
+
+
+def _dual_stream_layer(layer_name: LayerNameType) -> "Cohere2MoeDecoderLayer":
+    layer = get_forward_context().no_compile_layers[_resolve_layer_name(layer_name)]
+    assert isinstance(layer, Cohere2MoeDecoderLayer)
+    return layer
+
+
+def _cohere2_mlp_fork(
+    hidden_states: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return _dual_stream_layer(layer_name)._fork_mlp(hidden_states)
+
+
+def _cohere2_mlp_fork_fake(
+    hidden_states: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return torch.empty_like(hidden_states)
+
+
+def _cohere2_mlp_join(
+    attn_output: torch.Tensor, mlp_output: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return _dual_stream_layer(layer_name)._join_mlp(attn_output, mlp_output)
+
+
+def _cohere2_mlp_join_fake(
+    attn_output: torch.Tensor, mlp_output: torch.Tensor, layer_name: LayerNameType
+) -> torch.Tensor:
+    return torch.empty_like(attn_output)
+
+
+# The MLP/MoE branch is forked onto a side stream before attention and joined
+# after o_proj. Fork and join are opaque to Dynamo (a traced stream switch
+# would be dropped), while attention stays a regular splitting op, so piecewise
+# CUDA graphs keep working for prefill and mixed batches.
+direct_register_custom_op(
+    op_name="cohere2_mlp_fork",
+    op_func=_cohere2_mlp_fork,
+    fake_impl=_cohere2_mlp_fork_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+direct_register_custom_op(
+    op_name="cohere2_mlp_join",
+    op_func=_cohere2_mlp_join,
+    fake_impl=_cohere2_mlp_join_fake,
+    tags=(torch.Tag.needs_fixed_stride_order,),
+)
+
+
+def is_prefix_dense_layer(config: CohereConfig, layer_idx: int) -> bool:
+    """True when layer_idx lies in the contiguous dense MLP prefix."""
+    if layer_idx >= len(config.mlp_layer_types):
+        return False
+    return all(t == "dense" for t in config.mlp_layer_types[: layer_idx + 1])
 
 
 @torch.compile(backend=current_platform.simple_compile_backend)
@@ -67,35 +138,13 @@ def token_choice_with_bias(
     return topk_weights.to(torch.float32), topk_ids.to(torch.int32)
 
 
-@torch.compile(backend=current_platform.simple_compile_backend)
-def rms_norm_func(hidden_states, weight, variance_epsilon):
-    input_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float32)
-    variance = hidden_states.pow(2).mean(-1, keepdim=True)
-    hidden_states = hidden_states * torch.rsqrt(variance + variance_epsilon)
-    hidden_states = weight.to(torch.float32) * hidden_states
-    return hidden_states.to(input_dtype)
-
-
-class RMSNorm(nn.Module):
-    def __init__(self, param_shape=None, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(param_shape))
-        self.variance_epsilon = eps
-        set_weight_attrs(self.weight, {"weight_loader": row_parallel_weight_loader})
-
-    def forward(self, hidden_states, residuals=None):
-        hidden_states = rms_norm_func(hidden_states, self.weight, self.variance_epsilon)
-        return hidden_states, residuals
-
-
-def select_norm_impl(config: CohereConfig) -> tuple[type[nn.Module], float]:
-    """Returns (norm_class, eps). Uses RMSNorm when config.rms_norm_eps is set,
-    otherwise falls back to LayerNorm with config.layer_norm_eps."""
+def make_norm(config: CohereConfig) -> nn.Module:
+    """RMSNorm when config.rms_norm_eps is set, otherwise Cohere LayerNorm with
+    config.layer_norm_eps."""
     rms_eps = getattr(config, "rms_norm_eps", None)
     if rms_eps is not None:
-        return RMSNorm, rms_eps
-    return LayerNorm, config.layer_norm_eps
+        return RMSNorm(config.hidden_size, eps=rms_eps)
+    return LayerNorm(param_shape=(config.hidden_size,), eps=config.layer_norm_eps)
 
 
 class Cohere2MoeMLP(nn.Module):
@@ -173,6 +222,7 @@ class Cohere2MoeAttention(nn.Module):
         self.max_position_embeddings = getattr(
             config, "model_max_length", None
         ) or getattr(config, "max_position_embeddings", 8192)
+        assert isinstance(self.max_position_embeddings, int)
         self.qkv_proj = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
@@ -187,6 +237,7 @@ class Cohere2MoeAttention(nn.Module):
             self.hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=False,
             prefix=f"{prefix}.o_proj",
         )
         self.rotary_emb = get_rope(
@@ -202,19 +253,17 @@ class Cohere2MoeAttention(nn.Module):
             layer_types is not None
             and layer_types[self.layer_idx] == "sliding_attention"
         ):
-            self.sliding_window = config.sliding_window
+            self.sliding_window = config.sliding_window + 1
 
-        # Prefix-dense layers (layer_idx < first_k_dense_replace) have full
-        # attention (no sliding window). When prefix_dense_sliding_window_pattern
-        # == 1, they keep RoPE even though they are not sliding-window layers.
-        first_k_dense_replace = getattr(config, "first_k_dense_replace", 0)
+        # Prefix-dense layers have full attention (no sliding window). When
+        # prefix_dense_sliding_window_pattern == 1, they keep RoPE even though
+        # they are not sliding-window layers.
         prefix_dense_sliding_window_pattern = getattr(
             config, "prefix_dense_sliding_window_pattern", 1
         )
         self.force_rope = bool(
-            first_k_dense_replace
+            is_prefix_dense_layer(config, self.layer_idx)
             and prefix_dense_sliding_window_pattern == 1
-            and self.layer_idx < first_k_dense_replace
         )
 
         self.attn = Attention(
@@ -271,15 +320,14 @@ class Cohere2Moe(nn.Module):
         else:
             self.custom_routing_function = None
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.num_experts,
-            bias=False,
             params_dtype=params_dtype,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
+        self.shared_experts: Cohere2MoeMLP | None
         if hasattr(config, "num_shared_experts") and config.num_shared_experts > 0:
             self.shared_experts = Cohere2MoeMLP(
                 config=config,
@@ -297,7 +345,10 @@ class Cohere2Moe(nn.Module):
             self.shared_experts = None
             self.shared_expert_combination_strategy = None
 
-        self.experts = FusedMoE(
+        # Routed-only MoE leaves its TP all-reduce to the decoder layer, which
+        # reduces the attention and MoE outputs together.
+        defer_all_reduce = self.tp_size > 1 and self.shared_experts is None
+        self.experts = FusedMoEFactory(
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
@@ -309,18 +360,66 @@ class Cohere2Moe(nn.Module):
             prefix=f"{prefix}.experts",
             custom_routing_function=self.custom_routing_function,
             shared_experts=self.shared_experts,
+            reduce_results=not defer_all_reduce,
+        )
+        # The deferral is dropped when the MoE runner must reduce itself
+        # (e.g. EP all2all or sequence parallel).
+        self.output_is_reduced = not (
+            defer_all_reduce and self.experts.moe_config.skip_final_all_reduce
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
         router_logits, _ = self.gate(hidden_states)
-        # FusedMoE handles shared expert overlap internally and returns
+        # FusedMoEFactory handles shared expert overlap internally and returns
         # shared_output + routed_output when shared_experts is set.
         final_hidden_states = self.experts(hidden_states, router_logits)
         if self.shared_expert_combination_strategy == "average":
             final_hidden_states = final_hidden_states / 2
         return final_hidden_states.view(orig_shape)
+
+
+def _make_dual_stream(vllm_config: VllmConfig) -> torch.cuda.Stream | None:
+    """Side stream shared by all decoder layers, or None when the dual stream
+    is disabled (token threshold 0) or unsupported."""
+    token_threshold = envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD
+    if token_threshold <= 0:
+        return None
+    if not current_platform.is_cuda():
+        logger.info_once(
+            "Cohere2MoE attention/MoE dual stream is CUDA-only; running single-stream."
+        )
+        return None
+    if vllm_config.parallel_config.use_ubatching:
+        # Each layer holds a single fork/join state, so microbatches would race.
+        logger.info_once(
+            "Cohere2MoE attention/MoE dual stream does not support "
+            "microbatching (DBO); running single-stream."
+        )
+        return None
+    logger.info_once(
+        "Cohere2MoE attention/MoE dual stream enabled (token threshold=%d).",
+        token_threshold,
+    )
+    # Dedicated stream: the global aux_stream() is used by the shared-expert
+    # and LoRA overlaps inside the MoE branch.
+    return torch.cuda.Stream()
+
+
+@dataclasses.dataclass
+class _DualStreamState:
+    """Dual-stream state of one decoder layer.
+
+    ``stream`` is the model's single side stream, shared by every layer; the
+    events and ``join_pending`` are per layer, since a layer has at most one
+    fork in flight. DBO would need one state per ubatch."""
+
+    stream: torch.cuda.Stream
+    token_threshold: int
+    fork_event: torch.cuda.Event = dataclasses.field(default_factory=torch.cuda.Event)
+    join_event: torch.cuda.Event = dataclasses.field(default_factory=torch.cuda.Event)
+    join_pending: bool = False
 
 
 class Cohere2MoeDecoderLayer(nn.Module):
@@ -330,6 +429,8 @@ class Cohere2MoeDecoderLayer(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        *,
+        moe_stream: torch.cuda.Stream | None = None,
     ):
         super().__init__()
         self.config = config
@@ -343,25 +444,108 @@ class Cohere2MoeDecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
         )
 
-        # Layers before first_k_dense_replace use a dense MLP instead of MoE.
-        first_k_dense_replace = getattr(config, "first_k_dense_replace", 0)
-        if self.layer_idx < first_k_dense_replace:
+        if config.mlp_layer_types[self.layer_idx] == "dense":
             self.mlp = Cohere2MoeMLP(
                 config=config,
                 intermediate_size=getattr(
                     config, "prefix_dense_intermediate_size", config.intermediate_size
                 ),
                 quant_config=quant_config,
-                reduce_results=True,
                 prefix=f"{prefix}.mlp",
             )
         else:
             self.mlp = Cohere2Moe(
                 config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
             )
+        self.mlp_output_is_reduced = (
+            isinstance(self.mlp, Cohere2Moe) and self.mlp.output_is_reduced
+        )
 
-        norm_cls, norm_eps = select_norm_impl(config)
-        self.input_layernorm = norm_cls(param_shape=(config.hidden_size,), eps=norm_eps)
+        self.input_layernorm = make_norm(config)
+        self.uses_rms_norm = isinstance(self.input_layernorm, RMSNorm)
+
+        if moe_stream is not None and not self._allows_dual_stream():
+            logger.info_once(
+                "Cohere2MoE MoE layers that reduce internally under TP (shared "
+                "experts, EP all2all or sequence parallel) run single-stream."
+            )
+            moe_stream = None
+        self.dual_stream = (
+            _DualStreamState(
+                stream=moe_stream,
+                token_threshold=envs.VLLM_COHERE2_ATTN_MOE_DUAL_STREAM_TOKEN_THRESHOLD,
+            )
+            if moe_stream is not None
+            else None
+        )
+        self.layer_name = prefix
+        if self.dual_stream is not None:
+            static_forward_context = (
+                get_current_vllm_config().compilation_config.static_forward_context
+            )
+            if prefix in static_forward_context:
+                raise ValueError(f"Duplicate layer name: {prefix}")
+            static_forward_context[prefix] = self
+
+    def _allows_dual_stream(self) -> bool:
+        """With the dual stream the only TP collective in a layer is the
+        all-reduce of attention + MLP after the join. A MoE that reduces
+        internally would let the attention all-reduce run while the MoE stream
+        is still communicating.
+
+        EP all2all kernels stay single-stream at any TP size (including DP + EP
+        at TP1): all2all on the side stream, and next to DBO, is not
+        validated."""
+        if (
+            isinstance(self.mlp, Cohere2Moe)
+            and self.mlp.experts.moe_config.moe_parallel_config.use_all2all_kernels
+        ):
+            return False
+        return (
+            get_tensor_model_parallel_world_size() == 1
+            or not self.mlp_output_is_reduced
+        )
+
+    def _fork_mlp(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        state = self.dual_stream
+        assert state is not None
+        assert not state.join_pending, "Cohere2MoE dual-stream fork was not joined"
+        # A fork must not span a piecewise CUDA graph boundary: the segment
+        # captured before attention would end with an unjoined stream. Prefill
+        # and mixed batches use piecewise graphs, so they run the MLP inline.
+        if (
+            hidden_states.shape[0] > state.token_threshold
+            or get_forward_context().cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
+            or BreakableCUDAGraphCapture.is_active()
+        ):
+            return self.mlp(hidden_states)
+
+        logger.info_once("Cohere2MoE attention/MoE dual stream is active.")
+        # Inductor may reuse the storage of hidden_states once this op returns
+        # (bypassing the caching allocator), so the MoE stream reads a copy.
+        mlp_input = hidden_states.clone()
+        state.fork_event.record(torch.cuda.current_stream())
+        with torch.cuda.stream(state.stream):
+            state.fork_event.wait()
+            mlp_output = self.mlp(mlp_input)
+            state.join_event.record()
+        mlp_input.record_stream(state.stream)
+        # mlp_output needs no record_stream: its block can only be reused by a
+        # side-stream allocation, and side-stream work always runs after a later
+        # fork_event, recorded on the main stream after every use of mlp_output.
+        # Keep it that way: no side-stream work outside a fork.
+        state.join_pending = True
+        return mlp_output
+
+    def _join_mlp(
+        self, attn_output: torch.Tensor, mlp_output: torch.Tensor
+    ) -> torch.Tensor:
+        state = self.dual_stream
+        assert state is not None
+        if state.join_pending:
+            torch.cuda.current_stream().wait_event(state.join_event)
+            state.join_pending = False
+        return attn_output + mlp_output
 
     def forward(
         self,
@@ -369,20 +553,54 @@ class Cohere2MoeDecoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        residual = hidden_states
-        hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states_attention = self.self_attn(
-            positions=positions,
-            hidden_states=hidden_states,
-        )
-        hidden_states_mlp = self.mlp(hidden_states)
+        if not self.uses_rms_norm:
+            residual = hidden_states
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
+        elif residual is None:
+            residual = hidden_states
+            hidden_states = self.input_layernorm(hidden_states)
+        else:
+            hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = residual + hidden_states_attention + hidden_states_mlp
-        return hidden_states, residual
+        if self.dual_stream is not None:
+            layer_name = _encode_layer_name(self.layer_name)
+            hidden_states_mlp = torch.ops.vllm.cohere2_mlp_fork(
+                hidden_states, layer_name
+            )
+            hidden_states_attention = self.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
+            # Only layers that reduce attention + MLP together keep a
+            # dual_stream (see __init__), so the join can return the sum.
+            parallel_block_output = tensor_model_parallel_all_reduce(
+                torch.ops.vllm.cohere2_mlp_join(
+                    hidden_states_attention, hidden_states_mlp, layer_name
+                )
+            )
+        else:
+            hidden_states_attention = self.self_attn(
+                positions=positions,
+                hidden_states=hidden_states,
+            )
+            hidden_states_mlp = self.mlp(hidden_states)
+            if self.mlp_output_is_reduced:
+                parallel_block_output = (
+                    tensor_model_parallel_all_reduce(hidden_states_attention)
+                    + hidden_states_mlp
+                )
+            else:
+                parallel_block_output = tensor_model_parallel_all_reduce(
+                    hidden_states_attention + hidden_states_mlp
+                )
+
+        if self.uses_rms_norm:
+            # The residual add is fused into the next RMSNorm (or the final norm).
+            return parallel_block_output, residual
+        return residual + parallel_block_output, residual
 
 
 @support_torch_compile
-class Cohere2MoeModel(nn.Module):
+class Cohere2MoeModel(nn.Module, EagleModelMixin):
     """Transformer decoder for Cohere2Moe."""
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -399,15 +617,22 @@ class Cohere2MoeModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size, config.hidden_size
         )
+
+        self._moe_stream = _make_dual_stream(vllm_config)
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: Cohere2MoeDecoderLayer(
-                config, cache_config, quant_config, prefix=prefix
+                config,
+                cache_config,
+                quant_config,
+                prefix=prefix,
+                moe_stream=self._moe_stream,
             ),
             prefix=f"{prefix}.layers",
         )
-        norm_cls, norm_eps = select_norm_impl(config)
-        self.norm = norm_cls(param_shape=(config.hidden_size,), eps=norm_eps)
+        self.norm = make_norm(config)
+        self.uses_rms_norm = isinstance(self.norm, RMSNorm)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -421,7 +646,7 @@ class Cohere2MoeModel(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -432,109 +657,58 @@ class Cohere2MoeModel(nn.Module):
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+
+        aux_hidden_states: list[torch.Tensor] = []
+        if self.start_layer in self.aux_hidden_state_layers:
+            start_hidden_states = hidden_states
+            if self.uses_rms_norm and residual is None:
+                # The first layer carries hidden_states as the residual, which
+                # later fused RMSNorm calls update in place.
+                start_hidden_states = hidden_states.clone()
+            aux_hidden_states = self._maybe_add_hidden_state(
+                aux_hidden_states,
+                self.start_layer,
+                start_hidden_states,
+                residual if self.uses_rms_norm else None,
+            )
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            aux_hidden_states = self._maybe_add_hidden_state(
+                aux_hidden_states,
+                layer_idx + 1,
+                hidden_states,
+                residual if self.uses_rms_norm else None,
+            )
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm(hidden_states, residual)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
 
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts,
-        )
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-
-            for param_name, shard_name, shard_id in stacked_params_mapping:
-                if shard_name not in name:
-                    continue
-                if "mlp.experts" in name:
-                    continue
-                name = name.replace(shard_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    name = name.replace(weight_name, param_name)
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = param.weight_loader
-                    weight_loader(
-                        param,
-                        loaded_weight,
-                        name,
-                        shard_id=shard_id,
-                        expert_id=expert_id,
-                    )
-                    break
-                else:
-                    if (
-                        name.endswith(".bias") or name.endswith("_bias")
-                    ) and name not in params_dict:
-                        continue
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    name = maybe_remap_kv_scale_name(name, params_dict)
-                    if name is None:
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
-
-
-class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
+class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant, SupportsEagle3):
     is_text_generation_model = True
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            # weight_name: (param_name, shard_id)
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+            # .experts.gate_up_proj must be handled by MoERunner.load_weights for EP
+            ".mlp.gate_proj": (".mlp.gate_up_proj", 0),
+            ".mlp.up_proj": (".mlp.gate_up_proj", 1),
+            ".shared_experts.gate_proj": (".shared_experts.gate_up_proj", 0),
+            ".shared_experts.up_proj": (".shared_experts.gate_up_proj", 1),
+        },
+        orig_to_new_prefix={"lm_head.": None},
+    )
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -552,7 +726,6 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.config = config
-        assert getattr(config, "tie_word_embeddings", True)
         self.unpadded_vocab_size = config.vocab_size
         self.quant_config = quant_config
         self.logits_scale = config.logit_scale
@@ -579,7 +752,7 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor | IntermediateTensors:
+    ) -> torch.Tensor | IntermediateTensors | tuple[torch.Tensor, list[torch.Tensor]]:
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def compute_logits(
@@ -589,5 +762,5 @@ class Cohere2MoeForCausalLM(nn.Module, SupportsPP, SupportsQuant):
         return self.logits_processor(self.model.embed_tokens, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_prefixes=["lm_head."])
-        return loader.load_weights(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

@@ -161,9 +161,14 @@ def mteb_test_embed_models(
     model_info: EmbedModelInfo,
     vllm_extra_kwargs=None,
     hf_model_callback=None,
-    atol=MTEB_EMBED_TOL,
+    atol: float | None = None,
     prompt_prefix: str | None = None,
+    vllm_model_callback=None,
 ):
+    if atol is None:
+        atol = (
+            model_info.mteb_tol if model_info.mteb_tol is not None else MTEB_EMBED_TOL
+        )
     vllm_extra_kwargs = get_vllm_extra_kwargs(model_info, vllm_extra_kwargs)
 
     # Test embed_dims, isnan and whether to use normalize
@@ -177,6 +182,9 @@ def mteb_test_embed_models(
         **vllm_extra_kwargs,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
+
+        if vllm_model_callback is not None:
+            vllm_model_callback(vllm_model)
 
         # Confirm whether vllm is using the correct architecture
         if model_info.architecture:
@@ -207,9 +215,18 @@ def mteb_test_embed_models(
         vllm_dtype = vllm_model.llm.llm_engine.model_config.dtype
         head_dtype = model_config.head_dtype
 
-        # Test embedding_size, isnan and whether to use normalize
+        # Test embedding_size, isnan and whether to use normalize.
+        # Apply the same prompt_prefix used for scoring so this check compares
+        # identical effective inputs: HF's SentenceTransformer.encode() applies
+        # the model's default prompt (e.g. "Document: "), so vLLM must receive it
+        # too. This mirrors VllmMtebEncoder and changes no production behavior.
+        consistency_prompts = (
+            [prompt_prefix + p for p in example_prompts]
+            if prompt_prefix
+            else example_prompts
+        )
         vllm_outputs = vllm_model.embed(
-            example_prompts,
+            consistency_prompts,
             tokenization_kwargs=dict(truncate_prompt_tokens=-1),
         )
         outputs_tensor = torch.tensor(vllm_outputs)
@@ -255,4 +272,8 @@ def mteb_test_embed_models(
 
     # We are not concerned that the vllm mteb results are better
     # than SentenceTransformers, so we only perform one-sided testing.
-    assert st_main_score - vllm_main_score < atol
+    diff = st_main_score - vllm_main_score
+    assert diff < atol, (
+        f"diff={diff:.6g} tol={atol} model={model_info.name} "
+        f"(st={st_main_score}, vllm={vllm_main_score})"
+    )

@@ -3,9 +3,12 @@
 
 from typing import Any, Literal, get_args
 
+from pydantic import model_validator
+from pydantic_core import ArgsKwargs
+
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.tasks import PoolingTask
+from vllm.tasks import PoolingTask, check_removed_pooling_task
 from vllm.utils.hashing import safe_hash
 
 logger = init_logger(__name__)
@@ -15,6 +18,12 @@ SEQ_POOLING_TYPES: tuple[SequencePoolingType, ...] = get_args(SequencePoolingTyp
 
 TokenPoolingType = Literal["ALL", "STEP"]
 TOK_POOLING_TYPES: tuple[TokenPoolingType, ...] = get_args(TokenPoolingType)
+
+POOLER_CONFIG_LOG_FIELDS = (
+    "seq_pooling_type",
+    "tok_pooling_type",
+    "use_activation",
+)
 
 
 @config
@@ -54,6 +63,14 @@ class PoolerConfig:
     `None` uses the pooler's default, which is `True` in most cases.
     """
 
+    enable_flash_late_interaction: bool = True
+    """
+    Whether the engine-side late-interaction scorer may use the fused
+    flash-maxsim Triton kernel. Disabled automatically when the API server
+    is started with `--disable-flash-late-interaction`; the reference
+    scorer is used instead.
+    """
+
     ## for embedding models
     dimensions: int | None = None
     """
@@ -66,7 +83,7 @@ class PoolerConfig:
     maximum position embeddings. When enabled, long inputs will be split into
     chunks, processed separately, and then aggregated using weighted averaging.
     This allows embedding models to handle arbitrarily long text without CUDA
-    errors. Defaults to False.
+    errors. Multimodal inputs are not supported. Defaults to False.
     """
     max_embed_len: int | None = None
     """
@@ -106,6 +123,19 @@ class PoolerConfig:
     `math-shepherd-mistral-7b-prm` model.
     """
 
+    @model_validator(mode="before")
+    @classmethod
+    def reject_removed_parameters(cls, data):
+        values = data.kwargs if isinstance(data, ArgsKwargs) else data
+        if not isinstance(values, dict):
+            return data
+        if "normalize" in values:
+            raise ValueError(
+                "Parameter `normalize` was removed; use `use_activation` instead."
+            )
+        check_removed_pooling_task(values.get("task"))
+        return data
+
     def __post_init__(self) -> None:
         if self.logit_sigma is not None and self.logit_sigma == 0:
             raise ValueError("logit_sigma cannot be 0 (division by zero)")
@@ -138,16 +168,23 @@ class PoolerConfig:
                 raise NotImplementedError(pooling_type)
 
     def get_seq_pooling_type(self) -> SequencePoolingType:
-        assert self.seq_pooling_type is not None, "Should be resolved by ModelConfig"
+        if self.seq_pooling_type is None:
+            raise ValueError(
+                "seq_pooling_type is not set; it should be resolved by"
+                " ModelConfig before calling get_seq_pooling_type()"
+            )
         return self.seq_pooling_type
 
     def get_tok_pooling_type(self) -> TokenPoolingType:
-        assert self.tok_pooling_type is not None, "Should be resolved by ModelConfig"
+        if self.tok_pooling_type is None:
+            raise ValueError(
+                "tok_pooling_type is not set; it should be resolved by"
+                " ModelConfig before calling get_tok_pooling_type()"
+            )
         return self.tok_pooling_type
 
     def compute_hash(self) -> str:
-        """
-        WARNING: Whenever a new field is added to this config,
+        """WARNING: Whenever a new field is added to this config,
         ensure that it is included in the factors list if
         it affects the computation graph.
 

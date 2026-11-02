@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
@@ -10,9 +13,9 @@ use crate::EngineId;
 pub use crate::mock_engine::{MockCoordinatorSockets, MockEngineSockets};
 use crate::mock_engine::{
     MockEngineConfig, MockEngineDataSockets, connect_to_bootstrapped_frontend, connect_to_frontend,
-    default_ready_response,
+    connect_to_hybrid_frontends, default_ready_response,
 };
-use crate::protocol::handshake::HandshakeInitMessage;
+use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
 
 /// Per-test IPC endpoint namespace backed by a unique temporary directory.
 ///
@@ -62,6 +65,15 @@ fn test_mock_engine_config() -> MockEngineConfig {
     }
 }
 
+fn test_mock_engine_config_with_ready(ready_response: EngineCoreReadyResponse) -> MockEngineConfig {
+    MockEngineConfig {
+        local: true,
+        headless: true,
+        ready_response,
+        ..Default::default()
+    }
+}
+
 /// Complete the engine-core handshake and connect mock input/output sockets
 /// plus optional coordinator sockets.
 pub async fn setup_mock_engine_sockets(
@@ -71,6 +83,23 @@ pub async fn setup_mock_engine_sockets(
     connect_to_frontend(engine_handshake, engine_id, test_mock_engine_config())
         .await
         .expect("connect mock engine")
+}
+
+/// Join a rank-0 frontend and the engine's own frontend like an engine on a
+/// node in hybrid or external DP LB.
+pub async fn setup_hybrid_mock_engine_sockets(
+    head_handshake: String,
+    client_handshake: String,
+    engine_id: impl Into<EngineId>,
+) -> MockEngineSockets {
+    connect_to_hybrid_frontends(
+        head_handshake,
+        client_handshake,
+        engine_id,
+        test_mock_engine_config(),
+    )
+    .await
+    .expect("connect hybrid mock engine")
 }
 
 /// Connect one mock engine directly to already-bootstrapped frontend
@@ -142,6 +171,52 @@ where
     let engine_id = engine_id.into();
     let engine_task = tokio::spawn(async move {
         let (mut dealer, mut push) = setup_mock_engine(engine_handshake, engine_id).await;
+        run(&mut dealer, &mut push).await;
+        let _ = shutdown_rx.await;
+    });
+    (shutdown_tx, engine_task)
+}
+
+/// Like [`setup_mock_engine`] but uses a custom ready response for the
+/// handshake, allowing tests to control `world_size`, `data_parallel_size`,
+/// etc.
+async fn setup_mock_engine_with_ready(
+    engine_handshake: String,
+    engine_id: impl Into<EngineId>,
+    ready_response: EngineCoreReadyResponse,
+) -> (DealerSocket, PushSocket) {
+    let config = test_mock_engine_config_with_ready(ready_response);
+    let MockEngineSockets { data_sockets, .. } =
+        connect_to_frontend(engine_handshake, engine_id, config)
+            .await
+            .expect("connect mock engine with custom ready response");
+    let MockEngineDataSockets { dealer, push } =
+        data_sockets.into_iter().next().expect("mock engine data socket");
+    (dealer, push)
+}
+
+/// Like [`spawn_mock_engine_task`] but uses a custom ready response for the
+/// handshake, allowing tests to set `world_size` and `data_parallel_size` to
+/// non-default values.
+pub fn spawn_mock_engine_task_with_ready<F>(
+    engine_handshake: String,
+    engine_id: impl Into<EngineId>,
+    ready_response: EngineCoreReadyResponse,
+    run: F,
+) -> (oneshot::Sender<()>, tokio::task::JoinHandle<()>)
+where
+    F: for<'a> FnOnce(
+            &'a mut DealerSocket,
+            &'a mut PushSocket,
+        ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>
+        + Send
+        + 'static,
+{
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let engine_id = engine_id.into();
+    let engine_task = tokio::spawn(async move {
+        let (mut dealer, mut push) =
+            setup_mock_engine_with_ready(engine_handshake, engine_id, ready_response).await;
         run(&mut dealer, &mut push).await;
         let _ = shutdown_rx.await;
     });

@@ -10,14 +10,13 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionStreamResponse,
     ChatMessage,
 )
-from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.serve.engine.protocol import UsageInfo
 
 
 async def accumulate_streaming_response(
     stream_generator: AsyncGenerator[str, None],
 ) -> ChatCompletionResponse:
-    """
-    Accumulate streaming SSE chunks into a complete ChatCompletionResponse.
+    """Accumulate streaming SSE chunks into a complete ChatCompletionResponse.
 
     This helper parses the SSE format and builds up the complete response
     by combining all the delta chunks.
@@ -155,6 +154,8 @@ def verify_harmony_messages(
             assert msg.content[0].text == expected["content"]
         if "content_type" in expected:
             assert msg.content_type == expected["content_type"]
+        if "instructions" in expected:
+            assert msg.content[0].instructions == expected["instructions"]
         if "tool_definitions" in expected:
             # Check that the tool definitions match the expected list of tool names
             actual_tools = [t.name for t in msg.content[0].tools["functions"].tools]

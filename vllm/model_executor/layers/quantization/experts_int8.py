@@ -56,5 +56,5 @@ class ExpertsInt8Config(QuantizationConfig):
         if isinstance(layer, LinearBase):
             return UnquantizedLinearMethod()
         elif isinstance(layer, RoutedExperts):
-            return Int8OnlineMoEMethod(layer=layer)
+            return Int8OnlineMoEMethod(moe=layer.moe_config)
         return None

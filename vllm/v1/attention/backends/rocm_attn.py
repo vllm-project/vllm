@@ -2,11 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with PagedAttention and Triton prefix prefill."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
@@ -16,7 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
+from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -35,7 +36,11 @@ from vllm.v1.attention.ops.paged_attn import PagedAttention
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheLayout,
+    is_quantized_kv_cache,
+)
 
 logger = init_logger(__name__)
 
@@ -58,16 +63,8 @@ class RocmAttentionMetadata:
     block_table: torch.Tensor
     slot_mapping: torch.Tensor
 
-    # For cascade attention.
-    use_cascade: bool
-    common_prefix_len: int
-    cu_prefix_query_lens: torch.Tensor | None
-    prefix_kv_lens: torch.Tensor | None
-    suffix_kv_lens: torch.Tensor | None
-
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
-    prefix_scheduler_metadata: torch.Tensor | None = None
 
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
@@ -103,11 +100,9 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         # slow, so here we set it to 1.
         attn_metadata.seq_lens.fill_(1)
 
-        # Here we set the query start locs to 0. This is to
-        # cover up an invalid memory access in the prefix_prefil kernel
-        # that we run into during graph capture (#25985)
+        # Zero device query start locations to avoid invalid memory access in
+        # the prefix prefill kernel during graph capture (#25985).
         common_attn_metadata.query_start_loc.zero_()
-        common_attn_metadata.query_start_loc_cpu.zero_()
 
         return attn_metadata
 
@@ -126,23 +121,6 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
 
-        use_cascade = common_prefix_len > 0
-
-        if use_cascade:
-            cu_prefix_query_lens = torch.tensor(
-                [0, num_actual_tokens], dtype=torch.int32, device=self.device
-            )
-            prefix_kv_lens = torch.tensor(
-                [common_prefix_len], dtype=torch.int32, device=self.device
-            )
-            suffix_kv_lens = common_attn_metadata.seq_lens.cpu() - common_prefix_len
-            suffix_kv_lens = suffix_kv_lens.to(self.device)
-        else:
-            cu_prefix_query_lens = None
-            prefix_kv_lens = None
-            suffix_kv_lens = None
-            prefix_scheduler_metadata = None
-
         attn_metadata = RocmAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -151,12 +129,6 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             seq_lens=seq_lens,
             block_table=block_table_tensor,
             slot_mapping=slot_mapping,
-            use_cascade=use_cascade,
-            common_prefix_len=common_prefix_len,
-            cu_prefix_query_lens=cu_prefix_query_lens,
-            prefix_kv_lens=prefix_kv_lens,
-            suffix_kv_lens=suffix_kv_lens,
-            prefix_scheduler_metadata=prefix_scheduler_metadata,
             causal=common_attn_metadata.causal,
         )
         return attn_metadata
@@ -178,10 +150,13 @@ class RocmAttentionBackend(AttentionBackend):
     ]
 
     @staticmethod
-    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+    def get_supported_kernel_block_sizes(kv_cache_spec=None) -> list[int | MultipleOf]:
         # ROCM paged attention native C++ kernel only supports block sizes 16 and 32
         # due to shared memory (LDS) constraints on AMD GPUs.
-        # See csrc/rocm/attention.cu CALL_CUSTOM_LAUNCHER_BLK macro.
+        # The (head_size, block_size) pairs that have a native kernel are enumerated
+        # by csrc/rocm/attention_paged_attn_<head>_<dtype>_<kv>.cu, each of which
+        # instantiates ATTN_LAUNCH from csrc/rocm/attention_kernels.cuh; the runtime
+        # gate is use_rocm_custom_paged_attention() in vllm/platforms/rocm.py.
         # However, vLLM allows support for any multiple of 16 via the Triton path.
         # As addressed in PR: https://github.com/vllm-project/vllm/pull/31380,
         # non-standard models (like qwen3-next with block_size 544, or qwen3_5
@@ -191,11 +166,15 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
+        # Head sizes with a native ROCm kernel are only 64 and 128 (see
+        # csrc/rocm/attention_paged_attn_h{64,128}_*.cu); the remaining entries are
+        # served by the Triton fallback selected in use_rocm_custom_paged_attention().
         return [32, 64, 80, 96, 128, 160, 192, 224, 256]
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
-        return True
+        # Not implemented
+        return False
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -220,6 +199,10 @@ class RocmAttentionBackend(AttentionBackend):
     def get_name() -> str:
         return "ROCM_ATTN"
 
+    @classmethod
+    def supports_sliding_window(cls) -> bool:
+        return True
+
     @staticmethod
     def get_impl_cls() -> type["RocmAttentionImpl"]:
         return RocmAttentionImpl
@@ -239,21 +222,30 @@ class RocmAttentionBackend(AttentionBackend):
             AttentionType.ENCODER_ONLY,
         )
 
-    @staticmethod
-    def get_kv_cache_shape(
-        num_blocks: int,
-        block_size: int,
-        num_kv_heads: int,
-        head_size: int,
-        cache_dtype_str: str = "auto",
-    ) -> tuple[int, ...]:
-        if block_size % 16 != 0:
-            raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+    @classmethod
+    def customize_spec(cls, spec: AttentionSpec) -> AttentionSpec:
+        """K and V as two head groups so the native HIP kernels address each side
+        as one contiguous region (x-packed interior applied in split_kv_cache)."""
+        if spec.state_content_bytes is not None:
+            return spec
+        assert spec.head_size == spec.head_size_v, (
+            "Separate K/V head groups require symmetric K/V head sizes."
+        )
+        return replace(
+            spec,
+            num_head_slots=2,
+            state_content_bytes=spec.num_kv_heads
+            * spec.head_size
+            * get_dtype_size(spec.dtype),
+        )
 
-    @staticmethod
-    def use_cascade_attention(*args, **kwargs) -> bool:
-        return False
+    @classmethod
+    def supported_kv_cache_layouts(cls) -> tuple[KVCacheLayout, ...]:
+        # The native HIP kernels hardcode group-contiguous block addressing, so
+        # they need the K and V groups to span all blocks (H outermost within the layer)
+        # The Triton fallbacks are stride-aware, so block-interior LBHNC is also
+        # supported, just without the native kernels.
+        return (KVCacheLayout.LHBNC, KVCacheLayout.LBHNC)
 
     @staticmethod
     def get_builder_cls() -> type["RocmAttentionMetadataBuilder"]:
@@ -288,6 +280,8 @@ class RocmAttentionImpl(AttentionImpl):
         self.alibi_slopes = alibi_slopes
         if sliding_window is None:
             self.sliding_window = (-1, -1)
+        elif attn_type in (AttentionType.ENCODER, AttentionType.ENCODER_ONLY):
+            self.sliding_window = (sliding_window - 1, sliding_window - 1)
         else:
             self.sliding_window = (sliding_window - 1, 0)
         self.kv_cache_dtype = kv_cache_dtype
@@ -309,6 +303,8 @@ class RocmAttentionImpl(AttentionImpl):
                 f"num_heads: {num_heads}."
             )
 
+        self._use_interleaved_v_cache = False
+
     def _forward_encoder_attention(
         self,
         query: torch.Tensor,
@@ -327,6 +323,7 @@ class RocmAttentionImpl(AttentionImpl):
             output: shape = [num_encoder_tokens, num_heads, head_size]
             attn_metadata: Encoder attention metadata
             layer: The attention layer
+
         """
         # For encoder attention, process FP8 quantization if needed
         if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -354,6 +351,7 @@ class RocmAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             sliding_window_q=self.sliding_window[0],
             sliding_window_k=self.sliding_window[1],
+            sinks=self.sinks,
         )
         return output
 
@@ -372,14 +370,21 @@ class RocmAttentionImpl(AttentionImpl):
         """Forward pass with FlashAttention.
 
         Args:
+            layer: The attention layer, providing the q/k/v quantization scales.
             query: shape = [num_tokens, num_heads, head_size]
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
-            kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+            kv_cache: logical [num_blocks, 2, block_size, num_kv_heads *
+                head_size] under LHBNC (physically K/V-group-first)
             attn_metadata: Metadata for attention.
+            output: Tensor that the attention result is written into.
+            output_scale: Scale for fused output quantization.
+            output_block_scale: Block scale for fused output quantization;
+                not supported by this backend.
+
         Returns:
             shape = [num_tokens, num_heads * head_size]
+
         """
         if output_block_scale is not None:
             raise NotImplementedError(
@@ -390,8 +395,6 @@ class RocmAttentionImpl(AttentionImpl):
         if attn_metadata is None:
             # Profiling run.
             return output.fill_(0)
-
-        assert attn_metadata.use_cascade is False
 
         # IMPORTANT!
         # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
@@ -414,16 +417,22 @@ class RocmAttentionImpl(AttentionImpl):
                 layer,
             )
 
+        # The bound view is logical [B, 2, N, H*hs]; split_kv_cache expects
+        # the K/V groups first.
         key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
+            kv_cache.transpose(0, 1), self.num_kv_heads, self.head_size
         )
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-            assert layer._q_scale_float == 1.0, (
-                "A non 1.0 q_scale is not currently supported."
-            )
+            # q_scale only applies to an fp8 query; this path keeps the query
+            # in full precision, so a non-1.0 q_scale is not applicable here.
+            if query.dtype == self.fp8_dtype and layer._q_scale_float != 1.0:
+                raise NotImplementedError(
+                    "A non 1.0 q_scale with an fp8 query is not currently "
+                    "supported by RocmAttentionImpl."
+                )
 
         cu_seqlens_q = attn_metadata.query_start_loc
         seqused_k = attn_metadata.seq_lens
@@ -448,10 +457,13 @@ class RocmAttentionImpl(AttentionImpl):
             k_scale=layer._k_scale,
             v_scale=layer._v_scale,
             alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window[0],
+            # self.sliding_window[0] is the FlashAttention-style left span (W - 1).
+            # chunked_prefill_paged_decode expects the full window length W.
+            sliding_window=1 + self.sliding_window[0],
             sm_scale=self.scale,
             output_scale=output_scale,
             sinks=self.sinks,
+            use_interleaved_v_cache=self._use_interleaved_v_cache,
             causal=attn_metadata.causal,
         )
 
@@ -468,7 +480,7 @@ class RocmAttentionImpl(AttentionImpl):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
         key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
+            kv_cache.transpose(0, 1), self.num_kv_heads, self.head_size
         )
 
         # Reshape the input keys and values and store them in the cache.
@@ -476,6 +488,12 @@ class RocmAttentionImpl(AttentionImpl):
         # value_cache shape: [num_blocks, num_heads, head_size, block_size]
         block_size = value_cache.shape[3]
         has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
+
+        # Match the fused writer's interleaved V-cache when fusion is active.
+        interleaved_v = self._use_interleaved_v_cache
+        interleaved_v_pack_factor = (
+            (16 // value_cache.element_size()) if interleaved_v else 0
+        )
 
         if block_size in (16, 32) and has_native_layout:
             # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
@@ -488,6 +506,7 @@ class RocmAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                interleaved_v,
             )
         else:
             # Non-standard blocks and hybrid attention/Mamba layouts need the
@@ -503,7 +522,60 @@ class RocmAttentionImpl(AttentionImpl):
                 self.kv_cache_dtype,
                 layer._k_scale,
                 layer._v_scale,
+                interleaved_v_pack_factor,
             )
+
+    def fused_qk_norm_rope_kvcache_supported(self):
+        return rocm_aiter_ops.is_enabled()
+
+    def set_interleaved_v_cache(self):
+        # Decode/prefill kernels must read the interleaved V-cache the AITER
+        # fused write emits when use_shuffle_layout=True.
+        self._use_interleaved_v_cache = True
+
+    def do_qk_norm_rope_kvcache_update(
+        self,
+        layer: AttentionLayer,
+        qkv: torch.Tensor,
+        q_out: torch.Tensor,
+        k_out: torch.Tensor,
+        positions: torch.Tensor,
+        q_weight: torch.Tensor,
+        k_weight: torch.Tensor,
+        rms_norm_eps: float,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        # kv_cache is logical [num_blocks, 2, block_size, num_kv_heads * head_size]
+        # (see forward); the AITER shuffle writer takes one (B, N, H, hs) per side.
+        key_cache, value_cache = kv_cache.unflatten(
+            -1, (self.num_kv_heads, self.head_size)
+        ).unbind(1)
+        use_shuffle_layout = self._use_interleaved_v_cache
+        rocm_aiter_ops.do_qk_norm_rope_kvcache_update(
+            qkv=qkv,
+            q_weight=q_weight,
+            k_weight=k_weight,
+            cos_sin_cache=cos_sin_cache,
+            positions=positions,
+            num_heads_q=self.num_heads,
+            num_heads_k=self.num_kv_heads,
+            head_dim=self.head_size,
+            is_neox=is_neox,
+            rms_norm_eps=rms_norm_eps,
+            q_out=q_out,
+            k_out=k_out,
+            key_cache=key_cache,
+            value_cache=value_cache,
+            slot_mapping=layer_slot_mapping,
+            k_scale=layer._k_scale_cpu,
+            v_scale=layer._v_scale_cpu,
+            kv_cache_dtype=self.kv_cache_dtype,
+            use_shuffle_layout=use_shuffle_layout,
+            return_kv=True,
+        )
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
@@ -522,8 +594,23 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
+        if self._use_interleaved_v_cache:
+            # The Triton RoPE + cache writer only stores the regular V layout.
+            # With layer_name hoisted, one RoPE + KV-cache pattern serves every
+            # layer, so a layer switched to the interleaved V cache is handled
+            # here at run time rather than left out of the fusion.
+            ops.rotary_embedding(
+                positions,
+                query,
+                key,
+                layer.head_size,  # type: ignore[attr-defined]
+                cos_sin_cache,
+                is_neox,
+            )
+            self.do_kv_cache_update(layer, key, value, kv_cache, layer_slot_mapping)
+            return
         key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache,
+            kv_cache.transpose(0, 1),
             layer.num_kv_heads,  # type: ignore[attr-defined]
             layer.head_size,  # type: ignore[attr-defined]
         )

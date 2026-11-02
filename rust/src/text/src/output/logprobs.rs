@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use itertools::Itertools as _;
 use serde::{Deserialize, Serialize};
 use vllm_llm::{Logprobs, PositionLogprobs};
@@ -10,7 +13,8 @@ use crate::error::Error;
 pub struct DecodedTokenLogprob {
     /// Original vocabulary token ID for this candidate.
     pub token_id: u32,
-    /// Best-effort decoded token string for this candidate.
+    /// Best-effort decoded token string for this candidate; empty when the
+    /// request outputs no text.
     pub token: String,
     /// Log probability of this token candidate.
     pub logprob: f32,
@@ -37,7 +41,8 @@ pub struct DecodedLogprobs {
 pub struct DecodedPromptLogprobs {
     /// Original vocabulary token ID for the first prompt token.
     pub first_token_id: u32,
-    /// Best-effort decoded string for the first prompt token.
+    /// Best-effort decoded string for the first prompt token; empty when the
+    /// request outputs no text.
     ///
     /// The first prompt token has no left context to score against, so it is
     /// stored separately instead of appearing in `scored_positions`.
@@ -55,7 +60,7 @@ pub struct DecodedPromptLogprobs {
 /// Each returned position corresponds to one generated token position from the
 /// same `llm` update.
 pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
-    tokenizer: &T,
+    tokenizer: Option<&T>,
     logprobs: &Logprobs,
     skip_special_tokens: bool,
 ) -> Result<DecodedLogprobs, Error> {
@@ -75,7 +80,7 @@ pub(super) fn decode_logprobs<T: Tokenizer + ?Sized>(
 /// the remaining scored prompt positions into `scored_positions`, matching
 /// vLLM's prompt-logprobs semantics.
 pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
-    tokenizer: &T,
+    tokenizer: Option<&T>,
     prompt_token_ids: &[u32],
     logprobs: &Logprobs,
     skip_special_tokens: bool,
@@ -84,7 +89,7 @@ pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
         .first()
         .copied()
         .expect("prompt logprobs require at least one prompt token");
-    let first_token = tokenizer.decode(&[first_token_id], skip_special_tokens)?;
+    let first_token = decode_token(tokenizer, first_token_id, skip_special_tokens)?;
     let scored_positions = logprobs
         .positions
         .iter()
@@ -101,10 +106,10 @@ pub(super) fn decode_prompt_logprobs<T: Tokenizer + ?Sized>(
 /// Decode one token position's raw candidate set into decoded token strings
 /// plus logprob metadata.
 ///
-/// This decodes every candidate token ID independently through the active text
-/// backend.
+/// With a tokenizer, every candidate token ID is decoded independently through
+/// the active text backend.
 fn decode_position_logprobs<T: Tokenizer + ?Sized>(
-    tokenizer: &T,
+    tokenizer: Option<&T>,
     position: &PositionLogprobs,
     skip_special_tokens: bool,
 ) -> Result<DecodedPositionLogprobs, Error> {
@@ -113,7 +118,7 @@ fn decode_position_logprobs<T: Tokenizer + ?Sized>(
             .entries
             .iter()
             .map(|entry| {
-                tokenizer.decode(&[entry.token_id], skip_special_tokens).map(|token| {
+                decode_token(tokenizer, entry.token_id, skip_special_tokens).map(|token| {
                     DecodedTokenLogprob {
                         token_id: entry.token_id,
                         token,
@@ -126,43 +131,28 @@ fn decode_position_logprobs<T: Tokenizer + ?Sized>(
     })
 }
 
+/// Without a tokenizer the request outputs no text, so the token string stays
+/// empty.
+fn decode_token<T: Tokenizer + ?Sized>(
+    tokenizer: Option<&T>,
+    token_id: u32,
+    skip_special_tokens: bool,
+) -> vllm_tokenizer::Result<String> {
+    tokenizer.map_or(Ok(String::new()), |tokenizer| {
+        tokenizer.decode(&[token_id], skip_special_tokens)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use vllm_llm::{Logprobs, PositionLogprobs, TokenLogprob};
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
 
-    #[derive(Debug)]
-    struct ByteTokenizer;
-
-    impl vllm_tokenizer::Tokenizer for ByteTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            unreachable!()
-        }
-
-        fn decode(
-            &self,
-            token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::from_utf8_lossy(
-                &token_ids.iter().map(|token_id| *token_id as u8).collect::<Vec<_>>(),
-            )
-            .into_owned())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            unreachable!()
-        }
-    }
-
     #[test]
     fn decode_logprobs_decodes_every_candidate_token() {
-        let tokenizer = ByteTokenizer;
+        let tokenizer = TestTokenizer::new();
         let logprobs = Logprobs {
             positions: vec![PositionLogprobs {
                 entries: vec![
@@ -181,7 +171,7 @@ mod tests {
         };
 
         assert_eq!(
-            decode_logprobs(&tokenizer, &logprobs, false).unwrap(),
+            decode_logprobs(Some(&tokenizer), &logprobs, false).unwrap(),
             DecodedLogprobs {
                 positions: vec![DecodedPositionLogprobs {
                     entries: vec![
@@ -205,7 +195,7 @@ mod tests {
 
     #[test]
     fn decode_prompt_logprobs_separates_first_prompt_token() {
-        let tokenizer = ByteTokenizer;
+        let tokenizer = TestTokenizer::new();
         let logprobs = Logprobs {
             positions: vec![PositionLogprobs {
                 entries: vec![TokenLogprob {
@@ -217,8 +207,13 @@ mod tests {
         };
 
         assert_eq!(
-            decode_prompt_logprobs(&tokenizer, &[b'p' as u32, b'x' as u32], &logprobs, false)
-                .unwrap(),
+            decode_prompt_logprobs(
+                Some(&tokenizer),
+                &[b'p' as u32, b'x' as u32],
+                &logprobs,
+                false
+            )
+            .unwrap(),
             DecodedPromptLogprobs {
                 first_token_id: b'p' as u32,
                 first_token: "p".to_string(),

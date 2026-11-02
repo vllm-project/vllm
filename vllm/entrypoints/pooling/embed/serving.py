@@ -1,14 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import TypeAlias, cast
+from typing import TypeAlias, assert_never, cast
 
-from fastapi.responses import JSONResponse, Response, StreamingResponse
-from typing_extensions import assert_never
+from fastapi.responses import Response, StreamingResponse
 
+from vllm.entrypoints.serve.utils.api_utils import create_json_response
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.utils.serial_utils import EmbedDType, Endianness
 
+from ..base.io_processor import PoolingIOProcessor
 from ..base.serving import PoolingServing
 from ..typing import PoolingServeContext
 from ..utils import (
@@ -17,7 +18,6 @@ from ..utils import (
     build_pooling_bytes_streaming_response,
     encode_pooling_output_float,
     encode_pooling_output_float_or_ndarray,
-    get_json_response_cls,
     get_pooling_output_encoder,
     get_pooling_usage,
 )
@@ -45,13 +45,14 @@ class ServingEmbedding(PoolingServing):
     request_id_prefix = "embd"
     io_processor: EmbedIOProcessor
 
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-
-        self.json_response_cls = get_json_response_cls()
-
     def init_io_processor(self, *args, **kwargs) -> EmbedIOProcessor:
         return EmbedIOProcessor(*args, **kwargs)
+
+    async def _preprocessing(
+        self, io_processor: PoolingIOProcessor, ctx: PoolingServeContext
+    ):
+        await super()._preprocessing(io_processor, ctx)
+        self.io_processor.maybe_pre_process_chunked(ctx)
 
     def _build_response(
         self,
@@ -64,7 +65,7 @@ class ServingEmbedding(PoolingServing):
     def _build_openai_response(
         self,
         ctx: EmbeddingServeContext,
-    ) -> JSONResponse | StreamingResponse:
+    ) -> Response:
         encoding_format = ctx.request.encoding_format
         embed_dtype = ctx.request.embed_dtype
         endianness = ctx.request.endianness
@@ -102,12 +103,8 @@ class ServingEmbedding(PoolingServing):
         encoding_format: JsonEncodingFormat,
         embed_dtype: EmbedDType,
         endianness: Endianness,
-    ) -> JSONResponse:
-        use_ndarray_response = (
-            encoding_format == "float"
-            and self.json_response_cls.__name__ == "ORJSONResponse"
-        )
-        if use_ndarray_response:
+    ) -> Response:
+        if encoding_format == "float":
             ndarray_items: list[dict[str, object]] = []
 
             for idx, final_res in enumerate(final_res_batch):
@@ -128,7 +125,7 @@ class ServingEmbedding(PoolingServing):
             ).model_dump()
             ndarray_response["data"] = ndarray_items
 
-            return self.json_response_cls(content=ndarray_response)
+            return create_json_response(ndarray_response)
 
         encode_fn = get_pooling_output_encoder(
             encoding_format=encoding_format,
@@ -153,7 +150,7 @@ class ServingEmbedding(PoolingServing):
             data=items,
             usage=get_pooling_usage(final_res_batch),
         )
-        return self.json_response_cls(content=response.model_dump())
+        return create_json_response(response)
 
     def _openai_bytes_response(
         self,
@@ -178,7 +175,7 @@ class ServingEmbedding(PoolingServing):
     def _build_cohere_response_from_ctx(
         self,
         ctx: PoolingServeContext,
-    ) -> JSONResponse:
+    ) -> Response:
         request = ctx.request
         assert isinstance(request, CohereEmbedRequest)
 
@@ -188,7 +185,12 @@ class ServingEmbedding(PoolingServing):
         ]
         total_tokens = get_pooling_usage(ctx.final_res_batch).prompt_tokens
 
-        image_tokens = total_tokens if request.images is not None else 0
+        has_image_input = request.images is not None or any(
+            content.type == "image_url"
+            for input_item in request.inputs or []
+            for content in input_item.content
+        )
+        image_tokens = total_tokens if has_image_input else 0
         texts_echo = request.texts
 
         embedding_types = request.embedding_types or ["float"]
@@ -206,4 +208,4 @@ class ServingEmbedding(PoolingServing):
                 ),
             ),
         )
-        return self.json_response_cls(content=response.model_dump(exclude_none=True))
+        return create_json_response(response.model_dump(exclude_none=True))

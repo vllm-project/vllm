@@ -5,8 +5,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.logger import init_logger
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -15,13 +14,13 @@ router = APIRouter()
 logger = init_logger(__name__)
 
 
-def base(request: Request) -> OpenAIServing:
+def base(request: Request) -> ServingTokenization:
     # Reuse the existing instance
     return tokenization(request)
 
 
-def tokenization(request: Request) -> OpenAIServingTokenization:
-    return request.app.state.openai_serving_tokenization
+def tokenization(request: Request) -> ServingTokenization:
+    return request.app.state.serving_tokenization
 
 
 def engine_client(request: Request) -> EngineClient:
@@ -55,3 +54,10 @@ async def get_server_load_metrics(request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
+
+
+@router.get("/kv_event_sources")
+async def kv_event_sources(raw_request: Request):
+    """KV-event publisher config per DP rank; empty on render-only servers."""
+    client: EngineClient | None = raw_request.app.state.engine_client
+    return client.get_kv_event_sources() if client is not None else {}

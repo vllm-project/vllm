@@ -1,14 +1,19 @@
 #include "marlin.cuh"
 
-#include "core/registration.h"
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/csrc/stable/library.h>
+#include <torch/csrc/stable/ops.h>
+#include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include "torch_utils.h"
 
 namespace marlin {
 
-template <int const num_threads, int const num_bits, bool const has_perm,
-          bool is_a_8bit>
+template <int const num_threads, int const num_bits, bool is_a_8bit>
 __global__ void gptq_marlin_repack_kernel(
-    uint32_t const* __restrict__ b_q_weight_ptr,
-    uint32_t const* __restrict__ perm_ptr, uint32_t* __restrict__ out_ptr,
+    uint32_t const* __restrict__ b_q_weight_ptr, uint32_t* __restrict__ out_ptr,
     int size_k, int size_n) {
   constexpr int pack_factor = 32 / num_bits;
 
@@ -37,30 +42,13 @@ __global__ void gptq_marlin_repack_kernel(
 
   extern __shared__ int4 sh[];
 
-  constexpr int perm_size = target_tile_k_size / 4;
-
-  int4* sh_perm_ptr = sh;
-  int4* sh_pipe_ptr = sh_perm_ptr;
-  if constexpr (has_perm) {
-    sh_pipe_ptr += perm_size;
-  }
+  int4* sh_pipe_ptr = sh;
 
   constexpr int tile_ints = target_tile_k_size / pack_factor;
 
   constexpr int stage_n_threads = target_tile_n_size / 4;
-  constexpr int stage_k_threads = has_perm ? target_tile_k_size : tile_ints;
+  constexpr int stage_k_threads = tile_ints;
   constexpr int stage_size = stage_k_threads * stage_n_threads;
-
-  auto load_perm_to_shared = [&](int k_tile_id) {
-    int first_k_int4 = (k_tile_id * target_tile_k_size) / 4;
-
-    int4 const* perm_int4_ptr = reinterpret_cast<int4 const*>(perm_ptr);
-
-    if (threadIdx.x < perm_size) {
-      sh_perm_ptr[threadIdx.x] = perm_int4_ptr[first_k_int4 + threadIdx.x];
-    }
-    __syncthreads();
-  };
 
   auto fetch_to_shared = [&](int pipe, int k_tile_id, int n_tile_id) {
     if (n_tile_id >= n_tiles) {
@@ -72,36 +60,17 @@ __global__ void gptq_marlin_repack_kernel(
 
     int4* sh_ptr = sh_pipe_ptr + stage_size * pipe;
 
-    if constexpr (has_perm) {
-      if (threadIdx.x < stage_size) {
-        auto k_id = threadIdx.x / stage_n_threads;
-        auto n_id = threadIdx.x % stage_n_threads;
+    if (threadIdx.x < stage_size) {
+      auto k_id = threadIdx.x / stage_n_threads;
+      auto n_id = threadIdx.x % stage_n_threads;
 
-        uint32_t const* sh_perm_int_ptr =
-            reinterpret_cast<uint32_t const*>(sh_perm_ptr);
+      int first_k = k_tile_id * target_tile_k_size;
+      int first_k_packed = first_k / pack_factor;
 
-        int src_k = sh_perm_int_ptr[k_id];
-        int src_k_packed = src_k / pack_factor;
-
-        cp_async4(
-            &sh_ptr[k_id * stage_n_threads + n_id],
-            reinterpret_cast<int4 const*>(&(
-                b_q_weight_ptr[src_k_packed * size_n + first_n + (n_id * 4)])));
-      }
-
-    } else {
-      if (threadIdx.x < stage_size) {
-        auto k_id = threadIdx.x / stage_n_threads;
-        auto n_id = threadIdx.x % stage_n_threads;
-
-        int first_k = k_tile_id * target_tile_k_size;
-        int first_k_packed = first_k / pack_factor;
-
-        cp_async4(&sh_ptr[k_id * stage_n_threads + n_id],
-                  reinterpret_cast<int4 const*>(
-                      &(b_q_weight_ptr[(first_k_packed + k_id) * size_n +
-                                       first_n + (n_id * 4)])));
-      }
+      cp_async4(&sh_ptr[k_id * stage_n_threads + n_id],
+                reinterpret_cast<int4 const*>(
+                    &(b_q_weight_ptr[(first_k_packed + k_id) * size_n +
+                                     first_n + (n_id * 4)])));
     }
 
     cp_async_fence();
@@ -132,56 +101,34 @@ __global__ void gptq_marlin_repack_kernel(
     int4* sh_stage_ptr = sh_pipe_ptr + stage_size * pipe;
     uint32_t* sh_stage_int_ptr = reinterpret_cast<uint32_t*>(sh_stage_ptr);
 
-    uint32_t* sh_perm_int_ptr = reinterpret_cast<uint32_t*>(sh_perm_ptr);
-
     uint32_t vals[8];
 
-    if constexpr (has_perm) {
-      static_assert(!is_a_8bit);
-      for (int i = 0; i < 4; i++) {
-        int k_idx = tc_row + tc_offsets[i];
-
-        uint32_t src_k = sh_perm_int_ptr[k_idx];
-        uint32_t src_k_pos = src_k % pack_factor;
-
-        uint32_t b1_val = sh_stage_int_ptr[k_idx * sh_stride + cur_n];
-        uint32_t b1_cur_val = (b1_val >> (src_k_pos * num_bits)) & mask;
-
-        uint32_t b2_val = sh_stage_int_ptr[k_idx * sh_stride + cur_n + 8];
-        uint32_t b2_cur_val = (b2_val >> (src_k_pos * num_bits)) & mask;
-
-        vals[i] = b1_cur_val;
-        vals[4 + i] = b2_cur_val;
-      }
-
-    } else {
-      uint32_t b1_vals[tile_ints];
-      uint32_t b2_vals[tile_ints];
+    uint32_t b1_vals[tile_ints];
+    uint32_t b2_vals[tile_ints];
 
 #pragma unroll
-      for (int i = 0; i < tile_ints; i++) {
-        if constexpr (is_a_8bit) {
-          b1_vals[i] =
-              sh_stage_int_ptr[cur_n + sh_stride * i + (warp_id % 2) * 8];
-        } else {
-          b1_vals[i] = sh_stage_int_ptr[cur_n + sh_stride * i];
-          b2_vals[i] = sh_stage_int_ptr[cur_n + 8 + sh_stride * i];
-        }
+    for (int i = 0; i < tile_ints; i++) {
+      if constexpr (is_a_8bit) {
+        b1_vals[i] =
+            sh_stage_int_ptr[cur_n + sh_stride * i + (warp_id % 2) * 8];
+      } else {
+        b1_vals[i] = sh_stage_int_ptr[cur_n + sh_stride * i];
+        b2_vals[i] = sh_stage_int_ptr[cur_n + 8 + sh_stride * i];
       }
+    }
 
 #pragma unroll
-      for (int i = 0; i < 4; i++) {
-        int cur_elem = tc_row + (is_a_8bit ? i : tc_offsets[i]);
-        int cur_int = cur_elem / pack_factor;
-        int cur_pos = cur_elem % pack_factor;
+    for (int i = 0; i < 4; i++) {
+      int cur_elem = tc_row + (is_a_8bit ? i : tc_offsets[i]);
+      int cur_int = cur_elem / pack_factor;
+      int cur_pos = cur_elem % pack_factor;
 
-        vals[i] = (b1_vals[cur_int] >> (cur_pos * num_bits)) & mask;
-        if constexpr (is_a_8bit)
-          vals[4 + i] =
-              (b1_vals[cur_int + tile_ints / 2] >> (cur_pos * num_bits)) & mask;
-        else
-          vals[4 + i] = (b2_vals[cur_int] >> (cur_pos * num_bits)) & mask;
-      }
+      vals[i] = (b1_vals[cur_int] >> (cur_pos * num_bits)) & mask;
+      if constexpr (is_a_8bit)
+        vals[4 + i] =
+            (b1_vals[cur_int + tile_ints / 2] >> (cur_pos * num_bits)) & mask;
+      else
+        vals[4 + i] = (b2_vals[cur_int] >> (cur_pos * num_bits)) & mask;
     }
 
     constexpr int tile_size =
@@ -241,10 +188,6 @@ __global__ void gptq_marlin_repack_kernel(
   for (int k_tile_id = start_k_tile; k_tile_id < finish_k_tile; k_tile_id++) {
     int n_tile_id = 0;
 
-    if constexpr (has_perm) {
-      load_perm_to_shared(k_tile_id);
-    }
-
     start_pipes(k_tile_id, n_tile_id);
 
     while (n_tile_id < n_tiles) {
@@ -262,96 +205,84 @@ __global__ void gptq_marlin_repack_kernel(
 
 }  // namespace marlin
 
-#define CALL_IF(NUM_BITS, HAS_PERM, IS_A_8BIT)                              \
-  else if (num_bits == NUM_BITS && has_perm == HAS_PERM &&                  \
-           is_a_8bit == IS_A_8BIT) {                                        \
+#define CALL_IF(NUM_BITS, IS_A_8BIT)                                        \
+  else if (num_bits == NUM_BITS && is_a_8bit == IS_A_8BIT) {                \
     cudaFuncSetAttribute(                                                   \
         marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS, \
-                                          HAS_PERM, IS_A_8BIT>,             \
+                                          IS_A_8BIT>,                       \
         cudaFuncAttributeMaxDynamicSharedMemorySize, max_shared_mem);       \
     marlin::gptq_marlin_repack_kernel<marlin::repack_threads, NUM_BITS,     \
-                                      HAS_PERM, IS_A_8BIT>                  \
+                                      IS_A_8BIT>                            \
         <<<blocks, marlin::repack_threads, max_shared_mem, stream>>>(       \
-            b_q_weight_ptr, perm_ptr, out_ptr, size_k, size_n);             \
+            b_q_weight_ptr, out_ptr, size_k, size_n);                       \
   }
 
-torch::Tensor gptq_marlin_repack(torch::Tensor& b_q_weight, torch::Tensor& perm,
-                                 int64_t size_k, int64_t size_n,
-                                 int64_t num_bits, bool is_a_8bit) {
+torch::stable::Tensor gptq_marlin_repack(torch::stable::Tensor& b_q_weight,
+                                         int64_t size_k, int64_t size_n,
+                                         int64_t num_bits, bool is_a_8bit) {
   // Verify compatibility with marlin tile of 16x64
-  TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
-              " is not divisible by tile_k_size = ", marlin::tile_k_size);
-  TORCH_CHECK(size_n % marlin::tile_n_size == 0, "size_n = ", size_n,
-              " is not divisible by tile_n_size = ", marlin::tile_n_size);
+  STD_TORCH_CHECK(size_k % marlin::tile_k_size == 0, "size_k = ", size_k,
+                  " is not divisible by tile_k_size = ", marlin::tile_k_size);
+  STD_TORCH_CHECK(size_n % marlin::tile_n_size == 0, "size_n = ", size_n,
+                  " is not divisible by tile_n_size = ", marlin::tile_n_size);
 
-  TORCH_CHECK(num_bits == 4 || num_bits == 8,
-              "num_bits must be 4 or 8. Got = ", num_bits);
+  STD_TORCH_CHECK(num_bits == 4 || num_bits == 8,
+                  "num_bits must be 4 or 8. Got = ", num_bits);
   int const pack_factor = 32 / num_bits;
 
   // Verify B
-  TORCH_CHECK((size_k / pack_factor) == b_q_weight.size(0),
-              "Shape mismatch: b_q_weight.size(0) = ", b_q_weight.size(0),
-              ", size_k = ", size_k, ", pack_factor = ", pack_factor);
-  TORCH_CHECK(b_q_weight.size(1) == size_n,
-              "b_q_weight.size(1) = ", b_q_weight.size(1),
-              " is not size_n = ", size_n);
+  STD_TORCH_CHECK((size_k / pack_factor) == b_q_weight.size(0),
+                  "Shape mismatch: b_q_weight.size(0) = ", b_q_weight.size(0),
+                  ", size_k = ", size_k, ", pack_factor = ", pack_factor);
+  STD_TORCH_CHECK(b_q_weight.size(1) == size_n,
+                  "b_q_weight.size(1) = ", b_q_weight.size(1),
+                  " is not size_n = ", size_n);
 
   // Verify device and strides
-  TORCH_CHECK(b_q_weight.device().is_cuda(), "b_q_weight is not on GPU");
-  TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
-  TORCH_CHECK(b_q_weight.dtype() == at::kInt, "b_q_weight type is not kInt");
+  STD_TORCH_CHECK(b_q_weight.is_cuda(), "b_q_weight is not on GPU");
+  STD_TORCH_CHECK(b_q_weight.is_contiguous(), "b_q_weight is not contiguous");
+  STD_TORCH_CHECK(
+      b_q_weight.scalar_type() == torch::headeronly::ScalarType::Int,
+      "b_q_weight type is not kInt");
 
-  TORCH_CHECK(perm.device().is_cuda(), "perm is not on GPU");
-  TORCH_CHECK(perm.is_contiguous(), "perm is not contiguous");
-  TORCH_CHECK(perm.dtype() == at::kInt, "perm type is not at::kInt");
+  const int32_t device_index = b_q_weight.get_device_index();
+  torch::stable::accelerator::DeviceGuard device_guard(device_index);
+  const cudaStream_t stream = get_current_cuda_stream(device_index);
 
   // Alloc buffers
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(b_q_weight));
-  auto options = torch::TensorOptions()
-                     .dtype(b_q_weight.dtype())
-                     .device(b_q_weight.device());
-  torch::Tensor out = torch::empty(
+  torch::stable::Tensor out = torch::stable::empty(
       {size_k / marlin::tile_size, size_n * marlin::tile_size / pack_factor},
-      options);
-
-  // Detect if there is act_order
-  bool has_perm = perm.size(0) != 0;
+      b_q_weight.scalar_type(), std::nullopt, b_q_weight.device());
 
   // Get ptrs
   uint32_t const* b_q_weight_ptr =
-      reinterpret_cast<uint32_t const*>(b_q_weight.data_ptr());
-  uint32_t const* perm_ptr = reinterpret_cast<uint32_t const*>(perm.data_ptr());
-  uint32_t* out_ptr = reinterpret_cast<uint32_t*>(out.data_ptr());
+      reinterpret_cast<uint32_t const*>(b_q_weight.const_data_ptr());
+  uint32_t* out_ptr = reinterpret_cast<uint32_t*>(out.mutable_data_ptr());
 
-  // Get dev info
-  int dev = b_q_weight.get_device();
-  cudaStream_t stream = at::cuda::getCurrentCUDAStream(dev);
   int blocks;
-  cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, dev);
+  cudaDeviceGetAttribute(&blocks, cudaDevAttrMultiProcessorCount, device_index);
 
   int max_shared_mem = 0;
   cudaDeviceGetAttribute(&max_shared_mem,
-                         cudaDevAttrMaxSharedMemoryPerBlockOptin, dev);
-  TORCH_CHECK(max_shared_mem > 0);
+                         cudaDevAttrMaxSharedMemoryPerBlockOptin, device_index);
+  STD_TORCH_CHECK(max_shared_mem > 0);
 
   if (false) {
   }
-  CALL_IF(4, false, false)
-  CALL_IF(4, true, false)
-  CALL_IF(8, false, false)
-  CALL_IF(8, true, false)
+  CALL_IF(4, false)
+  CALL_IF(8, false)
 
-  CALL_IF(4, false, true)
-  CALL_IF(8, false, true)
+  CALL_IF(4, true)
+  CALL_IF(8, true)
 
   else {
-    TORCH_CHECK(false, "Unsupported repack config: num_bits = ", num_bits,
-                ", has_perm = ", has_perm, ", is_a_8bit = ", is_a_8bit);
+    STD_TORCH_CHECK(false, "Unsupported repack config: num_bits = ", num_bits,
+                    ", is_a_8bit = ", is_a_8bit);
   }
 
   return out;
 }
 
-TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("gptq_marlin_repack", &gptq_marlin_repack);
+STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
+  m.impl("gptq_marlin_repack", TORCH_BOX(&gptq_marlin_repack));
 }

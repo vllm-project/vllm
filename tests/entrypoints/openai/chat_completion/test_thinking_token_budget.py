@@ -14,6 +14,7 @@ import openai
 import pytest
 import pytest_asyncio
 
+import vllm.envs as envs
 from tests.utils import RemoteOpenAIServer, multi_gpu_only, requires_fp8
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
@@ -33,7 +34,6 @@ def _count_reasoning_decode_token_ids_between_markers(
     reasoning_end_ids: list[int],
 ) -> int | None:
     """Count decode tokens in the thinking span (after last start, before first end)."""
-
     if not reasoning_start_ids or not reasoning_end_ids:
         raise ValueError("reasoning marker token id lists must be non-empty")
 
@@ -72,9 +72,7 @@ def server():
         "0.4",
         "--no-async-scheduling",
     ]
-    # thinking_token_budget is not yet supported by the V2 model runner.
-    env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -90,9 +88,7 @@ def server_with_auto_reasoning_config():
         "0.4",
         "--no-async-scheduling",
     ]
-    # thinking_token_budget is not yet supported by the V2 model runner.
-    env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -126,8 +122,7 @@ def server_qwen35_fp8_mtp_tp2():
             }
         ),
     ]
-    # thinking_token_budget is not yet supported by the V2 model runner.
-    env_dict: dict[str, str] = {"VLLM_USE_V2_MODEL_RUNNER": "0"}
+    env_dict: dict[str, str] = {}
     # With 4+ GPUs, run TP=2 on physical devices 2,3 so module-scoped 0.6B servers
     # on 0,1 do not exhaust memory on the same devices as this worker.
     if current_platform.device_count() >= 4:
@@ -158,7 +153,6 @@ async def client(request, server, server_with_auto_reasoning_config):
 async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
     """Test that mixed requests (some with thinking_token_budget, some without)
     complete successfully without errors."""
-
     response_with_budget = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
@@ -183,29 +177,73 @@ async def test_thinking_token_budget_mixed_requests(client: openai.AsyncOpenAI):
 async def test_thinking_token_budget_limits_reasoning(client: openai.AsyncOpenAI):
     """Test that thinking_token_budget limits the number of reasoning tokens.
 
-    Counts non-empty streaming ``delta.reasoning`` chunks (coarse proxy; each
-    chunk may represent multiple decode tokens — see
-    ``_count_reasoning_decode_token_ids_between_markers`` and the Qwen3.5 MTP
-    test for id-based checks).
+    Counts reasoning decode tokens by id, which is robust to how tokens are
+    grouped into streamed chunks (a single chunk can carry several tokens under
+    async scheduling / stream_interval > 1). Counting chunks under-counts.
     """
+    tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
+    start_ids = list(tokenizer.encode(REASONING_START_STR, add_special_tokens=False))
+    end_ids = list(tokenizer.encode(REASONING_END_STR, add_special_tokens=False))
 
-    reasoning_token_count = 0
+    prompt_token_ids: list[int] = []
+    decode_token_ids: list[int] = []
     stream = await client.chat.completions.create(
         model=MODEL_NAME,
         messages=MESSAGES,
         max_tokens=100,
         stream=True,
-        extra_body={"thinking_token_budget": THINK_BUDGET},
+        extra_body={"thinking_token_budget": THINK_BUDGET, "return_token_ids": True},
     )
     async for chunk in stream:
-        delta = chunk.choices[0].delta
-        if getattr(delta, "reasoning", None):
-            reasoning_token_count += 1
+        if not chunk.choices:
+            continue
+        if getattr(chunk, "prompt_token_ids", None):
+            prompt_token_ids = list(chunk.prompt_token_ids)
+        delta_ids = getattr(chunk.choices[0], "token_ids", None)
+        if delta_ids:
+            decode_token_ids.extend(delta_ids)
 
+    reasoning_token_count = _count_reasoning_decode_token_ids_between_markers(
+        prompt_token_ids + decode_token_ids, start_ids, end_ids
+    )
+    assert reasoning_token_count is not None, "missing reasoning start marker in ids"
     assert reasoning_token_count == THINK_BUDGET, (
-        f"reasoning tokens ({reasoning_token_count}) exceeded "
+        f"reasoning tokens ({reasoning_token_count}) != "
         f"thinking_token_budget ({THINK_BUDGET})"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="the Rust frontend does not serve /v1/responses",
+)
+@pytest.mark.parametrize("client", ["default"], indirect=True)
+async def test_thinking_token_budget_responses_api(client: openai.AsyncOpenAI):
+    """/v1/responses applies thinking_token_budget like /v1/chat/completions."""
+    extra_body = {"thinking_token_budget": THINK_BUDGET}
+    chat = await client.chat.completions.create(
+        model=MODEL_NAME,
+        messages=MESSAGES,
+        max_tokens=100,
+        temperature=0.0,
+        extra_body=extra_body,
+    )
+    response = await client.responses.create(
+        model=MODEL_NAME,
+        input=MESSAGES,
+        max_output_tokens=100,
+        temperature=0.0,
+        extra_body=extra_body,
+    )
+
+    reasoning = "".join(
+        part.text
+        for item in response.output
+        if item.type == "reasoning"
+        for part in item.content or []
+    )
+    assert reasoning == chat.choices[0].message.reasoning
 
 
 @pytest.mark.asyncio
@@ -220,7 +258,6 @@ async def test_thinking_token_budget_qwen35_fp8_mtp_concurrent_mixed_budget_and_
     Qwen3.5 FP8 + MTP (TP=2) server. Budgeted calls are checked with
     ``_count_reasoning_decode_token_ids_between_markers`` on full token ids.
     """
-
     _batch_spec: list[tuple[Literal["budget"], int] | tuple[Literal["plain"], None]] = [
         ("budget", 1),
         ("budget", 12),

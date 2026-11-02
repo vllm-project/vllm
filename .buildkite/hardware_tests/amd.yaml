@@ -1,42 +1,43 @@
-group: Hardware - AMD Build 
+group: Hardware - AMD Build
+
+# ROCm images: .buildkite/scripts/rocm/build.sh + docker/docker-bake-rocm.hcl. ci-infra's AMD CI pipeline
+# (test-template-amd.j2) renders these same steps and sets ROCM_CI_REPO (trusted rocm/vllm-ci, else rocm/vllm-dev).
+# The base step ensures the content-keyed stack (+ -wheels), runtime and test-deps images; the build
+# step adds the per-commit test image. Base groups are per stack/repo/PR/branch.
 steps:
-  - label: "AMD: :docker: build image"
-    key: image-build-amd
+  - label: ":docker: Ensure ROCm stack + runtime"
+    key: refresh-rocm-base-amd
     depends_on: []
     device: amd_cpu
     no_plugin: true
     commands:
-    - >
-      docker build
-      --build-arg max_jobs=16
-      --build-arg REMOTE_VLLM=1
-      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx90a;gfx942;gfx950'
-      --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-      --tag "rocm/vllm-ci:${BUILDKITE_COMMIT}"
-      -f docker/Dockerfile.rocm
-      --target test
-      --no-cache
-      --progress plain .
-    - |
-      docker run --rm --network=none --entrypoint /bin/bash "rocm/vllm-ci:${BUILDKITE_COMMIT}" -ec '
-        if [ ! -d /vllm-workspace ]; then echo Missing directory: /vllm-workspace >&2; exit 1; fi
-        if [ ! -d /vllm-workspace/tests ]; then echo Missing directory: /vllm-workspace/tests >&2; exit 1; fi
-        if [ ! -d /vllm-workspace/src/vllm ]; then echo Missing directory: /vllm-workspace/src/vllm >&2; exit 1; fi
-        if [ ! -x /vllm-workspace/src/vllm/vllm-rs ]; then echo Missing executable: /vllm-workspace/src/vllm/vllm-rs >&2; exit 1; fi
-        command -v python3
-        command -v uv
-        command -v pytest
-        if ! command -v amd-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
-          echo No ROCm CLI found in image >&2
-          exit 1
-        fi
-        python3 - <<PY
-      import torch, vllm
-      print(torch.__version__)
-      print(vllm.__version__)
-      PY
-        echo AMD image smoke OK
-      '
-    - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
-    env:
-      DOCKER_BUILDKIT: "1"
+      - bash .buildkite/scripts/rocm/build.sh rocm base
+    timeout_in_minutes: 540   # a key miss rebuilds the stack (hours); a hit takes seconds
+    concurrency: 1
+    concurrency_group: "vllm/rocm/base/rocm/$ROCM_CI_REPO/$BUILDKITE_PULL_REQUEST/$BUILDKITE_BRANCH"
+    retry:
+      automatic:
+        - exit_status: 75  # Registry error (build.sh)
+          limit: 1
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1
+
+  - label: ":docker: Build ROCm test image"
+    key: image-build-amd
+    depends_on:
+      - refresh-rocm-base-amd
+    device: amd_cpu
+    no_plugin: true
+    commands:
+      - bash .buildkite/scripts/rocm/build.sh rocm ci
+    timeout_in_minutes: 180
+    retry:
+      automatic:
+        - exit_status: 1  # Transient Docker/BuildKit failure
+          limit: 1
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
+          limit: 1

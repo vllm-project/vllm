@@ -49,6 +49,9 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
             "Only nvfp4 quantization are currently supported."
         )
         self.out_dtype = moe_config.in_dtype
+        self.use_deep_ep_ll_nvfp4_dispatch = (
+            envs.VLLM_DEEPEPLL_NVFP4_DISPATCH and moe_config.use_deepep_ll_kernels
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -89,9 +92,6 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
-    def supports_expert_map(self) -> bool:
-        return False
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()
@@ -107,8 +107,7 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        """
-        Compute the shapes for the temporary and final outputs of the two gemms
+        """Compute the shapes for the temporary and final outputs of the two gemms
         and activation in the fused expert function.  Since the gemms are
         independent, the workspace for the first gemm can be shared with the
         workspace for the last gemm.
@@ -123,10 +122,9 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         - Note: in order for activation chunking to work, the first dimension
           of each tuple must be the number of tokens.
         """
-
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
-        K_dim = K * 2 if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH else K
+        K_dim = K * 2 if self.use_deep_ep_ll_nvfp4_dispatch else K
         output_shape = (local_num_experts, M, K_dim)
         workspace2 = (local_num_experts, M, N)
         workspace1 = output_shape
@@ -164,11 +162,11 @@ class FlashInferCuteDSLBatchedExperts(mk.FusedMoEExpertsModular):
         assert self.w2_scale.ndim == 3
 
         input_global_scale = (
-            None if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH else self.a1_gscale
+            None if self.use_deep_ep_ll_nvfp4_dispatch else self.a1_gscale
         )
         flashinfer_hidden_states = (
             (hidden_states, a1q_scale)
-            if envs.VLLM_DEEPEPLL_NVFP4_DISPATCH
+            if self.use_deep_ep_ll_nvfp4_dispatch
             else hidden_states
         )
         flashinfer_cutedsl_moe_masked(
@@ -212,8 +210,7 @@ def flashinfer_cutedsl_moe_masked(
     workspace: torch.Tensor,
     out: torch.Tensor,
 ):
-    """
-    Perform masked Mixture-of-Experts computation with FlashInfer's CuteDSL
+    """Perform masked Mixture-of-Experts computation with FlashInfer's CuteDSL
     kernels.
 
     Args:
@@ -229,13 +226,14 @@ def flashinfer_cutedsl_moe_masked(
         a2_global_scale (torch.Tensor): (l,)
         w2_blockscale (torch.Tensor): blockscale factors, e4m3,
         w2_alpha (torch.Tensor): (l,)
+        out (torch.Tensor): output tensor written in place, [l, m, k], bf16
         masked_m (torch.Tensor): Masked dimension indices
         workspace (torch.Tensor): For gateup_output
 
     Notes:
         - Assumes max(masked_m) <= m.
-    """
 
+    """
     # === Assertions on dtypes ===
     assert w1.dtype == torch.uint8, f"w1 must be uint8, got {w1.dtype}"
     assert w1_blockscale.dtype == torch.float8_e4m3fn, (

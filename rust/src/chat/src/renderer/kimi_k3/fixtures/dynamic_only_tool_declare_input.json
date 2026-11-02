@@ -1,0 +1,40 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "Load the calculator."
+    },
+    {
+      "role": "developer",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "calc",
+            "description": "Evaluate an expression",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "expression": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "expression"
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "What is 2 + 2?"
+    }
+  ],
+  "add_generation_prompt": true,
+  "tool_choice": "none",
+  "template_kwargs": {
+    "thinking": true
+  }
+}

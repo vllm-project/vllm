@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Modules below used for the audio encoder component in: models/nano_nemotron_vl.py
-"""
+"""Modules below used for the audio encoder component in: models/nano_nemotron_vl.py."""
 
 from collections.abc import Iterable
 from functools import cache
@@ -12,13 +10,14 @@ import numpy as np
 import torch
 import torch.nn as nn
 from transformers import ParakeetEncoder as HFParakeetEncoder
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 from transformers.audio_utils import mel_filter_bank
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.platforms import current_platform
 from vllm.transformers_utils.configs.parakeet import ExtractorConfig, ParakeetConfig
 
 logger = init_logger(__name__)
@@ -48,7 +47,7 @@ class ParakeetProjection(nn.Module):
 class ProjectedParakeet(nn.Module):
     def __init__(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         *,
         dtype: torch.dtype,
         llm_hidden_size: int,
@@ -136,7 +135,7 @@ LOG_ZERO_GUARD_VALUE = 2**-24
 
 
 class ParakeetExtractor:
-    def __init__(self, config: PretrainedConfig) -> None:
+    def __init__(self, config: PreTrainedConfig) -> None:
         self.config = ExtractorConfig.from_hf_config(config)
         """`config` is named *exactly* for `._get_subsampling_output_length` below"""
         self._clip_target_samples = int(
@@ -186,7 +185,7 @@ class ParakeetExtractor:
         )
         return self._apply_mel_filters(stft, mel_filters)
 
-    @torch.compile(dynamic=True)
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def _apply_mel_filters(
         self, stft_output: torch.Tensor, mel_filters: torch.Tensor
     ) -> torch.Tensor:
@@ -195,7 +194,7 @@ class ParakeetExtractor:
         mel_spec = torch.log(mel_spec + LOG_ZERO_GUARD_VALUE)
         return mel_spec.permute(0, 2, 1)
 
-    @torch.compile(dynamic=True)
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def _apply_preemphasis(
         self, input_features: torch.Tensor, audio_lengths: torch.Tensor
     ) -> torch.Tensor:
@@ -213,7 +212,7 @@ class ParakeetExtractor:
         input_features = input_features.masked_fill(~timemask, 0.0)
         return input_features
 
-    @torch.compile(dynamic=True)
+    @torch.compile(dynamic=True, backend=current_platform.simple_compile_backend)
     def _normalize_mel_features(
         self, mel_features: torch.Tensor, audio_lengths: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -330,6 +329,6 @@ class ParakeetExtractor:
         }
 
     @staticmethod
-    def audio_length(raw_config: PretrainedConfig, audio_tokens: int) -> int:
+    def audio_length(raw_config: PreTrainedConfig, audio_tokens: int) -> int:
         config = ExtractorConfig.from_hf_config(raw_config)
         return int(audio_tokens * config.subsampling_factor * config.hop_length)

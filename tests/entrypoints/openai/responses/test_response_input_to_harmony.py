@@ -12,9 +12,10 @@ from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningIt
 from openai.types.responses.response_reasoning_item import (
     Content as ReasoningTextContent,
 )
-from openai_harmony import Role
+from openai_harmony import DeveloperContent, Role
 
 from vllm.entrypoints.openai.responses.harmony import response_input_to_harmony
+from vllm.exceptions import VLLMValidationError
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -49,6 +50,7 @@ class TestResponseInputToHarmonyMessage:
             {"type": "message", "role": "user", "content": "Hello"},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.USER
         assert msg.content[0].text == "Hello"
@@ -60,39 +62,47 @@ class TestResponseInputToHarmonyMessage:
             {"role": "user", "content": "Hello"},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.USER
         assert msg.content[0].text == "Hello"
 
     def test_system_message(self):
+        """System messages carry developer instructions and must be rendered
+        as developer messages with DeveloperContent."""
         msg = response_input_to_harmony(
             {"type": "message", "role": "system", "content": "Be helpful."},
             prev_responses=[],
         )
+        assert msg is not None
 
-        assert msg.author.role == Role.SYSTEM
-        assert msg.content[0].text == "Be helpful."
-        assert msg.channel is None
+        assert msg.author.role == Role.DEVELOPER
+        assert isinstance(msg.content[0], DeveloperContent)
+        assert msg.content[0].instructions == "Be helpful."
 
     def test_assistant_message_gets_final_channel(self):
         msg = response_input_to_harmony(
             {"type": "message", "role": "assistant", "content": "The answer is 42."},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "final"
         assert msg.content[0].text == "The answer is 42."
 
     def test_developer_message_gets_instructions_prefix(self):
+        """Developer messages must use DeveloperContent which adds the
+        '# Instructions' header the model was trained on."""
         msg = response_input_to_harmony(
             {"type": "message", "role": "developer", "content": "Be concise."},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.DEVELOPER
-        assert msg.content[0].text == "Instructions:\nBe concise."
-        assert msg.channel is None
+        assert isinstance(msg.content[0], DeveloperContent)
+        assert msg.content[0].instructions == "Be concise."
 
     def test_message_with_array_content(self):
         msg = response_input_to_harmony(
@@ -106,13 +116,16 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.USER
         assert len(msg.content) == 2
         assert msg.content[0].text == "Part one. "
         assert msg.content[1].text == "Part two."
 
-    def test_developer_message_array_content_gets_prefix_on_each_part(self):
+    def test_developer_message_array_content_concatenated(self):
+        """Array content in developer messages is flattened and rendered
+        via DeveloperContent with the '# Instructions' header."""
         msg = response_input_to_harmony(
             {
                 "type": "message",
@@ -124,9 +137,11 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[],
         )
+        assert msg is not None
 
-        assert msg.content[0].text == "Instructions:\nRule 1."
-        assert msg.content[1].text == "Instructions:\nRule 2."
+        assert msg.author.role == Role.DEVELOPER
+        assert isinstance(msg.content[0], DeveloperContent)
+        assert msg.content[0].instructions == "Rule 1.Rule 2."
 
     # -----------------------------------------------------------------------
     # type="reasoning"
@@ -142,6 +157,7 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "analysis"
@@ -150,6 +166,7 @@ class TestResponseInputToHarmonyMessage:
     def test_reasoning_pydantic_model_input(self):
         """A Pydantic ResponseReasoningItem should be model_dump()'d before parsing."""
         msg = response_input_to_harmony(_REASONING_ITEM, prev_responses=[])
+        assert msg is not None
 
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "analysis"
@@ -168,6 +185,7 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.ASSISTANT
         assert msg.channel == "commentary"
@@ -180,6 +198,7 @@ class TestResponseInputToHarmonyMessage:
             {"type": "function_call", "name": "ping", "arguments": ""},
             prev_responses=[],
         )
+        assert msg is not None
 
         assert msg.recipient == "functions.ping"
         assert msg.content[0].text == ""
@@ -193,6 +212,7 @@ class TestResponseInputToHarmonyMessage:
             {"type": "function_call_output", "call_id": "call_test", "output": "18°C"},
             prev_responses=[_PREV_CALL],
         )
+        assert msg is not None
 
         assert msg.author.role == Role.TOOL
         assert msg.author.name == "functions.get_weather"
@@ -226,6 +246,7 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[earlier, later],
         )
+        assert msg is not None
 
         assert msg.author.name == "functions.get_weather"
 
@@ -241,11 +262,14 @@ class TestResponseInputToHarmonyMessage:
             },
             prev_responses=[_REASONING_ITEM, _PREV_CALL],
         )
+        assert msg is not None
 
         assert msg.author.name == "functions.get_weather"
 
     def test_function_call_output_raises_if_no_matching_call(self):
-        with pytest.raises(ValueError, match="No call message found for"):
+        with pytest.raises(
+            VLLMValidationError, match="No call message found for"
+        ) as exc_info:
             response_input_to_harmony(
                 {
                     "type": "function_call_output",
@@ -254,21 +278,26 @@ class TestResponseInputToHarmonyMessage:
                 },
                 prev_responses=[_PREV_CALL],
             )
+        assert exc_info.value.parameter == "input"
 
     def test_function_call_output_raises_on_empty_prev_responses(self):
-        with pytest.raises(ValueError, match="No call message found for"):
+        with pytest.raises(
+            VLLMValidationError, match="No call message found for"
+        ) as exc_info:
             response_input_to_harmony(
                 {"type": "function_call_output", "call_id": "call_test", "output": "x"},
                 prev_responses=[],
             )
+        assert exc_info.value.parameter == "input"
 
     # -----------------------------------------------------------------------
     # Error cases
     # -----------------------------------------------------------------------
 
-    def test_unknown_type_raises_value_error(self):
-        with pytest.raises(ValueError, match="Unknown input type"):
+    def test_unknown_type_raises_validation_error(self):
+        with pytest.raises(VLLMValidationError, match="Unknown input type") as exc_info:
             response_input_to_harmony(
                 {"type": "image_url", "url": "https://example.com/img.png"},
                 prev_responses=[],
             )
+        assert exc_info.value.parameter == "input"

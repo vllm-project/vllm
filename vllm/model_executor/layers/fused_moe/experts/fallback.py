@@ -30,8 +30,7 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         type[mk.FusedMoEExpertsModular],
         type[mk.FusedMoEExpertsModular],
     ]:
-        """
-        Get the cls for the experts and fallback experts.
+        """Get the cls for the experts and fallback experts.
 
         Subclasses should implement this method, so that
         we have a consistent way to call the _supports_*
@@ -91,16 +90,6 @@ class FallbackExperts(mk.FusedMoEExpertsModular, ABC):
         return experts_cls._supports_parallel_config(
             moe_parallel_config
         ) and fallback_cls._supports_parallel_config(moe_parallel_config)
-
-    def supports_expert_map(self) -> bool:
-        assert (
-            self.experts.supports_expert_map()
-            == self.fallback_experts.supports_expert_map()
-        )
-        return (
-            self.experts.supports_expert_map()
-            and self.fallback_experts.supports_expert_map()
-        )
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         e_war = self.experts.finalize_weight_and_reduce_impl()

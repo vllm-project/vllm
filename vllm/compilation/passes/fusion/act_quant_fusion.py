@@ -45,8 +45,7 @@ if current_platform.is_cuda_alike():
 
 
 class ActivationQuantPattern(VllmPatternReplacement):
-    """
-    Base class for Activation+Quant fusions.
+    """Base class for Activation+Quant fusions.
     Should not be used directly.
     """
 
@@ -70,14 +69,16 @@ class ActivationQuantPattern(VllmPatternReplacement):
         self.silu_and_mul_matcher = MatcherSiluAndMul()
 
     def empty_quant(self, *args: Any, **kwargs: Any) -> torch.Tensor:
-        kwargs = {"dtype": self.quant_dtype, "device": "cuda", **kwargs}
+        kwargs = {
+            "dtype": self.quant_dtype,
+            "device": current_platform.device_type,
+            **kwargs,
+        }
         return torch.empty(*args, **kwargs)
 
 
 class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
-    """
-    Fusion for SiluMul+Fp8StaticQuant Pattern
-    """
+    """Fusion for SiluMul+Fp8StaticQuant Pattern."""
 
     def __init__(self) -> None:
         super().__init__(kFp8StaticTensorSym)
@@ -122,9 +123,7 @@ class SiluMulFp8StaticQuantPattern(ActivationQuantPattern):
 
 
 class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
-    """
-    Fusion for SiluMul+Nvfp4Quant Pattern
-    """
+    """Fusion for SiluMul+Nvfp4Quant Pattern."""
 
     def __init__(self) -> None:
         super().__init__(kNvfp4Dynamic)
@@ -178,8 +177,7 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
 
 
 class SiluMulBlockQuantPattern(ActivationQuantPattern):
-    """
-    Fusion for SiluMul+BlockQuant (FP8 dynamic per-group) Pattern.
+    """Fusion for SiluMul+BlockQuant (FP8 dynamic per-group) Pattern.
     Supports group_size 128 and 64 via QuantKey.
     Parameterized on is_scale_transposed for different scale layouts.
     """
@@ -277,8 +275,7 @@ class SiluMulBlockQuantPattern(ActivationQuantPattern):
 
 
 class ActivationQuantFusionPass(VllmFusionPatternMatcherPass):
-    """
-    This pass fuses a pre-defined set of custom ops into fused ops.
+    """This pass fuses a pre-defined set of custom ops into fused ops.
     It uses the torch pattern matcher to find the patterns and replace them.
 
     Because patterns can only be registered once, the pass is a singleton.

@@ -1,11 +1,18 @@
-use std::collections::BTreeMap;
-use std::time::{SystemTime, UNIX_EPOCH};
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+use std::collections::BTreeMap;
+
+use serde::Deserialize;
 use uuid::Uuid;
+use vllm_engine_core_client::protocol::kv_hints::KvHintsEnvelope;
+use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
-use vllm_engine_core_client::protocol::{EngineCoreRequest, EngineCoreSamplingParams, OpaqueValue};
+use vllm_engine_core_client::protocol::request::{EngineCoreRequest, ReasoningParserKwargs};
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::error::{Error, Result};
+use crate::request_metrics::current_unix_timestamp_secs;
 
 /// Tokenized decoder-only generate request accepted by [`crate::Llm`].
 ///
@@ -26,15 +33,35 @@ pub struct GenerateRequest {
     pub sampling_params: EngineCoreSamplingParams,
     /// Optional multimodal features already prepared by `vllm-chat`.
     pub mm_features: Option<MmFeatures>,
-
-    // Fields below are currently likely unused by callers.
+    /// Unix timestamp, in seconds, when this request arrived at the frontend.
+    ///
+    /// Stamped at the frontend entry, before render and tokenization, to match
+    /// Python's renderer-entry arrival_time. When omitted, it is filled as a
+    /// fallback before the request is sent to engine-core.
     pub arrival_time: Option<f64>,
+    /// Optional salt used to partition prefix-cache entries for this request.
     pub cache_salt: Option<String>,
+    /// Optional tracing headers to forward to engine-core and downstream
+    /// observability hooks.
     pub trace_headers: Option<BTreeMap<String, String>>,
+    /// Request scheduling priority. Lower values are scheduled earlier.
     pub priority: i32,
+    /// Optional data-parallel rank override for routing this request.
     pub data_parallel_rank: Option<u32>,
+    /// Stable session identity shared by related requests.
+    pub session_id: Option<String>,
+    /// Optional orchestrator-originated KV hints.
+    pub kv_hints: Option<KvHintsEnvelope>,
+    /// Optional reasoning-parser kwargs forwarded to engine-side structured
+    /// output logic.
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
+    /// Optional engine reasoning-gate override.
+    ///
+    /// `Some(true)` means the submitted grammar covers reasoning from the first
+    /// generated token.
     pub reasoning_ended: Option<bool>,
-    pub lora_request: Option<OpaqueValue>,
+    /// Optional LoRA adapter request applied to this generation.
+    pub lora_request: Option<LoraRequest>,
 }
 
 #[derive(Debug)]
@@ -60,6 +87,9 @@ impl GenerateRequest {
             trace_headers,
             priority,
             data_parallel_rank,
+            session_id,
+            kv_hints,
+            reasoning_parser_kwargs,
             reasoning_ended,
             lora_request,
         } = self;
@@ -71,7 +101,6 @@ impl GenerateRequest {
         } else {
             external_request_id.clone()
         };
-
         Ok(PreparedGenerateRequest {
             engine_request: EngineCoreRequest {
                 request_id: engine_request_id,
@@ -90,16 +119,47 @@ impl GenerateRequest {
                 priority,
                 trace_headers,
                 resumable: false,
+                session_id,
+                kv_hints,
                 external_req_id: Some(external_request_id),
                 reasoning_ended,
-                reasoning_parser_kwargs: None,
+                reasoning_parser_kwargs,
                 abort_immediately: false,
+                // Computed by the engine-core client, which knows the engine's
+                // prefix hash config.
+                block_hashes: None,
             },
         })
     }
 }
 
+/// The remote-prefill fields of `kv_transfer_params` read by the frontend.
+///
+/// The prefiller's scheduler fills `remote_prefill_cached_tokens` next to
+/// `do_remote_prefill` in the parameters it returns, which the P/D proxy then
+/// forwards to the decoder.
+#[derive(Deserialize)]
+struct RemotePrefillParams {
+    #[serde(default)]
+    do_remote_prefill: bool,
+    remote_prefill_cached_tokens: Option<usize>,
+}
+
 impl PreparedGenerateRequest {
+    /// Return the prefiller's cache hits when this is the decode side of a
+    /// P/D request, so response usage reports them instead of the transferred
+    /// KV that the decoder counts as cached.
+    pub fn remote_prefill_cached_tokens(&self) -> Option<usize> {
+        let params = (self.engine_request.sampling_params.as_ref()?.extra_args.as_ref()?)
+            .get("kv_transfer_params")?;
+        let params = RemotePrefillParams::deserialize(params).ok()?;
+        if params.do_remote_prefill {
+            params.remote_prefill_cached_tokens
+        } else {
+            None
+        }
+    }
+
     /// Return the original prompt token IDs copied into the raw engine request.
     pub fn prompt_token_ids(&self) -> &[u32] {
         self.engine_request
@@ -109,18 +169,14 @@ impl PreparedGenerateRequest {
     }
 }
 
-fn current_unix_timestamp_secs() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before unix epoch")
-        .as_secs_f64()
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
-    use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+    use serde_json::json;
+    use vllm_engine_core_client::protocol::kv_hints::{KvHintAction, KvHintsEnvelope};
+    use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+    use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
     use super::GenerateRequest;
     use crate::error::Error;
@@ -139,7 +195,27 @@ mod tests {
             )])),
             priority: 3,
             data_parallel_rank: Some(2),
-            reasoning_ended: Some(true),
+            session_id: Some("session-1".to_string()),
+            kv_hints: Some(KvHintsEnvelope {
+                protocol_version: "0.1".to_string(),
+                message_id: "msg-1".to_string(),
+                actions: vec![KvHintAction {
+                    action_id: "action-1".to_string(),
+                    action_type: "example.action".to_string(),
+                    action_version: "1.0".to_string(),
+                    payload: BTreeMap::new(),
+                }],
+            }),
+            reasoning_parser_kwargs: Some(ReasoningParserKwargs {
+                chat_template_kwargs: [(
+                    "chat_template_kwargs".to_string(),
+                    serde_json::json!({
+                        "enable_thinking": true,
+                    }),
+                )]
+                .into(),
+            }),
+            reasoning_ended: None,
             lora_request: None,
         }
     }
@@ -158,6 +234,11 @@ mod tests {
         assert_eq!(request.arrival_time, 42.5);
         assert_eq!(request.cache_salt.as_deref(), Some("salt"));
         assert_eq!(request.data_parallel_rank, Some(2));
+        assert_eq!(request.session_id.as_deref(), Some("session-1"));
+        assert_eq!(
+            request.kv_hints.as_ref().map(|hints| hints.message_id.as_str()),
+            Some("msg-1")
+        );
         assert_eq!(
             request.trace_headers,
             Some(BTreeMap::from([(
@@ -165,7 +246,16 @@ mod tests {
                 "abc".to_string(),
             )]))
         );
-        assert_eq!(request.reasoning_ended, Some(true));
+        assert_eq!(request.reasoning_ended, None);
+        assert_eq!(
+            request
+                .reasoning_parser_kwargs
+                .as_ref()
+                .and_then(|kwargs| kwargs.chat_template_kwargs.get("chat_template_kwargs")),
+            Some(&serde_json::json!({
+                "enable_thinking": true
+            }))
+        );
     }
 
     #[test]
@@ -197,5 +287,44 @@ mod tests {
         let prepared = request.prepare(false).unwrap();
 
         assert_eq!(prepared.engine_request.mm_features, Some(Vec::new()));
+    }
+
+    #[test]
+    fn remote_prefill_cached_tokens_requires_remote_prefill() {
+        let cases = [
+            (
+                "positive",
+                Some(json!({"do_remote_prefill": true, "remote_prefill_cached_tokens": 5})),
+                Some(5),
+            ),
+            (
+                "zero",
+                Some(json!({"do_remote_prefill": true, "remote_prefill_cached_tokens": 0})),
+                Some(0),
+            ),
+            (
+                "missing_count",
+                Some(json!({"do_remote_prefill": true})),
+                None,
+            ),
+            (
+                "false_flag",
+                Some(json!({"do_remote_prefill": false, "remote_prefill_cached_tokens": 5})),
+                None,
+            ),
+            (
+                "missing_flag",
+                Some(json!({"remote_prefill_cached_tokens": 5})),
+                None,
+            ),
+            ("no_kv_transfer_params", None, None),
+        ];
+        for (name, kv_transfer_params, expected) in cases {
+            let mut request = sample_request();
+            request.sampling_params.extra_args = kv_transfer_params
+                .map(|params| [("kv_transfer_params".to_string(), params)].into());
+            let actual = request.prepare(false).unwrap().remote_prefill_cached_tokens();
+            assert_eq!(actual, expected, "{name}");
+        }
     }
 }

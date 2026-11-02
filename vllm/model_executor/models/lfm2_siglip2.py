@@ -20,12 +20,12 @@ from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
+    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 from .vision import (
     is_vit_use_data_parallel,
     resolve_visual_encoder_outputs,
@@ -38,9 +38,10 @@ class Siglip2VisionEmbeddings(nn.Module):
         self.config = config
         self.embed_dim = config.hidden_size
         self.patch_size = config.patch_size
-        self.patch_embedding = nn.Linear(
-            in_features=config.num_channels * self.patch_size * self.patch_size,
-            out_features=self.embed_dim,
+        self.patch_embedding = ReplicatedLinear(
+            input_size=config.num_channels * self.patch_size * self.patch_size,
+            output_size=self.embed_dim,
+            return_bias=False,
         )
         self.num_patches = config.num_patches
         self.position_embedding_size = int(self.num_patches**0.5)
@@ -60,6 +61,7 @@ class Siglip2VisionEmbeddings(nn.Module):
 
         Returns:
             (1, total_tokens, embed_dim) packed embeddings.
+
         """
         assert spatial_shapes.device.type == "cpu", (
             "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
@@ -112,6 +114,7 @@ class Siglip2VisionEmbeddings(nn.Module):
         Returns:
             (total_tokens, embed_dim) packed positional embeddings, concatenated
             in the same order as `lengths_list`.
+
         """
         assert spatial_shapes.device.type == "cpu"
 
@@ -154,7 +157,7 @@ class Siglip2VisionEmbeddings(nn.Module):
 
 
 class Siglip2Attention(nn.Module):
-    """Multi-headed attention from 'Attention Is All You Need' paper"""
+    """Multi-headed attention from 'Attention Is All You Need' paper."""
 
     def __init__(
         self,
@@ -303,11 +306,11 @@ class Siglip2EncoderLayer(nn.Module):
         cu_seqlens: torch.Tensor,
         max_seqlen: int | torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Args:
-            hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
-            cu_seqlens: Cumulative sequence lengths tensor.
-            max_seqlen: Maximum sequence length.
+        """Args:
+        hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
+        cu_seqlens: Cumulative sequence lengths tensor.
+        max_seqlen: Maximum sequence length.
+
         """
         residual = hidden_states
 
@@ -327,12 +330,12 @@ class Siglip2EncoderLayer(nn.Module):
 
 
 class Siglip2Encoder(nn.Module):
-    """
-    Transformer encoder consisting of `config.num_hidden_layers`
+    """Transformer encoder consisting of `config.num_hidden_layers`
     self attention layers. Each layer is a [`Siglip2EncoderLayer`].
 
     Args:
-        config: PretrainedConfig
+        config: PreTrainedConfig
+
     """
 
     def __init__(
@@ -429,8 +432,7 @@ class Siglip2VisionTransformer(nn.Module):
         max_seqlen: torch.Tensor,
         select_layers: list[int] | None = None,
     ) -> torch.Tensor:
-        r"""
-        spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
+        r"""spatial_shapes (`torch.LongTensor` of shape `(batch_size, 2)`):
             Tensor containing the spatial dimensions (height, width)
         of the input images.
         select_layers (`list[int]` or `None`, defaults to `None`):
@@ -458,6 +460,14 @@ class Siglip2VisionTransformer(nn.Module):
 
 
 class Siglip2Model(torch.nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: Siglip2VisionConfig,
@@ -475,6 +485,10 @@ class Siglip2Model(torch.nn.Module):
             require_post_norm=require_post_norm,
             prefix=maybe_prefix(prefix, "vision_model"),
         )
+        if self.vision_model.post_layernorm is None:
+            self.hf_to_vllm_mapper = self.hf_to_vllm_mapper | WeightsMapper(
+                orig_to_new_prefix={"vision_model.post_layernorm.": None}
+            )
 
     def forward(
         self,
@@ -487,10 +501,15 @@ class Siglip2Model(torch.nn.Module):
         """Forward pass through the vision model.
 
         Args:
+            pixel_values_packed: Packed pixel values for all images.
+            spatial_shapes: Per-image spatial dimensions.
+            cu_seqlens: Cumulative sequence lengths of the packed images.
+            max_seqlen: Longest image sequence in the batch.
             select_layers: Layer indices to select hidden states from.
                 Supports negative indices (e.g., [-2] for second-to-last).
                 If None, returns the last layer output with post_layernorm.
                 Multiple layers can be selected and will be concatenated.
+
         """
         return self.vision_model(
             pixel_values_packed=pixel_values_packed,
@@ -501,42 +520,18 @@ class Siglip2Model(torch.nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        loader = AutoWeightsLoader(self)
+
+        # Drop layers omitted by num_hidden_layers_override.
         layer_count = len(self.vision_model.encoder.layers)
 
-        for name, loaded_weight in weights:
-            # post_layernorm is optional in Siglip2Model
-            if (
-                name.startswith("vision_model.post_layernorm")
-                and self.vision_model.post_layernorm is None
-            ):
-                continue
-
-            # omit layers when num_hidden_layers_override is set
-            if name.startswith("vision_model.encoder.layers"):
-                layer_idx = int(name.split(".")[3])
-                if layer_idx >= layer_count:
+        def _filter(ws):
+            for n, w in ws:
+                if (
+                    n.startswith("vision_model.encoder.layers.")
+                    and int(n.split(".")[3]) >= layer_count
+                ):
                     continue
+                yield n, w
 
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        return loader.load_weights(_filter(weights), mapper=self.hf_to_vllm_mapper)

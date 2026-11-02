@@ -52,8 +52,6 @@ While `NONE` , `PIECEWISE`, and `FULL` are single-mode configurations and simply
 !!! note
     Here, the single-modes `NONE`, `PIECEWISE`, and `FULL` are treated as the runtime modes for CUDA Graphs dispatching. If using a dual-mode, the dispatcher will always dispatch to one of its member modes (plus a potential `NONE` if no suitable CUDA Graph available), depending on the batch composition.
 
-While cascade attention is not cudagraph compatible, it is now compatible with all possible cudagraph mode configurations. If a batch uses cascade attention, it always gets dispatched to `PIECEWISE` mode if available (otherwise `NONE`).
-
 !!! note
     Not all CUDA Graph modes are compatible with every attention backend. We automatically "downgrade" modes to the closest supported mode. For example, if a backend only supports CUDA Graphs for pure decode/uniform batches, we convert `FULL` to `FULL_AND_PIECEWISE` if piecewise compilation is enabled, and `FULL_DECODE_ONLY` otherwise.
 
@@ -154,23 +152,23 @@ To signal the CUDA Graphs compatibility of the attention backends, we introduce 
 
 ```python
 class AttentionCGSupport(enum.Enum):
-    """ Constants for the CUDA Graphs support of the attention backend
-    Here we do not consider the cascade attention, as currently
-    it is never CUDA Graphs supported."""
+    """Constants for the CUDA Graphs support of the attention backend"""
 
     ALWAYS = 3
     """CUDA Graphs always supported; supports mixed-prefill-decode"""
     UNIFORM_BATCH = 2
-    """CUDA Graphs supported for batches the only contain query lengths that are
+    """CUDA Graphs supported for batches that only contain query lengths that are
     the same, this can be used for spec-decode 
         i.e. "decodes" are 1 + num_speculative_tokens"""
     UNIFORM_SINGLE_TOKEN_DECODE = 1
-    """CUDA Graphs supported for batches the only contain query_len==1 decodes"""
+    """CUDA Graphs supported for batches that only contain query_len==1 decodes"""
     NEVER = 0
     """NO CUDA Graphs support"""
 ```
 
 Suppose we have hybrid attention backends (e.g., in mamba mixer models). In that case, we seek the minimum capability of all backends to determine the final capability of the model, and we might resolve the incompatible CUDA Graphs mode by downgrading the mode to the best fit one. For example, downgrading `FULL` mode to `FULL_AND_PIECEWISE` mode if the minimum capability is `UNIFORM_BATCH`, or `PIECEWISE` mode if the minimum capability is `NEVER` for -O3 compilation mode. For the complete fallback policy, please see the code for [this][vllm.v1.worker.gpu_model_runner.GPUModelRunner._check_and_update_cudagraph_mode].
+
+Variable-length decode batches, where each request carries a different number of query tokens read from the device `query_start_loc` (as in adaptive verification), are declared separately and not ordered against the enum: `AttentionMetadataBuilder.get_varlen_cudagraph_max_query_len()` returns the largest per-request query length a FULL decode graph can replay. It returns `None` for builders reporting `ALWAYS`, which replay any batch, and for builders that cannot replay variable-length batches; FlashInfer returns `1 + num_speculative_tokens` when its TRTLLM-GEN varlen decode path is active. Batches with a prefill never replay these graphs.
 
 The following table lists backends that support full CUDA Graphs at the time of writing.
 
@@ -223,9 +221,9 @@ outputs = model.generate(
 )
 ```
 
-### Piecewise compilation and full graph custom passes (attention fusion, sequence parallelism)
+### Piecewise compilation and full graph custom passes (attention fusion)
 
-Unfortunately, some custom compile passes have to see the whole graph to be effective and hence aren't compatible with piecewise compilation. This includes `AttnQuantFusionPass` and `SequenceParallelismPass`. As a short-term solution, we automatically disable piecewise compilation (by setting `splitting_ops=[]`) when attention fusion is enabled. We use CUDA Graph modes `FULL` or `FULL_DECODE_ONLY` (depending on backend support). However, this leads to another optimization incompatibility and confusing performance tradeoffs.
+Unfortunately, some custom compile passes have to see the whole graph to be effective and hence aren't compatible with piecewise compilation. This includes `AttnQuantFusionPass`. As a short-term solution, we automatically disable piecewise compilation (by setting `splitting_ops=[]`) when attention fusion is enabled. We use CUDA Graph modes `FULL` or `FULL_DECODE_ONLY` (depending on backend support). However, this leads to another optimization incompatibility and confusing performance tradeoffs.
 
 Long term, we've added the ability to partition the graph in Inductor instead of right after Dynamo. It can be enabled with `CompilationConfig.use_inductor_graph_partition=True` but is currently experimental and only available with `torch>=2.9`. This also increases compilation time as it has to compile the whole graph and cannot reuse piecewise compilation artifacts. Once vLLM supports 2.9, we plan to make this the default approach as it will also speed up piecewise cudagraph capture.
 

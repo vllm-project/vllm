@@ -5,13 +5,20 @@
 # (vllm_ascend/distributed/kv_transfer/kv_pool/ascend_store/).
 """Data classes for MooncakeStoreConnector."""
 
-from collections.abc import Iterable
-from dataclasses import dataclass
+from collections.abc import Iterable, Sequence
+from dataclasses import dataclass, field
+from typing import NamedTuple, cast
 
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
+    KVConnectorWorkerMetadata,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.layout import (
+    KeyMetadata,
+    RankLocalStoreLayout,
+    StoreLayout,
 )
 from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv
@@ -23,130 +30,184 @@ from vllm.v1.core.kv_cache_utils import (
 logger = init_logger(__name__)
 
 
-@dataclass
-class KeyMetadata:
-    """Metadata for constructing pool keys."""
+class BlobBlockHashes(Sequence[BlockHash]):
+    """Lazy view over a flat buffer of fixed-size block hashes to avoid the overhead
+    of materializing all hashes upfront.
+    """
 
-    model_name: str
-    tp_rank: int
-    pcp_rank: int
-    dcp_rank: int
-    pp_rank: int
-    group_id: int = 0
+    def __init__(self, blob: memoryview, hash_len: int):
+        self._blob = blob
+        self._hash_len = hash_len
+        self._n = len(blob) // hash_len if hash_len else 0
+
+    def __len__(self) -> int:
+        return self._n
+
+    def __getitem__(self, idx):
+        if isinstance(idx, slice):
+            return [self[i] for i in range(*idx.indices(self._n))]
+        if idx < 0:
+            idx += self._n
+        if not 0 <= idx < self._n:
+            raise IndexError(idx)
+        off = idx * self._hash_len
+        return BlockHash(self._blob[off : off + self._hash_len])
 
 
-@dataclass(order=True)
-class PoolKey:
-    """Key for addressing KV cache blocks in the distributed store."""
+class _CompactChunkHashList(BlockHashListWithBlockSize):
+    """Key each chunk by its final chained hash, which identifies its full prefix.
 
-    key_metadata: KeyMetadata
-    chunk_hash: str
+    This keeps Store keys one digest long regardless of the chunk/hash size ratio.
+    """
 
-    def __hash__(self):
-        return hash(
-            (
-                self.key_metadata.model_name,
-                self.key_metadata.tp_rank,
-                self.key_metadata.pcp_rank,
-                self.key_metadata.dcp_rank,
-                self.key_metadata.pp_rank,
-                self.key_metadata.group_id,
-                self.chunk_hash,
-            )
-        )
+    def __init__(
+        self,
+        block_hashes: Sequence[BlockHash],
+        hash_block_size: int,
+        target_block_size: int,
+    ):
+        # The base class only needs sequence indexing and length.
+        assert target_block_size % hash_block_size == 0
+        self.block_hashes = block_hashes  # type: ignore[assignment]
+        self.scale_factor = target_block_size // hash_block_size
 
-    def to_string(self) -> str:
-        return (
-            f"{self.key_metadata.model_name}"
-            f"@tp_rank:{self.key_metadata.tp_rank}"
-            f"@pcp{self.key_metadata.pcp_rank}"
-            f"@dcp{self.key_metadata.dcp_rank}"
-            f"@pp_rank:{self.key_metadata.pp_rank}"
-            f"@group:{self.key_metadata.group_id}"
-            f"@{self.chunk_hash}"
-        )
+    def _get_value_at(self, idx: int) -> BlockHash:
+        return self.block_hashes[idx * self.scale_factor + self.scale_factor - 1]
+
+
+def chunk_hashes_for_block_size(
+    block_hashes: Sequence[BlockHash],
+    hash_block_size: int,
+    block_size: int,
+) -> Sequence[BlockHash]:
+    """Map ``hash_block_size``-granular block hashes to one compact hash per
+    ``block_size`` chunk (the chunk's last sub-hash). Returns ``block_hashes``
+    unchanged when the two sizes are equal.
+    """
+    if block_size == hash_block_size:
+        return block_hashes
+    # Structurally a Sequence[BlockHash] (indexable + sized); the base class
+    # just isn't declared as one.
+    return cast(
+        "Sequence[BlockHash]",
+        _CompactChunkHashList(block_hashes, hash_block_size, block_size),
+    )
 
 
 class ChunkedTokenDatabase:
-    """Maps token positions to store keys and GPU memory addresses."""
+    """Enumerates Store chunks and their prefix hashes."""
 
     def __init__(
         self,
         metadata: KeyMetadata,
-        block_size: int,
+        chunk_size: int,
         hash_block_size: int | None = None,
+        store_layout: StoreLayout | None = None,
     ):
         self.metadata = metadata
-        self.block_size = block_size
-        self.hash_block_size = hash_block_size or block_size
-        if self.block_size % self.hash_block_size != 0:
+        self.chunk_size = chunk_size
+        self.hash_block_size = hash_block_size or chunk_size
+        if self.chunk_size % self.hash_block_size != 0:
             raise ValueError(
-                f"block_size ({self.block_size}) must be a multiple of "
+                f"chunk_size ({self.chunk_size}) must be a multiple of "
                 f"hash_block_size ({self.hash_block_size})"
             )
-        self.kv_caches_base_addr: list[int] = []
-        self.block_len: list[int] = []
+        self.store_layout = store_layout or RankLocalStoreLayout(
+            metadata, chunk_size, self.hash_block_size
+        )
 
-    def _make_key_by_hash(self, chunk_hash: str) -> PoolKey:
-        return PoolKey(self.metadata, chunk_hash)
+    def _rank_local_layout(self) -> RankLocalStoreLayout:
+        if not isinstance(self.store_layout, RankLocalStoreLayout):
+            raise RuntimeError("This operation requires a rank-local Store layout")
+        return self.store_layout
 
     def set_kv_caches_base_addr(self, kv_caches_base_addr: list[int]):
-        self.kv_caches_base_addr = kv_caches_base_addr
+        self._rank_local_layout().set_kv_caches_base_addr(kv_caches_base_addr)
 
     def set_block_len(self, block_len: list[int]):
-        self.block_len = block_len
-
-    def prepare_value(
-        self, start: int, end: int, block_ids: list[int]
-    ) -> tuple[list[int], list[int], int]:
-        """Compute memory addresses and sizes for a token range.
-
-        Returns:
-            (addr_list, size_list, block_id)
-        """
-        addr_list = []
-        size_list = []
-        block_id = block_ids[start // self.block_size]
-        length = len(self.block_len)
-        for index, base_addr in enumerate(self.kv_caches_base_addr):
-            addr = base_addr + block_id * self.block_len[index % length]
-            assert (end - start) % self.block_size == 0
-            size = self.block_len[index % length] * cdiv(end - start, self.block_size)
-            addr_list.append(addr)
-            size_list.append(size)
-        return addr_list, size_list, block_id
+        self._rank_local_layout().set_block_len(block_len)
 
     def process_tokens(
         self,
         token_len: int,
         block_hashes: list[BlockHash],
         mask_num: int = 0,
-    ) -> Iterable[tuple[int, int, PoolKey]]:
-        """Process tokens and yield (start_idx, end_idx, pool_key) tuples.
+        *,
+        chunk_mask: list[bool] | None = None,
+        put_step: int = 1,
+        put_step_rank: int = 0,
+    ) -> Iterable[tuple[int, int, BlockHash]]:
+        """Process tokens and yield (start_idx, end_idx, block_hash) tuples.
+
+        When there are fewer KV heads than TP ranks, chunks are distributed
+        across TP ranks to avoid duplicate load/store. The assignment keys off
+        the absolute ``chunk_id`` so a given chunk always lands on the same
+        rank regardless of where the processed suffix begins.
 
         Args:
-            token_len: Total number of tokens.
+            token_len: Total number of tokens. Must be hash-block aligned and
+                covered by ``block_hashes`` when hashes are present.
             block_hashes: Block hashes computed at ``hash_block_size`` granularity.
-                When ``block_size > hash_block_size`` consecutive hashes are merged
-                up to the group's ``block_size`` via ``BlockHashListWithBlockSize``.
+                A chunk spanning multiple hashes is keyed by its last hash.
             mask_num: Number of tokens to skip from the beginning.
+            chunk_mask: Optional mask over chunks after ``mask_num``.
+            put_step: Stride for distributing chunks across ranks.
+            put_step_rank: ``chunk_id % put_step`` value this rank stores.
+
         """
+        assert put_step > 0
         if not block_hashes:
             return
-        if self.block_size == self.hash_block_size:
-            chunk_hashes: Iterable[BlockHash] = block_hashes
-        else:
-            chunk_hashes = BlockHashListWithBlockSize(
-                block_hashes, self.hash_block_size, self.block_size
-            )
-        for chunk_id, h in enumerate(chunk_hashes):
-            start_idx = chunk_id * self.block_size
-            if start_idx >= token_len:
-                break
-            end_idx = min(start_idx + self.block_size, token_len)
-            if start_idx < mask_num:
+        assert token_len % self.hash_block_size == 0
+        assert token_len // self.hash_block_size <= len(block_hashes)
+        start_chunk = max(0, cdiv(mask_num, self.chunk_size))
+        max_chunks = cdiv(token_len, self.chunk_size)
+        if chunk_mask is not None:
+            max_chunks = min(max_chunks, start_chunk + len(chunk_mask))
+        for chunk_id in range(start_chunk, max_chunks):
+            if chunk_mask is not None and not chunk_mask[chunk_id - start_chunk]:
                 continue
-            yield start_idx, end_idx, self._make_key_by_hash(h.hex())
+            if chunk_id % put_step != put_step_rank:
+                continue
+            start_idx = chunk_id * self.chunk_size
+            end_idx = min(start_idx + self.chunk_size, token_len)
+            h = block_hashes[end_idx // self.hash_block_size - 1]
+            yield start_idx, end_idx, h
+
+
+@dataclass(frozen=True)
+class TailKeyBoundary:
+    """Hash boundary used to key a group's tail block in the store.
+
+    Attributes:
+        group_id: KV-cache group containing the tail block.
+        num_tokens: Token boundary whose prefix hash identifies the matched
+            stored block. The loader uses
+            ``block_hashes[num_tokens // hash_block_size - 1]`` instead of the
+            hash implied by ``MooncakeLookupResult.hit_length``. This changes
+            only the load key, not the reusable prefix.
+
+    """
+
+    group_id: int
+    num_tokens: int
+
+
+@dataclass
+class MooncakeLookupResult:
+    """Lookup result used to build the subsequent load request.
+
+    Attributes:
+        hit_length: Longest prefix that every KV-cache group can reuse after
+            their individual cache hits converge.
+        tail_key_boundaries: Hash boundary used to store each cache group's
+            tail block when ``hit_length`` does not identify its store key.
+            There is one entry per group for every nonzero hit.
+
+    """
+
+    hit_length: int
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 @dataclass
@@ -157,6 +218,7 @@ class LoadSpec:
     kvpool_cached_tokens: int
     can_load: bool
     token_len: int = 0
+    tail_key_boundaries: tuple[TailKeyBoundary, ...] = ()
 
 
 @dataclass
@@ -168,17 +230,21 @@ class RequestTracker:
     allocated_block_ids: tuple[list[int], ...]
     num_saved_tokens: int = 0
     token_ids: list[int] | None = None
+    has_pending_offload: bool = False
     # Snapshot of the prefill range length at tracker creation time.
     # For a fresh request this is len(prompt). For a resumed-from-preemption
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
+    partial_tail_sent: bool = False
 
     def reset(self) -> None:
         self.token_len = 0
         self.allocated_block_ids = ()
         self.num_saved_tokens = 0
         self.token_ids = None
+        self.has_pending_offload = False
         self.prefill_end_tokens = 0
+        self.partial_tail_sent = False
 
     def update(
         self,
@@ -198,6 +264,14 @@ class RequestTracker:
                 existing.extend(new)
 
 
+class BoundaryPut(NamedTuple):
+    """A block stored under the hash of the prefix ending at ``num_tokens``."""
+
+    group_id: int
+    block_id: int
+    num_tokens: int
+
+
 @dataclass
 class ReqMeta:
     """Per-request metadata for store put/get operations."""
@@ -209,11 +283,30 @@ class ReqMeta:
 
     can_save: bool | None = None
     load_spec: LoadSpec | None = None
-    is_last_chunk: bool | None = None
     current_event: torch.cuda.Event | None = None
 
     token_ids: list[int] | None = None
-    original_block_size: int | None = None
+    # Absolute request offset represented by token_ids[0].
+    token_ids_start: int = 0
+    num_prompt_tokens: int | None = None
+    # Total prefill tokens, including generated tokens replayed after preemption.
+    prefill_end_tokens: int | None = None
+    # Identifies this store job for the engine's lifetime. A request id cannot
+    # serve that purpose: it is reused once a preempted request resumes, so it
+    # would release the wrong job's blocks.
+    store_job_id: int | None = None
+    # Blocks stored under an explicit prefix hash rather than by position:
+    # core-provided mamba "align" states (a block-aligned entry is a committed
+    # snapshot, a non-aligned one the sub-block CoW prompt tail) and the
+    # scheduler-resolved non-Mamba blocks of the prompt's partial tail. The
+    # store-job reference keeps each block alive until every worker rank
+    # finishes the job.
+    boundary_puts: list[BoundaryPut] | None = None
+    # Total computed prefix length at the end of this step.
+    completed_token_len: int | None = None
+    # Set on the save that first covers the whole prompt, so the scheduler
+    # publishes the prompt's partial tail once rather than on every save.
+    publish_partial_tail: bool = False
 
     @staticmethod
     def from_request_tracker(
@@ -222,18 +315,29 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         skip_save: bool | None = False,
         block_hashes: list[BlockHash] | None = None,
-        is_last_chunk: bool | None = None,
-        original_block_size: int | None = None,
+        save_partial_tail: bool = False,
+        num_prompt_tokens: int | None = None,
     ) -> "ReqMeta | None":
         """Create ReqMeta from a RequestTracker."""
+        if save_partial_tail:
+            assert num_prompt_tokens is not None
         if block_hashes is None:
             block_hashes = []
         input_token_len = tracker.token_len
 
-        chunk_boundary = cdiv(tracker.num_saved_tokens + 1, block_size) * block_size
+        token_ids_start = tracker.num_saved_tokens
+        chunk_boundary = cdiv(token_ids_start + 1, block_size) * block_size
         num_tokens_to_save = input_token_len // block_size * block_size
 
-        skip_save = skip_save or num_tokens_to_save < chunk_boundary
+        publish_tail = (
+            save_partial_tail
+            and not tracker.partial_tail_sent
+            and num_prompt_tokens is not None
+            and 0 < num_prompt_tokens <= input_token_len
+        )
+        skip_save = skip_save or (
+            num_tokens_to_save < chunk_boundary and not publish_tail
+        )
         # A ReqMeta must never carry both a save AND a load.
         # The save would also be wasted work — the bytes are being looked up
         # in the store right now. Later cached_reqs steps save new tokens
@@ -245,10 +349,13 @@ class ReqMeta:
 
         if not skip_save:
             tracker.num_saved_tokens = num_tokens_to_save
+            tracker.partial_tail_sent |= publish_tail
 
         token_ids = None
-        if tracker.token_ids:
-            token_ids = tracker.token_ids
+        if tracker.token_ids and not skip_save:
+            # Scheduler tracking continues while this job is handled by an
+            # asynchronous worker, so metadata must own a stable snapshot.
+            token_ids = tracker.token_ids[token_ids_start:num_tokens_to_save]
 
         if load_spec is not None and load_spec.can_load:
             logger.debug(
@@ -272,10 +379,30 @@ class ReqMeta:
             can_save=not skip_save,
             load_spec=load_spec,
             block_hashes=block_hashes,
-            is_last_chunk=is_last_chunk,
             token_ids=token_ids,
-            original_block_size=original_block_size,
+            token_ids_start=token_ids_start,
+            num_prompt_tokens=num_prompt_tokens,
+            prefill_end_tokens=tracker.prefill_end_tokens,
+            completed_token_len=input_token_len,
+            publish_partial_tail=publish_tail and not skip_save,
         )
+
+
+@dataclass
+class MooncakeStoreWorkerMetadata(KVConnectorWorkerMetadata):
+    """Maps ``ReqMeta.store_job_id`` to the number of ranks done with that job."""
+
+    completed_saves: dict[int, int] = field(default_factory=dict)
+
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "MooncakeStoreWorkerMetadata":
+        assert isinstance(other, MooncakeStoreWorkerMetadata)
+        for store_job_id, count in other.completed_saves.items():
+            self.completed_saves[store_job_id] = (
+                self.completed_saves.get(store_job_id, 0) + count
+            )
+        return self
 
 
 class MooncakeStoreConnectorMetadata(KVConnectorMetadata):

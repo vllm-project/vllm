@@ -30,11 +30,14 @@ def check_sequence_repetition(
     params: RepetitionDetectionParams,
 ) -> bool:
     """Check if a sequence of token IDs has a repetition pattern.
+
     Args:
         token_ids: List of token IDs
         params: Repetition detection parameters.
+
     Returns:
         True if a repetition pattern is found, False otherwise.
+
     """
     max_pattern_size = params.max_pattern_size
     min_pattern_size = params.min_pattern_size
@@ -77,6 +80,7 @@ def remove_all(lst: list, items_to_remove: set) -> list:
     Note:
         For single item removal, this modifies the original list in-place
         and returns it. For multiple items, it creates and returns a new list.
+
     """
     if not items_to_remove:
         return lst
@@ -97,9 +101,6 @@ def check_stop(request: Request, max_model_len: int) -> bool:
     sampling_params = request.sampling_params
     assert sampling_params is not None
 
-    if request.num_output_tokens < sampling_params.min_tokens:
-        return False
-
     last_token_id = request.output_token_ids[-1]
     if last_token_id == sampling_params.eos_token_id:
         request.status = RequestStatus.FINISHED_STOPPED
@@ -109,12 +110,21 @@ def check_stop(request: Request, max_model_len: int) -> bool:
         request.status = RequestStatus.FINISHED_STOPPED
         request.stop_reason = last_token_id
         return True
+
     if (
         request.num_tokens >= max_model_len
         or request.num_output_tokens >= request.max_tokens
     ):
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
         return True
+
+    # Note(arpera):
+    # Order of checks is important for min_tokens
+    # If you decide to change the order, first look at these PRs please:
+    # 47489, 49521, and 51299
+    # These PRs show some reasoning about the order of checks
+    if request.num_output_tokens < sampling_params.min_tokens:
+        return False
 
     repetition_detection = sampling_params.repetition_detection
     if repetition_detection is not None and (

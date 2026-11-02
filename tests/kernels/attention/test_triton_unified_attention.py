@@ -2,14 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops import triton_unified_attention as attention
+from vllm.v1.attention.ops.triton_attention_helpers import (
+    apply_softcap,
+    compute_tile_loop_bounds,
+    softmax_step,
+)
+from vllm.v1.attention.ops.triton_unified_attention import (
+    MAX_3D_QUERY_LEN,
+    reduce_segments,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import KVQuantMode
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -18,11 +33,7 @@ HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16]
 
 DTYPES = [torch.bfloat16]
-QDTYPES = (
-    [None, torch.float8_e4m3fn]
-    if not current_platform.is_rocm()
-    else [None, torch.float8_e4m3fnuz]
-)
+QDTYPES = [None, current_platform.fp8_dtype()]
 FP8_DTYPE = current_platform.fp8_dtype()
 
 # one value large enough to test overflow in index calculation.
@@ -32,6 +43,344 @@ NUM_BLOCKS = [32768, 2048]
 # 0: use 2D kernel for decode
 # 8: use 3D kernel for decode
 SEQ_THRESHOLD_3D_VALUES = [0, 8]
+
+
+def _scratch(rows):
+    shapes = [(rows, 8, 16, 128), (rows, 8, 16), (rows, 8, 16)]
+    return [torch.empty(shape, dtype=torch.float32, device="cpu") for shape in shapes]
+
+
+def _uses_splitk(
+    monkeypatch,
+    query_len,
+    scratch,
+    *,
+    causal=True,
+    threshold=8,
+    mm_prefix=None,
+    num_seqs=2,
+):
+    query = torch.empty(
+        (num_seqs * query_len, 8, 128), dtype=torch.bfloat16, device="cpu"
+    )
+    cache = torch.empty((1, 128, 1, 128), dtype=torch.bfloat16, device="cpu")
+    kernel = MagicMock()
+    monkeypatch.setattr(attention, "kernel_unified_attention", kernel)
+    monkeypatch.setattr(attention, "reduce_segments", MagicMock())
+    unified_attention(
+        query,
+        cache,
+        cache,
+        torch.empty_like(query),
+        torch.arange(num_seqs + 1, dtype=torch.int32, device="cpu") * query_len,
+        query_len,
+        torch.full((num_seqs,), 128, dtype=torch.int32, device="cpu"),
+        128,
+        128**-0.5,
+        causal,
+        (-1, -1),
+        torch.zeros((num_seqs, 1), dtype=torch.int32, device="cpu"),
+        0.0,
+        None,
+        None,
+        None,
+        seq_threshold_3D=threshold,
+        num_par_softmax_segments=16,
+        softmax_segm_output=scratch[0],
+        softmax_segm_max=scratch[1],
+        softmax_segm_expsum=scratch[2],
+        mm_prefix_range=mm_prefix,
+    )
+    return kernel.__getitem__.return_value.call_args.kwargs["IS_3D"]
+
+
+def _spy_reduce_segments(monkeypatch):
+    original = attention.reduce_segments
+    grids = []
+
+    def launch(grid):
+        grids.append(grid)
+        return original[grid]
+
+    spy = MagicMock()
+    spy.__getitem__.side_effect = launch
+    monkeypatch.setattr(attention, "reduce_segments", spy)
+    return grids
+
+
+@pytest.mark.parametrize(
+    "query_len,options,expected",
+    [
+        (1, {}, True),
+        (1, {"causal": False}, True),
+        (5, {}, True),
+        (6, {"num_seqs": 1}, True),
+        (8, {}, True),
+        (9, {"num_seqs": 1}, False),
+        (5, {"causal": False}, False),
+        (5, {"causal": "per_sequence"}, False),
+        (5, {"threshold": 1}, False),
+        (5, {"batch_invariant": True}, False),
+        (5, {"mm_prefix": True}, False),
+        # BLOCK_Q is 2 for 8 query heads per KV head: 4 * ceil(4 / 2) <= 8.
+        (4, {"num_seqs": 4}, True),
+        (5, {"num_seqs": 4}, False),
+        (5, {"scratch_rows": 9}, False),
+    ],
+)
+def test_splitk_admission_preserves_decode_and_bounds_verification(
+    monkeypatch, query_len, options, expected
+):
+    options = options.copy()
+    monkeypatch.setattr(
+        attention, "is_batch_invariant", options.pop("batch_invariant", False)
+    )
+    num_seqs = options.setdefault("num_seqs", 2)
+    if options.get("causal") == "per_sequence":
+        options["causal"] = torch.ones(num_seqs, dtype=torch.bool, device="cpu")
+    if options.get("mm_prefix"):
+        options["mm_prefix"] = torch.zeros(
+            (num_seqs, 1, 2), dtype=torch.int32, device="cpu"
+        )
+    scratch = _scratch(options.pop("scratch_rows", num_seqs * query_len))
+    assert _uses_splitk(monkeypatch, query_len, scratch, **options) is expected
+
+
+@pytest.mark.parametrize("empty_state", ["masked", "unvisited", "all_empty"])
+def test_reduce_segments_ignores_empty_softmax_states(empty_state: str) -> None:
+    """Empty segments must not suppress strongly negative, nonempty segments."""
+    output = torch.full((1, 1, 32), float("nan"), device=DEVICE_TYPE)
+    partial = torch.zeros((1, 1, 16, 32), device=DEVICE_TYPE)
+    maxima = torch.full((1, 1, 16), -float("inf"), device=DEVICE_TYPE)
+    masses = torch.ones_like(maxima)
+    if empty_state != "all_empty":
+        partial[:, :, 0] = 3.0
+        maxima[:, :, 0] = -1000.0
+    if empty_state in ("masked", "all_empty"):
+        maxima[:, :, 1:] = 0.0
+        masses[:, :, 1:] = 0.0
+    reduce_segments[(1, 1)](
+        output,
+        partial,
+        maxima,
+        masses,
+        torch.tensor([32], dtype=torch.int32, device=DEVICE_TYPE),
+        1,
+        1,
+        1.0,
+        output.stride(0),
+        output.stride(1),
+        1,
+        16,
+        32,
+        32,
+        torch.tensor([0, 1], dtype=torch.int32, device=DEVICE_TYPE),
+        16,
+        16,
+        False,
+    )
+    torch.testing.assert_close(
+        output, torch.full_like(output, 0.0 if empty_state == "all_empty" else 3.0)
+    )
+
+
+@triton.jit
+def _softmax_after_empty_tile(output_ptr):
+    maximum = tl.full((1,), float("-inf"), tl.float32)
+    mass = tl.full((1,), 1.0, tl.float32)
+    empty_scores = tl.full((1, 16), float("-inf"), tl.float32)
+    maximum, mass, _, _ = softmax_step(empty_scores, maximum, mass)
+    scores = tl.full((1, 16), -1000.0, tl.float32)
+    _, mass, probabilities, _ = softmax_step(scores, maximum, mass)
+    tl.store(output_ptr + tl.arange(0, 16), tl.sum(probabilities, axis=0) / mass)
+
+
+def test_splitk_softmax_recovers_after_fully_masked_tile() -> None:
+    """A masked first tile must not suppress later, strongly negative logits."""
+    probabilities = torch.empty(16, device=DEVICE_TYPE)
+    _softmax_after_empty_tile[(1,)](probabilities)
+    torch.testing.assert_close(probabilities, torch.full_like(probabilities, 1 / 16))
+
+
+@pytest.mark.parametrize(
+    "query_lens,seq_lens", [([5, 0], [5, 0]), ([0], [0]), ([5], [0]), ([5], [5])]
+)
+def test_reduce_segments_leaves_graph_padding_untouched(query_lens, seq_lens) -> None:
+    """A padded reducer row must return before reading sequence or scratch data."""
+    output = torch.full((10, 1, 32), 123.0, device=DEVICE_TYPE)
+    partial = torch.zeros((10, 1, 16, 32), device=DEVICE_TYPE)
+    maxima = torch.zeros((10, 1, 16), device=DEVICE_TYPE)
+    masses = torch.ones_like(maxima)
+    query_starts = torch.tensor(
+        [0] + query_lens, dtype=torch.int32, device=DEVICE_TYPE
+    ).cumsum(0, dtype=torch.int32)
+    reduce_segments[(10, 1)](
+        output,
+        partial,
+        maxima,
+        masses,
+        torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE_TYPE),
+        len(seq_lens),
+        1,
+        1.0,
+        output.stride(0),
+        output.stride(1),
+        1,
+        16,
+        32,
+        32,
+        query_starts,
+        16,
+        16,
+        False,
+    )
+    active_rows = sum(q for q, kv in zip(query_lens, seq_lens) if kv > 0)
+    torch.testing.assert_close(
+        output[:active_rows], torch.zeros_like(output[:active_rows])
+    )
+    torch.testing.assert_close(
+        output[active_rows:], torch.full_like(output[active_rows:], 123.0)
+    )
+
+
+@pytest.mark.parametrize(
+    ("seq_lens", "num_heads", "q_dtype"),
+    [
+        *[
+            pytest.param([(w, 128), (w, 129), (w, 257)], (8, 1), None, id=f"w{w}")
+            for w in range(2, MAX_3D_QUERY_LEN + 1, 2)
+        ],
+        # Prefill chunk, verification, decode, padding, short query.
+        pytest.param(
+            [(8, 8), (6, 129), (1, 257), (0, 0), (3, 64)], (8, 1), None, id="mixed"
+        ),
+        *[
+            pytest.param(
+                [(6, 128), (6, 129), (6, 257)],
+                heads,
+                FP8_DTYPE,
+                id=f"w6-fp8q-kv{heads[1]}",
+            )
+            for heads in [(8, 1), (8, 8)]
+        ],
+    ],
+)
+@pytest.mark.parametrize("sliding_window", [None, 32])
+def test_speculative_splitk_matches_reference(
+    monkeypatch, seq_lens, num_heads, q_dtype, sliding_window
+):
+    reduce_grids = _spy_reduce_segments(monkeypatch)
+    test_triton_unified_attn(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_size=128,
+        sliding_window=sliding_window,
+        dtype=torch.bfloat16,
+        block_size=128,
+        soft_cap=None,
+        num_blocks=8,
+        q_dtype=q_dtype,
+        seq_threshold_3D=32,
+    )
+    assert len(reduce_grids) == 1
+
+
+def test_speculative_splitk_bf16_query_fp8_kv(monkeypatch):
+    reduce_grids = _spy_reduce_segments(monkeypatch)
+    test_triton_unified_attn_bf16_query_fp8_kv(
+        seq_lens=[(6, 128), (6, 129), (6, 4097)],
+        num_heads=(8, 1),
+        head_size=128,
+        block_size=128,
+        num_blocks=64,
+        seq_threshold_3D=16,
+    )
+    assert len(reduce_grids) == 1
+
+
+@triton.jit
+def _compute_clamped_mm_tile_bounds(
+    output_ptr,
+    mm_prefix_range_ptr,
+    USE_CAUSAL: tl.constexpr,
+    USE_PER_SEQ_CAUSAL: tl.constexpr,
+    CHUNK_LOOKBACK: tl.constexpr,
+    CHUNK_SIZE: tl.constexpr,
+):
+    loop_lo, loop_hi, max_seq_prefix_len = compute_tile_loop_bounds(
+        0,  # context_len
+        4096,  # seq_len
+        4096,  # cur_batch_query_len
+        140,  # q_block_local_idx: query positions [1120, 1127]
+        0,  # segm_idx_or_0
+        0,  # tiles_per_segment_or_0
+        32,  # TILE_SIZE
+        16,  # BLOCK_M
+        8,  # BLOCK_Q
+        2,  # num_queries_per_kv
+        1024,  # SLIDING_WINDOW
+        True,  # USE_MM_PREFIX
+        False,  # IS_3D
+        USE_CAUSAL,
+        USE_PER_SEQ_CAUSAL,
+        CHUNK_LOOKBACK,
+        CHUNK_SIZE,
+        False,  # USE_R_SWA
+        True,  # MM_PREFIX_CLAMP_SW
+        2,  # MAX_MM_RANGES
+        mm_prefix_range_ptr,
+        0,  # seq_idx
+    )
+    tl.store(output_ptr, loop_lo)
+    tl.store(output_ptr + 1, loop_hi)
+    tl.store(output_ptr + 2, max_seq_prefix_len)
+
+
+def test_clamped_mm_prefix_prunes_sliding_window_tiles() -> None:
+    """Retain an intersecting image range without scanning the full sequence."""
+    mm_prefix_ranges = torch.tensor(
+        [[[1024, 2303], [0, 0]]], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    bounds = torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE)
+
+    _compute_clamped_mm_tile_bounds[(1,)](
+        bounds,
+        mm_prefix_ranges,
+        USE_CAUSAL=True,
+        USE_PER_SEQ_CAUSAL=False,
+        CHUNK_LOOKBACK=-1,
+        CHUNK_SIZE=-1,
+    )
+
+    # The range is wider than the sliding window, so the upper bound must use
+    # its inclusive endpoint rather than query_pos + sliding_window.
+    assert bounds.tolist() == [3, 72, 4096]
+
+
+@pytest.mark.parametrize(
+    ("use_causal", "use_per_seq_causal"), [(False, False), (True, True)]
+)
+def test_clamped_mm_prefix_preserves_noncausal_right_window(
+    use_causal: bool, use_per_seq_causal: bool
+) -> None:
+    """Union the non-causal right window with intersecting image ranges."""
+    mm_prefix_ranges = torch.tensor(
+        [[[1024, 1500], [0, 0]]], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    bounds = torch.empty(3, dtype=torch.int32, device=DEVICE_TYPE)
+
+    _compute_clamped_mm_tile_bounds[(1,)](
+        bounds,
+        mm_prefix_ranges,
+        USE_CAUSAL=use_causal,
+        USE_PER_SEQ_CAUSAL=use_per_seq_causal,
+        CHUNK_LOOKBACK=-1,
+        CHUNK_SIZE=-1,
+    )
+
+    # q_hi=1127 and window=1024 admit keys through 2150, beyond the image
+    # range endpoint at 1500. Tile 67 must therefore remain in the loop.
+    assert bounds.tolist() == [3, 68, 4096]
 
 
 def ref_paged_attn(
@@ -48,6 +397,7 @@ def ref_paged_attn(
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
     _, block_size, num_kv_heads, head_size = key_cache.shape
+    head_size_v = value_cache.shape[-1]
 
     outputs: list[torch.Tensor] = []
     start_idx = 0
@@ -62,7 +412,7 @@ def ref_paged_attn(
 
         k = key_cache[block_indices].view(-1, num_kv_heads, head_size)
         k = k[:kv_len]
-        v = value_cache[block_indices].view(-1, num_kv_heads, head_size)
+        v = value_cache[block_indices].view(-1, num_kv_heads, head_size_v)
         v = v[:kv_len]
 
         if q.shape[1] != k.shape[1]:
@@ -90,6 +440,217 @@ def ref_paged_attn(
         start_idx += query_len
 
     return torch.cat(outputs, dim=0)
+
+
+@torch.inference_mode()
+def test_fp8_softmax_preserves_small_probabilities() -> None:
+    """Keep exp(-8) contributions that underflow when cast directly to E4M3."""
+    device = torch.device(DEVICE_TYPE)
+    num_tokens = block_size = 32
+    head_size = 128
+
+    query = torch.zeros(1, 1, head_size, dtype=FP8_DTYPE, device=device)
+    query[..., 0] = 1
+    key_cache = torch.zeros(1, block_size, 1, head_size, dtype=FP8_DTYPE, device=device)
+    key_cache[:, 1:, :, 0] = -8
+    value_cache = torch.ones_like(key_cache)
+    value_cache[:, 0] = 0
+    output = torch.empty(1, 1, head_size, dtype=torch.bfloat16, device=device)
+
+    cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    seqused_k = torch.tensor([num_tokens], dtype=torch.int32, device=device)
+    block_table = torch.tensor([[0]], dtype=torch.int32, device=device)
+    scale = torch.ones(1, dtype=torch.float32, device=device)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=output,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=1,
+        seqused_k=seqused_k,
+        max_seqlen_k=num_tokens,
+        softmax_scale=1.0,
+        causal=True,
+        window_size=(-1, -1),
+        block_table=block_table,
+        softcap=0,
+        q_descale=scale,
+        k_descale=scale,
+        v_descale=scale,
+        kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+    )
+
+    scores = torch.einsum("qhd,thd->qht", query.float(), key_cache[0].float())
+    probabilities = torch.softmax(scores, dim=-1)
+    expected = torch.einsum("qht,thd->qhd", probabilities, value_cache[0].float())
+
+    torch.testing.assert_close(output.float(), expected, atol=5e-5, rtol=1e-2)
+
+
+def ref_paged_clamped_mm_attn(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    query_lens: list[int],
+    kv_lens: list[int],
+    block_tables: torch.Tensor,
+    mm_ranges: list[list[tuple[int, int]]],
+    scale: float,
+    sliding_window: int,
+    chunk_lookback: int,
+) -> torch.Tensor:
+    block_tables_cpu = block_tables.cpu().numpy()
+    _, block_size, num_kv_heads, head_size = key_cache.shape
+    chunk_size = sliding_window // (chunk_lookback + 1)
+
+    outputs: list[torch.Tensor] = []
+    query_start = 0
+    for req_idx, (query_len, kv_len) in enumerate(zip(query_lens, kv_lens)):
+        query_i = query[query_start : query_start + query_len].float()
+        context_len = kv_len - query_len
+        query_pos = torch.arange(query_len, device=query.device) + context_len
+        key_pos = torch.arange(kv_len, device=query.device)
+
+        num_kv_blocks = (kv_len + block_size - 1) // block_size
+        block_indices = block_tables_cpu[req_idx, :num_kv_blocks]
+        key_i = key_cache[block_indices].view(-1, num_kv_heads, head_size)[:kv_len]
+        value_i = value_cache[block_indices].view(-1, num_kv_heads, head_size)[:kv_len]
+        if query_i.shape[1] != key_i.shape[1]:
+            repeats = query_i.shape[1] // key_i.shape[1]
+            key_i = torch.repeat_interleave(key_i, repeats, dim=1)
+            value_i = torch.repeat_interleave(value_i, repeats, dim=1)
+
+        delta = query_pos[:, None] - key_pos[None, :]
+        keep = (delta >= 0) & (
+            query_pos[:, None] // chunk_size - key_pos[None, :] // chunk_size
+            <= chunk_lookback
+        )
+        for range_start, range_end in mm_ranges[req_idx]:
+            q_in_range = (query_pos >= range_start) & (query_pos <= range_end)
+            k_in_range = (key_pos >= range_start) & (key_pos <= range_end)
+            mm_mask = q_in_range[:, None] & k_in_range[None, :]
+            keep |= mm_mask & (delta < sliding_window)
+
+        scores = torch.einsum("qhd,khd->hqk", query_i, key_i.float()) * scale
+        scores.masked_fill_(~keep[None], float("-inf"))
+        probs = scores.softmax(-1).to(value_i.dtype)
+        outputs.append(torch.einsum("hqk,khd->qhd", probs, value_i))
+        query_start += query_len
+
+    return torch.cat(outputs)
+
+
+@torch.inference_mode()
+def test_triton_unified_attn_clamped_mm_matches_dense_reference() -> None:
+    set_random_seed(0)
+    query_lens = [384, 96]
+    kv_lens_list = [384, 320]
+    mm_ranges = [[(32, 351)], [(160, 287)]]
+    sliding_window = 128
+    chunk_lookback = 0
+    block_size = 16
+    num_query_heads = 4
+    num_kv_heads = 2
+    head_size = 128
+    scale = head_size**-0.5
+
+    query = torch.randn(
+        sum(query_lens),
+        num_query_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=DEVICE_TYPE,
+    )
+    num_blocks_per_req = [
+        (kv_len + block_size - 1) // block_size for kv_len in kv_lens_list
+    ]
+    total_blocks = sum(num_blocks_per_req)
+    key_cache = torch.randn(
+        total_blocks,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype=torch.bfloat16,
+        device=DEVICE_TYPE,
+    )
+    value_cache = torch.randn_like(key_cache)
+
+    block_tables = torch.zeros(
+        len(query_lens),
+        max(num_blocks_per_req),
+        dtype=torch.int32,
+        device=DEVICE_TYPE,
+    )
+    block_start = 0
+    for req_idx, num_blocks in enumerate(num_blocks_per_req):
+        block_tables[req_idx, :num_blocks] = torch.arange(
+            block_start,
+            block_start + num_blocks,
+            dtype=torch.int32,
+            device=DEVICE_TYPE,
+        )
+        block_start += num_blocks
+
+    cu_seqlens_q = torch.tensor(
+        [0] + query_lens, dtype=torch.int32, device=DEVICE_TYPE
+    ).cumsum(0, dtype=torch.int32)
+    kv_lens = torch.tensor(kv_lens_list, dtype=torch.int32, device=DEVICE_TYPE)
+    mm_prefix_range = torch.tensor(
+        [[[32, 351]], [[160, 287]]], dtype=torch.int32, device=DEVICE_TYPE
+    )
+    actual = torch.empty_like(query)
+
+    unified_attention(
+        q=query,
+        k=key_cache,
+        v=value_cache,
+        out=actual,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max(query_lens),
+        seqused_k=kv_lens,
+        max_seqlen_k=max(kv_lens_list),
+        softmax_scale=scale,
+        causal=True,
+        window_size=(sliding_window - 1, 0),
+        block_table=block_tables,
+        softcap=0,
+        q_descale=None,
+        k_descale=None,
+        v_descale=None,
+        mm_prefix_range=mm_prefix_range,
+        chunk_lookback=chunk_lookback,
+        mm_prefix_clamp_sliding_window=True,
+    )
+
+    expected = ref_paged_clamped_mm_attn(
+        query,
+        key_cache,
+        value_cache,
+        query_lens,
+        kv_lens_list,
+        block_tables,
+        mm_ranges,
+        scale,
+        sliding_window,
+        chunk_lookback,
+    )
+    chunk_only = ref_paged_clamped_mm_attn(
+        query,
+        key_cache,
+        value_cache,
+        query_lens,
+        kv_lens_list,
+        block_tables,
+        [[], []],
+        scale,
+        sliding_window,
+        chunk_lookback,
+    )
+
+    torch.testing.assert_close(actual.float(), expected.float(), atol=2e-2, rtol=2e-2)
+    assert not torch.allclose(expected, chunk_only, atol=2e-2, rtol=2e-2)
 
 
 @pytest.mark.parametrize(
@@ -171,16 +732,19 @@ def test_triton_unified_attn(
 
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
+    scratch_rows = seq_threshold_3D * (
+        max_query_len if max_query_len <= MAX_3D_QUERY_LEN else 1
+    )
     softmax_segm_output = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        (scratch_rows, num_query_heads, num_par_softmax_segments, head_size_padded),
         dtype=torch.float32,
     )
     softmax_segm_max = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
     softmax_segm_expsum = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
 
@@ -291,16 +855,19 @@ def test_triton_unified_attn_bf16_query_fp8_kv(
 
     num_par_softmax_segments = 16
     head_size_padded = next_power_of_2(head_size)
+    scratch_rows = seq_threshold_3D * (
+        max_query_len if max_query_len <= MAX_3D_QUERY_LEN else 1
+    )
     softmax_segm_output = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments, head_size_padded),
+        (scratch_rows, num_query_heads, num_par_softmax_segments, head_size_padded),
         dtype=torch.float32,
     )
     softmax_segm_max = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
     softmax_segm_expsum = torch.empty(
-        (seq_threshold_3D, num_query_heads, num_par_softmax_segments),
+        (scratch_rows, num_query_heads, num_par_softmax_segments),
         dtype=torch.float32,
     )
 
@@ -647,3 +1214,40 @@ def test_triton_unified_attn_use_td_tile_clamp(
         soft_cap=None,
         seq_threshold_3D=0,
     )
+
+
+@triton.jit
+def _softcap_probe_kernel(
+    scores_ptr,
+    out_ptr,
+    numel,
+    soft_cap,
+    BLOCK: tl.constexpr,
+):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < numel
+    scores = tl.load(scores_ptr + offs, mask=mask, other=0.0)
+    tl.store(out_ptr + offs, apply_softcap(scores, soft_cap), mask=mask)
+
+
+@torch.inference_mode()
+def test_softcap_does_not_overflow_on_large_scores() -> None:
+    """Scores above ~88 * soft_cap must not overflow to inf/NaN.
+
+    The exp-based softcap computes ``(exp(y) - exp(-y)) / (exp(y) + exp(-y))``
+    with ``y = S / soft_cap``. For ``|y| > ~88`` the exponentials overflow to
+    ``inf`` and the ratio becomes ``inf / inf = NaN``, poisoning the whole
+    attention row. Gemma-2 style models use ``attn_logit_softcapping = 50``,
+    so scores above 4400 are in range for their large attention logits.
+    """
+    soft_cap = 50.0
+    scores = torch.tensor(
+        [1.0, 100.0, 1000.0, 3000.0, 5000.0, 10000.0, -1.0, -10000.0, 4400.0],
+        device=DEVICE_TYPE,
+        dtype=torch.float32,
+    )
+    out = torch.empty_like(scores)
+    _softcap_probe_kernel[(1,)](scores, out, scores.numel(), soft_cap, BLOCK=16)
+    ref = soft_cap * torch.tanh(scores / soft_cap)
+    assert torch.isfinite(out).all(), out
+    torch.testing.assert_close(out, ref, atol=1e-3, rtol=1e-3)

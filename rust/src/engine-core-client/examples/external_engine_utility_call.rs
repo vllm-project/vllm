@@ -1,8 +1,12 @@
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
+use vllm_engine_core_client::protocol::utility::{PauseMode, SleepLevel};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, TransportMode};
 
 #[derive(Debug, Parser)]
@@ -32,8 +36,8 @@ struct Args {
     reset_external: bool,
     #[arg(long, default_value_t = 1)]
     sleep_level: u32,
-    #[arg(long, default_value = "abort")]
-    sleep_mode: String,
+    #[arg(long, default_value_t = PauseMode::Abort)]
+    sleep_mode: PauseMode,
     #[arg(
         long,
         default_value_t = false,
@@ -56,7 +60,9 @@ async fn main() -> Result<()> {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: args.handshake_address.clone(),
             advertised_host: args.host.clone(),
+            engine_start_index: 0,
             engine_count: args.engine_count,
+            data_parallel_size: args.engine_count,
             ready_timeout: Duration::from_secs(args.ready_timeout_secs),
             local_input_address: None,
             local_output_address: None,
@@ -64,6 +70,7 @@ async fn main() -> Result<()> {
         coordinator_mode: None,
         model_name: args.model.clone(),
         client_index: args.client_index,
+        engine_stats_enabled: true,
     })
     .await
     .context("failed to connect to external vLLM engine")?;
@@ -106,7 +113,8 @@ async fn main() -> Result<()> {
     if args.skip_sleep_wake {
         println!("sleep_wake=skipped");
     } else {
-        client.sleep(args.sleep_level, &args.sleep_mode).await.with_context(|| {
+        let sleep_level = SleepLevel::try_from(args.sleep_level).map_err(anyhow::Error::msg)?;
+        client.sleep(sleep_level, args.sleep_mode).await.with_context(|| {
             format!(
                 "failed to call sleep utility with level={} mode={}",
                 args.sleep_level, args.sleep_mode
