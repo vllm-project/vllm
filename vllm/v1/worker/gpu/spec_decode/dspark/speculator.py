@@ -135,6 +135,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self._markov_candidate_ids[start:end] = bias.topk(
                 self._draft_topk, dim=-1
             ).indices
+
     def supports_batch_sharded_draft_logits(self) -> bool:
         # A model's own sample_sequential kernels write the full-size cache.
         return not hasattr(self.model, "sample_sequential")
