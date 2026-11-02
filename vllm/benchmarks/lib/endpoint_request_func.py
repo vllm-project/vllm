@@ -252,6 +252,8 @@ async def async_request_openai_completions(
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
+                saw_done = False
+                stream_error: str | None = None
                 handler = StreamedResponseHandler()
 
                 async for chunk_bytes in response.content.iter_any():
@@ -268,8 +270,13 @@ async def async_request_openai_completions(
 
                         chunk = message.removeprefix("data: ")
 
-                        if chunk != "[DONE]":
+                        if chunk == "[DONE]":
+                            saw_done = True
+                        else:
                             data = json.loads(chunk)
+                            if data.get("error") or data.get("object") == "error":
+                                stream_error = json.dumps(data.get("error") or data)
+                                continue
                             _update_server_metrics(output, data)
 
                             # NOTE: Some completion API might have a last
@@ -295,14 +302,21 @@ async def async_request_openai_completions(
                                 output.output_tokens = usage.get("completion_tokens")
                                 if (pt := usage.get("prompt_tokens")) is not None:
                                     output.prompt_len = pt
-                if first_chunk_received:
-                    output.success = True
-                else:
+                if stream_error is not None:
+                    output.error = stream_error
+                elif not first_chunk_received:
                     output.success = False
                     output.error = (
                         "Never received a valid chunk to calculate TTFT."
                         "This response will be marked as failed!"
                     )
+                elif not saw_done:
+                    output.error = (
+                        "Stream ended without [DONE]."
+                        "This response will be marked as failed!"
+                    )
+                else:
+                    output.success = True
                 output.generated_text = generated_text
                 output.latency = most_recent_timestamp - st
             else:
@@ -447,6 +461,8 @@ async def async_request_openai_chat_completions(
         async with session.post(url=api_url, json=payload, headers=headers) as response:
             if response.status == 200:
                 first_chunk_received = False
+                saw_done = False
+                stream_error: str | None = None
                 handler = StreamedResponseHandler()
                 async for chunk_bytes in response.content.iter_any():
                     if not chunk_bytes:
@@ -462,9 +478,14 @@ async def async_request_openai_chat_completions(
 
                         chunk = message.removeprefix("data: ")
 
-                        if chunk != "[DONE]":
+                        if chunk == "[DONE]":
+                            saw_done = True
+                        else:
                             timestamp = time.perf_counter()
                             data = json.loads(chunk)
+                            if data.get("error") or data.get("object") == "error":
+                                stream_error = json.dumps(data.get("error") or data)
+                                continue
                             _update_server_metrics(output, data)
 
                             if (
@@ -490,14 +511,21 @@ async def async_request_openai_chat_completions(
                                     output.prompt_len = pt
 
                 output.generated_text = generated_text
-                if first_chunk_received:
-                    output.success = True
-                else:
+                if stream_error is not None:
+                    output.error = stream_error
+                elif not first_chunk_received:
                     output.success = False
                     output.error = (
                         "Never received a valid chunk to calculate TTFT."
                         "This response will be marked as failed!"
                     )
+                elif not saw_done:
+                    output.error = (
+                        "Stream ended without [DONE]."
+                        "This response will be marked as failed!"
+                    )
+                else:
+                    output.success = True
                 output.latency = most_recent_timestamp - st
             else:
                 output.error = response.reason or ""
