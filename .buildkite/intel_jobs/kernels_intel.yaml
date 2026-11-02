@@ -65,8 +65,6 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
     - vllm/v1/attention/backends/mla/xpu_mla_sparse.py
-    - vllm/v1/attention/ops/xpu_mla_sparse.py
-    - vllm/models/deepseek_v4/xpu/
     - tests/kernels/attention/test_xpu_mla_sparse.py
     - tests/v1/attention/test_xpu_mla_sparse_backend.py
   commands:
