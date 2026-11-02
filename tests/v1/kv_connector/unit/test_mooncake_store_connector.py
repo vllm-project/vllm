@@ -3,13 +3,15 @@
 
 import threading
 import time
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from prometheus_client import Counter, Gauge, Histogram
 
 from vllm.config import set_current_vllm_config
-from vllm.distributed.kv_events import BlockStored
+from vllm.distributed.kv_events import MEDIUM_CPU, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
     KVConnectorTransferResults,
@@ -29,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.metrics import (
     MooncakeStoreConnectorStats,
+    MooncakeStorePromMetrics,
 )
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import (
@@ -255,7 +258,7 @@ def _make_block_stored(
         token_ids=[1, 2, 3],
         block_size=16,
         lora_id=None,
-        medium="cpu",
+        medium=MEDIUM_CPU,
         lora_name=None,
         group_idx=group_idx,
     )
@@ -445,6 +448,109 @@ def test_build_kv_connector_stats_reconstructs_mooncake_stats():
     assert stats.data["save_put"][0]["num_bytes"] == 2048
 
 
+def test_get_kv_connector_stats_reports_scheduler_handoffs():
+    """The scheduler role owns the hand-off counters, so it reports them."""
+    vllm_config = _make_vllm_config()
+    kv_cache_config = _make_kv_cache_config()
+    expected_stats = MooncakeStoreConnectorStats()
+    expected_stats.record_boundary_handoffs({"published": 2, "accepted": 1})
+
+    with (
+        set_current_vllm_config(vllm_config),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store."
+            "connector.MooncakeStoreScheduler"
+        ) as mock_scheduler_cls,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, kv_cache_config
+        )
+
+    mock_scheduler_cls.return_value.get_kv_connector_stats.return_value = expected_stats
+
+    assert connector.get_kv_connector_stats() is expected_stats
+    mock_scheduler_cls.return_value.get_kv_connector_stats.assert_called_once_with()
+
+
+def test_store_stats_reduce_reports_boundary_handoff_outcomes():
+    stats = MooncakeStoreConnectorStats()
+    stats.record_boundary_handoffs({"published": 3, "accepted": 1})
+    stats.record_boundary_handoffs({"published": 2, "dropped_null_block": 2})
+
+    reduced = stats.reduce()
+    assert reduced["boundary_handoffs_published"] == 5
+    assert reduced["boundary_handoffs_accepted"] == 1
+    assert reduced["boundary_handoffs_dropped_null_block"] == 2
+    # An outcome that was never counted is absent rather than zero.
+    assert "boundary_handoffs_dropped_request_gone" not in reduced
+
+
+def test_store_stats_aggregate_sums_boundary_handoffs():
+    """Reports from different steps or engines add up rather than overwrite."""
+    first = MooncakeStoreConnectorStats()
+    first.record_boundary_handoffs({"published": 2})
+    second = MooncakeStoreConnectorStats()
+    second.record_boundary_handoffs({"published": 3, "accepted": 1})
+
+    reduced = first.aggregate(second).reduce()
+    assert reduced["boundary_handoffs_published"] == 5
+    assert reduced["boundary_handoffs_accepted"] == 1
+
+
+class _LabeledMetric:
+    """One label set of ``_FakeMetric``, collecting the amounts it is given."""
+
+    def __init__(self, increments: list[float]):
+        self._increments = increments
+
+    def inc(self, amount: float = 1) -> None:
+        self._increments.append(amount)
+
+
+class _FakeMetric:
+    """Stand-in for a Prometheus metric, recording increments per label set."""
+
+    def __init__(self, **kwargs: Any):
+        self.kwargs = kwargs
+        self.increments: dict[tuple[object, ...], list[float]] = {}
+
+    def labels(self, *labelvalues: object) -> _LabeledMetric:
+        return _LabeledMetric(self.increments.setdefault(labelvalues, []))
+
+
+def test_store_prom_metrics_label_boundary_handoffs_by_outcome():
+    """A declined hand-off reaches Prometheus under the reason that declined it.
+
+    ``store_mask`` keeps mamba groups out of the positional save, so a hand-off
+    the connector declines is the only reason that state was never stored; the
+    outcome label is what attributes a lower hit rate to it.
+    """
+    prom = MooncakeStorePromMetrics(
+        _make_vllm_config(),
+        {Gauge: _FakeMetric, Counter: _FakeMetric, Histogram: _FakeMetric},
+        ["engine"],
+        {0: ["0"]},
+    )
+
+    first = MooncakeStoreConnectorStats()
+    first.record_boundary_handoffs(
+        {"published": 3, "accepted": 1, "dropped_null_block": 2}
+    )
+    prom.observe(first.to_dict(), engine_idx=0)
+    second = MooncakeStoreConnectorStats()
+    second.record_boundary_handoffs({"published": 4})
+    prom.observe(second.to_dict(), engine_idx=0)
+
+    counter = prom._counter_boundary_handoffs
+    assert counter.kwargs["name"] == "vllm:mooncake_store_boundary_handoffs_total"
+    assert counter.kwargs["labelnames"] == ["engine", "outcome"]
+    assert {labelvalues[0] for labelvalues in counter.increments} == {"0"}
+    assert {
+        str(labelvalues[-1]): sum(amounts)
+        for labelvalues, amounts in counter.increments.items()
+    } == {"published": 7, "accepted": 1, "dropped_null_block": 2}
+
+
 def test_get_kv_connector_kv_cache_events_wraps_worker_events():
     vllm_config = _make_vllm_config()
     kv_cache_config = _make_kv_cache_config()
@@ -464,7 +570,7 @@ def test_get_kv_connector_kv_cache_events_wraps_worker_events():
     mock_worker_cls.return_value.get_kv_events.return_value = [event]
     mock_worker_cls.return_value.enable_kv_events = True
     mock_worker_cls.return_value.kv_send_thread = MagicMock()
-    mock_worker_cls.return_value.group_tp_replication_factors = (1,)
+    mock_worker_cls.return_value.group_tp_replication_factors = {0: 1}
     kv_events = connector.get_kv_connector_kv_cache_events()
 
     assert isinstance(kv_events, mooncake_store_connector.MooncakeStoreKVEvents)
@@ -490,7 +596,7 @@ def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
     worker = mock_worker_cls.return_value
     worker.enable_kv_events = True
     worker.kv_send_thread = MagicMock()
-    worker.group_tp_replication_factors = (2,)
+    worker.group_tp_replication_factors = {0: 2}
     worker.get_kv_events.return_value = []
 
     kv_events = connector.get_kv_connector_kv_cache_events()
@@ -502,7 +608,7 @@ def test_get_kv_connector_kv_cache_events_keeps_empty_worker_contribution():
 
 def _aggregate_store_events(
     worker_events: list[list[BlockStored]],
-    replication_factors: tuple[int, ...],
+    replication_factors: dict[int, int],
 ) -> list[BlockStored]:
     combined = mooncake_store_connector.MooncakeStoreKVEvents(
         num_workers=1,
@@ -522,7 +628,7 @@ def test_gqa_store_events_follow_tp_replica_striping():
 
     events = _aggregate_store_events(
         [[block_a], [block_b], [block_a], [block_b]],
-        replication_factors=(2,),
+        replication_factors={0: 2},
     )
 
     assert events == [block_a, block_b]
@@ -533,7 +639,7 @@ def test_mqa_store_events_require_one_replica():
 
     events = _aggregate_store_events(
         [[block] for block in blocks],
-        replication_factors=(4,),
+        replication_factors={0: 4},
     )
 
     assert events == blocks
@@ -550,7 +656,7 @@ def test_store_events_require_every_non_replicated_worker():
             [complete],
             [complete],
         ],
-        replication_factors=(1,),
+        replication_factors={0: 1},
     )
 
     assert events == [complete]
@@ -562,7 +668,7 @@ def test_store_events_reject_incomplete_replica_coverage():
 
     events = _aggregate_store_events(
         [[complete, incomplete], [complete], [], []],
-        replication_factors=(2,),
+        replication_factors={0: 2},
     )
 
     assert events == [complete]
@@ -579,7 +685,7 @@ def test_store_events_use_each_groups_replication_factor():
             [full_attention, replicated_attention],
             [full_attention],
         ],
-        replication_factors=(1, 2),
+        replication_factors={0: 1, 1: 2},
     )
 
     assert events == [full_attention, replicated_attention]
@@ -624,7 +730,7 @@ def test_store_events_persist_across_polls():
     def poll(worker_events: list[BlockStored]) -> list[BlockStored]:
         events = mooncake_store_connector.MooncakeStoreKVEvents(
             num_workers=4,
-            group_tp_replication_factors=(2,),
+            group_tp_replication_factors={0: 2},
         )
         events.add_events(worker_events)
         connector.update_connector_output(KVConnectorOutput(kv_cache_events=events))
