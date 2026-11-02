@@ -785,7 +785,8 @@ class Gemma3ForConditionalGeneration(
         )
 
         image_size = self.config.vision_config.image_size
-        dummy_pixel_values = torch.randn(
+        dtype = self.vision_tower.vision_model.input_norm.input_dtype or dtype
+        dummy_pixel_values = torch.zeros(
             num_images,
             3,
             image_size,

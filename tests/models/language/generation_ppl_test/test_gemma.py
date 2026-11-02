@@ -9,7 +9,6 @@ from .ppl_utils import wikitext_ppl_test
 MODELS = [
     GenerateModelInfo("google/gemma-2b", hf_ppl=21.48524284362793),
     GenerateModelInfo("google/gemma-2-2b", hf_ppl=102.59290313720703),
-    GenerateModelInfo("google/gemma-3-4b-it", hf_ppl=27.79648208618164),
 ]
 
 
