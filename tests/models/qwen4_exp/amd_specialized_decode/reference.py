@@ -176,3 +176,31 @@ def moe(x, w_gate, w13d, w2d, experts: int, topk: int, ri: int, rip: int):
                 w2d[e][:, :ri].double() @ dequant_mx(aq, as_)[0].double()
             )
     return y, ids, ws
+
+
+def int4_roundtrip(y):
+    """The TP exchange's INT4 line codec on ``y`` [rows, cols] (f32 math as
+    the kernels do): groups of 16 columns, ``scale = bf16(extremum / -8)``,
+    codes ``roundeven(y * (1 / scale))`` clamped to [-8, 7]."""
+    v = y.float().view(y.shape[0], -1, 16)
+    hi, lo = v.amax(-1, keepdim=True), v.amin(-1, keepdim=True)
+    ext = torch.where(hi > -lo, hi, lo)
+    scale = (ext * -0.125).to(torch.bfloat16).float()
+    inv = torch.where(scale == 0, torch.zeros_like(scale), 1.0 / scale)
+    q = torch.round(v * inv).clamp(-8, 7)
+    return (q * scale).view_as(y)
+
+
+def int4_lines(words, rows: int, groups: int, lpg: int, hidden: int):
+    """Decode an exchange row of INT4 lines (i32 ``words``) to [rows, hidden]
+    f32: a line's 64 code dwords (token ``t``, segment ``s`` at ``8 t + s``),
+    then each token's two scale dwords (bf16 pairs of its four groups)."""
+    lines = words.view(groups, lpg, 80).cpu().long() & 0xFFFFFFFF
+    codes = lines[..., :64].view(groups, lpg, 8, 8)  # [g, blk, token, seg]
+    nib = torch.stack([(codes >> (4 * e)) & 15 for e in range(8)], -1) - 8
+    sc = lines[..., 64:].view(groups, lpg, 8, 2)
+    halves = torch.stack([sc & 0xFFFF, sc >> 16], -1).view(groups, lpg, 8, 4)
+    scale = (halves << 16).to(torch.int32).view(torch.float32)  # [g, blk, token, group]
+    vals = nib.float() * scale.repeat_interleave(2, -1)[..., None]
+    out = vals.view(groups, lpg, 8, 64).permute(1, 2, 0, 3).reshape(lpg * 8, hidden)
+    return out[:rows]

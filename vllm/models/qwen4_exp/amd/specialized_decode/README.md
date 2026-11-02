@@ -21,6 +21,22 @@ in-kernel TP exchange, the striped grid barrier) in vLLM's execution model:
 one launch per layer on vLLM's buffers, weights and caches in place, no
 multi-step device loop.
 
+## MoE schedule
+
+A unit is one expert and up to 16 of its rows; its time is one CU's stream
+of the expert's weights (~1.3 MB a rank), whatever its row count. Real
+routing is far from uniform (128 rows of natural text: ~300 distinct experts
+a layer, up to ~80 rows on one; uniform: ~470), so the schedule
+(`wide/stages/moe.py`, `experts`) adapts to the step's distribution:
+
+- units of one expert are consecutive and run on one XCD (runs of 8 rotate
+  over the XCDs), so a hot expert's weights come through one L2;
+- a last round at most half full (for example 300 units on 256 CTAs) runs
+  as two intermediate halves a unit (half the gate/up rows and the down
+  projection's K each, the second half's partial in its own buffer, marked
+  for the combine), so the round ends after about half a unit instead of a
+  whole one.
+
 ## Supported
 
 - TP2 on dedicated, unpartitioned GPUs (256 CUs, one CTA per CU), Model
@@ -54,10 +70,18 @@ dense slots). The TP ranks agree on every stage.
 The stock path's rounding points are kept: bf16 multi-stream state, bf16
 gated-residual GEMM outputs, bf16 router logits, MXFP4 MoE activations and
 intermediate with AITER's scale rule, bf16 GDN projection outputs and core
-output. Two differences are deliberate: the online-MXFP4 dense projections
-run W4A16 (the weights decoded to bf16 in registers; stock quantizes the
-activations to MXFP4 too), and the all-reduces are exact bf16 sums in rank
-order (stock uses QuickReduce INT4).
+output. The online-MXFP4 dense projections run W4A16 (the weights decoded to
+bf16 in registers; stock quantizes the activations to MXFP4 too).
+
+The TP all-reduces are exact bf16 sums in rank order by default, as stock's
+custom all-reduce at decode sizes (QuickReduce's minimum message size is
+1 MB; a 128-row partial is 655 KB). `VLLM_QWEN4_EXP_DECODE_ALLREDUCE=int4`
+sends QuickReduce's INT4 codec instead (16-column groups, the group's signed
+extremum mapped to -8, here with a bf16 scale so small partials do not flush
+to zero): 3.2x fewer bytes on the link; every rank decodes every rank's copy,
+its own included, so the ranks still agree. At TP2 a two-stage
+(reduce-scatter + all-gather) exchange moves the same bytes as this one-shot
+one and adds a round trip, so the lines stay one-shot.
 
 ## Failure
 

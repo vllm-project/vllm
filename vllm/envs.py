@@ -218,6 +218,8 @@ if TYPE_CHECKING:
     VLLM_KIMI_K3_SHARD_SP_SHARED_EXPERT: bool = False
     VLLM_KIMI_K3_AUX_ATTN_RES_STREAM: bool = False
     VLLM_KIMI_K3_GEMM_AR: bool = True
+    VLLM_QWEN4_EXP_DECODE_ALLREDUCE: Literal["bf16", "int4"] = "bf16"
+    VLLM_QWEN4_EXP_DECODE_TRACE: bool = False
     VLLM_ENABLE_GEMM_RS: bool = False
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
@@ -1705,6 +1707,18 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Use the SM100 BF16 GEMM-AR kernel for eligible Kimi-K3 row-parallel
     # attention projections. All TP ranks must belong to one NVLink domain.
     "VLLM_KIMI_K3_GEMM_AR": lambda: bool(int(os.getenv("VLLM_KIMI_K3_GEMM_AR", "1"))),
+    # Line codec of the Qwen3.8-Flash-Next wide specialized decode's
+    # (--monokernel, 32-128 rows) in-kernel TP all-reduce: "bf16" (exact, as
+    # vLLM's custom all-reduce at decode sizes) or "int4" (QuickReduce's INT4
+    # codec on 16-column groups, 3.2x fewer bytes on the link).
+    "VLLM_QWEN4_EXP_DECODE_ALLREDUCE": env_with_choices(
+        "VLLM_QWEN4_EXP_DECODE_ALLREDUCE", "bf16", ["bf16", "int4"]
+    ),
+    # Build the Qwen3.8-Flash-Next wide specialized decode's launches with
+    # per-phase clock stamps (profiling only).
+    "VLLM_QWEN4_EXP_DECODE_TRACE": lambda: bool(
+        int(os.getenv("VLLM_QWEN4_EXP_DECODE_TRACE", "0"))
+    ),
     # Fuse eligible sequence-parallel row-parallel projections with their TP
     # reduce-scatter using the SM100 BF16/MXFP8 GEMM-RS kernel (Kimi-K3
     # attention/shared-expert projections, DeepSeek-V4.1 ``wo_b``). All TP

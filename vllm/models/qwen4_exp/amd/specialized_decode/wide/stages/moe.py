@@ -42,7 +42,6 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import (
     lds_ld,
     lds_st,
     mfma_f4,
-    pack_bf16x8,
     sched_barrier,
     sigmoid,
     silu,
@@ -382,13 +381,51 @@ def _assignment(idx, s, start, count, token):
     return lds_ld(idx + s.token_base + start + n)
 
 
+XCDS = 8  # CTAs are dispatched round-robin over the XCDs (L2 domains)
+XCD_RUN = 8  # consecutive units placed on one XCD
+
+
+def unit_slot(bid):
+    """CTA ``bid``'s place in unit order. Runs of ``XCD_RUN`` consecutive
+    units go to one XCD, so the units of one expert's rows (consecutive in
+    the schedule) read its weights through the same L2; the runs rotate over
+    the XCDs, so a partial round still spreads over all of them."""
+    i = bid // XCDS
+    return (i // XCD_RUN) * (XCDS * XCD_RUN) + (bid % XCDS) * XCD_RUN + i % XCD_RUN
+
+
+# A half piece: half the intermediate rows of a unit (gate, up and the down
+# projection's K), ``HALF_TILES`` 16-row tiles of each of gate and up over
+# the waves as (first, count) = (0, 3), (3, 3), (6, 2), (8, 2).
+HALF_TILES = UP_TILES * WAVES // 2
+HALF_GROUPS = AGROUPS // 2
+
+
+def pieces(n):
+    """``(whole, split)`` units of a step's ``n``: a last round at most half
+    full is run as two half pieces a unit, so it ends after about half a
+    unit's time (a unit's time is one CU's weight stream, so a short round
+    otherwise costs as much as a full one)."""
+    r = n % i32(BLOCKS)
+    split = ((r > 0) & (r <= BLOCKS // 2)).select(r, i32(0))
+    return n - split, split
+
+
 @traced
-def experts(g, s: Shape, lds, route_buf, x4, x4s, w13, w13s, w2, w2s, part):
-    """Build the schedule, then every unit of it (CTA ``bid``: units ``bid, bid
-    + BLOCKS, ..``)."""
+def experts(
+    g, s: Shape, lds, route_buf, x4, x4s, w13, w13s, w2, w2s, part, part2, flags, tag
+):
+    """Build the schedule, then every piece of it (CTA ``bid``: pieces ``p, p
+    + BLOCKS, ..`` from its slot ``p``): the whole units, then the split
+    units' halves. A second half writes ``part2`` and marks its (row, slot)
+    with ``tag`` in ``flags``."""
     build_schedule(g.tid, s, lds.index, lds.units, lds.scan, route_buf)
     n = lds_ld(lds.index + 2 * E_ALL)
-    for u in range(g.bid, n, BLOCKS):
+    whole, split = pieces(n)
+    for p in range(unit_slot(g.bid), whole + 2 * split, BLOCKS):
+        late = p >= whole
+        u = late.select(whole + (p - whole) // 2, p)
+        half = late.select(1 + (p - whole) % 2, i32(0))
         expert = uniform(lds_ld(lds.units + u * 3))
         start = uniform(lds_ld(lds.units + u * 3 + 1))
         count = uniform(lds_ld(lds.units + u * 3 + 2))
@@ -396,7 +433,24 @@ def experts(g, s: Shape, lds, route_buf, x4, x4s, w13, w13s, w2, w2s, part):
         us = fx.Int64(w13s) + fx.Int64(expert) * fx.Int64(s.w13_scale_bytes)
         db = fx.Int64(w2) + fx.Int64(expert) * fx.Int64(s.w2_bytes)
         ds = fx.Int64(w2s) + fx.Int64(expert) * fx.Int64(s.w2_scale_bytes)
-        unit(g, s, lds, x4, x4s, ub, us, db, ds, start, count, part)
+        unit(
+            g,
+            s,
+            lds,
+            x4,
+            x4s,
+            ub,
+            us,
+            db,
+            ds,
+            start,
+            count,
+            part,
+            part2,
+            flags,
+            tag,
+            uniform(half),
+        )
 
 
 @traced
@@ -439,16 +493,28 @@ def pipelined(steps: int, depth: int, issue, compute):
 
 
 @traced
-def unit(g, s, lds, x4, x4s, ub, us, db, ds, start, count, part):
-    """One (expert, <= 16 tokens) unit: gate/up -> silu * up -> MXFP4 -> down ->
-    f32 partials of each (row, slot)."""
+def unit(
+    g, s, lds, x4, x4s, ub, us, db, ds, start, count, part, part2, flags, tag, half
+):
+    """One (expert, <= 16 tokens) unit, or one half of it (``half`` 1, 2; 0 the
+    whole unit): gate/up -> silu * up -> MXFP4 -> down -> f32 partials of
+    each (row, slot), a second half's into ``part2``."""
     lane, wave = g.lane, g.wave
+    whole = half == 0
+    hh = half - 1
+    # the wave's gate/up tiles: 5 of the unit's 20, or 3/3/2/2 of a half's 10
+    first = (wave < 2).select(wave * 3, wave * 2 + 2)
+    tiles = whole.select(i32(UP_TILES), (wave < 2).select(i32(3), i32(2)))
+
+    def group_live(q):
+        return whole | (q // HALF_GROUPS == hh)
+
     row, group = lane % TILE, lane // TILE
     gather_rows(g, s, lds, x4, x4s, start, count)
     fx.barrier()
     rip_tiles = s.rip // TILE
     scale_tiles = s.w13_scale_cols // 8
-    base_tile = wave * UP_TILES
+    base_tile = whole.select(wave * UP_TILES, hh * HALF_TILES + first)
     even_base = (base_tile % 2) == 0
     accs = [zeros(4) for _ in range(2 * UP_TILES)]
     scales = {}
@@ -460,7 +526,10 @@ def unit(g, s, lds, x4, x4s, ub, us, db, ds, start, count, part):
         weights = []
         for t in range_constexpr(2 * UP_TILES):
             at = (tile_of(t) * (TILE * s.w13_row_bytes) + 1024 * k + 16 * lane) // 4
-            weights.append(ld_i32x4(ub, at, CM_NT))
+            on = i32(t % UP_TILES) < tiles
+            weights.append(
+                ld(ub, at, fx.Int32, 4, cm=CM_NT, nbytes=s.w13_bytes, mask=on)
+            )
         if const_expr(k % 2 == 0):
             for proj in range_constexpr(2):
                 for pair in range_constexpr((UP_TILES + 1) // 2):
@@ -488,16 +557,17 @@ def unit(g, s, lds, x4, x4s, ub, us, db, ds, start, count, part):
     fx.barrier()
     # the f32 bridge panel [16 tokens][RI] aliases the gathered rows
     for t in range_constexpr(UP_TILES):
-        col = (base_tile + t) * TILE + group * 4
-        vals = [silu(accs[t][e]) * accs[UP_TILES + t][e] for e in range(4)]
-        lds_st(
-            lds.x + row * RI + col,
-            fx.Vector.from_elements(vals, fx.Float32).bitcast(fx.Int32),
-        )
+        if i32(t) < tiles:
+            col = (base_tile + t) * TILE + group * 4
+            vals = [silu(accs[t][e]) * accs[UP_TILES + t][e] for e in range(4)]
+            lds_st(
+                lds.x + row * RI + col,
+                fx.Vector.from_elements(vals, fx.Float32).bitcast(fx.Int32),
+            )
     fx.barrier()
     for r in range_constexpr(-(-(TILE * AGROUPS) // THREADS)):
         at = g.tid + i32(r * THREADS)
-        if at < TILE * AGROUPS:
+        if (at < TILE * AGROUPS) & group_live(at % AGROUPS):
             token, q = at // AGROUPS, at % AGROUPS
             vals = []
             for m in range_constexpr(8):
@@ -513,7 +583,7 @@ def unit(g, s, lds, x4, x4s, ub, us, db, ds, start, count, part):
     xb, xc = [], []
     for k in range_constexpr(s.down_steps):
         q = 4 * k + group
-        live = q < AGROUPS
+        live = (q < AGROUPS) & group_live(q)
         qq = live.select(q, i32(0))
         raw = lds_ld(lds.act + row * (RI // 8) + qq * 4, 4)
         xb.append(live.select(raw, zeros(4, fx.Int32)))
@@ -522,13 +592,16 @@ def unit(g, s, lds, x4, x4s, ub, us, db, ds, start, count, part):
     for qd in range_constexpr(4):
         r = i32(4 * qd) + group
         dest.append((r < count, _assignment(lds.index, s, start, count, r)))
+    out = (half == 2).select(fx.Int64(part2), fx.Int64(part))
     for blk in range(i32(0), i32(DOWN_TILES // DOWN_BLOCK), i32(1)):
-        down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc)
+        down_block(g, s, lds, db, ds, out, wave, lane, dest, blk, xb, xc, group_live)
     fx.barrier()
+    if (half == 2) & (g.tid < count):
+        st(flags, _assignment(lds.index, s, start, count, g.tid), tag, CM_DEV)
 
 
 @traced
-def down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc):
+def down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc, group_live):
     first = wave * DOWN_TILES + blk * DOWN_BLOCK
     partials = [zeros(4) for _ in range(DOWN_BLOCK)]
     scale_tiles = s.w2_scale_cols // 8
@@ -538,16 +611,12 @@ def down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc):
             ((first + t) * (TILE * s.w2_row_bytes) + 1024 * k + 16 * lane) // 4
             for t in range(DOWN_BLOCK)
         ]
-        if const_expr((k + 1) * 128 > RI):
-            # the K step reaches into the padding past RI: those lanes' (zero)
-            # weights are not read
-            live = (lane // TILE) * mx.GROUP + 128 * k < RI
-            weights = [
-                ld(db, a, fx.Int32, 4, cm=CM_NT, nbytes=s.w2_bytes, mask=live)
-                for a in at
-            ]
-        else:
-            weights = [ld_i32x4(db, a, CM_NT) for a in at]
+        # a lane's K group past RI (the padding) or outside the half is not read
+        q = 4 * k + lane // TILE
+        live = (q < AGROUPS) & group_live(q)
+        weights = [
+            ld(db, a, fx.Int32, 4, cm=CM_NT, nbytes=s.w2_bytes, mask=live) for a in at
+        ]
         return (
             weights,
             [
@@ -597,7 +666,7 @@ def down_block(g, s, lds, db, ds, part, wave, lane, dest, blk, xb, xc):
 
 
 @traced
-def combine(g, xch, route_buf, part, rows: int):
+def combine(g, xch, route_buf, part, part2, flags, rows: int):
     """``y[b] = sum_j w[b, j] part[b, j]`` in slot order, a wave an exchange
     line: lane ``l`` sums 8 columns of token ``l // 8`` and pushes them as four
     packed bf16 dwords to every rank, then lane 0 the line's flag."""
@@ -626,12 +695,33 @@ def combine(g, xch, route_buf, part, rows: int):
             ]
             for j in range(SLOTS)
         ]
+        # a split unit's second half of (row, slot), marked with this use's tag
+        halves = [
+            ld(flags, tk * SLOTS + j, fx.Int32, cm=CM_DEV) == xch.tag
+            for j in range(SLOTS)
+        ]
+        ps2 = [
+            [
+                ld(
+                    part2,
+                    (tk * SLOTS + j) * HIDDEN + col + 4 * h,
+                    fx.Float32,
+                    4,
+                    cm=CM_DEV,
+                    nbytes=rows * SLOTS * HIDDEN * 4,
+                    mask=halves[j],
+                )
+                for h in range(2)
+            ]
+            for j in range(SLOTS)
+        ]
         sums = [fx.Float32(0.0)] * 8
         for j in range_constexpr(SLOTS):
-            sums = [sums[e] + ws[j] * ps[j][e // 4][e % 4] for e in range(8)]
-        dword = ex_.line_dword(rows, grp, token, g.lane % 8)
-        for base in xch.bases:
-            st(base, row + dword, pack_bf16x8(sums), cm=CM_SYS)
+            sums = [
+                sums[e] + ws[j] * (ps[j][e // 4][e % 4] + ps2[j][e // 4][e % 4])
+                for e in range(8)
+            ]
+        xch.put(grp, token, g.lane % 8, sums)
         drain_stores()
         if g.lane == 0:
             for base in xch.bases:

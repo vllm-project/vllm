@@ -103,13 +103,14 @@ class SpecializedDecode:
         self._kv: tuple[int, int] | None = None
         self.steps = 0
         logger.info(
-            "%s: %d layers, widths %s, %d builds, %d launches a step; other steps "
-            "run vLLM's decode",
+            "%s: %d layers, widths %s, %d builds, %d launches a step, %s TP "
+            "all-reduce lines; other steps run vLLM's decode",
             NAME,
             len(model.layers),
             ",".join(map(str, config.widths)),
             len(builds),
             self.launch.launches,
+            self.launch.allreduce,
         )
 
     def _keys(self, rows: int) -> list:

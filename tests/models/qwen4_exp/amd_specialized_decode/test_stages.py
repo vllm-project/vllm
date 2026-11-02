@@ -82,7 +82,7 @@ class Harness:
             self.health.data_ptr(),
         ]
 
-    def exchange_y(self, rows, slot):
+    def exchange_y(self, rows, slot, codec="bf16"):
         """The rank's partial in exchange slot ``slot`` as [rows, HIDDEN]."""
         from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import HIDDEN
         from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import (
@@ -90,7 +90,9 @@ class Harness:
         )
 
         words, lpg = ex.row_words(), ex.lines_per_group(rows)
-        row = self.mbox_t[slot * words : slot * words + ex.payload_words(rows)]
+        row = self.mbox_t[slot * words : slot * words + ex.payload_words(rows, codec)]
+        if codec == "int4":
+            return ref.int4_lines(row, rows, ex.GROUPS, lpg, HIDDEN)
         y = (
             row.contiguous()
             .view(torch.bfloat16)
@@ -260,7 +262,7 @@ def test_fp4_shuffle_matches_aiter():
 EPS = 1e-6
 
 
-def _hc_kernel(rows):
+def _hc_kernel(rows, codec="bf16"):
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr.typing import Int64
@@ -293,7 +295,7 @@ def _hc_kernel(rows):
         tile: fx.Array[fx.Int32, ex.GroupTile.words(rows), 16]
         word: fx.Array[fx.Int32, 4, 16]
 
-    @flyc.kernel(name=f"t_hc_{rows}", known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(name=f"t_hc_{rows}_{codec}", known_block_size=[THREADS, 1, 1])
     def kern(
         state: Int64,
         norm_w: Int64,
@@ -330,7 +332,7 @@ def _hc_kernel(rows):
         grid_sync(g)
         # y through a one-rank exchange (a 64-column group a CTA), then the combine
         tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 5
-        xch = ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 1, tag, rows)
+        xch = ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 1, tag, rows, codec)
         tile = ex.GroupTile(sm.tile.ptr, rows)
         for grp in range(bid, ex.GROUPS, BLOCKS):
             for idx in range(tid, rows * 8, THREADS):
@@ -386,10 +388,11 @@ def _hc_kernel(rows):
     return launch
 
 
-@pytest.mark.parametrize("rows", [32, 128])
-def test_gated_residual(harness, rows):
+@pytest.mark.parametrize("rows, codec", [(32, "bf16"), (128, "bf16"), (128, "int4")])
+def test_gated_residual(harness, rows, codec):
     """The mix's normalized gated mean and injection scales, the combine's new
-    state and its rrms."""
+    state and its rrms; with ``int4`` exchange lines the combine adds the
+    codec's round trip of the block output."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
         DOWN_ROWS,
         HC,
@@ -405,8 +408,9 @@ def test_gated_residual(harness, rows):
     w_di = (torch.randn(DOWN_ROWS, HC_HIDDEN, generator=gen) * 0.02).to(torch.bfloat16)
     w_up = (torch.randn(HC_HIDDEN, LOWRANK, generator=gen) * 0.1).to(torch.bfloat16)
     y = torch.randn(rows, HIDDEN, generator=gen).to(torch.bfloat16)
+    y_lines = ref.int4_roundtrip(y) if codec == "int4" else y
     mixed, inj_r, new, rrms_r, rrms2_r = ref.gated_residual(
-        state, norm_w, w_di, w_up, y, HC, LOWRANK, EPS
+        state, norm_w, w_di, w_up, y_lines, HC, LOWRANK, EPS
     )
 
     d = {
@@ -418,7 +422,7 @@ def test_gated_residual(harness, rows):
     part = torch.zeros(hc.down_plan().partial_words(rows), device="cuda")
     down = torch.zeros(rows, LOWRANK, dtype=torch.bfloat16, device="cuda")
     harness.mbox_t.zero_()
-    _hc_kernel(rows)(
+    _hc_kernel(rows, codec)(
         d["state"].data_ptr(),
         d["norm_w"].data_ptr(),
         d["w_di"].data_ptr(),
@@ -720,7 +724,7 @@ def test_gated_delta_net(harness, rows):
 RIP = 384  # the padded intermediate of a TP2 rank (320 real)
 
 
-def _moe_kernel(rows):
+def _moe_kernel(rows, codec="bf16"):
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr.typing import Int64
@@ -753,7 +757,7 @@ def _moe_kernel(rows):
         mstage: fx.Array[fx.Int32, words.stage, 16]
         word: fx.Array[fx.Int32, 4, 16]
 
-    @flyc.kernel(name=f"t_moe_{rows}", known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(name=f"t_moe_{rows}_{codec}", known_block_size=[THREADS, 1, 1])
     def kern(
         x: Int64,
         w_gate: Int64,
@@ -766,6 +770,8 @@ def _moe_kernel(rows):
         x4: Int64,
         x4s: Int64,
         mpart: Int64,
+        mpart2: Int64,
+        flags: Int64,
         mbox: Int64,
         epoch: Int64,
         s0: Int64,
@@ -792,14 +798,18 @@ def _moe_kernel(rows):
             acts=sm.acts.ptr,
             stage=sm.mstage.ptr,
         )
-        moe.experts(g, shape, lds, route, x4, x4s, w13, w13s, w2, w2s, mpart)
-        grid_sync(g)
         tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 9
+        moe.experts(
+            g, shape, lds, route, x4, x4s, w13, w13s, w2, w2s, mpart, mpart2, flags, tag
+        )
+        grid_sync(g)
         moe.combine(
             g,
-            ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 2, tag, rows),
+            ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 2, tag, rows, codec),
             route,
             mpart,
+            mpart2,
+            flags,
             rows,
         )
 
@@ -816,6 +826,8 @@ def _moe_kernel(rows):
         x4: Int64,
         x4s: Int64,
         mpart: Int64,
+        mpart2: Int64,
+        flags: Int64,
         mbox: Int64,
         epoch: Int64,
         s0: Int64,
@@ -836,6 +848,8 @@ def _moe_kernel(rows):
             x4,
             x4s,
             mpart,
+            mpart2,
+            flags,
             mbox,
             epoch,
             s0,
@@ -872,11 +886,62 @@ def _expert_weights(gen, experts, rows, k, rows_real, k_real):
     )
 
 
-@pytest.mark.parametrize("rows", [32, 128])
-def test_moe(harness, rows):
+def _routed_inputs(gen, rows, picks):
+    """``x`` and a router gate whose top-k of row ``b`` is ``picks[b]``: each
+    expert has a near-orthogonal direction ``u_e``; a row is the sum of its
+    experts' directions (slightly unequal) plus noise, the gate rows ``2
+    u_e``."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
+        E_ALL,
+        EXPERTS,
+        HIDDEN,
+    )
+
+    u = torch.randn(EXPERTS, HIDDEN, generator=gen)
+    u = u / u.norm(dim=1, keepdim=True)
+    x = 0.05 * torch.randn(rows, HIDDEN, generator=gen)
+    for b, pick in enumerate(picks):
+        w = 1 + 0.1 * torch.rand(len(pick), 1, generator=gen)
+        x[b] += (u[list(pick)] * w).sum(0) * 4
+    gate = torch.randn(E_ALL, HIDDEN, generator=gen) * 0.05
+    gate[:EXPERTS] = u * 2
+    return x.to(torch.bfloat16), gate.to(torch.bfloat16)
+
+
+def _skewed_picks(rows, gen):
+    """A real-checkpoint-like B128 routing: 20 hot experts of 24 rows and 280
+    of about 3 (328 units with the shared expert's 8: 72 run as halves)."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import TOPK
+
+    left = torch.zeros(512, dtype=torch.long)
+    left[:20] = 24
+    rest = rows * TOPK - 480
+    left[20:300] = rest // 280
+    left[20 : 20 + rest % 280] += 1
+    picks = []
+    for _ in range(rows):
+        pick = torch.topk(left.float() + 1e-3 * torch.rand(512, generator=gen), TOPK)
+        left[pick.indices] -= 1
+        picks.append(pick.indices.tolist())
+    return picks
+
+
+@pytest.mark.parametrize(
+    "rows, routing, codec",
+    [
+        (32, "random", "bf16"),
+        (128, "random", "bf16"),
+        (32, "hot", "bf16"),
+        (128, "skewed", "bf16"),
+        (128, "random", "int4"),
+    ],
+)
+def test_moe(harness, rows, routing, codec):
     """Routing (as sets: bf16 logits tie at the top-k boundary) and weights,
     then the rows whose routing agrees against the reference's MXFP4
-    activations; at most a few rows may route differently."""
+    activations; at most a few rows may route differently. ``hot`` (every
+    row on the same experts) and ``skewed`` routings run split units as
+    intermediate halves; their marks must be set."""
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
         E_ALL,
         EXPERTS,
@@ -888,8 +953,13 @@ def test_moe(harness, rows):
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import moe
 
     gen = torch.Generator().manual_seed(3)
-    x = torch.randn(rows, HIDDEN, generator=gen).to(torch.bfloat16)
-    w_gate = (torch.randn(E_ALL, HIDDEN, generator=gen) * 0.05).to(torch.bfloat16)
+    if routing == "random":
+        x = torch.randn(rows, HIDDEN, generator=gen).to(torch.bfloat16)
+        w_gate = (torch.randn(E_ALL, HIDDEN, generator=gen) * 0.05).to(torch.bfloat16)
+    elif routing == "hot":
+        x, w_gate = _routed_inputs(gen, rows, [list(range(TOPK))] * rows)
+    else:
+        x, w_gate = _routed_inputs(gen, rows, _skewed_picks(rows, gen))
     w13, w13s, w13d = _expert_weights(gen, E_ALL, 2 * RIP, HIDDEN, RI, HIDDEN)
     w2, w2s, w2d = _expert_weights(gen, E_ALL, HIDDEN, RIP, HIDDEN, RI)
     y_r, ids_r, ws_r = ref.moe(x, w_gate, w13d, w2d, EXPERTS, TOPK, RI, RIP)
@@ -903,14 +973,18 @@ def test_moe(harness, rows):
     x4 = torch.zeros(rows, HIDDEN // 8, dtype=torch.int32, device="cuda")
     x4s = torch.zeros(rows, HIDDEN // 32, dtype=torch.int32, device="cuda")
     mpart = torch.zeros(rows * SLOTS, HIDDEN, device="cuda")
+    mpart2 = torch.zeros(rows * SLOTS, HIDDEN, device="cuda")
+    flags = torch.zeros(rows * SLOTS, dtype=torch.int32, device="cuda")
     harness.mbox_t.zero_()
-    _moe_kernel(rows)(
+    _moe_kernel(rows, codec)(
         *[d[n].data_ptr() for n in ("x", "w_gate", "w13", "w13s", "w2", "w2s")],
         part.data_ptr(),
         route.data_ptr(),
         x4.data_ptr(),
         x4s.data_ptr(),
         mpart.data_ptr(),
+        mpart2.data_ptr(),
+        flags.data_ptr(),
         harness.mbox,
         harness.epoch.data_ptr(),
         *harness.sync_args(),
@@ -926,7 +1000,20 @@ def test_moe(harness, rows):
         agree
     ]
     assert ws_err.max().item() < 1e-5
-    y = harness.exchange_y(rows, 2).double().cpu()
+    y = harness.exchange_y(rows, 2, codec).double().cpu()
     err = ((y - y_r).norm(dim=1) / y_r.norm(dim=1))[agree]
-    assert err.median().item() < 5e-3
-    assert err.max().item() < 5e-2
+    if codec == "int4":
+        # the codec's own error: a 16-column group's step is its extremum / 8
+        q_err = (ref.int4_roundtrip(y_r) - y_r).norm(dim=1) / y_r.norm(dim=1)
+        assert err.median().item() < 1.5 * q_err.median().item() + 5e-3
+    else:
+        assert err.median().item() < 5e-3
+        assert err.max().item() < 5e-2
+    tag = harness.epoch[0].item() * 128 + 9
+    marked = (flags == tag).sum().item()
+    if routing == "random":
+        assert marked == 0
+    else:
+        assert marked > 0
+    if routing == "hot":
+        assert marked == rows * SLOTS

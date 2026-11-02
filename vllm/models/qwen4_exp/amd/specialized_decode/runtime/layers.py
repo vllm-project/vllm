@@ -11,10 +11,9 @@ fold counters, the step epoch (bumped once a step; a CUDA graph captures the
 bump, and the TP exchange tags carry it), the health words and the peer
 mailboxes of the TP exchange."""
 
-import os
-
 import torch
 
+from vllm import envs
 from vllm.models.qwen4_exp.amd.specialized_decode.runtime.guards import (
     experts_rip,
     gdn_states,
@@ -39,7 +38,6 @@ from vllm.platforms import current_platform
 # CTA 0 stamps the clock at each of its phase ends into ``Launcher.trace``
 # ([layers, layer.TRACE_WORDS] int64, s_memrealtime ticks at 100 MHz; the
 # phase names are ``layer.PHASES[key]``). Off: no stamps are compiled.
-TRACE_ENV = "VLLM_QWEN4_EXP_DECODE_TRACE"
 
 
 def _hc_args(hc, prefix: str) -> dict:
@@ -62,7 +60,8 @@ class Launcher:
         from vllm.models.qwen4_exp.amd.specialized_decode.runtime.peer import PeerBuffer
 
         self.model, self.widths, self.tp, self.rank = model, widths, tp, rank
-        self.scratch = torch.empty(
+        # zeroed: the MoE's split-unit marks are compared against step tags
+        self.scratch = torch.zeros(
             K.scratch_bytes(max(widths)), dtype=torch.uint8, device=dev
         )
         self.x = torch.empty(max(widths), L.HIDDEN, dtype=torch.bfloat16, device=dev)
@@ -82,7 +81,8 @@ class Launcher:
         self.slots = (base, base + 4 * SLOT_WORDS)
         self.folds = base + 4 * FOLD_BASE
         self.rip = experts_rip(next(ly.mlp for ly in model.layers))
-        self.traced = os.environ.get(TRACE_ENV, "0") not in ("", "0")
+        self.traced = envs.VLLM_QWEN4_EXP_DECODE_TRACE
+        self.allreduce = envs.VLLM_QWEN4_EXP_DECODE_ALLREDUCE
         self.trace = torch.zeros(
             len(model.layers) * K.TRACE_WORDS, dtype=torch.int64, device=dev
         )
@@ -156,6 +156,7 @@ class Launcher:
             rip=self.rip,
             hc_eps=layer.attn_hyper_connection.config.rms_norm_eps,
             trace=self.traced,
+            allreduce=self.allreduce,
         )
         if layer.layer_type == "linear_attention":
             g = layer.linear_attn

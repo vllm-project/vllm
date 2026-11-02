@@ -253,10 +253,10 @@ def combine(g, xch, state, inj, rrms, rows: int, eps: float):
         scale = ld(inj, unit, fx.Float32, cm=CM_DEV)
         sq = fx.Float32(0.0)
         for i in range_constexpr(reps):
-            dword = ex_.line_dword(rows, groups[i], b, g.lane % 8)
-            y = unpack_bf16x8(xch.load4(0, dword, gates[i * xch.tp]))
+            seg = g.lane % 8
+            y = xch.get(0, groups[i], b, seg, gates[i * xch.tp])
             for src in range_constexpr(1, xch.tp):
-                more = unpack_bf16x8(xch.load4(src, dword, gates[i * xch.tp + src]))
+                more = xch.get(src, groups[i], b, seg, gates[i * xch.tp + src])
                 y = [y[e] + more[e] for e in range(8)]
             at = unit * HIDDEN + (i * 64 + g.lane) * 8
             x = unpack_bf16x8(ld_i32x4(state, at // 2, CM_DEV))

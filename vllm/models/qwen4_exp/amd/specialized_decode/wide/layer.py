@@ -48,6 +48,7 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
     HC,
     HIDDEN,
     LOWRANK,
+    MAX_TOKENS,
     QSA_CORE,
     SLOTS,
     THREADS,
@@ -72,10 +73,13 @@ class LayerBuild:
     hc_eps: float = 1e-6
     gdn_eps: float = 1e-6
     trace: bool = False  # CTA 0 stamps the clock at every phase end (``phase_names``)
+    allreduce: str = "bf16"  # the TP exchange's line codec (``exchange.CODECS``)
 
     def __post_init__(self):
         if self.kind not in KINDS:
             raise ValueError(f"layer kind {self.kind!r}")
+        if self.allreduce not in ex_.CODECS:
+            raise ValueError(f"all-reduce codec {self.allreduce!r}")
         if self.tokens % ex_.TOKENS:
             raise ValueError(f"{self.tokens} rows: a multiple of {ex_.TOKENS}")
 
@@ -165,8 +169,12 @@ def _part_words(rows: int) -> int:
 
 
 def scratch_layout(rows: int) -> dict[str, tuple[int, int]]:
-    """Name -> (byte offset, bytes) of a width's scratch, 256-byte aligned."""
+    """Name -> (byte offset, bytes) of a width's scratch, 256-byte aligned.
+    ``split`` (the MoE's split-unit marks) comes first and is sized for the
+    widest step, so every width's marks share one zeroed region that nothing
+    else writes."""
     sizes = {
+        "split": MAX_TOKENS * SLOTS * 4,
         "rrms": rows * HC * 4,
         "inj_a": rows * HC * 4,
         "inj_m": rows * HC * 4,
@@ -180,6 +188,7 @@ def scratch_layout(rows: int) -> dict[str, tuple[int, int]]:
         "x4": rows * HIDDEN // 8 * 4,
         "x4s": rows * HIDDEN // 32 * 4,
         "mpart": rows * SLOTS * HIDDEN * 4,
+        "mpart2": rows * SLOTS * HIDDEN * 4,
     }
     out, off = {}, 0
     for name, n in sizes.items():
@@ -208,6 +217,8 @@ class Scratch(TraceInvariant):
     x4: fx.Int64
     x4s: fx.Int64
     mpart: fx.Int64
+    mpart2: fx.Int64
+    split: fx.Int64
 
     def __init__(self, base, rows: int):
         for name, (off, _) in scratch_layout(rows).items():
@@ -257,6 +268,7 @@ def build(key: LayerBuild):
 
     keyed = key_tuple(key)
     name = f"q4w_{key.kind}_s{S}_tp{tp}" + ("_st" if key.stats else "")
+    name += "" if key.allreduce == "bf16" else f"_{key.allreduce}"
 
     @flyc.kernel(name=name, known_block_size=[THREADS, 1, 1])
     def kernel(
@@ -336,9 +348,8 @@ def build(key: LayerBuild):
 
         def exchange(kind: int):
             slot = (layer % 2) * 2 + kind
-            return ex_.Exchange(
-                bases, own, rank, tp, slot, ep * 128 + layer * 2 + kind + 1, S
-            )
+            tag = ep * 128 + layer * 2 + kind + 1
+            return ex_.Exchange(bases, own, rank, tp, slot, tag, S, key.allreduce)
 
         def mix(tag, norm, di, up, inj):
             hc.mix_down(g, gemm, state, scr.rrms, norm, di, scr.part)
@@ -372,12 +383,25 @@ def build(key: LayerBuild):
                 acts=ml.acts.ptr,
                 stage=ml.stage.ptr,
             )
+            xch = exchange(MLP)
             moe.experts(
-                g, shape, lds, scr.route, scr.x4, scr.x4s, w13, w13s, w2, w2s, scr.mpart
+                g,
+                shape,
+                lds,
+                scr.route,
+                scr.x4,
+                scr.x4s,
+                w13,
+                w13s,
+                w2,
+                w2s,
+                scr.mpart,
+                scr.mpart2,
+                scr.split,
+                xch.tag,
             )
             end_phase("experts")
-            xch = exchange(MLP)
-            moe.combine(g, xch, scr.route, scr.mpart, S)
+            moe.combine(g, xch, scr.route, scr.mpart, scr.mpart2, scr.split, S)
             hc.combine(g, xch, state, scr.inj_m, scr.rrms, S, key.hc_eps)
             if const_expr(key.trace):
                 end_phase("moe_combine+allreduce+combine")
