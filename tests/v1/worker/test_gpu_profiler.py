@@ -15,6 +15,7 @@ import torch
 from pydantic import ValidationError
 
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
+from tests.utils import create_new_process_for_each_test
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
@@ -924,12 +925,10 @@ class TestDPSynchronizedProfiler:
         assert not profiler.is_armed
 
 
-@pytest.mark.parametrize(
-    "device_type",
-    ["cuda", pytest.param("cpu", marks=pytest.mark.forked), "xpu"],
-)
+@pytest.mark.parametrize("device_type", ["cuda", "cpu", "xpu"])
 @pytest.mark.parametrize("use_v2", [False, True])
 @pytest.mark.parametrize("synchronized,dp_size", [(True, 2), (False, 2), (True, 1)])
+@create_new_process_for_each_test("spawn")
 def test_worker_init_enables_requested_profiler_clock(
     device_type,
     use_v2,
@@ -940,7 +939,8 @@ def test_worker_init_enables_requested_profiler_clock(
 ):
     """Each init path must make an armed profile advance, not wait forever."""
     if device_type == "cpu":
-        # Import only in a child: CPUWorker installs process-wide Torch shims.
+        # A fresh interpreter isolates CPUWorker's process-wide Torch shims
+        # without forking a parent that may have initialized CUDA.
         from vllm.v1.worker.cpu_worker import CPUWorker
 
         worker_type = CPUWorker
