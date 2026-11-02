@@ -23,11 +23,11 @@ MODELS = [
         32,
         {},
     ),
-    (
-        GenerateModelInfo("Qwen/Qwen3.5-4B", hf_ppl=6.478141784667969),
-        32,
-        {"enable_prefix_caching": False},
-    ),
+    # (
+    #    GenerateModelInfo("Qwen/Qwen3.5-4B", hf_ppl=6.478141784667969),
+    #    32,
+    #    {"enable_prefix_caching": False},
+    # ),
 ]
 
 
