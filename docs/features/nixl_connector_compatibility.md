@@ -106,13 +106,18 @@ By default, a **compatibility hash** is checked during handshake. P and D instan
 
 ### Pipeline parallelism
 
-The default (pull) NixlConnector does **not** support
-`pipeline-parallel-size > 1` together with a hybrid KV cache (HMA)
-layout and raises at startup. Use the push connector
-(`NixlPushConnector`) for pipeline parallelism with hybrid KV caches.
 Both connectors pair KV regions with a peer's by the layers each region
-holds, so a PP-sharded prefiller can write into a `PP=1` decoder. See
-[NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
+holds, so a PP-sharded prefiller works with a `PP=1` decoder: the pull
+NixlConnector reads each layer from the prefiller stage that holds it, and
+the push connector (`NixlPushConnector`) writes each stage's layers into the
+decoder. See [NIXL push-mode KV transfer](../design/nixl_kv_push_connector.md).
+
+Current pull PP limitations:
+
+- Only the prefiller (producer) may be PP-sharded; decode-side PP is not supported.
+- Hybrid SSM/Mamba layouts, DCP and mixed-memory KV caches are not supported under PP.
+- Under HMA, only attention KV is supported: MLA and CSA-linear caches raise at startup; use the push connector for those.
+- Both sides must place every layer in the same KV cache group.
 
 Current push PP + HMA limitations:
 
