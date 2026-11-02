@@ -190,6 +190,7 @@ def _build_prefill_metadata(
     return MLACommonPrefillMetadata(
         block_table=block_table,
         query_start_loc=query_start_loc_cpu.to(device),
+        query_start_loc_cpu=query_start_loc_cpu,
         max_query_len=max(_QUERY_LENS),
         chunked_context=chunked_context,
         q_data_type=q_data_type,
