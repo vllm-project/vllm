@@ -14,12 +14,17 @@ from vllm.model_executor.layers.fused_moe.config import mxfp4_w4a16_moe_quant_co
 from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
     TrtLlmMxfp4LoRAExperts,
 )
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEActivationFormat,
+)
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
     _requested_kernel_cls,
+    _return_or_raise,
     backend_to_kernel_cls,
     convert_weight_to_mxfp4_moe_kernel_format,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Static
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 from vllm.utils.torch_utils import set_random_seed
@@ -211,7 +216,13 @@ def test_lora_experts_are_opt_in_for_bf16_activations():
     assert _requested_kernel_cls(mxfp8, config) == backend_to_kernel_cls(mxfp8)
 
     config.is_lora_enabled = True
-    assert _requested_kernel_cls(bf16, config)[0] is TrtLlmMxfp4LoRAExperts
+    assert _requested_kernel_cls(bf16, config) == [TrtLlmMxfp4LoRAExperts]
+    config.is_lora_fully_sharded = True
+    with pytest.raises(ValueError, match="does not support fully sharded LoRA"):
+        _return_or_raise(
+            bf16, config, kMxfp4Static, None, FusedMoEActivationFormat.Standard
+        )
+    config.is_lora_fully_sharded = False
     with pytest.raises(ValueError, match="MXFP8 activations"):
         _requested_kernel_cls(mxfp8, config)
     marlin = Mxfp4MoeBackend.MARLIN

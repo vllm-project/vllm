@@ -591,9 +591,8 @@ def _requested_kernel_cls(
 ) -> list[type[mk.FusedMoEExperts]]:
     """Kernel classes for an explicitly requested backend. The LoRA-aware
     TRT-LLM experts are opt-in: "auto" keeps its current LoRA selection."""
-    candidates = backend_to_kernel_cls(backend)
     if not config.is_lora_enabled or backend not in TRTLLM_BACKENDS:
-        return candidates
+        return backend_to_kernel_cls(backend)
     if backend == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8:
         raise ValueError(
             _make_log_unsupported(
@@ -606,7 +605,7 @@ def _requested_kernel_cls(
         TrtLlmMxfp4LoRAExperts,
     )
 
-    return [TrtLlmMxfp4LoRAExperts, *candidates]
+    return [TrtLlmMxfp4LoRAExperts]
 
 
 def _return_or_raise(
