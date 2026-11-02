@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp6_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kMxfp4Dynamic,
+    kMxfp4Static,
     kMxfp6E2M3Dynamic,
     kMxfp6E3M2Dynamic,
 )
@@ -46,9 +47,8 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
         super().__init__(config)
         if config.activation_quant_key is None:
             # no input Q/DQ for weight-only
-            self.quant_dequant_func: Callable[[torch.Tensor], torch.Tensor] = (
-                lambda x: x
-            )
+            qdq_fn: Callable[[torch.Tensor], torch.Tensor] = lambda x: x
+            self.quant_dequant_func = qdq_fn
         else:
             self.quant_dequant_func = _ACTIVATION_QUANT_DEQUANT_FUNCS[
                 config.activation_quant_key
@@ -59,6 +59,16 @@ class EmulationMxfp4LinearKernel(MxFp4LinearKernel):
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         return True, None
+
+    @classmethod
+    def _supports_quant_scheme(
+        cls,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        return weight_key == kMxfp4Static and (
+            activation_key is None or activation_key in _ACTIVATION_QUANT_DEQUANT_FUNCS
+        )
 
     @classmethod
     def can_implement(cls, config: MxFp4LinearLayerConfig) -> tuple[bool, str | None]:

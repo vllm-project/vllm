@@ -55,6 +55,9 @@ CacheDType = Literal[
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
     "turboquant_3bit_nc",
+    "octave_k3v4",
+    "octave_k3v3",
+    "octave_k3v3_compact",
     "ultraquant_4bit",
     "int4_per_token_head",
     "int8_per_token_head",
@@ -332,6 +335,9 @@ class CacheConfig:
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
 
+    simple_cpu_offload_num_blocks: int | None = field(default=None, init=False)
+    """Worker-aligned offload block count for ``SimpleCPUOffloadConnector``."""
+
     # Set after KV cache initialization.
     effective_attention_block_size: int | None = field(default=None, init=False)
     """Full-attention block size in tokens, including DCP, or None if unavailable."""
@@ -415,6 +421,7 @@ class CacheConfig:
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "simple_cpu_offload_num_blocks",
             "effective_attention_block_size",
             "kv_cache_size_tokens",
             "kv_cache_max_concurrency",

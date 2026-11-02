@@ -341,6 +341,8 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
         cum_seq_lens_q: torch.Tensor | None = None
         max_q_len: int | None = None
         row_req: torch.Tensor | None = None
+        # Per split row: query tokens of its request after it.
+        causal_rows_after: torch.Tensor | None = None
 
         if not attn_metadata.causal:
             # FlashInfer decode has no causal flag. Flatten each non-causal
@@ -357,15 +359,23 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             # do not return on the ragged path (flashinfer #3238).
             cum_seq_lens_q = attn_metadata.decode.query_start_loc
             max_q_len = attn_metadata.decode.max_query_len
-        # trtllm API requires extra dimension q_len_per_request for MTP
-        elif attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
-            logger.warning_once(
-                """FlashInferMLAImpl got a query of uneven length.
-                This usually indicates an issue in batch reordering
-                or incorrect setup in dummy_run."""
-            )
+        elif (
+            attn_metadata.num_decode_tokens
+            != attn_metadata.num_decodes * attn_metadata.decode.max_query_len
+        ):
+            # Ragged causal DCP decode, e.g. requests with fewer drafts: split
+            # into single-token rows, each bounded at its own causal position.
             q = q.unsqueeze(1)
+            block_table, seq_lens, row_req = self._flattened_decode_metadata(
+                attn_metadata, q.shape[0]
+            )
+            query_start_loc = attn_metadata.decode.query_start_loc
+            assert query_start_loc is not None
+            query_end = query_start_loc[1:]
+            rows = torch.arange(q.shape[0], device=q.device, dtype=query_end.dtype)
+            causal_rows_after = query_end[row_req] - 1 - rows
         else:
+            # trtllm API requires extra dimension q_len_per_request for MTP
             q = q.view(attn_metadata.num_decodes, -1, q.shape[-2], q.shape[-1])
 
         if self.bmm1_scale is None:
@@ -389,6 +399,8 @@ class FlashInferMLAImpl(MLACommonImpl[FlashInferMLAMetadata]):
             assert causal_seqlens_kv_global is not None
             if row_req is not None:
                 causal_seqlens_kv_global = causal_seqlens_kv_global[row_req]
+            if causal_rows_after is not None:
+                causal_seqlens_kv_global = causal_seqlens_kv_global - causal_rows_after
             extra_kwargs.update(
                 enable_dcp=True,
                 cp_world=self.dcp_world_size,

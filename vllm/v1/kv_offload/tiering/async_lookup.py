@@ -272,7 +272,7 @@ class AsyncLookupManager(ABC):
             for req_context, entries in batches.values():
                 keys = [key for key, _ in entries]
                 try:
-                    hits = self.batch_lookup(keys, req_context)
+                    hits: Iterable[bool] = list(self.batch_lookup(keys, req_context))
                 except Exception as exc:
                     logger.warning(
                         "batch_lookup failed on tier %s for %d keys: %s",

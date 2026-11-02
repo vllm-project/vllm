@@ -112,7 +112,7 @@ PARALLEL_COMBOS = [
 BACKENDS = ["allgather_reducescatter"]
 
 if has_mori():
-    BACKENDS += ["mori_high_throughput", "mori_low_latency"]
+    BACKENDS += ["mori_high_throughput", "mori_low_latency", "mori"]
 
 if has_flashinfer_nvlink_two_sided():
     BACKENDS += ["flashinfer_nvlink_two_sided"]
@@ -135,7 +135,7 @@ DEEPEP_SINGLE_NODE_NVSHMEM_ENV = {
     # DeepEP forces IBGDA on, so also hide the NICs from it.
     "NVSHMEM_HCA_LIST": "none",
 }
-MORI_BACKENDS = {"mori_high_throughput", "mori_low_latency"}
+MORI_BACKENDS = {"mori_high_throughput", "mori_low_latency", "mori"}
 
 QUANT_METHODS = [
     None,
@@ -151,6 +151,8 @@ BACKEND_SUPPORTED_QUANTS: dict[str, set[str | None]] = {
     "allgather_reducescatter":     {None,         "fp8", "modelopt_fp8", "modelopt_fp4"}, # noqa: E501
     "mori_high_throughput":        {None,         "fp8", "modelopt_fp8"},
     "mori_low_latency":            {None,         "fp8", "modelopt_fp8"},
+    # Pinned to EPv2, which rejects per-tensor FP8 activations.
+    "mori":                        {None, "fp8_blocked"},
     "flashinfer_nvlink_two_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "flashinfer_nvlink_one_sided": {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
     "deepep_low_latency":          {None, "fp8_blocked",                 "modelopt_fp4"}, # noqa: E501
@@ -163,8 +165,9 @@ BACKEND_EP_DP_TP_SUPPORT: dict[str, tuple[bool, bool, bool, bool]] = {
     "allgather_reducescatter":     (True,  True,  True,  True),
     "mori_high_throughput":        (True, False, False,  True),
     "mori_low_latency":            (True, False, False,  True),
+    "mori":                        (True, False, False,  True),
     "flashinfer_nvlink_two_sided": (False, True, False, False),
-    "flashinfer_nvlink_one_sided": (False, True, False, False),
+    "flashinfer_nvlink_one_sided": (True,  True, False, False),
     "deepep_low_latency":          (True, False, False,  True),
     "deepep_high_throughput":      (True, False, False,  True),
     "nixl_ep":                     (True, False, False,  True),
@@ -1824,6 +1827,24 @@ def _parallel_worker(
             local_failed = True
             local_error = traceback.format_exc()
         finally:
+            # Independent test configs can change top_k and num_experts, unlike
+            # the layers sharing a one-sided manager in a single model.
+            if test_config.backend == "flashinfer_nvlink_one_sided":
+                from flashinfer.comm.trtllm_moe_alltoall import MoeAlltoAll
+
+                from vllm.distributed.device_communicators.all2all import (
+                    FlashInferNVLinkOneSidedManager,
+                )
+
+                torch.accelerator.synchronize()
+                communicator = get_ep_group().device_communicator
+                assert communicator is not None
+                manager = communicator.all2all_manager
+                if manager is not None:
+                    assert isinstance(manager, FlashInferNVLinkOneSidedManager)
+                    manager.cleanup()
+                # Run cached tensor deleters before their JIT library unloads.
+                MoeAlltoAll._WORKSPACE_CACHE.clear()
             # DeepEP managers are not reliably reusable across many subtests in
             # a single worker process. Tear them down after each DeepEP case so
             # later subtests do not inherit stale communication state. Skip this
@@ -2171,6 +2192,8 @@ def test_moe_layer(
         tensor_parallel_size=tp_size,
         enable_expert_parallel=use_ep,
         all2all_backend=backend,
+        # Pin "mori" to EPv2; mori_high_throughput/mori_low_latency cover EPv1.
+        mori_ep_v2=True if backend == "mori" else None,
         enable_eplb=enable_eplb,
         eplb_config=eplb_config,
     )

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -17,6 +18,19 @@ from vllm.v1.worker.startup_plan import (
     maybe_apply_startup_plan,
     maybe_save_startup_plan,
 )
+
+
+def test_v2_gpu_worker_requires_triton(monkeypatch):
+    monkeypatch.setattr(gpu_worker, "HAS_TRITON", False)
+    monkeypatch.setattr(gpu_worker.current_platform, "is_cpu", lambda: False)
+    config = SimpleNamespace(use_v2_model_runner=True)
+    with pytest.raises(ValueError, match="Model Runner V2 requires Triton"):
+        gpu_worker.Worker(
+            config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="env://",
+        )
 
 
 def test_sleep_preservation_restores_private_draft_not_shared_target():
@@ -298,6 +312,23 @@ def test_startup_plan_apply_gate(plan_env):
     explicit = _plan_worker(kv_bytes=7 * GiB_bytes)
     maybe_apply_startup_plan(explicit)
     assert explicit.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+def test_startup_plan_rejects_budget_recorded_before_aux_capture(plan_env):
+    """Ignore an old-schema budget even when the fingerprint matches."""
+    worker = _plan_worker()
+    maybe_save_startup_plan(worker, 1024)
+    fingerprint = startup_plan.compute_plan_fingerprint(worker.vllm_config, 0, 1)
+    path = startup_plan._plan_path(fingerprint)
+    with open(path) as f:
+        plan = json.load(f)
+    plan["schema"] = 1
+    with open(path, "w") as f:
+        json.dump(plan, f)
+
+    maybe_apply_startup_plan(worker)
+
+    assert worker.cache_config.kv_cache_memory_bytes is None
 
 
 # Memory accounting of the profiling run (Worker.determine_available_memory).

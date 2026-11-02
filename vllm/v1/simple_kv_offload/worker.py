@@ -16,6 +16,7 @@ from vllm.v1.simple_kv_offload.metadata import (
     SimpleCPUOffloadMetadata,
     SimpleCPUOffloadWorkerMetadata,
 )
+from vllm.v1.simple_kv_offload.sizing import sync_num_offload_blocks_across_workers
 
 if TYPE_CHECKING:
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -182,7 +183,7 @@ class SimpleCPUOffloadWorker:
         local_capacity = capacity_bytes // bytes_per_block
         requested = self._num_cpu_blocks_override
         if requested is None:
-            return max(1, local_capacity)
+            return sync_num_offload_blocks_across_workers(max(1, local_capacity))
         if type(requested) is not int or not 0 < requested <= local_capacity:
             raise ValueError(
                 f"num_cpu_blocks={requested!r} must be between 1 and "
@@ -196,16 +197,11 @@ class SimpleCPUOffloadWorker:
         total_bytes_per_block: int,
         device: torch.device,
     ) -> None:
-        num_disk_slots = self._resolve_num_cpu_blocks(
-            self.disk_capacity_bytes, total_bytes_per_block
-        )
-        self.num_cpu_blocks = num_disk_slots
-
         logger.info(
             "SimpleCPUOffloadWorker [DISK]: %d tensors, %d disk slots (%.2f GB)",
             len(unique_gpu_caches),
-            num_disk_slots,
-            (num_disk_slots * total_bytes_per_block) / (1024**3),
+            self.num_cpu_blocks,
+            (self.num_cpu_blocks * total_bytes_per_block) / (1024**3),
         )
 
         assert self.disk_path is not None
@@ -217,7 +213,7 @@ class SimpleCPUOffloadWorker:
             self.load_stream,
             self.store_stream,
             rank_path,
-            num_disk_slots,
+            self.num_cpu_blocks,
             total_bytes_per_block,
             self.disk_buffer_slots,
             self.use_page_cache,
@@ -248,7 +244,8 @@ class SimpleCPUOffloadWorker:
             # Allocate non-pinned first, then pin via cudaHostRegister to
             # bypass PyTorch's CUDACachingHostAllocator which rounds up to
             # the next power of 2 (e.g. 100 GB -> 128 GB).
-            tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
+            # CPU blocks are loaded only after a completed GPU-to-CPU store.
+            tensor = torch.empty(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
             if pin_memory:
                 pin_tensor(tensor)
             self.cpu_kv_caches[name] = tensor

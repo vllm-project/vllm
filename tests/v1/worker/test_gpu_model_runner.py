@@ -12,6 +12,7 @@ import torch
 
 import vllm.model_executor.model_loader.reload.inplace as reload_inplace_module
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
+from tests.v1.core.utils import get_kv_cache_configs
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -47,10 +48,7 @@ from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     MambaAttentionBackendEnum,
 )
-from vllm.v1.core.kv_cache_planning import (
-    estimate_max_model_len,
-    get_kv_cache_configs,
-)
+from vllm.v1.core.kv_cache_planning import estimate_max_model_len
 from vllm.v1.core.sched.output import CachedRequestData, NewRequestData, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -1149,12 +1147,13 @@ def test_reload_weights_path_replaces_object_storage_source(monkeypatch):
     loader = Mock()
     loader.get_all_weights.return_value = iter(())
     monkeypatch.setattr(reload_inplace_module, "get_model_loader", lambda _: loader)
-    monkeypatch.setattr(reload_inplace_module, "initialize_layerwise_reload", Mock())
-    monkeypatch.setattr(reload_inplace_module, "finalize_layerwise_reload", Mock())
+    monkeypatch.setattr(reload_inplace_module, "start_reload", Mock())
+    monkeypatch.setattr(reload_inplace_module, "finish_reload", Mock())
 
     vllm_config = SimpleNamespace(
         lora_config=None,
-        load_config=SimpleNamespace(load_format="runai_streamer"),
+        load_config=SimpleNamespace(load_format="runai_streamer", device=None),
+        device_config=SimpleNamespace(device="cpu"),
         model_config=SimpleNamespace(
             model="/tmp/pulled-config-files",
             model_weights="s3://bucket/original",

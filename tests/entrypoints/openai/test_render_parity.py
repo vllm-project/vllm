@@ -458,6 +458,19 @@ class TestReasoningRenderParity:
             online_renderer._make_request_with_harmony(request)
         assert exc_info.value.parameter == "reasoning_effort"
 
+    async def test_effort_map_applies_to_harmony(self, online_renderer):
+        """Harmony renders the mapped effort instead of rejecting "none"."""
+        online_renderer.reasoning_effort_map = {"none": "low"}
+
+        def render(effort: str):
+            request = ChatCompletionRequest(
+                model=_MODEL, messages=_USER, reasoning_effort=effort
+            )
+            _, (engine_input,) = online_renderer._make_request_with_harmony(request)
+            return engine_input["prompt_token_ids"]
+
+        assert render("none") == render("low") != render("high")
+
     async def test_explicit_enable_thinking_not_overridden(
         self, online_renderer, serving_responses, monkeypatch
     ):
@@ -482,6 +495,40 @@ class TestReasoningRenderParity:
 
 @pytest.mark.asyncio
 class TestTemplateKwargsRenderParity:
+    async def test_unset_template_values_preserve_defaults(
+        self, online_renderer, serving_responses, monkeypatch
+    ):
+        """Null and auto inherit server defaults; explicit false overrides them."""
+        online_renderer.default_chat_template_kwargs = {
+            "reasoning_effort": "medium",
+            "mode": "strict",
+            "enable_thinking": True,
+        }
+        overrides = {
+            "reasoning_effort": None,
+            "mode": "auto",
+            "enable_thinking": False,
+        }
+        chat = await _capture_chat(
+            online_renderer,
+            ChatCompletionRequest(
+                model=_MODEL, messages=_USER, chat_template_kwargs=overrides
+            ),
+            monkeypatch,
+        )
+        responses = await _capture_responses(
+            serving_responses,
+            ResponsesRequest(model=_MODEL, input=_USER, chat_template_kwargs=overrides),
+            monkeypatch,
+        )
+        for captured in (chat, responses):
+            actual = captured.chat_params.chat_template_kwargs
+            assert {key: actual[key] for key in overrides} == {
+                "reasoning_effort": "medium",
+                "mode": "strict",
+                "enable_thinking": False,
+            }
+
     async def test_passthrough_fields(
         self, online_renderer, serving_responses, monkeypatch
     ):

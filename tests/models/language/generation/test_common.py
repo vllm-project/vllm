@@ -101,6 +101,7 @@ AITER_MODEL_LIST = [
             marks=[pytest.mark.core_model],
         ),
         pytest.param("swiss-ai/Apertus-8B-Instruct-2509"),  # apertus
+        pytest.param("domyn/Domyn-Edge-Base"),  # domyn_edge
         pytest.param(
             "naver-hyperclovax/HyperCLOVAX-SEED-Think-14B",  # hyperclovax
             marks=[large_gpu_mark(min_gb=32)],
@@ -152,7 +153,15 @@ def test_models(
         trust_remote_code=model_info.trust_remote_code,
     ) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
-            example_prompts, max_tokens, num_logprobs
+            example_prompts,
+            max_tokens,
+            num_logprobs,
+            # Domyn's remote code decodes with torch varlen_attn, whose ROCm
+            # causal mask is top-left aligned when max_q < max_k:
+            # https://github.com/pytorch/pytorch/pull/201930
+            use_cache=not (
+                current_platform.is_rocm() and model == "domyn/Domyn-Edge-Base"
+            ),
         )
 
         prompt_embeds: list[torch.Tensor] | None = [] if use_prompt_embeds else None

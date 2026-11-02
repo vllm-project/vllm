@@ -70,7 +70,7 @@ def _arch() -> str:
 # The (tensor parallel size, decode rows) cases of each GPU. The gfx942 kernels
 # build for TP4 only. 8 rows are two GEMV passes of 6 rows there, the second
 # one padded, and 42 rows are the most that they take.
-CASES = {"cdna4": [(2, 8), (4, 8)], "gfx942": [(4, 8), (4, 42)]}
+CASES = {"cdna4": [(2, 8), (4, 8), (8, 8), (8, 28)], "gfx942": [(4, 8), (4, 42)]}
 
 
 @torch.no_grad()
@@ -314,7 +314,7 @@ def _rel(a: torch.Tensor, b: torch.Tensor) -> float:
     return ((a - b).norm() / b.norm()).item()
 
 
-@pytest.mark.parametrize(("tp", "rows"), [(2, 8), (4, 8), (4, 42)])
+@pytest.mark.parametrize(("tp", "rows"), [(2, 8), (4, 8), (4, 42), (8, 8), (8, 28)])
 def test_mono_decode_matches_the_model(vllm_runner, monkeypatch, tmp_path, tp, rows):
     arch = _arch()
     if not arch:

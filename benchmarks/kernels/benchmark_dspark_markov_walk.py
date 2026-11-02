@@ -13,6 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.v1.worker.gpu.sample.greedy_argmax import greedy_argmax
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dspark.markov_walk import DSparkMarkovWalker
 
@@ -25,7 +26,7 @@ def eager_walk(
     for i in range(base.shape[1]):
         logits = base[:, i] + F.linear(F.embedding(prev, w1), w2)
         if draft_logits is None:
-            tok = logits.argmax(dim=-1)
+            tok = greedy_argmax(logits)
         else:
             tok = gumbel_sample(
                 logits,
