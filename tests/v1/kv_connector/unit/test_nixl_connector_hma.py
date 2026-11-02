@@ -1595,7 +1595,7 @@ def test_failed_load_rezeroes_unwritten_skipped_blocks():
 
     # Attention blocks covering tokens >= 48 are re-recorded for zeroing
     # and flow into the next step's zero list; Mamba blocks are not.
-    assert scheduler._get_new_block_ids_to_zero() == [13, 14, 15]
+    assert scheduler._get_new_block_ids_to_zero() == [[13, 14, 15], []]
 
 
 # ── Mamba N-1 prefill tests ──────────────────────────────────────────────
