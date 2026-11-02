@@ -23,6 +23,9 @@ pub enum ApiError {
     ModelNotFound { model: String },
     /// A resource other than the model, such as a LoRA adapter, does not exist.
     NotFound { message: String },
+    /// The requested response ID does not exist in this frontend. Every
+    /// response ID is unknown because the frontend has no response store.
+    ResponseNotFound { response_id: String },
     /// The request body could not be parsed as valid JSON.
     JsonParseError { message: String },
     /// The requested operation conflicts with current server state.
@@ -40,6 +43,7 @@ impl ApiError {
             Self::InvalidRequest { .. } => StatusCode::BAD_REQUEST,
             Self::ModelNotFound { .. } | Self::NotFound { .. } => StatusCode::NOT_FOUND,
             Self::Conflict { .. } => StatusCode::CONFLICT,
+            Self::ResponseNotFound { .. } => StatusCode::NOT_FOUND,
             Self::ServerError { .. } => StatusCode::INTERNAL_SERVER_ERROR,
             Self::JsonParseError { .. } => StatusCode::BAD_REQUEST,
             Self::ServiceUnavailable { .. } => StatusCode::SERVICE_UNAVAILABLE,
@@ -61,6 +65,11 @@ impl ApiError {
                 Some("model".to_string()),
             ),
             Self::NotFound { message } => ("NotFoundError", message.clone(), None),
+            Self::ResponseNotFound { response_id } => (
+                "NotFoundError",
+                format!("Response with id '{response_id}' not found."),
+                Some("response_id".to_string()),
+            ),
             // Python reports a body that fails to parse into the request
             // model through FastAPI's validation handler, which names the
             // HTTP status instead of an error class.
