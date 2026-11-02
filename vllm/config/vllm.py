@@ -768,6 +768,24 @@ class VllmConfig:
             }.intersection(draft_config.architectures or [])
         )
 
+    def _verify_dflash2_dtype(self) -> None:
+        spec = self.speculative_config
+        if spec is None or spec.method != "dflash":
+            return
+        draft_config = spec.draft_model_config
+        if (
+            draft_config is not None
+            and {"DFlash2DraftModel", "DFlash2BeamDraftModel"}.intersection(
+                draft_config.architectures or []
+            )
+            and self.model_config is not None
+            and self.model_config.dtype == torch.float16
+        ):
+            raise ValueError(
+                "DFlash2 speculative drafts do not support float16 because their "
+                "residual stream can overflow. Use --dtype bfloat16 instead."
+            )
+
     def _dflash_needs_multi_kv_group(self) -> bool:
         """Whether a DFlash draft mixes sliding-window and full attention."""
         spec = self.speculative_config
@@ -1564,6 +1582,7 @@ class VllmConfig:
         # limit first.
         self._limit_max_model_len_to_draft()
         self.try_verify_and_update_config()
+        self._verify_dflash2_dtype()
         self._reject_mismatched_float_kv_cache()
         self._resolve_and_verify_engram_config()
 
