@@ -103,6 +103,9 @@ class GDNAttentionMetadata:
     checkpoint: MambaPrefillCheckpointMetadata | None = None
     flashinfer_checkpoint_plan: GDNFlashInferCheckpointPlan | None = None
     has_initial_state: torch.Tensor | None = None
+    # Whether no ("none"), every ("all") or only some ("mixed") prefill rows
+    # continue from a cached state, known on the host.
+    prefill_initial_state_mode: Literal["none", "all", "mixed"] = "mixed"
 
     spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
     non_spec_query_start_loc: torch.Tensor | None = (
@@ -552,6 +555,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_query_start_loc = non_spec_query_start_loc
                 prefill_query_start_loc_cpu = non_spec_query_start_loc_cpu
                 prefill_state_indices = non_spec_state_indices_tensor
+            # FlashInfer's prefill kernels take a contiguous index tensor;
+            # with spec decode configured the block table rows hold
+            # 1 + num_spec slots, so column 0 is a strided view.
+            prefill_state_indices = prefill_state_indices.contiguous()
 
             if self.gdn_prefill_backend == "aiter_flydsl":
                 # AITER carries its own reusable varlen metadata and has no use
@@ -590,8 +597,12 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 prefill_has_initial_state = has_initial_state[num_decodes:]
             else:
                 prefill_has_initial_state = has_initial_state
+            prefill_initial_state_mode = self._prefill_initial_state_mode(
+                m, spec_sequence_masks_cpu, num_decodes, num_prefills
+            )
         else:
             has_initial_state = None
+            prefill_initial_state_mode = "mixed"
 
         checkpoint: MambaPrefillCheckpointMetadata | None = None
         if num_prefills > 0:
@@ -699,6 +710,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             checkpoint=checkpoint,
             flashinfer_checkpoint_plan=flashinfer_checkpoint_plan,
             has_initial_state=has_initial_state,
+            prefill_initial_state_mode=prefill_initial_state_mode,
             chunk_indices=chunk_indices,
             chunk_offsets=chunk_offsets,
             prefill_query_start_loc=prefill_query_start_loc,
@@ -720,6 +732,30 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             token_chunk_offset_ptr=token_chunk_offset_ptr,
         )
         return attn_metadata
+
+    @staticmethod
+    def _prefill_initial_state_mode(
+        m: CommonAttentionMetadata,
+        spec_sequence_masks_cpu: torch.Tensor | None,
+        num_decodes: int,
+        num_prefills: int,
+    ) -> Literal["none", "all", "mixed"]:
+        """Host mirror of ``prefill_has_initial_state``, reduced to a mode.
+
+        ``seq_lens_cpu_upper_bound`` is exact for prefill rows, so their
+        context lengths match the device-side ``has_initial_state``.
+        """
+        if m.seq_lens_cpu_upper_bound is None:
+            return "mixed"
+        has_initial_state = m.seq_lens_cpu_upper_bound > m.query_start_loc_cpu.diff()
+        if spec_sequence_masks_cpu is not None:
+            has_initial_state = has_initial_state[~spec_sequence_masks_cpu]
+        has_initial_state = has_initial_state[num_decodes:]
+        if has_initial_state.numel() != num_prefills:
+            return "mixed"
+        if not has_initial_state.any():
+            return "none"
+        return "all" if has_initial_state.all() else "mixed"
 
     def _stage_spec_decode(
         self,
@@ -770,7 +806,8 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
         if masks is None:
             non_spec_indices = blk_table[:, 0]
             if m.num_prefills > 0:
-                prefill_indices = non_spec_indices[m.num_decodes :]
+                # Same contiguity requirement as in build().
+                prefill_indices = non_spec_indices[m.num_decodes :].contiguous()
         elif m.num_prefills == 0:
             # Same as build(): padded sequences trail the spec decodes.
             spec_indices = blk_table[: m.num_spec_decodes, : self.num_spec + 1]

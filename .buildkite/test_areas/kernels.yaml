@@ -723,6 +723,9 @@ steps:
   - vllm/platforms/cuda.py
   - vllm/cute_utils/
   - vllm/model_executor/layers/mamba/ops/gdn_chunk_cutedsl/
+  - vllm/model_executor/layers/mamba/gdn/
+  - vllm/model_executor/layers/mamba/checkpoint.py
+  - vllm/v1/attention/backends/gdn_attn.py
   - vllm/model_executor/layers/fused_moe/router/bf16x3_router_gemm_sm100.py
   - cmake/external_projects/fmha_sm100.cmake
   - vllm/models/minimax_m3/common/sparse_attention.py
@@ -739,6 +742,8 @@ steps:
   - tests/kernels/quantization/nvfp4_utils.py
   - tests/kernels/test_fused_minimax_m3_qknorm_rope_kv_insert.py
   - tests/kernels/mamba/test_gdn_prefill_cutedsl.py
+  - tests/kernels/mamba/test_gdn_forward_core_flashinfer.py
+  - tests/v1/attention/utils.py
   - tests/kernels/test_bf16x3_router_gemm_cutedsl.py
   - tests/kernels/test_top_k_per_row.py
   - csrc/fused_mqa_topk/
@@ -778,6 +783,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
     - pytest -v -s tests/kernels/moe/test_trtllm_nvfp4_moe.py
     - pytest -v -s tests/kernels/mamba/test_gdn_prefill_cutedsl.py
+    - pytest -v -s tests/kernels/mamba/test_gdn_forward_core_flashinfer.py
   mirror:
     amd:
       automatic_shard: true
