@@ -139,6 +139,16 @@ SMOKE_CONFIGS = [
         id="dflash",
     ),
     pytest.param(
+        "Qwen/Qwen3-4B",
+        {
+            "method": "dflash",
+            "model": "z-lab/Qwen3-4B-DFlash-b16",
+            "num_speculative_tokens": 4,
+            "draft_lm_head_quantization": "fp8",
+        },
+        id="dflash-fp8-lm-head",
+    ),
+    pytest.param(
         "Qwen/Qwen3.5-0.8B",
         {
             "method": "mtp",
