@@ -23,7 +23,6 @@ albumentations==2.0.8
     # via -r requirements/test/xpu.in
 alembic==1.16.4
     # via
-    #   -c /tmp/cuda-pins.txt
     #   optuna
 annotated-doc==0.0.5
     # via
@@ -129,7 +128,6 @@ colorama==0.4.6
     # via sacrebleu
 colorlog==6.10.1
     # via
-    #   -c /tmp/cuda-pins.txt
     #   optuna
 compressed-tensors==0.17.0
     # via
@@ -141,7 +139,6 @@ coverage==7.15.4
     # via pytest-cov
 cramjam==2.9.0
     # via
-    #   -c /tmp/cuda-pins.txt
     #   fastparquet
 cryptography==50.0.0
     # via
@@ -227,7 +224,6 @@ fastavro==1.12.2
     # via cohere
 fastparquet==2024.11.0
     # via
-    #   -c /tmp/cuda-pins.txt
     #   genai-perf
 filelock==3.32.3
     # via
@@ -259,7 +255,6 @@ ftfy==6.3.1
     #   open-clip-torch
 genai-perf==0.0.16
     # via
-    #   -c /tmp/cuda-pins.txt
     #   -r requirements/test/xpu.in
 google-api-core==2.34.0
     # via
@@ -456,7 +451,6 @@ kaldi-native-fbank==1.22.3
     # via -r requirements/test/xpu.in
 kaleido==0.2.1
     # via
-    #   -c /tmp/cuda-pins.txt
     #   genai-perf
 kiwisolver==1.5.1
     # via matplotlib
@@ -701,7 +695,6 @@ opentelemetry-semantic-conventions-ai==0.5.1
     #   -r requirements/test/xpu.in
 optuna==3.6.1
     # via
-    #   -c /tmp/cuda-pins.txt
     #   genai-perf
 orjson==3.12.0
     # via
@@ -751,11 +744,9 @@ pathvalidate==3.3.1
     # via pytablewriter
 patsy==1.0.1
     # via
-    #   -c /tmp/cuda-pins.txt
     #   statsmodels
 perf-analyzer==0.1.0
     # via
-    #   -c /tmp/cuda-pins.txt
     #   genai-perf
 pillow==13.0.0
     # via
@@ -771,7 +762,6 @@ platformdirs==4.11.3
     #   pooch
 plotly==5.24.1
     # via
-    #   -c /tmp/cuda-pins.txt
     #   genai-perf
 pluggy==1.6.0
     # via
@@ -915,7 +905,6 @@ pytest-forked==1.7.5
     # via -r requirements/test/xpu.in
 pytest-mock==3.14.0
     # via
-    #   -c /tmp/cuda-pins.txt
     #   genai-perf
 pytest-rerunfailures==16.6
     # via -r requirements/test/xpu.in
@@ -1010,7 +999,6 @@ requests==2.34.2
     #   tiktoken
 responses==0.25.3
     # via
-    #   -c /tmp/cuda-pins.txt
     #   genai-perf
 rich==15.0.0
     # via
@@ -1116,7 +1104,6 @@ soxr==1.1.0
     #   mistral-common
 sqlalchemy==2.0.41
     # via
-    #   -c /tmp/cuda-pins.txt
     #   alembic
     #   optuna
 sqlitedict==2.1.0
@@ -1137,7 +1124,6 @@ starlette-testclient==0.4.1
     # via schemathesis
 statsmodels==0.14.4
     # via
-    #   -c /tmp/cuda-pins.txt
     #   genai-perf
 stringzilla==5.1.2
     # via albucore
