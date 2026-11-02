@@ -12,11 +12,13 @@ max_model_len.
 import pytest
 
 from vllm.config import ModelConfig, ParallelConfig, SpeculativeConfig, VllmConfig
+from vllm.engine.arg_utils import EngineArgs
 
 # All repos are public; only config/tokenizer-config files are fetched.
 AR_MODEL = "JackFram/llama-68m"  # max_position_embeddings=2048
 EAGLE3_DRAFT = "yuhuili/EAGLE3-LLaMA3.1-Instruct-8B"  # max_position_embeddings=2048
 LLAMA3_TARGET = "unsloth/Meta-Llama-3.1-8B-Instruct"  # max_position_embeddings=131072
+HYBRID_MODEL = "ai21labs/Jamba-tiny-random"  # hybrid Mamba/attention
 
 
 @pytest.mark.cpu_test
@@ -71,3 +73,26 @@ def test_eagle_draft_limits_max_model_len_unless_resized(
     draft_hf_config = speculative_config.draft_model_config.hf_config
     assert draft_hf_config.max_position_embeddings == (8192 if resizable else 2048)
     assert vllm_config.model_config.max_model_len == (8192 if resizable else 2048)
+
+
+@pytest.mark.cpu_test
+def test_draft_limit_applies_before_hybrid_mamba_block_size(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """With prefix caching off, hybrid models default mamba_block_size to
+    max_model_len, so it must follow the draft's limit instead of tripping
+    the --mamba-block-size validation (#63844)."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    vllm_config = EngineArgs(
+        model=HYBRID_MODEL,
+        max_model_len=4096,
+        enable_prefix_caching=False,
+        speculative_config={
+            "method": "draft_model",
+            "model": HYBRID_MODEL,
+            "num_speculative_tokens": 3,
+            "max_model_len": 1024,
+        },
+    ).create_engine_config()
+    assert vllm_config.model_config.max_model_len == 1024
+    assert vllm_config.cache_config.mamba_block_size == 1024

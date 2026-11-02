@@ -90,6 +90,11 @@ TierFilter.ALL = TierFilter(matchers=(TierMatcher(),))
 
 @dataclass
 class ReqContext:
+    """Per-request offloading state with optional token counts.
+
+    Counts are live until the scheduler finishes the request, then frozen.
+    """
+
     req_id: str
     kv_transfer_params: dict[str, Any] | None = None
     kv_hints: KvHintsEnvelope | None = None
@@ -104,6 +109,26 @@ class ReqContext:
     _offload_key_positions: dict[OffloadKey, int] = field(
         default_factory=dict, repr=False, init=False
     )
+
+    @property
+    def num_computed_tokens(self) -> int | None:
+        """Scheduler's computed token count, including in-flight work."""
+        return None
+
+    @property
+    def num_in_flight_tokens(self) -> int | None:
+        """Scheduled tokens whose output has not yet been processed."""
+        return None
+
+    @property
+    def num_prompt_tokens(self) -> int | None:
+        """Number of prompt tokens."""
+        return None
+
+    @property
+    def num_tokens(self) -> int | None:
+        """Number of prompt and output tokens, excluding speculative tokens."""
+        return None
 
     def set_state(self, val: Any) -> None:
         self._state[type(val)] = val
@@ -175,6 +200,8 @@ class OffloadingEvent:
     removal_expected: bool = False
     # Failed allocations release metadata without announcing a public eviction.
     metadata_only: bool = False
+    # Originating request context for a stored event.
+    req_context: ReqContext | None = field(default=None, repr=False, compare=False)
 
 
 """
@@ -189,11 +216,6 @@ The class provides the following primitives:
         The given blocks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
         information required for performing the load.
-    touch() - marks the give blocks as recently used. Can be used
-        to track block's LRU. This function is separated from the
-        prepare_load function to allow setting block recency even
-        for blocks which do not need reading from the cache, such as
-        blocks that are cached by the GPU prefix cache.
     complete_load() - mark blocks which were previously prepared to be
         loaded as done loading. This is to re-allow their eviction.
     prepare_store() - prepare the given blocks to be written.
@@ -350,17 +372,6 @@ class OffloadingManager(ABC):
 
         """
         pass
-
-    def touch(self, keys: Collection[OffloadKey], req_context: ReqContext):
-        """Mark the given blocks as recently used.
-        This could in practice mean moving them to the end of an LRU list.
-
-        Args:
-            keys: the keys identifying the blocks.
-            req_context: per-request context (e.g. kv_transfer_params).
-
-        """
-        return
 
     def complete_load(self, keys: Collection[OffloadKey], req_context: ReqContext):
         """Marks previous blocks that were prepared to load as done loading.

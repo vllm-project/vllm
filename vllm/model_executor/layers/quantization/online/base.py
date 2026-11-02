@@ -64,6 +64,9 @@ from vllm.model_executor.layers.quantization.utils.config_utils import (
     get_layer_name_after_index,
 )
 from vllm.model_executor.layers.quantization.utils.mxfp4_utils import mxfp4_quantize
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    dequant_mxfp8_to_bf16,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
@@ -74,6 +77,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kLutBStatic,
     kMxfp4Static,
     kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Static,
 )
 
@@ -117,6 +121,14 @@ ONLINE_SHARED_EXPERT_QUANTIZERS: dict[
     QuantKey, Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
 ] = {
     kMxfp4Static: mxfp4_quantize,
+}
+
+# Dequantizers `(weight, weight_scale) -> high precision weight` of quantized fused
+# shared-expert checkpoint weights, keyed by the checkpoint weight QuantKey.
+ONLINE_SHARED_EXPERT_DEQUANTIZERS: dict[
+    QuantKey, Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+] = {
+    kMxfp8Static: dequant_mxfp8_to_bf16,
 }
 
 
