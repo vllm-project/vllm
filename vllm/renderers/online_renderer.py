@@ -317,7 +317,7 @@ class OnlineRenderer:
             )
 
         observe_request_render_duration(
-            request.model or self.model_config.model,
+            cast(str, self.model_config.served_model_name),
             "chat",
             time.perf_counter() - render_start,
         )
@@ -673,7 +673,7 @@ class OnlineRenderer:
         )
 
         observe_request_render_duration(
-            request.model or self.model_config.model,
+            cast(str, self.model_config.served_model_name),
             "completion",
             time.perf_counter() - render_start,
         )

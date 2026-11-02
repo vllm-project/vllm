@@ -7,6 +7,9 @@ from functools import lru_cache
 from prometheus_client import Histogram
 
 
+# Registered lazily: PrometheusStatLogger unregisters all `vllm:` collectors on
+# startup, after this module has been imported, which would drop a module-level
+# metric from /metrics.
 @lru_cache(maxsize=1)
 def _request_render_duration() -> Histogram:
     return Histogram(

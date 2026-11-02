@@ -10,6 +10,8 @@ from vllm.renderers import metrics
 from vllm.renderers.metrics import observe_request_render_duration
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 
+pytestmark = pytest.mark.cpu_test
+
 METRIC_NAME = "vllm:request_render_duration_seconds"
 
 
