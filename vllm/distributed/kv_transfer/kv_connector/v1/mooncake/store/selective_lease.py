@@ -11,7 +11,7 @@ outside a sliding window or states at earlier block boundaries. With
 
 import time
 from collections.abc import Callable, Sequence
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (  # noqa: E501
     ChunkedTokenDatabase,
@@ -146,7 +146,7 @@ class SelectiveLookupLease:
             key_prefixes = self.lookup_key_prefixes[g_idx]
             for start, _, block_hash in db.process_tokens(
                 hit_length,
-                block_hashes,
+                cast(list[BlockHash], block_hashes),
                 tail_key_boundary=tail_tokens.get(g_idx),
             ):
                 block_index = start // store_block_size
