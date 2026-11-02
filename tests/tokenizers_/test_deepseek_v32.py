@@ -4,6 +4,7 @@
 import pytest
 
 from tests.tokenizers_.test_deepseek_v4 import FakeHfTokenizer
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.tokenizers.deepseek_v32 import get_deepseek_v32_tokenizer
 
 
@@ -15,6 +16,7 @@ def render(messages, **kwargs):
 def test_add_generation_prompt_false_omits_final_assistant_prefix():
     prompt = render(
         [{"role": "user", "content": "What is 2+2?"}],
+        thinking=False,
         add_generation_prompt=False,
     )
 
@@ -27,6 +29,7 @@ def test_add_generation_prompt_opens_a_new_turn_after_final_assistant():
             {"role": "user", "content": "Say hello."},
             {"role": "assistant", "content": "Hello."},
         ],
+        thinking=False,
         add_generation_prompt=True,
     )
 
@@ -41,10 +44,43 @@ def test_continue_final_message_keeps_assistant_message_open():
             {"role": "user", "content": "Complete this sentence."},
             {"role": "assistant", "content": "The answer is "},
         ],
+        thinking=False,
+        add_generation_prompt=False,
         continue_final_message=True,
     )
 
     assert prompt.endswith("<｜Assistant｜></think>The answer is ")
+    assert "<｜end▁of▁sentence｜>" not in prompt
+
+
+def test_continue_final_reasoning_keeps_thinking_open():
+    prompt = render(
+        [
+            {"role": "user", "content": "Explain your answer."},
+            {"role": "assistant", "content": None, "reasoning": "Let me consider "},
+        ],
+        thinking=True,
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+
+    assert prompt.endswith("<｜Assistant｜><think>Let me consider ")
+    assert "</think>" not in prompt
+    assert "<｜end▁of▁sentence｜>" not in prompt
+
+
+def test_continue_final_content_works_in_thinking_mode():
+    prompt = render(
+        [
+            {"role": "user", "content": "Complete this sentence."},
+            {"role": "assistant", "content": "The answer is "},
+        ],
+        thinking=True,
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+
+    assert prompt.endswith("<｜Assistant｜><think></think>The answer is ")
     assert "<｜end▁of▁sentence｜>" not in prompt
 
 
@@ -54,3 +90,21 @@ def test_continue_final_message_requires_final_assistant_message():
             [{"role": "user", "content": "What is 2+2?"}],
             continue_final_message=True,
         )
+
+
+def test_continue_final_message_through_chat_request():
+    request = ChatCompletionRequest(
+        model="deepseek-ai/DeepSeek-V3.2",
+        messages=[
+            {"role": "user", "content": "Complete this sentence."},
+            {"role": "assistant", "content": "The answer is "},
+        ],
+        add_generation_prompt=False,
+        continue_final_message=True,
+    )
+    kwargs = request.build_chat_params(None, "auto").get_apply_chat_template_kwargs()
+
+    prompt = render(request.messages, **kwargs)
+
+    assert prompt.endswith("<｜Assistant｜></think>The answer is ")
+    assert "<｜end▁of▁sentence｜>" not in prompt
