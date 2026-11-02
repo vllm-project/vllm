@@ -1697,10 +1697,9 @@ def apply_top_k_top_p_triton(
         and logits.device.type == "cuda"
         and current_platform.is_cuda()
     ):
-        # Large p-only batches (e.g. speculative-decoding verification rows):
-        # the histogram pipeline finds the exact boundary in four streaming
-        # passes, where the monolithic kernel's pivot search sweeps each row
-        # many times with one program per row.
+        # Large p-only batches: the histogram pipeline finds the exact
+        # boundary in four streaming passes, where the monolithic kernel's
+        # pivot search sweeps each row many times with one program per row.
         return apply_top_p_histogram(logits, p_ptr, mask_value, num_sm)
 
     # At small batch sizes the monolithic kernel's standalone top-p path is

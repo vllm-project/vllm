@@ -3,10 +3,14 @@
 """Histogram-bracket top-p masking for large batches.
 
 The monolithic Triton top-k/top-p kernel runs one program per row and searches
-the top-p pivot with repeated full-vocab sweeps, so at large batches (the
-verification rows of speculative decoding, e.g. 256 rows of a 200k vocab) it
-costs about a millisecond. This pipeline finds the exact top-p boundary in four
-streaming passes over the row, each split across several programs per row:
+the top-p pivot with repeated full-vocab sweeps, so at large batches (e.g. 256
+rows of a 200k vocab) it costs about a millisecond. Such batches reach
+``apply_top_k_top_p`` from the sampler when the fused FlashInfer sampler is not
+used (a greedy or seeded row in the batch, processed logprobs, or FlashInfer
+unavailable), and from the rejection samplers, which mask the processed fp32
+logits of speculative-decoding verification before verifying. This pipeline
+finds the exact top-p boundary in four streaming passes over the row, each
+split across several programs per row:
 
 1. min/max per slice.
 2. sum of exp(x - max) and a histogram of (max - x) over ``NUM_BINS`` bins.

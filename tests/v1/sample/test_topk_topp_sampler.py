@@ -887,9 +887,12 @@ class TestTritonTopkTopp:
         )
         assert len(kept_idx) == pytorch_kept
 
-    # Both sizes take the split top-p pipeline (64 is its max batch). 1e9 / 0.6
-    # models the forced logit after temperature=0.6.
-    @pytest.mark.parametrize("batch_size", [4, 64], ids=["split", "split-boundary"])
+    # 4 and 31 rows take the split top-p pipeline; 64 rows take the histogram
+    # pipeline on CUDA (the split pipeline elsewhere). 1e9 / 0.6 models the
+    # forced logit after temperature=0.6.
+    @pytest.mark.parametrize(
+        "batch_size", [4, 31, 64], ids=["split", "split-max", "histogram"]
+    )
     @pytest.mark.parametrize(
         "forced_logit", [1e9, 1e9 / 0.6], ids=["1e9", "1e9_over_temp0.6"]
     )
@@ -916,10 +919,15 @@ class TestTritonTopkTopp:
         assert not probs.isnan().any()
         assert (probs.argmax(dim=-1) == forced_token).all()
         if current_platform.is_cuda_alike():
-            # Split path only; the monolithic kernel leaves this row unmasked.
+            # Split and histogram paths only; the monolithic kernel leaves
+            # this row unmasked.
             assert ((result != float("-inf")).sum(-1) == 1).all()
 
-    def test_topp_ties_across_blocks(self):
+    # 31 rows take the split top-p pipeline, whose slices span more than one
+    # 8192-entry block at this vocab size; 64 rows take the histogram
+    # pipeline on CUDA (the split pipeline elsewhere).
+    @pytest.mark.parametrize("batch_size", [31, 64], ids=["split", "histogram"])
+    def test_topp_ties_across_blocks(self, batch_size: int):
         """The split top-p tie budget must carry across a slice's blocks.
 
         Regression: the split top-p mask kernel restarted its count of
@@ -928,7 +936,7 @@ class TestTritonTopkTopp:
         """
         from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
 
-        batch_size, vocab_size, num_ties = 64, 151936, 4096
+        vocab_size, num_ties = 151936, 4096
         # 4096 tied tokens spread over many blocks, between 64 tokens above
         # and a low tail; the p=0.75 boundary lands mid-copy in the tie group.
         tie_idx = torch.arange(num_ties) * 37

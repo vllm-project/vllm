@@ -67,13 +67,15 @@ def _logits(batch: int, vocab: int, regime: str, seed: int) -> torch.Tensor:
     g.manual_seed(seed)
     if regime == "flat":
         return torch.randn(batch, vocab, device=DEVICE, generator=g)
-    if regime == "bf16":
-        # LM-like: a few hot tokens over a broad tail, bf16 values upcast to
-        # fp32, so the boundary region holds many exactly tied tokens.
+    if regime in ("bf16", "fp16"):
+        # LM-like: a few hot tokens over a broad tail, bf16 or fp16 values
+        # upcast to fp32 (the sampler's copy of a half-precision head's
+        # logits), so the boundary region holds exactly tied tokens.
         x = torch.randn(batch, vocab, device=DEVICE, generator=g) * 2.5 - 3.0
         hot = torch.randint(0, vocab, (batch, 16), device=DEVICE, generator=g)
         x.scatter_(1, hot, torch.rand(batch, 16, device=DEVICE, generator=g) * 6 + 8)
-        return x.bfloat16().float().contiguous()
+        half = torch.bfloat16 if regime == "bf16" else torch.float16
+        return x.to(half).float().contiguous()
     if regime == "wide":
         # max - min beyond the coarse range cap: a far tail shares the last bin.
         x = torch.randn(batch, vocab, device=DEVICE, generator=g) * 3.0
@@ -126,7 +128,7 @@ def _check(
 @pytest.mark.parametrize("vocab", [1024, 32000, 200064])
 @pytest.mark.parametrize(
     "regime",
-    ["peaked", "mixed", "flat", "ties", "masked", "bf16", "wide", "shifted"],
+    ["peaked", "mixed", "flat", "ties", "masked", "bf16", "fp16", "wide", "shifted"],
 )
 def test_top_p_histogram_matches_reference(batch: int, vocab: int, regime: str):
     logits = _logits(batch, vocab, regime, seed=batch * 7 + vocab)
