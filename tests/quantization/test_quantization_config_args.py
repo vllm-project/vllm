@@ -82,10 +82,10 @@ def test_args_moe_string_resolves_via_online_shorthand(shorthand, weight):
 
 
 def test_args_string_shorthand_missing_slot_raises():
-    # int8_per_channel_weight_only sets only `moe`; using it on `linear`
-    # has no defined spec and should raise rather than silently no-op.
+    # nvfp4_per_token sets only `moe`; using it on `linear` has no defined
+    # spec and should raise rather than silently no-op.
     with pytest.raises(ValueError, match="does not define a linear spec"):
-        quant_config_args(linear="int8_per_channel_weight_only")
+        quant_config_args(linear="nvfp4_per_token")
 
 
 @pytest.mark.parametrize(
@@ -113,6 +113,15 @@ def test_resolve_shorthand_only_populates_both_slots():
     assert args.moe == QuantSpec(weight=kFp8Static128BlockSym)
 
 
+def test_resolve_int8_shorthand_populates_both_slots():
+    # The `_weight_only` suffix is historical; the scheme quantizes both
+    # LinearBase and MoE layers, with INT8 activations.
+    args = resolve_quantization_config("int8_per_channel_weight_only", None)
+    assert args is not None
+    assert args.linear == QuantSpec(weight=kInt8StaticChannelSym)
+    assert args.moe == QuantSpec(weight=kInt8StaticChannelSym)
+
+
 @pytest.mark.parametrize("quantization", ["mxfp4", "mxfp8"])
 def test_resolve_colliding_shorthand_is_deferred(quantization: str):
     """Checkpoint metadata determines whether an MXFP shorthand is online."""
@@ -122,7 +131,6 @@ def test_resolve_colliding_shorthand_is_deferred(quantization: str):
 @pytest.mark.parametrize(
     "shorthand,weight",
     [
-        ("int8_per_channel_weight_only", kInt8StaticChannelSym),
         ("nvfp4_per_token", kNvfp4Static),
     ],
 )

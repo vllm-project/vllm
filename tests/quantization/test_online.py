@@ -71,6 +71,7 @@ from vllm.model_executor.layers.quantization.modelopt import (
 )
 from vllm.model_executor.layers.quantization.online.base import (
     OnlineQuantizationConfig,
+    OnlineQuantizationSource,
 )
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
@@ -84,7 +85,12 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     _fp8_scale,
     _is_tp_sharded,
 )
-from vllm.model_executor.layers.quantization.online.int8 import Int8OnlineMoEMethod
+from vllm.model_executor.layers.quantization.online.int8 import (
+    Int8OnlineLinearMethod,
+    Int8OnlineMoEMethod,
+    _int8_channel_scale,
+    _int8_quant_per_channel,
+)
 from vllm.model_executor.layers.quantization.online.mxfp4 import (
     Mxfp4OnlineLinearMethod,
     Mxfp4OnlineMoEMethod,
@@ -2666,3 +2672,44 @@ def test_online_quant_load_format_dummy(
     ) as llm:
         outputs = llm.generate_greedy(["The future of AI is"], max_tokens=4)
         print(outputs[0][1])
+
+
+def test_online_int8_per_channel_dispatches_linear_and_moe() -> None:
+    """The int8 online scheme covers LinearBase, not only routed experts."""
+    args = resolve_quantization_config("int8_per_channel_weight_only", None)
+    assert args is not None
+    config = OnlineQuantizationConfig(args)
+
+    linear = config.resolve_quant_method_cls(LinearBase, "model.layers.0.mlp.down_proj")
+    assert linear is not None
+    assert linear[0] is OnlineQuantizationSource.linear
+    assert linear[-1] is Int8OnlineLinearMethod
+
+    moe = config.resolve_quant_method_cls(RoutedExperts, "model.layers.0.mlp.experts")
+    assert moe is not None
+    assert moe[0] is OnlineQuantizationSource.moe
+    assert moe[-1] is Int8OnlineMoEMethod
+
+
+def test_online_int8_linear_weight_quantization() -> None:
+    """Per-channel INT8 weights match the scaled-mm kernel's quant formula."""
+    torch.manual_seed(0)
+    weight = torch.randn(8, 32, device=DEVICE, dtype=torch.bfloat16)
+    weight[0].zero_()
+    weight[1, 0] = 1000.0
+
+    amax = weight_amax(weight, dim=-1, keepdim=True)
+    scale = _int8_channel_scale(amax)
+    qweight = _int8_quant_per_channel(weight, amax)
+
+    assert qweight.dtype is torch.int8
+    assert qweight.shape == weight.shape
+    # Saturated values keep the int8 endpoint, not a wrap-around.
+    assert qweight[1, 0].item() == 127
+    # An all-zero row keeps a neutral scale and reconstructs exactly to zero.
+    assert torch.equal(scale[0], torch.ones_like(scale[0]))
+    assert torch.count_nonzero(qweight[0]).item() == 0
+    # Non-saturating rows are within half a quantization step of the weight.
+    dequant = qweight[1:].to(torch.float32) * scale[1:]
+    error = (dequant - weight[1:].to(torch.float32)).abs()
+    assert (error <= scale[1:] / 2 * 1.01).all()
