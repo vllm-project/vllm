@@ -36,7 +36,7 @@ def test_ppl(
 
 @pytest.mark.parametrize("model_info", MODELS)
 @pytest.mark.parametrize("mm_device_do_normalize", [False, True])
-def test_ppl_gc(
+def test_ppl_cg(
     hf_runner,
     vllm_runner,
     model_info: GenerateModelInfo,
