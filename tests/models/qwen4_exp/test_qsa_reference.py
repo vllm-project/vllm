@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import dataclasses
 import math
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from vllm.models.qwen4_exp.nvidia.ops import qsa as qsa_ops
 from vllm.models.qwen4_exp.nvidia.ops import qsa_indexer as qsa_indexer_ops
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON
+from vllm.v1.kv_cache_interface import CircularBufferSpec, MLAAttentionSpec
 from vllm.v1.worker.utils import clear_layer_kv_caches
 
 requires_qsa_kernels = pytest.mark.skipif(
@@ -506,6 +508,137 @@ def test_qsa_compressed_metadata_keeps_dummy_slots_inert() -> None:
     assert metadata.slot_mapping.tolist() == [-1] * 8
     assert metadata.visible_blocks.tolist() == [1, 1, 1, 2, 2, 2, 2, 3]
     assert metadata.k_work_metadata.tolist() == [[0, 0], [2, 0], [2, 1], [-1, -1]]
+
+
+_DRAFT_NUM_REQUESTS = 4
+_DRAFT_BLOCK_SIZE = 16
+_DRAFT_RING_CAPACITY = 8
+_DRAFT_COMPRESS_RATIO = 4
+_DRAFT_MAX_SEQ_LEN = 64
+# One captured batch, then a replayed batch with one padding request whose
+# draft steps advance every live request's sequence length by one.
+_DRAFT_CAPTURED_SEQ_LENS = [5, 8, 12, 63]
+_DRAFT_REPLAYED_SEQ_LENS = [[9, 3, 30, 0], [10, 4, 31, 0], [11, 5, 32, 0]]
+
+
+def _draft_indexer_builder(cache_kind: str, device: torch.device):
+    if cache_kind == "circular":
+        spec = CircularBufferSpec(
+            block_size=_DRAFT_RING_CAPACITY,
+            num_kv_heads=1,
+            head_size=64,
+            head_size_v=0,
+            dtype=torch.bfloat16,
+        )
+    else:
+        spec = MLAAttentionSpec(
+            block_size=_DRAFT_BLOCK_SIZE,
+            num_kv_heads=1,
+            head_size=64,
+            dtype=torch.bfloat16,
+            tokens_per_state=_DRAFT_COMPRESS_RATIO if cache_kind == "compressed" else 1,
+        )
+    config = SimpleNamespace(
+        scheduler_config=SimpleNamespace(
+            max_num_batched_tokens=64, max_num_seqs=_DRAFT_NUM_REQUESTS
+        ),
+        speculative_config=None,
+        parallel_config=SimpleNamespace(decode_context_parallel_size=1),
+    )
+    return QSAIndexerMetadataBuilder(spec, ["indexer"], config, device)
+
+
+def _draft_decode_batch(
+    seq_lens: list[int], block_table: torch.Tensor
+) -> SimpleNamespace:
+    """One query token per request; trailing zero lengths are padding."""
+    num_live = sum(seq_len > 0 for seq_len in seq_lens)
+    assert all(seq_len > 0 for seq_len in seq_lens[:num_live])
+    query_start_loc = torch.tensor(
+        [min(request, num_live) for request in range(len(seq_lens) + 1)],
+        dtype=torch.int32,
+    )
+    # The runner's group slots for the token at position seq_len - 1.
+    slots = [
+        int(block_table[request, (seq_len - 1) // _DRAFT_BLOCK_SIZE])
+        * _DRAFT_BLOCK_SIZE
+        + (seq_len - 1) % _DRAFT_BLOCK_SIZE
+        if seq_len > 0
+        else -1
+        for request, seq_len in enumerate(seq_lens)
+    ]
+    device = block_table.device
+    return SimpleNamespace(
+        num_actual_tokens=len(seq_lens),
+        num_reqs=len(seq_lens),
+        max_query_len=1,
+        max_seq_len=_DRAFT_MAX_SEQ_LEN,
+        query_start_loc=query_start_loc.to(device),
+        query_start_loc_cpu=query_start_loc,
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=device),
+        slot_mapping=torch.tensor(slots, dtype=torch.int64, device=device),
+        block_table_tensor=block_table.clone(),
+    )
+
+
+def _check_draft_steps_match_fresh_builds(cache_kind: str, run_update) -> None:
+    """Advance the runner buffers like a speculator and compare after updates."""
+    device = torch.device("cuda")
+    captured_table = torch.arange(1, 17, dtype=torch.int32, device=device).view(4, 4)
+    replayed_table = torch.arange(32, 16, -1, dtype=torch.int32, device=device)
+    replayed_table = replayed_table.view(4, 4)
+    replayed_table[-1] = 0  # The padding request sits on the null block.
+    builder = _draft_indexer_builder(cache_kind, device)
+    captured = _draft_decode_batch(_DRAFT_CAPTURED_SEQ_LENS, captured_table)
+    metadata = builder.build(0, captured)
+    run_update = run_update(builder, metadata)
+
+    for seq_lens in _DRAFT_REPLAYED_SEQ_LENS:
+        step = _draft_decode_batch(seq_lens, replayed_table)
+        # The replayed step arrives through the captured persistent buffers.
+        for name in ("query_start_loc", "seq_lens", "slot_mapping"):
+            getattr(captured, name).copy_(getattr(step, name))
+        captured.block_table_tensor.copy_(step.block_table_tensor)
+        run_update()
+
+        expected = _draft_indexer_builder(cache_kind, device).build(0, step)
+        for field in dataclasses.fields(expected):
+            actual_value = getattr(metadata, field.name)
+            expected_value = getattr(expected, field.name)
+            if isinstance(expected_value, torch.Tensor):
+                assert torch.equal(actual_value, expected_value), field.name
+            else:
+                assert actual_value == expected_value, field.name
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("cache_kind", ["circular", "compressed", "uncompressed"])
+def test_qsa_indexer_draft_decode_update_matches_fresh_build(cache_kind: str) -> None:
+    assert QSAIndexerMetadataBuilder.supports_draft_decode_metadata_update
+
+    def eager_update(builder, metadata):
+        return lambda: builder.update_draft_decode_metadata(metadata)
+
+    _check_draft_steps_match_fresh_builds(cache_kind, eager_update)
+
+
+@requires_qsa_kernels
+@pytest.mark.parametrize("cache_kind", ["circular", "compressed", "uncompressed"])
+def test_qsa_indexer_draft_decode_update_replays_in_cuda_graph(
+    cache_kind: str,
+) -> None:
+    """The update must be capturable: one capture serves every replayed step."""
+
+    def capture_update(builder, metadata):
+        # Compile the Triton kernel before capture.
+        builder.update_draft_decode_metadata(metadata)
+        torch.accelerator.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            builder.update_draft_decode_metadata(metadata)
+        return graph.replay
+
+    _check_draft_steps_match_fresh_builds(cache_kind, capture_update)
 
 
 @requires_qsa_kernels
