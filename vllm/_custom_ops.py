@@ -1742,6 +1742,7 @@ def mxfp4_experts_quant(
     topk: int,
     sorted_expert_ids: torch.Tensor | None = None,
     input_permutation: torch.Tensor | None = None,
+    block_size_override: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Quantize input tensor to MXFP4 for packed MoE inputs.
     Uses 32-element blocks with E8M0 (power-of-two) scale factors.
@@ -1758,6 +1759,9 @@ def mxfp4_experts_quant(
             lookup in the CUDA kernel when provided.
         input_permutation: Optional map from expert-ordered output rows to
             source token rows. When provided, it must contain m * topk entries.
+        block_size_override: CUDA block size for the gather quant kernel.
+            Must be 0 (auto), 192, or 384. Ignored when input_permutation is
+            None.
 
     Returns:
         output: [m_topk, k//2] packed E2M1 values (uint8)
@@ -1804,10 +1808,62 @@ def mxfp4_experts_quant(
         n_experts,
         sorted_expert_ids,
         input_permutation,
+        block_size_override,
     )
     # E8M0 SFs are stored as uint8
     output_scales = output_scales.view(torch.uint8)
     return output, output_scales
+
+
+def mxfp4_experts_quantize_once_fanout(
+    input_tensor: torch.Tensor,
+    topk_ids: torch.Tensor,
+    output_permutation: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+    vectors_per_token_tile: int = 8,
+    optimization_variant: int = 0,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Quantize each token once and write packed rows in expert order."""
+    assert not current_platform.is_rocm()
+    assert input_tensor.ndim == 2
+    assert input_tensor.shape[1] % 32 == 0
+    assert topk_ids.ndim == 2
+    assert topk_ids.shape[0] == input_tensor.shape[0]
+    assert output_permutation.ndim == 1
+    assert output_permutation.numel() == topk_ids.numel()
+
+    MAX_TOKENS_PER_EXPERT = envs.VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE
+    m, k = input_tensor.shape
+    topk = topk_ids.shape[1]
+    assert m <= MAX_TOKENS_PER_EXPERT
+    num_routes = m * topk
+    scales_k = k // 32
+    padded_k = (scales_k + 3) // 4
+
+    output = torch.empty(
+        num_routes, k // 2, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.empty(
+        MAX_TOKENS_PER_EXPERT * topk,
+        padded_k,
+        dtype=torch.int32,
+        device=input_tensor.device,
+    )
+    torch.ops._C.mxfp4_experts_quantize_once_fanout(
+        output,
+        output_scales,
+        input_tensor,
+        topk_ids,
+        output_permutation,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+        vectors_per_token_tile,
+        optimization_variant,
+    )
+    return output, output_scales.view(torch.uint8)
 
 
 def silu_and_mul_mxfp4_experts_quant(

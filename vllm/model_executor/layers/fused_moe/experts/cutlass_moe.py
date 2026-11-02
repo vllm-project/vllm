@@ -837,6 +837,14 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         )
 
 
+# B200 route/cache sweeps found fanout consistently faster from M=58 for the
+# GLM-5.3 MXFP4 shape.
+MXFP4_QUANTIZE_ONCE_MIN_TOKENS = 58
+MXFP4_GATHER_BLOCK_SIZE_OVERRIDE = 192
+MXFP4_GATHER_BLOCK_SIZE_MIN_TOKENS = 19
+MXFP4_GATHER_BLOCK_SIZE_MAX_TOKENS = 27
+
+
 def run_cutlass_moe_mxfp4(
     output: torch.Tensor,
     a: torch.Tensor,
@@ -858,6 +866,7 @@ def run_cutlass_moe_mxfp4(
     expert_map: torch.Tensor | None = None,
     *,
     activation_config: ApplyMoEActivationConfig | None = None,
+    input_quantize_once: bool | None = None,
 ) -> None:
     """MXFP4 x MXFP4 MoE implementation using CUTLASS grouped GEMM."""
     topk_ids = _prepare_topk_ids_for_cutlass_fp4_moe(topk_ids, expert_map)
@@ -924,15 +933,36 @@ def run_cutlass_moe_mxfp4(
         sorted_expert_ids=sorted_expert_ids,
     )
 
-    rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quant(
-        a,
-        expert_offsets,
-        blockscale_offsets,
-        e,
-        num_topk,
-        sorted_expert_ids,
-        input_permutation=a_map,
-    )
+    if input_quantize_once is None:
+        input_quantize_once = m >= MXFP4_QUANTIZE_ONCE_MIN_TOKENS
+
+    if input_quantize_once:
+        rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quantize_once_fanout(
+            a,
+            topk_ids,
+            c_map,
+            expert_offsets,
+            blockscale_offsets,
+            e,
+        )
+    else:
+        gather_block_size_override = 0
+        if (
+            MXFP4_GATHER_BLOCK_SIZE_MIN_TOKENS
+            <= m
+            <= (MXFP4_GATHER_BLOCK_SIZE_MAX_TOKENS)
+        ):
+            gather_block_size_override = MXFP4_GATHER_BLOCK_SIZE_OVERRIDE
+        rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quant(
+            a,
+            expert_offsets,
+            blockscale_offsets,
+            e,
+            num_topk,
+            sorted_expert_ids,
+            input_permutation=a_map,
+            block_size_override=gather_block_size_override,
+        )
     c1 = _resize_cache(workspace13, (m * topk, w1_n))
     c2 = _resize_cache(workspace2, (m * topk, n))
     c3 = _resize_cache(workspace13, (m * topk, k))

@@ -75,6 +75,42 @@ def _mxfp4_experts_quant_for_test(
     return output, output_scales.view(torch.uint8)
 
 
+def _mxfp4_experts_quantize_once_fanout_for_test(
+    input_tensor: torch.Tensor,
+    topk_ids: torch.Tensor,
+    output_permutation: torch.Tensor,
+    expert_offsets: torch.Tensor,
+    blockscale_offsets: torch.Tensor,
+    n_experts: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Call fanout quantization with sentinel-filled output buffers."""
+    m, k = input_tensor.shape
+    topk = topk_ids.size(1)
+    num_sf_rows = int(blockscale_offsets[-1].item())
+    padded_k = (k // MXFP4_BLOCK_SIZE + 3) // 4
+    output = torch.full(
+        (m * topk, k // 2), 0xA5, device=input_tensor.device, dtype=torch.uint8
+    )
+    output_scales = torch.full(
+        (num_sf_rows, padded_k),
+        0x5A5A5A5A,
+        device=input_tensor.device,
+        dtype=torch.int32,
+    )
+    torch.ops._C.mxfp4_experts_quantize_once_fanout(
+        output,
+        output_scales,
+        input_tensor,
+        topk_ids,
+        output_permutation,
+        expert_offsets,
+        blockscale_offsets,
+        n_experts,
+        8,
+    )
+    return output, output_scales.view(torch.uint8)
+
+
 def _mxfp4_scale_written_mask(
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
@@ -682,13 +718,15 @@ def test_mxfp4_experts_quant_sorted_expert_ids_matches_offset_search(
     ("m", "topk", "num_experts", "k", "dtype", "routing"),
     [
         pytest.param(4, 8, 256, 6144, torch.bfloat16, "mixed_invalid", id="decode"),
+        pytest.param(4, 8, 256, 160, torch.bfloat16, "mixed_invalid", id="tail-k160"),
+        pytest.param(4, 8, 256, 224, torch.bfloat16, "mixed_invalid", id="tail-k224"),
         pytest.param(32, 8, 16, 512, torch.bfloat16, "skewed", id="small-experts"),
         pytest.param(32, 1, 256, 512, torch.float16, "topk1", id="topk1-fp16"),
         pytest.param(8192, 1, 256, 512, torch.bfloat16, "topk1", id="large-route"),
         pytest.param(4, 8, 256, 512, torch.bfloat16, "all_invalid", id="all-invalid"),
     ],
 )
-def test_mxfp4_experts_quant_gathers_original_rows(
+def test_mxfp4_experts_quantize_once_fanout_matches_gather(
     m: int,
     topk: int,
     num_experts: int,
@@ -696,6 +734,7 @@ def test_mxfp4_experts_quant_gathers_original_rows(
     dtype: torch.dtype,
     routing: str,
 ):
+    """Gather and fanout must match the expert-row quantization reference."""
     set_random_seed(2)
     if routing == "all_invalid":
         topk_ids = torch.full((m, topk), -1, device="cuda", dtype=torch.int32)
@@ -754,21 +793,31 @@ def test_mxfp4_experts_quant_gathers_original_rows(
         input_permutation,
         fill_unwritten=True,
     )
+    fanout_out, fanout_sf = _mxfp4_experts_quantize_once_fanout_for_test(
+        activations,
+        topk_ids,
+        output_permutation,
+        expert_offsets,
+        blockscale_offsets,
+        num_experts,
+    )
 
     num_valid_rows = int(expert_offsets[-1].item())
     valid_sources = input_permutation[:num_valid_rows]
     assert torch.all((valid_sources >= 0) & (valid_sources < m))
     assert torch.all(input_permutation[num_valid_rows:] == -1)
     assert torch.equal(baseline_out[:num_valid_rows], gathered_out[:num_valid_rows])
-    assert torch.all(baseline_out[num_valid_rows:] == 0xA5)
-    assert torch.all(gathered_out[num_valid_rows:] == 0xA5)
+    assert torch.equal(baseline_out[:num_valid_rows], fanout_out[:num_valid_rows])
+    for output in (baseline_out, gathered_out, fanout_out):
+        assert torch.all(output[num_valid_rows:] == 0xA5)
     assert torch.equal(baseline_sf, gathered_sf)
+    assert torch.equal(baseline_sf, fanout_sf)
 
     written_sf = _mxfp4_scale_written_mask(
         expert_offsets, blockscale_offsets, k, activations.device
     )
     assert written_sf.numel() == baseline_sf.numel()
-    for output_sf in (baseline_sf, gathered_sf):
+    for output_sf in (baseline_sf, gathered_sf, fanout_sf):
         assert torch.all(output_sf.reshape(-1)[~written_sf] == 0x5A)
 
     if routing == "skewed":

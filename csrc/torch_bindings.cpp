@@ -249,7 +249,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor input, Tensor input_offset_by_experts,"
       "Tensor output_scale_offset_by_experts, int n_experts, "
       "Tensor? sorted_expert_ids=None, "
-      "Tensor? input_permutation=None) -> ()");
+      "Tensor? input_permutation=None, int block_size_override=0) -> ()");
+
+  // Quantize each token once and fan out its MXFP4 row to routed experts.
+  ops.def(
+      "mxfp4_experts_quantize_once_fanout(Tensor! output, Tensor! "
+      "output_scale, Tensor input, Tensor topk_ids, "
+      "Tensor output_permutation, Tensor input_offset_by_experts, "
+      "Tensor output_scale_offset_by_experts, int n_experts, "
+      "int vectors_per_token_tile=8, int optimization_variant=0) -> ()");
 
   // Fused SiLU+Mul+MXFP4 experts quantization.
   ops.def(
