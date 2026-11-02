@@ -63,12 +63,26 @@ def _make_experts(**kwargs) -> DeepGemmMegaMoEExperts:
 
 
 def test_deep_gemm_mega_moe_capture_precedes_eplb(monkeypatch):
+    """Routed-experts capture sees logical ids; staging maps them with EPLB."""
     experts = DeepGemmMegaMoEExperts.__new__(DeepGemmMegaMoEExperts)
     torch.nn.Module.__init__(experts)
     monkeypatch.setattr(experts, "_synchronize_first_launch", lambda: None)
     experts.prefix = "model.layers.3.ffn.experts"
     experts.max_num_tokens = 4
     experts.num_shared_experts = 0
+    experts.shared_spec = None
+    experts.weight_format = MEGA_MOE_MXFP4
+    experts._kernel_kwargs = {}
+    monkeypatch.setattr(
+        experts,
+        "get_symm_buffer",
+        lambda: SimpleNamespace(
+            x=torch.empty(4, 8),
+            x_sf=torch.empty(4, 1),
+            topk_idx=torch.empty(4, 2),
+            topk_weights=torch.empty(4, 2),
+        ),
+    )
     experts.capture_fn = None
     experts.eplb_state = SimpleNamespace(
         logical_to_physical_map=torch.empty(1),
@@ -85,19 +99,20 @@ def test_deep_gemm_mega_moe_capture_precedes_eplb(monkeypatch):
         SimpleNamespace(capture=lambda layer_id, ids: captured.append((layer_id, ids))),
     )
 
-    class MappingReached(Exception):
+    class StagingReached(Exception):
         pass
 
-    def map_ids(**kwargs):
+    def stage(hidden_states, topk_weights, ids, *args, eplb_state, **kwargs):
         assert captured == [(3, topk_ids)]
-        raise MappingReached
+        assert ids is topk_ids
+        assert eplb_state is experts.eplb_state
+        raise StagingReached
 
     monkeypatch.setattr(
-        f"{DeepGemmMegaMoEExperts.__module__}.eplb_map_to_physical_and_record",
-        map_ids,
+        f"{DeepGemmMegaMoEExperts.__module__}.prepare_megamoe_inputs", stage
     )
 
-    with pytest.raises(MappingReached):
+    with pytest.raises(StagingReached):
         experts(torch.empty(2, 8), torch.empty(2, 2), topk_ids)
 
 
@@ -688,7 +703,7 @@ def test_deep_gemm_mega_moe_adds_unfused_shared_expert_once(monkeypatch, fused):
 
 
 @requires_sm100
-@pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 16384])
+@pytest.mark.parametrize("num_tokens", [7, 63, 64, 65, 127, 128, 135, 434, 1025, 16384])
 @pytest.mark.parametrize("hidden_size", [256, 5120])
 def test_prepare_megamoe_inputs_is_bitwise_exact(num_tokens, hidden_size):
     from vllm.third_party.deep_gemm.utils import per_token_cast_to_fp8
@@ -760,6 +775,121 @@ def test_prepare_megamoe_inputs_is_bitwise_exact(num_tokens, hidden_size):
         fused_topk_weights.view(torch.uint8),
         ref_topk_weights.view(torch.uint8),
     )
+
+
+@requires_sm100
+@pytest.mark.parametrize("nvfp4", [False, True])
+@pytest.mark.parametrize("num_tokens", [7, 100])
+def test_prepare_megamoe_eplb_maps_and_records_under_graph_replay(
+    monkeypatch, nvfp4, num_tokens
+):
+    """Fused EPLB staging maps each routed id to a replica of its logical expert
+    and records unpadded load, and a replayed graph sees map and record-flag
+    updates."""
+    from vllm.distributed.eplb.eplb_state import EplbLayerState, compute_logical_maps
+
+    device = torch.device("cuda")
+    hidden_size, top_k = 256, 6
+    hidden = torch.randn(num_tokens, hidden_size, device=device, dtype=torch.bfloat16)
+    ids = torch.arange(num_tokens * top_k, device=device).reshape(-1, top_k) % 8
+    ids = ids.int()
+    ids[1, 0], ids[2, 0] = -1, 8
+    weights = torch.rand(num_tokens, top_k, device=device)
+    padding = torch.arange(num_tokens, device=device) % 11 == 0
+    replicas = torch.tensor([1, 2, 3, 1, 1, 1, 1, 1])
+    num_physical = int(replicas.sum())
+    mapping, counts = compute_logical_maps(
+        torch.arange(8).repeat_interleave(replicas), 8
+    )
+    # Spare slots make the map stride differ from the max replica count.
+    mapping = F.pad(mapping, (0, 2), value=-1)
+    num_unpadded = [
+        torch.tensor(0, dtype=torch.int32, device=device),
+        torch.tensor(num_tokens - 3, dtype=torch.int32, device=device),
+    ]
+    state = EplbLayerState(
+        logical_to_physical_map=mapping.to(device),
+        logical_replica_count=counts.to(device),
+        expert_load_view=torch.zeros(num_physical, dtype=torch.int32, device=device),
+        should_record_tensor=torch.tensor(True, device=device),
+        num_unpadded_tokens_tensors=num_unpadded,
+    )
+    # Staging must read this ubatch's count; ubatch 0 would record nothing.
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.prepare_megamoe.dbo_current_ubatch_id",
+        lambda: 1,
+    )
+    topk_idx = torch.empty(num_tokens, top_k, dtype=torch.int64, device=device)
+    topk_weights = torch.empty_like(weights)
+    if nvfp4:
+        x = torch.empty(num_tokens, hidden_size // 2, dtype=torch.int8, device=device)
+        x_sf = torch.empty(
+            num_tokens, hidden_size // 64, dtype=torch.int32, device=device
+        )
+        x_scales = torch.empty(num_tokens, device=device)
+
+        def stage():
+            prepare_megamoe_nvfp4_inputs(
+                hidden,
+                weights,
+                ids,
+                x,
+                x_sf,
+                x_scales,
+                topk_idx,
+                topk_weights,
+                is_padding=padding,
+                eplb_state=state,
+            )
+    else:
+        x = torch.empty(
+            num_tokens, hidden_size, dtype=torch.float8_e4m3fn, device=device
+        )
+        x_sf = torch.empty(
+            num_tokens, hidden_size // 128, dtype=torch.int32, device=device
+        )
+
+        def stage():
+            prepare_megamoe_inputs(
+                hidden,
+                weights,
+                ids,
+                x,
+                x_sf,
+                topk_idx,
+                topk_weights,
+                is_padding=padding,
+                eplb_state=state,
+            )
+
+    stage()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        stage()
+    physical = state.logical_to_physical_map
+    record_flag, load = state.should_record_tensor, state.expert_load_view
+    assert physical is not None and record_flag is not None and load is not None
+    logical = torch.where(padding[:, None], -1, ids).long().cpu()
+    valid = (logical >= 0) & (logical < 8)
+    unpadded = torch.arange(num_tokens)[:, None] < num_tokens - 3
+    for record in (False, True):
+        physical.copy_(
+            torch.where(physical >= 0, num_physical - 1 - physical, physical)
+        )
+        record_flag.fill_(record)
+        load.zero_()
+        graph.replay()
+        physical_to_logical = torch.full((num_physical,), -1, dtype=torch.long)
+        for expert, slots in enumerate(physical.cpu()):
+            physical_to_logical[slots[slots >= 0]] = expert
+        mapped = topk_idx.cpu()
+        assert (mapped[~valid] == -1).all()
+        assert torch.equal(physical_to_logical[mapped[valid]], logical[valid])
+        recorded = mapped[valid & unpadded] if record else mapped.new_empty(0)
+        expected_load = torch.bincount(recorded, minlength=num_physical)
+        assert torch.equal(load.cpu(), expected_load.to(load.dtype))
+    # Tokens spread over the replicas of a replicated expert.
+    assert mapped[logical == 2].unique().numel() > 1
 
 
 def _shared_sf_tma_layout(sf: torch.Tensor, block_m: int) -> torch.Tensor:
@@ -940,7 +1070,7 @@ def test_prepare_megamoe_inputs_masks_padding(nonfinite_padding, num_tokens, qua
 
 @requires_sm100
 @pytest.mark.parametrize("shared", [None, "mxfp8", "bf16"])
-@pytest.mark.parametrize("num_tokens", [0, 7, 65, 135])
+@pytest.mark.parametrize("num_tokens", [0, 7, 65, 135, 600])
 def test_prepare_megamoe_nvfp4_inputs_is_bitwise_exact(num_tokens, shared):
     """Per-token NVFP4 dispatch, shared-expert inputs, unrouted padding and the
     L2 alphas match DeepGEMM's reference quantizers bit for bit."""

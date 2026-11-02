@@ -51,7 +51,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import stash_weight_part
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.image import normalize_image
@@ -2653,7 +2652,7 @@ class Molmo2ForConditionalGeneration(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        weights = _get_weights_with_merged_embedding(self, weights)
+        weights = _get_weights_with_merged_embedding(weights)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def get_mm_mapping(self) -> MultiModelKeys:
@@ -2666,23 +2665,26 @@ class Molmo2ForConditionalGeneration(
 
 
 def _get_weights_with_merged_embedding(
-    module: nn.Module,
     weights: Iterable[tuple[str, torch.Tensor]],
 ) -> Iterable[tuple[str, torch.Tensor]]:
+    embedding_weights = {}
     for name, weight in weights:
         if "wte.embedding" in name:
-            part = "embedding"
+            embedding_weights["embedding"] = weight
         elif "wte.new_embedding" in name:
-            part = "new_embedding"
+            embedding_weights["new_embedding"] = weight
         else:
             yield (name, weight)
-            continue
-        parts = stash_weight_part(
-            module, "wte", part, weight, ("embedding", "new_embedding")
+    # this is compatible with most of quantization,
+    # because they won't quantize embed_tokens
+    if "embedding" not in embedding_weights or "new_embedding" not in embedding_weights:
+        raise ValueError(
+            "Checkpoint is missing 'wte.embedding' or "
+            "'wte.new_embedding' weights required for Molmo2."
         )
-        # Quantization leaves embed_tokens unquantized, so the concat is safe.
-        if parts is not None:
-            yield (
-                "model.embed_tokens.weight",
-                torch.cat([parts["embedding"], parts["new_embedding"]], dim=0),
-            )
+
+    embedding_weights = torch.cat(
+        [embedding_weights["embedding"], embedding_weights["new_embedding"]],
+        dim=0,
+    )
+    yield ("model.embed_tokens.weight", embedding_weights)

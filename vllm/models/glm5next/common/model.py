@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -24,7 +25,6 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
@@ -59,7 +59,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
-    stash_weight_part,
 )
 from vllm.model_executor.models.deepseek_v2 import _get_moe_router_dtype
 from vllm.model_executor.models.glm4_1v import (
@@ -77,6 +76,8 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    extract_layer_index,
+    get_fused_shared_expert_layers,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -750,8 +751,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         # The active slice is fixed after construction; cache it so forward
         # doesn't rebuild the slice (a fresh list) every step.
         self._active_layers = self.layers[self.start_layer : self.end_layer]
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers, Glm5NextMoE, "mlp"
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            Glm5NextMoE,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -875,6 +878,10 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             (".in_proj_qkvbfg_a", ".b_proj", 3),
             (".in_proj_qkvbfg_a", ".f_a_proj", 4),
             (".in_proj_qkvbfg_a", ".g_a_proj", 5),
+            # KDA: fuse the q, k, v short convs into one conv1d
+            (".conv1d", ".q_conv1d", 0),
+            (".conv1d", ".k_conv1d", 1),
+            (".conv1d", ".v_conv1d", 2),
         ]
         if _is_moe(self.config):
             # Params for weights, fp8 weight scales, fp8 activation scales
@@ -891,13 +898,15 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 0,
             )
             num_fused_shared = _num_fused_shared_experts(
-                self.config.n_shared_experts, self.is_fused_shared_expert_enabled
+                self.config.n_shared_experts,
+                bool(self.fused_shared_expert_layers),
             )
             expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",
+                # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
                 num_experts=self.config.n_routed_experts + num_fused_shared,
                 num_redundant_experts=num_redundant_experts,
             )
@@ -912,6 +921,8 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         if self.config.mla_use_nope and self.config.qk_rope_head_dim > 0:
             kv_a_pad_size = self.config.qk_rope_head_dim
 
+        _pending_wk_fp8: dict = {}
+
         for args in weights:
             name, loaded_weight = args[:2]
             kwargs: dict = args[2] if len(args) > 2 else {}
@@ -925,7 +936,12 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
-            if self.is_fused_shared_expert_enabled:
+            # Only parse the layer index when FSE is enabled.
+            if (
+                "mlp.shared_experts." in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in self.fused_shared_expert_layers
+            ):
                 name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             # Handle FP8 indexer WK: dequantize to BF16 for fusion with
@@ -933,7 +949,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             if _try_load_fp8_indexer_wk(
                 name,
                 loaded_weight,
-                self,
+                _pending_wk_fp8,
                 params_dict,
                 loaded_params,
             ):
@@ -944,7 +960,7 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
             if _try_load_fp8_attn_proj(
                 name,
                 loaded_weight,
-                self,
+                _pending_wk_fp8,
                 params_dict,
                 loaded_params,
                 kv_a_pad_size,
@@ -1043,16 +1059,6 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         return loaded_params
 
 
-def refresh_post_load_caches(model: nn.Module) -> None:
-    """Rebuild caches derived from loaded weights (KDA merged conv weight,
-    indexer fp32 head gate). Runs after every load and reload."""
-    for module in model.modules():
-        if module is not model and callable(
-            getattr(module, "refresh_post_load_cache", None)
-        ):
-            module.refresh_post_load_cache()
-
-
 class Glm5NextForCausalLM(
     nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsEagle3
 ):
@@ -1140,9 +1146,6 @@ class Glm5NextForCausalLM(
     ) -> torch.Tensor | None:
         logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
-
-    def process_weights_after_loading(self) -> None:
-        refresh_post_load_caches(self)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -1247,9 +1250,6 @@ class Glm5NextForConditionalGeneration(
         # Glm5NextForCausalLM does not implement make_empty_intermediate_tensors,
         # so pipeline parallelism is gated off (consistent with the text-only
         # model) and we intentionally do not alias it here.
-
-    def process_weights_after_loading(self) -> None:
-        refresh_post_load_caches(self)
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [
@@ -1368,7 +1368,7 @@ def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
     return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 
-def _try_load_fp8_indexer_wk(name, tensor, module, params_dict, loaded_params):
+def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):
     if "indexer.wk." not in name or "wk_weights" in name:
         return False
     is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
@@ -1376,13 +1376,13 @@ def _try_load_fp8_indexer_wk(name, tensor, module, params_dict, loaded_params):
     if not is_weight and not is_scale:
         return False
     layer_prefix = name.rsplit(".wk.", 1)[0]
-    entry = stash_weight_part(
-        module, layer_prefix, "weight" if is_weight else "scale", tensor
-    )
-    if entry is None:
+    entry = buf.setdefault(layer_prefix, {})
+    entry["weight" if is_weight else "scale"] = tensor
+    if "weight" not in entry or "scale" not in entry:
         return True
 
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
+    del buf[layer_prefix]
     block_size = weight_fp8.shape[1] // scale_inv.shape[1]
     weight_bf16 = scaled_dequantize(
         weight_fp8,
@@ -1438,7 +1438,7 @@ _FP8_ATTN_PROJS = {
 def _try_load_fp8_attn_proj(
     name,
     tensor,
-    module,
+    buf,
     params_dict,
     loaded_params,
     kv_a_pad_size: int,
@@ -1475,13 +1475,13 @@ def _try_load_fp8_attn_proj(
     if target_s in params_dict:
         return False
 
-    entry = stash_weight_part(
-        module, f"{layer_prefix}{suffix}", "weight" if is_weight else "scale", tensor
-    )
-    if entry is None:
+    entry = buf.setdefault(layer_prefix, {}).setdefault(key, {})
+    entry["weight" if is_weight else "scale"] = tensor
+    if "weight" not in entry or "scale" not in entry:
         return True
 
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
+    buf[layer_prefix].pop(key, None)
     block_size = weight_fp8.shape[1] // scale_inv.shape[1]
     weight_bf16 = _dequant_fp8_block(weight_fp8, scale_inv, block_size)
     # NoPE: pad kv_a rope portion (kv_lora_rank -> kv_lora_rank + qk_rope_head_dim).

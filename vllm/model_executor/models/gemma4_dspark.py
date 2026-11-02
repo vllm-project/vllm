@@ -22,10 +22,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.mtp_validation import (
     is_mtp_completeness_check_enabled,
 )
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    set_cached_tensor,
-)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from .gemma4_mtp import Gemma4MTPAttention, Gemma4MTPDecoderLayer
 from .qwen3_dflash import (
@@ -238,18 +235,22 @@ class Gemma4DSparkModel(DFlashQwen3Model):
     ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
         self._context_k_projs = [a.k_proj for a in layers_attn]
-        k_weight = k_bias = None
+        self._fused_k_weight: torch.Tensor | None = None
+        self._fused_k_bias: torch.Tensor | None = None
         if _reads_raw_weights(self._context_k_projs):
-            k_weight = torch.cat([p.weight for p in self._context_k_projs])
+            self._fused_k_weight = torch.cat([p.weight for p in self._context_k_projs])
             if has_bias:
-                k_bias = torch.cat([p.bias for p in self._context_k_projs])
-        set_cached_tensor(self, "_fused_k_weight", k_weight)
-        set_cached_tensor(self, "_fused_k_bias", k_bias)
-        k_norm = torch.stack([a.k_norm.weight.data for a in layers_attn], dim=0)
-        set_cached_tensor(self, "_k_norm_weights", k_norm.contiguous())
+                self._fused_k_bias = torch.cat([p.bias for p in self._context_k_projs])
+        self._k_norm_weights = torch.stack(
+            [a.k_norm.weight.data for a in layers_attn], dim=0
+        ).contiguous()
         # v_norm has no learnable scale; ones matching the K-norm call shape.
-        if getattr(self, "_v_norm_weights", None) is None:
-            self._v_norm_weights = torch.ones_like(self._k_norm_weights)
+        self._v_norm_weights = torch.ones(
+            len(layers_attn),
+            layers_attn[0].head_dim,
+            dtype=self._k_norm_weights.dtype,
+            device=self._k_norm_weights.device,
+        )
 
     def _project_context_kv(
         self,

@@ -59,7 +59,6 @@ from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
@@ -93,11 +92,11 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
-    stash_weight_part,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     sequence_parallel_chunk,
 )
 from vllm.platforms import current_platform
@@ -856,7 +855,7 @@ class Indexer(nn.Module):
 
 
 def _try_load_fp8_indexer_wk(
-    name, tensor, module, params_dict, loaded_params, pp_missing_layer_names
+    name, tensor, buf, params_dict, loaded_params, pp_missing_layer_names
 ):
     """We fuse the WK and weights_proj projections, but in some checkpoints WK is stored
     in FP8 with a separate weight_scale_inv, while weights_proj is stored in BF16.
@@ -878,14 +877,14 @@ def _try_load_fp8_indexer_wk(
         for missing_layer_name in pp_missing_layer_names
     ):
         return True
-    entry = stash_weight_part(
-        module, layer_prefix, "weight" if is_weight else "scale", tensor
-    )
-    if entry is None:
+    entry = buf.setdefault(layer_prefix, {})
+    entry["weight" if is_weight else "scale"] = tensor
+    if "weight" not in entry or "scale" not in entry:
         return True  # still waiting for the other param
 
     # We have both weight and scale: dequantize FP8 to BF16.
     weight_fp8, scale_inv = entry["weight"], entry["scale"]
+    del buf[layer_prefix]
     if scale_inv.dtype in (torch.uint8, torch.float8_e8m0fnu):
         # MXFP8 checkpoints store power-of-two E8M0 scales, decode them to float.
         scale_inv = scale_inv.view(torch.float8_e8m0fnu).to(torch.float32)
@@ -1477,10 +1476,10 @@ class DeepseekV2Model(nn.Module):
             prefix=f"{prefix}.layers",
         )
 
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            self.layers,
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
             DeepseekV2MoE,
-            "mlp",
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
 
         if get_pp_group().is_last_rank:
@@ -1608,6 +1607,10 @@ class DeepseekV2Model(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
+
         indexer_fused_mapping = [
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
@@ -1626,12 +1629,9 @@ class DeepseekV2Model(nn.Module):
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
+            # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
             num_experts=self.config.n_routed_experts
-            + (
-                self.config.n_shared_experts
-                if self.is_fused_shared_expert_enabled
-                else 0
-            ),
+            + (self.config.n_shared_experts if self.fused_shared_expert_layers else 0),
             num_redundant_experts=self.num_redundant_experts,
         )
 
@@ -1656,14 +1656,17 @@ class DeepseekV2Model(nn.Module):
             ):
                 continue  # this layer has no indexer; drop its checkpoint weights
 
+            # Only parse the layer index when FSE is enabled.
             is_fusion_moe_shared_experts_layer = (
-                self.is_fused_shared_expert_enabled and ("mlp.shared_experts" in name)
+                "mlp.shared_experts" in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in self.fused_shared_expert_layers
             )
 
             if _try_load_fp8_indexer_wk(
                 name,
                 loaded_weight,
-                self,
+                _pending_wk_fp8,
                 params_dict,
                 loaded_params,
                 pp_missing_layer_names,

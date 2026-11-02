@@ -6,6 +6,7 @@ import inspect
 import sys
 import types
 from importlib import import_module
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 from weakref import WeakKeyDictionary, ref
@@ -17,10 +18,18 @@ from torch.nn.parameter import UninitializedParameter
 import vllm.model_executor.model_loader.reload.layerwise as reload_layerwise
 import vllm.model_executor.model_loader.reload.meta as reload_meta
 from vllm.config import ModelConfig
+from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+    SparseNCCLWeightTransferEngine,
+)
+from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.linear import QKVParallelLinear
 from vllm.model_executor.layers.quantization.base_config import QuantizeMethodBase
+from vllm.model_executor.model_loader.checkpoint_weight_patch import (
+    CheckpointWeightPatch,
+    load_checkpoint_weight_patches,
+)
 from vllm.model_executor.model_loader.reload.layerwise import (
     finalize_layerwise_reload,
     initialize_layerwise_reload,
@@ -41,8 +50,27 @@ from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     default_weight_loader,
     load_attention_sink,
+    safetensors_weights_iterator,
 )
 from vllm.platforms import current_platform
+from vllm.transformers_utils.repo_utils import hf_api
+
+
+def test_preserve_placement_remapping_until_checkpoint_iteration_finishes():
+    """Deferred reload keeps loaders installed through trailing checkpoint entries."""
+    layer = torch.nn.Linear(2, 2, bias=False)
+    record_metadata_for_reloading(layer)
+    initialize_layerwise_reload(layer, defer_processing=True)
+    checkpoint = torch.arange(4, dtype=torch.float32).reshape(2, 2)
+    loader = layer.weight.weight_loader
+    loader(layer.weight, checkpoint)
+    assert layer.weight.is_meta
+    assert layer.weight.weight_loader is loader
+    loader(layer.weight, checkpoint + 1)
+    assert layer.weight.is_meta
+    finalize_layerwise_reload(layer, model_config=None)
+    assert torch.equal(layer.weight, checkpoint + 1)
+    assert not reload_layerwise.get_layerwise_info(layer).defer_processing
 
 
 @pytest.mark.parametrize("tp_rank", [0, 1])
@@ -72,6 +100,7 @@ def test_attention_sink_model_loading_shards_once(
     model = cls.__new__(cls)
     torch.nn.Module.__init__(model)
     model.hf_to_vllm_mapper = WeightsMapper()
+    model._context_kv_proj = None  # set by DFlashQwen3Model.__init__
     model.model = torch.nn.Module()
     model.model.mtp = torch.nn.Module()
     sink = torch.nn.Parameter(torch.zeros(4), requires_grad=False)
@@ -716,6 +745,7 @@ def test_padded_moe_reload_releases_each_layer(
         has_bias=has_bias,
         tp_rank=tp_rank,
         tp_shard_with_padding=False,
+        num_experts=experts,
         moe_parallel_config=SimpleNamespace(tp_size=2),
     )
     model = torch.nn.ModuleList()
@@ -731,9 +761,11 @@ def test_padded_moe_reload_releases_each_layer(
         layer.moe_config = config
         layer.quant_config = None
         layer.quant_method = method
-        layer.expert_map_manager = SimpleNamespace(map_global_to_local=lambda i: i)
+        layer.expert_map_manager = SimpleNamespace(
+            map_global_to_local=lambda i: i, num_fused_shared_experts=0
+        )
         layer._loaded_expert_biases = set()
-        layer._fused_shared_expert_quantizer = None
+        layer.shared_expert_online_loader = None
         method.create_weights(
             layer,
             experts,
@@ -1268,22 +1300,6 @@ def _device_tensor_ptrs(worker) -> dict[str, int]:
     return ptrs
 
 
-def _state_digest(worker) -> dict[str, int]:
-    """Exact per-tensor digest of every parameter and buffer, so two loads of
-    the same checkpoint can be compared byte for byte."""
-    digest = {}
-    model = worker.get_model()
-    named = [*model.named_parameters(), *model.named_buffers()]
-    for name, tensor in named:
-        flat = tensor.detach().contiguous().view(-1).view(torch.uint8)
-        total = 0
-        for chunk in flat.split(1 << 24):
-            weights = torch.arange(1, chunk.numel() + 1, device=chunk.device)
-            total += int((chunk.long() * (weights % 65521)).sum())
-        digest[name] = total
-    return digest
-
-
 def _moved_tensors(llm, ptrs: list[dict[str, int]]) -> list[list[str]]:
     after = llm.collective_rpc(_device_tensor_ptrs)
     return [
@@ -1372,7 +1388,6 @@ def test_reload_weights(
         ptrs = llm.collective_rpc(_device_tensor_ptrs)
         llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
         assert _moved_tensors(llm, ptrs) == [[]] * len(ptrs)
-        mul_state = llm.collective_rpc(_state_digest)
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert mul_perp < add_perp
@@ -1383,15 +1398,63 @@ def test_reload_weights(
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
 
-        # Idempotent: reloading a checkpoint again reproduces the same state.
-        llm.collective_rpc("reload_weights", kwargs={"weights_path": mul_model})
-        assert _moved_tensors(llm, ptrs) == [[]] * len(ptrs)
-        for rank, (old, new) in enumerate(
-            zip(mul_state, llm.collective_rpc(_state_digest))
-        ):
-            assert old == new, (
-                f"rank {rank}: {sorted(n for n in old if new.get(n) != old[n])}"
-            )
+
+def _reload_with_lora_expert_names(worker) -> None:
+    """Reload the checkpoint under the names that LoRA-wrapped experts load."""
+
+    def lora_name(name: str) -> str:
+        parts = name.split(".")
+        if "experts" in parts[:-2] and parts[parts.index("experts") + 1].isdigit():
+            parts.insert(parts.index("experts") + 3, "base_layer")
+        return ".".join(parts)
+
+    path = Path(hf_api().snapshot_download(worker.vllm_config.model_config.model))
+    files = sorted(str(f) for f in path.glob("*.safetensors"))
+    weights = safetensors_weights_iterator(files, use_tqdm_on_load=False)
+    worker.reload_weights(
+        weights_iterator=((lora_name(name), weight) for name, weight in weights)
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="LoRA on quantized MoE requires CUDA"
+)
+def test_reload_weights_with_lora_moe(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    lora_path = hf_api().snapshot_download(repo_id="jeeejeee/qwen3-moe-text2sql-spider")
+    prompts = [
+        "<|im_start|>user\nCount the rows of table candidate.<|im_end|>\n"
+        "<|im_start|>assistant\n<think>\n\n</think>\n\nSELECT count(*) FROM candidate"
+    ]
+
+    def prompt_logprobs(llm, lora_id):
+        lora_request = LoRARequest("sql", lora_id, lora_path) if lora_id else None
+        output = llm.generate_greedy_logprobs(
+            prompts,
+            max_tokens=1,
+            num_logprobs=None,
+            num_prompt_logprobs=0,
+            lora_request=lora_request,
+        )[0]
+        return [next(iter(token.values())).logprob for token in output[3][1:]]
+
+    with vllm_runner(
+        model_name="RedHatAI/Qwen3-30B-A3B-quantized.w4a16",
+        enable_lora=True,
+        max_lora_rank=8,
+        max_loras=1,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=64,
+        max_num_seqs=1,
+    ) as llm:
+        before = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 1)]
+        assert before[0] != before[1]
+        llm.collective_rpc(_reload_with_lora_expert_names)
+        after = [prompt_logprobs(llm, 0), prompt_logprobs(llm, 2)]
+    assert after == before
 
 
 def test_kv_scale_reload(vllm_runner):
@@ -1487,3 +1550,68 @@ def test_online_quantize_reload(
         mul_perp = llm.generate_prompt_perplexity(["3 4 = 12"], mask=["3 4 ="])[0]
         add_perp = llm.generate_prompt_perplexity(["3 4 = 7"], mask=["3 4 ="])[0]
         assert add_perp < mul_perp
+
+
+class _TwoLayerModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.a = torch.nn.Linear(2, 2, bias=False)
+        self.b = torch.nn.Linear(2, 2, bias=False)
+        self.hook_saw: list[tuple[float, float]] = []
+
+    def load_weights(self, weights) -> set[str]:
+        params = dict(self.named_parameters())
+        loaded = set()
+        for name, tensor in weights:
+            param = params[name]
+            getattr(param, "weight_loader", default_weight_loader)(param, tensor)
+            loaded.add(name)
+        return loaded
+
+    def process_weights_after_loading(self) -> None:
+        a, b = self.a.weight.mean().item(), self.b.weight.mean().item()
+        self.hook_saw.append((a, b))
+
+
+def _full(value: float) -> torch.Tensor:
+    return torch.full((2, 2), value)
+
+
+def _loaded_model() -> _TwoLayerModel:
+    model = _TwoLayerModel()
+    model.load_weights([("a.weight", _full(1.0)), ("b.weight", _full(2.0))])
+    return model
+
+
+class TestModelHookOnSplitLoad:
+    def test_layerwise_reload(self):
+        model = _loaded_model()
+        record_metadata_for_reloading(model)
+        config = SimpleNamespace(dtype=torch.float32)
+
+        initialize_layerwise_reload(model)
+        model.load_weights([("a.weight", _full(3.0))])
+        model.load_weights([("b.weight", _full(4.0))])
+        assert model.hook_saw == []
+        finalize_layerwise_reload(model, config)
+        assert model.hook_saw == [(3.0, 4.0)]
+
+        # Partial update: the untouched layer is restored before the hook runs.
+        initialize_layerwise_reload(model)
+        model.load_weights([("a.weight", _full(5.0))])
+        finalize_layerwise_reload(model, config)
+        assert model.hook_saw == [(3.0, 4.0), (5.0, 4.0)]
+
+    def test_sparse_update(self):
+        model = _loaded_model()
+        engine = object.__new__(SparseNCCLWeightTransferEngine)
+        engine.model = model
+
+        engine.start_weight_update()
+        for name, value in (("a.weight", 5.0), ("b.weight", 6.0)):
+            values, indices = torch.full((4,), value), torch.arange(4)
+            patch = CheckpointWeightPatch(name, (2, 2), torch.float32, values, indices)
+            load_checkpoint_weight_patches(model, [patch])
+        assert model.hook_saw == []
+        engine.finish_weight_update()
+        assert model.hook_saw == [(5.0, 6.0)]

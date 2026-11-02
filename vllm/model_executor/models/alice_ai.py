@@ -20,7 +20,6 @@ from vllm.distributed import (
 )
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory, GateLinear
 from vllm.model_executor.layers.fused_moe.utils import (
-    is_model_fused_shared_expert_compatible,
     resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm
@@ -42,9 +41,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.mtp_validation import (
-    is_mtp_completeness_check_enabled,
-)
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsHybrid,
@@ -60,6 +56,7 @@ from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
     extract_layer_index,
+    get_fused_shared_expert_layers,
     make_layers,
     maybe_fuse_shared_experts,
     maybe_prefix,
@@ -503,8 +500,10 @@ class AliceAIModel(nn.Module):
             layer_fn=get_layer,
             prefix=f"{prefix}.layers",
         )
-        self.is_fused_shared_expert_enabled = is_model_fused_shared_expert_compatible(
-            layers=self.layers, moe_cls=AliceAISparseMoeBlock, moe_name="mlp"
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            AliceAISparseMoeBlock,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
         )
         self.norm = GemmaRMSNorm(
             hidden_size=config.hidden_size, eps=config.rms_norm_eps
@@ -570,7 +569,7 @@ class AliceAIModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         weights = maybe_fuse_shared_experts(
             weights=weights,
-            enabled=self.is_fused_shared_expert_enabled,
+            fused_shared_expert_layers=self.fused_shared_expert_layers,
             n_routed_experts=self.config.num_experts,
             n_shared_experts=1,
             ckpt_prefix="mlp.shared_expert",
@@ -720,8 +719,6 @@ class AliceAIForCausalLM(
         loader = AutoWeightsLoader(self)
         loaded = loader.load_weights(weights=weights)
         loaded.update(manually_loaded)
-        if not is_mtp_completeness_check_enabled():
-            return loaded
         expected_target_weights = {
             name
             for name, _ in self.named_parameters()

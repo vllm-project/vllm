@@ -390,22 +390,20 @@ class MistralTokenizer(TokenizerLike):
         **kwargs,
     ) -> list[int]:
         add_generation_prompt = kwargs.pop("add_generation_prompt", False)
-        continue_final_message = kwargs.get("continue_final_message", False)
-        tokenize = kwargs.get("tokenize", True)
-        padding = kwargs.get("padding", False)
-        truncation = kwargs.get("truncation", False)
-        max_length = kwargs.get("max_length")
-
-        version_kwargs = {}
-        # NOTE: This is for backward compatibility.
-        # Transformers should be passed arguments it knows.
-        if self.version >= 15:
-            version_kwargs["reasoning_effort"] = kwargs.get("reasoning_effort")
+        continue_final_message = kwargs.pop("continue_final_message", False)
+        tokenize = kwargs.pop("tokenize", True)
+        padding = kwargs.pop("padding", False)
+        truncation = kwargs.pop("truncation", False)
+        max_length = kwargs.pop("max_length", None)
+        kwargs.pop("return_tensors", None)
+        kwargs.pop("return_dict", None)
 
         _validate_apply_chat_template_args(
             messages, continue_final_message, add_generation_prompt
         )
 
+        # Remaining kwargs (e.g. reasoning_effort, response_format) reach
+        # ChatCompletionRequest.from_openai, which drops unknown fields.
         return self.transformers_tokenizer.apply_chat_template(
             conversation=messages,
             tools=tools,
@@ -416,7 +414,7 @@ class MistralTokenizer(TokenizerLike):
             max_length=max_length,
             return_tensors=None,
             return_dict=False,
-            **version_kwargs,
+            **kwargs,
         )
 
     def decode(

@@ -45,7 +45,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
-    ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -54,7 +53,6 @@ from vllm.model_executor.model_loader.utils import initialize_model
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_moe_expert_param_name,
-    stash_weight_part,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -267,38 +265,24 @@ class Llama4VisionAttention(nn.Module):
             prefix=f"{prefix}.attn",
         )
 
-        if use_data_parallel:
-            self.qkv_proj = ReplicatedLinear(
-                self.embed_dim,
-                self.q_size + 2 * self.kv_size,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.qkv_proj",
-            )
-            self.o_proj = ReplicatedLinear(
-                self.num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.o_proj",
-            )
-        else:
-            self.qkv_proj = QKVParallelLinear(
-                self.embed_dim,
-                self.head_dim,
-                self.num_heads,
-                bias=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.qkv_proj",
-            )
-            self.o_proj = RowParallelLinear(
-                self.num_heads * self.head_dim,
-                self.embed_dim,
-                bias=True,
-                input_is_parallel=True,
-                quant_config=quant_config,
-                prefix=f"{prefix}.o_proj",
-            )
+        self.qkv_proj = QKVParallelLinear(
+            self.embed_dim,
+            self.head_dim,
+            self.num_heads,
+            bias=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.qkv_proj",
+            disable_tp=use_data_parallel,
+        )
+        self.o_proj = RowParallelLinear(
+            self.num_heads * self.head_dim,
+            self.embed_dim,
+            bias=True,
+            input_is_parallel=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.o_proj",
+            disable_tp=use_data_parallel,
+        )
 
         rope_parameters = {
             "rope_type": "mllama4",
@@ -1039,24 +1023,6 @@ class Llama4ForConditionalGeneration(
     ) -> torch.Tensor | None:
         return self.language_model.compute_logits(hidden_states)
 
-    def _consolidate_qkv_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> Iterable[tuple[str, torch.Tensor]]:
-        for name, loaded_weight in weights:
-            for part in ("q", "k", "v"):
-                weight_name = f".self_attn.{part}_proj"
-                if weight_name not in name:
-                    continue
-                new_name = name.replace(weight_name, ".self_attn.qkv_proj")
-                parts = stash_weight_part(
-                    self, new_name, part, loaded_weight, ("q", "k", "v")
-                )
-                if parts is not None:
-                    yield new_name, torch.cat([parts[p] for p in "qkv"], dim=0)
-                break
-            else:
-                yield name, loaded_weight
-
     def _rename_weight_for_modelopt_checkpoint(self, name: str) -> str:
         """Rename weights from ModelOpt llama4 fp8 checkpoints to vLLM
         format."""
@@ -1110,13 +1076,10 @@ class Llama4ForConditionalGeneration(
         """Load non-language-model weights with stacking support."""
         updated_params = set()
 
-        if self.use_data_parallel:
-            other_weights = self._consolidate_qkv_weights(other_weights)
-
         for name, loaded_weight in other_weights:
             # Try stacked parameter mapping first
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name or self.use_data_parallel:
+                if weight_name not in name:
                     continue
                 name = name.replace(weight_name, param_name)
                 param = params_dict[name]

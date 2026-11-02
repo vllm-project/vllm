@@ -392,9 +392,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         return loaded_params
 
     def process_weights_after_loading(self) -> None:
-        self._finalize_moe()
-
-    def _finalize_moe(self) -> None:
         for layer in self.model.layers:
             layer.ffn.finalize_mega_moe_weights()
 

@@ -374,10 +374,7 @@ class DeepseekCompressor(nn.Module):
         state_metadata = cast(
             CompressorMetadata, attn_metadata[self.state_cache.prefix]
         )
-        token_to_req_indices = state_metadata.token_to_req_indices
         slot_mapping = state_metadata.slot_mapping
-        num_actual = slot_mapping.shape[0]
-        block_table = state_metadata.block_table
         block_size = state_metadata.block_size
 
         # [num_blocks, block_size, kv_dim+score_dim], where kv_dim == score_dim
@@ -418,6 +415,34 @@ class DeepseekCompressor(nn.Module):
             and state_metadata.c128_boundary is False
         ):
             return
+
+        self._compress_norm_rope_store(
+            state_metadata,
+            state_cache,
+            state_width,
+            positions,
+            rotary_emb,
+            attn_metadata,
+            pdl_kwargs,
+        )
+
+    def _compress_norm_rope_store(
+        self,
+        state_metadata: CompressorMetadata,
+        state_cache: torch.Tensor,
+        state_width: int,
+        positions: torch.Tensor,
+        rotary_emb,
+        attn_metadata: dict[str, Any],
+        pdl_kwargs: dict,
+    ) -> None:
+        """Compress the saved states and write K to the cache; a platform
+        subclass overrides it to write its own cache layout."""
+        token_to_req_indices = state_metadata.token_to_req_indices
+        slot_mapping = state_metadata.slot_mapping
+        num_actual = slot_mapping.shape[0]
+        block_table = state_metadata.block_table
+        block_size = state_metadata.block_size
 
         # Fused: compress → RMSNorm → RoPE → FP8 quant → KV cache write.
         # RoPE requirements (kernel applies forward GPT-J style rotation):

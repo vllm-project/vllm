@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import vllm.models.muse_spark.amd.muse_moe_runner as amd_muse_moe_runner
+from vllm import envs
 from vllm.config.kernel import MoEBackend
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -43,6 +45,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseMoERunner,
     MuseSparkAiterExperts,
+    MuseSparkOnlineMXFP4FusedMoE,
     MuseSparkQuarkOCPMXFusedMoE,
     MuseSparkQuarkOCPMXMoEQuantConfig,
     MuseSparkQuarkW8A8Fp8FusedMoE,
@@ -50,6 +53,8 @@ from vllm.models.muse_spark.amd.muse_moe_runner import (
     MuseSparkTritonExperts,
     MuseSparkUnquantizedFusedMoE,
     MuseSparkUnquantizedMoEQuantConfig,
+    _online_mxfp4_applies,
+    _quantize_experts_to_mxfp4,
     validate_bf16_deployment,
     validate_fp8_deployment,
     validate_mxfp4_deployment,
@@ -974,3 +979,54 @@ def test_token_sharded_finalize_pads_and_slices_per_rank(monkeypatch) -> None:
     expected = reference.apply(None, routed[:3], weights[:3], ids[:3], False)
     torch.testing.assert_close(actual[:3], expected, atol=2e-2, rtol=2e-2)
     assert torch.count_nonzero(actual[3:]) == 0
+
+
+@pytest.mark.skipif(not ROCM_AITER_SUPPORTED, reason="requires supported AITER")
+def test_online_mxfp4_quantizer_matches_the_quark_export_layout() -> None:
+    """Packed nibbles + E8M0 block scales, and a bounded rounding error."""
+    torch.manual_seed(0)
+    weight = torch.randn(5, 12, 64, device="cuda", dtype=torch.bfloat16) * 0.02
+    packed, scales = _quantize_experts_to_mxfp4(weight, experts_per_chunk=2)
+
+    assert packed.shape == (5, 12, 32) and packed.dtype == torch.uint8
+    assert scales.shape == (5, 12, 2) and scales.dtype == torch.uint8
+
+    # E2M1 value grid, low nibble first, scaled by 2**(e8m0 - 127) per block.
+    grid = torch.tensor(
+        [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6],
+        device="cuda",
+    )
+    nibbles = torch.stack((packed & 0xF, packed >> 4), dim=-1).flatten(-2).long()
+    block_scale = torch.pow(2.0, scales.float() - 127).repeat_interleave(32, dim=-1)
+    dequantized = grid[nibbles] * block_scale
+    reference = weight.float()
+    error = (dequantized - reference).abs().max(dim=-1).values
+    # Rounding to the grid is off by at most half the widest step (2 * scale).
+    assert torch.all(error <= block_scale.amax(dim=-1) * 1.0 + 1e-6)
+    assert (
+        torch.nn.functional.cosine_similarity(
+            dequantized.flatten(), reference.flatten(), dim=0
+        )
+        > 0.98
+    )
+
+
+def test_online_mxfp4_is_opt_in_and_skips_the_first_and_last_layer(
+    monkeypatch,
+) -> None:
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(
+            hf_text_config=SimpleNamespace(num_hidden_layers=62)
+        )
+    )
+    monkeypatch.setattr(amd_muse_moe_runner, "get_current_vllm_config", lambda: config)
+    prefix = "model.layers.{}.feed_forward.experts"
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "")
+    assert not _online_mxfp4_applies(prefix.format(5))
+
+    monkeypatch.setattr(envs, "VLLM_ROCM_MUSE_MOE_ONLINE_QUANT", "mxfp4")
+    assert _online_mxfp4_applies(prefix.format(5))
+    assert not _online_mxfp4_applies(prefix.format(0))
+    assert not _online_mxfp4_applies(prefix.format(61))
+    assert issubclass(MuseSparkOnlineMXFP4FusedMoE, MuseSparkQuarkOCPMXFusedMoE)

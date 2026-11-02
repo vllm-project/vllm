@@ -56,6 +56,7 @@ from pydantic import (
     PrivateAttr,
     ValidationError,
     field_serializer,
+    field_validator,
     model_validator,
 )
 
@@ -71,7 +72,12 @@ from vllm.entrypoints.generate.base.protocol import (
 from vllm.entrypoints.serve.engine.protocol import OpenAIBaseModel
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
-from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
+from vllm.renderers import (
+    ChatParams,
+    TokenizeParams,
+    map_reasoning_effort,
+    merge_kwargs,
+)
 from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -80,6 +86,7 @@ from vllm.sampling_params import (
     RequestOutputKind,
     SamplingParams,
     StructuredOutputsParams,
+    ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
 
@@ -212,6 +219,31 @@ def _resolve_named_tool_choice(tool_name: str, tools: list[Any]) -> str:
     )
 
 
+# OpenAI's response allows only in_memory / 24h; older request SDKs sent "in-memory"
+PromptCacheRetention = Literal["in_memory", "24h"]
+
+
+class PromptCacheOptions(OpenAIBaseModel):
+    """OpenAI prompt_cache_options; defined here because openai>=2.25 lacks it"""
+
+    mode: Literal["implicit", "explicit"] = "implicit"
+    ttl: Literal["30m"] = "30m"
+    comparison_response_id: str | None = None
+
+
+class PromptCacheOptionsParam(PromptCacheOptions):
+    """Request-side variant; prewarm is request-only in OpenAI's schema."""
+
+    prewarm: bool | None = None
+
+    def to_response(self) -> PromptCacheOptions:
+        return PromptCacheOptions(
+            mode=self.mode,
+            ttl=self.ttl,
+            comparison_response_id=self.comparison_response_id,
+        )
+
+
 class ResponsesRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/responses/create
@@ -271,6 +303,7 @@ class ResponsesRequest(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"] | None = "disabled"
     user: str | None = None
     skip_special_tokens: bool | None = None
+    spaces_between_special_tokens: bool = True
     include_stop_str_in_output: bool = False
     presence_penalty: float | None = Field(
         default=None,
@@ -296,6 +329,27 @@ class ResponsesRequest(OpenAIBaseModel):
             "A key that was used to read from or write to the prompt cache."
             "Note: This field has not been implemented yet "
             "and vLLM will ignore it."
+        ),
+    )
+    prompt_cache_options: PromptCacheOptionsParam | None = Field(
+        default=None,
+        description=(
+            "Prompt-caching options. Accepted and echoed in the response; "
+            "vLLM does not act on them."
+        ),
+    )
+    prompt_cache_retention: PromptCacheRetention | None = Field(
+        default=None,
+        description=(
+            "Prompt cache retention policy. Accepted and echoed in the "
+            "response; vLLM does not act on it."
+        ),
+    )
+    safety_identifier: str | None = Field(
+        default=None,
+        description=(
+            "Stable identifier for the end user. Accepted and echoed in the "
+            "response; vLLM does not act on it."
         ),
     )
 
@@ -395,6 +449,7 @@ class ResponsesRequest(OpenAIBaseModel):
     stop: StopParam = []
     stop_token_ids: list[int] | None = []
     ignore_eos: bool = False
+    thinking_token_budget: ThinkingTokenBudget = None
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -421,10 +476,16 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     # --8<-- [end:responses-extra-params]
 
+    @field_validator("prompt_cache_retention", mode="before")
+    @classmethod
+    def _normalize_prompt_cache_retention(cls, value: object) -> object:
+        return "in_memory" if value == "in-memory" else value
+
     def build_chat_params(
         self,
         default_template: str | None,
         default_template_content_format: ChatTemplateContentFormatOption,
+        reasoning_effort_map: dict[str, str] | None = None,
     ) -> ChatParams:
         from .utils import should_continue_final_message
 
@@ -434,7 +495,9 @@ class ResponsesRequest(OpenAIBaseModel):
         continue_final = should_continue_final_message(self.input)
 
         reasoning = self.reasoning
-        reasoning_effort = None if reasoning is None else reasoning.effort
+        reasoning_effort = map_reasoning_effort(
+            None if reasoning is None else reasoning.effort, reasoning_effort_map
+        )
 
         extra_kwargs: dict[str, Any] = dict(
             add_generation_prompt=not continue_final,
@@ -584,9 +647,11 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=self.extract_structured_outputs(),
             logit_bias=self.logit_bias,
+            thinking_token_budget=self.thinking_token_budget,
             extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=skip_special_tokens,
+            spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
 
@@ -669,73 +734,105 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if not isinstance(item, dict):
-                processed_input.append(item)
+            normalized_item = cls._normalize_openresponses_input_item(item)
+
+            if not isinstance(normalized_item, dict):
+                processed_input.append(normalized_item)
                 continue
 
-            item_type = item.get("type")
+            item_type = normalized_item.get("type")
 
             if item_type == "function_call":
                 try:
-                    processed_input.append(ResponseFunctionToolCall(**item))
+                    processed_input.append(ResponseFunctionToolCall(**normalized_item))
                 except ValidationError:
                     logger.debug(
                         "Failed to parse function_call to ResponseFunctionToolCall, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(normalized_item)
 
             elif item_type == "reasoning":
-                if "id" not in item:
-                    item = {**item, "id": f"rs_{random_uuid()}"}
                 try:
-                    processed_input.append(ResponseReasoningItem(**item))
+                    processed_input.append(ResponseReasoningItem(**normalized_item))
                 except ValidationError:
                     logger.debug(
                         "Failed to parse reasoning to ResponseReasoningItem, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(normalized_item)
 
-            elif item_type == "message" and item.get("role") == "assistant":
-                content = item.get("content")
-                if not isinstance(content, list):
+            elif item_type == "message" and normalized_item.get("role") == "assistant":
+                if not isinstance(normalized_item.get("content"), list):
                     # String content is a valid EasyInputMessageParam,
                     # do not coerce it to ResponseOutputMessage
                     processed_input.append(item)
                     continue
 
-                original_item = item
-                item = dict(item)
-                if "id" not in item:
-                    item["id"] = f"msg_{random_uuid()}"
-                if "status" not in item:
-                    item["status"] = "completed"
-                # ResponseOutputText requires annotations
-                new_content = []
-                for c in content:
-                    if (
-                        isinstance(c, dict)
-                        and c.get("type") == "output_text"
-                        and "annotations" not in c
-                    ):
-                        c = {**c, "annotations": []}
-                    new_content.append(c)
-                item["content"] = new_content
                 try:
-                    processed_input.append(ResponseOutputMessage(**item))
+                    processed_input.append(ResponseOutputMessage(**normalized_item))
                 except ValidationError:
                     logger.debug(
                         "Failed to parse assistant message to ResponseOutputMessage, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(original_item)
+                    processed_input.append(item)
 
             else:
-                processed_input.append(item)
+                processed_input.append(normalized_item)
 
         data["input"] = processed_input
         return data
+
+    @staticmethod
+    def _normalize_openresponses_input_item(item: Any) -> Any:
+        """Normalize input items to bridge OpenResponses schema and openai-python.
+
+        The OpenResponses specification treats several fields as optional
+        (``id``, ``status`` on assistant/reasoning items; ``annotations``
+        on output_text content) that the openai-python SDK marks as
+        required.  Fill sensible defaults so payloads conforming to the
+        OpenResponses spec pass SDK validation.
+        """
+        if not isinstance(item, dict):
+            return item
+
+        item_type = item.get("type", "message")
+        should_fill = item_type == "reasoning" or (
+            item_type == "message" and item.get("role") == "assistant"
+        )
+        if not should_fill:
+            return item
+
+        normalized_item = item.copy()
+        # ``type`` is optional in the OpenResponses schema but load-bearing for
+        # SDK validation: without it a filled-in assistant item matches
+        # ``ItemReference`` in the input union and collapses to ``{"id": ...}``,
+        # silently dropping role/content. Stamp back the type we keyed off.
+        normalized_item["type"] = item_type
+        if normalized_item.get("id") in (None, ""):
+            prefix = "rs" if item_type == "reasoning" else "msg"
+            normalized_item["id"] = f"{prefix}_{random_uuid()}"
+        if normalized_item.get("status") in (None, ""):
+            normalized_item["status"] = "completed"
+        if item_type == "reasoning" and normalized_item.get("summary") is None:
+            normalized_item["summary"] = []
+
+        # OpenResponses schema treats ``annotations`` as optional for
+        # output_text content, but the openai SDK requires it.
+        if item_type == "message" and isinstance(normalized_item.get("content"), list):
+            normalized_content = []
+            for content_item in normalized_item["content"]:
+                if (
+                    isinstance(content_item, dict)
+                    and content_item.get("type") == "output_text"
+                    and "annotations" not in content_item
+                ):
+                    content_item = {**content_item, "annotations": []}
+                normalized_content.append(content_item)
+            normalized_item["content"] = normalized_content
+
+        return normalized_item
 
     @model_validator(mode="before")
     @classmethod
@@ -825,7 +922,11 @@ class ResponsesResponse(OpenAIBaseModel):
     max_tool_calls: int | None = None
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
+    prompt_cache_options: PromptCacheOptions | None = None
+    prompt_cache_key: str | None = None
+    prompt_cache_retention: PromptCacheRetention | None = None
     reasoning: Reasoning | None = None
+    safety_identifier: str | None = None
     service_tier: Literal["auto", "default", "flex", "scale", "priority"]
     status: ResponseStatus
     text: ResponseTextConfig | None = None
@@ -941,8 +1042,16 @@ class ResponsesResponse(OpenAIBaseModel):
             max_tool_calls=request.max_tool_calls,
             previous_response_id=request.previous_response_id,
             prompt=request.prompt,
+            prompt_cache_key=request.prompt_cache_key,
+            prompt_cache_options=(
+                request.prompt_cache_options.to_response()
+                if request.prompt_cache_options is not None
+                else None
+            ),
+            prompt_cache_retention=request.prompt_cache_retention,
             reasoning=request.reasoning,
             service_tier=request.service_tier,
+            safety_identifier=request.safety_identifier,
             presence_penalty=sampling_params.presence_penalty,
             frequency_penalty=sampling_params.frequency_penalty,
             status=status,

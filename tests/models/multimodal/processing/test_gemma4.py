@@ -14,6 +14,7 @@ from vllm.model_executor.model_loader import get_model_cls
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4ForConditionalGeneration,
     Gemma4ImagePixelInputs,
+    Gemma4ProcessingInfo,
 )
 from vllm.model_executor.models.interfaces import supports_multimodal
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -98,6 +99,7 @@ def test_compute_num_soft_tokens_does_not_exceed_max_soft_tokens(
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4ProcessingInfo)
 
     num_soft_tokens = processor.info._compute_num_soft_tokens(
         image_width=image_width,
@@ -190,6 +192,7 @@ def test_get_prompt_updates_respects_nested_max_soft_tokens(model_id: str):
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    assert isinstance(processor.info, Gemma4ProcessingInfo)
     image = PILImage.new("RGB", (1000, 1000), color="white")
     image_size = image.size
     mm_items = processor.info.parse_mm_data({"image": image})
@@ -397,7 +400,7 @@ def test_encoder_chunk_no_free_memory_falls_back_to_one():
 
 
 def _gemma4_for_encoder_cudagraph() -> Gemma4ForConditionalGeneration:
-    model = object.__new__(Gemma4ForConditionalGeneration)
+    model = object.__new__(Gemma4ForConditionalGeneration)  # type: ignore[type-abstract]
     vision_config = SimpleNamespace(
         patch_size=16, pooling_kernel_size=3, default_output_length=280
     )
@@ -447,3 +450,16 @@ def test_encoder_cudagraph_mixed_width_images_pack_by_padded_width():
     assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (70,)
     selected = model.select_encoder_cudagraph_items(mm_kwargs, [0, 1])
     assert selected[ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG] == (280,)
+
+
+@pytest.mark.parametrize(
+    "mm_processor_kwargs",
+    [{"max_soft_tokens": 560}, {"images_kwargs": {"max_soft_tokens": 560}}],
+)
+def test_encoder_cudagraph_config_respects_max_soft_tokens(mm_processor_kwargs):
+    model = _gemma4_for_encoder_cudagraph()
+    model.config.text_config = SimpleNamespace(hidden_size=8)
+    model.multimodal_config = SimpleNamespace(mm_processor_kwargs=mm_processor_kwargs)
+
+    config = model.get_encoder_cudagraph_config()
+    assert config.capture_axes == ((70, 140, 280, 560),)

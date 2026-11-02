@@ -351,6 +351,7 @@ class KimiK3KDAMetadataBuilder(GDNAttentionMetadataBuilder):
             layers,
             spec_query_len=1 + self.vllm_config.num_speculative_tokens,
             max_num_reqs=self.vllm_config.scheduler_config.max_num_seqs,
+            backend=layers[0].recoverssm_backend,
         )
         self.recoverssm_context = context
         return context
