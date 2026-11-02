@@ -52,7 +52,10 @@ from vllm.v1.attention.backends.mla.prefill.selector import (
 from vllm.v1.attention.backends.mla.prefill.trtllm_ragged import (
     is_cute_dsl_mla_prefill_supported,
 )
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.registry import (
+    AttentionBackendEnum,
+    register_backend,
+)
 from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
 from vllm.v1.kv_cache_interface import (
     KVQuantMode,
@@ -73,6 +76,12 @@ if current_platform.is_rocm():
     BACKENDS_TO_TEST.append(AttentionBackendEnum.ROCM_AITER_MLA)
 
 DEVICE_TYPE = current_platform.device_type
+
+if current_platform.is_xpu():
+    register_backend(
+        AttentionBackendEnum.FLASH_ATTN_MLA,
+        "vllm.v1.attention.backends.mla.flashattn_mla.XPUFlashAttnMLABackend",
+    )
 
 
 @pytest.mark.parametrize(
