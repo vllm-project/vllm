@@ -20,6 +20,7 @@ from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
 )
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     _compute_global_logsumexp,
+    _div_rn_by_scalar,
     rejection_sample,
 )
 
@@ -2029,3 +2030,36 @@ def test_precomputed_target_lse_matches_stats_pass(
     torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
     valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
     torch.testing.assert_close(sampled[valid], expected_sampled[valid], rtol=0, atol=0)
+
+
+@triton.jit
+def _div_rn_by_scalar_probe_kernel(x_ptr, temp_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    offsets = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    mask = offsets < n
+    out = _div_rn_by_scalar(
+        tl.load(x_ptr + offsets, mask=mask), tl.load(temp_ptr + tl.program_id(1))
+    )
+    tl.store(out_ptr + tl.program_id(1) * n + offsets, out, mask=mask)
+
+
+def test_div_rn_by_scalar_matches_ieee_division():
+    """On-load scaling must round x / T exactly as topp_cutoffs_lse and torch do,
+    or the kernels' log-probabilities drift from the cutoff kernel's log-sum-exp.
+    Every bf16 logit pattern of magnitude >= 2^-100, including signed zeros and
+    infinities, over temperatures that stress the reciprocal."""
+    x = torch.arange(-32768, 32768, dtype=torch.int32).to(torch.int16)
+    x = x.view(torch.bfloat16).float().cuda()
+    x = x[~x.isnan() & ((x.abs() >= 2.0**-100) | (x == 0))]
+    temps = torch.tensor(
+        [0.05, 0.3, 0.6, 0.7, 0.73, 0.95, 1.3, 2.0, 1 - 2**-24, 1 + 2**-23, 2 - 2**-23],
+        device="cuda",
+    )
+    temps = torch.cat([temps, torch.rand(53, device="cuda") * 3 + 1e-3])
+    out = torch.empty(len(temps), len(x), device="cuda")
+
+    _div_rn_by_scalar_probe_kernel[(triton.cdiv(len(x), 1024), len(temps))](
+        x, temps, out, len(x), BLOCK=1024
+    )
+
+    expected = x.unsqueeze(0) / temps.unsqueeze(1)
+    assert torch.equal(out.view(torch.int32), expected.view(torch.int32))

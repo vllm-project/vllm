@@ -37,10 +37,21 @@ def _scale_target_logits(
     if MASK_TARGET_LOGITS:
         thresh = tl.load(target_topp_thresh_ptr + logit_idx)
         logits = tl.where(logits >= thresh, logits, float("-inf"))
-    # The precise divide is costly per element; x / 1 needs none.
     if temp != 1.0:
-        logits = tl.div_rn(logits, temp)
+        logits = _div_rn_by_scalar(logits, temp)
     return logits
+
+
+@triton.jit
+def _div_rn_by_scalar(x, t):
+    # tl.div_rn(x, t) for one t across a block, at a fraction of its per-element
+    # cost: x * RN(1/t) corrected once by its exact FMA remainder rounds to
+    # nearest (Markstein) for |x| >= 2^-100. A zero remainder keeps the sign of
+    # zero and infinities pass through.
+    r = tl.div_rn(1.0, t)
+    q = x * r
+    e = tl.fma(-q, t, x)
+    return tl.where((e == 0.0) | (tl.abs(q) == float("inf")), q, tl.fma(e, r, q))
 
 
 @triton.jit
@@ -1488,6 +1499,8 @@ def rejection_sample(
                 SCALE_TARGET_LOGITS=scale_target_logits,
                 target_topp_thresh_ptr=target_topp_thresh,
                 MASK_TARGET_LOGITS=target_topp_thresh is not None,
+                # Scaling on load needs more registers; 4 warps would cut occupancy.
+                num_warps=8 if scale_target_logits else 4,
             )
         else:
             local_residual_mass = None
