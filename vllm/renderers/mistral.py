@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Any, cast
+from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -15,7 +15,6 @@ from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
-from .hf import _convert_developer_to_system
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
@@ -29,16 +28,6 @@ def safe_apply_chat_template(
     **kwargs,
 ) -> str | list[int]:
     from mistral_common.exceptions import MistralCommonException
-
-    if any(msg["role"] == "developer" for msg in messages):
-        messages = cast(
-            list[ChatCompletionMessageParam],
-            _convert_developer_to_system(cast(list[ConversationMessage], messages)),
-        )
-        logger.info_once(
-            "Mistral tokenizers do not support the 'developer' message role. "
-            "Converting developer messages to 'system' role."
-        )
 
     try:
         return tokenizer.apply_chat_template(messages, **kwargs)
