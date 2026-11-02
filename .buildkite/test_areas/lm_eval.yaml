@@ -924,6 +924,7 @@ steps:
 
 - label: ":nvidia: (B200) [Nightly] LM Eval Humming Activation FP8/INT8 TEMPORARY"
   key: lm-eval-humming-b200-act
+  automatic_shard: true
   optional: true
   timeout_in_minutes: 50
   device: b200-k8s
