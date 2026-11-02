@@ -768,3 +768,74 @@ def test_chat_empty_string_token_is_counted(
     assert residual == pytest.approx(0.0, abs=tick / 1000), (
         f"{client}: (latency - ttft) - sum(itl) = {residual!r}"
     )
+
+
+def _reasoning_chunk(field: str, text: str) -> bytes:
+    choice = {"index": 0, "delta": {field: text}}
+    return _sse(
+        {"id": "cmpl-test", "object": "chat.completion.chunk", "choices": [choice]}
+    )
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+@pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
+def test_chat_reasoning_chunk_is_streamed_output(
+    monkeypatch: pytest.MonkeyPatch, client: str, reasoning_field: str
+) -> None:
+    """Reasoning deltas count toward TTFT under either field name.
+
+    vLLM streams ``reasoning``; SGLang streams ``reasoning_content`` and omits
+    ``content`` from reasoning deltas.
+    """
+    tick = 1.0
+    clock = _ScriptedClock(tick=tick)
+    n_tokens = 4
+
+    chunks = [
+        (0.0, _role_chunk()),
+        (0.0, _reasoning_chunk(reasoning_field, "think")),
+        (0.0, _reasoning_chunk(reasoning_field, "ing")),
+        (0.0, _token_chunk(0, chat=True)),
+        (0.0, _token_chunk(1, chat=True)),
+        (0.0, _usage_chunk(n_tokens)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, n_tokens, clock=clock)
+
+    assert output.success, output.error
+    assert len(output.itl) == n_tokens - 1
+
+    # Clock read 0 is start_time (1000.0).
+    # Clock read 1 is role chunk (1001.0); skipped because delta carries role.
+    # Clock read 2 is the first reasoning chunk (1002.0); sets TTFT = 2 * tick.
+    expected_ttft = 2.0 * tick
+    assert output.ttft == pytest.approx(expected_ttft, abs=tick / 1000), (
+        f"{client}/{reasoning_field}: TTFT {output.ttft} should be measured to the "
+        f"first reasoning chunk ({expected_ttft}), not the first content chunk "
+        f"({4.0 * tick})"
+    )
+
+    residual = (output.latency - output.ttft) - sum(output.itl)
+    assert residual == pytest.approx(0.0, abs=tick / 1000), (
+        f"{client}/{reasoning_field}: (latency - ttft) - sum(itl) = {residual!r}"
+    )
+
+
+@pytest.mark.parametrize("client", ["packaged", "legacy"])
+@pytest.mark.parametrize("reasoning_field", ["reasoning", "reasoning_content"])
+def test_chat_reasoning_only_stream_succeeds(
+    monkeypatch: pytest.MonkeyPatch, client: str, reasoning_field: str
+) -> None:
+    """A request that stops while still reasoning, e.g. at max_tokens, succeeds."""
+    n_tokens = 2
+    chunks = [
+        (0.0, _role_chunk()),
+        (0.0, _reasoning_chunk(reasoning_field, "think")),
+        (0.0, _reasoning_chunk(reasoning_field, "ing")),
+        (0.0, _usage_chunk(n_tokens)),
+        (0.0, b"data: [DONE]\n\n"),
+    ]
+    output = _run_chat(monkeypatch, client, chunks, n_tokens)
+
+    assert output.success, f"{client}/{reasoning_field}: {output.error}"
+    assert len(output.itl) == n_tokens - 1
