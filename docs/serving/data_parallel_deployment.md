@@ -155,4 +155,15 @@ For example, a hybrid endpoint managing global ranks `2` and `3` accepts header 
 
 Local indices take precedence when the ranges overlap, preserving existing callers. For an endpoint managing global ranks `1` and `2`, header `1` still selects local index `1` (global rank `2`). Values outside both ranges are rejected; this header cannot route a request to an engine outside the endpoint's managed group.
 
+!!! warning "Local-index compatibility is not strict global-rank validation"
+
+    A request sent to the wrong endpoint is still accepted if its header is a
+    valid local index there. For example, an endpoint managing global rank `2`
+    accepts header `0`, even if the router intended global rank `0`.
+
+    Uneven per-node DP sizes can also produce overlapping local and global
+    ranges. In that case, a router intending a managed global rank may select a
+    different engine because local indices take precedence. Routers must account
+    for this interpretation and validate their endpoint/rank mapping.
+
 With internal load balancing, the Python API server continues to accept ranks in `[0, data_parallel_size)`. The Rust frontend interprets the header as a global rank.
