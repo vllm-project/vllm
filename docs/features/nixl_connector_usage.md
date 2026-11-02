@@ -121,6 +121,36 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-ports 8200
 ```
 
+### Resetting the Prefix Cache Through the Proxy
+
+The toy proxy exposes `POST /reset_prefix_cache` when started with
+`VLLM_SERVER_DEV_MODE=1`. Set the same variable before starting every prefiller
+and decoder so their native reset routes are also available. The route is
+disabled by default and is intended for a trusted development environment.
+
+If the backends use an API key, set `OPENAI_API_KEY` in the proxy's environment.
+The reset request must then carry the same Bearer token:
+
+```bash
+curl -X POST http://localhost:8192/reset_prefix_cache \
+  -H "Authorization: Bearer $OPENAI_API_KEY"
+```
+
+The proxy resets every configured prefiller and decoder, without advancing the
+round-robin iterators. Both `reset_running_requests` and `reset_external` default
+to `false` and are forwarded as query parameters. Use `reset_external=true` only
+when connector-managed cache tiers should also be reset; the default already
+includes each P/D engine's local prefix cache.
+
+The response contains `success` and a `results` list with each backend's `role`,
+`id` (its zero-based index in that role's configured list), `status`, and
+`success`. Overall success requires every backend to succeed. A backend that
+cannot release its cache produces HTTP 200 with `success=false`. An unavailable,
+non-200, or malformed backend response produces HTTP 502 and an `error` in that
+backend's result. Requests time out after 30 seconds, do not follow redirects,
+and are not automatically retried. Partial resets are not rolled back; stop
+generation traffic first if a fully cold cache is required.
+
 ## Environment Variables
 
 - `VLLM_NIXL_SIDE_CHANNEL_PORT`: Port for NIXL handshake communication
