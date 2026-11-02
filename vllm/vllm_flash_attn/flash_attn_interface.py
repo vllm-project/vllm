@@ -216,6 +216,7 @@ def flash_attn_varlen_func(
     dynamic_causal: "torch.Tensor | None" = None,
     gather_kv_indices=None,
     gather_kv_valid_length=None,
+    gather_kv_query_group_size: int = 1,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -295,6 +296,9 @@ def flash_attn_varlen_func(
         gather_kv_indices: (total_q, k) int32 KV rows per query token, `-1` padded,
             k a multiple of 128. Requires q_v, excludes block_table. FA4 only.
         gather_kv_valid_length: (total_q,) int32, real entries per row. FA4 only.
+        gather_kv_query_group_size: 2, 4 or 8 consecutive queries packed into each
+            128-head row of q/q_v, whose gather_kv_indices are the union of their
+            top-k encoded as `row | (membership << 24)`. FA4 only.
 
     Return:
         out: (total, nheads, headdim).
@@ -318,7 +322,9 @@ def flash_attn_varlen_func(
         f"got fa_version={fa_version}"
     )
     assert fa_version == 4 or (
-        gather_kv_indices is None and gather_kv_valid_length is None
+        gather_kv_indices is None
+        and gather_kv_valid_length is None
+        and gather_kv_query_group_size == 1
     ), f"gather_kv_* is only supported by FA4, got fa_version={fa_version}"
 
     if softmax_scale is None:
@@ -474,6 +480,7 @@ def flash_attn_varlen_func(
             page_table=block_table,
             gather_kv_indices=gather_kv_indices,
             gather_kv_valid_length=gather_kv_valid_length,
+            gather_kv_query_group_size=gather_kv_query_group_size,
             softmax_scale=softmax_scale,
             causal=causal,
             dynamic_causal=dynamic_causal,
