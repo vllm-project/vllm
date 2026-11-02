@@ -149,13 +149,13 @@ def unpad_and_flat_audio_features(
     return torch.cat(unpadded_features, dim=-1)
 
 
-def check_interleaved_audio_video(
+def maybe_contains_interleaved_audio_video(
     is_video: torch.Tensor,
     is_audio: torch.Tensor,
     num_video: int,
     num_audio: int,
 ) -> bool:
-    """Check if video and audio positions are interleaved in any per-video span.
+    """Check if any spans contain contiguous audio & video runs.
 
     For use_audio_in_video=True, each video placeholder is expanded into one
     local span containing only video/audio pad tokens, bounded by non-pad
@@ -164,6 +164,10 @@ def check_interleaved_audio_video(
     form one global dense range; otherwise multi-video requests can be
     misclassified as non-interleaved because of the boundary tokens between
     videos.
+
+    NOTE: A chunked prefill step may only see part of a span (e.g. an audio
+    tail followed by a video head), so we count any span containing both modalities
+    as interleaved.
     """
     if num_video == 0 or num_audio == 0:
         return False
@@ -179,16 +183,8 @@ def check_interleaved_audio_video(
             continue
 
         span = va_pos[span_start:span_end]
-        span_is_video = is_video[span]
-        span_is_audio = is_audio[span]
-        if span_is_video.any() and span_is_audio.any():
-            video_offsets = span_is_video.nonzero(as_tuple=True)[0]
-            audio_offsets = span_is_audio.nonzero(as_tuple=True)[0]
-            if (
-                video_offsets[0].item() < audio_offsets[-1].item()
-                and audio_offsets[0].item() < video_offsets[-1].item()
-            ):
-                return True
+        if is_video[span].any() and is_audio[span].any():
+            return True
 
         span_start = span_end
 
@@ -1552,7 +1548,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             num_video = is_video.sum().item()
             num_audio = is_audio.sum().item()
 
-        if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
+        if maybe_contains_interleaved_audio_video(
+            is_video, is_audio, num_video, num_audio
+        ):
             inputs_embeds = self._embed_text_input_ids(
                 input_ids,
                 self.get_language_model().embed_input_ids,

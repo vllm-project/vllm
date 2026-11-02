@@ -15,7 +15,7 @@ import pytest
 import torch
 
 from vllm.model_executor.models.qwen2_5_omni_thinker import (
-    check_interleaved_audio_video,
+    maybe_contains_interleaved_audio_video,
     merge_interleaved_embeddings,
 )
 from vllm.multimodal.utils import set_mm_embedding_modality
@@ -109,17 +109,17 @@ def make_interleaved_seq(
 
 
 # ---------------------------------------------------------------------------
-# Tests for check_interleaved_audio_video
+# Tests for maybe_contains_interleaved_audio_video
 # ---------------------------------------------------------------------------
 
 
-class TestCheckInterleavedAudioVideo:
+class TestMaybeContainsInterleavedAudioVideo:
     def test_non_interleaved_audio_then_video(self):
         """Audio entirely before video → not interleaved."""
         input_ids, is_multimodal = make_token_seq(5, 0, 4)
         is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
         is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
-        assert not check_interleaved_audio_video(
+        assert not maybe_contains_interleaved_audio_video(
             is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
         )
 
@@ -128,7 +128,7 @@ class TestCheckInterleavedAudioVideo:
         input_ids, is_multimodal = make_token_seq(5, 4, 6)
         is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
         is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
-        assert not check_interleaved_audio_video(
+        assert not maybe_contains_interleaved_audio_video(
             is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
         )
 
@@ -137,7 +137,7 @@ class TestCheckInterleavedAudioVideo:
         input_ids, is_multimodal = make_token_seq(0, 0, 6)
         is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
         is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
-        assert not check_interleaved_audio_video(
+        assert not maybe_contains_interleaved_audio_video(
             is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
         )
 
@@ -146,7 +146,18 @@ class TestCheckInterleavedAudioVideo:
         input_ids, is_multimodal = make_interleaved_seq([4, 4], [3, 3])
         is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
         is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
-        assert check_interleaved_audio_video(
+        assert maybe_contains_interleaved_audio_video(
+            is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
+        )
+
+    @pytest.mark.parametrize("video_first", [False, True])
+    def test_chunk_of_interleaved_span(self, video_first: bool):
+        """Ensure a chunk with only part of an interleaved span still counts."""
+        audio, video = [AUDIO_TOKEN_ID] * 3, [VIDEO_TOKEN_ID] * 4
+        input_ids = torch.tensor(video + audio if video_first else audio + video)
+        is_video = input_ids == VIDEO_TOKEN_ID
+        is_audio = input_ids == AUDIO_TOKEN_ID
+        assert maybe_contains_interleaved_audio_video(
             is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
         )
 
@@ -164,7 +175,7 @@ class TestCheckInterleavedAudioVideo:
         is_multimodal = (input_ids == VIDEO_TOKEN_ID) | (input_ids == AUDIO_TOKEN_ID)
         is_video = is_multimodal & (input_ids == VIDEO_TOKEN_ID)
         is_audio = is_multimodal & (input_ids == AUDIO_TOKEN_ID)
-        assert check_interleaved_audio_video(
+        assert maybe_contains_interleaved_audio_video(
             is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
         )
 
@@ -175,7 +186,7 @@ class TestCheckInterleavedAudioVideo:
         each has [audio][image][video] in separate blocks with text between them.
         Across the batch, audio from request N falls between video blocks of
         request N and request N+1, causing the global ranges to overlap.
-        check_interleaved_audio_video must return False (not a false positive).
+        maybe_contains_interleaved_audio_video must return False (not a false positive).
         """
         # Build one request: [text][audio*5][text][image*4][text][video*6][text]
         single_ids, _ = make_token_seq(5, 4, 6)
@@ -189,7 +200,7 @@ class TestCheckInterleavedAudioVideo:
         )
         is_video = is_multimodal & (batched_ids == VIDEO_TOKEN_ID)
         is_audio = is_multimodal & (batched_ids == AUDIO_TOKEN_ID)
-        assert not check_interleaved_audio_video(
+        assert not maybe_contains_interleaved_audio_video(
             is_video, is_audio, is_video.sum().item(), is_audio.sum().item()
         ), "Batched non-interleaved requests should not be detected as interleaved"
 
@@ -391,6 +402,30 @@ class TestEmbedInputIds:
         assert result[audio_pos].allclose(torch.full((audio_n, hidden), audio_val)), (
             "Interleaved: audio positions should get audio embeddings"
         )
+
+    def test_chunked_audio_tail_then_video_head(self):
+        """Ensure an audio-tail, video-head chunk puts embeddings on their slots."""
+        HIDDEN = 8
+        NUM_VIDEO = 3
+        VIDEO_VAL = 20.0
+        NUM_AUDIO = 4
+        AUDIO_VAL = 10.0
+        input_ids = torch.tensor(
+            [AUDIO_TOKEN_ID] * NUM_AUDIO + [VIDEO_TOKEN_ID] * NUM_VIDEO
+        )
+        is_multimodal = torch.ones(len(input_ids), dtype=torch.bool)
+        mm_embeds = [
+            _mm_embed((NUM_VIDEO, HIDDEN), VIDEO_VAL, "video"),
+            _mm_embed((NUM_AUDIO, HIDDEN), AUDIO_VAL, "audio"),
+        ]
+
+        model, _ = make_mock_model(HIDDEN)
+        result = model.embed_input_ids(
+            input_ids, mm_embeds, is_multimodal=is_multimodal
+        )
+        # Ensure audio the audio / video embeds are correctly placed
+        assert torch.all(result[:NUM_AUDIO] == AUDIO_VAL)
+        assert torch.all(result[NUM_AUDIO:] == VIDEO_VAL)
 
 
 # ---------------------------------------------------------------------------
