@@ -7,7 +7,7 @@ from tests.models.utils import GenerateModelInfo
 
 from .ppl_utils import vqa_ppl_test
 
-MODELS = [
+MODELS: List[Tuple[GenerateModelInfo, int, Dict[str, Any]]] = [
     (
         GenerateModelInfo("Qwen/Qwen2-VL-2B-Instruct", hf_ppl=9.810060501098633),
         28,
