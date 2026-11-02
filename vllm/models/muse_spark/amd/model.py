@@ -1210,8 +1210,6 @@ class MuseSpark1xForCausalLM(LlamaForCausalLM, SupportsLoRA, MixtureOfExperts):
             "Materialized residual-path constants for %d gated residual connections",
             n_gates,
         )
-
-    def process_weights_after_loading(self) -> None:
         # The experts are in their kernel layout only after the per-layer
         # quant finalize, which runs between load_weights and this hook.
         maybe_attach_mono(self)
