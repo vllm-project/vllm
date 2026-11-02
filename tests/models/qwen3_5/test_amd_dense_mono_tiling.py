@@ -113,8 +113,7 @@ def test_128_plan():
     assert (g1.qg_cta, g1.qg_pass, g1.qkvz_passes) == (8, 4, 2)
     assert (g2.qg_cta, g2.qg_pass, g2.qkvz_passes) == (4, 4, 1)
     assert T.gdn_passes(g1, 4) == ((0, 24),)
-    assert T.gdn_passes(g1, 5) == ((0, 18), (18, 12))
-    assert T.gdn_passes(g1, 8) == ((0, 24), (24, 24))
+    assert T.gdn_passes(g1, 8) == ((0, 48),)
     assert T.gdn_passes(g2, 8) == ((0, 24),)
     assert T.gdn_passes(g2, 9) == ((0, 15), (15, 12))
     assert T.gdn_passes(g2, 16) == ((0, 24), (24, 24))
@@ -269,11 +268,22 @@ def test_gdn_tasks_once_and_passes_closed(grid, tp):
     and a pass's tokens are all of their tasks on every CTA: the hand-offs a
     task waits on (its key head's q / k, its value head's o, all of its token)
     are produced in the same pass, so no CTA waits on a later pass."""
-    geo = T.Geo(tp, grid)
+    _check_gdn(T.Geo(tp, grid), tp, grid)
+
+
+@pytest.mark.parametrize("cap", [6, 12, 18])
+def test_gdn_passes_closed_at_smaller_caps(monkeypatch, cap):
+    """The same at TP1 on 128 CTAs with a pass cap that forces passes."""
+    monkeypatch.setitem(T.GDN_PASS_TASKS, 1, cap)
+    assert len(T.gdn_passes(T.Geo(1, 128), 8)) > 1
+    _check_gdn(T.Geo(1, 128), 1, 128)
+
+
+def _check_gdn(geo, tp, grid):
     for s in range(1, T.max_tokens(tp) + 1):
         passes = T.gdn_passes(geo, s)
         assert sum(n for _, n in passes) == T.n_tasks(geo, s)
-        assert all(n <= T.GDN_PASS_TASKS for _, n in passes)
+        assert all(n <= T.GDN_PASS_TASKS[tp] for _, n in passes)
         got, pass_of_token = Counter(), {}
         for p, (k0, nk) in enumerate(passes):
             for b in range(grid):

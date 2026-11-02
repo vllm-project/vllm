@@ -40,7 +40,7 @@ every task is computed as on 256 CTAs:
 | --- | --- | --- | --- |
 | K1 front, K2 o_proj, TP2 out_proj | 160 owners of 32 columns | CTAs 0..159 | second pass on CTAs 0..31 |
 | K1 in_proj_qkvz | 1024 groups of 16 rows | 4 a CTA, 1 pass | 8 a CTA, 2 passes (TP2: 4, 1 pass) |
-| K1 GDN | 768 S tasks of 8 state rows | 3 S a CTA, 1 pass | 6 S a CTA, passes of whole tokens above 24 tasks |
+| K1 GDN | 768 S tasks of 8 state rows | 3 S a CTA, 1 pass | 6 S a CTA, 1 pass (TP2: passes of whole tokens above 24 tasks) |
 | K2 gate_up | 1088 groups of 16 columns | 4 whole + 4 columns | 8 whole + 8 columns |
 | K2 down | 320 groups of 16 rows | 1 whole + 4 rows, 1 pass | 2 whole + 8 rows, 2 passes |
 

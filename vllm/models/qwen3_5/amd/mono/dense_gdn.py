@@ -36,8 +36,8 @@ of the heads (``Geo``) on the full input; nothing crosses ranks. One launch,
 
 The CTA counts above are the 256-CTA grid (``K1Build.grid``, MI355X). On 128
 CTAs (MI350P, ``tiling``) a CTA takes 8 [4] qkvz groups, at TP1 in two passes
-of 4; 6 S [3 S] GDN tasks, in passes of whole tokens when more than 24
-(``tiling.gdn_passes``: S > 4 [S > 8]); and front's / out_proj's owners 128 +
+of 4; 6 S [3 S] GDN tasks, in one pass at TP1 and in passes of whole tokens
+above 24 tasks at TP2 (``tiling.gdn_passes``: S > 8); and front's / out_proj's owners 128 +
 b (b < 32) in a second pass. Each task's arithmetic is the same at either
 width.
 

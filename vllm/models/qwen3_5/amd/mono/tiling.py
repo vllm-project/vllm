@@ -64,11 +64,11 @@ NV = 48
 BA_E = 8  # K eighths of an in_proj_ba group
 VCH = 8  # state rows a GDN task
 NVCH = HD // VCH  # 16 tasks a value head
-# The most GDN tasks a CTA runs in one pass: the widest single-pass load of a
-# validated 256-CTA build (TP1 at 8 rows, TP2 at 16). More tasks than this go in
-# passes, so a pass's registers (the state rows in flight) and LDS stay within
-# what that build uses.
-GDN_PASS_TASKS = 24
+# The most GDN tasks a CTA runs in one pass, by TP; more go in passes. TP1: 48,
+# so every width up to 8 rows runs one pass on 128 CTAs (247 VGPRs at 8 rows, no
+# spills; faster than two passes). TP2: 24, the widest single pass of the
+# 256-CTA build, so the 128-CTA TP2 builds keep its register footprint.
+GDN_PASS_TASKS = {1: 48, 2: 24}
 
 
 def max_tokens(tp: int) -> int:
@@ -361,14 +361,15 @@ def n_tasks(geo: Geo, s: int) -> int:
 def gdn_passes(geo: Geo, s: int) -> tuple[tuple[int, int], ...]:
     """The CTA's GDN tasks in passes, (first task, tasks) each.
 
-    One pass when all of them fit ``GDN_PASS_TASKS``. Otherwise a pass is a run
+    One pass when all of them fit ``GDN_PASS_TASKS[tp]``. Otherwise a pass is a run
     of whole tokens: each token is ``tpt / grid`` consecutive tasks on every CTA
     (``tpt`` a multiple of the grid), and every hand-off a task waits on (its key
     head's q / k, its value head's o) comes from a task of the same token, so all
     CTAs produce what a pass waits on in that pass. The tokens are split as
     evenly as the passes allow."""
     nt = n_tasks(geo, s)
-    if nt <= GDN_PASS_TASKS:
+    cap = GDN_PASS_TASKS[geo.tp]
+    if nt <= cap:
         return ((0, nt),)
     if geo.tpt % geo.grid:
         raise ValueError(
@@ -376,9 +377,9 @@ def gdn_passes(geo: Geo, s: int) -> tuple[tuple[int, int], ...]:
             f" need passes, and a token's {geo.tpt} tasks do not divide over the CTAs"
         )
     tpc = geo.tpt // geo.grid
-    if tpc > GDN_PASS_TASKS:
+    if tpc > cap:
         raise ValueError(f"K1: one token's {tpc} tasks a CTA exceed a pass")
-    n = _cdiv(s, GDN_PASS_TASKS // tpc)
+    n = _cdiv(s, cap // tpc)
     out, t0 = [], 0
     for p in range(n):
         tokens = s // n + (p < s % n)
