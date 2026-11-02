@@ -166,6 +166,38 @@ def test_reshape_and_cache(
         torch.testing.assert_close(value_cache, cloned_value_cache)
 
 
+@pytest.mark.parametrize(
+    "num_heads, head_size, kv_cache_dtype",
+    [(32, 192, "auto"), (32, 256, "auto"), (64, 256, "fp8")],
+)
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_reshape_and_cache_many_heads(
+    kv_cache_factory,
+    num_heads: int,
+    head_size: int,
+    kv_cache_dtype: str,
+    dtype: torch.dtype,
+) -> None:
+    """Regression test for https://github.com/vllm-project/vllm/issues/62697.
+
+    These shapes have more 16-byte chunks per token (num_heads * head_size / x,
+    x = 16 // cache element size) than the kernel's 512 threads per token.
+    """
+    test_reshape_and_cache(
+        kv_cache_factory,
+        num_tokens=42,
+        num_heads=num_heads,
+        head_size=head_size,
+        block_size=16,
+        num_blocks=128,
+        dtype=dtype,
+        seed=0,
+        device=CUDA_DEVICES[0],
+        kv_cache_dtype=kv_cache_dtype,
+    )
+
+
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
 @pytest.mark.parametrize("num_heads", NUM_HEADS)
 @pytest.mark.parametrize("head_size", HEAD_SIZES)
