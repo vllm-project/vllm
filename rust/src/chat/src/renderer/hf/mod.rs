@@ -676,31 +676,29 @@ fn to_template_string_content(
     match content {
         ChatContent::Text(text) => Ok(text.clone()),
         ChatContent::Parts(parts) => {
-            let mut out = String::new();
-            for part in parts {
-                match part {
-                    ChatContentPart::Text { text } => out.push_str(text),
-                    ChatContentPart::ImageUrl { .. } => {
-                        let image_token = multimodal
-                            .and_then(|multimodal| multimodal.image_token.as_ref())
-                            .ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
-                        out.push_str(image_token);
-                    }
-                    ChatContentPart::VideoUrl { .. } => {
-                        let video_token = multimodal
-                            .and_then(|multimodal| multimodal.video_token.as_ref())
-                            .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
-                        out.push_str(video_token);
-                    }
+            // Same as Python with `--interleave-mm-strings`: each part becomes one segment,
+            // media as its modality's placeholder in place, empty text parts are dropped, and
+            // the segments are joined with "\n". Python's default moves placeholders to the
+            // front instead.
+            let segments: Vec<&str> = parts
+                .iter()
+                .filter(|part| !part.is_empty_text())
+                .map(|part| match part {
+                    ChatContentPart::Text { text } => Ok(text.as_str()),
+                    ChatContentPart::ImageUrl { .. } => multimodal
+                        .and_then(|multimodal| multimodal.image_token.as_deref())
+                        .ok_or(Error::UnsupportedMultimodalContent("image_url")),
+                    ChatContentPart::VideoUrl { .. } => multimodal
+                        .and_then(|multimodal| multimodal.video_token.as_deref())
+                        .ok_or(Error::UnsupportedMultimodalContent("video_url")),
                     ChatContentPart::InputAudio { .. } | ChatContentPart::AudioUrl { .. } => {
-                        let audio_token = multimodal
-                            .and_then(|multimodal| multimodal.audio_token.as_ref())
-                            .ok_or(Error::UnsupportedMultimodalContent("audio"))?;
-                        out.push_str(audio_token);
+                        multimodal
+                            .and_then(|multimodal| multimodal.audio_token.as_deref())
+                            .ok_or(Error::UnsupportedMultimodalContent("audio"))
                     }
-                }
-            }
-            Ok(out)
+                })
+                .collect::<Result<_>>()?;
+            Ok(segments.join("\n"))
         }
     }
 }
@@ -935,7 +933,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("a<image>b".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("a\n<image>\nb".to_string()));
     }
 
     #[test]
@@ -947,7 +945,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rendered.prompt, Prompt::Text("a<video>b".to_string()));
+        assert_eq!(rendered.prompt, Prompt::Text("a\n<video>\nb".to_string()));
     }
 
     #[test]
@@ -961,7 +959,7 @@ mod tests {
 
         assert_eq!(
             rendered.prompt,
-            Prompt::Text("a<audio><audio>b".to_string())
+            Prompt::Text("a\n<audio>\n<audio>\nb".to_string())
         );
     }
 
@@ -1234,14 +1232,19 @@ mod tests {
 
     #[test]
     fn chat_template_flattens_text_parts_for_string_templates() {
-        let request = sample_request(vec![ChatMessage::user(vec![
-            ChatContentPart::text("hello"),
-            ChatContentPart::text(" world"),
-        ])]);
-
-        let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
-
-        assert_eq!(rendered, "hello world");
+        for (parts, expected) in [
+            (vec!["hello", " world"], "hello\n world"),
+            (vec!["", "hello", "", "world", ""], "hello\nworld"),
+            (vec!["hello\n", "world"], "hello\n\nworld"),
+            (vec!["hello"], "hello"),
+            (vec![""], ""),
+        ] {
+            let request = sample_request(vec![ChatMessage::user(
+                parts.into_iter().map(ChatContentPart::text).collect::<Vec<_>>(),
+            )]);
+            let rendered = render(Some("{{ messages[0].content }}"), &request).unwrap();
+            assert_eq!(rendered, expected);
+        }
     }
 
     #[test]
@@ -1469,7 +1472,7 @@ mod tests {
         .unwrap()
         .prompt;
 
-        assert_eq!(rendered, Prompt::Text("hello world".to_string()));
+        assert_eq!(rendered, Prompt::Text("hello\n world".to_string()));
     }
 
     #[test]
@@ -1966,7 +1969,7 @@ mod tests {
 
         expect![[r#"
             Text(
-                "<｜begin▁of▁sentence｜>You are a helpful assistant.<|BOT|>user\nDescribe this image:<im_patch>What is in it?<|EOT|><|BOT|>assistant\n<think>\n",
+                "<｜begin▁of▁sentence｜>You are a helpful assistant.<|BOT|>user\nDescribe this image:\n<im_patch>\nWhat is in it?<|EOT|><|BOT|>assistant\n<think>\n",
             )
         "#]]
         .assert_debug_eq(&rendered.prompt);
