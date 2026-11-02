@@ -234,11 +234,13 @@ class MooncakeStoreScheduler:
             return None
         return self.client.prefetch(request.num_tokens, request.block_hashes)
 
-    def cancel_lookup_prefetch(self, request: Request) -> None:
-        """Cancel a prefetch whose request finished before its first probe."""
+    def release_lookup(self, request: Request) -> None:
+        """Cancel a finished request's lookup, adopted or not, so a queued
+        one never occupies the lookup executor."""
         if (prefetched := request.kv_preschedule_handle) is not None:
             request.kv_preschedule_handle = None
             prefetched.future.cancel()
+        self.client.discard(request.request_id)
 
     def get_num_new_matched_tokens(
         self,

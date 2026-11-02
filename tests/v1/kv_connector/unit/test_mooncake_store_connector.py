@@ -849,6 +849,51 @@ def test_admission_lookup_retains_completed_result_until_scheduled():
         connector.shutdown()
 
 
+@pytest.mark.parametrize("all_groups", [False, True])
+def test_finished_request_cancels_queued_lookup_before_next_step(all_groups):
+    """An aborted request's lookup queued behind a slow RPC must never run,
+    even if the executor frees up before the next build_connector_meta."""
+    vllm_config = create_vllm_config(
+        kv_connector="MooncakeStoreConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={"lookup_async": True},
+    )
+    with (
+        set_current_vllm_config(vllm_config),
+        patch.object(worker, "make_zmq_socket") as make_socket,
+    ):
+        connector = mooncake_store_connector.MooncakeStoreConnector(
+            vllm_config, KVConnectorRole.SCHEDULER, _make_kv_cache_config()
+        )
+    sched = connector.connector_scheduler
+    assert sched is not None
+    client = sched.client
+    sock = make_socket.return_value
+    gate, started = threading.Event(), threading.Event()
+    sock.send_multipart.side_effect = lambda *args, **kwargs: started.set()
+    sock.recv.side_effect = _gated_recv(gate, 32)
+    request = SimpleNamespace(request_id="dead", kv_preschedule_handle=None)
+    try:
+        assert client.lookup("busy", 48, [], non_block=True) is None
+        assert started.wait(5)
+        assert client.lookup(request.request_id, 48, [], non_block=True) is None
+
+        if all_groups:
+            finished = connector.request_finished_all_groups(request, ([],))
+        else:
+            finished = connector.request_finished(request, [])
+        assert finished == (False, None)
+
+        gate.set()
+        assert client.lookup("busy", 48, []).hit_length == 32
+        client.executor.submit(lambda: None).result(timeout=5)
+        assert sock.send_multipart.call_count == 1
+        assert request.request_id not in client._lookups
+    finally:
+        gate.set()
+        connector.shutdown()
+
+
 def _make_lookup_client(extra_config=None):
     vllm_config = create_vllm_config(
         kv_connector="MooncakeStoreConnector",

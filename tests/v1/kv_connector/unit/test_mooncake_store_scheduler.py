@@ -1025,7 +1025,7 @@ def test_admission_lookup_skips_ineligible_requests(option):
     assert scheduler.client.prefetched == []
 
 
-def test_unadopted_admission_lookup_is_cancelled_when_request_finishes():
+def test_lookup_is_released_when_request_finishes():
     """A request aborted while waiting never reaches the scheduler probe."""
     scheduler = _make_bare_scheduler()
     scheduler.lookup_async = True
@@ -1034,10 +1034,11 @@ def test_unadopted_admission_lookup_is_cancelled_when_request_finishes():
     handle = scheduler.start_lookup_prefetch(request)
     request.kv_preschedule_handle = handle
 
-    scheduler.cancel_lookup_prefetch(request)
+    scheduler.release_lookup(request)
 
     handle.future.cancel.assert_called_once()
     assert request.kv_preschedule_handle is None
+    assert scheduler.client.discarded == [request.request_id]
 
 
 @pytest.mark.parametrize("preempted", [False, True])
