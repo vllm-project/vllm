@@ -1519,15 +1519,9 @@ def finalize_model_weights(model: torch.nn.Module) -> None:
     them in its earlier per-layer passes, which later passes may read.
     """
     from vllm.model_executor.layers.attention import is_deferred_attention_layer
-    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
     from vllm.model_executor.layers.quantization.base_config import (
         QuantizeMethodBase,
     )
-
-    # inside FusedMoE layers, which the module pass below does not enter
-    for module in model.modules():
-        if isinstance(module, MoERunner):
-            module.fuse_gate_weights()
 
     seen: set[torch.nn.Module] = set()
 

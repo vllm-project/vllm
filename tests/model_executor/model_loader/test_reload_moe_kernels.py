@@ -97,7 +97,7 @@ def test_fused_gate_weight_refilled_after_reload():
     from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
     from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
 
-    # Only the attributes `fuse_gate_weights` reads; a full runner needs a
+    # Only the attributes its post-load hook reads; a full runner needs a
     # MoE config and kernels.
     runner = MoERunner.__new__(MoERunner)
     torch.nn.Module.__init__(runner)

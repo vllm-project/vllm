@@ -342,13 +342,13 @@ class MoERunner(MoERunnerInterface):
         if self._shared_experts is not None:
             self._shared_experts._set_moe_config(new_moe_config)
 
-    def fuse_gate_weights(self) -> None:
+    def process_weights_after_loading(self) -> None:
         """Fuse router and shared expert gate weights.
 
         Cannot be done at __init__ because gate weights are loaded after
-        module construction (via weight_loader). Runs after every load or
-        reload (`finalize_model_weights`), refilling the fused tensor in place
-        so captured CUDA graphs see updated gates.
+        module construction (via weight_loader). The loader runs this after
+        every load or reload, refilling the fused tensor in place so captured
+        CUDA graphs see updated gates.
         """
         if not self._fse_fuse_gate:
             return
@@ -911,7 +911,7 @@ class MoERunner(MoERunnerInterface):
         if self.gate is not None:
             if self._fse_fuse_gate:
                 if self._combined_gate_weight is None:
-                    self.fuse_gate_weights()
+                    self.process_weights_after_loading()
                 router_logits = dispatch_unquantized_gemm()(
                     self, hidden_states, self._combined_gate_weight, None
                 )
