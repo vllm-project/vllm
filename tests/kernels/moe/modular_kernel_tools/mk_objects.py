@@ -44,6 +44,7 @@ from vllm.utils.import_utils import (
     has_deep_ep_v2,
     has_deep_gemm,
     has_mori,
+    mori_epv2_unavailable_reason,
 )
 
 
@@ -247,6 +248,7 @@ if has_mori():
     from vllm.model_executor.layers.fused_moe.prepare_finalize.mori import (
         MoriPrepareAndFinalize,
     )
+    from vllm.platforms.rocm import get_cdna_version
 
     register_prepare_and_finalize(
         MoriPrepareAndFinalize,
@@ -257,18 +259,21 @@ if has_mori():
         supports_apply_weight_on_input=False,
     )
 
-    from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
-        MoriEPv2PrepareAndFinalize,
-    )
+    # Config.make_env_data pins mori_ep_v2=True, which skips the EPv1 fallback
+    # in RocmPlatform.check_and_update_config, so apply its EPv2 gate here.
+    if get_cdna_version() >= 4 and mori_epv2_unavailable_reason() is None:
+        from vllm.model_executor.layers.fused_moe.prepare_finalize.mori_epv2 import (
+            MoriEPv2PrepareAndFinalize,
+        )
 
-    register_prepare_and_finalize(
-        MoriEPv2PrepareAndFinalize,
-        standard_format,
-        [torch.bfloat16],
-        blocked_quantization_support=False,
-        backend="mori",
-        supports_apply_weight_on_input=False,
-    )
+        register_prepare_and_finalize(
+            MoriEPv2PrepareAndFinalize,
+            standard_format,
+            [torch.bfloat16],
+            blocked_quantization_support=False,
+            backend="mori",
+            supports_apply_weight_on_input=False,
+        )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
     from vllm.model_executor.layers.fused_moe.experts.flashinfer_cutlass_moe import (
