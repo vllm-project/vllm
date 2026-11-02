@@ -398,7 +398,8 @@ def _reserve_triton_dcp_verify_workspace(
 # * cprr: causal qlen >= _MIN_CPRR_QLEN, gfx950, speculative decoding. AITER's
 #   round-robin ASM decode rebuilds global positions from g_kv_indptr, cp_rank
 #   and cp_world_size and applies the causal window in-kernel. Kernels exist only
-#   at _NATIVE_CPRR_HEADS; other gathered head counts are padded up.
+#   at _NATIVE_CPRR_HEADS, and at fp8 96 where AITER reports it
+#   (_aiter_native_fp8_cprr); other gathered head counts are padded up.
 # * triton: causal qlen > 1 on gfx942 for shapes segmented MLA cannot fit in
 #   LDS (_segmented_mla_fits_lds). Generic split-KV decode over the same
 #   per-row local window segmented uses.
@@ -432,6 +433,38 @@ def _asm_dcp_verify_heads(decode_num_heads: int) -> int:
         if nat >= decode_num_heads:
             return nat
     return 0
+
+
+def _aiter_native_fp8_cprr(
+    decode_num_heads: int, kv_cache_dtype: str, max_qlen: int, cp_world_size: int
+) -> bool:
+    """Whether AITER runs fp8 cprr verify at 96 gathered heads without padding.
+
+    96 is the only count outside _NATIVE_CPRR_HEADS measured faster unpadded.
+    AITER's planner must report it native for every qlen the cprr route can
+    take; builds without get_mla_decode_shape_support keep padding.
+    """
+    if decode_num_heads != 96 or not is_quantized_kv_cache(kv_cache_dtype):
+        return False
+    try:
+        from aiter import dtypes
+        from aiter.ops.attention import get_mla_decode_shape_support
+    except ImportError:
+        return False
+    for qlen in range(_MIN_CPRR_QLEN, max_qlen + 1):
+        support = get_mla_decode_shape_support(
+            decode_num_heads,
+            qlen,
+            dtypes.fp8,
+            dtypes.fp8,
+            return_lse=True,
+            cp_world_size=cp_world_size,
+            cp_round_robin=True,
+        )
+        # supported is None where AITER has no kernel table, e.g. OPUS.
+        if not support.native or support.supported is False:
+            return False
+    return True
 
 
 def _select_dcp_decode_route(
@@ -875,8 +908,16 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # The head-count half of the route decision needs self.num_heads, so only
         # the config half is known before super().__init__().
         if asm_dcp_verify_config:
-            self._asm_dcp_verify_heads = _asm_dcp_verify_heads(
-                self.num_heads * self.dcp_world_size
+            decode_num_heads = self.num_heads * self.dcp_world_size
+            self._asm_dcp_verify_heads = (
+                decode_num_heads
+                if _aiter_native_fp8_cprr(
+                    decode_num_heads,
+                    vllm_config.cache_config.cache_dtype,
+                    self.reorder_batch_threshold or 1,
+                    self.dcp_world_size,
+                )
+                else _asm_dcp_verify_heads(decode_num_heads)
             )
             if self._asm_dcp_verify_heads:
                 self._asm_dcp_verify = True
