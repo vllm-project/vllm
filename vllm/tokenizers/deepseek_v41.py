@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import copy
+from collections.abc import Iterator
 from typing import Any
 
 from transformers import TokenizersBackend
@@ -30,6 +31,10 @@ def _normalize_messages(
 ) -> list[dict[str, Any]]:
     # vLLM additions to the reference: Responses API part types, image_pil,
     # and ValueError (400) instead of the reference's asserts.
+    for message in messages:
+        content = message.get("content")
+        if isinstance(content, Iterator):
+            message["content"] = list(content)
     result = [dict(message) for message in copy.deepcopy(messages)]
     image_idx = 0
     for message in result:
