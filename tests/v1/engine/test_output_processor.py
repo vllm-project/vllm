@@ -62,13 +62,15 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 
     state = RequestState.__new__(RequestState)
     state.detokenizer = MagicMock()
-    state.detokenizer.get_next_output_text.return_value = ""
+    state.detokenizer.get_next_output.return_value = ("", 0)
     state.logprobs_processor = MagicMock()
     state.logprobs_processor.logprobs = accumulated
     state.logprobs_processor.cumulative_logprob = -0.5
     state.output_kind = RequestOutputKind.DELTA
     state.request_index = 0
     state.sampling_mask_chunks = []
+    state.num_held_tokens = 0
+    state.held_sampling_mask_positions = []
     state.routed_experts_chunks = []
     state.spec_decode_metrics = None
 
@@ -81,12 +83,14 @@ def test_delta_output_without_new_tokens_returns_empty_logprobs(
 def test_completion_output_preserves_each_sampling_mask_position() -> None:
     state = RequestState.__new__(RequestState)
     state.detokenizer = MagicMock()
-    state.detokenizer.get_next_output_text.return_value = ""
+    state.detokenizer.get_next_output.return_value = ("", 0)
     state.logprobs_processor = MagicMock()
     state.logprobs_processor.logprobs = None
     state.logprobs_processor.cumulative_logprob = None
     state.output_kind = RequestOutputKind.DELTA
     state.request_index = 0
+    state.num_held_tokens = 0
+    state.held_sampling_mask_positions = []
     state.sampling_mask_chunks = [
         SamplingMaskLists(
             token_ids=np.array([10, 11, 20]),
@@ -1057,7 +1061,7 @@ def test_stop_string(
                 gen_tokens[request_id].extend(new_tokens)
                 lp = gen_logprobs[request_id]
                 plp = gen_prompt_logprobs[request_id]
-                if lp:
+                if lp is not None:
                     lp.extend(logprobs)
                 if plp:
                     plp.extend(prompt_logprobs)
@@ -1538,7 +1542,7 @@ def test_routed_experts_are_accumulated_until_finish():
             cumulative_logprob=0.0,
             pop_prompt_logprobs=Mock(return_value=None),
         ),
-        detokenizer=Mock(get_next_output_text=Mock(return_value="")),
+        detokenizer=Mock(get_next_output=Mock(return_value=("", 0))),
         max_tokens_param=2,
         arrival_time=0.0,
         queue=None,
@@ -1871,13 +1875,15 @@ def test_request_rejected_by_engine(runner: str, error, exception_type):
 def test_sampling_masks_follow_output_kind(output_kind):
     state = RequestState.__new__(RequestState)
     state.detokenizer = MagicMock()
-    state.detokenizer.get_next_output_text.return_value = ""
+    state.detokenizer.get_next_output.return_value = ("", 0)
     state.logprobs_processor = MagicMock()
     state.logprobs_processor.logprobs = None
     state.logprobs_processor.cumulative_logprob = None
     state.output_kind = output_kind
     state.request_index = 0
     state.sampling_mask_chunks = []
+    state.num_held_tokens = 0
+    state.held_sampling_mask_positions = []
     state.routed_experts_chunks = []
     state.spec_decode_metrics = None
     state.weight_version_starts = []

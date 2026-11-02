@@ -4,7 +4,7 @@
 import numpy as np
 import pytest
 
-from vllm.sampling_params import SamplingParams
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
 from vllm.v1.engine.detokenizer import BaseIncrementalDetokenizer
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -97,9 +97,9 @@ def test_stop_string_while_stop_token_terminates(include_stop_str_in_output: boo
     # Tokens after the stop string, including the stop token, are dropped.
     assert detok.output_token_ids == token_ids[:4]
 
-    # get_next_output_text should return the full text when finished=True.
+    # get_next_output should return the full text when finished=True.
     # (Buffering only applies during streaming when finished=False.)
-    assert detok.get_next_output_text(finished=True, delta=False) == expected_text
+    assert detok.get_next_output(finished=True, delta=False) == (expected_text, 0)
 
 
 @pytest.mark.parametrize(
@@ -202,3 +202,104 @@ def test_stop_string_trims_speculative_overflow(
     assert result.sampling_mask.token_ids == [[token] for token in expected_token_ids]
     assert result.routed_experts is not None
     assert result.routed_experts.ravel().tolist() == expected_token_ids
+
+
+@pytest.mark.parametrize(
+    "decoded_tokens,num_kept",
+    [
+        (["Say", " <", "tool", "_call", ">", "{}", "</", "tool", "_", ">"], None),
+        (["Say", " <", "tool", "_call", ">", "{}", "</", "block>", "x", "y"], 8),
+    ],
+)
+@pytest.mark.parametrize(
+    "output_kind", [RequestOutputKind.DELTA, RequestOutputKind.CUMULATIVE]
+)
+@pytest.mark.parametrize("step", [1, 3])
+def test_streamed_tokens_match_streamed_text(
+    include_stop_str_in_output: bool,
+    decoded_tokens: list[str],
+    num_kept: int | None,
+    output_kind: RequestOutputKind,
+    step: int,
+    monkeypatch,
+):
+    token_ids = list(range(len(decoded_tokens)))
+    expected_token_ids = token_ids[:num_kept]
+    expected_text = "".join(decoded_tokens[:num_kept])
+    if num_kept is not None and not include_stop_str_in_output:
+        expected_text = expected_text.removesuffix("</block>")
+    req = _make_request(
+        stop=["</block>"], include_stop_str_in_output=include_stop_str_in_output
+    )
+    req.external_req_id = req.request_id
+    assert req.sampling_params is not None
+    req.sampling_params.logprobs = 0
+    req.sampling_params.output_kind = output_kind
+    detok = _DummyDetokenizer(req)
+    monkeypatch.setattr(detok, "decode_next", decoded_tokens.__getitem__)
+    processor = OutputProcessor(tokenizer=None, log_stats=False)
+    processor.add_request(req, prompt=None)
+    processor.request_states[req.request_id].detokenizer = detok
+
+    sent_text, sent_token_ids = "", []
+    for start in range(0, len(token_ids), step):
+        new_token_ids = token_ids[start : start + step]
+        last = start + step >= len(token_ids)
+        outputs = processor.process_outputs(
+            [
+                EngineCoreOutput(
+                    request_id=req.request_id,
+                    new_token_ids=new_token_ids,
+                    finish_reason=FinishReason.LENGTH if last else None,
+                    new_logprobs=LogprobsLists(
+                        np.array(new_token_ids).reshape(-1, 1),
+                        np.zeros((len(new_token_ids), 1)),
+                        np.ones(len(new_token_ids), dtype=int),
+                        None,
+                    ),
+                    new_sampling_mask=SamplingMaskLists(
+                        np.array(new_token_ids), np.arange(len(new_token_ids) + 1)
+                    ),
+                )
+            ]
+        )
+        result = outputs.request_outputs[0].outputs[0]
+        finished = result.finish_reason is not None
+        if output_kind == RequestOutputKind.DELTA:
+            sent_text += result.text
+            sent_token_ids += result.token_ids
+            assert result.logprobs is not None
+            assert [next(iter(lp)) for lp in result.logprobs] == result.token_ids
+            if result.sampling_mask is not None:
+                assert result.sampling_mask.token_ids == [
+                    [token] for token in result.token_ids
+                ]
+        else:
+            sent_text, sent_token_ids = result.text, list(result.token_ids)
+            assert result.logprobs is not None
+            assert len(result.logprobs) == len(result.token_ids)
+        if finished:
+            break
+        assert "".join(decoded_tokens[t] for t in sent_token_ids) == sent_text
+        if not include_stop_str_in_output:
+            assert len(sent_text) <= max(len(detok.output_text) - 7, 0)
+
+    assert finished
+    assert sent_token_ids == expected_token_ids
+    assert sent_text == expected_text
+
+
+def test_released_tokens_are_not_held_again(monkeypatch):
+    decoded_tokens = ["ab", "</bl", "ock>", "xy", "zw"]
+    req = _make_request(stop=["</block>"], include_stop_str_in_output=False)
+    detok = _DummyDetokenizer(req)
+    monkeypatch.setattr(detok, "decode_next", decoded_tokens.__getitem__)
+
+    assert detok.update([0, 1, 2], False) == "</block>"
+    assert detok.get_next_output(finished=True, delta=True) == ("ab", 0)
+
+    detok.update([3], False)
+    assert detok.get_next_output(finished=False, delta=True) == ("", 1)
+    detok.update([4], False)
+    assert detok.get_next_output(finished=False, delta=True) == ("", 2)
+    assert detok.get_next_output(finished=True, delta=True) == ("xyzw", 0)
