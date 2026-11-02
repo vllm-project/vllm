@@ -5,6 +5,8 @@
 Run `pytest tests/kernels/moe/test_fused_topk.py`.
 """
 
+from unittest.mock import patch
+
 import pytest
 import torch
 
@@ -275,3 +277,44 @@ def test_fused_topk_bias_nan_inf_clamp(
             f"Row {row} has non-finite weights {topk_weights[row].tolist()} "
             f"(bad_value={bad_value}, scoring_func={scoring_func})"
         )
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router.vllm_topk_softmax"
+)
+@patch(
+    "vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router."
+    "rocm_aiter_ops.is_fused_moe_enabled",
+    return_value=True,
+)
+def test_fused_topk_bias_softmax_dispatches_to_fused_kernel_under_aiter(
+    mock_is_fused_moe_enabled, mock_vllm_topk_softmax
+):
+    """Regression test for AITER MoE routing dispatch.
+
+    Only "sqrtsoftplus" had an AITER-enabled fallback branch (added by
+    #44945) routing to a fused custom op; "softmax" fell through to the
+    slow manual softmax() + torch.topk() path whenever AITER fused-MoE was
+    enabled, costing up to ~16.6s in prefill with no B200 equivalent. This
+    verifies "softmax" now dispatches to vllm_topk_softmax instead.
+    """
+    num_tokens, hidden_size, num_experts, topk = 4, 8, 6, 2
+    hidden_states = torch.randn(num_tokens, hidden_size)
+    gating_output = torch.randn(num_tokens, num_experts)
+
+    expected_weights = torch.randn(num_tokens, topk)
+    expected_ids = torch.randint(0, num_experts, (num_tokens, topk), dtype=torch.int32)
+    mock_vllm_topk_softmax.return_value = (expected_weights, expected_ids)
+
+    topk_weights, topk_ids = fused_topk_bias(
+        hidden_states=hidden_states,
+        gating_output=gating_output,
+        scoring_func="softmax",
+        e_score_correction_bias=None,
+        topk=topk,
+        renormalize=False,
+    )
+
+    mock_vllm_topk_softmax.assert_called_once()
+    assert torch.equal(topk_weights, expected_weights)
+    assert torch.equal(topk_ids, expected_ids)
