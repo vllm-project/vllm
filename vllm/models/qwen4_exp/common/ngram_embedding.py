@@ -163,6 +163,17 @@ class Qwen4ExpPLEEmbedding(PLEVocabParallelEmbedding, ABC):
         """Bind the checkpoint files of a disk-offloaded table after loading."""
         return None
 
+    def _reduce_etp_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
+        """Combine host-table lookup results owned by different ETP ranks."""
+        if self.tp_size == 1:
+            return embeddings
+        assert self.parallel_group is not None
+        if embeddings.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
+            # Each vocabulary row has one owner, so reduce the raw FP8 bytes.
+            reduced = self.parallel_group.all_reduce(embeddings.view(torch.int8))
+            return reduced.view(embeddings.dtype)
+        return self.parallel_group.all_reduce(embeddings)
+
     @abstractmethod
     def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
         """Start an asynchronous lookup when supported."""
@@ -753,17 +764,6 @@ class Qwen4ExpPLEPinnedHostEmbedding(Qwen4ExpPLEEmbedding):
             ngram_ids.shape[0],
             slot_offset,
         )
-
-    def _reduce_etp_embeddings(self, embeddings: torch.Tensor) -> torch.Tensor:
-        """Combine pinned lookup results owned by different ETP ranks."""
-        if self.tp_size == 1:
-            return embeddings
-        assert self.parallel_group is not None
-        if embeddings.dtype in (torch.float8_e4m3fn, torch.float8_e5m2):
-            # Each vocabulary row has one owner, so reduce the raw FP8 bytes.
-            reduced = self.parallel_group.all_reduce(embeddings.view(torch.int8))
-            return reduced.view(embeddings.dtype)
-        return self.parallel_group.all_reduce(embeddings)
 
     @eager_break_during_capture
     def start_prefetch(self, ngram_ids: torch.Tensor) -> None:

@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Qwen4Exp n-gram embeddings with device, pinned-host and disk storage."""
+"""Qwen4Exp n-gram embeddings with device, pinned-host, host-staged and disk storage."""
 
 import mmap
 import os
+from abc import abstractmethod
 from collections.abc import Iterable
 
 import torch
@@ -21,6 +22,7 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm.models.common.ops.sequence_parallel import sp_reduce_scatter, sp_shard
 from vllm.utils.gpu_sync_debug import gpu_sync_allowed
 from vllm.utils.math_utils import round_up
+from vllm.utils.platform_utils import is_uva_available
 
 from ..common.ngram_embedding import (
     Qwen4ExpPLEDeviceEmbedding,
@@ -41,6 +43,8 @@ __all__ = [
     "Qwen4ExpPLEEmbeddingMethod",
     "Qwen4ExpPLEDiskOffloadEmbedding",
     "Qwen4ExpPLEFp8EmbeddingMethod",
+    "Qwen4ExpPLEHostMemoryEmbedding",
+    "Qwen4ExpPLEHostStagedEmbedding",
     "Qwen4ExpPLENvFp4EmbeddingMethod",
     "Qwen4ExpPLEPinnedHostEmbedding",
     "Qwen4ExpPLEUnquantizedEmbeddingMethod",
@@ -60,13 +64,13 @@ def _maps_entry(ptr: int) -> tuple[str, int]:
     return "", 0
 
 
-class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
-    """PLE rows read on the host from the checkpoint shard files.
+class Qwen4ExpPLEHostStagedEmbedding(Qwen4ExpPLEEmbedding):
+    """PLE rows gathered on the host each step and copied to the device.
 
-    No table is allocated. Each step, `stage_checkpoint_rows` reads the rows
-    of that step's n-gram ids from the safetensors files and copies them to
-    fixed device buffers, which the forward reads, so CUDA graphs replay it.
-    Every ETP rank stages full rows, so no ETP reduction is needed.
+    Each step, `stage_host_rows` reads the rows of that step's n-gram ids
+    from the host-side table and copies them to fixed device buffers, which
+    the forward reads, so CUDA graphs replay it. Subclasses decide where the
+    rows come from by implementing `_read_rows`.
     """
 
     def __init__(
@@ -93,10 +97,10 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
             data_parallel_rank=data_parallel_rank,
             reduce_results=reduce_results,
         )
-        self._dummy = get_current_vllm_config().load_config.load_format == "dummy"
         # NVFP4 rows are packed E2M1 bytes plus a separate plane of block scales.
         self._nvfp4 = isinstance(embedding_method, Qwen4ExpPLENvFp4EmbeddingMethod)
-        device, pin = self.weight.device, self.weight.is_cuda
+        device = self._staging_device()
+        pin = device.type == "cuda"
         rows = (max_total_tokens, num_ngram_heads)
         self._host_ids = torch.empty(
             rows, dtype=torch.long, device="cpu", pin_memory=pin
@@ -118,6 +122,94 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
                 (*rows, embedding_dim), dtype=params_dtype, device=device
             )
             self._row_ids = torch.arange(rows[0] * rows[1], device=device)
+
+    def _staging_device(self) -> torch.device:
+        """Device that holds the staged rows the forward reads."""
+        return self.weight.device
+
+    def copy_ids_to_host(self, ids: torch.Tensor) -> None:
+        self._host_ids[: ids.shape[0]].copy_(ids, non_blocking=True)
+
+    def stage_rows(self, num_tokens: int) -> None:
+        """Read the rows of `_host_ids[:num_tokens]` and copy them to staging."""
+        ids = self._host_ids[:num_tokens].flatten()
+        ids, inverse = ids.unique(return_inverse=True)
+        if ids.numel() and not 0 <= ids[0] <= ids[-1] < self.org_vocab_size:
+            raise IndexError(f"PLE id out of range for {self.org_vocab_size} rows")
+        for name, (_, host, rows) in self._planes.items():
+            out = host[:num_tokens].flatten(0, 1).view(torch.uint8)
+            self._read_rows(name, ids, rows[: ids.numel()])
+            torch.index_select(rows[: ids.numel()], 0, inverse, out=out)
+        for staging, host, _ in self._planes.values():
+            staging[:num_tokens].copy_(host[:num_tokens], non_blocking=True)
+
+    @abstractmethod
+    def _read_rows(self, name: str, ids: torch.Tensor, rows: torch.Tensor) -> None:
+        """Read one plane's rows for sorted distinct ids into `rows` (bytes)."""
+        raise NotImplementedError
+
+    def staged_rows(self, num_tokens: int) -> torch.Tensor:
+        """Return this step's staged rows, decoded if they are NVFP4."""
+        weight, *scale = (
+            staging[:num_tokens] for staging, _, _ in self._planes.values()
+        )
+        if not self._nvfp4:
+            return weight.flatten(-2)
+        num_rows = weight.shape[0] * weight.shape[1]
+        output = self._output[:num_tokens]
+        # Staged rows are compact, so the i-th staged row has id i.
+        Qwen4ExpPLENvFp4EmbeddingMethod.decode_rows(
+            weight,
+            scale[0],
+            self.weight_scale_2,
+            self._row_ids[:num_rows],
+            output,
+            0,
+            num_rows,
+        )
+        return output.flatten(-2)
+
+    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
+        return None
+
+    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
+        raise RuntimeError("Host-staged PLE embedding does not support prefetch")
+
+
+class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEHostStagedEmbedding):
+    """PLE rows read on the host from the checkpoint shard files.
+
+    No table is allocated; the rows stay in the safetensors files.
+    Every ETP rank stages full rows, so no ETP reduction is needed.
+    """
+
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        *,
+        params_dtype: torch.dtype,
+        padding_size: int,
+        prefix: str,
+        embedding_method: Qwen4ExpPLEEmbeddingMethod,
+        num_ngram_heads: int = 1,
+        max_total_tokens: int = 0,
+        data_parallel_rank: int = 0,
+        reduce_results: bool = True,
+    ) -> None:
+        super().__init__(
+            num_embeddings,
+            embedding_dim,
+            params_dtype=params_dtype,
+            padding_size=padding_size,
+            prefix=prefix,
+            embedding_method=embedding_method,
+            num_ngram_heads=num_ngram_heads,
+            max_total_tokens=max_total_tokens,
+            data_parallel_rank=data_parallel_rank,
+            reduce_results=reduce_results,
+        )
+        self._dummy = get_current_vllm_config().load_config.load_format == "dummy"
         self._shards: dict[str, dict[int, torch.Tensor]] = {n: {} for n in self._planes}
         self._shard_size = 0
         self._bound = False
@@ -181,36 +273,14 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
         self._shards.clear()
         self._bound = True
 
-    def copy_ids_to_host(self, ids: torch.Tensor) -> None:
-        self._host_ids[: ids.shape[0]].copy_(ids, non_blocking=True)
-
-    def stage_rows(self, num_tokens: int) -> None:
-        """Read the rows of `_host_ids[:num_tokens]` and copy them to staging."""
-        ids = self._host_ids[:num_tokens].flatten()
+    def _read_rows(self, name: str, ids: torch.Tensor, rows: torch.Tensor) -> None:
+        """Read one plane's rows for sorted distinct ids from the shard files."""
         if not self._fds:
-            for _, host, _ in self._planes.values():
-                host[:num_tokens].view(torch.uint8).zero_()
-        else:
-            ids, inverse = ids.unique(return_inverse=True)
-            if ids.numel() and not 0 <= ids[0] <= ids[-1] < self.org_vocab_size:
-                raise IndexError(f"PLE id out of range for {self.org_vocab_size} rows")
-            shard = ids // self._shard_size
-            local = ids - shard * self._shard_size
-            for name, (_, host, rows) in self._planes.items():
-                out = host[:num_tokens].flatten(0, 1).view(torch.uint8)
-                self._read_rows(name, shard, local, rows[: ids.numel()])
-                torch.index_select(rows[: ids.numel()], 0, inverse, out=out)
-        for staging, host, _ in self._planes.values():
-            staging[:num_tokens].copy_(host[:num_tokens], non_blocking=True)
-
-    def _read_rows(
-        self,
-        name: str,
-        shard: torch.Tensor,
-        local: torch.Tensor,
-        rows: torch.Tensor,
-    ) -> None:
-        """Read one plane's rows for sorted distinct ids into `rows`."""
+            # Dummy weights have no files to read.
+            rows.zero_()
+            return
+        shard = ids // self._shard_size
+        local = ids - shard * self._shard_size
         fds, bases = self._sources[name]
         page, row_bytes = mmap.PAGESIZE, rows.shape[1]
         start = bases[shard] + local * row_bytes
@@ -233,32 +303,81 @@ class Qwen4ExpPLEDiskOffloadEmbedding(Qwen4ExpPLEEmbedding):
                     f"truncated at offset {offset}"
                 )
 
+
+class Qwen4ExpPLEHostMemoryEmbedding(Qwen4ExpPLEHostStagedEmbedding):
+    """CPU-offloaded PLE table in host memory, for GPUs without UVA.
+
+    Fallback for `cpu_offload` where the GPU cannot read host memory through
+    UVA, such as NVIDIA Confidential Computing, where the device view of
+    pinned host memory is not coherent. The table is ETP-sharded like the
+    pinned-host table; rows owned by other ETP ranks are staged as zeros and
+    the ranks are combined after the lookup.
+    """
+
+    def __init__(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        *,
+        params_dtype: torch.dtype,
+        padding_size: int,
+        prefix: str,
+        embedding_method: Qwen4ExpPLEEmbeddingMethod,
+        num_ngram_heads: int = 1,
+        max_total_tokens: int = 0,
+        data_parallel_rank: int = 0,
+        reduce_results: bool = True,
+    ) -> None:
+        super().__init__(
+            num_embeddings,
+            embedding_dim,
+            params_dtype=params_dtype,
+            padding_size=padding_size,
+            prefix=prefix,
+            embedding_method=embedding_method,
+            num_ngram_heads=num_ngram_heads,
+            max_total_tokens=max_total_tokens,
+            data_parallel_rank=data_parallel_rank,
+            reduce_results=reduce_results,
+        )
+        if self.etp_data_parallel_size != 1:
+            raise NotImplementedError(
+                "Host-memory PLE embedding does not support ETP spanning DP ranks"
+            )
+
+    def allocate_embedding_weight(
+        self,
+        num_embeddings: int,
+        embedding_dim: int,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Allocate the local ETP rows in ordinary CPU memory."""
+        return torch.empty(num_embeddings, embedding_dim, dtype=dtype, device="cpu")
+
+    def _staging_device(self) -> torch.device:
+        # The table is on the CPU; stage on the device the model is built on.
+        return torch.empty(0).device
+
+    def _read_rows(self, name: str, ids: torch.Tensor, rows: torch.Tensor) -> None:
+        """Gather one plane's rows from the host table; other owners get zeros."""
+        table = getattr(self, name).view(torch.uint8)
+        if self.tp_size == 1:
+            torch.index_select(table, 0, ids, out=rows)
+            return
+        vocab_start = self.shard_indices.org_vocab_start_index
+        vocab_end = self.shard_indices.org_vocab_end_index
+        owned = (ids >= vocab_start) & (ids < vocab_end)
+        torch.index_select(table, 0, torch.where(owned, ids - vocab_start, 0), out=rows)
+        rows[~owned] = 0
+
     def staged_rows(self, num_tokens: int) -> torch.Tensor:
-        """Return this step's staged rows, decoded if they are NVFP4."""
-        weight, *scale = (
-            staging[:num_tokens] for staging, _, _ in self._planes.values()
-        )
-        if not self._nvfp4:
-            return weight.flatten(-2)
-        num_rows = weight.shape[0] * weight.shape[1]
-        output = self._output[:num_tokens]
-        # Staged rows are compact, so the i-th staged row has id i.
-        Qwen4ExpPLENvFp4EmbeddingMethod.decode_rows(
-            weight,
-            scale[0],
-            self.weight_scale_2,
-            self._row_ids[:num_rows],
-            output,
-            0,
-            num_rows,
-        )
-        return output.flatten(-2)
-
-    def start_prefetch(self, ngram_ids: torch.Tensor) -> None:
-        return None
-
-    def finalize_prefetch(self, total_tokens: int) -> torch.Tensor:
-        raise RuntimeError("PLE disk offload does not support prefetch")
+        """Return the staged rows combined across ETP ranks."""
+        embeddings = super().staged_rows(num_tokens)
+        if self.reduce_results:
+            return self._reduce_etp_embeddings(embeddings)
+        # The outer TP reduce-scatter requires ETP=TP.
+        assert self.etp_data_parallel_size == 1
+        return embeddings
 
 
 class Qwen4ExpNGramEmbedding(nn.Module):
@@ -431,13 +550,18 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if params_dtype is None:
             params_dtype = torch.get_default_dtype()
         engram_config = get_current_vllm_config().engram_config
-        embedding_cls = (
-            Qwen4ExpPLEDiskOffloadEmbedding
-            if engram_config is not None and engram_config.disk_offload
-            else Qwen4ExpPLEPinnedHostEmbedding
-            if engram_config is not None and engram_config.cpu_offload
-            else Qwen4ExpPLEDeviceEmbedding
-        )
+        embedding_cls: type[Qwen4ExpPLEEmbedding] = Qwen4ExpPLEDeviceEmbedding
+        if engram_config is not None and engram_config.disk_offload:
+            embedding_cls = Qwen4ExpPLEDiskOffloadEmbedding
+        elif engram_config is not None and engram_config.cpu_offload:
+            if is_uva_available():
+                embedding_cls = Qwen4ExpPLEPinnedHostEmbedding
+            else:
+                logger.info_once(
+                    "UVA is unavailable; gathering the CPU-offloaded PLE table "
+                    "on the host and copying its rows to the device."
+                )
+                embedding_cls = Qwen4ExpPLEHostMemoryEmbedding
         # A TP reduce-scatter covers all vocabulary owners only when ETP=TP.
         # Disk-offload ranks hold full rows, so they only shard tokens.
         self.use_reduce_scatter = (
@@ -609,7 +733,7 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         if embedding.supports_prefetch:
             # Prefetch contains full tokens even when hidden states are sharded.
             embeddings = embedding.finalize_prefetch(total_tokens=input_ids.shape[0])
-        elif isinstance(embedding, Qwen4ExpPLEDiskOffloadEmbedding):
+        elif isinstance(embedding, Qwen4ExpPLEHostStagedEmbedding):
             embeddings = embedding.staged_rows(input_ids.shape[0])
         else:
             ngram_ids = self.compute_ngram_ids(
@@ -730,13 +854,13 @@ class Qwen4ExpNGramEmbedding(nn.Module):
         return loaded
 
 
-def stage_checkpoint_rows(
-    modules: list[tuple[Qwen4ExpNGramEmbedding, Qwen4ExpPLEDiskOffloadEmbedding]],
+def stage_host_rows(
+    modules: list[tuple[Qwen4ExpNGramEmbedding, Qwen4ExpPLEHostStagedEmbedding]],
     input_ids: torch.Tensor,
     query_start_loc: torch.Tensor,
     ngram_context: torch.Tensor,
 ) -> None:
-    """Stage disk-offload PLE rows for one step behind one stream sync.
+    """Stage host-side PLE rows for one step behind one stream sync.
 
     The ids hash this step's tokens, which the previous step samples on the
     GPU, so the host read has to wait for them.
