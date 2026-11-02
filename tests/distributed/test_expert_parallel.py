@@ -229,3 +229,45 @@ def test_ep(
         num_gpus_available,
         method="generate",
     )
+
+
+def test_bounded_dbo_allocates_independent_cached_native_buffers(monkeypatch):
+    """The real manager caches three transports, rather than aliasing two slots."""
+    import sys
+    from types import ModuleType
+    from unittest.mock import Mock
+
+    from vllm.distributed import parallel_state
+    from vllm.distributed.device_communicators import all2all
+
+    class RecordingBuffer:
+        def __init__(self, **kwargs):
+            self.options = kwargs
+            self.destroyed = False
+
+        def destroy(self):
+            self.destroyed = True
+
+    transport = ModuleType("deep_ep")
+    transport.Buffer = RecordingBuffer
+    monkeypatch.setitem(sys.modules, "deep_ep", transport)
+    monkeypatch.setattr(all2all, "has_deep_ep", lambda: True)
+    monkeypatch.setattr(
+        parallel_state, "get_dp_group", lambda: Mock(world_size=2, rank_in_group=0)
+    )
+    monkeypatch.setattr(parallel_state, "get_tp_group", lambda: Mock(world_size=1))
+    monkeypatch.setattr(
+        parallel_state, "in_the_same_node_as", lambda *args, **kwargs: [True, True]
+    )
+    group = Mock()
+    group.rank.return_value = 0
+    group.size.return_value = 2
+    manager = all2all.DeepEPHTAll2AllManager(group)
+    buffers = [manager.get_handle({"ubatch_id": index}) for index in range(3)]
+    assert len({id(buffer) for buffer in buffers}) == 3
+    assert all(buffer.options["num_rdma_bytes"] == 0 for buffer in buffers)
+    assert all("ubatch_id" not in buffer.options for buffer in buffers)
+    assert manager.get_handle({}) is buffers[0]
+    assert manager.get_handle({"ubatch_id": 2}) is buffers[2]
+    manager.destroy()
+    assert all(buffer.destroyed for buffer in buffers)

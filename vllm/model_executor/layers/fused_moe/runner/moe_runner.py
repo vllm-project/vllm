@@ -52,6 +52,7 @@ from vllm.utils.torch_utils import (
     LayerName,
     direct_register_custom_op,
 )
+from vllm.v1.worker.ubatch_utils import get_num_ubatches
 
 logger = init_logger(__name__)
 
@@ -288,6 +289,9 @@ class MoERunner(MoERunnerInterface):
                 moe_config=moe_config,
                 enable_dbo=enable_dbo,
                 mk_can_overlap_shared_experts=can_overlap,
+                num_ubatches=get_num_ubatches(
+                    get_current_vllm_config().parallel_config
+                ),
             )
 
         # Needed for string -> MoERunner layer lookup in custom ops.

@@ -104,6 +104,16 @@ def test_memory_utilization_cli_aliases(option):
     assert args.gpu_memory_utilization == 0.8
 
 
+@pytest.mark.parametrize(
+    ("options", "expected"), [([], 2), (["--dbo-ubatch-capacity", "3"], 3)]
+)
+def test_dbo_ubatch_capacity_cli(options, expected):
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = EngineArgs.from_cli_args(parser.parse_args(options))
+
+    assert args.dbo_ubatch_capacity == expected
+
+
 def test_device_memory_utilization_property():
     config = CacheConfig(gpu_memory_utilization=0.8)
 
