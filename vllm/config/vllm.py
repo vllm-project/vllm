@@ -3234,7 +3234,7 @@ class VllmConfig:
             # hsa_amd_portable_export_dmabuf accepts VMM ranges.
             unsupported = (
                 "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
-                "which the NIXL, Mooncake and MoRIIO connectors require"
+                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
             )
         if requested is None:
             cache_config.enable_extensible_kv_cache = unsupported is None
