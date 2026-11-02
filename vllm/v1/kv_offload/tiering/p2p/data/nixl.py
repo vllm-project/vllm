@@ -105,11 +105,18 @@ class _Inflight(NamedTuple):
     transport is shared across all peer sessions of the engine.
     ``struck`` is set once the transfer has counted against its peer, so a
     state check that keeps raising charges it once, not once per poll.
+    ``retired`` is set once its peer is removed while it still runs; only
+    poll_retired() sees it from then on.
     """
 
     peer_id: str
     handle: object
     struck: bool = False
+    retired: bool = False
+
+
+# A removed peer's (peer_id, dlist, nixl_name, retired transfer_ids).
+_DeferredRemote = tuple[str, object | None, str | None, set[int]]
 
 
 class NixlTransport(DataTransport):
@@ -144,6 +151,9 @@ class NixlTransport(DataTransport):
         self._peer_strikes: dict[str, int] = {}
         # peer_id → fault cause; reported by poll(peer_id) until removal.
         self._peer_faults: dict[str, str] = {}
+        # Remote handles of removed peers that retired transfers still
+        # reference. Released by poll_retired() once those transfers are gone.
+        self._deferred_remote: list[_DeferredRemote] = []
         # Registration is O(num_blocks) NIXL work — add_remote_agent plus a
         # prep_xfer_dlist over every block of the peer's region — so it runs
         # off the scheduler thread, mirroring the NIXL connector's
@@ -181,15 +191,22 @@ class NixlTransport(DataTransport):
                 self._backends,
             )
         else:
-            cfg = _NixlAgentConfig(
-                num_threads=self._num_threads, capture_telemetry=True
-            )
+            cfg = _NixlAgentConfig(backends=[], capture_telemetry=True)
             logger.info(
                 "NixlTransport %s: NIXL backends=[UCX] num_threads=%d",
                 self._agent_name,
                 self._num_threads,
             )
         self._agent = _NixlAgent(self._agent_name, cfg)
+        if not non_ucx_backends:
+            # The tier moves host memory only. UCX otherwise also wires up
+            # rc_gda GPU lanes to every peer, and their connect fails after a
+            # peer stalls or is replaced, leaving that peer unreachable until
+            # restart. UCX_* env vars win over engine_config.
+            params = {"engine_config": "TLS=^rc_gda"}
+            if self._num_threads > 0:
+                params["num_threads"] = str(self._num_threads)
+            self._agent.create_backend("UCX", params)
 
         total_size = self._num_blocks * self._block_len
         reg_descs = [(self._base_addr, total_size, 0, "")]
@@ -221,11 +238,9 @@ class NixlTransport(DataTransport):
         num_blocks: int,
         block_len: int,
     ) -> None:
-        gen = self._begin_registration(peer_id)
-        nixl_name, remote_dlist = self._build_peer_handles(
-            agent_metadata, base_addr, num_blocks, block_len
-        )
-        self._publish_peer(peer_id, gen, nixl_name, remote_dlist)
+        self.add_remote_peer_async(
+            peer_id, agent_metadata, base_addr, num_blocks, block_len
+        ).result()
 
     def add_remote_peer_async(
         self,
@@ -239,7 +254,7 @@ class NixlTransport(DataTransport):
 
         def register() -> None:
             nixl_name, remote_dlist = self._build_peer_handles(
-                agent_metadata, base_addr, num_blocks, block_len
+                peer_id, agent_metadata, base_addr, num_blocks, block_len
             )
             if not self._publish_peer(peer_id, gen, nixl_name, remote_dlist):
                 raise RuntimeError(
@@ -258,6 +273,17 @@ class NixlTransport(DataTransport):
             dlist = self._remote_dlists.pop(peer_id, None)
         self._peer_strikes.pop(peer_id, None)
         self._peer_faults.pop(peer_id, None)
+        # Transfers still inflight here may still be writing. Retire them so
+        # a reconnected session under the same peer_id never sees them, and
+        # keep the remote handles they were prepped against until they end.
+        retired: set[int] = set()
+        for tid, entry in self._inflight.items():
+            if entry.peer_id == peer_id and not entry.retired:
+                self._inflight[tid] = entry._replace(retired=True)
+                retired.add(tid)
+        if retired:
+            self._deferred_remote.append((peer_id, dlist, nixl_name, retired))
+            return
         if self._agent is not None:
             self._release_remote_handles(peer_id, dlist, nixl_name)
 
@@ -270,6 +296,7 @@ class NixlTransport(DataTransport):
 
     def _build_peer_handles(
         self,
+        peer_id: str,
         agent_metadata: bytes,
         base_addr: int,
         num_blocks: int,
@@ -277,16 +304,25 @@ class NixlTransport(DataTransport):
     ) -> tuple[str, Any]:
         """The expensive half: agent wireup plus one descriptor per block.
 
-        Touches no shared state, so it runs unlocked — holding the peer
-        lock across it would stall the scheduler thread for exactly as
-        long as the registration it is meant to move off that thread.
+        Holding the peer lock across native registration would stall the
+        scheduler thread for exactly as long as the registration it is
+        meant to move off that thread.
         """
         nixl_name = self._agent.add_remote_agent(agent_metadata)
-        block_descs = [
-            (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
-        ]
-        xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
-        remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
+        try:
+            block_descs = [
+                (base_addr + i * block_len, block_len, 0) for i in range(num_blocks)
+            ]
+            xfer_dlist = self._agent.get_xfer_descs(block_descs, mem_type="DRAM")
+            remote_dlist = self._agent.prep_xfer_dlist(nixl_name, xfer_dlist)
+        except Exception:
+            # All builds run on the single-worker _reg_executor, so another
+            # registration cannot acquire this name between check and release.
+            with self._peer_lock:
+                published = nixl_name in self._peer_nixl_names.values()
+            if not published:
+                self._release_remote_handles(peer_id, None, nixl_name)
+            raise
         return nixl_name, remote_dlist
 
     def _publish_peer(
@@ -431,7 +467,7 @@ class NixlTransport(DataTransport):
         failures: list[tuple[str, str]] | None = None
 
         for transfer_id, entry in self._inflight.items():
-            if peer_id is not None and entry.peer_id != peer_id:
+            if entry.retired or (peer_id is not None and entry.peer_id != peer_id):
                 continue
             try:
                 state = self._agent.check_xfer_state(entry.handle)
@@ -499,6 +535,48 @@ class NixlTransport(DataTransport):
             failed=failed_ids if failed_ids is not None else _EMPTY_POLL_RESULT.failed,
             peer_fault=fault,
         )
+
+    def poll_retired(self) -> list[int]:
+        """Release retired transfers that have stopped; return their ids.
+
+        A transfer stopped once NIXL reports it terminal, by the same rule
+        as ``cancel(mode="wait")``, but without charging its peer: the
+        peer is gone, and a reconnected one under the same id is not at
+        fault. A removed peer's remote handles are released once none of
+        its retired transfers remain.
+        """
+        stopped: list[int] = []
+        for tid, entry in self._inflight.items():
+            if not entry.retired:
+                continue
+            try:
+                state = self._agent.check_xfer_state(entry.handle)
+            except Exception as exc:
+                if not _is_terminal_state_error(exc):
+                    continue
+                state = "ERR"
+            if state not in ("PROC", "PEND"):
+                stopped.append(tid)
+        if not stopped:
+            return []
+        self._release_handles([self._inflight.pop(tid).handle for tid in stopped])
+        self._release_deferred_remote()
+        return stopped
+
+    def force_release_retired(self, transfer_ids: Iterable[int]) -> None:
+        """Release retired transfers that never stopped (bounded hold)."""
+        self.cancel(transfer_ids, mode="immediate")
+        self._release_deferred_remote()
+
+    def _release_deferred_remote(self) -> None:
+        pending: list[_DeferredRemote] = []
+        for peer_id, dlist, nixl_name, tids in self._deferred_remote:
+            tids &= self._inflight.keys()
+            if tids:
+                pending.append((peer_id, dlist, nixl_name, tids))
+            elif self._agent is not None:
+                self._release_remote_handles(peer_id, dlist, nixl_name)
+        self._deferred_remote = pending
 
     def cancel(
         self,
@@ -579,6 +657,7 @@ class NixlTransport(DataTransport):
             return
         self._release_handles([entry.handle for entry in self._inflight.values()])
         self._inflight.clear()
+        self._release_deferred_remote()
         for peer_id in list(self._remote_dlists):
             self.remove_remote_peer(peer_id)
         if self._local_dlist is not None:

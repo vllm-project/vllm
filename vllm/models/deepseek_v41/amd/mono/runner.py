@@ -22,6 +22,8 @@ from pathlib import Path
 
 import torch
 
+from vllm.v1.attention.ops.flydsl_kernels import _run_compiled
+
 from .attention.front import FRONT_POINTS
 from .attention.plan import HEAD_DIM, HIDDEN, KEYS, Q_RANK, WINDOW, Dims
 from .common.arch import GFX942
@@ -386,7 +388,8 @@ class DSV41MonoLayer:
         else:
             comp, comp_stride, comp_block = self._dummy, 0, 1
             bt, bt_stride, topk = self._dummy, 0, self._dummy
-        k1(
+        _run_compiled(
+            k1,
             residual.data_ptr(),
             x.data_ptr(),
             post_mix.data_ptr(),
@@ -427,7 +430,7 @@ class DSV41MonoLayer:
             self.scratch(M).data_ptr(),
             self.epoch.data_ptr(),
             self.tl1.data_ptr() if self.timeline else 0,
-            stream=st,
+            st,
         )
         if select is not None:
             select(self.normed[:M], self.qr[:M])
@@ -450,7 +453,8 @@ class DSV41MonoLayer:
                     comp_block_table=bt,
                     comp_block=comp_block,
                 )
-        k2(
+        _run_compiled(
+            k2,
             self.q.data_ptr(),
             swa_cache.data_ptr(),
             swa_cache.stride(0),
@@ -505,7 +509,7 @@ class DSV41MonoLayer:
             self.rank,
             self.epoch.data_ptr(),
             self.tl2.data_ptr() if self.timeline else 0,
-            stream=st,
+            st,
         )
         return outs
 
@@ -533,7 +537,8 @@ class DSV41MonoLayer:
         if outs is None:
             outs = self._outs(M, residual)
         out, res_out, post_out, comb_out, pre_out = outs
-        self.ffn_kernel(M, w.gate_w.shape[0], topk)(
+        _run_compiled(
+            self.ffn_kernel(M, w.gate_w.shape[0], topk),
             part.data_ptr(),
             residual.data_ptr(),
             post_mix.data_ptr(),
@@ -564,6 +569,6 @@ class DSV41MonoLayer:
             self.rank,
             self.epoch.data_ptr(),
             self.tl3.data_ptr() if self.timeline else 0,
-            stream=torch.cuda.current_stream(),
+            torch.cuda.current_stream(),
         )
         return outs

@@ -41,6 +41,26 @@ EEP_NOTIFICATION_CALL_ID = -1
 FT_STATUS_CALL_ID = -2
 
 
+class CheckpointState(enum.StrEnum):
+    """Process checkpoint lifecycle of an engine. It serves only while
+    RUNNING, and may go through the cycle any number of times."""
+
+    RUNNING = "running"
+    # Draining, then releasing what a checkpoint must not contain.
+    PREPARING = "preparing"
+    # Safe to capture.
+    PREPARED = "prepared"
+    # Bringing back what preparing released.
+    RESTORING = "restoring"
+    FAILED = "failed"
+
+    @property
+    def is_restored(self) -> bool:
+        """Whether released state is back or coming back, so memory may wake and
+        scheduling resume."""
+        return self in (CheckpointState.RUNNING, CheckpointState.RESTORING)
+
+
 class EEPNotificationType(enum.Enum):
     RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
@@ -68,6 +88,22 @@ class FinishReason(enum.IntEnum):
 
     def __str__(self):
         return FINISH_REASON_STRINGS[self.value]
+
+
+@dataclass
+class PrefixHashConfig:
+    """What a frontend needs to compute a request's prompt block hashes itself
+    (see `EngineCoreRequest.block_hashes`)."""
+
+    # The --prefix-caching-hash-algo name, e.g. "sha256".
+    hash_algo: str
+    # Tokens per hashed block.
+    hash_block_size: int
+    # Parent hash of the first block.
+    none_hash: bytes
+    # Tokens after each block that its hash also covers (as extra keys), so a
+    # block is hashed only once they exist.
+    num_lookahead_tokens: int = 0
 
 
 @dataclass
@@ -108,6 +144,13 @@ class EngineCoreReadyResponse:
     coord_store_port: int = 0
     coordinator_input_address: str | None = None
     coordinator_output_address: str | None = None
+    # JSON-mode dump of this engine's VllmConfig, for frontends that serve
+    # `/server_info` without holding the config themselves (the Rust frontend).
+    # Sent only with VLLM_SERVER_DEV_MODE, the same gate as `/server_info`.
+    vllm_config: dict[str, Any] | None = None
+    # Set when the engine hashes request blocks (prefix caching or a KV
+    # connector), so that a frontend can send prompt block hashes.
+    prefix_hash_config: PrefixHashConfig | None = None
 
 
 class EngineCoreRequest(
@@ -163,6 +206,10 @@ class EngineCoreRequest(
 
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
+
+    # Prompt block hashes computed by the frontend with the engine's
+    # PrefixHashConfig, including any extra keys (LoRA, multimodal, cache salt).
+    block_hashes: list[bytes] | None = None
 
     @property
     def params(self) -> SamplingParams | PoolingParams:
@@ -335,3 +382,5 @@ class EngineStatusType(enum.IntEnum):
     HEALTHY = 0
     DEAD = 1
     UNHEALTHY = 2
+    # Faulted; querying the workers' all2all mask before going UNHEALTHY.
+    DIAGNOSING = 3

@@ -1,24 +1,110 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.engine.core import EngineCore
+from vllm.v1.executor.abstract import Executor
 from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
     MLAAttentionSpec,
 )
+from vllm.v1.worker.worker_base import WorkerBase
 
 pytestmark = pytest.mark.cpu_test
 
 BASE_BLOCK_SIZE = 1536
 DCP_WORLD_SIZE = 8
+
+
+@pytest.mark.parametrize("interleave,expected", [(None, 16), (8, 8)])
+def test_global_layout_finalizes_worker_interleave_before_profiling(
+    interleave, expected
+):
+    """Workers with different local blocks must use the global interleave."""
+    config = VllmConfig(
+        cache_config=CacheConfig(block_size=64),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            decode_context_parallel_size=2,
+            distributed_executor_backend="mp",
+            cp_kv_cache_interleave_size=interleave or 1,
+            _allow_auto_resolve_cp_interleave_size=interleave is None,
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_both"
+        ),
+    )
+    config.model_config = SimpleNamespace(supports_kv_cache_grouping=False)
+    config.cache_config.kv_cache_layout = "BLHNC"
+    workers = []
+    specs = []
+    for i, block_size in enumerate((16, 64)):
+        worker = object.__new__(WorkerBase)
+        worker.vllm_config = deepcopy(config)
+        worker.vllm_config.cache_config.kv_cache_layout = None
+        workers.append(worker)
+        specs.append(
+            {
+                f"layer{i}": FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=64,
+                    dtype=torch.float16,
+                )
+            }
+        )
+    parallel_configs = [config.parallel_config] + [
+        worker.vllm_config.parallel_config for worker in workers
+    ]
+
+    class ProfilingStarted(Exception):
+        pass
+
+    class LocalExecutor:
+        set_kv_cache_layout = Executor.set_kv_cache_layout
+
+        def get_kv_cache_specs(self):
+            return specs
+
+        def get_supported_kv_cache_layouts(self):
+            return [["BLHNC"] for _ in workers]
+
+        def collective_rpc(self, method, args):
+            for worker in workers:
+                getattr(worker, method)(*args)
+
+        def determine_available_memory(self):
+            assert all(
+                parallel.cp_kv_cache_interleave_size == expected
+                for parallel in parallel_configs
+            )
+            assert all(
+                worker.vllm_config.cache_config.kv_cache_layout == "BLHNC"
+                for worker in workers
+            )
+            raise ProfilingStarted
+
+    engine = object.__new__(EngineCore)
+    engine.model_executor = LocalExecutor()
+    with pytest.raises(ProfilingStarted):
+        engine._initialize_kv_caches(config)
 
 
 def _make_engine_core_with_dcp_manager() -> EngineCore:

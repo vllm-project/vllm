@@ -259,9 +259,6 @@ async def serve_http(
     async def dummy_shutdown() -> None:
         pass
 
-    loop.add_signal_handler(signal.SIGINT, signal_handler)
-    loop.add_signal_handler(signal.SIGTERM, signal_handler)
-
     async def handle_shutdown() -> None:
         await shutdown_event.wait()
 
@@ -285,12 +282,13 @@ async def serve_http(
         server_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
-        if ssl_cert_refresher:
-            ssl_cert_refresher.stop()
 
-    shutdown_task = loop.create_task(handle_shutdown())
-
+    shutdown_task = None
     try:
+        loop.add_signal_handler(signal.SIGINT, signal_handler)
+        loop.add_signal_handler(signal.SIGTERM, signal_handler)
+        shutdown_task = loop.create_task(handle_shutdown())
+
         await server_task
         return dummy_shutdown()
     except asyncio.CancelledError:
@@ -306,9 +304,12 @@ async def serve_http(
         logger.info_once("[shutdown] API server: shutting down FastAPI HTTP server")
         return server.shutdown()
     finally:
-        shutdown_task.cancel()
+        if shutdown_task is not None:
+            shutdown_task.cancel()
         if watchdog_task is not None:
             watchdog_task.cancel()
+        if ssl_cert_refresher:
+            ssl_cert_refresher.stop()
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):

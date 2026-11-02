@@ -121,7 +121,15 @@ def _store_block(
                 )
         finally:
             os.close(fd)
-        os.replace(tmp_path, dest_path)
+        try:
+            os.replace(tmp_path, dest_path)
+        except FileExistsError:
+            # Another writer published this block after the check above; some
+            # shared filesystems fail the rename with EEXIST instead of
+            # replacing. File names are content hashes, so the file already in
+            # place holds this block and the store is done.
+            with contextlib.suppress(OSError):
+                os.remove(tmp_path)
     except Exception:
         try:
             os.remove(tmp_path)

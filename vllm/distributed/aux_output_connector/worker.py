@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import TYPE_CHECKING, Any
@@ -101,11 +101,26 @@ class PendingAuxOutput:
 class AuxOutputWorkerConnector:
     """Own capture, request tails, and backend resources on the output worker."""
 
-    def __init__(self, vllm_config: VllmConfig) -> None:
-        self.vllm_config = vllm_config
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        model: torch.nn.Module,
+    ) -> None:
+        self._vllm_config = vllm_config
         self._capturer: RoutedExpertsCapturer | None = None
-        self._unbind_capturer: Callable[[], None] | None = None
+        if vllm_config.aux_output_config.enable_return_routed_experts:
+            self._capturer = RoutedExpertsCapturer(
+                max_num_batched_tokens=vllm_config.scheduler_config.max_num_batched_tokens,
+                vllm_config=vllm_config,
+            )
+            bind_routed_experts_capturer(model, self._capturer)
         self._indexer: IndexerCapturer | None = None
+        if vllm_config.aux_output_config.enable_return_indexer_topk:
+            self._indexer = IndexerCapturer(
+                model, vllm_config, output_rank=get_tp_group().is_first_rank
+            )
+            bind_indexer_capturer(model, self._indexer)
         self._r3_shape: tuple[int, ...] = ()
         self._r3_dtype = np.dtype("uint8")
         self._r3_nbytes = 0
@@ -121,30 +136,9 @@ class AuxOutputWorkerConnector:
         self._lock = Lock()
         self._max_concurrent_batches = vllm_config.max_concurrent_batches
 
-    def initialize_capturers(self, model: torch.nn.Module) -> None:
-        """Allocate and bind capture outside the weights pool, before profiling."""
-        if self._capturer is not None or self._indexer is not None:
-            raise RuntimeError("auxiliary-output capturers are already initialized")
-        config = self.vllm_config
-        if config.aux_output_config.enable_return_routed_experts:
-            self._capturer = RoutedExpertsCapturer(
-                max_num_batched_tokens=config.scheduler_config.max_num_batched_tokens,
-                vllm_config=config,
-            )
-            self._unbind_capturer = bind_routed_experts_capturer(model, self._capturer)
-        if config.aux_output_config.enable_return_indexer_topk:
-            self._indexer = IndexerCapturer(
-                model, config, output_rank=get_tp_group().is_first_rank
-            )
-            bind_indexer_capturer(model, self._indexer)
-        if self._capturer is not None:
-            self._r3_shape = self._capturer.shape_per_token
-            self._r3_dtype = np.dtype(self._capturer.output_dtype_name)
-            self._r3_nbytes = int(np.prod(self._r3_shape)) * self._r3_dtype.itemsize
-
-    def initialize_storage(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_output_storage(self, kv_cache_config: KVCacheConfig) -> None:
         """Initialize the SHM data plane after KV capacity is resolved."""
-        vllm_config = self.vllm_config
+        vllm_config = self._vllm_config
         if vllm_config.aux_output_config.enable_return_routed_experts:
             assert self._capturer is not None, (
                 "capture must be initialized before storage"
@@ -158,11 +152,14 @@ class AuxOutputWorkerConnector:
         if not get_tp_group().is_first_rank:
             return
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        for capturer in (self._capturer, self._indexer):
-            if capturer is not None:
-                assert len(capturer.device_buffer) >= max_num_batched_tokens, (
-                    "auxiliary-output capture capacity is smaller than the token budget"
-                )
+        if self._capturer is not None:
+            self._r3_shape = self._capturer.shape_per_token
+            self._r3_dtype = np.dtype(self._capturer.output_dtype_name)
+            self._r3_nbytes = int(np.prod(self._r3_shape)) * self._r3_dtype.itemsize
+        if self._indexer is not None:
+            assert len(self._indexer.device_buffer) >= max_num_batched_tokens, (
+                "auxiliary-output capture capacity is smaller than the token budget"
+            )
         shape_per_token: tuple[int, ...]
         if self._indexer is None:
             assert self._capturer is not None
@@ -538,16 +535,12 @@ class AuxOutputWorkerConnector:
                 self._buffer = None
                 self._requests.clear()
                 self._step_metadata = None
-                unbind, self._unbind_capturer = self._unbind_capturer, None
-                try:
-                    if unbind is not None:
-                        unbind()
-                finally:
-                    self._capturer = None
-                    if self._indexer is not None:
-                        self._indexer.close()
-                        self._indexer = None
+                if self._indexer is not None:
+                    self._indexer.close()
+                    self._indexer = None
 
 
-def get_aux_output_connector(vllm_config: VllmConfig) -> AuxOutputWorkerConnector:
-    return AuxOutputWorkerConnector(vllm_config)
+def get_aux_output_connector(
+    model: torch.nn.Module, vllm_config: VllmConfig
+) -> AuxOutputWorkerConnector:
+    return AuxOutputWorkerConnector(model=model, vllm_config=vllm_config)
