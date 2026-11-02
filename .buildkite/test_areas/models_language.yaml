@@ -212,10 +212,10 @@ steps:
     - pytest -v -s models/language/pooling -m 'not core_model' --timeout=900 --timeout-method=thread
   mirror:
     amd:
-      parallelism: 4
+      automatic_shard: true
       commands:
-        - "pytest -v -s models/language/pooling -m 'not core_model' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB"
-      label: ":amd: (MI355 DPX) Language Models (Extended Pooling) Shard %N"
+        - "pytest -v -s models/language/pooling -m 'not core_model'"
+      label: ":amd: (MI355 DPX) Language Models (Extended Pooling)"
       dind: false
       device: mi355_dpx
       timeout_in_minutes: 95
