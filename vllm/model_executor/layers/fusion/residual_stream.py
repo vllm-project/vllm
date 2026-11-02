@@ -56,7 +56,39 @@ class Scatter(Enum):
 
 
 class ResidualStream:
-    """TODO: document"""
+    """Per-forward state machine holding a decoder stack's residual stream.
+
+    One instance is created at the model's forward entry (``residual=None``, or
+    via :meth:`from_handoff` on a non-first pipeline-parallel rank) and threaded
+    through every migrated decoder layer, which reads from and writes to it at
+    each sublayer boundary:
+
+    - read: :meth:`prepare` consumes the pending sublayer contribution and
+      performs the transition the stream's distribution state requires --
+      (all-reduce +) residual-add + RMSNorm (+ activation-quant) -- handing the
+      activation to the next consumer linear.
+    - write: :meth:`record` parks a sublayer output with its distribution tag,
+      and is consumed by the next :meth:`prepare`, which installs the new
+      residual.
+
+    A layer tags what it produced: ``PARTIAL`` when its row-linear defers its
+    reduce (see :meth:`defer_attn` / :meth:`defer_mlp`), ``FULL`` otherwise. A
+    ``PARTIAL`` value owes exactly one all-reduce, which the next read performs;
+    a ``FULL`` value is never reduced, so a double all-reduce is impossible by
+    construction. After the last layer, :func:`finalize_norm` performs the final
+    transition outside the stream.
+
+    At most one contribution may be pending at a time, and the tensors passed to
+    :meth:`prepare` / :meth:`snapshot` must be the ones the model is forwarding
+    (verified by identity), because the fused kernel updates the pending value and
+    the residual in place.
+
+    Args:
+        residual: Running residual sum, or ``None`` at the stack entry.
+        vllm_config: Read for the LoRA setting, which keeps the activation
+            unquantized so adapter patching stays valid.
+
+    """
 
     def __init__(
         self,

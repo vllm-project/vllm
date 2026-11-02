@@ -2,12 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """End-to-end tests that the model wiring defers and reduces as expected.
 
-``ResidualStream`` itself is unit-tested in ``test_residual_stream.py``; the
-missing link is the model wiring: which layer declares which distribution
-state, how many boundaries enter the stream per forward, and whether the final
-norm absorbs the last owed reduce. These tests drive a real engine with every
-compiler fusion pass disabled, so manual fusion cannot be confused with a
-compiler pass doing the work.
+These tests drive a real engine with every compiler fusion pass disabled,
+so manual fusion cannot be confused with a compiler pass doing the work.
 
 Counts are collected inside the workers (see ``conftest.py``): the model runs
 in spawned processes, so instrumenting the test process observes nothing.

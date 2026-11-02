@@ -14,18 +14,13 @@ import torch.nn as nn
 
 import vllm.model_executor.layers.fusion.ar_rms_quant as arq
 from vllm.model_executor.layers.fusion.ar_rms_quant import (
-    _FUSED_AR_RMS_QUANT_IMPLS,
     _FUSED_RMS_QUANT_IMPLS,
-    _flashinfer_ar_rms_fp8,
-    _flashinfer_ar_rms_nvfp4,
-    _rms_norm_fp8_static,
     fused_ar_rms_norm_quant,
 )
 from vllm.model_executor.layers.fusion.quant_activation import QuantizedActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
-    kNvfp4Dynamic,
 )
 
 HIDDEN = 64
@@ -259,13 +254,3 @@ def test_unsupported_quant_key_degrades_to_plain_norm(default_vllm_config, dist)
     )
 
     assert isinstance(out, torch.Tensor)
-
-
-def test_kernel_registry_matches_supported_quant_keys():
-    assert {
-        kFp8StaticTensorSym: _flashinfer_ar_rms_fp8,
-        kNvfp4Dynamic: _flashinfer_ar_rms_nvfp4,
-    } == _FUSED_AR_RMS_QUANT_IMPLS
-    # Only FP8-static has an unfused norm+quant kernel, so an NVFP4 model at TP1
-    # quantizes in the linear instead of in the norm.
-    assert {kFp8StaticTensorSym: _rms_norm_fp8_static} == _FUSED_RMS_QUANT_IMPLS

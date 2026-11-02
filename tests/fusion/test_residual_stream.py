@@ -2,16 +2,17 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for the model-level ``ResidualStream`` state machine.
 
-On this branch one ``ResidualStream`` is created per model forward and threaded
-through every decoder layer, so correctness hinges on its pending/record/prepare
-transitions rather than on per-layer module capture. These tests pin those
-transitions plus the distribution-state gating (``Scatter.FULL`` vs
-``Scatter.PARTIAL``) without a GPU or a model load.
+One ``ResidualStream`` is created per model forward and threaded through every
+decoder layer, so correctness hinges on its pending/record/prepare transitions.
+These tests pin those transitions plus the distribution-state gating
+(``Scatter.FULL`` vs ``Scatter.PARTIAL``) without a GPU or a model load.
 
 The TP collective is the one thing mocked here: ``tensor_model_parallel_all_reduce``
-is replaced by an identity-times-world-size function so that an all-reduce
-applied twice is observable (``4x`` instead of the correct ``2x``). The real
-multi-rank path is covered by ``test_qwen3_deferred_allreduce_e2e.py``.
+is replaced by an identity-times-world-size function. This is deliberate: a real
+single-rank all-reduce is a no-op, so a bug that reduces twice would be
+invisible. With the mock, one call gives the correct 2x and a second call
+would give 4x, so double-reduce bugs fail the equality assertions loudly.
+The real multi-rank path is covered by ``test_qwen3_deferred_allreduce_e2e.py``.
 """
 
 import contextlib
