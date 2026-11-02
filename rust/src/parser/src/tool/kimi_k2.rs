@@ -3,6 +3,7 @@
 
 use std::collections::BTreeMap;
 
+use vllm_tokenizer::{DecodedText, DynTokenizer};
 use winnow::ascii::{digit1, multispace0 as ws0};
 use winnow::combinator::{alt, eof, repeat, seq};
 use winnow::prelude::*;
@@ -139,7 +140,7 @@ impl KimiK2ToolParser {
 }
 
 impl ToolParser for KimiK2ToolParser {
-    fn create(tools: &[Tool]) -> Result<Box<dyn ToolParser>>
+    fn create(tools: &[Tool], _tokenizer: DynTokenizer) -> Result<Box<dyn ToolParser>>
     where
         Self: Sized + 'static,
     {
@@ -158,8 +159,8 @@ impl ToolParser for KimiK2ToolParser {
         self.call_ids.get(&tool_index).map(String::as_str)
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
             parse_next_kimi_k2_event(input, &mut self.mode)
