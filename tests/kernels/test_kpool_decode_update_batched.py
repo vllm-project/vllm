@@ -63,6 +63,159 @@ def _make_caches():
     return kv, tail
 
 
+@pytest.mark.parametrize("start_remainder", range(4))
+@pytest.mark.parametrize("chunk_size", [1, 3, 12])
+@pytest.mark.parametrize("preceding_request", [False, True])
+@pytest.mark.parametrize("ring_size,padding", [(4, 0), (16, 64)])
+def test_chunked_prefill_uses_its_own_pool_history(
+    start_remainder: int,
+    chunk_size: int,
+    preceding_request: bool,
+    ring_size: int,
+    padding: int,
+):
+    """Chunk boundaries must not drop pools or mix different requests' keys."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.forward_context import set_forward_context
+    from vllm.v1.attention.backends.mla.indexer import (
+        DeepseekV32IndexerMetadata,
+        DeepseekV32IndexerPrefillMetadata,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    if current_platform.is_rocm():
+        from vllm.models.glm5next.amd.sparse_indexer import (
+            sparse_attn_indexer_kpool,
+        )
+    else:
+        from vllm.models.glm5next.nvidia.sparse_indexer import (
+            sparse_attn_indexer_kpool,
+        )
+
+    torch.manual_seed(0)
+    pool = 4
+    start = 32 + start_remainder
+    end = start + chunk_size
+    key = torch.randn(48, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+    score = torch.randn_like(key)
+    ape = torch.randn(pool, HEAD_DIM, dtype=torch.float32, device="cuda")
+    kv, tail = _make_caches()
+    tail = torch.empty_strided(
+        (NUM_BLOCKS, 2, ring_size, HEAD_DIM),
+        (2 * ring_size * HEAD_DIM + padding, ring_size * HEAD_DIM, HEAD_DIM, 1),
+        dtype=tail.dtype,
+        device=tail.device,
+    ).zero_()
+    expected = kv.clone()
+    prior_pos = torch.arange(start, device="cuda")
+    kpool_seed_tail_cache(
+        tail,
+        key[:start],
+        score[:start],
+        ring_size + prior_pos % ring_size,
+        pool,
+        HEAD_DIM,
+    )
+
+    positions = torch.arange(start, end, device="cuda")
+    slots = torch.where(positions % pool == pool - 1, positions // pool, -1)
+    tail_slots = ring_size + positions % ring_size
+    batch_key, batch_score = key[start:end], score[start:end]
+    first_pool, last_pool = start // pool, end // pool
+    if last_pool > first_pool:
+        kpool_compress_and_write_cache(
+            expected,
+            key[first_pool * pool : last_pool * pool].reshape(-1, pool, HEAD_DIM),
+            score[first_pool * pool : last_pool * pool].reshape(-1, pool, HEAD_DIM),
+            ape,
+            torch.arange(first_pool, last_pool, device="cuda"),
+            pool,
+            HEAD_DIM,
+        )
+
+    if preceding_request:
+        prior_key = torch.randn(12, HEAD_DIM, dtype=torch.bfloat16, device="cuda")
+        prior_score = torch.randn_like(prior_key)
+        prior_positions = torch.arange(12, device="cuda")
+        prior_slots = torch.where(
+            prior_positions % pool == pool - 1, 64 + prior_positions // pool, -1
+        )
+        kpool_compress_and_write_cache(
+            expected,
+            prior_key.reshape(-1, pool, HEAD_DIM),
+            prior_score.reshape(-1, pool, HEAD_DIM),
+            ape,
+            torch.arange(64, 67, device="cuda"),
+            pool,
+            HEAD_DIM,
+        )
+        positions = torch.cat((prior_positions, positions))
+        slots = torch.cat((prior_slots, slots))
+        tail_slots = torch.cat(
+            (2 * ring_size + prior_positions % ring_size, tail_slots)
+        )
+        batch_key = torch.cat((prior_key, batch_key))
+        batch_score = torch.cat((prior_score, batch_score))
+
+    n = len(positions)
+    metadata = DeepseekV32IndexerMetadata(
+        seq_lens=torch.tensor(
+            [12, end] if preceding_request else [end],
+            device="cuda",
+            dtype=torch.int32,
+        ),
+        max_seq_len=end,
+        slot_mapping=slots,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=1 + preceding_request,
+        num_prefill_tokens=n,
+        prefill=DeepseekV32IndexerPrefillMetadata([], max_prefill_seq_len=end),
+    )
+    tail_metadata = DeepseekV32IndexerMetadata(
+        seq_lens=metadata.seq_lens,
+        max_seq_len=end,
+        slot_mapping=tail_slots,
+        num_decodes=0,
+        num_decode_tokens=0,
+        num_prefills=metadata.num_prefills,
+        num_prefill_tokens=n,
+    )
+    config = VllmConfig()
+    init_workspace_manager(torch.device("cuda"))
+    topk = torch.empty(n, 128, dtype=torch.int32, device="cuda")
+    with (
+        set_current_vllm_config(config),
+        set_forward_context({"indexer": metadata, "tail": tail_metadata}, config),
+    ):
+        sparse_attn_indexer_kpool(
+            hidden_states=batch_key,
+            k_cache_prefix="indexer",
+            kv_cache=kv,
+            q_quant=batch_key,
+            q_scale=None,
+            k=batch_key,
+            weights=torch.ones(n, 1, device="cuda"),
+            quant_block_size=HEAD_DIM,
+            scale_fmt="ue8m0",
+            topk_tokens=128,
+            head_dim=HEAD_DIM,
+            max_pool_len=32,
+            total_seq_lens=48,
+            topk_indices_buffer=topk,
+            skip_k_cache_insert=False,
+            gate_score=batch_score,
+            compress_ape=ape,
+            index_kpool=pool,
+            positions=positions,
+            tail_kv_cache=tail,
+            tail_prefix="tail",
+        )
+    assert torch.equal(kv, expected), (
+        "Chunked prefill must write the same pool bytes as an unbroken prefill"
+    )
+
+
 def _tail_slot_for(blocks, pos):
     """tail_slot = block*POOL + pos%POOL; each request owns a distinct tail block."""
     blk = torch.tensor(blocks, device=pos.device, dtype=torch.int32).unsqueeze(1)

@@ -30,6 +30,7 @@ from vllm.model_executor.models.deepseek_v2 import (
     yarn_get_mscale,
 )
 from vllm.model_executor.utils import maybe_disable_graph_partition
+from vllm.models.glm5next.common.sparse_indexer import _gather_kpool_prefill_kernel
 from vllm.models.glm5next.nvidia.ops.kpool_compress import fwht128_quant_fp8
 from vllm.models.glm5next.sparse_indexer import SparseAttnIndexerKpool
 from vllm.platforms import current_platform
@@ -292,6 +293,12 @@ class Indexer(nn.Module):
             self.max_total_seq_len,
             self.topk_indices_buffer,
             tail_cache=self.tail_cache,
+        )
+        _gather_kpool_prefill_kernel.register_warmup(
+            tail_cache=self.tail_cache,
+            head_dim=self.head_dim,
+            kpool=self.index_kpool,
+            dtype=torch.bfloat16,
         )
 
     def forward(
