@@ -153,6 +153,9 @@ class FixFunctionalizationPass(VllmInductorPass):
             elif (
                 hasattr(torch.ops._C, "silu_and_mul_nvfp4_quant")
                 and at_target == torch.ops._C.silu_and_mul_nvfp4_quant.default
+            ) or (
+                hasattr(torch.ops._C, "gelu_tanh_and_mul_nvfp4_quant")
+                and at_target == torch.ops._C.gelu_tanh_and_mul_nvfp4_quant.default
             ):
                 mutated_args = {1: "result", 2: "result_block_scale"}
                 self.defunctionalize(

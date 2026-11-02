@@ -34,15 +34,39 @@
 
 namespace vllm {
 
+// Gated activations for the fused activation + NVFP4 quantization kernel:
+// act(gate) * up in float32, rounded to the input type before quantization.
+struct SiluMul {
+  static constexpr const char* kName = "silu_and_mul_nvfp4_quant_kernel";
+
+  template <class Type>
+  static __device__ __forceinline__ PackedVec<Type, CVT_FP4_PACK16> apply(
+      const PackedVec<Type, CVT_FP4_PACK16>& gate,
+      const PackedVec<Type, CVT_FP4_PACK16>& up) {
+    return compute_silu_mul<Type>(gate, up);
+  }
+};
+
+struct GeluTanhMul {
+  static constexpr const char* kName = "gelu_tanh_and_mul_nvfp4_quant_kernel";
+
+  template <class Type>
+  static __device__ __forceinline__ PackedVec<Type, CVT_FP4_PACK16> apply(
+      const PackedVec<Type, CVT_FP4_PACK16>& gate,
+      const PackedVec<Type, CVT_FP4_PACK16>& up) {
+    return compute_gelu_tanh_mul<Type>(gate, up);
+  }
+};
+
 // Use UE4M3 by default.
-template <class Type, bool UE8M0_SF = false>
+template <class Type, class ActMul, bool UE8M0_SF = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
-    silu_mul_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols,
-                             int32_t num_packed_cols, int32_t num_padded_cols,
-                             Type const* __restrict__ in,
-                             float const* __restrict__ SFScale,
-                             uint32_t* __restrict__ out,
-                             uint32_t* __restrict__ SFout) {
+    act_mul_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols,
+                            int32_t num_packed_cols, int32_t num_padded_cols,
+                            Type const* __restrict__ in,
+                            float const* __restrict__ SFScale,
+                            uint32_t* __restrict__ out,
+                            uint32_t* __restrict__ SFout) {
   using PackedVec = vllm::PackedVec<Type, CVT_FP4_PACK16>;
   static constexpr int CVT_FP4_NUM_THREADS_PER_SF =
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
@@ -96,8 +120,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                          valid);
       }
 
-      // Compute silu and mul
-      PackedVec out_silu_mul = compute_silu_mul<Type>(in_vec, in_vec2);
+      // Compute act(gate) * up
+      PackedVec out_act_mul = ActMul::template apply<Type>(in_vec, in_vec2);
 
       auto sf_out =
           cvt_quant_to_fp4_get_sf_out_offset<uint32_t,
@@ -108,7 +132,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       if (valid) {
         out_val =
             cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
-                out_silu_mul, SFScaleVal, sf_out);
+                out_act_mul, SFScaleVal, sf_out);
       } else if (sf_out != nullptr) {
         // The swizzled scale tensor may be allocated with torch.empty.
         // Explicitly initialize padded rows and columns in this kernel so
@@ -134,11 +158,13 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
 }  // namespace vllm
 
-void silu_and_mul_nvfp4_quant_sm1xxa(
-    torch::stable::Tensor& output,  // [..., d]
-    torch::stable::Tensor& output_sf,
-    torch::stable::Tensor& input,  // [..., 2 * d]
-    torch::stable::Tensor& input_sf) {
+namespace {
+
+template <class ActMul>
+void launch_act_mul_nvfp4_quant(torch::stable::Tensor& output,  // [..., d]
+                                torch::stable::Tensor& output_sf,
+                                torch::stable::Tensor& input,  // [..., 2 * d]
+                                torch::stable::Tensor& input_sf) {
   int32_t m = input.size(0);
   int32_t n = input.size(1) / 2;
 
@@ -180,24 +206,42 @@ void silu_and_mul_nvfp4_quant_sm1xxa(
   bool const use_pdl =
       int64_t(m) * num_packed_cols <= int64_t(multiProcessorCount) * 4096;
 
-  VLLM_STABLE_DISPATCH_HALF_TYPES(
-      input.scalar_type(), "silu_and_mul_nvfp4_quant_kernel", [&] {
-        using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
-        auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-        cudaLaunchConfig_t config = {};
-        config.gridDim = grid;
-        config.blockDim = block;
-        config.dynamicSmemBytes = 0;
-        config.stream = stream;
-        cudaLaunchAttribute attrs[1];
-        attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-        attrs[0].val.programmaticStreamSerializationAllowed = 1;
-        config.numAttrs = use_pdl ? 1 : 0;
-        config.attrs = attrs;
-        cudaLaunchKernelEx(&config, vllm::silu_mul_cvt_fp16_to_fp4<cuda_type>,
-                           m, n, num_packed_cols, num_padded_cols, input_ptr,
-                           input_sf_ptr,
-                           reinterpret_cast<uint32_t*>(output_ptr),
-                           reinterpret_cast<uint32_t*>(sf_out));
-      });
+  VLLM_STABLE_DISPATCH_HALF_TYPES(input.scalar_type(), ActMul::kName, [&] {
+    using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
+    auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
+    cudaLaunchConfig_t config = {};
+    config.gridDim = grid;
+    config.blockDim = block;
+    config.dynamicSmemBytes = 0;
+    config.stream = stream;
+    cudaLaunchAttribute attrs[1];
+    attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attrs[0].val.programmaticStreamSerializationAllowed = 1;
+    config.numAttrs = use_pdl ? 1 : 0;
+    config.attrs = attrs;
+    cudaLaunchKernelEx(&config,
+                       vllm::act_mul_cvt_fp16_to_fp4<cuda_type, ActMul>, m, n,
+                       num_packed_cols, num_padded_cols, input_ptr,
+                       input_sf_ptr, reinterpret_cast<uint32_t*>(output_ptr),
+                       reinterpret_cast<uint32_t*>(sf_out));
+  });
+}
+
+}  // namespace
+
+void silu_and_mul_nvfp4_quant_sm1xxa(
+    torch::stable::Tensor& output,  // [..., d]
+    torch::stable::Tensor& output_sf,
+    torch::stable::Tensor& input,  // [..., 2 * d]
+    torch::stable::Tensor& input_sf) {
+  launch_act_mul_nvfp4_quant<vllm::SiluMul>(output, output_sf, input, input_sf);
+}
+
+void gelu_tanh_and_mul_nvfp4_quant_sm1xxa(
+    torch::stable::Tensor& output,  // [..., d]
+    torch::stable::Tensor& output_sf,
+    torch::stable::Tensor& input,  // [..., 2 * d]
+    torch::stable::Tensor& input_sf) {
+  launch_act_mul_nvfp4_quant<vllm::GeluTanhMul>(output, output_sf, input,
+                                                input_sf);
 }

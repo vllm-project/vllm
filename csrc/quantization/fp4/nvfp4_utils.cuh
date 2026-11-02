@@ -18,6 +18,7 @@
 
 #include <cuda_runtime.h>
 #include <cuda_fp8.h>
+#include <cmath>
 #include <utility>
 
 #include "../../cuda_vec_utils.cuh"
@@ -310,22 +311,52 @@ __device__ __forceinline__ float2 silu2(float2 x) {
   return make_float2(silu(x.x), silu(x.y));
 }
 
-template <class Type>
-__inline__ __device__ PackedVec<Type, CVT_FP4_PACK16> compute_silu_mul(
+// gelu (tanh approximation) in float32. Same expression as gelu_tanh_kernel in
+// activation_kernels.cu (and PyTorch's GeluCUDAKernelImpl).
+__device__ __forceinline__ float gelu_tanh(float x) {
+  constexpr float BETA = M_SQRT2 * M_2_SQRTPI * 0.5f;
+  constexpr float KAPPA = 0.044715;
+  const float x_cube = x * x * x;
+  const float inner = BETA * (x + KAPPA * x_cube);
+  return 0.5f * x * (1.0f + ::tanhf(inner));
+}
+
+__device__ __forceinline__ float2 gelu_tanh2(float2 x) {
+  return make_float2(gelu_tanh(x.x), gelu_tanh(x.y));
+}
+
+// act(x) * y in float32, rounded once to Type. This matches the Inductor-fused
+// native path; the standalone act_and_mul kernels round the activation to Type
+// before the multiply, so their output is not bit-identical to this.
+template <float2 (*ACT2)(float2), class Type>
+__inline__ __device__ PackedVec<Type, CVT_FP4_PACK16> compute_act_mul(
     const PackedVec<Type, CVT_FP4_PACK16>& x_vec,
     const PackedVec<Type, CVT_FP4_PACK16>& y_vec) {
   PackedVec<Type, CVT_FP4_PACK16> result;
 
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
-    // silu_mul in float32
     using packed_t = typename PackedTypeConverter<Type>::Type;
-    float2 silu_vec = silu2(cast_to_float2(x_vec.elts[i]));
+    float2 act_vec = ACT2(cast_to_float2(x_vec.elts[i]));
     float2 y_f2 = cast_to_float2(y_vec.elts[i]);
     result.elts[i] = cast_to_packed<packed_t>(
-        make_float2(silu_vec.x * y_f2.x, silu_vec.y * y_f2.y));
+        make_float2(act_vec.x * y_f2.x, act_vec.y * y_f2.y));
   }
   return result;
+}
+
+template <class Type>
+__inline__ __device__ PackedVec<Type, CVT_FP4_PACK16> compute_silu_mul(
+    const PackedVec<Type, CVT_FP4_PACK16>& x_vec,
+    const PackedVec<Type, CVT_FP4_PACK16>& y_vec) {
+  return compute_act_mul<silu2, Type>(x_vec, y_vec);
+}
+
+template <class Type>
+__inline__ __device__ PackedVec<Type, CVT_FP4_PACK16> compute_gelu_tanh_mul(
+    const PackedVec<Type, CVT_FP4_PACK16>& x_vec,
+    const PackedVec<Type, CVT_FP4_PACK16>& y_vec) {
+  return compute_act_mul<gelu_tanh2, Type>(x_vec, y_vec);
 }
 
 }  // namespace vllm
