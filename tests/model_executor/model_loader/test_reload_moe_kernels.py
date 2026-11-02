@@ -91,3 +91,30 @@ def test_reload_keeps_moe_output(
             name_0="before reload",
             name_1="after reload",
         )
+
+
+def test_fused_gate_weight_refilled_after_reload():
+    from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
+    from vllm.model_executor.model_loader.weight_utils import finalize_model_weights
+
+    # Only the attributes `fuse_gate_weights` reads; a full runner needs a
+    # MoE config and kernels.
+    runner = MoERunner.__new__(MoERunner)
+    torch.nn.Module.__init__(runner)
+    runner.gate = torch.nn.Linear(8, 4, bias=False)
+    runner.shared_expert_gate = torch.nn.Linear(8, 1, bias=False)
+    runner._fse_fuse_gate = True
+    runner._combined_gate_weight = None
+    model = torch.nn.Sequential(runner)
+
+    finalize_model_weights(model)  # cold start
+    fused = runner._combined_gate_weight
+    with torch.no_grad():
+        runner.gate.weight.add_(1.0)
+        runner.shared_expert_gate.weight.add_(2.0)
+    finalize_model_weights(model)  # reload
+
+    assert runner._combined_gate_weight is fused
+    torch.testing.assert_close(
+        fused, torch.cat([runner.gate.weight, runner.shared_expert_gate.weight])
+    )
