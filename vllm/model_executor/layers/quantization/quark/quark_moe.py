@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -978,6 +979,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
         return make_fp8_moe_quant_config(
@@ -992,6 +994,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
             per_act_token_quant=self.input_qscheme == "per_channel",
             per_out_ch_quant=self.weight_qscheme == "per_channel",
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     def apply(
@@ -1872,6 +1875,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
             self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def get_fused_moe_quant_config(
@@ -2115,6 +2119,7 @@ class QuarkW8A8Mxfp8MoEMethod(QuarkMoEMethod):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
@@ -2317,8 +2322,8 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
 
     def dequantize_weight(
         self, layer: torch.nn.Module
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Dequantize Quark NVFP4 expert weights for requantization."""
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield ``(experts, w13, w2)`` dequantized Quark NVFP4 experts."""
         return dequantize_nvfp4_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,
@@ -2397,6 +2402,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
                 backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
             )
+            self.moe_kernel.fused_experts.keep_constants(layer)
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
