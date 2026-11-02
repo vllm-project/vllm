@@ -5,7 +5,7 @@ Replacement for lm-eval-harness with better performance and control.
 
 Usage:
 pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
-    --config-list-file=configs/models-small.txt
+    --config-list-file=configs/models-small.yaml
 """
 
 import shlex
@@ -109,15 +109,17 @@ def test_gsm8k_correctness(config_filename):
             "Its W2A16 (uint2b2) scheme has no kernel outside CUDA."
         )
 
-    # TODO(akaratza): Enable DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms
     if current_platform.is_rocm() and (
         "deepseek-ai/DeepSeek-V3.2" in eval_config["model_name"]
         or "deepseek-ai/DeepSeek-R1" in eval_config["model_name"]
     ):
-        pytest.skip(
-            "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms "
-            "due to agent pool disk space issues and pod evictions."
-        )
+        from vllm.platforms.rocm import get_cdna_version
+
+        if get_cdna_version() < 4:
+            pytest.skip(
+                "Skipping DeepSeek-V3.2 and DeepSeek-R1 on ROCm platforms below "
+                "CDNA 4 due to agent pool disk space issues and pod evictions."
+            )
     if current_platform.is_rocm() and (
         "Qwen3.5-35B-A3B-MXFP4-AITER-TP2" in config_filename.name
     ):
@@ -175,6 +177,16 @@ def test_gsm8k_correctness(config_filename):
     ) as remote_server:
         server_url = remote_server.url_for("v1")
         print(f"Server started at: {server_url}")
+
+        # Run before any traffic: EPLB may rearrange experts after a few steps.
+        for method in eval_config.get("startup_rpc_checks", []):
+            response = requests.post(
+                remote_server.url_for("collective_rpc"), json={"method": method}
+            )
+            response.raise_for_status()
+            results = response.json()["results"]
+            print(f"  {method}: {results}")
+            assert results and not any(results), f"{method} failed: {results}"
 
         results = run_gsm8k_eval(eval_config, server_url)
 

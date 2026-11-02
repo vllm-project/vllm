@@ -14,7 +14,7 @@ from typing import Annotated, Any, Literal, TypeAlias, TypedDict, TypeVar
 
 import torch
 import torch.nn as nn
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BatchFeature, PreTrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import MultiModalDummyOptions
@@ -48,9 +48,9 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.internvl import (
-    InternVLImageProcessor,
-    InternVLProcessor,
-    InternVLVideoProcessor,
+    InternVLChatImageProcessor,
+    InternVLChatProcessor,
+    InternVLChatVideoProcessor,
 )
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -134,7 +134,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
     """Basic image-only ProcessingInfo for InternVL-style models."""
 
     @abstractmethod
-    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> InternVLChatProcessor:
         raise NotImplementedError
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -145,7 +145,7 @@ class BaseInternVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: InternVLProcessor,
+        processor: InternVLChatProcessor,
     ) -> int:
         return processor.get_num_image_tokens(
             image_width=image_width,
@@ -261,7 +261,7 @@ class BaseInternVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def _get_prompt_repl_image(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor: InternVLProcessor,
+        hf_processor: InternVLChatProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
         tokenizer = self.info.get_tokenizer()
@@ -333,7 +333,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         kwargs.setdefault("dynamic_image_size", config.dynamic_image_size)
         kwargs.setdefault("use_thumbnail", config.use_thumbnail)
 
-        return InternVLImageProcessor(**kwargs)
+        return InternVLChatImageProcessor(**kwargs)
 
     def get_video_processor(self, **kwargs):
         config = self.get_hf_config()
@@ -342,7 +342,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         kwargs = self.ctx.get_merged_mm_kwargs(kwargs)
         kwargs.setdefault("image_size", vision_config.image_size)
 
-        return InternVLVideoProcessor(**kwargs)
+        return InternVLChatVideoProcessor(**kwargs)
 
     @cached_property
     def ctx_video_token(self):
@@ -363,7 +363,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
 
         return ctx_video_token
 
-    def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
+    def get_hf_processor(self, **kwargs: object) -> InternVLChatProcessor:
         config = self.get_hf_config()
         vision_config = config.vision_config
 
@@ -378,7 +378,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
             self.get_video_processor(**kwargs) if ctx_video_token else None
         )
 
-        return InternVLProcessor(
+        return InternVLChatProcessor(
             tokenizer=self.get_tokenizer(),
             image_processor=image_processor,
             video_processor=video_processor,
@@ -498,7 +498,7 @@ class InternVLMultiModalProcessor(
     def _get_prompt_repl_video(
         self,
         mm_items: MultiModalDataItems,
-        hf_processor: InternVLProcessor,
+        hf_processor: InternVLChatProcessor,
         out_mm_data: BatchedTensorInputs,
     ):
         tokenizer = self.info.get_tokenizer()
@@ -629,7 +629,7 @@ class InternVLChatModel(
         )
 
     def _patch_quant_config(
-        self, config: PretrainedConfig, quant_config: QuantizationConfig | None
+        self, config: PreTrainedConfig, quant_config: QuantizationConfig | None
     ):
         # the awq models from OpenGVLab missing `modules_to_not_convert`
         # patch the quant_config to add `modules_to_not_convert` back
@@ -643,7 +643,7 @@ class InternVLChatModel(
 
     def _init_vision_model(
         self,
-        config: PretrainedConfig,
+        config: PreTrainedConfig,
         quant_config: QuantizationConfig | None,
         *,
         prefix: str,
@@ -663,7 +663,7 @@ class InternVLChatModel(
             prefix=prefix,
         )
 
-    def _init_mlp1(self, config: PretrainedConfig) -> nn.Module:
+    def _init_mlp1(self, config: PreTrainedConfig) -> nn.Module:
         vit_hidden_size = config.vision_config.hidden_size
         llm_hidden_size = config.text_config.hidden_size
 

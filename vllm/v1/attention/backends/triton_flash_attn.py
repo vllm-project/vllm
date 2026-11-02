@@ -5,6 +5,7 @@
 import torch
 
 from vllm.config.cache import CacheDType
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backends.composite import (
     MMPrefixAttentionRouting,
@@ -15,7 +16,14 @@ from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 
 
-class _FA4Backend(FlashAttentionBackend):
+class _FABackend(FlashAttentionBackend):
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        if current_platform.is_xpu():
+            return True
+        # CUDA: Hopper only; Blackwell uses the Triton/FlashInfer composite.
+        return capability.major == 9 and super().supports_compute_capability(capability)
+
     @classmethod
     def supports_combination(
         cls,
@@ -42,26 +50,25 @@ class _FA4Backend(FlashAttentionBackend):
         )
         if reason is not None:
             return reason
-        if (
-            get_flash_attn_version(
-                head_size=head_size,
-                has_sinks=has_sink,
-                kv_cache_block_size=block_size,
-                supports_fa4_hd256=True,
-            )
-            != 4
-        ):
-            return "causal route requires FlashAttention v4"
+        if current_platform.is_xpu():
+            return None
+        fa_version = get_flash_attn_version(
+            head_size=head_size,
+            has_sinks=has_sink,
+            kv_cache_block_size=block_size,
+            supports_fa4_hd256=True,
+        )
+        if fa_version not in (3, 4):
+            return "causal route requires FlashAttention v3 or v4"
         return None
 
 
 TritonFlashAttentionBackend = create_composite_attention_backend(
     TritonAttentionBackend,
-    _FA4Backend,
+    _FABackend,
     name="TritonFlashAttentionBackend",
     backend_name="TRITON_FLASH_ATTN",
     module=__name__,
     routing_policy=MMPrefixAttentionRouting,
     head_sizes=(256, 512),
-    device_major=9,
 )

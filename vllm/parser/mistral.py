@@ -13,20 +13,12 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import ijson
 import regex as re
-from mistral_common.protocol.instruct.tool_calls import (
-    NamedToolChoice as MistralNamedToolChoice,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    Tool as MistralTool,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    ToolChoice as MistralToolChoice,
-)
-from mistral_common.protocol.instruct.tool_calls import (
-    ToolChoiceEnum as MistralToolChoiceEnum,
+from mistral_common.exceptions import InvalidRequestException
+from mistral_common.protocol.instruct.request import (
+    ChatCompletionRequest as MistralChatCompletionRequest,
 )
 from mistral_common.tokens.tokenizers.base import SpecialTokens
-from pydantic import Field
+from pydantic import Field, ValidationError
 
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
@@ -40,6 +32,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionNamedToolChoiceParam,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.parser.engine.events import EventType
 from vllm.parser.engine.parser_engine import ParserEngine
@@ -48,7 +41,7 @@ from vllm.parser.engine.parser_engine_config import (
     ParserState,
     Transition,
 )
-from vllm.sampling_params import StructuredOutputsParams
+from vllm.sampling_params import StructuredOutputsParams, check_json_nesting
 from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
@@ -63,9 +56,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 _ALPHANUMERIC = ascii_letters + digits
-_DEFAULT_JSON_SCHEMA: dict[str, Any] = {
-    "anyOf": [{"type": "object"}, {"type": "array"}]
-}
 
 # Special token strings as emitted/decoded by MistralTokenizer.
 _TOOL_CALLS = SpecialTokens.tool_calls.value
@@ -110,11 +100,77 @@ class MistralToolCall(ToolCall):
         return id.isalnum() and len(id) == 9
 
 
+def _mistral_response_format(request: ChatCompletionRequest) -> dict[str, Any]:
+    """Return the OpenAI-format response format to pass to mistral-common.
+
+    `structured_outputs` (`json`, `json_object`) takes precedence over
+    `response_format`, as in `structured_outputs_from_response_format`.
+    """
+    structured_outputs = request.structured_outputs
+    if structured_outputs is not None:
+        if structured_outputs.json_object is not None:
+            return {"type": "json_object"}
+        if structured_outputs.json is None:
+            raise ValueError(
+                "Unsupported request.structured_outputs for MistralParser. "
+                "Only `json` and `json_object` are supported."
+            )
+        schema = structured_outputs.json
+        if isinstance(schema, str):
+            check_json_nesting(schema)
+            schema = json.loads(schema)
+        # `structured_outputs.json` asks vLLM to enforce the schema.
+        return {
+            "type": "json_schema",
+            "json_schema": {"name": "response", "schema": schema, "strict": True},
+        }
+
+    if request.response_format is None:
+        return {"type": "text"}
+    if request.response_format.type not in ("text", "json_object", "json_schema"):
+        raise ValueError(
+            "MistralParser only accepts `text`, `json_object` or "
+            f"`json_schema`, got {request.response_format=}"
+        )
+    return request.response_format.model_dump(by_alias=True, exclude_none=True)
+
+
 def _is_pre_v11_tokeniser(model_tokenizer: TokenizerLike) -> bool:
     if is_mistral_tokenizer(model_tokenizer):
         return model_tokenizer.version < 11
     vocab: dict[str, int] = getattr(model_tokenizer, "get_vocab", lambda: {})()
     return _ARGS not in vocab
+
+
+def _pre_v11_function_calls(parsed: Any) -> list[FunctionCall]:
+    """Decode the JSON after a pre-v11 ``[TOOL_CALLS]`` marker.
+
+    Mirrors the streaming path: a bare object is a single call, entries that
+    are not call objects are skipped, a missing or non-string name becomes
+    ``""`` (as in the v11+ path) and string arguments are kept as-is.
+    """
+    if isinstance(parsed, dict):
+        parsed = [parsed]
+    if not isinstance(parsed, list):
+        return []
+    function_calls: list[FunctionCall] = []
+    for tool_call in parsed:
+        if not isinstance(tool_call, dict) or not (
+            "name" in tool_call or "arguments" in tool_call
+        ):
+            continue
+        name = tool_call.get("name")
+        arguments = tool_call.get("arguments")
+        if arguments is None:
+            arguments = "{}"
+        elif not isinstance(arguments, str):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        function_calls.append(
+            FunctionCall(
+                name=name if isinstance(name, str) else "", arguments=arguments
+            )
+        )
+    return function_calls
 
 
 @functools.cache
@@ -301,6 +357,7 @@ class MistralParser(ParserEngine):
         self.starting_new_tool: bool = False
         self.streamed_args_for_tool: list[str] = []
         self._is_pre_v11: bool = _is_pre_v11_tokeniser(tokenizer)
+        self.current_tool_string_arguments: str | None = None
         self.parse_coro = None
         if self._is_pre_v11:
             self.parse_coro = ijson.parse_coro(
@@ -375,81 +432,32 @@ class MistralParser(ParserEngine):
                     request.response_format = None
             return request
 
-        json_schema: dict[str, Any] | None = None
-        if request.structured_outputs is not None:
-            if request.structured_outputs.json_object is not None:
-                json_schema = _DEFAULT_JSON_SCHEMA
-            elif request.structured_outputs.json is not None:
-                if isinstance(request.structured_outputs.json, str):
-                    json_schema = json.loads(request.structured_outputs.json)
-                else:
-                    json_schema = request.structured_outputs.json
-            else:
-                raise ValueError(
-                    "Unsupported request.structured_outputs for MistralParser. "
-                    "Only `json` and `json_object` are supported."
-                )
-        elif (
-            request.response_format is not None
-            and request.response_format.type != "text"
-        ):
-            if request.response_format.type == "json_object":
-                json_schema = _DEFAULT_JSON_SCHEMA
-            elif request.response_format.type == "json_schema":
-                if request.response_format.json_schema is not None:
-                    json_schema = request.response_format.json_schema.json_schema
-                else:
-                    json_schema = _DEFAULT_JSON_SCHEMA
-            else:
-                raise ValueError(
-                    "MistralParser only accepts `text`, `json_object` or "
-                    f"`json_schema`, got {request.response_format=}"
-                )
-            request.response_format = None
+        response_format = _mistral_response_format(request)
+        # The grammar replaces response_format as the engine constraint.
+        request.response_format = None
 
         grammar_factory = self.model_tokenizer.grammar_factory
 
         # Rendering grammar is cached in mistral-common given tools, template and mode.
         template = grammar_factory.select_jinja_template()
 
-        mistral_tools = (
-            [MistralTool.from_openai(tool.model_dump()) for tool in request.tools]
-            if request.tools is not None
-            else None
-        )
+        try:
+            mistral_request = MistralChatCompletionRequest.from_openai(
+                **request.model_dump(
+                    include={"messages", "tools", "tool_choice", "parallel_tool_calls"},
+                    exclude_none=True,
+                ),
+                response_format=response_format,
+            )
+            lark_grammar = grammar_factory.get_grammar_for_chat_request(
+                request=mistral_request, template=template
+            )
+        except (ValidationError, InvalidRequestException) as e:
+            raise VLLMValidationError(str(e)) from e
 
-        tool_choice: MistralToolChoice
-        match request.tool_choice:
-            case "none" | "auto" | "required":
-                tool_choice = MistralToolChoiceEnum(request.tool_choice)
-            case None:
-                tool_choice = MistralToolChoiceEnum.auto
-            # _ == Named tool choice
-            case _:
-                tool_choice = MistralNamedToolChoice.model_validate(
-                    {
-                        "type": "function",
-                        "function": {"name": request.tool_choice.function.name},
-                    }
-                )
-
-        match tool_choice, json_schema is not None:
-            case MistralToolChoiceEnum.none, True:
-                lark_grammar = grammar_factory.get_lark_for_json_schema(
-                    template=template, json_schema=json_schema
-                )
-            case _, _:
-                lark_grammar = grammar_factory.get_lark_from_jinja(
-                    template=template,
-                    mode=tool_choice,
-                    tools=mistral_tools,
-                    json_schema=json_schema,
-                    parallel_tool_calls=request.parallel_tool_calls,
-                    json_only=False,
-                )
-
-        request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
-        request._grammar_from_parser = True
+        if lark_grammar is not None:
+            request.structured_outputs = StructuredOutputsParams(grammar=lark_grammar)
+            request._grammar_from_parser = True
         return request
 
     def _build_guided_schema_pre_v11(
@@ -550,16 +558,13 @@ class MistralParser(ParserEngine):
 
         content: str | None = None
         if self.bot_token in model_output:
-            content_and_raw_tool_calls = model_output.split(self.bot_token)
-            content = content_and_raw_tool_calls[0]
-            raw_tool_calls = content_and_raw_tool_calls[1:]
             # pre-v11: content[BOT] [{tool_call1},{tool_call2}]
-            if len(raw_tool_calls) != 1:
-                raise ValueError(
-                    "Only one BOT token should have been outputted, "
-                    f"but got {model_output}."
-                )
-            stringified_tool_calls = raw_tool_calls[0].strip()
+            # Repeated BOT tokens with nothing between them count as one, and
+            # output after a later BOT token is trailing text, as in streaming.
+            content, *segments = model_output.split(self.bot_token)
+            stringified_tool_calls = next(
+                (segment.strip() for segment in segments if segment.strip()), ""
+            )
         elif tool_choice == "required" or isinstance(
             tool_choice, ChatCompletionNamedToolChoiceParam
         ):
@@ -574,49 +579,31 @@ class MistralParser(ParserEngine):
             # Use raw_decode to parse the first valid JSON value,
             # ignoring trailing tokens the model may emit after
             # the tool call array.
-            tool_calls, _ = json.JSONDecoder().raw_decode(stringified_tool_calls)
+            parsed, _ = json.JSONDecoder().raw_decode(stringified_tool_calls)
         except json.JSONDecodeError:
             try:
                 raw_tool_call = self.tool_call_regex.findall(stringified_tool_calls)[0]
-                tool_calls = json.loads(raw_tool_call)
-                tool_calls = [
-                    {
-                        "name": tool_call["name"],
-                        "arguments": json.dumps(
-                            tool_call.get("arguments", {}),
-                            ensure_ascii=False,
-                        ),
-                    }
-                    for tool_call in tool_calls
-                ]
+                parsed = json.loads(raw_tool_call)
             except (IndexError, json.JSONDecodeError):
                 logger.exception("Error in extracting tool call from response.")
-                return ExtractedToolCallInformation(
-                    tools_called=False,
-                    tool_calls=[],
-                    content=stringified_tool_calls,
+                parsed = None
+
+        function_calls = _pre_v11_function_calls(parsed)
+        if not function_calls:
+            if parsed is not None:
+                logger.warning(
+                    "No tool call found in the JSON after %s; returning it as content.",
+                    self.bot_token,
                 )
-        else:
-            tool_calls = [
-                {
-                    "name": tool_call["name"],
-                    "arguments": json.dumps(
-                        tool_call.get("arguments", {}),
-                        ensure_ascii=False,
-                    ),
-                }
-                for tool_call in tool_calls
-            ]
+            return ExtractedToolCallInformation(
+                tools_called=False,
+                tool_calls=[],
+                content=stringified_tool_calls,
+            )
 
         mistral_tool_calls: list[MistralToolCall] = [
-            MistralToolCall(
-                type="function",
-                function=FunctionCall(
-                    name=tool_call["name"],
-                    arguments=tool_call.get("arguments", "{}"),
-                ),
-            )
-            for tool_call in tool_calls
+            MistralToolCall(type="function", function=function_call)
+            for function_call in function_calls
         ]
 
         return ExtractedToolCallInformation(
@@ -668,8 +655,15 @@ class MistralParser(ParserEngine):
 
     @ijson.coroutine
     def update_stream_state_pre_v11_tokenizer(self):
+        bare_object = False
         while True:
             (prefix, event, value) = yield
+
+            # A bare top-level object is a single call: parse it as an item.
+            if prefix == "" and event == "start_map":
+                bare_object = True
+            if bare_object:
+                prefix = f"item.{prefix}" if prefix else "item"
 
             if prefix == "item" and event == "start_map":
                 self.streaming_state = StreamingState.WAITING_FOR_TOOL_KEY
@@ -685,8 +679,14 @@ class MistralParser(ParserEngine):
                 self.streaming_state = StreamingState.PARSING_ARGUMENTS
             if prefix == "item.arguments" and event == "end_map":
                 self.streaming_state = StreamingState.PARSING_ARGUMENTS_COMPLETED
+            if prefix == "item.arguments" and event == "string":
+                self.current_tool_string_arguments = value
             if prefix == "item" and event == "end_map":
-                self.streaming_state = StreamingState.TOOL_COMPLETE
+                self.streaming_state = (
+                    StreamingState.ALL_TOOLS_COMPLETE
+                    if bare_object
+                    else StreamingState.TOOL_COMPLETE
+                )
             if prefix == "" and event == "end_array":
                 self.streaming_state = StreamingState.ALL_TOOLS_COMPLETE
 
@@ -722,22 +722,27 @@ class MistralParser(ParserEngine):
                     delta_text=delta_text,
                     stop_after_opening_curly_braces=1,
                 )
+            # Every state in which the call object can close stops after "}",
+            # so text following a bare object is never sent to ijson.
             elif self.streaming_state == StreamingState.WAITING_FOR_TOOL_KEY:
                 delta_to_be_parsed, delta_text = self._split_delta(
                     delta_text=delta_text,
                     stop_after_colon=1,
                     stop_after_opening_curly_braces=1,
+                    stop_after_closing_curly_braces=1,
                 )
             elif self.streaming_state == StreamingState.PARSING_NAME:
                 delta_to_be_parsed, delta_text = self._split_delta(
                     delta_text=delta_text,
                     stop_after_comma=1,
                     stop_after_closing_brackets=1,
+                    stop_after_closing_curly_braces=1,
                 )
             elif self.streaming_state == StreamingState.WAITING_FOR_ARGUMENTS_START:
                 delta_to_be_parsed, delta_text = self._split_delta(
                     delta_text=delta_text,
                     stop_after_opening_curly_braces=1,
+                    stop_after_closing_curly_braces=1,
                 )
             elif self.streaming_state == StreamingState.PARSING_ARGUMENTS:
                 delta_to_be_parsed, delta_text = self._split_delta(
@@ -798,6 +803,12 @@ class MistralParser(ParserEngine):
                     self.current_tool_name
                 )
                 self.current_tool_name = None
+            if self.current_tool_string_arguments is not None:
+                current_tool_call_modified = True
+                current_tool_call.function.arguments = (
+                    self.current_tool_string_arguments
+                )
+                self.current_tool_string_arguments = None
             if self.streaming_state == StreamingState.PARSING_NAME_COMPLETED:
                 self.streaming_state = StreamingState.WAITING_FOR_TOOL_KEY
             if self.streaming_state in [

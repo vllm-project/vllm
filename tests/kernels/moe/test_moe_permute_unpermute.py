@@ -141,6 +141,7 @@ def test_moe_permute_unpermute(
     n_local_expert = n_expert
     if ep_size != 1:
         n_local_expert, expert_map, _ = determine_expert_map(ep_size, ep_rank, n_expert)
+        assert expert_map is not None
         expert_map = expert_map.cuda()
     start_expert = n_local_expert * ep_rank
     set_random_seed(0)
@@ -169,13 +170,9 @@ def test_moe_permute_unpermute(
     scratch = None
     if use_scratch:
         scratch = get_moe_permute_scratch(
-            max_num_tokens=n_token,
-            topk=topk,
             num_experts=n_expert,
             num_local_experts=n_local_expert,
             device=hidden_states.device,
-            hidden_size=n_hidden,
-            hidden_dtype=dtype,
         )
 
     (
@@ -247,13 +244,9 @@ def test_moe_permute_reuses_scratch_buffers(
     _, topk_ids, _ = fused_topk(hidden_states, gating_output, topk, False)
 
     scratch_config = dict(
-        max_num_tokens=n_token,
-        topk=topk,
         num_experts=n_expert,
         num_local_experts=n_expert,
         device=hidden_states.device,
-        hidden_size=n_hidden,
-        hidden_dtype=hidden_states.dtype,
     )
     scratch = get_moe_permute_scratch(**scratch_config)
 
@@ -300,15 +293,10 @@ def test_moe_permute_reuses_scratch_buffers(
         permuted_idx_2,
     ) = second
 
-    torch.testing.assert_close(permuted_hidden_states_1, permuted_hidden_states_2)
     torch.testing.assert_close(expert_first_token_offset_1, expert_first_token_offset_2)
     torch.testing.assert_close(inv_permuted_idx_1, inv_permuted_idx_2)
     torch.testing.assert_close(permuted_idx_1, permuted_idx_2)
 
-    assert (
-        permuted_hidden_states_1.untyped_storage().data_ptr()
-        == permuted_hidden_states_2.untyped_storage().data_ptr()
-    )
     assert (
         expert_first_token_offset_1.untyped_storage().data_ptr()
         == expert_first_token_offset_2.untyped_storage().data_ptr()
@@ -330,14 +318,11 @@ def test_moe_permute_scratch_reused_across_graph_sizes(workspace_init) -> None:
 
     device = torch.device("cuda:0")
     scratch = get_moe_permute_scratch(
-        max_num_tokens=128,
-        topk=6,
         num_experts=16,
         num_local_experts=16,
         device=device,
-        hidden_size=2048,
-        hidden_dtype=torch.bfloat16,
     )
+    scratch.reserve(128 * 6)
     current_workspace_manager().lock()
     runs = []
     for n_token in (128, 1, 33):
@@ -372,13 +357,9 @@ def test_moe_permute_scratch_isolated_across_execution_slots(monkeypatch) -> Non
     ubatch = 0
     monkeypatch.setattr(workspace, "dbo_current_ubatch_id", lambda: ubatch)
     scratch_config = dict(
-        max_num_tokens=64,
-        topk=6,
         num_experts=16,
         num_local_experts=16,
         device=device,
-        hidden_size=2048,
-        hidden_dtype=torch.bfloat16,
     )
     runs = []
     for i, n_token in enumerate((1, 7, 33, 64)):
@@ -396,7 +377,7 @@ def test_moe_permute_scratch_isolated_across_execution_slots(monkeypatch) -> Non
             runs.append((stream, graph, hidden, topk_ids, output, scratch))
         torch.cuda.current_stream().wait_stream(stream)
 
-    assert len({run[-1].permuted_hidden_states.data_ptr() for run in runs}) == 4
+    assert len({run[-1].permuted_idx.data_ptr() for run in runs}) == 4
     manager.lock()
     for _ in range(3):
         for i, (stream, graph, hidden, topk_ids, _, scratch) in enumerate(runs):
@@ -423,8 +404,6 @@ def test_moe_permute_scratch_without_manager(monkeypatch) -> None:
 
     monkeypatch.setattr(workspace, "_manager", None)
     config = dict(
-        max_num_tokens=4,
-        topk=2,
         num_experts=4,
         num_local_experts=4,
         device=torch.device("cuda"),
@@ -432,6 +411,8 @@ def test_moe_permute_scratch_without_manager(monkeypatch) -> None:
     first = get_moe_permute_scratch(**config)
     second = get_moe_permute_scratch(**config)
 
+    first.reserve(8)
+    second.reserve(8)
     assert (
         first.token_expert_indices.data_ptr() != second.token_expert_indices.data_ptr()
     )
@@ -450,13 +431,9 @@ def test_moe_permute_ignores_invalid_expert_ids_with_scratch() -> None:
     topk_ids = torch.tensor([[0], [-1], [1], [4], [2]], device="cuda")
     expert_map = torch.tensor([0, 1, -1, -1], dtype=torch.int32, device="cuda")
     scratch = MoEPermuteScratch(
-        max_num_tokens=5,
-        topk=1,
         num_experts=4,
         num_local_experts=2,
         device=hidden_states.device,
-        hidden_size=16,
-        hidden_dtype=hidden_states.dtype,
     )
 
     permuted, _, expert_offsets, inverse, _ = moe_permute(
@@ -498,3 +475,88 @@ def test_moe_permute_ignores_invalid_expert_ids_with_scratch() -> None:
     expected_offsets = torch.tensor([0, 5, 5], dtype=torch.int64, device="cuda")
     torch.testing.assert_close(indices.flatten(), expected_inverse)
     torch.testing.assert_close(expert_offsets, expected_offsets)
+
+
+def test_moe_permute_scratch_grows_until_workspace_lock(workspace_init) -> None:
+    """Capacity follows the inputs seen in warmup, whatever their topk or size."""
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    device = torch.device("cuda:0")
+    scratch = get_moe_permute_scratch(
+        num_experts=16, num_local_experts=16, device=device
+    )
+
+    def run(n_token: int, topk: int, dtype: torch.dtype) -> None:
+        hidden = torch.randn((n_token, 64), device=device).to(dtype)
+        topk_ids = torch.randint(16, (n_token, topk), device=device)
+        actual = moe_permute(hidden, None, topk_ids, 16, scratch=scratch)
+        expected = moe_permute(hidden, None, topk_ids, 16)
+        for a, e in zip(actual, expected):
+            if a is not None:
+                torch.testing.assert_close(a.float(), e.float())
+
+    run(8, 6, torch.bfloat16)
+    run(64, 6, torch.bfloat16)
+    run(384, 1, torch.float8_e4m3fn)
+    assert scratch.max_expanded_rows == 384
+
+    current_workspace_manager().lock()
+    run(64, 6, torch.bfloat16)
+    with pytest.raises(AssertionError, match="Scratch growth is not allowed"):
+        run(65, 6, torch.bfloat16)
+
+    # Experts rebuilt after the lock (e.g. a weight reload) keep the capacity.
+    rebuilt = get_moe_permute_scratch(
+        num_experts=16, num_local_experts=16, device=device
+    )
+    assert rebuilt.max_expanded_rows == 384
+
+
+@pytest.mark.parametrize("n_expert", [16, 128])
+@pytest.mark.parametrize("n_valid,n_pad", [(1, 7), (27, 5)])
+@pytest.mark.parametrize("use_scratch", [False, True])
+def test_moe_permute_invalid_expert_ids_without_expert_map(
+    n_expert: int, n_valid: int, n_pad: int, use_scratch: bool
+) -> None:
+    """Padding routes (topk_ids == -1) must not shift the expert offsets of
+    valid routes when no expert_map is given."""
+    if not moe_permute_unpermute_supported():
+        pytest.skip("moe_permute_unpermute is not supported on this platform.")
+
+    topk, n_hidden = 4, 256
+    n_token = n_valid + n_pad
+    # Column 0 holds the token index (exact in bf16) to identify permuted rows.
+    hidden_states = torch.randn(n_token, n_hidden, device="cuda").to(torch.bfloat16)
+    hidden_states[:, 0] = torch.arange(n_token, device="cuda")
+    valid_ids = torch.stack(
+        [torch.randperm(n_expert, device="cuda")[:topk] for _ in range(n_valid)]
+    ).to(torch.int32)
+    padding = torch.full((n_pad, topk), -1, dtype=torch.int32, device="cuda")
+    topk_ids = torch.cat([valid_ids, padding])
+
+    scratch = None
+    if use_scratch:
+        scratch = MoEPermuteScratch(
+            num_experts=n_expert,
+            num_local_experts=n_expert,
+            device=hidden_states.device,
+        )
+    permuted, _, expert_offsets, _, _ = moe_permute(
+        hidden_states=hidden_states,
+        a1q_scale=None,
+        topk_ids=topk_ids,
+        n_expert=n_expert,
+        scratch=scratch,
+    )
+
+    counts = torch.bincount(valid_ids.flatten(), minlength=n_expert)
+    expected_offsets = torch.cat([counts.new_zeros(1), counts.cumsum(0)])
+    torch.testing.assert_close(expert_offsets, expected_offsets)
+
+    # Each expert segment holds exactly the tokens routed to that expert.
+    for e in torch.nonzero(counts).flatten().tolist():
+        lo, hi = expert_offsets[e].item(), expert_offsets[e + 1].item()
+        actual = permuted[lo:hi, 0].long().sort().values
+        expected = (valid_ids == e).any(dim=1).nonzero().flatten()
+        torch.testing.assert_close(actual, expected)

@@ -6,7 +6,6 @@ typically specific to a small subset of models.
 """
 
 import types
-from pathlib import PosixPath
 
 import numpy as np
 import numpy.typing as npt
@@ -23,13 +22,14 @@ from transformers import (
     GenerationMixin,
 )
 from transformers.masking_utils import create_causal_mask
+from transformers.utils import ModelOutput
 from transformers.video_utils import VideoMetadata
 
 from vllm.logprobs import SampleLogprobs
 from vllm.platforms import current_platform
 from vllm.utils.collection_utils import is_list_of
 
-from .....conftest import HfRunner, ImageAsset, ImageTestAssets
+from .....conftest import HfRunner, ImageTestAssets
 from .types import RunnerOutput
 
 
@@ -46,17 +46,6 @@ def blip2_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOutp
     hf_output_ids = hf_output_ids[1:]
 
     return hf_output_ids, hf_output_str, out_logprobs
-
-
-def qwen_vllm_to_hf_output(
-    vllm_output: RunnerOutput, model: str
-) -> tuple[list[int], str, SampleLogprobs | None]:
-    """Sanitize vllm output [qwen models] to be comparable with hf output."""
-    output_ids, output_str, out_logprobs = vllm_output
-
-    hf_output_str = output_str + "<|endoftext|>"
-
-    return output_ids, hf_output_str, out_logprobs
 
 
 def qwen2_vllm_to_hf_output(
@@ -117,7 +106,9 @@ def _llava_vllm_to_hf_output(
     hf_output_str = output_str[1:] if output_str[0] == " " else output_str
 
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -149,7 +140,9 @@ def llava_onevision_vllm_to_hf_output(
 
     hf_output_str = output_str
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -191,7 +184,9 @@ def paligemma_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> Runner
     hf_output_str = output_str
 
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -237,37 +232,6 @@ def ultravox_trunc_hf_output(hf_output: RunnerOutput, model: str) -> RunnerOutpu
 ####### Functions for converting image assets to embeddings
 def get_llava_embeddings(image_assets: ImageTestAssets):
     return [asset.image_embeds for asset in image_assets]
-
-
-####### Prompt path encoders for models that need models on disk
-def qwen_prompt_path_encoder(
-    tmp_path: PosixPath, prompt: str, assets: list[ImageAsset] | ImageTestAssets
-) -> str:
-    """Given a temporary dir path, export one or more image assets into the
-    tempdir & replace its contents with the local path to the string so that
-    the HF version of Qwen-VL can resolve the path and load the image in its
-    forward() call.
-
-    Args:
-        tmp_path: Tempdir for test under consideration.
-        prompt: Prompt with image placeholders.
-        assets: list of image assets whose len equals the num placeholders.
-
-    """
-    # Ensure that the number of placeholders matches the number of assets;
-    # If this is not true, the test is probably written incorrectly.
-    assert prompt.count("<img></img>") == len(assets)
-
-    # Replace the placeholders with local paths to the exported assets
-    for asset in assets:
-        image_tmp_path = tmp_path / f"{asset.name}.jpg"
-        asset.pil_image.save(image_tmp_path)
-        prompt = prompt.replace(
-            "<img></img>",
-            f"<img>{image_tmp_path}</img>",
-            1,
-        )
-    return prompt
 
 
 ####### Model-specific HuggingFace runner patchers
@@ -329,7 +293,9 @@ def gemma3_vllm_to_hf_output(vllm_output: RunnerOutput, model: str) -> RunnerOut
 
     hf_output_str = output_str
     if hf_output_ids[-1] == eos_token_id:
-        hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
+        decoded_eos = tokenizer.decode(eos_token_id)
+        assert isinstance(decoded_eos, str)
+        hf_output_str = hf_output_str + decoded_eos
 
     return hf_output_ids, hf_output_str, out_logprobs
 
@@ -615,11 +581,10 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         # Prepare attention mask
         attention_mask = create_causal_mask(
             config=self.config,
-            input_embeds=inputs_embeds,
+            inputs_embeds=inputs_embeds,
             attention_mask=attention_mask,
             past_key_values=past_key_values,
             position_ids=position_ids,
-            cache_position=cache_position,
         )
 
         # Initialize and collect hidden states
@@ -843,7 +808,7 @@ def _internvl_generate(
     input_ids: torch.FloatTensor,
     attention_mask: torch.LongTensor | None = None,
     **generate_kwargs,
-) -> torch.LongTensor:
+) -> torch.Tensor | ModelOutput:
     """Generate method for InternVL2 model without fixed use_cache."""
     assert self.img_context_token_id is not None
     target_dtype = next(self.parameters()).dtype
@@ -1154,6 +1119,19 @@ def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     return hf_model
 
 
+def cohere_compass_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
+    """Declare the video modality that CohereCompass omits upstream.
+
+    Without it ``generate`` leaves ``pixel_values_videos`` unconsumed and the
+    forward pass rejects it, see huggingface/transformers#49320. Drop this once
+    the pinned transformers declares the modality itself.
+    """
+    model = hf_model.model
+    if "video" not in model.input_modalities:
+        model.input_modalities = (*model.input_modalities, "video")
+    return hf_model
+
+
 def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     """Patch HfRunner for Voxtral's conversation-based processor.
 
@@ -1236,8 +1214,8 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
                 output.sequences = output.sequences[:, prompt_len:]
         return output
 
-    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign, assignment]
-    hf_model.model.generate = patched_generate  # type: ignore[method-assign]
+    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign]
+    hf_model.model.generate = patched_generate
     return hf_model
 
 

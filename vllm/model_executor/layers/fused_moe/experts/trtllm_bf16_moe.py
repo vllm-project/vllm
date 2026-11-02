@@ -205,6 +205,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
         from flashinfer.fused_moe import WeightLayout
 
         topk_ids = topk_ids.to(dtype=torch.int32)
+        defer = self._uses_post_gemm2_hook(topk_ids.shape[0])
 
         result = flashinfer.fused_moe.trtllm_bf16_routed_moe(
             topk_ids=(topk_ids, topk_weights),
@@ -222,9 +223,20 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
             routing_method_type=1,  # not used
             use_shuffled_weight=True,
             weight_layout=WeightLayout.BlockMajorK,
-            do_finalize=True,
+            do_finalize=not defer,
             activation_type=activation_to_flashinfer_int(activation),
         )
+        if defer:
+            self._run_post_gemm2_hook(
+                convert_flashinfer_moe_output(
+                    result,
+                    do_finalize=False,
+                    num_tokens=topk_ids.shape[0],
+                    top_k=topk_ids.size(1),
+                ),
+                output,
+            )
+            return
         # FlashInfer's BF16 routed wrapper does not expose an output= argument.
         output.copy_(result[0] if isinstance(result, list) else result)
 
@@ -254,6 +266,7 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
             RoutingMethodType.SigmoidRenorm,
+            RoutingMethodType.MiniMax2,
             RoutingMethodType.Sigmoid,
         ]
 
@@ -272,20 +285,18 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
         e_score_correction_bias: torch.Tensor | None = None,
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
+        routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
         import flashinfer
 
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
         num_tokens = hidden_states.shape[0]
+        hooked = self._uses_post_gemm2_hook(num_tokens)
         # The runner divides by the token count on the host, so an idle rank's
         # dummy 0-token forward has to keep the finalized (empty) form.
-        defer = self.moe_config.should_defer_moe_finalize(num_tokens)
+        defer = hooked or self.moe_config.should_defer_moe_finalize(num_tokens)
 
-        routing_replay_out = self._maybe_make_routing_replay_buffer(
-            num_tokens=num_tokens,
-            device=hidden_states.device,
-        )
         flashinfer_output = flashinfer.fused_moe.trtllm_bf16_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -312,5 +323,6 @@ class TrtLlmBf16ExpertsMonolithic(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsMonol
             num_tokens=num_tokens,
             top_k=self.topk,
         )
-        self._maybe_dispatch_routing_replay(routing_replay_out, num_tokens=num_tokens)
+        if hooked:
+            return self._run_post_gemm2_hook(routed_output)
         return routed_output

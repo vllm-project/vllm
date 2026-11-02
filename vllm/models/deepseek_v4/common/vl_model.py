@@ -40,6 +40,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalKwargsItem
 
 from .mm_preprocess import (
+    COMPRESS_PAD_TO,
     IMAGE_PLACEHOLDER,
     IMAGE_SENTINEL_BASE_ID,
     DeepseekV4VLDummyInputsBuilder,
@@ -105,6 +106,10 @@ class DeepseekV4ForConditionalGeneration(
     # (borrowed reserved ids, see common/mm_preprocess.py) and apply bias_vl.
     requires_raw_input_tokens = True
     supports_tower_connector_lora = True
+    # Image spans widen the sparse-SWA window in-kernel and the placeholder
+    # starts with a compressor-alignment pad
+    mm_prefix_clamp_sliding_window = True
+    mm_prefix_span_leading_pad_modulus = COMPRESS_PAD_TO
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -180,7 +185,6 @@ class DeepseekV4ForConditionalGeneration(
         self.hf_to_vllm_mapper = _make_deepseek_v4_vl_weights_mapper(
             text_mapper, image_enabled
         )
-        self._weights_finalized = False
 
     def _parse_and_validate_image_input(self, **kwargs: object) -> dict | None:
         patches = kwargs.pop("patches", None)
@@ -322,26 +326,11 @@ class DeepseekV4ForConditionalGeneration(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        child_finalizes = getattr(
-            self.language_model, "finalizes_weights_during_load", True
-        )
-        mapped = self.hf_to_vllm_mapper.apply(weights)
-        if child_finalizes:
-            # A child which finalizes inside load_weights must see all of its
-            # weights in one contiguous delegation from AutoWeightsLoader.
-            mapped = iter(sorted(mapped, key=lambda x: x[0]))
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(mapped)
-        self._weights_finalized = child_finalizes
-        return loaded_params
+        return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
 
     def process_weights_after_loading(self) -> None:
-        # Backbones such as the ROCm implementation require this to run only
-        # after the loader's generic per-layer quantization finalization.
-        if getattr(self, "_weights_finalized", False):
-            return
         self.language_model.process_weights_after_loading()
-        self._weights_finalized = True
 
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefixes in the multimodal model."""

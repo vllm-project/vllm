@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import logging
 import random
 import time
@@ -78,10 +79,16 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
         calls.append("load")
         return True
 
+    def record_expedited_load_shutdown() -> bool:
+        calls.append("expedited_load")
+        return True
+
     store_handler = MagicMock()
     load_handler = MagicMock()
+    expedited_load_handler = MagicMock()
     store_handler.shutdown.side_effect = record_store_shutdown
     load_handler.shutdown.side_effect = record_load_shutdown
+    expedited_load_handler.shutdown.side_effect = record_expedited_load_shutdown
 
     def record_region_cleanup(**_: bool) -> bool:
         calls.append("region")
@@ -91,11 +98,12 @@ def test_worker_shutdown_releases_region_and_runs_both_handlers() -> None:
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._expedited_load_handler = expedited_load_handler
     worker._mmap_region = mmap_region
 
     worker.shutdown()
 
-    assert calls == ["store", "load", "region"]
+    assert calls == ["store", "load", "expedited_load", "region"]
     store_handler.shutdown.assert_called_once_with()
     load_handler.shutdown.assert_called_once_with()
     mmap_region.cleanup.assert_called_once_with()
@@ -146,6 +154,7 @@ def test_worker_logs_handler_error_and_cleans_region(
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
     with caplog_vllm.at_level(
@@ -196,6 +205,202 @@ def test_handler_shutdown_skips_transfers_after_event_sync_failure() -> None:
     assert not handler.dst_tensors
 
 
+def _bare_handler(gpu_to_cpu: bool = True):
+    """Handler with only the state the failure paths touch."""
+    handler = gpu_worker.SingleDirectionOffloadingHandler.__new__(
+        gpu_worker.SingleDirectionOffloadingHandler
+    )
+    handler.gpu_to_cpu = gpu_to_cpu
+    handler._transfers = gpu_worker.deque()
+    handler._transfer_events = {}
+    handler._stream_pool = []
+    handler._event_pool = []
+    handler._buffer_pool = []
+    return handler
+
+
+def _submittable_handler(monkeypatch: pytest.MonkeyPatch, gpu_to_cpu: bool = True):
+    """Bare handler wired up far enough to run transfer_async off-device."""
+    handler = _bare_handler(gpu_to_cpu)
+    handler.layer_refs_per_group = [MagicMock()]
+    handler.src_blocks_per_chunk = 1
+    handler.dst_blocks_per_chunk = 1
+    handler._estimate_max_copy_ops = lambda group_sizes: 4
+    handler._fill_group_ops = lambda g_idx, **kwargs: (1, 128)
+    handler._swap_blocks_batch = MagicMock()
+    handler._buffer_pool = [tuple(torch.zeros(4, dtype=torch.int64) for _ in range(3))]
+
+    platform = MagicMock()
+    platform.stream.return_value = contextlib.nullcontext()
+    platform.is_cuda_alike.return_value = False
+    monkeypatch.setattr(gpu_worker, "current_platform", platform)
+    return handler
+
+
+def _submit(handler, job_id: int) -> bool:
+    spec = GPULoadStoreSpec(block_ids=[0], group_sizes=[1], block_indices=[0])
+    return handler.transfer_async(job_id, spec, spec)
+
+
+def test_submit_failure_is_not_reported_until_stream_drains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A submit fault leaves copies in flight, so the job completes only later.
+
+    swap_blocks_batch submits the descriptor list in chunks and the driver's
+    batch memcpy stops at the first failing copy, so earlier copies of the same
+    job may still be touching its blocks. Reporting the job before the stream
+    drains would let the scheduler reuse blocks that are still being written.
+    """
+    handler = _submittable_handler(monkeypatch)
+    stream, start_event, end_event = MagicMock(), MagicMock(), MagicMock()
+    handler._stream_pool = [stream]
+    handler._event_pool = [end_event, start_event]
+    handler._swap_blocks_batch.side_effect = RuntimeError("failed at index 1")
+    clear = MagicMock()
+    monkeypatch.setattr(gpu_worker, "_clear_pending_device_error", clear)
+
+    assert _submit(handler, 7) is True
+
+    clear.assert_called_once_with()
+    end_event.record.assert_called_once_with(stream)
+    (transfer,) = handler._transfers
+    assert (transfer.job_id, transfer.failed) == (7, True)
+    assert handler._transfer_events == {7: end_event}
+    assert not handler._stream_pool
+    assert not handler._event_pool
+    assert not handler._buffer_pool
+
+    end_event.query.return_value = False
+    assert handler.get_finished() == []
+
+    end_event.query.return_value = True
+    results = handler.get_finished()
+
+    assert [(r.job_id, r.success) for r in results] == [(7, False)]
+    assert not handler._transfers
+    assert not handler._transfer_events
+    assert not handler._stream_pool
+    assert not handler._event_pool
+    assert not handler._buffer_pool
+    start_event.elapsed_time.assert_not_called()
+
+
+def test_submit_failure_still_fences_wait_and_next_submission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The faulted job keeps ordering the work that follows it.
+
+    wait() is the store-flush fence and every submission chains onto the
+    previous transfer's end event; a faulted job that left neither would let
+    both run ahead of its in-flight copies.
+    """
+    handler = _submittable_handler(monkeypatch)
+    failed_stream, failed_start, failed_end = MagicMock(), MagicMock(), MagicMock()
+    handler._stream_pool = [failed_stream]
+    handler._event_pool = [failed_end, failed_start]
+    handler._swap_blocks_batch.side_effect = RuntimeError("failed at index 1")
+    _submit(handler, 7)
+
+    handler.wait({7})
+    failed_end.synchronize.assert_called_once_with()
+
+    next_stream = MagicMock()
+    handler._stream_pool = [next_stream]
+    handler._event_pool = [MagicMock(), MagicMock()]
+    handler._buffer_pool = [tuple(torch.zeros(4, dtype=torch.int64) for _ in range(3))]
+    handler._swap_blocks_batch.side_effect = None
+    _submit(handler, 8)
+
+    next_stream.wait_event.assert_called_once_with(failed_end)
+
+
+def test_submit_failure_propagates_when_the_end_event_cannot_be_recorded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an end event the in-flight copies cannot be bounded.
+
+    The device is unrecoverable at that point, so failing loudly beats
+    reporting a completion the blocks have not actually reached.
+    """
+    handler = _submittable_handler(monkeypatch)
+    end_event = MagicMock()
+    end_event.record.side_effect = RuntimeError("device lost")
+    handler._stream_pool = [MagicMock()]
+    handler._event_pool = [end_event, MagicMock()]
+    handler._swap_blocks_batch.side_effect = RuntimeError("failed at index 1")
+
+    with pytest.raises(RuntimeError, match="device lost"):
+        _submit(handler, 7)
+
+
+def test_get_finished_reports_failure_when_event_query_raises() -> None:
+    """A device error latched after submit surfaces at poll time, not as a raise."""
+    handler = _bare_handler()
+    failing = MagicMock()
+    failing.end_event.query.side_effect = RuntimeError("device lost")
+    failing.job_id = 3
+    ready = MagicMock()
+    ready.job_id = 4
+    ready.failed = False
+    ready.end_event.query.return_value = True
+    ready.start_event.elapsed_time.return_value = 2.0
+    ready.num_bytes = 512
+    handler._transfers.extend([failing, ready])
+    handler._transfer_events = {3: failing.end_event, 4: ready.end_event}
+
+    results = handler.get_finished()
+
+    assert [(r.job_id, r.success) for r in results] == [(3, False), (4, True)]
+    assert not handler._transfers
+    assert not handler._transfer_events
+    assert handler._stream_pool == [ready.stream]
+    assert handler._buffer_pool == [
+        (ready.batch_src, ready.batch_dst, ready.batch_sizes)
+    ]
+
+
+def test_get_finished_propagates_non_runtime_errors() -> None:
+    """Only RuntimeError, which device faults raise, becomes a failed transfer.
+
+    Anything else, such as a missing op, must stay loud rather than silently
+    degrade the cache.
+    """
+    handler = _bare_handler()
+    broken = MagicMock()
+    broken.job_id = 5
+    broken.end_event.query.side_effect = AttributeError("no such op")
+    handler._transfers.append(broken)
+
+    with pytest.raises(AttributeError, match="no such op"):
+        handler.get_finished()
+
+
+def test_submit_propagates_non_runtime_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    handler = _submittable_handler(monkeypatch)
+    handler._stream_pool = [MagicMock()]
+    handler._event_pool = [MagicMock(), MagicMock()]
+    handler._swap_blocks_batch.side_effect = AttributeError("no such op")
+    clear = MagicMock()
+    monkeypatch.setattr(gpu_worker, "_clear_pending_device_error", clear)
+
+    with pytest.raises(AttributeError, match="no such op"):
+        _submit(handler, 7)
+    clear.assert_not_called()
+
+
+def test_wait_swallows_synchronize_failure() -> None:
+    """wait() must not raise; the failure is reported by the next poll."""
+    handler = _bare_handler()
+    event = MagicMock()
+    event.synchronize.side_effect = RuntimeError("device lost")
+    handler._transfer_events[9] = event
+
+    handler.wait({9})
+
+    event.synchronize.assert_called_once_with()
+
+
 @pytest.mark.parametrize("device_sync_fails", [False, True])
 def test_worker_syncs_before_cleanup_after_handler_failure(
     caplog_vllm, monkeypatch: pytest.MonkeyPatch, device_sync_fails: bool
@@ -223,6 +428,7 @@ def test_worker_syncs_before_cleanup_after_handler_failure(
     mmap_region.cleanup.side_effect = record_region_cleanup
     worker._store_handler = store_handler
     worker._load_handler = load_handler
+    worker._expedited_load_handler = MagicMock()
     worker._mmap_region = mmap_region
 
     with caplog_vllm.at_level(
@@ -343,16 +549,16 @@ def test_transfer(
     # set transfer direction
     if gpu_to_cpu:
         handler = worker._store_handler
-        src_spec = GPULoadStoreSpec(
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
         )
-        dst_spec = CPULoadStoreSpec(cpu_chunks)
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
         dst_to_src = dict(zip(cpu_chunks_expanded, gpu_blocks))
         num_dst_sub_blocks = num_gpu_blocks
     else:
         handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_chunks)
-        dst_spec = GPULoadStoreSpec(
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=(len(gpu_blocks),), block_indices=(blocks_to_skip,)
         )
         dst_to_src = dict(zip(gpu_blocks, cpu_chunks_expanded))
@@ -371,9 +577,9 @@ def test_transfer(
     # call transfer function via public API
     start_time = time.time()
     if gpu_to_cpu:
-        assert worker.submit_store(1, src_spec, dst_spec)
+        assert worker.submit_store(1, gpu_spec, cpu_spec)
     else:
-        assert worker.submit_load(1, src_spec, dst_spec)
+        assert worker.submit_load(1, cpu_spec, gpu_spec)
     assert {x.job_id for x in handler._transfers} == {1}
 
     # wait for transfer to complete
@@ -387,8 +593,11 @@ def test_transfer(
                 len(gpu_blocks)
                 * sum([x.page_size_bytes for x in handler.layer_refs_per_group[0]])
             )
-            assert finished[0].transfer_time > 0
-            assert finished[0].transfer_time < (time.time() - start_time)
+            # a successful CPU transfer always reports its duration
+            transfer_time = finished[0].transfer_time
+            assert transfer_time is not None
+            assert transfer_time > 0
+            assert transfer_time < (time.time() - start_time)
             break
         time.sleep(0.1)
 
@@ -546,10 +755,10 @@ def test_transfer_multi_group(
 
     if gpu_to_cpu:
         handler = worker._store_handler
-        src_spec = GPULoadStoreSpec(
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
         )
-        dst_spec = CPULoadStoreSpec(cpu_chunks)
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
         # per-group mapping: cpu sub-block -> gpu sub-block
         dst_to_src_per_group = [
             dict(zip(expanded, gpu_blks))
@@ -560,8 +769,8 @@ def test_transfer_multi_group(
         num_dst_sub_blocks = num_cpu_chunks * blocks_per_chunk
     else:
         handler = worker._load_handler
-        src_spec = CPULoadStoreSpec(cpu_chunks)
-        dst_spec = GPULoadStoreSpec(
+        cpu_spec = CPULoadStoreSpec(cpu_chunks)
+        gpu_spec = GPULoadStoreSpec(
             gpu_blocks, group_sizes=group_sizes, block_indices=block_indices
         )
         # per-group mapping: gpu sub-block -> cpu sub-block
@@ -583,9 +792,9 @@ def test_transfer_multi_group(
     orig_dst_tensors = [x.clone() for x in handler.dst_tensors]
 
     if gpu_to_cpu:
-        assert worker.submit_store(1, src_spec, dst_spec)
+        assert worker.submit_store(1, gpu_spec, cpu_spec)
     else:
-        assert worker.submit_load(1, src_spec, dst_spec)
+        assert worker.submit_load(1, cpu_spec, gpu_spec)
     assert {x.job_id for x in handler._transfers} == {1}
 
     end_time = time.time() + 10
@@ -697,4 +906,77 @@ def test_load_waits_for_pending_compute_stream_writes(default_vllm_config) -> No
             for block_id in loaded_blocks:
                 torch.testing.assert_close(gpu_tensor[block_id].cpu(), expected)
     finally:
+        worker.shutdown()
+
+
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="faults a real hipMemcpyBatchAsync call",
+)
+@pytest.mark.parametrize("gpu_to_cpu", [True, False])
+@pytest.mark.parametrize(
+    "num_blocks", [16, 9000], ids=["one_batch", "fault_in_second_batch"]
+)
+def test_device_fault_does_not_fail_the_next_kernel_launch(
+    default_vllm_config, gpu_to_cpu: bool, num_blocks: int
+) -> None:
+    """A caught copy fault must not leave its error pending on the thread.
+
+    The runtime keeps a failed call's error until it is read, and the next
+    kernel launch check would raise it, killing the model step the catch was
+    meant to protect.
+    """
+    page_size_bytes = 4096
+    gpu_tensor = torch.zeros(
+        (num_blocks, page_size_bytes), dtype=torch.int8, device=DEVICES[0]
+    )
+    worker = CPUOffloadingWorker(
+        kv_caches=CanonicalKVCaches(
+            tensors=[
+                CanonicalKVCacheTensor(
+                    tensor=gpu_tensor, page_size_bytes=page_size_bytes
+                )
+            ],
+            group_data_refs=[
+                [CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size_bytes)]
+            ],
+        ),
+        blocks_per_chunk=1,
+        num_cpu_chunks=num_blocks,
+    )
+    handler = worker._store_handler if gpu_to_cpu else worker._load_handler
+    swap_blocks_batch = handler._swap_blocks_batch
+    faulted = []
+
+    def zero_one_copy(src, dst, sizes, **kwargs):
+        sizes[len(sizes) - 500 if num_blocks > 8192 else len(sizes) // 2] = 0
+        try:
+            swap_blocks_batch(src, dst, sizes, **kwargs)
+        except RuntimeError:
+            faulted.append(True)
+            raise
+
+    handler._swap_blocks_batch = zero_one_copy
+    gpu_spec = GPULoadStoreSpec(
+        list(range(num_blocks)), group_sizes=(num_blocks,), block_indices=(0,)
+    )
+    cpu_spec = CPULoadStoreSpec(list(range(num_blocks)))
+    try:
+        if gpu_to_cpu:
+            assert worker.submit_store(1, gpu_spec, cpu_spec)
+        else:
+            assert worker.submit_load(1, cpu_spec, gpu_spec)
+        if not faulted:
+            pytest.skip("this runtime accepts zero-size copies")
+
+        torch.arange(4096, device=DEVICES[0]).cumsum(0)
+        torch.accelerator.synchronize()
+
+        deadline = time.time() + 10
+        finished: list[TransferResult] = []
+        while time.time() < deadline and not finished:
+            finished = worker.get_finished()
+        assert [(r.job_id, r.success) for r in finished] == [(1, False)]
+    finally:
+        gpu_worker._clear_pending_device_error()
         worker.shutdown()

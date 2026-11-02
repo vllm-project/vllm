@@ -1,14 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import (
+from vllm.logger import init_logger
+from vllm.renderers.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.logger import init_logger
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async
 
@@ -47,6 +49,18 @@ def safe_apply_chat_template(
         raise ValueError(str(e)) from e
 
 
+def _get_chat_template_kwargs(params: ChatParams) -> dict[str, Any]:
+    kwargs = params.get_apply_chat_template_kwargs()
+    if params.response_format is not None:
+        rf = params.response_format.model_dump(
+            mode="json", by_alias=True, exclude_none=True
+        )
+        # mistral-common only accepts JSON objects and JSON schemas.
+        if rf["type"] == "json_object" or "schema" in rf.get("json_schema", {}):
+            kwargs["response_format"] = rf
+    return kwargs
+
+
 class MistralRenderer(BaseRenderer[MistralTokenizer]):
     def __init__(
         self,
@@ -74,9 +88,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         )
 
         prompt_raw = safe_apply_chat_template(
-            tokenizer,
-            messages,
-            **params.get_apply_chat_template_kwargs(),
+            tokenizer, messages, **_get_chat_template_kwargs(params)
         )
 
         prompt = parse_dec_only_prompt(prompt_raw)
@@ -102,9 +114,7 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         )
 
         prompt_raw = await self._apply_chat_template_async(
-            tokenizer,
-            messages,
-            **params.get_apply_chat_template_kwargs(),
+            tokenizer, messages, **_get_chat_template_kwargs(params)
         )
 
         prompt = parse_dec_only_prompt(prompt_raw)

@@ -19,6 +19,9 @@ from vllm.v1.worker.gpu.sample.logits_processor.interface import (
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
 
+# Overridden on CPU in vllm/v1/worker/cpu/shm.py.
+PENALTIES_BLOCK_SIZE = 8192
+
 
 class PenaltiesState(LogitsProcessor):
     def __init__(self, vllm_config: "VllmConfig", req_states: LogitsProcRequestState):
@@ -62,7 +65,7 @@ class PenaltiesState(LogitsProcessor):
     def apply_staged_writes(self) -> None:
         if self._new_penalties_reqs:
             idx_mapping = async_tensor_h2d(
-                self._new_penalties_reqs, dtype=torch.int32, device=self.device
+                self._new_penalties_reqs, dtype=torch.int64, device=self.device
             )
 
             prefill_lens = self.req_states.prefill_len.np[self._new_penalties_reqs]
@@ -127,7 +130,8 @@ def _penalties_kernel(
     use_rep_penalty = rep_penalty != 1.0
     use_freq_penalty = freq_penalty != 0.0
     use_pres_penalty = pres_penalty != 0.0
-    use_penalty = use_rep_penalty or use_freq_penalty or use_pres_penalty
+    # Parenthesize for Triton backends that reject chained `A or B or C`.
+    use_penalty = (use_rep_penalty or use_freq_penalty) or use_pres_penalty
     if not use_penalty:
         # Early return to avoid loading logits.
         return
@@ -193,7 +197,7 @@ def apply_penalties(
     output_bin_counts: torch.Tensor,
 ) -> None:
     num_tokens, vocab_size = logits.shape
-    BLOCK_SIZE = 8192
+    BLOCK_SIZE = PENALTIES_BLOCK_SIZE
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     _penalties_kernel[(num_tokens, num_blocks)](
         logits,

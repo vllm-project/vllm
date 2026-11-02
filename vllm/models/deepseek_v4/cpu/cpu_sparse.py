@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.forward_context import get_forward_context
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 from vllm.models.deepseek_v4.attention import (
     DeepseekV4Attention,
     DeepseekV4Indexer,
@@ -174,11 +175,6 @@ def _fused_indexer_q_rope_quant_cpu(
     return index_q_fp8, index_weights_out
 
 
-class _NoOpEvent:
-    """Stand-in for ``torch.cuda.Event`` on CPU: since CPU never sets an aux
-    stream list, these events are constructed but never actually used."""
-
-
 class DeepseekV4CPUIndexerCache(DeepseekV4IndexerCache):
     """CPU indexer K-cache descriptor: same fields as the shared base, just
     pointing ``get_attn_backend()`` at ``DeepseekV4CPUIndexerBackend``
@@ -321,21 +317,17 @@ class DeepseekV4CPUAttention(DeepseekV4Attention):
             dequant = dequant.view(self.n_local_groups, self.o_lora_rank, k_dim)
             self._wo_a_packed = torch.ops._C.convert_weight_packed(dequant.contiguous())
             orig_pwal(layer)
-            # orig_pwal VNNI-repacks layer.weight/scale for ordinary-linear
-            # use that _o_proj never needs -- free them, same pattern as
-            # dispatch_cpu_unquantized_gemm's remove_weight=True.
-            layer.weight = torch.nn.Parameter(torch.empty(0), requires_grad=False)
+            # _o_proj reads only the packed copy: it becomes the loaded weight's
+            # storage, and the (small) scale keeps its data.
+            replace_parameter(layer, "weight", self._wo_a_packed)
+            self._wo_a_packed = layer.weight.data
             scale_attr = (
                 "weight_scale_inv"
                 if hasattr(layer, "weight_scale_inv")
                 else "weight_scale"
             )
             if hasattr(layer, scale_attr):
-                setattr(
-                    layer,
-                    scale_attr,
-                    torch.nn.Parameter(torch.empty(0), requires_grad=False),
-                )
+                retire_parameter(layer, scale_attr)
 
         quant_method.process_weights_after_loading = (  # type: ignore[method-assign]
             _capture_and_pack

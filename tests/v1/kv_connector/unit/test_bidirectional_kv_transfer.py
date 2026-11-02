@@ -51,6 +51,7 @@ from .utils import (
     create_scheduler,
     create_vllm_config,
     make_kv_cache_config,
+    maybe_update_block_size,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -74,6 +75,7 @@ def _make_p_node_turn2_request(
     )
     if remote_num_tokens is None:
         remote_num_tokens = num_remote_blocks * block_size
+    assert request.kv_transfer_params is not None
     request.kv_transfer_params["remote_block_ids"] = [list(range(num_remote_blocks))]
     request.kv_transfer_params["remote_num_tokens"] = remote_num_tokens
     request.kv_transfer_params["remote_engine_id"] = "decode-engine"
@@ -87,10 +89,11 @@ def _make_connector_with_fake_worker(
     hand_shake_latency=0, cycles_before_done=0, do_handshake=True
 ):
     """Create a NixlConnector with FakeNixlConnectorWorker."""
+    block_size = maybe_update_block_size(32)
     vllm_config = create_vllm_config(
-        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG, block_size=32
+        kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG, block_size=block_size
     )
-    kv_cache_config = make_kv_cache_config(block_size=32, num_blocks=2)
+    kv_cache_config = make_kv_cache_config(block_size=block_size, num_blocks=2)
     connector = NixlConnector(vllm_config, KVConnectorRole.WORKER, kv_cache_config)
     connector.connector_worker = FakeNixlConnectorWorker(
         vllm_config,
@@ -256,6 +259,7 @@ def test_abort_p_side_non_length_capped():
     req = create_request(
         request_id=44, block_size=BS, num_tokens=int(BS * 2.5), do_remote_decode=True
     )
+    assert req.sampling_params is not None
     req.sampling_params.max_tokens = 100
     req.max_tokens = 100
     scheduler.add_request(req)
@@ -264,7 +268,9 @@ def test_abort_p_side_non_length_capped():
     mro = create_model_runner_output(reqs=[req])
     scheduler.update_from_output(so, mro)
     scheduler.finish_requests([req_id], RequestStatus.FINISHED_ABORTED)
+    assert isinstance(scheduler.connector, NixlConnector)
     conn = scheduler.connector.connector_scheduler
+    assert conn is not None
     assert req_id in conn._reqs_not_processed
     assert req_id not in scheduler.requests
     so = scheduler.schedule()
@@ -411,7 +417,9 @@ def test_build_connector_meta_clears_reqs_need_recv():
     BS = vllm_config.cache_config.block_size
     req = _make_p_node_turn2_request(2, BS, int(BS * 2.5))
     scheduler.add_request(req)
+    assert isinstance(scheduler.connector, NixlConnector)
     conn = scheduler.connector.connector_scheduler
+    assert conn is not None
     scheduler.schedule()
     assert len(conn._reqs_need_recv) == 0
 
@@ -554,7 +562,9 @@ def test_d_node_request_finished_delays_block_free():
         so, create_model_runner_output(reqs=[req], use_eos=True)
     )
     assert req_id in scheduler.requests
+    assert isinstance(scheduler.connector, NixlConnector)
     conn = scheduler.connector.connector_scheduler
+    assert conn is not None
     assert req_id in conn._reqs_need_send
 
 
@@ -579,6 +589,7 @@ def test_d_node_request_finished_remote_num_tokens():
         so, create_model_runner_output(reqs=[req], use_eos=True)
     )
     kv = eco[0].outputs[0].kv_transfer_params
+    assert kv is not None
     assert kv["remote_num_tokens"] > 0
     assert sum(len(g) for g in kv["remote_block_ids"]) > 0
 
@@ -605,6 +616,7 @@ def test_d_node_partial_last_block_remote_num_tokens():
         so, create_model_runner_output(reqs=[req], use_eos=True)
     )
     kv = eco[0].outputs[0].kv_transfer_params
+    assert kv is not None
     total_blocks = sum(len(g) for g in kv["remote_block_ids"])
     assert total_blocks == 3
     assert kv["remote_num_tokens"] < total_blocks * BS
@@ -628,7 +640,9 @@ def test_no_double_read_blocks_after_reschedule():
     req = _make_p_node_turn2_request(500, BS, int(BS * 2.5))
     scheduler.add_request(req)
     req_id = req.request_id
+    assert isinstance(scheduler.connector, NixlConnector)
     conn = scheduler.connector.connector_scheduler
+    assert conn is not None
 
     # First schedule: request enters WAITING_FOR_REMOTE_KVS,
     # _reqs_need_recv populated then cleared by build_connector_meta.
@@ -804,6 +818,7 @@ def test_cache_miss_first_turn_no_remote_pull():
         do_remote_decode=True,
     )
     # No remote_block_ids set — this is a cache MISS
+    assert req.kv_transfer_params is not None
     assert req.kv_transfer_params.get("remote_block_ids") is None
     scheduler.add_request(req)
     so = scheduler.schedule()
@@ -880,7 +895,9 @@ def test_remote_blocks_processed_flag_persists():
     req = _make_p_node_turn2_request(506, BS, int(BS * 2.5))
     scheduler.add_request(req)
     req_id = req.request_id
+    assert isinstance(scheduler.connector, NixlConnector)
     conn = scheduler.connector.connector_scheduler
+    assert conn is not None
 
     # First schedule → WAITING_FOR_REMOTE_KVS
     so = scheduler.schedule()
@@ -1028,6 +1045,7 @@ def test_d_node_request_finished_exports_blocks_expiry_time():
         so, create_model_runner_output(reqs=[req], use_eos=True)
     )
     kv = eco[0].outputs[0].kv_transfer_params
+    assert kv is not None
     assert kv["do_remote_decode"] is True
     assert isinstance(kv["remote_blocks_expiry_time"], float)
     assert kv["remote_blocks_expiry_time"] > time.perf_counter()
@@ -1062,8 +1080,8 @@ def test_handshake_listener_appends_perf_counter_frame():
     try:
         assert ready_event.wait(timeout=5)
         path = make_zmq_path("tcp", host, port)
-        with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[attr-defined]
-            sock.setsockopt(zmq.RCVTIMEO, 5000)  # type: ignore[attr-defined]
+        with zmq_ctx(zmq.REQ, path) as sock:
+            sock.setsockopt(zmq.RCVTIMEO, 5000)
             t0 = time.perf_counter()
             sock.send(msgspec.msgpack.encode((GET_META_MSG, 0, 0)))
             parts = sock.recv_multipart()

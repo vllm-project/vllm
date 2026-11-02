@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -31,6 +32,7 @@ from vllm.v1.kv_offload.base import (
     OffloadingManager,
     OffloadingSpec,
     OffloadingWorker,
+    TransferResult,
 )
 from vllm.v1.kv_offload.config import (
     OffloadingCacheConfig,
@@ -135,13 +137,14 @@ def _store_metadata(job_id: int) -> OffloadingConnectorMetadata:
     )
 
 
-def _load_metadata(job_id: int) -> OffloadingConnectorMetadata:
+def _load_metadata(job_id: int, sync: bool = False) -> OffloadingConnectorMetadata:
     return OffloadingConnectorMetadata(
         load_jobs={
             job_id: TransferJob(
                 req_id="req",
                 src_spec=LoadStoreSpec(),
                 dst_spec=GPULoadStoreSpec([0], group_sizes=(1,), block_indices=(0,)),
+                sync=sync,
             )
         },
         store_jobs={},
@@ -276,6 +279,101 @@ def test_start_kv_transfers_non_writer_still_submits_load():
     assert worker.build_connector_worker_meta() is None
 
 
+@pytest.mark.parametrize("sync", [False, True])
+def test_load_completion(sync: bool):
+    """Sync loads are submitted expedited and waited on, skip
+    finished_recving, and count as loads."""
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+
+    worker.start_kv_transfers(_load_metadata(11, sync=sync))
+
+    assert worker.worker is not None
+    worker.worker.submit_load.assert_called_once()
+    expedited = worker.worker.submit_load.call_args.kwargs.get("expedited", False)
+    assert expedited == sync
+    if sync:
+        worker.worker.wait.assert_called_once_with({11})
+    else:
+        worker.worker.wait.assert_not_called()
+
+    worker.worker.get_finished.return_value = [
+        TransferResult(job_id=11, success=True, transfer_size=64, transfer_time=0.5)
+    ]
+    assert worker.get_finished(set()) == (set(), set() if sync else {"req"})
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {11: 1}
+    assert meta.transfer_stats.load.bytes == 64
+    assert meta.transfer_stats.store.is_empty()
+
+
+def _kv_cache_config(num_groups: int) -> KVCacheConfig:
+    return KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[MagicMock() for _ in range(num_groups)],
+    )
+
+
+def _failed(job_id: int) -> list[TransferResult]:
+    return [TransferResult(job_id=job_id, success=False)]
+
+
+def test_failed_store_is_dropped_and_still_completes():
+    """A failed store is a future cache miss, not an error.
+
+    It must still be marked completed, or the scheduler's per-job pending
+    count never reaches zero, and marked failed so it is not published.
+    """
+    worker, _ = _make_worker(_kv_cache_config(1))
+    worker.prepare_store_kv(_store_metadata(11))
+    worker.start_kv_transfers(_empty_metadata())
+    worker.worker.get_finished.return_value = _failed(11)
+
+    finished_sending, finished_recving = worker.get_finished(set())
+
+    assert finished_sending == set()
+    assert finished_recving == set()
+    assert worker.take_failed_recving() == set()
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {11: 1}
+    assert meta.failed_jobs == {11}
+
+
+def test_failed_load_fails_its_request():
+    """A failed load leaves undefined KV in its destination blocks.
+
+    The request is reported as finished, per the base contract, and as failed,
+    which the scheduler handles for any number of KV cache groups.
+    """
+    worker, _ = _make_worker(_kv_cache_config(1))
+    worker.start_kv_transfers(_load_metadata(12))
+    worker.worker.get_finished.return_value = _failed(12)
+
+    _, finished_recving = worker.get_finished(set())
+
+    assert finished_recving == {"req"}
+    assert worker.take_failed_recving() == {"req"}
+    assert worker.take_failed_recving() == set()
+    meta = worker.build_connector_worker_meta()
+    assert meta is not None
+    assert meta.completed_jobs == {12: 1}
+    assert meta.failed_jobs == {12}
+
+
+def test_failed_sync_load_raises():
+    """A sync load's request already ran on the KV it was meant to load."""
+    worker, _ = _make_worker(_kv_cache_config(1))
+    worker.start_kv_transfers(_load_metadata(13, sync=True))
+    worker.worker.get_finished.return_value = _failed(13)
+
+    with pytest.raises(RuntimeError, match="sync load job 13 failed"):
+        worker.get_finished(set())
+
+
 def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
     from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
         OffloadingConnectorWorker,
@@ -311,6 +409,7 @@ def test_register_kv_caches(backend):
     Verifies that the canonicalized CanonicalKVCaches has the correct
     block tensors, tensor_idx references, and page sizes across all groups.
     """
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.attention.backends.mla.indexer import (
         DeepseekV32IndexerBackend,
     )
@@ -329,6 +428,7 @@ def test_register_kv_caches(backend):
     ALIGNED_SSM_STATE_SHAPE = (BLOCK_SIZE * NUM_KV_HEADS, HEAD_SIZE)
 
     backend_cls = AttentionBackendEnum[backend].get_class()
+    indexer_backend_cls = cast(type[AttentionBackend], DeepseekV32IndexerBackend)
 
     attn_spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
@@ -422,19 +522,19 @@ def test_register_kv_caches(backend):
                 kv_cache_group_id=0,
             ),
             AttentionGroup(
-                backend=DeepseekV32IndexerBackend,
+                backend=indexer_backend_cls,
                 layer_names=mla_layer_names,
                 kv_cache_spec=mla_spec,
                 kv_cache_group_id=1,
             ),
             AttentionGroup(
-                backend=DeepseekV32IndexerBackend,  # unused for mamba
+                backend=indexer_backend_cls,  # unused for mamba
                 layer_names=unaligned_mamba_layer_names,
                 kv_cache_spec=unaligned_mamba_spec,
                 kv_cache_group_id=2,
             ),
             AttentionGroup(
-                backend=DeepseekV32IndexerBackend,  # unused for mamba
+                backend=indexer_backend_cls,  # unused for mamba
                 layer_names=aligned_mamba_layer_names,
                 kv_cache_spec=aligned_mamba_spec,
                 kv_cache_group_id=3,
@@ -678,5 +778,9 @@ def test_register_kv_caches_uniform_type(backend):
 
     # Only layer_a matches the model's total KV head count, so layer_b gets an
     # opaque mapping rather than a certified, parallelism-agnostic one
-    assert group_refs[0].mapping.parallelism_agnostic
-    assert not group_refs[1].mapping.parallelism_agnostic
+    layer_a_mapping = group_refs[0].mapping
+    layer_b_mapping = group_refs[1].mapping
+    assert layer_a_mapping is not None
+    assert layer_b_mapping is not None
+    assert layer_a_mapping.parallelism_agnostic
+    assert not layer_b_mapping.parallelism_agnostic

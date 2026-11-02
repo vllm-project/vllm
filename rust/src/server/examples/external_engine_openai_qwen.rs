@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 use std::collections::HashMap;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -16,11 +17,11 @@ use clap::Parser;
 use futures::StreamExt as _;
 use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
-use vllm_chat::ToolStrictLevel;
 use vllm_engine_core_client::TransportMode;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 use vllm_server::{
-    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
-    HttpListenerMode, ParserSelection, RendererSelection, serve,
+    AccessLogConfig, ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode,
+    CorsConfig, HttpListenerMode, ParserSelection, RendererSelection, serve,
 };
 
 #[derive(Debug, Parser)]
@@ -54,7 +55,9 @@ async fn main() -> Result<()> {
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address: args.handshake_address,
             advertised_host: args.host,
+            engine_start_index: 0,
             engine_count: args.engine_count,
+            data_parallel_size: args.engine_count,
             ready_timeout: Duration::from_secs(args.ready_timeout_secs),
             local_input_address: None,
             local_output_address: None,
@@ -62,6 +65,8 @@ async fn main() -> Result<()> {
         coordinator_mode: CoordinatorMode::MaybeInProc,
         model: args.model,
         revision: None,
+        tokenizer: None,
+        hf_config: None,
         hf_overrides: Default::default(),
         generation_config: Default::default(),
         served_model_name: vec![],
@@ -69,24 +74,35 @@ async fn main() -> Result<()> {
             host: "127.0.0.1".to_string(),
             port,
         },
+        grpc_listener_mode: None,
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
-        tool_strict_level: ToolStrictLevel::Auto,
+        tool_strict_level: None,
+        structured_outputs_backend: StructuredOutputBackend::default(),
         renderer: RendererSelection::Auto,
         language_model_only: false,
         chat_template: None,
         default_chat_template_kwargs: None,
+        reasoning_effort_map: HashMap::new(),
+        trust_request_chat_template: false,
+        exclude_tools_when_tool_choice_none: false,
         limit_mm_per_prompt: HashMap::new(),
         lora_modules: Vec::new(),
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
         max_logprobs: None,
+        stream_interval: NonZeroU32::MIN,
         api_server_options: ApiServerOptions::default(),
         cors: CorsConfig::default(),
+        access_log: AccessLogConfig::default(),
         tls: None,
+        root_path: None,
         api_keys: Vec::new(),
         disable_log_stats: false,
-        grpc_port: None,
+        custom_histogram_buckets: Default::default(),
+        log_stats_interval: Some(Duration::from_secs(10)),
+        disable_request_id_randomization: false,
         shutdown_timeout: Duration::ZERO,
+        manages_engine: false,
         keep_alive_timeout: Duration::from_secs(5),
         profiler: None,
     };

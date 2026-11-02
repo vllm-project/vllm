@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, Self
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from typing_extensions import Self
 
 from vllm import envs
+from vllm.config.kernel import MEGA_MOE_BACKENDS, KernelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -25,7 +25,6 @@ logger = init_logger(__name__)
 
 LoRADType = Literal["auto", "float16", "bfloat16"]
 MaxLoRARanks = Literal[1, 8, 16, 32, 64, 128, 256, 320, 512]
-LoRAExtraVocabSize = Literal[256, 512]
 
 
 @config(config=ConfigDict(arbitrary_types_allowed=True))
@@ -82,8 +81,12 @@ class LoRAConfig:
     """If True, load MoE expert adapters in the "shared-outer" layout, where the
     gate/up (`w1`/`w3`) lora_A and the down (`w2`) lora_B are shared across all
     experts (stored once with expert-dim 1) instead of per-expert. The shared
-    factors are broadcast to the expert count at kernel time. Only meaningful for
-    MoE models whose adapters use this layout; ignored otherwise."""
+    factors are broadcast to the expert count at kernel time. 3D-weight MoE
+    models use `FusedMoEWithLoRA` for this layout. Only meaningful for MoE
+    models whose adapters use this layout; ignored otherwise."""
+    max_lora_cls_labels: int | None = Field(default=None, ge=1)
+    """Maximum output size for LoRA classification heads. Defaults to the
+    base classification head size."""
 
     def compute_hash(self) -> str:
         """WARNING: Whenever a new field is added to this config,
@@ -104,6 +107,7 @@ class LoRAConfig:
         factors.append(self.enable_tower_connector_lora)
         factors.append(self.enable_mixed_moe_lora_format)
         factors.append(self.enable_moe_shared_loras)
+        factors.append(self.max_lora_cls_labels)
         # target_modules affects which modules get LoRA applied
         factors.append(
             tuple(sorted(self.target_modules)) if self.target_modules else None
@@ -131,7 +135,25 @@ class LoRAConfig:
             envs.VLLM_LORA_ENABLE_DUAL_STREAM = False
         return self
 
+    def verify_with_kernel_config(self, kernel_config: KernelConfig) -> None:
+        """Reject MegaMoE backends, which do not support LoRA."""
+        moe_backend = kernel_config.moe_backend
+        if moe_backend in MEGA_MOE_BACKENDS or moe_backend == "aiter_mega_moe":
+            raise ValueError(
+                f"LoRA is not supported with moe_backend={moe_backend!r}. "
+                "Disable LoRA or select a MoE backend that supports LoRA."
+            )
+
     def verify_with_model_config(self, model_config: ModelConfig):
+        # Speculative decoding drafters don't run LoRA adapters.
+        if model_config.runner_type != "draft" and not model_config.is_lora_supported:
+            raise ValueError(
+                f"LoRA is not supported for {model_config.architecture} "
+                f"({model_config.model}). Supported models implement the "
+                "`SupportsLoRA` interface. Run this model without "
+                "`enable_lora`."
+            )
+
         if self.lora_dtype in (None, "auto"):
             self.lora_dtype = model_config.dtype
         elif isinstance(self.lora_dtype, str):

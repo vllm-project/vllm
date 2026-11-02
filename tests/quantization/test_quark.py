@@ -22,7 +22,7 @@ from packaging import version
 from tests.quantization.utils import load_model_without_vllm_runner
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.config.cache import CacheConfig
+from vllm.config.cache import CacheConfig, CacheDType
 from vllm.forward_context import set_forward_context
 from vllm.model_executor import parameter
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
@@ -57,10 +57,12 @@ from vllm.model_executor.layers.quantization.quark.quark import (  # noqa: E501
 )
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
     QuarkMoEMethod,
+    QuarkOCP_MX_MoEMethod,
     QuarkW4A8Fp8MoEMethod,
     QuarkW4A16Int4MoEMethod,
     QuarkW8A8Fp8MoEMethod,
     QuarkW8A8Int8MoEMethod,
+    QuarkW8A8Mxfp8MoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkScheme,
@@ -98,6 +100,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kMxfp6E2M3Static,
     kMxfp6E3M2Dynamic,
     kMxfp6E3M2Static,
+    kMxfp8Dynamic,
+    kMxfp8Static,
     kNvfp4Dynamic,
     kNvfp4Static,
 )
@@ -146,6 +150,9 @@ class QTensorConfig:
     act_quant_key: QuantKey | None = None
     dispatch_cls: type[QuarkScheme] | type[QuarkMoEMethod] | None = None
     expected_error: tuple[type[Exception], str] | None = None
+    # Layer type the `expected_error` case is exercised on: "linear" (the
+    # default, used by the FP8 per-block cases) or "experts".
+    expected_error_on: str = "linear"
 
 
 QTENSOR_CONFIGS = [
@@ -602,6 +609,50 @@ QTENSOR_CONFIGS = [
         dispatch_cls=QuarkOCP_MX,
     ),
     QTensorConfig(
+        name="ocp_mx_mxfp8_activation",
+        # MXFP8 (W8A8) has its own MoE method: the OCP MX method only handles
+        # MXFP4/MXFP6 elements.
+        weight={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+        weight_quant_key=kMxfp8Static,
+        act_quant_key=kMxfp8Dynamic,
+        dispatch_cls=QuarkW8A8Mxfp8MoEMethod,
+    ),
+    QTensorConfig(
+        name="ocp_mx_mxfp8_per_block_experts",
+        # Shape B (32x32 per-block e8m0) is served by QuarkOCP_MX for Linears but
+        # is not a spelling the MXFP8 MoE method can load.
+        weight={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "block_size": [32, 32],
+            "symmetric": True,
+            "is_dynamic": False,
+            "scale_type": "float8_e8m0fnu",
+        },
+        input_tensors={
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+        expected_error=(NotImplementedError, "1-D per_group"),
+        expected_error_on="experts",
+    ),
+    QTensorConfig(
         name="nvfp4",
         weight=[
             {
@@ -855,7 +906,7 @@ def test_quant_method_dispatch_ignored(default_vllm_config):
         UnquantizedFusedMoEMethod,
     )
 
-    dynamic_mxfp4_config = _make_qtensor_config(
+    mxfp4_config = _make_qtensor_config(
         {
             "dtype": "fp4",
             "qscheme": "per_group",
@@ -866,24 +917,23 @@ def test_quant_method_dispatch_ignored(default_vllm_config):
         None,
         exclude=["self_attn.q_proj", "mlp.down_proj"],
     )
-    dynamic_mxfp4_config.dynamic_mxfp4_quant = True
-
-    assert dynamic_mxfp4_config.get_quant_method_target(
-        "self_attn.q_proj", LinearBase
-    ) == (kMxfp4Static, None, QuarkLinearMethod)
-    attention_proj = TestLinear()
-    assert isinstance(
-        dynamic_mxfp4_config.get_quant_method(attention_proj, "self_attn.q_proj"),
-        QuarkLinearMethod,
+    assert mxfp4_config.get_quant_method_target("self_attn.q_proj", LinearBase) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
     )
-    assert isinstance(attention_proj.scheme, QuarkOCP_MX)
-    assert attention_proj.scheme.dynamic_mxfp4_quant
-
-    assert dynamic_mxfp4_config.get_quant_method_target(
-        "mlp.down_proj", LinearBase
-    ) == (None, None, UnquantizedLinearMethod)
     assert isinstance(
-        dynamic_mxfp4_config.get_quant_method(TestLinear(), "mlp.down_proj"),
+        mxfp4_config.get_quant_method(TestLinear(), "self_attn.q_proj"),
+        UnquantizedLinearMethod,
+    )
+
+    assert mxfp4_config.get_quant_method_target("mlp.down_proj", LinearBase) == (
+        None,
+        None,
+        UnquantizedLinearMethod,
+    )
+    assert isinstance(
+        mxfp4_config.get_quant_method(TestLinear(), "mlp.down_proj"),
         UnquantizedLinearMethod,
     )
 
@@ -893,8 +943,12 @@ def test_quant_method_dispatch_target(case):
     config = _make_qtensor_config(case.weight, case.input_tensors)
     if case.expected_error is not None:
         error_type, error_message = case.expected_error
+        on_experts = case.expected_error_on == "experts"
         with pytest.raises(error_type, match=error_message):
-            config.get_quant_method_target("linear", LinearBase)
+            config.get_quant_method_target(
+                "experts" if on_experts else "linear",
+                RoutedExperts if on_experts else LinearBase,
+            )
         return
 
     assert case.dispatch_cls is not None
@@ -908,6 +962,263 @@ def test_quant_method_dispatch_target(case):
     assert weight_quant_key == case.weight_quant_key
     assert act_quant_key == case.act_quant_key
     assert method_cls is (QuarkLinearMethod if is_linear else case.dispatch_cls)
+
+
+def test_quant_method_dispatch_mxfp8_2d_block(default_vllm_config):
+    """Shape B (DeepSeek-V4.1): 32x32 per-block e8m0 routes to QuarkOCP_MX.
+
+    Verifies that get_quant_method and get_quant_method_target agree (the
+    short-circuit that previously caused them to diverge has been removed).
+    """
+    from vllm.model_executor.layers.quantization.quark.schemes import QuarkOCP_MX
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Static
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    mxfp8_spec = {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "block_size": [32, 32],
+            "symmetric": True,
+            "is_dynamic": False,
+            "scale_type": "float8_e8m0fnu",
+        },
+        "input_tensors": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "symmetric": True,
+            "is_dynamic": True,
+        },
+    }
+    config = QuarkConfig(
+        {
+            "global_quant_config": {
+                "weight": {
+                    "dtype": "fp4",
+                    "qscheme": "per_group",
+                    "group_size": 32,
+                    "scale_format": "e8m0",
+                    "is_dynamic": False,
+                },
+                "input_tensors": {
+                    "dtype": "fp4",
+                    "qscheme": "per_group",
+                    "group_size": 32,
+                    "scale_format": "e8m0",
+                    "is_dynamic": True,
+                },
+            },
+            "layer_type_quant_config": {},
+            "layer_quant_config": {"layers.0.attn.wkv": mxfp8_spec},
+            "exclude": [],
+        }
+    )
+
+    class TestLinear(LinearBase):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+
+    # get_quant_method_target now routes MXFP8 through the matcher chain.
+    wk, ak, mcls = config.get_quant_method_target("layers.0.attn.wkv", LinearBase)
+    assert wk == kMxfp8Static
+    assert mcls is QuarkLinearMethod
+
+    linear = TestLinear()
+    method = config.get_quant_method(linear, "layers.0.attn.wkv")
+    assert isinstance(method, QuarkLinearMethod)
+    assert isinstance(linear.scheme, QuarkOCP_MX)
+    assert linear.scheme.weight_quant_key == kMxfp8Static
+    assert linear.scheme.scale_block_rows == 32
+
+    # Experts still fall through to the global MXFP4 spec.
+    assert (
+        config.get_quant_method_target("layers.0.ffn.experts", RoutedExperts)[2]
+        is not QuarkLinearMethod
+    )
+
+    # 128x128 per-block FP8 (DeepSeek V4) keeps its existing Quark scheme.
+    v4_spec = {
+        "weight": {**mxfp8_spec["weight"], "block_size": [128, 128]},
+        "input_tensors": {**mxfp8_spec["input_tensors"], "group_size": 128},
+    }
+    v4_config = _make_qtensor_config(v4_spec["weight"], v4_spec["input_tensors"])
+    assert v4_config.get_quant_method_target("linear", LinearBase)[2] is (
+        QuarkLinearMethod
+    )
+    linear = TestLinear()
+    assert isinstance(v4_config.get_quant_method(linear, "linear"), QuarkLinearMethod)
+    assert isinstance(linear.scheme, QuarkW8A8Fp8PerBlock)
+
+
+def test_quant_method_dispatch_mxfp8_canonical(default_vllm_config):
+    """Shape A (canonical MX): per_group/group_size=32/e8m0 FP8 routes
+    to QuarkOCP_MX with scale_block_rows == 1.
+
+    This covers the canonical MXFP8 spelling (no 2-D block). Validated by
+    synthetic dispatch test only — no canonical-MXFP8 checkpoint on hand.
+    """
+    from vllm.model_executor.layers.quantization.quark.schemes import QuarkOCP_MX
+    from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp8Static
+
+    default_vllm_config.model_config = SimpleNamespace(dtype=torch.bfloat16)
+    mxfp8_canonical_spec = {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": False,
+        },
+        "input_tensors": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_group",
+            "group_size": 32,
+            "scale_format": "e8m0",
+            "is_dynamic": True,
+        },
+    }
+    config = QuarkConfig(
+        {
+            "global_quant_config": mxfp8_canonical_spec,
+            "layer_type_quant_config": {},
+            "layer_quant_config": {},
+            "exclude": [],
+        }
+    )
+
+    wk, ak, mcls = config.get_quant_method_target("linear", LinearBase)
+    assert wk == kMxfp8Static
+    assert mcls is QuarkLinearMethod
+
+    class TestLinear(LinearBase):
+        def __init__(self):
+            torch.nn.Module.__init__(self)
+
+    linear = TestLinear()
+    method = config.get_quant_method(linear, "linear")
+    assert isinstance(method, QuarkLinearMethod)
+    assert isinstance(linear.scheme, QuarkOCP_MX)
+    assert linear.scheme.weight_quant_key == kMxfp8Static
+    assert linear.scheme.scale_block_rows == 1
+
+
+_MXFP8_MOE_SPEC = {
+    "weight": {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "group_size": 32,
+        "scale_format": "e8m0",
+        "is_dynamic": False,
+    },
+    "input_tensors": {
+        "dtype": "fp8_e4m3",
+        "qscheme": "per_group",
+        "group_size": 32,
+        "scale_format": "e8m0",
+        "is_dynamic": True,
+    },
+}
+_MXFP4_MOE_SPEC = {
+    "weight": {
+        "dtype": "fp4",
+        "qscheme": "per_group",
+        "group_size": 32,
+        "scale_format": "e8m0",
+        "is_dynamic": False,
+    },
+    "input_tensors": {
+        "dtype": "fp4",
+        "qscheme": "per_group",
+        "group_size": 32,
+        "scale_format": "e8m0",
+        "is_dynamic": True,
+    },
+}
+
+
+def _patch_mxfp8_moe_backend(monkeypatch) -> None:
+    monkeypatch.setattr(
+        f"{QUARK_MOE_MODULE}.select_mxfp8_moe_backend",
+        lambda *args, **kwargs: (SimpleNamespace(value="TEST_MXFP8"), object()),
+    )
+
+
+def test_quant_method_dispatch_mixed_mxfp4_mxfp8_experts(
+    monkeypatch, default_vllm_config
+):
+    """A per-layer ``<experts prefix>*`` entry selects MXFP8 for that layer's routed
+    experts only; other layers keep the global MXFP4, and the glob does not reach
+    the layer's shared experts (``shared_experts`` does not start with
+    ``experts``)."""
+    config = QuarkConfig(
+        {
+            "global_quant_config": _MXFP4_MOE_SPEC,
+            "layer_type_quant_config": {},
+            "layer_quant_config": {
+                "model.layers.1.block_sparse_moe.experts*": _MXFP8_MOE_SPEC,
+            },
+            "exclude": [],
+        }
+    )
+    targets = {
+        layer: config.get_quant_method_target(
+            f"model.layers.{layer}.block_sparse_moe.experts", RoutedExperts
+        )[2]
+        for layer in (0, 1, 10, 11)
+    }
+    assert targets == {
+        0: QuarkOCP_MX_MoEMethod,
+        1: QuarkW8A8Mxfp8MoEMethod,
+        10: QuarkOCP_MX_MoEMethod,
+        11: QuarkOCP_MX_MoEMethod,
+    }
+    assert (
+        config.get_layer_quant_config_from_name(
+            "model.layers.1.block_sparse_moe.shared_experts.down_proj"
+        )
+        is None
+    )
+
+
+def test_quark_w8a8_mxfp8_moe_weight_shapes(monkeypatch):
+    """The parameters match the checkpoint layout: E4M3 ``[E, rows, cols]`` and
+    uint8 E8M0 ``[E, rows, cols / 32]``, sharded as block scales."""
+    _patch_mxfp8_moe_backend(monkeypatch)
+    method = QuarkW8A8Mxfp8MoEMethod(
+        _make_test_moe_config(), kMxfp8Static, kMxfp8Dynamic
+    )
+    assert method.weight_block_size == [1, 32]
+    layer = torch.nn.Module()
+    method.create_weights(
+        layer,
+        num_experts=9,
+        hidden_size=256,
+        intermediate_size_per_partition=64,
+        params_dtype=torch.bfloat16,
+        weight_loader=lambda *args, **kwargs: None,
+    )
+    expected = {
+        "w13_weight": ((9, 128, 256), torch.float8_e4m3fn),
+        "w2_weight": ((9, 256, 64), torch.float8_e4m3fn),
+        "w13_weight_scale": ((9, 128, 8), torch.uint8),
+        "w2_weight_scale": ((9, 256, 2), torch.uint8),
+    }
+    for name, (shape, dtype) in expected.items():
+        param = getattr(layer, name)
+        assert tuple(param.shape) == shape, name
+        assert param.dtype == dtype, name
+        assert param.quant_method == FusedMoeWeightScaleSupported.BLOCK.value
+    assert layer.w13_input_scale is None and layer.w2_input_scale is None
+
+    with pytest.raises(ValueError, match="divisible by 32"):
+        method.create_weights(
+            torch.nn.Module(),
+            num_experts=9,
+            hidden_size=256,
+            intermediate_size_per_partition=48,
+            params_dtype=torch.bfloat16,
+        )
 
 
 @pytest.mark.parametrize(
@@ -1003,6 +1314,13 @@ def test_quant_method_dispatch_instantiation(case, monkeypatch, default_vllm_con
                 f"vllm.model_executor.layers.quantization.quark.quark_moe.{target}",
                 lambda *args, **kwargs: (object(), object()),
             )
+
+        # The MXFP8 method logs the backend it selected, so give it a named one.
+        monkeypatch.setattr(
+            "vllm.model_executor.layers.quantization.quark.quark_moe."
+            "select_mxfp8_moe_backend",
+            lambda *args, **kwargs: (SimpleNamespace(value="TEST_MXFP8"), object()),
+        )
 
         # AssertionError: W4A8 FP8 MoE requires ROCm AITER fused MoE support
         monkeypatch.setattr(
@@ -1144,7 +1462,6 @@ def test_quark_fp8_ptpc_exposes_kernel_input_quant_key(monkeypatch):
     scheme = QuarkW8A8Fp8.__new__(QuarkW8A8Fp8)
     scheme.weight_qscheme = "per_channel"
     scheme.is_static_input_scheme = False
-    scheme.input_qscheme = "per_channel"
     scheme.activation_quant_key = kFp8DynamicTokenSym
     scheme.weight_quant_key = kFp8StaticChannelSym
     scheme.out_dtype = dtype
@@ -1166,7 +1483,7 @@ def test_quark_fp8_ptpc_exposes_kernel_input_quant_key(monkeypatch):
 
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8"])
 def test_quark_fp8_w_per_tensor_a_per_tensor(
-    kv_cache_dtype: str, monkeypatch, dist_init, workspace_init
+    kv_cache_dtype: CacheDType, monkeypatch, dist_init, workspace_init
 ):
     model_path = "amd/Llama-3.1-8B-Instruct-FP8-KV-Quark-test"
     checkpoint_scales = {}
@@ -2148,7 +2465,10 @@ class TestQuarkInt4Format:
                 torch.zeros(1, 16, 8 // tp_size, dtype=torch.uint8),
                 requires_grad=False,
             )
-            loader = method.get_weight_loader(layer, weight_loader=None)
+            loader = method.get_weight_loader(
+                layer,
+                weight_loader=None,
+            )
             loader(
                 param,
                 raw_zp.clone(),
@@ -2314,3 +2634,107 @@ def test_quark_int4_canonicalizes_pack_for_kernel_layout(pack_method, symmetric)
     )
 
     assert torch.equal(actual, expected)
+
+
+# ---------------------------------------------------------------------------
+# override_quantization_method: Quark always delegates to QuarkConfig
+# ---------------------------------------------------------------------------
+
+_QUARK_MXFP4_CFG = {
+    "quant_method": "quark",
+    "global_quant_config": {
+        "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32},
+    },
+}
+
+_QUARK_MXFP8_CFG = {
+    "quant_method": "quark",
+    "global_quant_config": {
+        "weight": {
+            "dtype": "fp8_e4m3",
+            "qscheme": "per_block",
+            "block_size": [32, 32],
+            "scale_type": "float8_e8m0fnu",
+            "symmetric": True,
+        },
+    },
+}
+
+_QUARK_MIXED_CFG = {
+    "quant_method": "quark",
+    "global_quant_config": {
+        "weight": {"dtype": "fp4", "qscheme": "per_group", "group_size": 32},
+    },
+    "layer_quant_config": {"layers.0.attn": {"weight": {"dtype": "fp8_e4m3"}}},
+}
+
+_FP8_CFG = {"quant_method": "fp8"}
+
+_DSV4_FP8_CFG = {"quant_method": "deepseek_v4_fp8"}
+
+
+@pytest.mark.parametrize(
+    "quant_config_cls",
+    [
+        "deepseek_v41",
+        "deepseek_v4",
+    ],
+)
+@pytest.mark.parametrize(
+    "hf_quant_cfg, expect_none",
+    [
+        (_QUARK_MXFP4_CFG, True),
+        (_QUARK_MXFP8_CFG, True),
+        (_QUARK_MIXED_CFG, True),
+        (_FP8_CFG, False),
+        (_DSV4_FP8_CFG, False),
+    ],
+    ids=[
+        "quark-mxfp4",
+        "quark-mxfp8",
+        "quark-mixed",
+        "native-fp8",
+        "deepseek-v4-fp8",
+    ],
+)
+def test_quark_override_delegates_to_quark_config(
+    quant_config_cls, hf_quant_cfg, expect_none
+):
+    """Any quant_method=='quark' must return None (delegate to QuarkConfig).
+
+    Native FP8 configs should still be claimed by the model-specific config.
+    """
+    import importlib
+
+    if quant_config_cls == "deepseek_v41":
+        # Module was renamed from deepseek_v4_1 to deepseek_v41 upstream.
+        for mod_name in (
+            "vllm.models.deepseek_v41.quant_config",
+            "vllm.models.deepseek_v4_1.quant_config",
+        ):
+            try:
+                mod = importlib.import_module(mod_name)
+                break
+            except ModuleNotFoundError:
+                continue
+        else:
+            pytest.skip("deepseek_v41 quant_config not found")
+        model_type = "deepseek_v41"
+    else:
+        mod = importlib.import_module("vllm.models.deepseek_v4.quant_config")
+        model_type = "deepseek_v4"
+
+    config_cls = mod.DeepseekV4FP8Config
+    hf_config = SimpleNamespace(model_type=model_type)
+    result = config_cls.override_quantization_method(
+        hf_quant_cfg, None, hf_config=hf_config
+    )
+
+    if expect_none:
+        assert result is None, (
+            f"Quark config should delegate to QuarkConfig (return None), got {result!r}"
+        )
+    else:
+        assert result == "deepseek_v4_fp8", (
+            f"Native FP8 should be claimed by DeepseekV4FP8Config, got {result!r}"
+        )

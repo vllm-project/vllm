@@ -94,6 +94,11 @@ class DispatchPooler(Pooler):
         pooling_metadata: PoolingMetadata,
     ) -> PoolerOutput:
         poolers_by_task = self.poolers_by_task
+        tasks = pooling_metadata.tasks
+        pooler = poolers_by_task.get(tasks[0]) if tasks else None
+        if pooler and tasks.count(tasks[0]) == len(tasks):
+            return pooler(hidden_states, pooling_metadata)
+
         cursor = pooling_metadata.pooling_cursor
 
         outputs = list[torch.Tensor | None]()
@@ -198,6 +203,11 @@ class BOSEOSFilter(Pooler):
         for i, (prompt_len, token_ids) in enumerate(
             zip(pooling_metadata.prompt_lens, prompt_token_ids)
         ):
+            # Late chunking returns one row per chunk, with special tokens
+            # already included in the means. Skip BOS/EOS row removal for these
+            # requests; ordinary token outputs still use the filtering below.
+            if pooling_metadata.pooling_params[i].late_chunking_params is not None:
+                continue
             pooled_data = pooled_outputs[i]
             assert (
                 isinstance(pooled_data, torch.Tensor)

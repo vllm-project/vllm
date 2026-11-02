@@ -188,7 +188,8 @@ fn peel_leading_instructions(
         )),
         ChatMessage::User { .. }
         | ChatMessage::Assistant { .. }
-        | ChatMessage::ToolResponse { .. } => Ok((None, None, messages)),
+        | ChatMessage::ToolResponse { .. }
+        | ChatMessage::Custom { .. } => Ok((None, None, messages)),
     }
 }
 
@@ -243,9 +244,7 @@ fn preamble_tool_descriptions(
     leading_developer_tools: Option<&[ChatTool]>,
 ) -> Vec<ToolDescription> {
     let mut tools = Vec::new();
-    if request.tool_parsing_enabled() {
-        tools.extend(to_tool_descriptions(request.initial_tools()));
-    }
+    tools.extend(to_tool_descriptions(request.initial_tools()));
     if let Some(leading_developer_tools) = leading_developer_tools {
         tools.extend(to_tool_descriptions(leading_developer_tools));
     }
@@ -327,6 +326,9 @@ fn to_harmony_message(
                 .with_channel("commentary")
                 .with_recipient("assistant"),
             ]
+        }
+        ChatMessage::Custom { role, .. } => {
+            return Err(Error::UnsupportedChatRole { role: role.clone() });
         }
     })
 }

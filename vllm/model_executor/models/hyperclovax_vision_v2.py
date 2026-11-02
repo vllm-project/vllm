@@ -189,38 +189,6 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         num_videos = mm_counts.get("video", 0)
         return V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
 
-    def get_dummy_processor_inputs(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        mm_options: MultiModalDummyOptions | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
-    ) -> ProcessorInputs:
-        """Build dummy processor inputs for memory profiling."""
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-        prompt_text = V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
-
-        dummy_mm_data = self.get_dummy_mm_data(
-            seq_len,
-            mm_counts,
-            mm_options,
-            mm_processor_kwargs=mm_processor_kwargs,
-        )
-        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
-
-        tokenizer = self.info.get_tokenizer()
-        prompt = tokenizer.encode(
-            prompt_text,
-            **self.info.default_tok_params.get_encode_kwargs(),
-        )
-
-        return ProcessorInputs(
-            prompt=prompt,
-            mm_data_items=dummy_mm_items,
-            hf_processor_mm_kwargs=mm_processor_kwargs or {},
-        )
-
     def get_dummy_mm_data(
         self,
         seq_len: int,
@@ -255,6 +223,28 @@ class HCXVisionV2MultiModalProcessor(
 ):
     """Multimodal processor for HyperCLOVAX V2 (32B Think model)."""
 
+    def get_dummy_inputs(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+        mm_options: MultiModalDummyOptions,
+    ) -> ProcessorInputs:
+        num_images = mm_counts.get("image", 0)
+        num_videos = mm_counts.get("video", 0)
+        prompt_text = V2_IMAGE_TOKEN * num_images + V2_VIDEO_TOKEN * num_videos
+
+        builder = self.dummy_inputs
+        dummy_mm_data = builder.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
+
+        tokenizer = self.info.get_tokenizer()
+        prompt = tokenizer.encode(
+            prompt_text,
+            **self.info.default_tok_params.get_encode_kwargs(),
+        )
+
+        return ProcessorInputs(prompt=prompt, mm_data_items=dummy_mm_items)
+
     def _get_hf_mm_text(self, mm_counts: Mapping[str, int]) -> str:
         return self.dummy_inputs.get_dummy_text(mm_counts)
 
@@ -267,7 +257,7 @@ class HCXVisionV2MultiModalProcessor(
         hf_config = self.info.get_hf_config()
 
         # Use token IDs directly from config.
-        # This matches what get_dummy_processor_inputs uses, ensuring consistency.
+        # This matches what get_dummy_inputs uses, ensuring consistency.
         placeholder: dict[str, int] = {
             "image": hf_config.image_token_id,  # 128060 for <|IMAGE_PAD|>
             "video": hf_config.video_token_id,  # 128061 for <|VIDEO_PAD|>

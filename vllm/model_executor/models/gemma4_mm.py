@@ -98,6 +98,28 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+
+def _get_tower_quant_config(
+    tower_config: Any,
+    quant_config: "QuantizationConfig | None",
+) -> "QuantizationConfig | None":
+    # BNB/torchao/compressed-tensors handle arbitrary sizes; other methods
+    # (Marlin, FP8, …) require dimensions divisible by 64.
+    # TODO(mgoin): remove this by fixing kernel padding.
+    if quant_config and quant_config.get_name() in [
+        "bitsandbytes",
+        "torchao",
+        "compressed-tensors",
+    ]:
+        return quant_config
+    # The audio config has no intermediate_size; treat it as always divisible.
+    intermediate_size = getattr(tower_config, "intermediate_size", None)
+    quantizable = tower_config.hidden_size % 64 == 0 and (
+        intermediate_size is None or intermediate_size % 64 == 0
+    )
+    return quant_config if quantizable else None
+
+
 # Video constants — match transformers Gemma4VideoProcessor defaults.
 _SUPPORTED_SOFT_TOKENS = (70, 140, 280, 560, 1120)
 _VIDEO_MAX_SOFT_TOKENS = 70  # soft tokens per video frame (vs 280 for images)
@@ -222,12 +244,11 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
+    def has_audio(self) -> bool:
+        return self.get_hf_config().audio_config is not None
+
     def validate_num_items(self, modality: str, num_items: int) -> None:
-        if (
-            modality == "audio"
-            and num_items > 0
-            and self.get_hf_config().audio_config is None
-        ):
+        if modality == "audio" and num_items > 0 and not self.has_audio():
             model_config = self.ctx.model_config
             model = get_served_model_name(
                 model_config.model, model_config.served_model_name
@@ -243,7 +264,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         limits: dict[str, int | None] = {"image": None}
-        if self.get_hf_config().audio_config is not None:
+        if self.has_audio():
             limits["audio"] = None
         limits["video"] = None
         return limits
@@ -261,7 +282,7 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
             tokens_per_image = val
         tokens: dict[str, int] = {"image": tokens_per_image}
-        if config.audio_config is not None:
+        if self.has_audio():
             # Audio max tokens from the processor's audio_seq_length.
             processor = self.get_hf_processor()
             tokens["audio"] = processor.audio_seq_length
@@ -275,9 +296,8 @@ class Gemma4ProcessingInfo(BaseProcessingInfo):
         return tokens
 
     def get_data_parser(self) -> MultiModalDataParser:
-        config = self.get_hf_config()
         kwargs: dict[str, Any] = {"video_needs_metadata": True}
-        if getattr(config, "audio_config", None) is not None:
+        if self.has_audio():
             processor = self.get_hf_processor()
             kwargs["target_sr"] = processor.feature_extractor.sampling_rate
         return MultiModalDataParser(**kwargs)
@@ -1073,25 +1093,9 @@ class Gemma4ForConditionalGeneration(
             lora_config is not None and lora_config.enable_tower_connector_lora
         )
 
-        # Only quantize towers when the quant method supports their
-        # dimensions.  BNB/torchao handle arbitrary sizes; other methods
-        # (Marlin, FP8, …) require dimensions divisible by 64, which
-        # the vision tower (intermediate_size=4304) does not satisfy.
-        # TODO(mgoin): remove this by fixing kernel padding.
-        tower_quant: QuantizationConfig | None
-        if quant_config and quant_config.get_name() in [
-            "bitsandbytes",
-            "torchao",
-            "compressed-tensors",
-        ]:
-            tower_quant = quant_config
-        else:
-            vision_cfg = config.vision_config
-            quantizable = (
-                vision_cfg.hidden_size % 64 == 0
-                and vision_cfg.intermediate_size % 64 == 0
-            )
-            tower_quant = quant_config if quantizable else None
+        # Apply the dimension check independently because the vision and audio
+        # towers do not necessarily have the same hidden and intermediate sizes.
+        vision_tower_quant = _get_tower_quant_config(config.vision_config, quant_config)
 
         # ---- Vision tower (shared by image and video) ----
         with self._mark_tower_model(vllm_config, {"image", "video"}):
@@ -1099,18 +1103,21 @@ class Gemma4ForConditionalGeneration(
             self.embed_vision = Gemma4MultimodalEmbedder(
                 config.vision_config,
                 config.text_config,
-                quant_config=tower_quant,
+                quant_config=vision_tower_quant,
                 prefix=maybe_prefix(prefix, "embed_vision"),
             )
             recursive_replace_linear(
                 self.vision_tower,
-                tower_quant,
+                vision_tower_quant,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
 
         # ---- Audio tower (variants with audio_config) ----
         self.embed_audio: Gemma4MultimodalEmbedder | None
         if config.audio_config is not None:
+            audio_tower_quant = _get_tower_quant_config(
+                config.audio_config, quant_config
+            )
             with self._mark_tower_model(vllm_config, "audio"):
                 self.audio_tower = AutoModel.from_config(config=config.audio_config)
                 # AutoModel.from_config does NOT call post_init(),
@@ -1121,12 +1128,12 @@ class Gemma4ForConditionalGeneration(
                 self.embed_audio = Gemma4MultimodalEmbedder(
                     config.audio_config,
                     config.text_config,
-                    quant_config=tower_quant,
+                    quant_config=audio_tower_quant,
                     prefix=maybe_prefix(prefix, "embed_audio"),
                 )
                 recursive_replace_linear(
                     self.audio_tower,
-                    tower_quant,
+                    audio_tower_quant,
                     prefix=maybe_prefix(prefix, "audio_tower"),
                 )
         else:
@@ -1296,6 +1303,19 @@ class Gemma4ForConditionalGeneration(
     # Image processing
     # ------------------------------------------------------------------ #
 
+    def _get_max_soft_tokens(self) -> int:
+        max_soft_tokens = int(self.config.vision_config.default_output_length)
+        mm_processor_kwargs = getattr(
+            getattr(self, "multimodal_config", None),
+            "mm_processor_kwargs",
+            None,
+        )
+        if isinstance(mm_processor_kwargs, Mapping):
+            value, _ = _get_max_soft_tokens(mm_processor_kwargs)
+            if isinstance(value, int) and value in _SUPPORTED_SOFT_TOKENS:
+                max_soft_tokens = value
+        return max_soft_tokens
+
     def _process_image_input(
         self,
         image_input: Gemma4ImageInputs,
@@ -1326,17 +1346,7 @@ class Gemma4ForConditionalGeneration(
         pool_position_ids = pixel_position_ids
 
         if self._enable_mm_lora:
-            max_soft_tokens = vision_cfg.default_output_length
-            mm_processor_kwargs = getattr(
-                getattr(self, "multimodal_config", None),
-                "mm_processor_kwargs",
-                None,
-            )
-            if isinstance(mm_processor_kwargs, Mapping):
-                value, _ = _get_max_soft_tokens(mm_processor_kwargs)
-                if isinstance(value, int) and value in _SUPPORTED_SOFT_TOKENS:
-                    max_soft_tokens = value
-
+            max_soft_tokens = self._get_max_soft_tokens()
             max_patches = max_soft_tokens * pooling_k2
             padded_position_ids: list[torch.Tensor] = []
             for idx in range(total_images):
@@ -1656,6 +1666,13 @@ class Gemma4ForConditionalGeneration(
             batch_size, num_patches = src.shape[0], src.shape[1]
             dst[:batch_size, :num_patches].copy_(src)
 
+        configured_max_tokens = self._get_max_soft_tokens()
+        # One graph per row width (soft tokens of one image or video frame),
+        # so a budget's rows are not all padded to the widest image.
+        row_widths = tuple(
+            t for t in _SUPPORTED_SOFT_TOKENS if t <= configured_max_tokens
+        )
+
         return EncoderCudaGraphConfig(
             modalities=["image", "video"],
             buffer_keys=[
@@ -1669,6 +1686,7 @@ class Gemma4ForConditionalGeneration(
                 "pixel_values": pad_pixel_values,
                 "pixel_position_ids": pad_pixel_position_ids,
             },
+            capture_axes=(row_widths,),
         )
 
     def get_encoder_cudagraph_budget_range(
@@ -1705,10 +1723,15 @@ class Gemma4ForConditionalGeneration(
         if modality == "image":
             pixel_values = mm_kwargs["pixel_values"]
             if isinstance(pixel_values, list):
+                # A batch pads its images to the widest one, so pack by that.
+                row_tokens = (
+                    max((pv.shape[0] for pv in pixel_values), default=0) // pool_ratio
+                )
                 return [
                     EncoderItemSpec(
                         input_size=pv.shape[0],
                         output_tokens=pv.shape[0] // pool_ratio,
+                        path_output_tokens={"default": row_tokens},
                     )
                     for pv in pixel_values
                 ]
@@ -1743,10 +1766,25 @@ class Gemma4ForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         indices: list[int],
     ) -> dict[str, Any]:
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG,
+        )
+
+        vision_cfg = self.vision_tower.config
+        pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
+
         modality = self.get_input_modality(mm_kwargs)
         if modality == "image":
             pixel_values = mm_kwargs["pixel_values"]
             pixel_position_ids = mm_kwargs["pixel_position_ids"]
+            if isinstance(pixel_values, list):
+                row_patches = max(
+                    (pixel_values[i].shape[0] for i in indices), default=0
+                )
+            else:
+                row_patches = pixel_values.shape[1]
+            axis_keys = (row_patches // pool_ratio,)
+
             if len(indices) == 0:
                 is_pv_list = isinstance(pixel_values, list)
                 is_pp_list = isinstance(pixel_position_ids, list)
@@ -1755,20 +1793,24 @@ class Gemma4ForConditionalGeneration(
                     "pixel_position_ids": (
                         [] if is_pp_list else pixel_position_ids[:0]
                     ),
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
             if isinstance(pixel_values, list):
                 return {
                     "pixel_values": [pixel_values[i] for i in indices],
                     "pixel_position_ids": [pixel_position_ids[i] for i in indices],
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
             return {
                 "pixel_values": pixel_values[indices],
                 "pixel_position_ids": pixel_position_ids[indices],
+                ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
             }
         elif modality == "video":
             pixel_values_videos = mm_kwargs["pixel_values_videos"]
             pixel_position_ids_videos = mm_kwargs["pixel_position_ids_videos"]
             video_frame_counts = mm_kwargs["video_frame_counts"]
+            axis_keys = (pixel_values_videos.shape[1] // pool_ratio,)
 
             if len(indices) == 0:
                 is_fc_tensor = isinstance(video_frame_counts, torch.Tensor)
@@ -1778,6 +1820,7 @@ class Gemma4ForConditionalGeneration(
                     "video_frame_counts": (
                         video_frame_counts[:0] if is_fc_tensor else []
                     ),
+                    ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
                 }
 
             fc_list = (
@@ -1812,6 +1855,7 @@ class Gemma4ForConditionalGeneration(
                 "pixel_values_videos": selected_pv,
                 "pixel_position_ids_videos": selected_pp,
                 "video_frame_counts": selected_fc,
+                ENCODER_CUDAGRAPH_AXIS_KEYS_KWARG: axis_keys,
             }
         raise ValueError(f"Unknown modality: {modality}")
 
@@ -1832,20 +1876,21 @@ class Gemma4ForConditionalGeneration(
 
         dtype = dtype or torch.float32
 
-        max_size = max(max_batch_size, max_frames_per_batch)
+        assert axis_keys is not None
+        (per_item_output,) = axis_keys
+        assert isinstance(per_item_output, int)
+
+        # Every row of a batch replayed on this graph is an image or video
+        # frame of per_item_output tokens, so a batch that fits token_budget
+        # never needs more rows than this. Capture needs at least one row.
+        max_size = min(
+            max(max_batch_size, max_frames_per_batch),
+            max(1, token_budget // per_item_output),
+        )
 
         vision_cfg = self.vision_tower.config
         pool_ratio = getattr(vision_cfg, "pooling_kernel_size", 2) ** 2
 
-        # Retrieve the model's actual configured maximum tokens:
-        configured_max_tokens = getattr(
-            self.config.vision_config,
-            "num_soft_tokens",
-            _SUPPORTED_SOFT_TOKENS[2],
-        )
-        # Dynamically compute the slot capacity per item bounded by both the
-        # current graph budget and the user's maximum config:
-        per_item_output = min(token_budget, configured_max_tokens)
         # Satisfy k^2 * per_item_output = per_item_patches
         per_item_patches = per_item_output * pool_ratio
 
@@ -2262,16 +2307,7 @@ class Gemma4ForConditionalGeneration(
 
             if modality == "image":
                 pixel_values_key = "pixel_values"
-                max_soft_tokens = int(vision_config.default_output_length)
-                mm_processor_kwargs = getattr(
-                    getattr(self, "multimodal_config", None),
-                    "mm_processor_kwargs",
-                    None,
-                )
-                if isinstance(mm_processor_kwargs, Mapping):
-                    val, _ = _get_max_soft_tokens(mm_processor_kwargs)
-                    if isinstance(val, int) and val in _SUPPORTED_SOFT_TOKENS:
-                        max_soft_tokens = val
+                max_soft_tokens = self._get_max_soft_tokens()
             else:
                 pixel_values_key = "pixel_values_videos"
                 max_soft_tokens = _VIDEO_MAX_SOFT_TOKENS
@@ -2315,10 +2351,11 @@ class Gemma4ForConditionalGeneration(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        # Must match the tokens targeted in `_get_prompt_updates`.
         if modality == "image":
-            return "<image_soft_token>"
+            return "<|image|>"
         if modality == "audio":
-            return "<audio_soft_token>"
+            return "<|audio|>"
         if modality == "video":
             return "<|video|>"
         raise ValueError(f"Unsupported modality: {modality}")

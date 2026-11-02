@@ -12,7 +12,7 @@ from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.utils import get_current_attn_backends
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import worker_receiver_cache_from_config
 from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.utils.system_utils import update_environment_variables
@@ -109,9 +109,14 @@ class WorkerBase:
         backends = get_current_attn_backends(self.vllm_config)
         return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
 
-    def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
-        """Adopt the KV cache layout resolved by the engine core."""
+    def set_kv_cache_layout(
+        self, kv_cache_layout: str, cp_kv_cache_interleave_size: int
+    ) -> None:
+        """Assign the KV cache layout and CP interleave size resolved by the core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
+        self.vllm_config.parallel_config.cp_kv_cache_interleave_size = (
+            cp_kv_cache_interleave_size
+        )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
@@ -142,6 +147,13 @@ class WorkerBase:
         reset_fn = getattr(self.model_runner, "reset_mm_cache", None)
         if callable(reset_fn):
             reset_fn()
+
+    def release_late_interaction_query_cache(self, query_keys: list[str]) -> None:
+        release_fn = getattr(
+            self.model_runner, "release_late_interaction_query_cache", None
+        )
+        if callable(release_fn):
+            release_fn(query_keys)
 
     def get_model(self) -> nn.Module:
         raise NotImplementedError
@@ -237,9 +249,17 @@ class WorkerWrapperBase:
         # Initialized after init_worker is called
         self.worker: WorkerBase
         self.vllm_config: VllmConfig
+        self._worker_extension_cls: type | None = None
 
     def shutdown(self) -> None:
         if self.worker is not None:
+            hook = getattr(self._worker_extension_cls, "destroy_worker_extension", None)
+            if callable(hook):
+                try:
+                    hook(self.worker)
+                except Exception:
+                    # Don't raise: callers still need to run their own teardown.
+                    logger.exception("Worker extension destroy hook failed.")
             self.worker.shutdown()
 
     def update_environment_variables(
@@ -268,6 +288,12 @@ class WorkerWrapperBase:
 
         load_general_plugins()
 
+        # Let the platform replace core Triton kernels (e.g. CPU fallback
+        # implementations) before any worker or model code can launch them.
+        from vllm.platforms import current_platform
+
+        current_platform.register_triton_kernel_overrides()
+
         parallel_config = vllm_config.parallel_config
         if isinstance(parallel_config.worker_cls, str):
             worker_class: type[WorkerBase] = resolve_obj_by_qualname(
@@ -280,6 +306,7 @@ class WorkerWrapperBase:
                 "and pass the qualified name of the class as a string."
             )
 
+        worker_extension_cls: type | None = None
         if parallel_config.worker_extension_cls:
             worker_extension_cls = resolve_obj_by_qualname(
                 parallel_config.worker_extension_cls
@@ -315,30 +342,15 @@ class WorkerWrapperBase:
             )
 
         shared_worker_lock = kwargs.pop("shared_worker_lock", None)
-        if shared_worker_lock is None:
-            msg = (
-                "Missing `shared_worker_lock` argument from executor. "
-                "This argument is needed for mm_processor_cache_type='shm'."
-            )
-
-            mm_config = vllm_config.model_config.multimodal_config
-            if mm_config and mm_config.mm_processor_cache_type == "shm":
-                raise ValueError(msg)
-            else:
-                logger.warning_once(msg)
-
-            self.mm_receiver_cache = None
-        else:
-            self.mm_receiver_cache = (
-                MULTIMODAL_REGISTRY.worker_receiver_cache_from_config(
-                    vllm_config,
-                    shared_worker_lock,
-                )
-            )
+        self.mm_receiver_cache = worker_receiver_cache_from_config(
+            vllm_config,
+            shared_worker_lock,
+        )
 
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
+            self._worker_extension_cls = worker_extension_cls
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
@@ -351,6 +363,9 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during device initialization
             self.worker.init_device()  # type: ignore
+            hook = getattr(self._worker_extension_cls, "init_worker_extension", None)
+            if callable(hook):
+                hook(self.worker)
 
     def __getattr__(self, attr: str):
         return getattr(self.worker, attr)

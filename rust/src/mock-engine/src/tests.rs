@@ -21,7 +21,9 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
         transport_mode: TransportMode::HandshakeOwner {
             handshake_address,
             advertised_host: "127.0.0.1".to_string(),
+            engine_start_index: 0,
             engine_count,
+            data_parallel_size: engine_count,
             ready_timeout: Duration::from_secs(5),
             local_input_address: None,
             local_output_address: None,
@@ -29,6 +31,7 @@ fn client_config(handshake_address: String, engine_count: usize) -> EngineCoreCl
         coordinator_mode: None,
         model_name: "mock-model".to_string(),
         client_index: 0,
+        engine_stats_enabled: true,
     }
 }
 
@@ -115,18 +118,18 @@ async fn chunk_size_one_outputs_one_token_per_update() {
     let ipc = IpcNamespace::new().expect("ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 1).await;
-    let mut stream = client.call(sample_request("req-1", 3)).await.expect("call");
+    let mut stream = client.call(sample_request("req-1", 3)).await.expect("call").into_outputs();
 
     let first = stream.next().await.expect("first").expect("first ok");
     assert_eq!(first.new_token_ids.len(), 1);
     assert_eq!(first.finish_reason, None);
     assert_eq!(
         first.prefill_stats,
-        Some(PrefillStats {
+        Some(Box::new(PrefillStats {
             num_prompt_tokens: 3,
             num_computed_tokens: 3,
             ..Default::default()
-        })
+        }))
     );
     let second = stream.next().await.expect("second").expect("second ok");
     assert_eq!(second.new_token_ids.len(), 1);
@@ -146,7 +149,7 @@ async fn chunk_size_clips_final_output_to_max_tokens() {
     let ipc = IpcNamespace::new().expect("ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 4).await;
-    let mut stream = client.call(sample_request("req-clip", 6)).await.expect("call");
+    let mut stream = client.call(sample_request("req-clip", 6)).await.expect("call").into_outputs();
 
     let first = stream.next().await.expect("first").expect("first ok");
     assert_eq!(first.new_token_ids.len(), 4);
@@ -164,7 +167,11 @@ async fn abort_cancels_active_request_and_emits_terminal_output() {
     let ipc = IpcNamespace::new().expect("ipc namespace");
     let handshake_address = ipc.handshake_endpoint();
     let (client, shutdown, task) = connect_with_mock(handshake_address, 1, 1).await;
-    let mut stream = client.call(sample_request("req-abort", 1_000_000)).await.expect("call");
+    let mut stream = client
+        .call(sample_request("req-abort", 1_000_000))
+        .await
+        .expect("call")
+        .into_outputs();
     let first = stream.next().await.expect("first").expect("first ok");
     assert_eq!(first.finish_reason, None);
 

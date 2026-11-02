@@ -6,7 +6,7 @@ from typing import Any
 
 import torch
 from safetensors.torch import _TYPES as _SAFETENSORS_TO_TORCH_DTYPE
-from transformers import PretrainedConfig
+from transformers import PreTrainedConfig
 
 import vllm.model_executor.layers.fused_moe  # noqa
 from vllm.logger import init_logger
@@ -273,7 +273,7 @@ class AutoGPTQConfig(QuantizationConfig):
     def maybe_update_config(
         self,
         model_name: str,
-        hf_config: PretrainedConfig | None = None,
+        hf_config: PreTrainedConfig | None = None,
         revision: str | None = None,
     ):
         if self.modules_in_block_to_quantize:
@@ -626,19 +626,31 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             layer.register_parameter("w2_bias", None)
             w2_bias = None
 
+        # Normalize GPTQ K-first layout to canonical N-first format.
+        w13 = layer.w13_qweight.data.transpose(1, 2).contiguous()
+        w2 = layer.w2_qweight.data.transpose(1, 2).contiguous()
+        w13_scale = layer.w13_scales.data.transpose(1, 2).contiguous()
+        w2_scale = layer.w2_scales.data.transpose(1, 2).contiguous()
+        w13_qzeros = getattr(layer, "w13_qzeros", None)
+        w2_qzeros = getattr(layer, "w2_qzeros", None)
+        if w13_qzeros is not None:
+            w13_qzeros = w13_qzeros.data.transpose(1, 2).contiguous()
+        if w2_qzeros is not None:
+            w2_qzeros = w2_qzeros.data.transpose(1, 2).contiguous()
+
         converted = convert_to_wna16_moe_kernel_format(
             backend=self.wna16_moe_backend,
             layer=layer,
             quant_config=self.quant_config,
             input_dtype=self.input_dtype,
-            w13=layer.w13_qweight,
-            w2=layer.w2_qweight,
-            w13_scale=layer.w13_scales,
-            w2_scale=layer.w2_scales,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
             w13_bias=w13_bias,
             w2_bias=w2_bias,
-            w13_qzeros=getattr(layer, "w13_qzeros", None),
-            w2_qzeros=getattr(layer, "w2_qzeros", None),
+            w13_qzeros=w13_qzeros,
+            w2_qzeros=w2_qzeros,
         )
 
         if converted is None:
@@ -767,4 +779,5 @@ class AutoGPTQMoEMethod(FusedMoEMethodBase):
             topk_group=layer.topk_group,
             e_score_correction_bias=layer.e_score_correction_bias,
             routed_scaling_factor=layer.routed_scaling_factor,
+            routing_sink=layer.routing_sink,
         )

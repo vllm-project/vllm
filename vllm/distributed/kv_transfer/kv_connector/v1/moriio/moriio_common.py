@@ -31,7 +31,9 @@ from vllm.utils.network_utils import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+        MoRIIOWriteTPMapping,
+    )
 
 from dataclasses import field
 from enum import Enum
@@ -43,7 +45,8 @@ Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
 TransferId = str
-TransferOffsetsKey = tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype]
+# (layer, cache shape, cache stride, dtype, destination TP rank)
+TransferOffsetsKey = tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, int]
 
 
 def _positive_finite_timeout(name: str, value: Any) -> float:
@@ -63,12 +66,19 @@ class WriteTask:
     request_id: ReqId
     transfer_id: TransferId
     dst_engine_id: str
-    local_block_ids: list[int]
-    remote_block_ids_hint: list[int] | None
+    local_block_ids: BlockIds
+    remote_block_ids_hint: BlockIds | None
     layer_name: str
     event: torch.cuda.Event
     remote_notify_port: int
     remote_ip: str
+    remote_tp_size: int | None = None
+    multi_pod_hosts: list[str] = field(default_factory=list)
+    remote_dp_size_local: int = 0
+    remote_dp_size: int = 1
+    # Consumer ranks this producer rank writes, and what each receives. None
+    # writes the whole shard to the consumer rank with this producer's index.
+    tp_mapping: "MoRIIOWriteTPMapping | None" = None
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
 
@@ -91,13 +101,18 @@ class LayerTransferPlan:
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
-    block_ids: list[int]
+    block_ids: BlockIds | None
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
     completion_request_id: str | None = None
-    completion_remote_notify_port: int | None = None
+    completion_notify_port: int | None = None
     completion_remote_ip: str | None = None
+    # (ip, notify port) -> producer ranks writing into that consumer rank.
+    completion_notify_targets: dict[tuple[str, int], int] = field(default_factory=dict)
+    # Set once the targets above are known, even when there are none (a
+    # producer whose copy another producer writes still has to finish).
+    completion_targets_resolved: bool = False
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
@@ -124,6 +139,13 @@ class MoRIIOAgentMetadata(
     num_blocks: int
     block_len: int
     attn_backend_name: str
+    # Per-layer HeadLayout / MambaStateLayout wire forms, so a producer with a
+    # different TP size can address head and state slices of these caches.
+    kv_head_layouts: dict[str, list[int]] = {}
+    mamba_state_layouts: dict[str, list[int]] = {}
+    # Tokens per block of each attention layer. Hybrid models size attention
+    # blocks to the recurrent-state page, which depends on the TP size.
+    attention_block_sizes: dict[str, int] = {}
 
 
 class RoleManager:
@@ -305,8 +327,8 @@ class MoRIIOConfig:
         #                     WRITE mode.
         # transfer_timeout -> Timeout for waiting_for_transfer_complete before
         #                     raising TransferError (sec).
-        # defer_timeout    -> Timeout before a deferred send with no finished_sending
-        #                     notification is reaped and its blocks force-freed (sec).
+        # defer_timeout    -> Timeout for deferred WRITE allocation or a missing
+        #                     READ release notification (sec).
         # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
         #                     completion never arrived is aborted (sec).
 
@@ -412,8 +434,8 @@ class MoRIIOConstants:
     # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError.
     # Overridable via kv_connector_extra_config["transfer_timeout"].
     DEFAULT_TRANSFER_TIMEOUT = 30.0
-    # Timeout (seconds) before a deferred send with no finished_sending
-    # notification is reaped and its blocks force-freed.
+    # Timeout (seconds) for deferred WRITE allocation or a missing READ release
+    # notification.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
     # Timeout (seconds) before an in-flight recv whose RDMA completion was lost

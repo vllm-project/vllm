@@ -1,8 +1,8 @@
-group: Expert Parallelism
+group: Expert Parallelism Intel
 depends_on:
   - image-build-xpu
 steps:
-- label: EPLB Algorithm
+- label: ":intel: (BMG) EPLB Algorithm"
   key: eplb-algorithm
   timeout_in_minutes: 45
   device: intel_gpu
@@ -26,3 +26,28 @@ steps:
       'cd tests &&
       pytest -v -s distributed/test_eplb_algo.py &&
       pytest -v -s distributed/test_eplb_utils.py'
+
+- label: ":intel: (BMG) External LB DP + EP (2 GPUs)"
+  key: external-lb-dp-ep-intel
+  timeout_in_minutes: 50
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/distributed/
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/v1/distributed/test_external_lb_dp.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      SKIP_DEVICE_MASK_IN_EP=true pytest -v -s v1/distributed/test_external_lb_dp.py -k "not completion_streaming and not api-4-standard"'
