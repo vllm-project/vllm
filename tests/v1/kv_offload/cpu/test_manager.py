@@ -78,6 +78,14 @@ def to_keys(int_hashes: list[int]) -> list[OffloadKey]:
     return [to_key(i) for i in int_hashes]
 
 
+def reuse_keys(manager: CPUOffloadingManager, keys: list[OffloadKey]) -> None:
+    """Load ready keys in one finished request, recording a single access."""
+    ctx = make_req_context("reuse")
+    manager.prepare_load(keys, ctx)
+    manager.complete_load(keys, ctx)
+    manager.on_request_finished(ctx)
+
+
 def verify_store_output(
     prepare_store_output: PrepareStoreOutput | None,
     expected_prepare_store_output: ExpectedPrepareStoreOutput,
@@ -143,6 +151,20 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
+def test_cpu_stored_event_carries_request_context():
+    manager = CPUOffloadingManager(
+        num_chunks=1,
+        enable_events=True,
+    )
+    req_context = make_req_context("writer")
+    keys = to_keys([1])
+    assert manager.prepare_store(keys, req_context) is not None
+    manager.complete_store(keys, req_context)
+
+    [event] = manager.take_events()
+    assert event.req_context is req_context
+
+
 def test_cpu_eviction_removed_precedes_stored():
     """An eviction is announced before the store that reuses its capacity."""
     manager = make_cpu_manager(num_chunks=2, enable_events=True)
@@ -170,7 +192,7 @@ def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
 
     Scenario:
         - Store chunks [1, 2] and complete.
-        - touch([1]) makes chunk 2 the LRU candidate.
+        - Reusing [1] makes chunk 2 the LRU candidate.
         - prepare_store([2, 3, 4, 5]):
             * chunk 2 is filtered out as "already stored"
             * but without the fix, chunk 2 would be evicted as the LRU
@@ -187,8 +209,8 @@ def test_already_stored_chunk_not_evicted_during_prepare_store(eviction_policy):
     manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
     manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
 
-    # touch [1] to make chunk 2 the LRU candidate
-    manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+    # reuse [1] to make chunk 2 the LRU candidate
+    reuse_keys(manager, to_keys([1]))
 
     # prepare_store([2, 3, 4, 5]):
     #   - chunk 2 is already stored -> filtered out of keys_to_store
@@ -464,10 +486,10 @@ def test_cpu_manager():
     # complete store [6, 7, 8]
     cpu_manager.complete_store(to_keys([6, 7, 8]), _EMPTY_REQ_CTX)
 
-    # touch [2, 6, 7] (move to end of LRU order)
-    cpu_manager.touch(to_keys([2, 6, 7]), _EMPTY_REQ_CTX)
+    # reuse [2, 6, 7] (move to end of LRU order)
+    reuse_keys(cpu_manager, to_keys([2, 6, 7]))
 
-    # prepare store [7, 9] -> evicts [8] (oldest following previous touch)
+    # prepare store [7, 9] -> evicts [8] (oldest following previous reuse)
     prepare_store_output = cpu_manager.prepare_store(to_keys([9]), _EMPTY_REQ_CTX)
     verify_store_output(
         prepare_store_output,
@@ -656,8 +678,8 @@ class TestARCPolicy:
         assert to_keys([1])[0] in arc_policy.t1
         assert to_keys([1])[0] not in arc_policy.t2
 
-        # touch chunk 1 (simulate second access)
-        cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+        # reuse chunk 1 (second access)
+        reuse_keys(cpu_manager, to_keys([1]))
 
         # chunk 1 should now be in T2 (frequent)
         assert to_keys([1])[0] not in arc_policy.t1
@@ -723,9 +745,9 @@ class TestARCPolicy:
         # chunk 1 should be in B1 (ghost list)
         assert to_keys([1])[0] in arc_policy.b1
 
-        # touch chunk 1 (cache miss, but in B1)
+        # store chunk 1 again (cache miss, but in B1)
         # this should increase target_t1_size (favor recency)
-        cpu_manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
+        cpu_manager.prepare_store(to_keys([1]), make_req_context("ghost-hit"))
 
         # target should have increased
         assert arc_policy.target_t1_size > initial_target
@@ -740,8 +762,8 @@ class TestARCPolicy:
         cpu_manager.prepare_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
         cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
-        # promote chunks 3, 4 to T2 by touching them
-        cpu_manager.touch(to_keys([3, 4]), _EMPTY_REQ_CTX)
+        # promote chunks 3, 4 to T2 by reusing them
+        reuse_keys(cpu_manager, to_keys([3, 4]))
 
         # now: T1 = {1, 2}, T2 = {3, 4}
         assert len(arc_policy.t1) == 2
@@ -772,7 +794,7 @@ class TestARCPolicy:
         cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
         cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
 
-        cpu_manager.touch(keys[128:], _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, keys[128:])
         arc_policy.target_t1_size = 64
 
         protected = {keys[0], keys[2], keys[255]}
@@ -816,7 +838,7 @@ class TestARCPolicy:
         cpu_manager.prepare_store(keys, _EMPTY_REQ_CTX)
         cpu_manager.complete_store(keys, _EMPTY_REQ_CTX)
 
-        cpu_manager.touch(keys[6:], _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, keys[6:])
         arc_policy.target_t1_size = 4
 
         t1_order = list(arc_policy.t1)
@@ -868,9 +890,9 @@ class TestARCPolicy:
             manager.complete_store(to_keys(keys), _EMPTY_REQ_CTX)
 
         # Ghost hits raise the target to 3; promotion leaves only 2 entries in T1.
-        manager.touch(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        manager.touch(to_keys([1]), _EMPTY_REQ_CTX)
-        manager.touch(to_keys([5, 6]), _EMPTY_REQ_CTX)
+        policy.on_store_miss(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        policy.on_store_miss(to_keys([1]), _EMPTY_REQ_CTX)
+        reuse_keys(manager, to_keys([5, 6]))
         assert policy.target_t1_size == 3
         assert list(policy.t1) == to_keys([3, 4])
         assert list(policy.t2) == to_keys([6, 5])
@@ -937,8 +959,8 @@ class TestARCPolicy:
         assert len(arc_policy.b1) <= arc_policy.cache_capacity
         assert len(arc_policy.b2) <= arc_policy.cache_capacity
 
-    def test_touch_ordering(self):
-        """Tests that touch() correctly updates access patterns.
+    def test_reuse_ordering(self):
+        """Tests that request reuse correctly updates access patterns.
         Similar to LRU test but verifies T1/T2 ordering.
         """
         cpu_manager, arc_policy = self._make_manager()
@@ -948,11 +970,11 @@ class TestARCPolicy:
         cpu_manager.complete_store(to_keys([1, 2, 3, 4]), _EMPTY_REQ_CTX)
 
         # promote 3, 4 to T2
-        cpu_manager.touch(to_keys([3, 4]), _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, to_keys([3, 4]))
 
         # T1 = {1, 2}, T2 = {3, 4}
-        # touch [1, 3, 4] - should promote 1 to T2, and move 3,4 to end of T2
-        cpu_manager.touch(to_keys([1, 3, 4]), _EMPTY_REQ_CTX)
+        # reuse [1, 3, 4] - should promote 1 to T2, and move 3,4 to end of T2
+        reuse_keys(cpu_manager, to_keys([1, 3, 4]))
 
         # T1 = {2}, T2 = {1, 3, 4} (in that order, with 4 most recent)
         assert len(arc_policy.t1) == 1
@@ -1016,7 +1038,7 @@ class TestARCPolicy:
         cpu_manager.complete_store(to_keys([3, 4, 5]), _EMPTY_REQ_CTX)
 
         # promote some chunks to T2
-        cpu_manager.touch(to_keys([2, 3]), _EMPTY_REQ_CTX)
+        reuse_keys(cpu_manager, to_keys([2, 3]))
 
         # T1 has {4, 5}, T2 has {2, 3}
         assert len(arc_policy.t1) == 2
@@ -1256,29 +1278,6 @@ def test_evictable_cache_chunk_count(monkeypatch):
     manager.complete_store(to_keys([14, 15]), _EMPTY_REQ_CTX)
     # cache state [10, 11, 14, 15] <- all chunks idle
     assert manager._num_evictable_cache_chunks == 4
-
-
-def test_touch_forwards_req_context_to_policy(monkeypatch):
-    """Regression: CPUOffloadingManager.touch forwards ReqContext to policy."""
-    manager = make_cpu_manager(num_chunks=4, cache_policy="lru")
-    received = []
-
-    def spy_touch(keys: Iterable[OffloadKey], req_context: ReqContext) -> None:
-        received.append((list(keys), req_context))
-
-    monkeypatch.setattr(manager._policy, "touch", spy_touch)
-
-    keys = to_keys([1, 2])
-    ctx = make_req_context(
-        req_id="test-req",
-        kv_transfer_params={"test_param": "test_value"},
-    )
-
-    manager.touch(keys, ctx)
-
-    assert len(received) == 1
-    assert received[0][0] == keys
-    assert received[0][1] is ctx
 
 
 @pytest.mark.parametrize("finish_before_completion", [False, True])
