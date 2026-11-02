@@ -288,6 +288,7 @@ class RejectionSampler:
             and self.sampler.needs_only_temperature_scaling(idx_mapping_np)
         )
         target_topp_thresh = None
+        target_lse = None
         if (
             not skip_scaling
             and not needs_processed_logits
@@ -296,10 +297,10 @@ class RejectionSampler:
             and self.sampler.needs_only_temperature_and_top_p(idx_mapping_np)
         ):
             # Top-p cutoffs on the raw logits, with every tie at the cutoff
-            # kept; the verify kernels mask and scale as they load, so no fp32
-            # copy of the logits is made.
+            # kept, and the kept log-sum-exp; the verify kernels mask and scale
+            # as they load, so no fp32 copy of the logits is made.
             states = self.sampler.sampling_states
-            target_topp_thresh, _ = ops.topp_cutoffs_lse(
+            target_topp_thresh, target_lse = ops.topp_cutoffs_lse(
                 logits, expanded_idx_mapping, states.temperature.gpu, states.top_p.gpu
             )
             skip_scaling = True
@@ -336,6 +337,7 @@ class RejectionSampler:
             fly_entropy_top_k=self.fly_entropy_top_k,
             target_logits_pre_scaled=not skip_scaling,
             target_topp_thresh=target_topp_thresh,
+            target_lse=target_lse,
             **self._watermarking_kwargs(
                 draft_sampled, expanded_idx_mapping, expanded_local_pos
             ),

@@ -296,10 +296,13 @@ def _compute_local_logits_stats_kernel(
     expanded_local_pos_ptr,
     # [max_num_reqs]
     temp_ptr,
+    # [num_logits] fp64, read when HAS_TARGET_LSE
+    target_lse_ptr,
     vocab_size,
     num_logits,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    HAS_TARGET_LSE: tl.constexpr,
     SCALE_TARGET_LOGITS: tl.constexpr,
     target_topp_thresh_ptr,
     MASK_TARGET_LOGITS: tl.constexpr,
@@ -338,32 +341,47 @@ def _compute_local_logits_stats_kernel(
             value,
         )
     else:
-        # Get local target max and summed exponentials.
-        target_logits = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
-        if SCALE_TARGET_LOGITS:
-            # target_logits is raw; temp != 0 is guaranteed in this branch.
-            target_logits = _scale_target_logits(
-                target_logits,
-                logit_idx,
-                temp,
-                target_topp_thresh_ptr,
-                MASK_TARGET_LOGITS,
+        if HAS_TARGET_LSE:
+            # One (lse, 1) partial per row, which the fp64 global log-sum-exp
+            # reproduces exactly.
+            target_lse = tl.load(target_lse_ptr + logit_idx)
+            tl.store(
+                target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
+                tl.where(block_idx == 0, target_lse, float("-inf")),
             )
-        target_max, target_sumexp = _compute_max_and_sumexp(target_logits)
-        tl.store(
-            target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
-            target_max,
-        )
-        tl.store(
-            target_local_sumexp_ptr
-            + logit_idx * target_local_sumexp_stride
-            + block_idx,
-            target_sumexp,
-        )
+            tl.store(
+                target_local_sumexp_ptr
+                + logit_idx * target_local_sumexp_stride
+                + block_idx,
+                tl.where(block_idx == 0, 1.0, 0.0),
+            )
+        else:
+            # Get local target max and summed exponentials.
+            target_logits = tl.load(
+                target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
+                mask=mask,
+                other=float("-inf"),
+            ).to(tl.float32)
+            if SCALE_TARGET_LOGITS:
+                # target_logits is raw; temp != 0 is guaranteed in this branch.
+                target_logits = _scale_target_logits(
+                    target_logits,
+                    logit_idx,
+                    temp,
+                    target_topp_thresh_ptr,
+                    MASK_TARGET_LOGITS,
+                )
+            target_max, target_sumexp = _compute_max_and_sumexp(target_logits)
+            tl.store(
+                target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
+                target_max,
+            )
+            tl.store(
+                target_local_sumexp_ptr
+                + logit_idx * target_local_sumexp_stride
+                + block_idx,
+                target_sumexp,
+            )
         if HAS_DRAFT_LOGITS:
             # Get local draft max and summed exponentials. draft_logits is
             # stored pre-temperature, so apply scale first.
@@ -1254,6 +1272,9 @@ def rejection_sample(
     target_logits_pre_scaled: bool = True,
     # [num_logits] per-row top-p cutoffs on the raw logits (topp_cutoffs_lse).
     target_topp_thresh: torch.Tensor | None = None,
+    # [num_logits] fp64 log-sum-exp of the (masked, scaled) target logits; skips
+    # the target half of the stats pass. Greedy rows may hold anything.
+    target_lse: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert target_topp_thresh is None or (
@@ -1331,8 +1352,13 @@ def rejection_sample(
     target_local_argmax = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.int64
     )
+    assert target_lse is None or (
+        target_lse.dtype == torch.float64 and target_lse.shape == (num_logits,)
+    )
     target_local_max = target_logits.new_empty(
-        num_logits, vocab_num_blocks, dtype=torch.float32
+        num_logits,
+        vocab_num_blocks,
+        dtype=torch.float32 if target_lse is None else torch.float64,
     )
     target_local_sumexp = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
@@ -1363,10 +1389,12 @@ def rejection_sample(
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
+        target_lse,
         vocab_size,
         num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        HAS_TARGET_LSE=target_lse is not None,
         SCALE_TARGET_LOGITS=scale_target_logits,
         target_topp_thresh_ptr=target_topp_thresh,
         MASK_TARGET_LOGITS=target_topp_thresh is not None,

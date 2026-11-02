@@ -1971,3 +1971,61 @@ def test_global_logsumexp_keeps_near_max_correction():
     # (~8.3e-7) is below fp32's ULP at this magnitude (~3e-6) and rounds away.
     assert result != max_logit
     assert result == pytest.approx(expected, abs=1e-9)
+
+
+@pytest.mark.parametrize(
+    "num_speculative_steps,temperature", [(1, 0.0), (3, 0.73), (1, 1.0)]
+)
+@pytest.mark.parametrize("has_draft_logits", [True, False])
+@pytest.mark.parametrize("use_block_verification", [False, True])
+def test_precomputed_target_lse_matches_stats_pass(
+    num_speculative_steps: int,
+    temperature: float,
+    has_draft_logits: bool,
+    use_block_verification: bool,
+):
+    """A target_lse handed in the way topp_cutoffs_lse writes it (fp64, over the
+    masked x / T, NaN on greedy rows) must sample what the stats pass's own
+    log-sum-exp samples."""
+    torch.manual_seed(12)
+    device = "cuda"
+    vocab_size = 3 * 8192 + 17
+    num_trials = 64
+    K = num_speculative_steps
+
+    raw_1d = (torch.randn(vocab_size, device=device) * 3).to(torch.bfloat16)
+    inputs = _build_rejection_sample_inputs(
+        raw_1d.float(),
+        torch.randn(vocab_size, device=device),
+        K,
+        temperature=temperature,
+        num_trials=num_trials,
+    )
+    if not has_draft_logits:
+        inputs["draft_logits"] = None
+    raw = raw_1d.unsqueeze(0).expand(num_trials * (K + 1), -1).contiguous()
+    q = torch.linspace(0.5, 0.999, raw.shape[0], device=device)
+    thresh = torch.quantile(raw_1d.float(), q).to(raw.dtype).float()
+    kept = raw.float() >= thresh[:, None]
+    scaled = raw.float() / temperature if temperature > 0 else raw.float()
+    target_lse = torch.where(kept, scaled, float("-inf")).double().logsumexp(-1)
+    if temperature == 0.0:
+        thresh.fill_(float("-inf"))
+        target_lse.fill_(float("nan"))
+
+    kwargs = dict(
+        num_speculative_steps=K,
+        use_block_verification=use_block_verification,
+        target_logits_pre_scaled=False,
+        target_topp_thresh=thresh,
+    )
+    expected_sampled, expected_num_sampled = _rejection_sample(
+        **dict(inputs, target_logits=raw), **kwargs
+    )
+    sampled, num_sampled = _rejection_sample(
+        **dict(inputs, target_logits=raw), **kwargs, target_lse=target_lse
+    )
+
+    torch.testing.assert_close(num_sampled, expected_num_sampled, rtol=0, atol=0)
+    valid = torch.arange(K + 1, device=device) < num_sampled.unsqueeze(1)
+    torch.testing.assert_close(sampled[valid], expected_sampled[valid], rtol=0, atol=0)
