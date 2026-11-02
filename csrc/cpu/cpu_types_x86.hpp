@@ -1087,24 +1087,23 @@ inline void fma(FP32Vec16& acc, BF16Vec32& a, BF16Vec32& b) {
 #else
 template <>
 inline void storeFP32<c10::BFloat16>(float v, c10::BFloat16* ptr) {
-  c10::BFloat16 __attribute__((__may_alias__))* v_ptr =
-      reinterpret_cast<c10::BFloat16*>(&v);
-  *ptr = *(v_ptr + 1);
+  *ptr = c10::BFloat16(v);
 }
 
-  #ifdef __AVX512F__
-inline BF16Vec8::BF16Vec8(const FP32Vec8& v)
-    : reg(_mm256_cvtepi32_epi16(
-          _mm256_bsrli_epi128(_mm256_castps_si256(v.reg), 2))) {}
-
-inline BF16Vec16::BF16Vec16(const FP32Vec16& v)
-    : reg(_mm512_cvtepi32_epi16(
-          _mm512_bsrli_epi128(_mm512_castps_si512(v.reg), 2))) {}
-  #else
 namespace {
 __m128i FP32Vec8_to_BF16Vec8_avx2(__m256 a) {
   __m256i ai = _mm256_castps_si256(a);
-  ai = _mm256_srli_epi32(ai, 16);
+  const __m256i nan_mask =
+      _mm256_cmpgt_epi32(_mm256_and_si256(ai, _mm256_set1_epi32(0x7fffffff)),
+                         _mm256_set1_epi32(0x7f800000));
+  // Round to nearest, ties to even, as c10::BFloat16 and AVX512-BF16 do.
+  const __m256i lsb =
+      _mm256_and_si256(_mm256_srli_epi32(ai, 16), _mm256_set1_epi32(1));
+  const __m256i rounding_bias =
+      _mm256_add_epi32(lsb, _mm256_set1_epi32(0x7fff));
+  ai = _mm256_srli_epi32(_mm256_add_epi32(ai, rounding_bias), 16);
+  // Preserve NaNs even when their payload occupies only the discarded bits.
+  ai = _mm256_blendv_epi8(ai, _mm256_set1_epi32(0x7fc0), nan_mask);
   ai = _mm256_packus_epi32(ai, ai);
   ai = _mm256_permute4x64_epi64(ai, 0b00111001);
   return _mm256_extracti128_si256(ai, 0);
@@ -1115,12 +1114,16 @@ inline BF16Vec8::BF16Vec8(const FP32Vec8& v)
     : reg(FP32Vec8_to_BF16Vec8_avx2(v.reg)) {}
 
 inline BF16Vec16::BF16Vec16(const FP32Vec16& v) {
+  #ifdef __AVX512F__
+  BF16Vec8 low = BF16Vec8(FP32Vec8(_mm512_castps512_ps256(v.reg)));
+  BF16Vec8 high = BF16Vec8(FP32Vec8(_mm512_extractf32x8_ps(v.reg, 1)));
+  #else
   BF16Vec8 low = BF16Vec8(FP32Vec8(v.reg_low));
   BF16Vec8 high = BF16Vec8(FP32Vec8(v.reg_high));
+  #endif
   reg = _mm256_insertf128_si256(_mm256_castsi128_si256(low.reg), high.reg, 1);
 }
-  #endif  // __AVX512F__
-#endif    // __AVX512BF16__
+#endif  // __AVX512BF16__
 
 inline void prefetch(const void* addr) { _mm_prefetch(addr, _MM_HINT_T1); }
 
