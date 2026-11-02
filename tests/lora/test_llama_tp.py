@@ -63,6 +63,7 @@ def do_sample(
         generated_text = output.outputs[0].text
         # The output should include  correct lora_request info
         if lora_request is not None:
+            assert output.lora_request is not None
             assert output.lora_request.lora_name == lora_request.lora_name
             assert output.lora_request.lora_int_id == lora_request.lora_int_id
             assert output.lora_request.lora_path == lora_request.lora_path

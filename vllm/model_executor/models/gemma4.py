@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe import (
     GateLinear,
     MoERunner,
 )
+from vllm.model_executor.layers.fused_moe.router.base_router import (
+    get_moe_padding_mask,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -133,9 +136,11 @@ def _gemma4_routing_kernel(
     per_expert_scale_ptr,
     topk_weights_ptr,
     topk_ids_ptr,
+    is_padding_ptr,
     E: tl.constexpr,
     K: tl.constexpr,
     BLOCK_E: tl.constexpr,
+    HAS_PADDING: tl.constexpr,
 ):
     pid = tl.program_id(0)
     offs_e = tl.arange(0, BLOCK_E)
@@ -187,6 +192,13 @@ def _gemma4_routing_kernel(
     # Final weights: vectorized multiply (only top-K will be stored)
     all_weights = (all_raw_exp * inv_renorm * all_scales).to(tl.float32)
 
+    if HAS_PADDING:
+        # CUDA-graph padding rows hold stale activations; route them to the
+        # -1 skip sentinel so they don't pull real experts' weights.
+        is_pad = tl.load(is_padding_ptr + pid).to(tl.int1)
+        all_ids = tl.where(is_pad, -1, all_ids)
+        all_weights = tl.where(is_pad, 0.0, all_weights)
+
     # Write results with TWO masked stores — replaces K × 2 serial scalar stores
     base_off = pid * K + offs_e
     tl.store(topk_ids_ptr + base_off, all_ids, mask=top_mask)
@@ -198,6 +210,8 @@ def gemma4_fused_routing_kernel_triton(
     topk: int,
     per_expert_scale: torch.Tensor,
     num_warps: int = 1,
+    *,
+    is_padding: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     gating_output = gating_output.contiguous()
     per_expert_scale = per_expert_scale.contiguous()
@@ -210,9 +224,11 @@ def gemma4_fused_routing_kernel_triton(
         per_expert_scale,
         weights,
         ids,
+        is_padding if is_padding is not None else ids,
         E,
         topk,
         BLOCK_E,
+        is_padding is not None,
         num_warps=num_warps,
     )
     return weights, ids
@@ -348,7 +364,10 @@ class Gemma4Router(nn.Module):
         """
         if current_platform.is_cuda_alike() or current_platform.is_xpu():
             return gemma4_fused_routing_kernel_triton(
-                gating_output, topk, self.per_expert_scale
+                gating_output,
+                topk,
+                self.per_expert_scale,
+                is_padding=get_moe_padding_mask(gating_output.shape[0]),
             )
 
         return gemma4_routing_function_torch(gating_output, topk, self.per_expert_scale)
@@ -400,11 +419,14 @@ class Gemma4Attention(nn.Module):
         self.scaling = 1.0
 
         layer_idx = extract_layer_index(prefix)
+        layer_type = config.layer_types[layer_idx]
         num_kv_shared_layers = getattr(config, "num_kv_shared_layers", 0)
+        attention_k_eq_v = getattr(config, "attention_k_eq_v", False)
         first_kv_shared_layer_idx = config.num_hidden_layers - num_kv_shared_layers
         self.is_kv_shared_layer = (
             num_kv_shared_layers > 0 and layer_idx >= first_kv_shared_layer_idx
         )
+        self.is_sliding = layer_type == "sliding_attention"
 
         if self.is_kv_shared_layer:
             # K/V come from the target layer's cache, so like HF this layer
@@ -429,6 +451,9 @@ class Gemma4Attention(nn.Module):
                 quant_config=quant_config,
                 prefix=f"{prefix}.qkv_proj",
             )
+            if attention_k_eq_v and not self.is_sliding:
+                # k_proj LoRA must be applied to the V slice
+                self.qkv_proj.lora_packed_modules = ["q_proj", "k_proj", "k_proj"]
             self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
             # V norm: no learnable scale (pure normalization only)
             self.v_norm = RMSNorm(
@@ -445,9 +470,6 @@ class Gemma4Attention(nn.Module):
         # Q norm: output = norm(x) * weight (learnable per-head scale)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
-        # Determine layer type and sliding window
-        layer_type = config.layer_types[layer_idx]
-        self.is_sliding = layer_type == "sliding_attention"
         sliding_window = config.sliding_window if self.is_sliding else None
 
         # Initialize RoPE based on layer type.
