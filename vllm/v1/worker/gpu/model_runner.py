@@ -539,6 +539,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.prompt_logprobs_worker = PromptLogprobsWorker(
                 self.max_num_reqs,
                 self.device,
+                self.main_stream,
+                self.output_copy_stream,
                 logprobs_mode=self.model_config.logprobs_mode,
             )
             self.structured_outputs_worker = StructuredOutputsWorker(

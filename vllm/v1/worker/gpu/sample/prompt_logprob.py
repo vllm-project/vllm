@@ -11,6 +11,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.worker.gpu.async_utils import stream
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import (
     compute_token_logprobs,
@@ -35,17 +36,21 @@ class PromptLogprobsWorker:
         self,
         max_num_reqs: int,
         device: torch.device,
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
         logprobs_mode: LogprobsMode = "raw_logprobs",
     ):
         self.max_num_reqs = max_num_reqs
         self.device = device
+        self.main_stream = main_stream
+        self.copy_stream = copy_stream
         self.logprobs_mode = logprobs_mode
 
         self.uses_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=bool)
         self.num_prompt_logprobs = np.zeros(self.max_num_reqs, dtype=np.int32)
         self.prompt_logprob_start = np.zeros(self.max_num_reqs, dtype=np.int32)
-        # req_idx -> list of in-progress LogprobsTensors
-        self.in_progress_prompt_logprobs: dict[str, list[LogprobsTensors]] = {}
+        # req_id -> pinned host buffer for a prompt chunked across steps
+        self.in_progress_prompt_logprobs: dict[str, LogprobsTensors] = {}
         # req_id -> fixed-ID scoring state
         self.token_id_scores: dict[str, _TokenIdScores] = {}
 
@@ -54,8 +59,7 @@ class PromptLogprobsWorker:
         self.uses_prompt_logprobs[req_idx] = uses_prompt_logprobs
         self.num_prompt_logprobs[req_idx] = sampling_params.prompt_logprobs or 0
         self.prompt_logprob_start[req_idx] = sampling_params.prompt_logprob_start or 0
-        if uses_prompt_logprobs:
-            self.in_progress_prompt_logprobs[req_id] = []
+        self.in_progress_prompt_logprobs.pop(req_id, None)
         if sampling_params.prompt_logprob_token_ids is not None:
             ids = sampling_params.prompt_logprob_token_ids
             # Decoded arrays may be read-only; torch.from_numpy warns on those.
@@ -182,6 +186,8 @@ class PromptLogprobsWorker:
 
         query_start_loc_np = input_batch.query_start_loc_np
         prompt_logprobs_dict: dict[str, LogprobsTensors] = {}
+        # (host buffer, row offset, device source) per chunked request
+        host_copies: list[tuple[LogprobsTensors, int, LogprobsTensors]] = []
         for i, req_id in enumerate(input_batch.req_ids):
             if not needs_prompt_logprobs[i]:
                 continue
@@ -214,22 +220,48 @@ class PromptLogprobsWorker:
                 )
             )
 
-            prompt_logprobs_list = self.in_progress_prompt_logprobs[req_id]
-            if logprobs is not None and (req_is_prompt_chunked or prompt_logprobs_list):
-                prompt_logprobs_list.append(logprobs)
+            # Accumulate a prompt chunked across steps on the host, so device
+            # memory holds no more than one step's logprobs.
+            host = self.in_progress_prompt_logprobs.get(req_id)
+            if logprobs is not None and (req_is_prompt_chunked or host is not None):
+                # The buffer ends at the last prompt position, so it is full
+                # once the final chunk is copied.
+                pos = max(int(prompt_logprob_start[i]), int(computed_prefill[i]))
+                rows_left = int(prompt_lens[i]) - 1 - pos
+                if host is None:
+                    host = LogprobsTensors.empty_cpu(rows_left, width)
+                    self.in_progress_prompt_logprobs[req_id] = host
+                offset = len(host.logprobs) - rows_left
+                host_copies.append((host, offset, logprobs))
             if req_is_prompt_chunked:
                 # Prompt is chunked. Do not return the logprobs yet.
                 continue
 
-            if prompt_logprobs_list:
-                # Merge the in-progress logprobs.
-                logprobs = LogprobsTensors.cat(prompt_logprobs_list)
-                prompt_logprobs_list.clear()
+            if host is not None:
+                logprobs = self.in_progress_prompt_logprobs.pop(req_id)
 
             if logprobs is None:
                 continue
 
             prompt_logprobs_dict[req_id] = logprobs
+
+        if host_copies:
+            # The output copy stream also copies this step's other outputs, so
+            # its completion event covers these copies too.
+            self.copy_stream.wait_stream(self.main_stream)
+            with stream(self.copy_stream, self.main_stream):
+                for host, offset, src in host_copies:
+                    rows = slice(offset, offset + len(src.logprobs))
+                    host.logprob_token_ids[rows].copy_(
+                        src.logprob_token_ids, non_blocking=True
+                    )
+                    host.logprobs[rows].copy_(src.logprobs, non_blocking=True)
+                    host.selected_token_ranks[rows].copy_(
+                        src.selected_token_ranks, non_blocking=True
+                    )
+            # Keep the sources from being reused before the copies run.
+            for tensor in (prompt_token_ids, prompt_logprobs, prompt_ranks):
+                tensor.record_stream(self.copy_stream)
         return prompt_logprobs_dict
 
 
