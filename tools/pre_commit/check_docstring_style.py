@@ -13,7 +13,6 @@
 """
 
 import ast
-import inspect
 import sys
 
 import regex as re
@@ -59,8 +58,10 @@ def prose_mask(lines: list[str]) -> list[bool]:
 
 
 def prose(doc: str) -> str:
-    lines = inspect.cleandoc(doc).splitlines()
-    return "\n".join(line for line, p in zip(lines, prose_mask(lines)) if p)
+    """The docstring with code blocks and code spans blanked, lines preserved."""
+    lines = doc.splitlines()
+    text = "\n".join(ln if p else "" for ln, p in zip(lines, prose_mask(lines)))
+    return CODE_SPAN.sub(lambda m: "\n" * m.group().count("\n"), text)
 
 
 def docstring_nodes(tree: ast.Module, rendered_only: bool) -> list[ast.Constant]:
@@ -79,8 +80,11 @@ def docstring_nodes(tree: ast.Module, rendered_only: bool) -> list[ast.Constant]
     ]
 
 
-def fix_backticks(source: str, tree: ast.Module) -> str:
+def fix_backticks(
+    filepath: str, source: str, tree: ast.Module
+) -> tuple[str, list[str]]:
     lines = source.splitlines(keepends=True)
+    fixes = []
     nodes = docstring_nodes(tree, rendered_only=False)
     # Bottom up, so splicing a docstring doesn't shift the ones still to come
     for node in sorted(nodes, key=lambda n: n.lineno, reverse=True):
@@ -92,29 +96,35 @@ def fix_backticks(source: str, tree: ast.Module) -> str:
         body[-1] = body[-1].encode()[: node.end_col_offset].decode()
         body[0] = body[0][len(head) :]
         mask = prose_mask([line.rstrip("\n") for line in body])
-        body = [
-            DOUBLE_BACKTICKS.sub(r"`\1`", line) if p else line
-            for line, p in zip(body, mask)
-        ]
+        for i, prose_line in enumerate(mask):
+            if prose_line and DOUBLE_BACKTICKS.search(body[i]):
+                body[i] = DOUBLE_BACKTICKS.sub(r"`\1`", body[i])
+                fixes.append(first + i + 1)
         lines[first : last + 1] = [head + "".join(body) + tail]
-    return "".join(lines)
+    msg = "rewrote ``code`` as `code` in a docstring"
+    return "".join(lines), [f"{filepath}:{n}: {msg}" for n in sorted(fixes)]
 
 
 def crossref_violations(filepath: str, tree: ast.Module) -> list[str]:
     violations = []
     for node in docstring_nodes(tree, rendered_only=True):
-        for match in REF_LINK.finditer(CODE_SPAN.sub("", prose(node.value))):
+        text = prose(node.value)
+        for match in REF_LINK.finditer(text):
             label, target = match.groups()
             if target and TARGET.fullmatch(target):
                 continue
             if not target and COLLAPSED_TARGET.fullmatch(label):
                 continue
-            violations.append(f"{filepath}:{node.lineno}: {match.group()}")
+            lineno = node.lineno + text.count("\n", 0, match.start())
+            violations.append(
+                f"{filepath}:{lineno}: `{match.group()}` in a docstring is a "
+                "cross-reference; wrap it in backticks or use a qualified target"
+            )
     return violations
 
 
 def main() -> int:
-    fixed, violations = [], []
+    failures = []
     for filepath in sys.argv[1:]:
         try:
             with open(filepath, encoding="utf-8") as f:
@@ -122,25 +132,14 @@ def main() -> int:
             tree = ast.parse(source, filename=filepath)
         except (OSError, UnicodeDecodeError, SyntaxError):
             continue
-        new_source = fix_backticks(source, tree)
-        if new_source != source:
+        new_source, fixes = fix_backticks(filepath, source, tree)
+        if fixes:
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(new_source)
-            fixed.append(filepath)
             tree = ast.parse(new_source, filename=filepath)
-        violations.extend(crossref_violations(filepath, tree))
-
-    if fixed:
-        print("Rewrote ``code`` as `code` in docstrings:")
-        print("\n".join(f"   {f}" for f in fixed))
-    if violations:
-        print("❌ Docstring text that mkdocs will read as a cross-reference:")
-        print("\n".join(f"   {v}" for v in violations))
-        print(
-            "   Wrap shapes and indexing in backticks (`[block][2][16]`), or "
-            "use a fully qualified target ([LLM][vllm.LLM], [int][])."
-        )
-    return 1 if fixed or violations else 0
+        failures += fixes + crossref_violations(filepath, tree)
+    print("\n".join(failures), end="\n" if failures else "")
+    return 1 if failures else 0
 
 
 if __name__ == "__main__":
