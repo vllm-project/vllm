@@ -68,3 +68,22 @@ def test_choose_mp_linear_kernel_uint4_asymmetric():
 
     kernel_type = choose_mp_linear_kernel(config)
     assert kernel_type.__name__ == _expected_rocm_kernel(scalar_types.uint4, 64)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only")
+@pytest.mark.parametrize("act_type", [torch.float16, torch.bfloat16])
+def test_choose_mp_linear_kernel_rejects_group_size_16(act_type):
+    # No ROCm kernel handles groups smaller than 32 correctly; selection must
+    # fail instead of producing wrong outputs.
+    K, N = 1024, 256
+    config = MPLinearLayerConfig(
+        full_weight_shape=(K, N),
+        partition_weight_shape=(K, N),
+        weight_type=scalar_types.uint4b8,
+        act_type=act_type,
+        group_size=16,
+        zero_points=False,
+    )
+
+    with pytest.raises(ValueError):
+        choose_mp_linear_kernel(config)
