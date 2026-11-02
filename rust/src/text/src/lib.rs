@@ -25,6 +25,7 @@ pub use output::{
 pub use request::{Prompt, SamplingParams, TextRequest, normalize_top_k};
 use trait_set::trait_set;
 use vllm_engine_core_client::EngineCoreClient;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
 use vllm_tokenizer::DynTokenizer;
@@ -53,6 +54,8 @@ pub struct TextRequestProcessor {
     max_model_len: u32,
     /// Maximum number of top log probabilities accepted by this text facade.
     max_logprobs: i32,
+    /// Backend that compiles every structured-output constraint.
+    structured_outputs_backend: StructuredOutputBackend,
 }
 
 impl TextRequestProcessor {
@@ -62,6 +65,7 @@ impl TextRequestProcessor {
             backend,
             max_model_len,
             max_logprobs: SamplingLimits::DEFAULT_MAX_LOGPROBS,
+            structured_outputs_backend: StructuredOutputBackend::default(),
         }
     }
 
@@ -71,6 +75,17 @@ impl TextRequestProcessor {
             self.max_logprobs = max_logprobs;
         }
         self
+    }
+
+    /// Override the structured-output backend, xgrammar by default.
+    pub fn with_structured_outputs_backend(mut self, backend: StructuredOutputBackend) -> Self {
+        self.structured_outputs_backend = backend;
+        self
+    }
+
+    /// Return the backend that compiles every structured-output constraint.
+    pub fn structured_outputs_backend(&self) -> StructuredOutputBackend {
+        self.structured_outputs_backend
     }
 
     /// Return the tokenizer used by this processor.
@@ -159,6 +174,7 @@ impl TextRequestProcessor {
             prompt_token_ids,
             sampling_hints,
             sampling_limits,
+            self.structured_outputs_backend,
             tokenizer.as_ref(),
         )
     }
@@ -192,6 +208,12 @@ impl TextLlm {
     /// Override the maximum accepted logprobs count.
     pub fn with_max_logprobs(mut self, max_logprobs: Option<i32>) -> Self {
         self.processor = self.processor.with_max_logprobs(max_logprobs);
+        self
+    }
+
+    /// Override the structured-output backend, xgrammar by default.
+    pub fn with_structured_outputs_backend(mut self, backend: StructuredOutputBackend) -> Self {
+        self.processor = self.processor.with_structured_outputs_backend(backend);
         self
     }
 

@@ -363,6 +363,10 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
 
         return output
 
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self._model_runner_output.kv_connector_output
+
 
 def _copy_pooler_output_to_cpu(
     raw_pooler_output: PoolerOutput, finished_mask: list[bool]
@@ -446,6 +450,10 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         # Release the device tensors once the copy has completed.
         del self._raw_pooler_output
         return self._model_runner_output
+
+    def get_kv_connector_output(self) -> KVConnectorOutput | None:
+        """Get the KV connector output for this async output."""
+        return self._model_runner_output.kv_connector_output
 
 
 class ExecuteModelState(NamedTuple):
@@ -3945,18 +3953,8 @@ class GPUModelRunner(
                     return make_empty_encoder_model_runner_output(scheduler_output)
 
             if not num_scheduled_tokens:
-                if (
-                    self.parallel_config.distributed_executor_backend
-                    == "external_launcher"
-                    and self.parallel_config.data_parallel_size > 1
-                ):
-                    # this is a corner case when both external launcher
-                    # and DP are enabled, num_scheduled_tokens could be
-                    # 0, and has_unfinished_requests in the outer loop
-                    # returns True. before returning early here we call
-                    # dummy run to ensure coordinate_batch_across_dp
-                    # is called into to avoid out of sync issues.
-                    self._dummy_run(1)
+                # With DP, LLMEngine.step() / DPEngineCoreProc run a dummy
+                # batch for this step so the DP collectives stay aligned.
                 if not has_kv_transfer_group():
                     # Return empty ModelRunnerOutput if no work to do.
                     return EMPTY_MODEL_RUNNER_OUTPUT

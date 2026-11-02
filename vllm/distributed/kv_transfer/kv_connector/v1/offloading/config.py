@@ -4,16 +4,18 @@
 
 from typing import TYPE_CHECKING
 
-from vllm.utils.math_utils import round_up
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.v1.core.kv_cache_utils import (
     resolve_dcp_kv_block_size,
     resolve_kv_cache_block_sizes,
 )
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
+    ChunkedLocalAttentionSpec,
     FullAttentionSpec,
     KVCacheGroupRole,
     KVCacheSpec,
+    MambaSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
     SlidingWindowSpec,
@@ -56,6 +58,32 @@ def _group_kv_bytes_per_block(group: "KVCacheGroupSpec") -> int:
     return spec.page_size_bytes * len(group.layer_names)
 
 
+def get_sliding_window_size_in_chunks(
+    kv_cache_spec: KVCacheSpec, tokens_per_chunk: int
+) -> int | None:
+    if isinstance(kv_cache_spec, SlidingWindowSpec):
+        assert kv_cache_spec.sliding_window > 0
+        return max(
+            cdiv(kv_cache_spec.sliding_window, tokens_per_chunk),
+            cdiv(
+                kv_cache_spec.sliding_window - 1 + kv_cache_spec.extra_retained_tokens,
+                tokens_per_chunk,
+            ),
+        )
+
+    if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):
+        # Attention never reaches back past one chunk
+        assert kv_cache_spec.attention_chunk_size > 0
+        return cdiv(kv_cache_spec.attention_chunk_size, tokens_per_chunk)
+
+    if isinstance(kv_cache_spec, MambaSpec):
+        # Mamba depends on a single state
+        return 1
+
+    assert isinstance(kv_cache_spec, FullAttentionSpec)
+    return None
+
+
 def build_offloading_config(
     vllm_config: "VllmConfig",
     kv_cache_config: "KVCacheConfig",
@@ -74,22 +102,17 @@ def build_offloading_config(
     )
     if not selected_groups:
         raise ValueError("KV offloading found no eligible cache groups.")
-    groups = tuple(
-        OffloadingGroupConfig(
-            group_id=group_id,
-            tokens_per_block=resolve_dcp_kv_block_size(
-                group.kv_cache_spec,
-                parallel_config.decode_context_parallel_size,
-            ),
-            layer_names=tuple(group.layer_names),
-        )
-        for group_id, group in selected_groups
-    )
 
+    group_tokens_per_block = tuple(
+        resolve_dcp_kv_block_size(
+            group.kv_cache_spec, parallel_config.decode_context_parallel_size
+        )
+        for _, group in selected_groups
+    )
     _, tokens_per_hash = resolve_kv_cache_block_sizes(kv_cache_config, vllm_config)
-    for group in groups:
-        assert group.tokens_per_block % tokens_per_hash == 0, (
-            f"tokens_per_block={group.tokens_per_block} not divisible by "
+    for tokens_per_block in group_tokens_per_block:
+        assert tokens_per_block % tokens_per_hash == 0, (
+            f"tokens_per_block={tokens_per_block} not divisible by "
             f"tokens_per_hash={tokens_per_hash}. "
             f"Hybrid models (e.g. Mamba+Attention) need "
             f"--enable-prefix-caching to align block sizes."
@@ -114,7 +137,7 @@ def build_offloading_config(
     elif tokens_per_chunk is not None:
         tokens_per_chunk_int = int(tokens_per_chunk)
 
-        unique_tokens_per_block = {group.tokens_per_block for group in groups}
+        unique_tokens_per_block = set(group_tokens_per_block)
 
         assert len(unique_tokens_per_block) == 1, (
             "If 'block_size' is specified in kv_connector_extra_config, "
@@ -133,6 +156,21 @@ def build_offloading_config(
                 f"{round_up(tokens_per_chunk_int, tokens_per_block)} instead, or set "
                 f"'blocks_per_chunk' to express the chunk size in blocks."
             )
+
+    groups = tuple(
+        OffloadingGroupConfig(
+            group_id=group_id,
+            tokens_per_block=tokens_per_block,
+            layer_names=tuple(group.layer_names),
+            sliding_window_size_in_chunks=get_sliding_window_size_in_chunks(
+                next(iter(iter_layer_specs(group.kv_cache_spec))),
+                tokens_per_block * blocks_per_chunk,
+            ),
+        )
+        for (group_id, group), tokens_per_block in zip(
+            selected_groups, group_tokens_per_block
+        )
+    )
 
     worker_kv_bytes_per_block = 0
     if (
@@ -261,6 +299,7 @@ def build_offloading_config(
         model=OffloadingModelConfig(
             name=vllm_config.model_config.model,
             dtype=str(cache_dtype).removeprefix("torch."),
+            max_model_len=vllm_config.model_config.max_model_len,
         ),
         cache=OffloadingCacheConfig(
             tokens_per_hash=tokens_per_hash,
