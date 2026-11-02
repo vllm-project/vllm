@@ -891,6 +891,13 @@ class VllmBackend:
         # in future we need PostGradPassManager.uuid() to be executed
         # only at compile time.
         self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
+
+        if self.compilation_config.pass_config.fuse_allreduce_rms:
+            from .passes.fusion.allreduce_rms_fusion import (
+                preinit_fused_ar_workspaces,
+            )
+
+            preinit_fused_ar_workspaces(vllm_config)
         # `torch.compile` is JIT compiled, so we don't need to
         # do anything here
 
