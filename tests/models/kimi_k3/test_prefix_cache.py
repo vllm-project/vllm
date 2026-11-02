@@ -175,19 +175,10 @@ DEPLOYMENTS = {
 }
 
 
-def _known_failure(name: str, mode: Mode) -> str | None:
-    deployment = DEPLOYMENTS[name]
-    if mode.spec and deployment.decode.dcp > 1 and current_platform.is_cuda():
-        return "FlashInfer MLA DCP decode breaks on ragged spec batches (#59392)"
-    return None
-
-
 def _case(name: str, mode: Mode):
     marks = []
     if (num_gpus := DEPLOYMENTS[name].num_gpus) > 1:
         marks += multi_gpu_marks(num_gpus=num_gpus)
-    if reason := _known_failure(name, mode):
-        marks.append(pytest.mark.xfail(reason=reason, strict=True))
     return pytest.param(name, mode, marks=marks, id=f"{name}-{mode.name}")
 
 
