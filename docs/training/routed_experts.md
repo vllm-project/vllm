@@ -53,6 +53,5 @@ Per-request, default `0`: drops the first N prompt-token rows (e.g. routing alre
 
 Example: [examples/rl/routed_experts_e2e.py](../../examples/rl/routed_experts_e2e.py).
 
-
 For sparse-attention selections, see [Indexer Replay](indexer_replay.md).
 Indexer and routed-expert return can be enabled independently or together.
