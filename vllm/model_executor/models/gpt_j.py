@@ -31,6 +31,7 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.layernorm import LayerNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -163,7 +164,7 @@ class GPTJBlock(nn.Module):
     ):
         super().__init__()
         inner_dim = 4 * config.n_embd if config.n_inner is None else config.n_inner
-        self.ln_1 = nn.LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
+        self.ln_1 = LayerNorm(config.n_embd, eps=config.layer_norm_epsilon)
         self.attn = GPTJAttention(
             config, cache_config, quant_config, prefix=f"{prefix}.attn"
         )
@@ -206,7 +207,7 @@ class GPTJModel(nn.Module):
             lambda prefix: GPTJBlock(config, cache_config, quant_config, prefix=prefix),
             prefix=f"{prefix}.h",
         )
-        self.ln_f = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
+        self.ln_f = LayerNorm(self.embed_dim, eps=config.layer_norm_epsilon)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states"], config.n_embd
         )
@@ -227,6 +228,7 @@ class GPTJModel(nn.Module):
             else:
                 hidden_states = self.embed_input_ids(input_ids)
         else:
+            assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
         for layer in islice(self.h, self.start_layer, self.end_layer):
             hidden_states = layer(position_ids, hidden_states)
@@ -243,7 +245,11 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
             ".q_proj": (".qkv_proj", "q"),
             ".k_proj": (".qkv_proj", "k"),
             ".v_proj": (".qkv_proj", "v"),
-        }
+        },
+        orig_to_new_substr={
+            "attn.bias": None,
+            "attn.masked_bias": None,
+        },
     )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -291,5 +297,5 @@ class GPTJForCausalLM(nn.Module, SupportsPP):
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loader = AutoWeightsLoader(self, skip_substrs=["attn.bias", "attn.masked_bias"])
+        loader = AutoWeightsLoader(self)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

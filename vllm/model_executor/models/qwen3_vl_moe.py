@@ -25,6 +25,7 @@
 """Inference-only Qwen3-VL-MoE model compatible with HuggingFace weights."""
 
 from itertools import islice
+from typing import ClassVar
 
 import torch
 from transformers.models.qwen3_vl_moe.configuration_qwen3_vl_moe import (
@@ -35,6 +36,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.distributed import get_pp_group
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -54,6 +56,7 @@ from .qwen3_vl import (
     Qwen3VLForConditionalGeneration,
     Qwen3VLMultiModalProcessor,
     Qwen3VLProcessingInfo,
+    mrope_positions_factor,
 )
 from .utils import StageMissingLayer, maybe_prefix
 
@@ -71,6 +74,7 @@ class Qwen3VLMoeDecoderLayer(Qwen3MoeDecoderLayer):
             vllm_config=vllm_config,
             prefix=prefix,
             is_fused_checkpoint_transposed=True,
+            mrope_positions_factor=mrope_positions_factor(vllm_config),
         )
 
 
@@ -176,6 +180,9 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
 
 
 class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
+    language_model: Qwen3MoeLLMForCausalLM
+    num_local_physical_experts: int
+
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -223,7 +230,7 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
 class Qwen3VLMoeForConditionalGeneration(
     Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
 ):
-    is_3d_moe_weight: bool = True
+    is_3d_moe_weight: ClassVar[bool] = True
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -236,7 +243,7 @@ class Qwen3VLMoeForConditionalGeneration(
         super(Qwen3VLForConditionalGeneration, self).__init__()
         config: Qwen3VLMoeConfig = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
+        multimodal_config = vllm_config.model_config.get_multimodal_config()
 
         self.config = config
         self.model_config = vllm_config.model_config
@@ -250,6 +257,7 @@ class Qwen3VLMoeForConditionalGeneration(
                 config.vision_config,
                 norm_eps=getattr(config, "rms_norm_eps", 1e-6),
                 quant_config=quant_config,
+                input_norm=build_mm_input_norm(self.model_config),
                 prefix=maybe_prefix(prefix, "visual"),
             )
 
@@ -275,7 +283,10 @@ class Qwen3VLMoeForConditionalGeneration(
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3MoeLLMForCausalLM(
-                vllm_config=vllm_config.with_hf_config(config.text_config),
+                vllm_config=vllm_config.with_hf_config(
+                    config.text_config,
+                    architectures=["Qwen3MoeForCausalLM"],
+                ),
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
@@ -290,8 +301,8 @@ class Qwen3VLMoeForConditionalGeneration(
             )
 
         # Whether to include the gate_up_proj mapping is determined by
-        # the language model.
-        self.packed_modules_mapping = (
+        # the language model. Keep this override local to the instance.
+        self.packed_modules_mapping = (  # type: ignore[misc]
             self.packed_modules_mapping | self.language_model.packed_modules_mapping
         )
 

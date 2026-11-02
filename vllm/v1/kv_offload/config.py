@@ -14,6 +14,11 @@ class OffloadingGroupConfig:
     tokens_per_block: int
     # Layer names belonging to this group.
     layer_names: tuple[str, ...]
+    # Original KVCacheConfig group index.
+    group_id: int
+    # Chunks of this group the tier keeps for one request, or None when
+    # attention reaches back without a bound (a full layer).
+    sliding_window_size_in_chunks: int | None = None
 
 
 @dataclass(frozen=True)
@@ -22,6 +27,8 @@ class OffloadingModelConfig:
     name: str
     # KV cache data type (e.g. "float16").
     dtype: str
+    # Longest request the engine accepts, in tokens. 0 when not known.
+    max_model_len: int = 0
 
 
 @dataclass(frozen=True)
@@ -84,3 +91,5 @@ class OffloadingConfig:
     # True when the canonical per-layer host byte layout was requested via
     # kv_connector_extra_config; certified per-layer at worker registration.
     canonical_layout: bool = False
+    # Resolved KVCacheLayout name of the worker KV cache.
+    kv_cache_layout: str | None = None

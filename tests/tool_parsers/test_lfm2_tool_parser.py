@@ -10,7 +10,7 @@ from tests.tool_parsers.utils import (
     run_tool_extraction,
     run_tool_extraction_streaming,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.generate.base.protocol import FunctionCall
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser, ToolParserManager
 
@@ -634,15 +634,30 @@ def test_adjust_request_disables_skip_special_tokens(
             }
         ],
     )
-    assert request_with_tools.skip_special_tokens is True
+    assert (
+        request_with_tools.to_sampling_params(
+            1, default_sampling_params={}
+        ).skip_special_tokens
+        is True
+    )
     adjusted = tool_parser.adjust_request(request_with_tools)
     assert adjusted.skip_special_tokens is False
 
     # No tools → no override; default behaviour preserved.
     request_no_tools = ChatCompletionRequest(messages=[], model="test-model")
-    assert request_no_tools.skip_special_tokens is True
+    assert (
+        request_no_tools.to_sampling_params(
+            1, default_sampling_params={}
+        ).skip_special_tokens
+        is True
+    )
     adjusted_no_tools = tool_parser.adjust_request(request_no_tools)
-    assert adjusted_no_tools.skip_special_tokens is True
+    assert (
+        adjusted_no_tools.to_sampling_params(
+            1, default_sampling_params={}
+        ).skip_special_tokens
+        is True
+    )
 
 
 @pytest.mark.parametrize("streaming", [False])

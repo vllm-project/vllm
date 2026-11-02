@@ -31,11 +31,11 @@ def test_get_draft_quant_config_with_draft_model():
     mock_quant_config = Mock()
     with patch.object(
         VllmConfig, "get_quantization_config", return_value=mock_quant_config
-    ):
+    ) as mock_get_quantization_config:
         result = get_draft_quant_config(mock_vllm_config)
 
         # Verify the function calls get_quantization_config with draft model config
-        VllmConfig.get_quantization_config.assert_called_once_with(
+        mock_get_quantization_config.assert_called_once_with(
             mock_draft_model_config, mock_load_config
         )
         assert result == mock_quant_config
@@ -83,6 +83,7 @@ def test_fc_layer_quant_config_usage(default_vllm_config, dist_init, device) -> 
     assert fc_no_quant.output_size == output_size
 
     mock_quant_config = Mock()
+    mock_quant_config.online_quantization_config = None
     fc_with_quant = ReplicatedLinear(
         input_size=input_size,
         output_size=output_size,

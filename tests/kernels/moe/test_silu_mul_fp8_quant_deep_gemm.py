@@ -142,9 +142,7 @@ def silu_mul_quant(
 
 
 def pack_scales(x: torch.Tensor, tokens_per_expert: torch.Tensor) -> torch.Tensor:
-    """
-    pack float32 scales into a int32 tensor
-    """
+    """Pack float32 scales into a int32 tensor."""
     assert x.dtype == torch.float32
     E, T, G = x.size()
 
@@ -170,8 +168,7 @@ def ref_with_scale_fmt(
     up: torch.Tensor,
     scale_fmt: DeepGemmQuantScaleFMT,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    The precision types of the operations triggered by this function
+    """The precision types of the operations triggered by this function
     match closely with the kernel implementation so we compare more
     accurately.
     """
@@ -204,8 +201,7 @@ def ref_with_scale_fmt(
 
 
 def token_random(E, T, H2, tokens_per_expert):
-    """
-    Initialize each token in a random range so we test a range of
+    """Initialize each token in a random range so we test a range of
     scale values.
     """
     y = torch.empty((E, T, H2), dtype=torch.bfloat16, device=DEVICE)
@@ -239,12 +235,8 @@ def test_silu_mul_fp8_quant_deep_gemm(E: int, T: int, H: int, fp8_type: torch.dt
     scale_fmts = [
         DeepGemmQuantScaleFMT.FLOAT32,
         DeepGemmQuantScaleFMT.FLOAT32_CEIL_UE8M0,
+        DeepGemmQuantScaleFMT.UE8M0,
     ]
-    # UE8M0 (int32 packed) scales require the C++ kernel which is
-    # not available on ROCm (#ifndef USE_ROCM).
-    # https://github.com/ROCm/aiter/issues/2420
-    if current_platform.is_cuda():
-        scale_fmts.append(DeepGemmQuantScaleFMT.UE8M0)
 
     # Run the SiLU V2 kernel
     for scale_fmt in scale_fmts:

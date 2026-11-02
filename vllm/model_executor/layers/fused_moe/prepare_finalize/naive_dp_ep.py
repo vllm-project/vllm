@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -8,9 +11,16 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceContiguous,
     TopKWeightAndReduceDelegate,
+    TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.platforms import current_platform
 from vllm.utils.flashinfer import nvfp4_block_scale_interleave
+from vllm.v1.worker.ubatching import (
+    dbo_enabled,
+    dbo_switch_to_compute_sync,
+    dbo_yield_and_switch_from_compute_to_comm,
+)
 
 
 def _quantize_and_setup_dispatch(
@@ -69,8 +79,7 @@ def _unwrap_scale_and_prepare_for_moe(
 
 
 class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
-    """
-    Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
+    """Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
 
     Uses Torch AR/RS or AR for dispatch/combine operations, applied
     to the topk weights and ids.
@@ -109,6 +118,58 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
     def output_is_reduced(self) -> bool:
         return False
 
+    def _allocate_combine_input(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        return get_ep_group().allocate_combine_input(
+            shape,
+            dtype,
+            device,
+            is_sequence_parallel=self.is_sequence_parallel,
+        )
+
+    def allocate_fused_expert_output(
+        self,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+        weight_and_reduce_impl: mk.TopKWeightAndReduce,
+    ) -> torch.Tensor | None:
+        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP):
+            return self._allocate_combine_input(shape, dtype, device)
+        return None
+
+    def supports_dbo(self) -> bool:
+        # prepare()/finalize() hand the collective to the comm stream
+        # themselves (see _comm_region), so the synchronous path is DBO-safe.
+        # supports_async() stays False: it also selects MK-internal
+        # shared-expert overlap. Only validated on ROCm so far.
+        return current_platform.is_rocm()
+
+    @contextmanager
+    def _comm_region(self) -> Iterator[None]:
+        """Scope the dispatch/combine collective runs in.
+
+        Without DBO the collective runs on the calling stream. Under DBO it
+        runs on the comm stream so the peer ubatch can compute while it is in
+        flight, using the same compute/comm handoff as DeepEP-HT. Graph
+        capture keeps every collective on the capture stream, so overlap is
+        limited to eager steps (prefill).
+        """
+        if not dbo_enabled() or torch.cuda.is_current_stream_capturing():
+            yield
+            return
+        # Release the CPU to the peer ubatch so it can enqueue compute while
+        # this ubatch's collective runs; the compute stream waits on exit.
+        dbo_yield_and_switch_from_compute_to_comm()
+        try:
+            yield
+        finally:
+            dbo_switch_to_compute_sync()
+
     def prepare(
         self,
         a1: torch.Tensor,
@@ -121,7 +182,6 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
         """Quantize and Dispatch Topk Weights and Topk Ids."""
-
         if apply_router_weight_on_input:
             topk = topk_ids.size(1)
             assert topk == 1, (
@@ -155,13 +215,14 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
                 extra_tensors = []
             extra_tensors.append(local_token_lora_mapping)
 
-        res = get_ep_group().dispatch(
-            a1q,
-            topk_weights,
-            topk_ids,
-            is_sequence_parallel=self.is_sequence_parallel,
-            extra_tensors=extra_tensors,
-        )
+        with self._comm_region():
+            res = get_ep_group().dispatch(
+                a1q,
+                topk_weights,
+                topk_ids,
+                is_sequence_parallel=self.is_sequence_parallel,
+                extra_tensors=extra_tensors,
+            )
 
         if extra_tensors is None:
             assert len(res) == 3
@@ -196,22 +257,35 @@ class MoEPrepareAndFinalizeNaiveDPEPModular(mk.FusedMoEPrepareAndFinalizeModular
         if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
             weight_and_reduce_impl = TopKWeightAndReduceContiguous()
 
+        if isinstance(weight_and_reduce_impl, TopKWeightAndReduceNoOP):
+            # allocate_fused_expert_output already selected the combine input.
+            # Reuse it directly; the symmetric allocator may return a new view
+            # object for the same high-water backing allocation.
+            combine_input = fused_expert_output
+        else:
+            combine_input = self._allocate_combine_input(
+                (topk_ids.shape[0], fused_expert_output.shape[-1]),
+                fused_expert_output.dtype,
+                fused_expert_output.device,
+            )
         out = weight_and_reduce_impl.apply(
-            output=None,
+            output=combine_input,
             fused_expert_output=fused_expert_output,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             apply_router_weight_on_input=apply_router_weight_on_input,
         )
 
-        output.copy_(
-            get_ep_group().combine(out, is_sequence_parallel=self.is_sequence_parallel)
-        )
+        with self._comm_region():
+            get_ep_group().combine_into_output(
+                out,
+                output,
+                is_sequence_parallel=self.is_sequence_parallel,
+            )
 
 
 class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMonolithic):
-    """
-    Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
+    """Naive Prepare/Finalize for Dp/Ep case for Modular Kernels.
 
     Uses Torch AR/RS or AR for dispatch/combine operations, applied
     to the router logits (the MoE kernel runs the router internally).
@@ -250,7 +324,6 @@ class MoEPrepareAndFinalizeNaiveDPEPMonolithic(mk.FusedMoEPrepareAndFinalizeMono
         defer_input_quant: bool = False,
     ) -> mk.PrepareMonolithicResultType:
         """Quantize and Dispatch Router Logits."""
-
         a1q, scales, a1q_scale_orig = _quantize_and_setup_dispatch(
             a1, quant_config, defer_input_quant
         )

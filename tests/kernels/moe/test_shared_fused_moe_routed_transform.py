@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Tests for FusedMoEFactory with routed_input_transform.
+"""Tests for FusedMoEFactory with routed_input_transform.
 
 Verifies that applying routed_input_transform inside FusedMoEFactory
 produces the same results as applying the transform manually outside.

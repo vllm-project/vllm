@@ -8,9 +8,12 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.utils import is_weights_pre_processed
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import is_quantized_kv_cache
-from vllm.v1.kv_cache_interface import kv_cache_uses_per_token_head_scales
+from vllm.v1.kv_cache_interface import (
+    is_quantized_kv_cache,
+    kv_cache_uses_per_token_head_scales,
+)
 
 logger = init_logger(__name__)
 
@@ -40,8 +43,7 @@ class KVCacheScaleParameter(torch.nn.Parameter):
 
 
 class BaseKVCacheMethod(QuantizeMethodBase):
-    """
-    Quant method that adds `_k_scale` and `_v_scale` attributes to the
+    """Quant method that adds `_k_scale` and `_v_scale` attributes to the
     Attention layer to support loading those scaling factors from checkpoints.
     The k/v_scale will be used to:
         - quantize k/v_cache entries before saving them to the cache
@@ -49,14 +51,16 @@ class BaseKVCacheMethod(QuantizeMethodBase):
 
     Args:
         quant_config: the appropriate QuantizationConfig
+
     """
+
+    supports_pre_processed_weights = True
 
     def __init__(self, quant_config: QuantizationConfig):
         self.quant_config = quant_config
 
     def create_weights(self, layer: torch.nn.Module):
-        """
-        Create "weight" (aka q_scale, k_scale and v_scale)
+        """Create "weight" (aka q_scale, k_scale and v_scale)
         for an attention layer.
         """
         # Initialize the Q and KV cache scales to -1.0, an invalid value.
@@ -72,7 +76,18 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         raise RuntimeError(f"{self.__class__.__name__}.apply should not be called.")
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # skip if there are no weights to process (for example, weight reloading)
+        if is_weights_pre_processed():
+            # Scale buffers were exported with post-processed values; rebuild the
+            # host-side copies.
+            if hasattr(layer, "_k_scale"):
+                layer._k_scale_float = layer._k_scale.item()
+                layer._v_scale_float = layer._v_scale.item()
+                layer._q_scale_float = layer._q_scale.item()
+                layer._k_scale_cpu = layer._k_scale.detach().to("cpu")
+                layer._v_scale_cpu = layer._v_scale.detach().to("cpu")
+            return
+
+        # skip if there are no weights to process
         if not hasattr(layer, "q_scale"):
             assert not hasattr(layer, "k_scale")
             assert not hasattr(layer, "v_scale")
@@ -86,10 +101,6 @@ class BaseKVCacheMethod(QuantizeMethodBase):
             layer._v_scale.copy_(1.0)
             layer._k_scale_float = 1.0
             layer._v_scale_float = 1.0
-            del layer.k_scale
-            del layer.v_scale
-            del layer.q_scale
-            del layer.prob_scale
             return
 
         # If the kv-cache is not quantized, we enforce the k/v_scale to be 1.0
@@ -153,13 +164,13 @@ class BaseKVCacheMethod(QuantizeMethodBase):
         if layer.q_scale > 0.0:
             q_scale = layer.q_scale
             if current_platform.is_fp8_fnuz():
-                q_scale *= 2
+                q_scale = q_scale * 2
         else:
             q_scale = 1.0
         if layer.prob_scale > 0.0:
             prob_scale = layer.prob_scale
             if current_platform.is_fp8_fnuz():
-                prob_scale *= 2
+                prob_scale = prob_scale * 2
         else:
             prob_scale = 1.0
 
@@ -188,8 +199,3 @@ class BaseKVCacheMethod(QuantizeMethodBase):
                 "issues. Please make sure q/prob scaling factors are "
                 "available in the fp8 checkpoint."
             )
-
-        del layer.k_scale
-        del layer.v_scale
-        del layer.q_scale
-        del layer.prob_scale

@@ -236,6 +236,31 @@ curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
 
 An example can be found here: [examples/pooling/score/colqwen3_5_rerank_online.py](../../../examples/pooling/score/colqwen3_5_rerank_online.py)
 
+## ColUltraVBERT Multi-Modal Late Interaction Models
+
+ColUltraVBERT pairs the UltraBERT text encoder with a SigLIP vision encoder and returns per-token vectors for MaxSim scoring.
+
+| Architecture | Backbone | Example HF Models |
+| - | - | - |
+| `ColUltraVBertForRetrieval` | UltraVBERT | `athrael-soju/ColUltraVBERT` |
+
+Clients send the prompts the model was trained with: a page goes in as `User:<image>Describe the image.<end_of_utterance>\nAssistant:` with its image, and a query as its text followed by ten `<end_of_utterance>` tokens.
+
+```python
+from PIL import Image
+
+from vllm import LLM
+
+llm = LLM(model="athrael-soju/ColUltraVBERT", runner="pooling")
+page = {
+    "prompt": "User:<image>Describe the image.<end_of_utterance>\nAssistant:",
+    "multi_modal_data": {"image": Image.open("page.png").convert("RGB")},
+}
+query = "What was the total revenue in 2023?" + "<end_of_utterance>" * 10
+page_output, query_output = llm.encode([page, query], pooling_task="token_embed")
+page_vectors, query_vectors = page_output.outputs.data, query_output.outputs.data
+```
+
 ## Llama Nemotron Multimodal
 
 ### Embedding Model
@@ -313,14 +338,12 @@ Start the server:
 ```shell
 vllm serve nvidia/llama-nemotron-rerank-vl-1b-v2 \
     --runner pooling \
-    --trust-remote-code \
-    --chat-template examples/pooling/score/template/nemotron-vl-rerank.jinja
+    --trust-remote-code
 ```
 
 !!! note
-    The chat template bundled with this checkpoint's tokenizer is not suitable
-    for the Score/Rerank APIs. Use the provided override template when serving:
-    `examples/pooling/score/template/nemotron-vl-rerank.jinja`.
+    The checkpoint declares its score template in its Sentence Transformers config, so vLLM applies it automatically (see [Templates declared by Sentence Transformers checkpoints](scoring.md#templates-declared-by-sentence-transformers-checkpoints)).
+    Revisions older than October 2026 need `--chat-template examples/pooling/score/template/nemotron-vl-rerank.jinja`.
 
 Score a text query against an image document:
 
@@ -365,36 +388,99 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
 
 ## BAAI/bge-m3
 
-The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`
-the architecture is declared as `XLMRobertaModel`, which makes `vLLM` load it as a vanilla ROBERTA model without the
-extra weights. To load the full model weights, override its architecture like this:
+`BAAI/bge-m3` supports dense retrieval, lexical matching, and ColBERT-style
+multi-vector retrieval. Its `config.json` declares `XLMRobertaModel`, so vLLM
+otherwise loads it as a vanilla RoBERTa model without the extra sparse and
+ColBERT weights. The examples below therefore override the architecture with
+`BgeM3EmbeddingModel`.
+
+The three retrieval modes map to concrete pooling tasks as follows:
+
+| Retrieval mode | Pooling task | Output |
+| -------------- | ------------ | ------ |
+| Dense | `embed` | One embedding vector per input |
+| Lexical/sparse | `token_classify` | One scalar weight per non-special token |
+| ColBERT multi-vector | `token_embed` | One embedding vector per non-special token |
+
+Serve one concrete mode by selecting its task at load time:
 
 ```shell
-vllm serve BAAI/bge-m3 --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}'
+vllm serve BAAI/bge-m3 \
+  --runner pooling \
+  --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}' \
+  --pooler-config.task <task>
 ```
 
-Then you obtain the sparse embeddings like this:
+For dense embeddings, replace `<task>` with `embed` and use the Embeddings API:
+
+```shell
+curl -s http://localhost:8000/v1/embeddings \
+  -H "Content-Type: application/json" -d '{
+    "model": "BAAI/bge-m3",
+    "input": ["What is BGE M3?", "Definition of BM25"]
+  }'
+```
+
+For lexical weights, replace `<task>` with `token_classify` and use the
+Pooling API:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
-     "model": "BAAI/bge-m3",
-     "task": "token_classify",
-     "input": ["What is BGE M3?", "Definition of BM25"]
+  "model": "BAAI/bge-m3",
+  "task": "token_classify",
+  "input": ["What is BGE M3?", "Definition of BM25"]
 }'
 ```
 
 Due to limitations in the output schema, the output consists of a list of
-token scores for each token for each input. This means that you'll have to call
-`/tokenize` as well to be able to pair tokens with scores.
-Refer to the tests in  `tests/models/language/pooling/test_bge_m3.py` to see how
-to do that.
+token scores for each input. Call `/tokenize` as well to pair token IDs with
+their scores. See
+[`test_bge_m3.py`](../../../tests/models/language/pooling/test_bge_m3.py) for a
+complete example that also combines repeated token IDs.
 
-You can obtain the colbert embeddings like this:
+For ColBERT vectors, replace `<task>` with `token_embed` and use the Pooling API:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
-     "model": "BAAI/bge-m3",
-     "task": "token_embed",
-     "input": ["What is BGE M3?", "Definition of BM25"]
+  "model": "BAAI/bge-m3",
+  "task": "token_embed",
+  "input": ["What is BGE M3?", "Definition of BM25"]
 }'
 ```
+
+### Dense and sparse output through an IO processor plugin
+
+The source tree includes a reference
+[BGE-M3 IO processor plugin](../../../tests/plugins/bge_m3_sparse_plugin) that
+formats dense embeddings, sparse token weights, or both in one response. From
+a source checkout, install it in the vLLM environment and load it as follows:
+
+```shell
+uv pip install ./tests/plugins/bge_m3_sparse_plugin
+
+vllm serve BAAI/bge-m3 \
+  --runner pooling \
+  --hf-overrides '{"architectures": ["BgeM3EmbeddingModel"]}' \
+  --io-processor-plugin bge_m3_sparse_plugin
+```
+
+The plugin selects the internal `embed&token_classify` task so the model
+computes dense and lexical outputs together. Public requests must use task
+`plugin` and put the plugin-specific fields under `data`:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+  "model": "BAAI/bge-m3",
+  "task": "plugin",
+  "data": {
+    "input": ["What is BGE M3?", "Definition of BM25"],
+    "embed_task": "dense&sparse",
+    "return_tokens": true
+  }
+}'
+```
+
+`embed_task` accepts `dense`, `sparse`, or `dense&sparse`. The combined
+`embed&token_classify` task is an internal execution contract for this plugin,
+not a generic Pooling API response format. Without the plugin, select one of
+the three concrete tasks above.

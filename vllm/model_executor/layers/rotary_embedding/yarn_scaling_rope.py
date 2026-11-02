@@ -23,25 +23,27 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         scaling_factor: float,
         dtype: torch.dtype,
         *,
-        extrapolation_factor: float = 1,
-        attn_factor: float = 1,
         beta_fast: int = 32,
         beta_slow: int = 1,
-        apply_yarn_scaling: bool = True,
+        mscale: float | None = None,
+        mscale_all_dim: float | None = None,
+        attention_factor: float | None = None,
         truncate: bool = True,
     ) -> None:
         self.scaling_factor = scaling_factor
-        self.extrapolation_factor = extrapolation_factor
-        self.attn_factor = attn_factor
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
         # Get n-d magnitude scaling corrected for interpolation
-        self.mscale = (
-            float(yarn_get_mscale(self.scaling_factor) * attn_factor)
-            if apply_yarn_scaling
-            else float(attn_factor)
-        )
+        if attention_factor is not None:
+            self.mscale = float(attention_factor)
+        elif mscale and mscale_all_dim:
+            self.mscale = float(
+                yarn_get_mscale(self.scaling_factor, mscale)
+                / yarn_get_mscale(self.scaling_factor, mscale_all_dim)
+            )
+        else:
+            self.mscale = float(yarn_get_mscale(self.scaling_factor))
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
         )
@@ -62,10 +64,9 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
             self.truncate,
         )
         # Get n-d rotational scaling corrected for extrapolation
-        inv_freq_mask = (
-            1
-            - yarn_linear_ramp_mask(low, high, self.rotary_dim // 2, dtype=torch.float)
-        ) * self.extrapolation_factor
+        inv_freq_mask = 1 - yarn_linear_ramp_mask(
+            low, high, self.rotary_dim // 2, dtype=torch.float
+        )
         inv_freq = (
             inv_freq_interpolation * (1 - inv_freq_mask)
             + inv_freq_extrapolation * inv_freq_mask

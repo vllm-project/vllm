@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Based on:
+"""Based on:
 Chen, L., Ye, Z., Wu, Y., Zhuo, D., Ceze, L., & Krishnamurthy, A. (2023).
 Punica: Multi-Tenant LoRA Serving.
 https://arxiv.org/abs/2310.18547
@@ -21,8 +20,7 @@ _EXPAND_LORA_SCALE_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
 def _get_expand_lora_scale_ptr(lora_weights: list[torch.Tensor], device: torch.device):
-    """
-    `_EXPAND_LORA_SCALE_PTR_DICT` collects the required information during
+    """`_EXPAND_LORA_SCALE_PTR_DICT` collects the required information during
     `profile_run`,
     After this, it remains constant and subsequent usage is through LUT.
     Refer to:
@@ -91,9 +89,7 @@ def _lora_expand_kernel_fp8(
     per_channel_quant: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    """
-    FP8-compatible expand kernel wrapper.
-    """
+    """FP8-compatible expand kernel wrapper."""
     cta_n_num = tl.cdiv(N, BLOCK_N)
     cta_m_num = tl.cdiv(M, BLOCK_M)
 
@@ -192,8 +188,7 @@ def _lora_expand_fp8(
     use_fp8_w8a8: bool = False,
     per_channel_quant: bool = False,
 ) -> None:
-    """
-    FP8-compatible LoRA expand operation.
+    """FP8-compatible LoRA expand operation.
 
     Args:
         inputs: Input tensor from shrink operation [num_slices, num_tokens, lora_rank]
@@ -206,6 +201,8 @@ def _lora_expand_fp8(
         num_tokens_per_lora: Number of tokens per LoRA
         lora_token_start_loc: Start location for each LoRA's tokens
         lora_ids: LoRA IDs to process
+        num_active_loras: Number of active LoRAs. Accepted for API parity with
+            the non-FP8 kernel and unused here.
         no_lora_flag_cpu (torch.Tensor): A CPU tensor of size 1, that indicates
             if there are any requests that require LoRA.
         offset_start (int, optional): Offset start for output_tensor.
@@ -216,6 +213,7 @@ def _lora_expand_fp8(
         group_n (int, optional): Block size for N in block-wise quantization.
         use_fp8_w8a8 (bool, optional): Whether to use FP8 W8A8 quantization.
         per_channel_quant (bool, optional): Whether to use per-channel quantization.
+
     """
     assert no_lora_flag_cpu.numel() == 1
     if no_lora_flag_cpu.item():
@@ -367,35 +365,11 @@ def _lora_expand_fp8(
     return
 
 
-def _lora_expand_fp8_fake(
-    inputs: torch.Tensor,
-    lora_b_weights: list[torch.Tensor],
-    output_tensor: torch.Tensor,
-    token_lora_mapping: torch.Tensor,
-    token_indices_sorted_by_lora_ids: torch.Tensor,
-    num_tokens_per_lora: torch.Tensor,
-    lora_token_start_loc: torch.Tensor,
-    lora_ids: torch.Tensor,
-    no_lora_flag_cpu: torch.Tensor,
-    num_active_loras: int,
-    b_scale: list[torch.Tensor],
-    a_scale: torch.Tensor | None = None,
-    offset_start: int = 0,
-    add_inputs: bool = False,
-    group_k: int = 0,
-    group_n: int = 0,
-    use_fp8_w8a8: bool = False,
-    per_channel_quant: bool = False,
-) -> None:
-    return
-
-
 try:
     direct_register_custom_op(
         op_name="lora_expand_fp8",
         op_func=_lora_expand_fp8,
         mutates_args=["output_tensor"],
-        fake_impl=_lora_expand_fp8_fake,
     )
     lora_expand_fp8 = torch.ops.vllm.lora_expand_fp8
 

@@ -1,20 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use std::collections::HashMap;
 use std::slice;
 
+use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
-use vllm_llm::TokenUsage;
+use vllm_llm::{PromptCacheUsage, TokenUsage};
 
 // ============================================================================
 // Constants
 // ============================================================================
-
-/// Default model identifier used when no model is specified.
-pub const UNKNOWN_MODEL_ID: &str = "unknown";
 
 // ============================================================================
 // Default value helpers
@@ -23,6 +20,53 @@ pub const UNKNOWN_MODEL_ID: &str = "unknown";
 /// Helper function for serde default value (returns true).
 pub fn default_true() -> bool {
     true
+}
+
+/// Deserialize an OpenAI request `top_k` while preserving explicit disable.
+///
+/// Null remains `None` so model generation defaults apply. Explicit `-1` and
+/// `0` become `Some(0)` so the request overrides those defaults and disables
+/// top-k sampling. Positive limits are preserved.
+pub fn deserialize_request_top_k<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    match Option::<i64>::deserialize(deserializer)? {
+        None => Ok(None),
+        Some(value) => vllm_text::normalize_top_k(value)
+            .map(|value| Some(value.unwrap_or(0)))
+            .map_err(serde::de::Error::custom),
+    }
+}
+
+/// Effort level for reasoning models.
+///
+/// Fixed OpenAI HTTP request grades. Request conversion maps these names to
+/// the model-independent `vllm_chat::EffortValue` before renderer validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    XHigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::XHigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
 }
 
 // ============================================================================
@@ -187,11 +231,48 @@ pub struct InputAudio {
 // Streaming
 // ============================================================================
 
+#[derive(Debug, Serialize)]
+pub(crate) struct StreamResponseEnvelope {
+    id: String,
+    object: &'static str,
+    created: u64,
+    model: String,
+}
+
+impl StreamResponseEnvelope {
+    pub(crate) fn new(id: String, object: &'static str, created: u64, model: String) -> Self {
+        Self {
+            id,
+            object,
+            created,
+            model,
+        }
+    }
+
+    pub(crate) fn model(&self) -> &str {
+        &self.model
+    }
+}
+
 /// Mirrors the Python vLLM `StreamOptions` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StreamOptions {
     pub include_usage: Option<bool>,
     pub continuous_usage_stats: Option<bool>,
+}
+
+impl StreamOptions {
+    /// Whether no option is set, as in `"stream_options": {}`.
+    ///
+    /// Python rejects `stream_options` without `stream=true` only when the
+    /// object is non-empty, so an empty object must pass that check.
+    pub fn is_empty(&self) -> bool {
+        let Self {
+            include_usage,
+            continuous_usage_stats,
+        } = self;
+        include_usage.is_none() && continuous_usage_stats.is_none()
+    }
 }
 
 // ============================================================================
@@ -201,8 +282,17 @@ pub struct StreamOptions {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Tool {
     #[serde(rename = "type")]
+    #[serde(default = "default_function_tool_type")]
     pub tool_type: String,
     pub function: Function,
+    /// Tool-level form of [`Function::defer_loading`]; the function-level value
+    /// takes precedence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub defer_loading: Option<bool>,
+}
+
+fn default_function_tool_type() -> String {
+    "function".to_string()
 }
 
 #[serde_with::skip_serializing_none]
@@ -210,9 +300,13 @@ pub struct Tool {
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
+    #[serde(default)]
     pub parameters: Value,
     /// Whether to enable strict schema adherence (OpenAI structured outputs).
     pub strict: Option<bool>,
+    /// Whether the schema is loaded on demand via tool search (vLLM extension,
+    /// mirroring the OpenAI Responses and Anthropic Messages field).
+    pub defer_loading: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -337,9 +431,17 @@ impl ToolReference {
 // Chat Messages
 // ============================================================================
 
+/// One chat message, tagged by `role`.
+///
+/// The derived serde impls use `remote = "Self"` and cover only the standard
+/// roles; the trait impls below dispatch on the role tag and handle
+/// [`ChatMessage::Custom`] separately. A `#[serde(untagged)]` fallback variant
+/// would also accept malformed standard messages, such as a `tool` message
+/// without `tool_call_id`, and replace their field errors with serde's generic
+/// untagged-enum error.
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "role")]
+#[serde(tag = "role", remote = "Self")]
 pub enum ChatMessage {
     #[serde(rename = "system")]
     System {
@@ -374,6 +476,67 @@ pub enum ChatMessage {
         tools: Option<Vec<Tool>>,
         name: Option<String>,
     },
+    /// Message with a role outside the OpenAI set, such as `root`. Chat
+    /// templates receive the role string unchanged.
+    #[serde(skip)]
+    Custom {
+        role: String,
+        content: MessageContent,
+    },
+}
+
+/// Role tags of the standard [`ChatMessage`] variants.
+const STANDARD_CHAT_ROLES: &[&str] = &[
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "function",
+    "developer",
+];
+
+/// Wire shape of [`ChatMessage::Custom`].
+#[derive(Deserialize, Serialize)]
+struct CustomChatMessage<R, C> {
+    role: R,
+    content: C,
+}
+
+impl Serialize for ChatMessage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Self::Custom { role, content } => {
+                CustomChatMessage { role, content }.serialize(serializer)
+            }
+            _ => Self::serialize(self, serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ChatMessage {
+    /// Dispatch on the role tag: standard roles keep their derived errors,
+    /// and any other string role becomes [`ChatMessage::Custom`].
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let is_custom = value
+            .get("role")
+            .and_then(Value::as_str)
+            .is_some_and(|role| !STANDARD_CHAT_ROLES.contains(&role));
+
+        if is_custom {
+            let CustomChatMessage { role, content } =
+                CustomChatMessage::deserialize(value).map_err(serde::de::Error::custom)?;
+            Ok(Self::Custom { role, content })
+        } else {
+            Self::deserialize(value).map_err(serde::de::Error::custom)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
@@ -397,31 +560,46 @@ pub struct Usage {
     pub total_tokens: usize,
     pub completion_tokens: Option<usize>,
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
+    /// Reasoning-token breakdown. `None` when the frontend cannot count
+    /// reasoning tokens: on chat without a reasoning parser, and always on
+    /// completions and generate.
+    pub completion_tokens_details: Option<CompletionTokenUsageInfo>,
 }
 
 impl Usage {
-    /// Create a Usage with prompt-token cache details.
-    pub fn from_counts(
-        prompt_tokens: usize,
-        completion_tokens: usize,
-        cached_tokens: Option<usize>,
+    /// Create a Usage with prompt-token cache and reasoning-token details.
+    ///
+    /// The one mapping from token usage onto the wire: every field comes from
+    /// `usage`, and `enable_prompt_tokens_details` only decides whether
+    /// prompt-token details are reported. `usage` is destructured exhaustively,
+    /// so a new usage field fails to compile until it is mapped here.
+    /// `reasoning_tokens` is `None` when the route does not count reasoning
+    /// tokens.
+    pub fn from_token_usage(
+        usage: TokenUsage,
+        enable_prompt_tokens_details: bool,
+        reasoning_tokens: Option<usize>,
     ) -> Self {
+        let TokenUsage {
+            prompt_token_count: prompt_tokens,
+            output_token_count: completion_tokens,
+            prompt_cache_usage:
+                PromptCacheUsage {
+                    cached_token_count,
+                    cache_creation_token_count,
+                },
+        } = usage;
         Self {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: cached_tokens
-                .filter(|&c| c > 0)
-                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
+            prompt_tokens_details: enable_prompt_tokens_details.then_some(PromptTokenUsageInfo {
+                cached_tokens: cached_token_count,
+                created_cache_tokens: cache_creation_token_count,
+            }),
+            completion_tokens_details: reasoning_tokens
+                .map(|reasoning_tokens| CompletionTokenUsageInfo { reasoning_tokens }),
         }
-    }
-
-    pub fn from_token_usage(usage: TokenUsage, enable_prompt_tokens_details: bool) -> Self {
-        Self::from_counts(
-            usage.prompt_token_count,
-            usage.output_token_count,
-            enable_prompt_tokens_details.then_some(usage.cached_token_count),
-        )
     }
 }
 
@@ -429,24 +607,36 @@ impl Usage {
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
     pub cached_tokens: usize,
+    /// Prompt tokens newly written to the prefix cache. Python reports it on
+    /// chat only; Rust reports it wherever `cached_tokens` is reported.
+    pub created_cache_tokens: usize,
+}
+
+/// Mirrors the Python vLLM `CompletionTokenUsageInfo` class.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CompletionTokenUsageInfo {
+    pub reasoning_tokens: usize,
 }
 
 #[cfg(test)]
 mod usage_tests {
-    use vllm_llm::TokenUsage;
+    use serde_json::json;
+    use vllm_llm::{PromptCacheUsage, TokenUsage};
 
     use super::Usage;
 
+    const USAGE: TokenUsage = TokenUsage {
+        prompt_token_count: 5,
+        output_token_count: 2,
+        prompt_cache_usage: PromptCacheUsage {
+            cached_token_count: 3,
+            cache_creation_token_count: 1,
+        },
+    };
+
     #[test]
     fn token_usage_hides_prompt_token_details_by_default() {
-        let usage = Usage::from_token_usage(
-            TokenUsage {
-                prompt_token_count: 5,
-                output_token_count: 2,
-                cached_token_count: 3,
-            },
-            false,
-        );
+        let usage = Usage::from_token_usage(USAGE, false, None);
 
         assert_eq!(usage.prompt_tokens, 5);
         assert_eq!(usage.completion_tokens, Some(2));
@@ -455,19 +645,43 @@ mod usage_tests {
 
     #[test]
     fn token_usage_includes_prompt_token_details_when_enabled() {
+        let usage = Usage::from_token_usage(USAGE, true, None);
+
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(
+            json["prompt_tokens_details"],
+            json!({"cached_tokens": 3, "created_cache_tokens": 1})
+        );
+    }
+
+    #[test]
+    fn token_usage_serializes_zero_cached_tokens_when_enabled() {
         let usage = Usage::from_token_usage(
             TokenUsage {
-                prompt_token_count: 5,
+                prompt_token_count: 8,
                 output_token_count: 2,
-                cached_token_count: 3,
+                prompt_cache_usage: Default::default(),
             },
             true,
+            None,
         );
+        let json = serde_json::to_value(&usage).expect("usage serializes");
+        assert_eq!(json["prompt_tokens_details"]["cached_tokens"], 0);
+    }
 
-        assert_eq!(
-            usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
-            Some(3)
-        );
+    /// Like Python's `UsageInfo`, reasoning-token details are reported only
+    /// when counted (including a zero count), and `null` otherwise.
+    #[test]
+    fn token_usage_serializes_reasoning_token_details_only_when_counted() {
+        let json = |reasoning_tokens| {
+            serde_json::to_value(Usage::from_token_usage(USAGE, false, reasoning_tokens))
+                .expect("usage serializes")["completion_tokens_details"]
+                .clone()
+        };
+
+        assert_eq!(json(Some(3)), json!({"reasoning_tokens": 3}));
+        assert_eq!(json(Some(0)), json!({"reasoning_tokens": 0}));
+        assert_eq!(json(None), json!(null));
     }
 }
 
@@ -476,9 +690,23 @@ mod usage_tests {
 pub struct LogProbs {
     pub tokens: Vec<String>,
     pub token_logprobs: Vec<Option<f32>>,
-    pub top_logprobs: Vec<Option<HashMap<String, f32>>>,
+    /// Each position's candidates in the engine's order (the sampled token
+    /// first), serialized in that order like Python's dict.
+    pub top_logprobs: Vec<Option<IndexMap<String, f32>>>,
     pub text_offset: Vec<u32>,
 }
+
+/// vLLM prompt-logprob metadata keyed by vocabulary token ID.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PromptLogprob {
+    pub logprob: f32,
+    pub rank: u32,
+    pub decoded_token: String,
+}
+
+/// Each scored position's candidates in the engine's order (the prompt token
+/// first), serialized in that order like Python's dict.
+pub type PromptLogprobs = Vec<Option<IndexMap<u32, PromptLogprob>>>;
 
 /// Mirrors the Python vLLM `ChatCompletionLogProbs` class.
 #[derive(Debug, Clone, Serialize)]
@@ -512,13 +740,16 @@ pub struct ErrorResponse {
     pub error: ErrorDetail,
 }
 
+/// Mirrors the Python vLLM `ErrorInfo` class.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ErrorDetail {
     pub message: String,
+    /// The error class, such as `BadRequestError`.
     #[serde(rename = "type")]
     pub error_type: String,
     pub param: Option<String>,
-    pub code: Option<String>,
+    /// The HTTP status code.
+    pub code: u16,
 }
 
 // ============================================================================

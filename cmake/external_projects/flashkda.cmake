@@ -13,7 +13,7 @@ else()
   FetchContent_Declare(
     flashkda
     GIT_REPOSITORY https://github.com/vllm-project/FlashKDA.git
-    GIT_TAG 053de1b716ef3255873e02d2d28f4adf09951978
+    GIT_TAG 47fc9fec6661d04aa9a42e9e5e069a51ad3b649b
     GIT_PROGRESS TRUE
     GIT_SUBMODULES cutlass
   )

@@ -3,16 +3,17 @@
 import time
 from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Generic, TypeAlias, TypedDict, TypeVar
+from typing import Any, Generic, NotRequired, TypeAlias, TypedDict, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
-from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.inputs import DataPrompt, EngineInput
 from vllm.lora.request import LoRARequest
+from vllm.outputs import LateChunkingMetadata
 from vllm.renderers import ChatParams, TokenizeParams
+from vllm.renderers.chat_utils import ChatCompletionMessageParam
 from vllm.renderers.inputs import DictPrompt
 
 from ...tasks import PoolingTask
@@ -39,11 +40,13 @@ from .pooling.protocol import (
 )
 from .scoring.protocol import ScoringRequest, ScoringResponse
 from .scoring.typing import ScoreData, ScoringData
+from .token_embed.protocol import TokenEmbeddingRequest, TokenEmbeddingResponse
 
 PoolingCompletionLikeRequest: TypeAlias = (
     EmbeddingCompletionRequest
     | ClassificationCompletionRequest
     | PoolingCompletionRequest
+    | TokenEmbeddingRequest
 )
 
 PoolingChatLikeRequest: TypeAlias = (
@@ -69,6 +72,7 @@ AnyPoolingResponse: TypeAlias = (
     | PoolingResponse
     | PoolingBytesResponse
     | ScoringResponse
+    | TokenEmbeddingResponse
 )
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
@@ -78,6 +82,13 @@ PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
 class ChunkedEmbeddingMetadata:
     prompt_index: int
     chunk_index: int
+
+
+@dataclass
+class LateChunkingSlot:
+    """Per-document source ranges shared by frontend rendering and output contexts."""
+
+    metadata: LateChunkingMetadata | None = None
 
 
 @dataclass(kw_only=True)
@@ -101,6 +112,7 @@ class PoolingServeContext(Generic[PoolingRequestT]):
         None
     )
     final_res_batch: list[PoolingRequestOutput] = field(default_factory=list)
+    late_chunking: list[LateChunkingSlot] = field(default_factory=list)
 
     ## for Long Text Embedding with Chunked Processing
     original_engine_inputs: Sequence["PoolingEngineInput"] | None = None
@@ -114,6 +126,8 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
     ## for flash-late-interaction
     query_final_res_batch: list[PoolingRequestOutput] | None = None
+    late_interaction_query_keys: list[str] | None = None
+    late_interaction_doc_keys: list[str] | None = None
 
 
 @dataclass
@@ -122,6 +136,9 @@ class OfflineInputsContext:
     tokenization_kwargs: dict[str, Any] | None
     lora_request: Sequence[LoRARequest | None] | None
     priorities: int | Sequence[int] | None
+    late_chunking: list[LateChunkingSlot | None] = field(
+        default_factory=list, kw_only=True
+    )
 
 
 @dataclass
@@ -156,6 +173,7 @@ class OfflineOutputsContext:
 
     ## for bi-encoder & late-interaction
     n_queries: int | None = None
+    late_chunking: list[LateChunkingSlot | None] = field(default_factory=list)
 
 
 class RenderParams(TypedDict):
@@ -166,6 +184,7 @@ class RenderParams(TypedDict):
     params: PoolingParams
     lora_requests: LoRARequest | None
     priorities: int
+    late_chunking: NotRequired[LateChunkingSlot]
 
 
 class EncodeCMPLRenderParams(RenderParams):

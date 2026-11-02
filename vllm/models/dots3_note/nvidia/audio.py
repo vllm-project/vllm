@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-import math
 from functools import lru_cache
 
 import torch
@@ -16,11 +15,9 @@ SAMPLE_RATE = 16000
 N_FFT = 400
 HOP_LENGTH = 160
 DEFAULT_CHUNK_LENGTH_S = 60
-DEFAULT_CONV_TEMPORAL_STRIDE = 8
 DEFAULT_MERGE_FACTOR = 1
 N_SAMPLES = DEFAULT_CHUNK_LENGTH_S * SAMPLE_RATE
-STRIDE = HOP_LENGTH * DEFAULT_CONV_TEMPORAL_STRIDE * DEFAULT_MERGE_FACTOR
-ENCODER_SEQ_LEN = N_SAMPLES // HOP_LENGTH // 2
+_AUDIO_FORWARD_MAX_SEGMENTS = 16
 
 
 class Dots3NoteAudioConfig:
@@ -114,37 +111,15 @@ def _hann_window(device):
     return torch.hann_window(N_FFT).to(device)
 
 
-def log_mel_spectrogram(audio, n_mels=128):
+def batched_log_mel_spectrogram(audio, n_mels=128):
     window = _hann_window(audio.device)
     stft = torch.stft(audio, N_FFT, HOP_LENGTH, window=window, return_complex=True)
     magnitudes = stft[..., :-1].abs() ** 2
     filters = _mel_filters(audio.device, n_mels)
     mel_spec = filters @ magnitudes
     log_spec = torch.clamp(mel_spec, min=1e-10).log10()
-    log_spec = torch.maximum(log_spec, log_spec.max() - 8.0)
-    log_spec = (log_spec + 4.0) / 4.0
-    return log_spec
-
-
-def compute_audio_token_length(
-    num_samples,
-    *,
-    sample_rate: int = SAMPLE_RATE,
-    chunk_seconds: int = DEFAULT_CHUNK_LENGTH_S,
-    hop_length: int = HOP_LENGTH,
-    conv_temporal_stride: int = DEFAULT_CONV_TEMPORAL_STRIDE,
-    merge_factor: int = DEFAULT_MERGE_FACTOR,
-):
-    stride = hop_length * conv_temporal_stride * merge_factor
-    total = 0
-    time_step = 0
-    while time_step * sample_rate < num_samples:
-        chunk_len = min(
-            num_samples - time_step * sample_rate, chunk_seconds * sample_rate
-        )
-        total += math.ceil(chunk_len / stride)
-        time_step += chunk_seconds
-    return total
+    log_spec = torch.maximum(log_spec, log_spec.amax(dim=(-2, -1), keepdim=True) - 8.0)
+    return (log_spec + 4.0) / 4.0
 
 
 class DotsEncoderWithMask(nn.Module):
@@ -181,57 +156,81 @@ class DotsEncoderWithMask(nn.Module):
         input_seq_lens: torch.Tensor,
         audio_sample_lens: list[int],
     ) -> torch.Tensor:
-        """Run the eager speech encoder without server-side slicing/batching."""
         mel_features = mel_features.to(dtype=torch.bfloat16, device=self.device)
-        return self.speech_encoder(
-            mel_features,
-            return_dict=True,
-            input_seq_lens=input_seq_lens,
-            audio_sample_lens=audio_sample_lens,
-        ).last_hidden_state
+        if mel_features.shape[0] <= _AUDIO_FORWARD_MAX_SEGMENTS:
+            return self.speech_encoder(
+                mel_features,
+                return_dict=True,
+                input_seq_lens=input_seq_lens,
+                audio_sample_lens=audio_sample_lens,
+            ).last_hidden_state
 
-    def encode_waveform(self, audio_waveform: torch.Tensor) -> torch.Tensor:
-        segments = []
-        time_step = 0
-        while time_step * SAMPLE_RATE < audio_waveform.shape[0]:
-            segments.append(
-                audio_waveform[
+        chunks = []
+        for start in range(0, mel_features.shape[0], _AUDIO_FORWARD_MAX_SEGMENTS):
+            end = start + _AUDIO_FORWARD_MAX_SEGMENTS
+            chunks.append(
+                self.speech_encoder(
+                    mel_features[start:end],
+                    return_dict=True,
+                    input_seq_lens=input_seq_lens[start:end],
+                    audio_sample_lens=audio_sample_lens[start:end],
+                ).last_hidden_state
+            )
+        max_seq_len = max(chunk.shape[1] for chunk in chunks)
+        chunks = [
+            F.pad(chunk, (0, 0, 0, max_seq_len - chunk.shape[1]))
+            if chunk.shape[1] < max_seq_len
+            else chunk
+            for chunk in chunks
+        ]
+        return torch.cat(chunks, dim=0)
+
+    def encode_waveforms(self, audio_waveforms) -> list[torch.Tensor]:
+        stride = HOP_LENGTH * self.conv_temporal_stride * self.merge_factor
+        segment_token_lengths = []
+        segment_sample_lengths = []
+        audio_segment_counts = []
+        padded_segments = []
+
+        for audio_waveform in audio_waveforms:
+            segment_count = 0
+            time_step = 0
+            while time_step * SAMPLE_RATE < audio_waveform.shape[0]:
+                segment = audio_waveform[
                     time_step * SAMPLE_RATE : (time_step + self.chunk_seconds)
                     * SAMPLE_RATE
                 ]
-            )
-            time_step += self.chunk_seconds
+                segment_length = segment.shape[0]
+                padded_segments.append(
+                    pad_or_trim(segment.flatten(), length=self.chunk_samples)
+                )
+                segment_token_lengths.append((segment_length - 1) // stride + 1)
+                segment_sample_lengths.append(segment_length)
+                segment_count += 1
+                time_step += self.chunk_seconds
+            audio_segment_counts.append(segment_count)
 
-        mel_features = []
-        token_lens = []
-        audio_sample_lens = []
-        for audio_segment in segments:
-            segment_length = audio_segment.shape[0]
-            token_len = (segment_length - 1) // (
-                HOP_LENGTH * self.conv_temporal_stride * self.merge_factor
-            ) + 1
-            pad_audio = pad_or_trim(audio_segment.flatten(), length=self.chunk_samples)
-            mel = log_mel_spectrogram(pad_audio)
-            assert mel.shape[1] == self.chunk_mel_frames
-            mel_features.append(mel)
-            token_lens.append(token_len)
-            audio_sample_lens.append(segment_length)
-
-        mel_features = torch.stack(mel_features, dim=0)
-        # Keep input_seq_lens on CPU: the conv2d bucket path reads it via
-        # ``.item()`` and CPU scalars avoid device->host syncs. The encoder's
-        # varlen path moves it to the device itself.
-        input_seq_lens = torch.tensor(token_lens, dtype=torch.long) * self.merge_factor
+        mel_features = batched_log_mel_spectrogram(torch.stack(padded_segments))
+        assert mel_features.shape[-1] == self.chunk_mel_frames
+        input_seq_lens = (
+            torch.tensor(segment_token_lengths, dtype=torch.long) * self.merge_factor
+        )
         audio_embedding = self._forward_speech_encoder(
-            mel_features, input_seq_lens, audio_sample_lens
+            mel_features, input_seq_lens, segment_sample_lengths
         )
 
-        chunk_embeddings = []
-        for idx, token_len in enumerate(token_lens):
-            chunk_embeddings.append(
-                audio_embedding[idx, : token_len * self.merge_factor, :]
-            )
-        return torch.cat(chunk_embeddings, dim=0).unsqueeze(0)
+        embeddings = []
+        segment_idx = 0
+        for segment_count in audio_segment_counts:
+            chunks = []
+            for _ in range(segment_count):
+                token_length = segment_token_lengths[segment_idx]
+                chunks.append(
+                    audio_embedding[segment_idx, : token_length * self.merge_factor, :]
+                )
+                segment_idx += 1
+            embeddings.append(torch.cat(chunks).unsqueeze(0))
+        return embeddings
 
 
 class AudioAdapter(nn.Module):
@@ -275,12 +274,6 @@ class Dots3NoteAudioModel(nn.Module):
             embedding.shape[2] * self.merge_factor,
         )
 
-    def _encode_single_audio(self, audio_waveform):
-        embedding = self.dots_encoder.encode_waveform(audio_waveform)
-        embedding = self._merge_embeddings(embedding)
-        embedding = self.audio_adapter(embedding)
-        return embedding.squeeze(0)
-
     def _split_waveforms(self, audio_inputs, lengths):
         # Convert lengths to CPU ints once so the per-audio slicing below stays
         # on the host and does not trigger a device->host sync per audio.
@@ -294,12 +287,15 @@ class Dots3NoteAudioModel(nn.Module):
             audio_start += length
         return waveforms
 
+    def _forward_batched(self, waveforms):
+        raw_embeddings = self.dots_encoder.encode_waveforms(waveforms)
+        merged = [
+            self._merge_embeddings(embedding).squeeze(0) for embedding in raw_embeddings
+        ]
+        token_lengths = [embedding.shape[0] for embedding in merged]
+        packed = self.audio_adapter(torch.cat(merged))
+        return packed, token_lengths
+
     def forward(self, audio_inputs, lengths):
         waveforms = self._split_waveforms(audio_inputs, lengths)
-        all_embeddings = []
-        token_lengths = []
-        for waveform in waveforms:
-            embedding = self._encode_single_audio(waveform)
-            all_embeddings.append(embedding)
-            token_lengths.append(embedding.shape[0])
-        return torch.cat(all_embeddings, dim=0), token_lengths
+        return self._forward_batched(waveforms)

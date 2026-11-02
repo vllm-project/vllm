@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import math
 import os
 import threading
 import time
@@ -14,6 +15,7 @@ import torch
 import zmq
 
 from vllm.config import KVTransferConfig, VllmConfig
+from vllm.distributed.kv_transfer.kv_connector.utils import BlockIds
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorMetadata,
 )
@@ -29,7 +31,9 @@ from vllm.utils.network_utils import (
 )
 
 if TYPE_CHECKING:
-    pass
+    from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_tp_mapping import (
+        MoRIIOWriteTPMapping,
+    )
 
 from dataclasses import field
 from enum import Enum
@@ -41,6 +45,15 @@ Transfer = tuple[int, float]
 EngineId = str
 ReqId = str
 TransferId = str
+# (layer, cache shape, cache stride, dtype, destination TP rank)
+TransferOffsetsKey = tuple[str, tuple[int, ...], tuple[int, ...], torch.dtype, int]
+
+
+def _positive_finite_timeout(name: str, value: Any) -> float:
+    timeout = float(value)
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(f"{name} must be finite and greater than zero")
+    return timeout
 
 
 class MoRIIOTransferAck(NamedTuple):
@@ -53,12 +66,19 @@ class WriteTask:
     request_id: ReqId
     transfer_id: TransferId
     dst_engine_id: str
-    local_block_ids: list[int]
-    remote_block_ids_hint: list[int] | None
+    local_block_ids: BlockIds
+    remote_block_ids_hint: BlockIds | None
     layer_name: str
     event: torch.cuda.Event
     remote_notify_port: int
     remote_ip: str
+    remote_tp_size: int | None = None
+    multi_pod_hosts: list[str] = field(default_factory=list)
+    remote_dp_size_local: int = 0
+    remote_dp_size: int = 1
+    # Consumer ranks this producer rank writes, and what each receives. None
+    # writes the whole shard to the consumer rank with this producer's index.
+    tp_mapping: "MoRIIOWriteTPMapping | None" = None
     enqueue_time: float = field(default_factory=time.perf_counter)
     retried: int = 0
 
@@ -81,17 +101,22 @@ class LayerTransferPlan:
 class RemoteAllocInfo:
     """Information about remote block allocation."""
 
-    block_ids: list[int]
+    block_ids: BlockIds | None
     writes_done: int = 0
     writes_expected: int | None = None
     decode_dp_rank: int = 0
     completion_request_id: str | None = None
-    completion_remote_notify_port: int | None = None
+    completion_notify_port: int | None = None
     completion_remote_ip: str | None = None
+    # (ip, notify port) -> producer ranks writing into that consumer rank.
+    completion_notify_targets: dict[tuple[str, int], int] = field(default_factory=dict)
+    # Set once the targets above are known, even when there are none (a
+    # producer whose copy another producer writes still has to finish).
+    completion_targets_resolved: bool = False
     completion_notified: bool = False
     transfer_statuses: list[Any] = field(default_factory=list)
     transfer_offsets: dict[
-        tuple[tuple[int, ...], tuple[int, ...], torch.dtype],
+        TransferOffsetsKey,
         tuple[list[int], list[int], list[int]],
     ] = field(default_factory=dict)
 
@@ -114,6 +139,13 @@ class MoRIIOAgentMetadata(
     num_blocks: int
     block_len: int
     attn_backend_name: str
+    # Per-layer HeadLayout / MambaStateLayout wire forms, so a producer with a
+    # different TP size can address head and state slices of these caches.
+    kv_head_layouts: dict[str, list[int]] = {}
+    mamba_state_layouts: dict[str, list[int]] = {}
+    # Tokens per block of each attention layer. Hybrid models size attention
+    # blocks to the recurrent-state page, which depends on the TP size.
+    attention_block_sizes: dict[str, int] = {}
 
 
 class RoleManager:
@@ -156,6 +188,20 @@ def get_role() -> ROLE:
 class MoRIIOMode(Enum):
     READ = "read"
     WRITE = "write"
+
+
+class TransferBatchState(Enum):
+    """Verdict for a group of transfer statuses that belong to one request.
+
+    A request's KV transfer is spread over one status per layer (two for a KDA
+    layer), so a single status never decides the request: PENDING means at
+    least one is still in flight and none has failed, FAILED means at least
+    one failed, DONE means all succeeded.
+    """
+
+    DONE = "done"
+    FAILED = "failed"
+    PENDING = "pending"
 
 
 class MoRIIOError(Exception):
@@ -258,6 +304,7 @@ class MoRIIOConfig:
     tp_size: int
     transfer_timeout: float
     defer_timeout: float
+    recv_abort_timeout: float
     read_mode: bool = False
     qp_per_transfer: int = 1
     post_batch_size: int = -1
@@ -280,8 +327,10 @@ class MoRIIOConfig:
         #                     WRITE mode.
         # transfer_timeout -> Timeout for waiting_for_transfer_complete before
         #                     raising TransferError (sec).
-        # defer_timeout    -> Timeout before a deferred send with no finished_sending
-        #                     notification is reaped and its blocks force-freed (sec).
+        # defer_timeout    -> Timeout for deferred WRITE allocation or a missing
+        #                     READ release notification (sec).
+        # recv_abort_timeout -> Timeout before an in-flight recv whose RDMA
+        #                     completion never arrived is aborted (sec).
 
         # Knobs for RDMA transfers, ignored if on xgmi backend
         # qp_per_transfer  -> Number of RDMA Queue Pairs per KV transfer.
@@ -313,13 +362,29 @@ class MoRIIOConfig:
                 "must be one of 'rdma' or 'xgmi'."
             )
 
-        transfer_timeout = float(
+        transfer_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.transfer_timeout",
             extra_config.get(
                 "transfer_timeout", MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT
-            )
+            ),
         )
-        defer_timeout = float(
-            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
+        defer_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.defer_timeout",
+            extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT),
+        )
+        legacy_recv_abort_timeout = os.environ.get("VLLM_MORIIO_TRANSFER_TIMEOUT_S")
+        if legacy_recv_abort_timeout is not None:
+            logger.warning_once(
+                "The environment variable VLLM_MORIIO_TRANSFER_TIMEOUT_S is "
+                "deprecated. Set 'recv_abort_timeout' inside "
+                "kv_transfer_config.kv_connector_extra_config instead."
+            )
+        recv_abort_timeout = _positive_finite_timeout(
+            "kv_connector_extra_config.recv_abort_timeout",
+            extra_config.get(
+                "recv_abort_timeout",
+                legacy_recv_abort_timeout or MoRIIOConstants.DEFAULT_RECV_ABORT_TIMEOUT,
+            ),
         )
 
         return cls(
@@ -345,6 +410,7 @@ class MoRIIOConfig:
             backend=backend,
             transfer_timeout=transfer_timeout,
             defer_timeout=defer_timeout,
+            recv_abort_timeout=recv_abort_timeout,
         )
 
 
@@ -368,10 +434,14 @@ class MoRIIOConstants:
     # Timeout (seconds) for waiting_for_transfer_complete before raising TransferError.
     # Overridable via kv_connector_extra_config["transfer_timeout"].
     DEFAULT_TRANSFER_TIMEOUT = 30.0
-    # Timeout (seconds) before a deferred send with no finished_sending
-    # notification is reaped and its blocks force-freed.
+    # Timeout (seconds) for deferred WRITE allocation or a missing READ release
+    # notification.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
+    # Timeout (seconds) before an in-flight recv whose RDMA completion was lost
+    # is aborted, so the decode worker does not hang on it forever.
+    # Overridable via kv_connector_extra_config["recv_abort_timeout"].
+    DEFAULT_RECV_ABORT_TIMEOUT = 120.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -443,8 +513,8 @@ class ReqMeta:
     """Metadata for a single request."""
 
     transfer_id: TransferId
-    local_block_ids: list[int]
-    remote_block_ids: list[int]
+    local_block_ids: BlockIds
+    remote_block_ids: BlockIds
     remote_host: str
     remote_port: int
     remote_handshake_port: int
@@ -480,7 +550,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
     def add_new_req(
         self,
         request_id: ReqId,
-        local_block_ids: list[int],
+        local_block_ids: BlockIds,
         kv_transfer_params: dict[str, Any],
         write_mode=False,
     ):
@@ -565,9 +635,12 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
             # Remote peer TP degree (used as remote_tp_size downstream). The
-            # proxy advertises it under "remote_tp_size"; #46332 read "tp_size"
-            # which is absent on WRITE producer requests -> defaulted to 1 ->
-            # rank collapse. Read the right key; 0 == unknown (== homogeneous).
+            # decode side must know the prefiller's TP degree to map producer
+            # ranks onto the correct decode rank (and vice versa). The old plain
+            # "tp_size" key (#46332) is absent on WRITE producer requests and
+            # defaulted to 1, collapsing every producer rank onto decode rank 0
+            # and corrupting the transfer; prefer "remote_tp_size". 0 == unknown
+            # (treated as homogeneous downstream).
             tp_size=int(
                 kv_transfer_params.get("remote_tp_size")
                 or kv_transfer_params.get("tp_size")
@@ -586,8 +659,7 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
 
 @contextlib.contextmanager
 def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
-
+    """Context manager for a ZMQ socket."""
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
         raise ValueError(f"Unexpected socket type: {socket_type}")
 
