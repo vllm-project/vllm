@@ -22,7 +22,12 @@ from tests.kernels.quantization.nvfp4_utils import (
     dequantize_nvfp4_to_dtype,
 )
 from vllm import _custom_ops as ops
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    KernelConfig,
+    ParallelConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
@@ -453,9 +458,15 @@ def test_megamoe_trtllm_weight_layout_matches_native(dist_init, workspace_init):
     ).cuda()
     norm.weight.copy_(torch.linspace(-0.5, 0.5, K, device="cuda"))
     layers = []
-    for layout, threshold in (("native", 0), ("trtllm", 16)):
+    for layout, tp_size in (("native", 1), ("trtllm", 4)):
         config = VllmConfig(
-            additional_config={"muse_spark_trtllm_token_threshold": threshold}
+            kernel_config=KernelConfig(moe_backend="deep_gemm_mega_moe"),
+            quant_config=nvfp4_quant_config(),
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=tp_size,
+                enable_expert_parallel=True,
+                distributed_executor_backend="mp",
+            ),
         )
         with set_current_vllm_config(config):
             layer = MuseSparkMegaMoEExperts(

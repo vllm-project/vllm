@@ -479,45 +479,34 @@ steps:
       - export TORCH_CPP_LOG_LEVEL=INFO
       - torchrun --nproc-per-node=8 ../examples/features/torchrun/torchrun_dp_example_offline.py --tp-size=2 --pp-size=1 --dp-size=4 --enable-ep
 
-- label: ":nvidia: (A100) [Nightly] Distributed"
-  key: distributed-tests-4xa100
-  device: a100
+# Key kept from the former A100 step's mirror for job history and retries.
+- label: ':amd: (MI355) Distributed'
+  key: amd-distributed-tests-4xa100
+  dind: false
+  device: mi355_4
   optional: true
   num_devices: 4
+  timeout_in_minutes: 40
+  working_dir: /vllm-workspace/tests
+  depends_on:
+  - image-build-amd
   source_file_dependencies:
   - vllm/
   - "!vllm/distributed/kv_transfer/"
+  - tests/models/test_vision.py
+  - vllm/platforms/rocm.py
+  - tests/distributed/
+  - tests/basic_correctness/
+  - tests/lora/test_mixtral.py
   commands:
   # NOTE: don't test llama model here, it seems hf implementation is buggy
   # see https://github.com/vllm-project/vllm/pull/5689 for details
   - pytest -v -s distributed/test_custom_all_reduce.py
   - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s distributed/test_weight_transfer.py -k multiple_sources
-  - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
+  - TARGET_TEST_SUITE=MI355 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
-  mirror:
-    amd:
-      label: ':amd: (MI355) Distributed'
-      dind: false
-      device: mi355_4
-      timeout_in_minutes: 40
-      working_dir: /vllm-workspace/tests
-      depends_on:
-      - image-build-amd
-      source_file_dependencies:
-      - vllm/
-      - tests/models/test_vision.py
-      - vllm/platforms/rocm.py
-      - tests/distributed/
-      - tests/basic_correctness/
-      - tests/lora/test_mixtral.py
-      commands:
-      - pytest -v -s distributed/test_custom_all_reduce.py
-      - torchrun --nproc_per_node=2 distributed/test_ca_buffer_sharing.py
-      - VLLM_ALLOW_INSECURE_SERIALIZATION=1 pytest -v -s distributed/test_weight_transfer.py -k multiple_sources
-      - TARGET_TEST_SUITE=MI355 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
-      - pytest -v -s -x lora/test_mixtral.py
-      - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
+  - pytest -v -s models/test_vision.py -m 'distributed(num_gpus=4)'
 
 - label: ":nvidia: (H100) [Nightly] Distributed Features"
   key: distributed-tests-2xh100-2xmi300
