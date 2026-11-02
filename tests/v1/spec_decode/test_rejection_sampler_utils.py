@@ -1932,7 +1932,7 @@ def _global_logsumexp_probe_kernel(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
 ):
-    lse = _compute_global_logsumexp(
+    lse_hi, lse_lo = _compute_global_logsumexp(
         local_max_ptr,
         PADDED_VOCAB_NUM_BLOCKS,
         local_sumexp_ptr,
@@ -1941,7 +1941,7 @@ def _global_logsumexp_probe_kernel(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
     )
-    tl.store(out_ptr, lse)
+    tl.store(out_ptr, lse_hi.to(tl.float64) + lse_lo.to(tl.float64))
 
 
 def test_global_logsumexp_keeps_near_max_correction():
