@@ -256,7 +256,7 @@ pub struct ChatCompletionRequest {
     pub return_prompt_text: Option<bool>,
 
     /// Include the weight-version spans that sampled each choice's output
-    /// tokens. Not supported yet.
+    /// tokens.
     pub return_weight_versions: Option<bool>,
 
     /// Salt for prefix cache isolation in multi-user environments
@@ -386,7 +386,7 @@ pub(super) struct ChatCompletionResponse {
     pub system_fingerprint: Option<String>,
     pub prompt_logprobs: Option<PromptLogprobs>,
     pub prompt_token_ids: Option<Vec<u32>>,
-    /// Always `None` until `return_prompt_text` is supported.
+    /// The rendered prompt text when the request sets `return_prompt_text`.
     pub prompt_text: Option<String>,
     pub kv_transfer_params: Option<Value>,
     pub ec_transfer_params: Option<Value>,
@@ -404,7 +404,7 @@ pub(super) struct ChatCompletionChoice {
     /// Always `None`.
     /// TODO: return routed experts when `--enable-return-routed-experts` is set.
     pub routed_experts: Option<String>,
-    /// Always `None` until `return_weight_versions` is supported.
+    /// Contiguous weight-version spans over output-token indexes.
     pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
@@ -470,7 +470,7 @@ impl ChatCompletionStreamResponse {
 #[derive(Debug, Clone, Serialize)]
 pub(super) struct ChatCompletionStreamPrompt {
     pub prompt_token_ids: Option<Vec<u32>>,
-    /// Always `None` until `return_prompt_text` is supported.
+    /// The rendered prompt text when the request sets `return_prompt_text`.
     pub prompt_text: Option<String>,
 }
 
@@ -484,6 +484,8 @@ pub(super) struct ChatCompletionStreamChoice {
     pub finish_reason: Option<String>,
     pub stop_reason: Option<Value>,
     pub token_ids: Option<Vec<u32>>,
+    /// Set on the final chunk only; covers the whole output.
+    pub weight_versions: Option<Vec<WeightVersionSpan>>,
 }
 
 /// Mirrors the Python vLLM `DeltaMessage` class.
