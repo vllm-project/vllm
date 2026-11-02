@@ -2442,7 +2442,7 @@ def test_scheduler_reset_prefix_cache():
     scheduler.aux_output_connector = Mock(
         wraps=AuxOutputSchedulerConnector(scheduler.kv_cache_manager)
     )
-    requests = create_requests(num_requests=10)
+    requests = create_requests(num_requests=10, num_tokens=32)
     for request in requests:
         scheduler.add_request(request)
 
@@ -2458,6 +2458,21 @@ def test_scheduler_reset_prefix_cache():
     # Reset prefix cache should fail since there are still running requests
     # and they are taking KV cache
     assert not scheduler.reset_prefix_cache()
+    scheduler.aux_output_connector.reset.assert_not_called()
+
+    with pytest.raises(ValueError):
+        scheduler.reset_prefix_cache(
+            reset_running_requests=True, keep_running_requests=True
+        )
+
+    # keep_running_requests drops the cached prefixes without preempting.
+    block_pool = scheduler.kv_cache_manager.block_pool
+    assert block_pool.cached_block_hash_to_block
+    num_computed_tokens = [request.num_computed_tokens for request in requests]
+    assert scheduler.reset_prefix_cache(keep_running_requests=True)
+    assert not block_pool.cached_block_hash_to_block
+    assert list(scheduler.running) == requests
+    assert [r.num_computed_tokens for r in requests] == num_computed_tokens
     scheduler.aux_output_connector.reset.assert_not_called()
 
     # Pause completes pending model outputs before the caller resets the scheduler.

@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from http import HTTPStatus
 
-from fastapi import APIRouter, FastAPI, Query, Request
+from fastapi import APIRouter, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
 
 from vllm.engine.protocol import EngineClient
@@ -22,6 +23,7 @@ async def reset_prefix_cache(
     raw_request: Request,
     reset_running_requests: bool = Query(default=False),
     reset_external: bool = Query(default=False),
+    keep_running_requests: bool = Query(default=False),
 ):
     """Reset the local prefix cache.
 
@@ -32,14 +34,30 @@ async def reset_prefix_cache(
     blocks are still held, e.g. by running requests or in-flight async KV
     offload transfers; callers may retry.
 
+    With `reset_running_requests=true`, running requests are preempted
+    first and recompute from scratch.
+
+    With `keep_running_requests=true`, the reset succeeds without preempting
+    running requests. Their blocks stay allocated but can no longer be hit,
+    and blocks they fill afterwards are cached as usual, so do not use this
+    after a weight update. It cannot be combined with
+    `reset_running_requests=true`.
+
     Example:
        POST /reset_prefix_cache?reset_external=true
 
     """
+    if reset_running_requests and keep_running_requests:
+        raise HTTPException(
+            status_code=HTTPStatus.BAD_REQUEST.value,
+            detail="reset_running_requests and keep_running_requests "
+            "cannot both be true",
+        )
+
     logger.info("Resetting prefix cache...")
 
     success = await engine_client(raw_request).reset_prefix_cache(
-        reset_running_requests, reset_external
+        reset_running_requests, reset_external, keep_running_requests
     )
     return JSONResponse(content={"success": bool(success)})
 

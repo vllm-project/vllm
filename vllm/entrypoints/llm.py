@@ -830,10 +830,31 @@ class LLM(
         self.llm_engine.stop_profile()
 
     def reset_prefix_cache(
-        self, reset_running_requests: bool = False, reset_connector: bool = False
+        self,
+        reset_running_requests: bool = False,
+        reset_connector: bool = False,
+        keep_running_requests: bool = False,
     ) -> bool:
+        """Reset the prefix cache.
+
+        By default the reset fails while running requests hold KV cache blocks.
+
+        Args:
+            reset_running_requests: Preempt running requests first, so the
+                reset succeeds and they recompute from scratch.
+            reset_connector: Also reset the KV connector's cache.
+            keep_running_requests: Reset without preempting running requests.
+                Their blocks stay allocated but can no longer be hit, and
+                blocks they fill afterwards are cached as usual. Do not use
+                this after a weight update. Cannot be combined with
+                `reset_running_requests`.
+
+        Returns:
+            True if the prefix cache was reset.
+
+        """
         return self.llm_engine.reset_prefix_cache(
-            reset_running_requests, reset_connector
+            reset_running_requests, reset_connector, keep_running_requests
         )
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort"):
