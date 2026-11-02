@@ -1369,7 +1369,7 @@ def unified_attention(
     if launch_num_stages is not None:
         launch_kwargs["num_stages"] = launch_num_stages
 
-    if (use_td or use_td_qo) and q.device not in _TD_ALLOCATOR_DEVICES:
+    if use_td and q.device not in _TD_ALLOCATOR_DEVICES:
         # The hoisted 3D descriptor requires a PyTorch-backed scratch
         # allocator to be registered (Triton raises "no allocator was
         # set" otherwise on sm_100/sm_120). Same pattern as fused_moe /
