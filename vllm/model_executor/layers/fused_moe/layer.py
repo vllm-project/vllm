@@ -232,6 +232,12 @@ def FusedMoEFactory(
         MoERunner: Configured MoE execution pipeline ready for forward passes
 
     """
+    # MoERunner uses shared_expert_gate only by fusing its weight into gate's,
+    # and the router expects that extra logit column whenever it is passed.
+    assert shared_expert_gate is None or gate is not None, (
+        "shared_expert_gate is only applied through the fused router gate; "
+        "pass gate as well."
+    )
     vllm_config = get_current_vllm_config()
 
     layer_name = prefix
@@ -342,6 +348,7 @@ def FusedMoEFactory(
                 )
                 else 1.0
             ),
+            has_shared_expert_gate=shared_expert_gate is not None,
             zero_expert_type=zero_expert_type,
             num_logical_experts=logical_num_experts,
             hash_indices_table=hash_indices_table,
