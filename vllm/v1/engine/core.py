@@ -2555,7 +2555,8 @@ class DPEngineCoreProc(EngineCoreProc):
                 "flight. Wait for the pause future to resolve before "
                 "resuming."
             )
-        if self.engines_running:
+        # Set at pause consensus, so all ranks take the same branch.
+        if not self.ignore_start_dp_wave:
             logger.debug("Resume called while engines are not paused, ignoring.")
             return
 
