@@ -40,16 +40,19 @@ def main(argv):
             lines = f.readlines()
         if "torch" in "".join(lines).lower():
             with open(file, "w") as f:
+                continued = False
                 for line in lines:
-                    if (
-                        args.prefix
-                        and not line.lower().strip().startswith(TORCH_LIB_PREFIXES)
-                        or not args.prefix
-                        and "torch" not in line.lower()
-                    ):
+                    if not continued:
+                        keep = (
+                            not line.lower().strip().startswith(TORCH_LIB_PREFIXES)
+                            if args.prefix
+                            else "torch" not in line.lower()
+                        )
+                    if keep:
                         f.write(line)
                     else:
                         print(f">>> removed from {file}:", line.strip())
+                    continued = line.rstrip().endswith("\\")
 
 
 if __name__ == "__main__":
