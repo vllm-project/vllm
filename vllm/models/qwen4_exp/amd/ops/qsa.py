@@ -14,6 +14,9 @@ from vllm.triton_utils import HAS_TRITON, tl, triton
 
 _LOGITS_WORKSPACE_BYTES = 128 * 1024 * 1024
 _TOPK_WORKSPACE_BYTES = 1024 * 1024
+# Scoring programs a launch aims for: a row's programs stride over its visible
+# column tiles, so the grid does not grow with the page table's capacity.
+_SCORE_PROGRAMS = 4096
 
 
 @triton.jit
@@ -49,7 +52,7 @@ def _qsa_mqa_paged_kernel(
     COMPRESS_RATIO: tl.constexpr,
 ) -> None:
     row = tl.program_id(0)
-    columns = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
+    first_tile = tl.program_id(1)
     dims = tl.arange(0, BLOCK_D)
     request = tl.load(token_to_req_ptr + row)
     safe_request = tl.minimum(tl.maximum(request, 0), num_requests - 1)
@@ -63,37 +66,29 @@ def _qsa_mqa_paged_kernel(
         (query_position + 1) // COMPRESS_RATIO,
         sequence_length // COMPRESS_RATIO,
     )
-    if tl.program_id(1) == 0:
+    if first_tile == 0:
         tl.store(visible_blocks_ptr + row, visible)
-    logical_page = columns // PAGE_SIZE
-    page_offset = columns % PAGE_SIZE
-    valid = (
-        (row < num_rows)
-        & (columns < num_columns)
-        & (columns < visible)
-        & (request >= 0)
-        & (request < num_requests)
-        & (logical_page < PAGE_TABLE_WIDTH)
-    )
-    safe_logical_page = tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1)
-    physical_page = tl.load(
-        page_table_ptr
-        + safe_request * stride_table_req
-        + safe_logical_page * stride_table_page,
-        mask=valid,
-        other=-1,
-    )
-    valid &= (physical_page >= 0) & (physical_page < num_pages)
-    # physical_page * block stride can overflow int32 for large caches.
-    safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
-    score = tl.zeros((BLOCK_N,), dtype=tl.float32)
-
-    for head in tl.static_range(0, NUM_HEADS):
-        query = tl.load(
-            q_ptr + row * stride_q_row + head * stride_q_head + dims * stride_q_dim,
-            mask=dims < HEAD_DIM,
-            other=0.0,
-        ).to(tl.float32)
+    # The top-k reads a row's first ``visible`` columns only, so the program
+    # scores just those tiles, striding by the grid's programs per row; the
+    # columns past ``visible`` are left unwritten.
+    live_row = (row < num_rows) & (request >= 0) & (request < num_requests)
+    end = tl.where(live_row, tl.minimum(visible, num_columns), 0)
+    for tile in range(first_tile, tl.cdiv(end, BLOCK_N), tl.num_programs(1)):
+        columns = tile * BLOCK_N + tl.arange(0, BLOCK_N)
+        logical_page = columns // PAGE_SIZE
+        page_offset = columns % PAGE_SIZE
+        valid = (columns < end) & (logical_page < PAGE_TABLE_WIDTH)
+        safe_logical_page = tl.minimum(logical_page, PAGE_TABLE_WIDTH - 1)
+        physical_page = tl.load(
+            page_table_ptr
+            + safe_request * stride_table_req
+            + safe_logical_page * stride_table_page,
+            mask=valid,
+            other=-1,
+        )
+        valid &= (physical_page >= 0) & (physical_page < num_pages)
+        # physical_page * block stride can overflow int32 for large caches.
+        safe_physical_page = tl.maximum(physical_page, 0).to(tl.int64)
         keys = tl.load(
             k_cache_ptr
             + safe_physical_page[:, None] * stride_cache_block
@@ -102,15 +97,22 @@ def _qsa_mqa_paged_kernel(
             mask=valid[:, None] & (dims[None, :] < HEAD_DIM),
             other=0.0,
         ).to(tl.float32)
-        dot = tl.sum(keys * query[None, :], axis=1)
-        score += tl.maximum(dot, 0.0)
+        score = tl.zeros((BLOCK_N,), dtype=tl.float32)
+        for head in tl.static_range(0, NUM_HEADS):
+            query = tl.load(
+                q_ptr + row * stride_q_row + head * stride_q_head + dims * stride_q_dim,
+                mask=dims < HEAD_DIM,
+                other=0.0,
+            ).to(tl.float32)
+            dot = tl.sum(keys * query[None, :], axis=1)
+            score += tl.maximum(dot, 0.0)
 
-    score /= score_divisor
-    tl.store(
-        logits_ptr + row * stride_logits_row + columns,
-        tl.where(valid, score, -float("inf")),
-        mask=(row < num_rows) & (columns < num_columns),
-    )
+        score /= score_divisor
+        tl.store(
+            logits_ptr + row * stride_logits_row + columns,
+            tl.where(valid, score, -float("inf")),
+            mask=columns < end,
+        )
 
 
 @triton.jit
@@ -641,7 +643,11 @@ def qsa_mqa_paged(
     if not q.shape[0] or not columns:
         return logits, visible_blocks
     block_n = 32
-    _qsa_mqa_paged_kernel[(q.shape[0], triton.cdiv(columns, block_n))](
+    # A fixed grid for the shapes (CUDA graph safe): the programs of a row
+    # stride over its visible tiles, wherever ``visible`` ends.
+    tiles = triton.cdiv(columns, block_n)
+    per_row = max(1, min(tiles, _SCORE_PROGRAMS // q.shape[0]))
+    _qsa_mqa_paged_kernel[(q.shape[0], per_row)](
         q,
         k_cache,
         page_table,
