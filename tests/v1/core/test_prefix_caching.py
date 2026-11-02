@@ -4365,6 +4365,83 @@ def test_eagle_identical_prompt_hit(
     assert num_tokens == expected_blocks * block_size
 
 
+@pytest.mark.parametrize(
+    "num_hit_tokens,dcp_world_size,use_eagle",
+    [(n, d, False) for n in (80, 96, 112, 128) for d in (1, 2)] + [(96, 1, True)],
+)
+def test_emit_cached_block_events_for_sparse_mamba_hit(
+    num_hit_tokens: int, dcp_world_size: int, use_eagle: bool
+):
+    """Report registered residency without changing the shorter reusable hit."""
+    hash_block_size = 16
+    block_size = 64
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(
+            block_size, num_blocks=64, spec_types=["full", "mamba"]
+        ),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+        enable_kv_cache_events=True,
+        dcp_world_size=dcp_world_size,
+        scheduler_block_size=block_size * dcp_world_size,
+        use_eagle=use_eagle,
+    )
+    token_ids = list(range(num_hit_tokens + (hash_block_size if use_eagle else 1)))
+    producer = make_request("producer", token_ids, hash_block_size, sha256)
+    for chunk in (64, 32, 16) if use_eagle else (num_hit_tokens,):
+        assert manager.allocate_slots(producer, chunk) is not None
+        producer.num_computed_tokens += chunk
+        manager.new_step_starts()
+    if use_eagle:
+        assert manager.block_pool.get_cached_block(producer.block_hashes[6], [0])
+        assert (
+            manager.block_pool.get_cached_block(producer.block_hashes[5], [0]) is None
+        )
+    manager.free(producer)
+    manager.new_step_starts()
+    stored_events = manager.take_events()
+
+    consumer = make_request("consumer", token_ids, hash_block_size, sha256)
+    consumer.kv_cache_report_mode = "full"
+    blocks, num_computed, _ = manager.get_computed_blocks(consumer)
+
+    assert num_computed == num_hit_tokens
+    assert blocks.blocks[1][0].is_null
+    events = [
+        event for event in manager.take_events() if isinstance(event, BlockStored)
+    ]
+    attention_events = [event for event in events if event.group_idx == 0]
+    attention_block_size = block_size * dcp_world_size
+    attention_ends = list(
+        range(attention_block_size, num_hit_tokens + 1, attention_block_size)
+    )
+    if num_hit_tokens % attention_block_size:
+        attention_ends.append(num_hit_tokens + (hash_block_size if use_eagle else 0))
+    hashes = [kv_cache_utils.maybe_convert_block_hash(h) for h in consumer.block_hashes]
+    assert [h for event in attention_events for h in event.block_hashes] == [
+        hashes[end // hash_block_size - 1] for end in attention_ends
+    ]
+    assert attention_events[-1].block_size == (
+        hash_block_size
+        if attention_ends[-1] % attention_block_size
+        else attention_block_size
+    )
+    if use_eagle:
+        assert attention_events[-1] == next(
+            event
+            for event in reversed(stored_events)
+            if isinstance(event, BlockStored) and event.group_idx == 0
+        )
+    (event,) = [event for event in events if event.group_idx == 1]
+    event_block_size = hash_block_size if num_hit_tokens % block_size else block_size
+    event_start = num_hit_tokens - event_block_size
+    assert event.block_hashes == [hashes[num_hit_tokens // hash_block_size - 1]]
+    assert event.parent_block_hash == hashes[event_start // hash_block_size - 1]
+    assert event.token_ids == token_ids[event_start:num_hit_tokens]
+    assert event.block_size == event_block_size
+
+
 @pytest.mark.parametrize("lookahead", [1, 2])
 def test_kv_events_reconstruct_lookahead_block_hashes(lookahead: int):
     block_size = 2
