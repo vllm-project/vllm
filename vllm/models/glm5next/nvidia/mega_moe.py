@@ -45,10 +45,6 @@ def requant_block_fp8_to_ue8m0(
     return _mxfp8_e4m3_quantize_torch(real.view(n, mn, k))
 
 
-def _shared_shard_id(name: str) -> str:
-    return "w1" if ".gate_proj." in name else "w3" if ".up_proj." in name else "w2"
-
-
 class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
     """MXFP8 MegaMoE experts loaded from GLM-5.3-Flash's block-FP8 checkpoint.
 
@@ -111,6 +107,10 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         half = t.shape[0] // 2
         return t[:half] if shard_id == "w1" else t[half:]
 
+    @staticmethod
+    def _shared_shard_id(name: str) -> str:
+        return "w1" if ".gate_proj." in name else "w3" if ".up_proj." in name else "w2"
+
     def weight_loader(
         self,
         param: nn.Parameter,
@@ -149,7 +149,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
 
     def load_shared_expert_weight(self, name: str, loaded_weight: torch.Tensor) -> str:
         """Load one shared-expert checkpoint tensor; return the parameter name."""
-        layer = "shared_l2" if _shared_shard_id(name) == "w2" else "shared_l1"
+        layer = "shared_l2" if self._shared_shard_id(name) == "w2" else "shared_l1"
         suffix = "weight_scale_inv" if "weight_scale" in name else "weight"
         param = getattr(self, f"{layer}_{suffix}")
         param.weight_loader(param, loaded_weight, name)
@@ -158,7 +158,7 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
     def shared_weight_loader(
         self, param: nn.Parameter, loaded_weight: torch.Tensor, weight_name: str
     ) -> None:
-        shard_id = _shared_shard_id(weight_name)
+        shard_id = self._shared_shard_id(weight_name)
         if "weight_scale" in weight_name:
             self._shard_rows(param.data, shard_id).copy_(loaded_weight)
             self._new_scales.add((None, shard_id))
