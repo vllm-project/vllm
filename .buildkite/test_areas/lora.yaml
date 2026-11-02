@@ -10,6 +10,12 @@ steps:
   source_file_dependencies:
   - vllm/lora
   - tests/lora
+  - vllm/config/lora.py
+  - vllm/engine/arg_utils.py
+  - vllm/entrypoints/common/offline.py
+  - vllm/entrypoints/llm.py
+  - vllm/v1/engine/
+  - vllm/v1/core/kv_cache_utils.py
   commands:
     # Which tests share a shard varies, and forking an engine is unsafe once an
     # earlier test initialized CUDA in a way vLLM's fork check misses.
@@ -36,6 +42,12 @@ steps:
       source_file_dependencies:
       - vllm/lora
       - tests/lora
+      - vllm/config/lora.py
+      - vllm/engine/arg_utils.py
+      - vllm/entrypoints/common/offline.py
+      - vllm/entrypoints/llm.py
+      - vllm/v1/engine/
+      - vllm/v1/core/kv_cache_utils.py
       - vllm/platforms/rocm.py
       depends_on:
       - image-build-amd

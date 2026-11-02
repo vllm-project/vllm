@@ -34,6 +34,8 @@ class LoRAConfig:
     """Max LoRA rank."""
     max_loras: int = Field(default=1, ge=1)
     """Max number of LoRAs in a single batch."""
+    max_loras_per_request: int = Field(default=1, ge=1)
+    """Maximum adapters combined by one request. Requires eager execution."""
     fully_sharded_loras: bool = False
     """By default, only half of the LoRA computation is sharded with tensor
     parallelism. Enabling this will use the fully sharded layers. At high
@@ -111,6 +113,8 @@ class LoRAConfig:
 
     @model_validator(mode="after")
     def _validate_lora_config(self) -> Self:
+        if self.max_loras_per_request > self.max_loras:
+            raise ValueError("max_loras_per_request must be <= max_loras")
         if self.max_cpu_loras is None:
             self.max_cpu_loras = self.max_loras
         elif self.max_cpu_loras < self.max_loras:
