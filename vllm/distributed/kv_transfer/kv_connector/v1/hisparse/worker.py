@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -78,7 +79,10 @@ def _allocate_dma_descriptors(size: int) -> _DMADescriptors:
     )
 
 
-_METRICS_INTERVAL = 2000
+# The engine logs connector stats every few seconds. Snapshot the device
+# counters on the same timescale so a reporting interval never misses traffic
+# that happened while a 2000-step cadence was still pending.
+_METRICS_FLUSH_SECONDS = 2.0
 
 
 def _get_hisparse_cache(
@@ -343,9 +347,9 @@ class HiSparseConnectorWorker:
         self._pending_transfer_events: deque[tuple[torch.Event, tuple[int, ...]]] = (
             deque()
         )
-        self._metrics_calls = 0
         self._metrics_event = torch.Event()
         self._metrics_pending = False
+        self._metrics_next_flush = time.monotonic() + _METRICS_FLUSH_SECONDS
         self._init_dma()
         if self.is_host_writer:
             for layer_index, handle in enumerate(cache_handles):
@@ -557,9 +561,9 @@ class HiSparseConnectorWorker:
             if stats.is_empty():
                 stats = None
 
-        self._metrics_calls += 1
+        now = time.monotonic()
         if (
-            self._metrics_calls % _METRICS_INTERVAL == 0
+            now >= self._metrics_next_flush
             and not self._metrics_pending
             and not self.backend.is_current_stream_capturing()
         ):
@@ -572,6 +576,7 @@ class HiSparseConnectorWorker:
                 group.copy_stream.wait_stream(compute_stream)
             self._metrics_event.record()
             self._metrics_pending = True
+            self._metrics_next_flush = now + _METRICS_FLUSH_SECONDS
         return stats
 
     def _release_completed_dma_descriptors(self) -> None:
