@@ -94,7 +94,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import round_up
 
-from .attention import Glm5NextMLAAttention
+from .attention import Glm5NextMLAAttention, Indexer
 from .kda import Glm5NextLinearAttention
 from .multimodal import (
     Glm5NextMultiModalProcessor,
@@ -1059,12 +1059,12 @@ class Glm5NextModel(nn.Module, EagleModelMixin):
         return loaded_params
 
 
-def refresh_post_load_caches(model: nn.Module) -> None:
-    """Rebuild the indexers' fp32 head gate from the loaded weights, in place.
-    Runs after every load and reload."""
+def process_indexers_after_loading(model: nn.Module) -> None:
+    """Run the indexers' post-load processing (the fp32 head gate, rebuilt in
+    place) after every load and reload."""
     for module in model.modules():
-        if callable(getattr(module, "refresh_post_load_cache", None)):
-            module.refresh_post_load_cache()
+        if isinstance(module, Indexer):
+            module.process_weights_after_loading()
 
 
 class Glm5NextForCausalLM(
@@ -1156,7 +1156,7 @@ class Glm5NextForCausalLM(
         return logits
 
     def process_weights_after_loading(self) -> None:
-        refresh_post_load_caches(self)
+        process_indexers_after_loading(self)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
@@ -1263,7 +1263,7 @@ class Glm5NextForConditionalGeneration(
         # model) and we intentionally do not alias it here.
 
     def process_weights_after_loading(self) -> None:
-        refresh_post_load_caches(self)
+        process_indexers_after_loading(self)
 
     def set_moe_parameters(self) -> None:
         self.moe_mlp_layers = [

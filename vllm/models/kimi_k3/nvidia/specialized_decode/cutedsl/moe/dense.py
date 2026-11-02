@@ -74,7 +74,7 @@ class PreparedDenseMLP:
         self.activation = _compile_activation(hidden, padded, architecture(self.device))
 
     @torch.no_grad()
-    def refresh_weights(self, mlp):
+    def process_weights_after_loading(self, mlp):
         """After a weight reload: the padded TP16 down copy is ours, refill it in
         place (padding columns stay zero). Unpadded, it is the backbone weight."""
         if self.padded != self.hidden:

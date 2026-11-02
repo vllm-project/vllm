@@ -178,7 +178,7 @@ class SpecializedDecode:
             self.feed_forward[index] = moe
 
     @torch.no_grad()
-    def refresh_weights(self):
+    def process_weights_after_loading(self):
         """After a weight reload: re-derive, in place, the copies built from the
         weights. Everything else reads the backbone's tensors directly, which a
         reload refills at the same addresses."""
@@ -187,10 +187,13 @@ class SpecializedDecode:
                 fresh = pack_front(layer.mlp, self.rank, self.tp)
                 self.packed[layer.layer_idx].copy_(fresh)
             else:
-                self.feed_forward[layer.layer_idx].refresh_weights(layer.mlp)
+                self.feed_forward[layer.layer_idx].process_weights_after_loading(
+                    layer.mlp
+                )
             core = self.attention[layer.layer_idx].core
-            if hasattr(core, "refresh_weights"):  # KDA; MLA reads the backbone's
-                core.refresh_weights(layer.self_attn)
+            # KDA; MLA reads the backbone's
+            if hasattr(core, "process_weights_after_loading"):
+                core.process_weights_after_loading(layer.self_attn)
 
     def prepare_kv(self):
         """Compile each layer's cores for its bound KV cache layout (the profiling

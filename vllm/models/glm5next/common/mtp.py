@@ -44,7 +44,7 @@ from .model import (
     _try_load_fp8_indexer_wk,
     get_sparse_topk_buffer_width,
     get_spec_layer_idx_from_weight_name,
-    refresh_post_load_caches,
+    process_indexers_after_loading,
 )
 
 
@@ -271,7 +271,7 @@ class Glm5NextMTP(nn.Module, DeepseekV2MixtureOfExperts):
         return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def process_weights_after_loading(self) -> None:
-        refresh_post_load_caches(self)
+        process_indexers_after_loading(self)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         spec_layer_weight_names = [

@@ -1551,7 +1551,7 @@ class KimiLinearForCausalLM(
         """The specialized decode is built after the first load and keeps copies
         derived from the weights; refresh them after a reload."""
         if self.specialized_decode is not None:
-            self.specialized_decode.refresh_weights()
+            self.specialized_decode.process_weights_after_loading()
 
 
 def get_spec_layer_idx_from_weight_name(

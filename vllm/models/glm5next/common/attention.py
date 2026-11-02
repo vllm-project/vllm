@@ -294,7 +294,7 @@ class Indexer(nn.Module):
             tail_cache=self.tail_cache,
         )
 
-    def refresh_post_load_cache(self) -> None:
+    def process_weights_after_loading(self) -> None:
         """Build the fp32 head-gate projection from the loaded weights; reloads
         refill it in place."""
         wp = (
@@ -316,7 +316,7 @@ class Indexer(nn.Module):
         kw, _ = self.wk_weights_proj(hidden_states)
         k = kw[:, : self.head_dim]
         if self._wp_fp32 is None:  # only when post-load processing never ran
-            self.refresh_post_load_cache()
+            self.process_weights_after_loading()
         weights = torch.mm(hidden_states.float(), self._wp_fp32)
 
         k = _fused_indexer_k_norm(

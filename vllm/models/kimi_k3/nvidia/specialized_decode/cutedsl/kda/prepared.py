@@ -68,7 +68,7 @@ class PreparedKda:
         self.conv_dim_first, self.kernels = conv_dim_first, {}
 
     @torch.no_grad()
-    def refresh_weights(self, attention):
+    def process_weights_after_loading(self, attention):
         """Refill the derived conv weight and FP32 norm after a weight reload."""
         conv_w, *_, norm = self.weights
         conv_w.copy_(decode_conv_weight(attention.conv1d.weight))
