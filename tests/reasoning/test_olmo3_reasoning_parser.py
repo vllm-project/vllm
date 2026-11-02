@@ -236,3 +236,63 @@ def test_buffer_holds_only_a_genuine_marker_prefix():
     # completing the marker flushes the buffer
     buffer.add_text("think>")
     assert len(buffer) == 0
+
+
+def test_char_level_streaming_holds_only_marker_characters():
+    # One character per delta. A character of the reasoning or the content
+    # must surface in the call that fed it; only the markers' own characters
+    # are allowed to produce no delta while they are still ambiguous.
+    text = "<think>R</think>That is what I think"
+    # "<think>" is text[0:6], "R" is text[6:7], "</think>" is text[7:15]
+    marker_spans = set(range(0, 6)) | set(range(7, 15))
+
+    parser = Olmo3ReasoningParser(_TinyTokenizer())
+    reasoning, content, prev = "", "", ""
+    silent: list[int] = []
+    for i, ch in enumerate(text):
+        message = parser.extract_reasoning_streaming(prev, prev + ch, ch, [], [], [])
+        prev += ch
+        if message is None:
+            silent.append(i)
+            continue
+        reasoning += message.reasoning or ""
+        content += message.content or ""
+        # never behind: what has streamed is a prefix of the final text, so
+        # no character is carried over into a later chunk
+        assert "R".startswith(reasoning)
+        assert "That is what I think".startswith(content)
+
+    assert (reasoning, content) == ("R", "That is what I think")
+    assert set(silent) <= marker_spans
+    assert not set(silent) & set(range(15, len(text)))
+    assert parser.finish_streaming() is None
+
+
+def test_contained_delta_streams_in_the_call_that_fed_it():
+    # A delta that occurs inside a marker but cannot grow into one ("think"
+    # after "</think" already closed, or in plain content) must come back in
+    # its own call, not be merged into whatever chunk follows it.
+    parser = Olmo3ReasoningParser(_TinyTokenizer())
+    prev = ""
+
+    def step(chunk):
+        nonlocal prev
+        message = parser.extract_reasoning_streaming(
+            prev, prev + chunk, chunk, [], [], []
+        )
+        prev += chunk
+        return message
+
+    step("<think>")
+    assert step("R").reasoning == "R"
+    step("</")
+    step("think")
+    step(">")
+
+    contained = step("think")
+    assert contained is not None, "contained delta was held back"
+    assert contained.content == "think"
+
+    follow_up = step("ing done")
+    assert follow_up is not None
+    assert follow_up.content == "ing done"

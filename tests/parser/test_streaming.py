@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.parser.engine.registered_adapters import Qwen3ParserReasoningAdapter
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.reasoning.olmo3_reasoning_parser import Olmo3ReasoningParser
 from vllm.tool_parsers.hermes_tool_parser import Hermes2ProToolParser
 
 
@@ -812,3 +813,45 @@ def test_parse_delta_finished_flushes_legacy_reasoning_holdback(tokenizer, reque
     # no double flush on a repeated finished call
     again = parser.parse_delta("", [], request_obj, finished=True)
     assert again is None or not again.reasoning
+
+
+class _Olmo3VocabTokenizer:
+    """Just enough vocab for Olmo3ReasoningParser's think_end splits."""
+
+    def get_vocab(self):
+        return {"Ġ</": 1, "</": 2, "think": 3, ">": 4}
+
+
+def test_parse_delta_contained_marker_substring_streams_mid_stream(request_obj):
+    # The same no-latency property one layer up, through the facade rather
+    # than against the reasoning parser directly: a delta that occurs inside
+    # a marker but cannot grow into one must come back from the parse_delta
+    # call that fed it, not ride along with the next chunk.
+    class TestParser(DelegatingParser):
+        reasoning_parser_cls = Olmo3ReasoningParser
+        tool_parser_cls = None
+
+    parser = TestParser(_Olmo3VocabTokenizer())
+    prev = ""
+
+    def step(chunk):
+        nonlocal prev
+        message = parser.parse_delta(chunk, [], request_obj, finished=False)
+        prev += chunk
+        return message
+
+    step("<think>")
+    assert step("R").reasoning == "R"
+    step("</")
+    step("think")
+    step(">")
+    assert step("plain ").content == "plain "
+
+    contained = step("think")
+    assert contained is not None, "contained delta was held back at the facade"
+    assert contained.content == "think"
+
+    assert step("ing done").content == "ing done"
+
+    final = parser.parse_delta("", [], request_obj, finished=True)
+    assert final is None or not final.content
