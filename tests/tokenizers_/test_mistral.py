@@ -2276,7 +2276,10 @@ def test_convert_ids_to_tokens_pre_args_tekken():
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("reasoning_effort", [None, "none", "high"])
+@pytest.mark.parametrize(
+    "reasoning_effort",
+    [None, "none", "minimal", "low", "medium", "high", "xhigh", "max"],
+)
 def test_validate_request_params_valid_effort(reasoning_effort: str | None) -> None:
     request = ChatCompletionRequest(
         model="test-model",
@@ -2284,17 +2287,6 @@ def test_validate_request_params_valid_effort(reasoning_effort: str | None) -> N
         reasoning_effort=reasoning_effort,
     )
     assert validate_request_params(request) is None
-
-
-def test_validate_request_params_rejects_unsupported_effort() -> None:
-    request = ChatCompletionRequest(
-        model="test-model",
-        messages=[],
-        reasoning_effort="medium",
-    )
-    with pytest.raises(VLLMValidationError, match="reasoning_effort") as exc_info:
-        validate_request_params(request)
-    assert exc_info.value.parameter == "reasoning_effort"
 
 
 def test_validate_request_params_rejects_chat_template() -> None:

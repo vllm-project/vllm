@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum
 from fnmatch import fnmatch
@@ -114,6 +114,7 @@ from vllm.model_executor.parameter import (
 )
 from vllm.model_executor.utils import (
     is_weights_pre_processed,
+    refill_derived,
     replace_parameter,
     retire_parameter,
     set_weight_attrs,
@@ -622,6 +623,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         w13 = layer.w13_weight
@@ -898,8 +900,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     def dequantize_weight(
         self, layer: torch.nn.Module
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Materialize serialized ModelOpt NVFP4 expert weights."""
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield ``(experts, w13, w2)`` dequantized ModelOpt NVFP4 experts."""
         return dequantize_nvfp4_moe_weights(
             layer.w13_weight,
             layer.w13_weight_scale,
@@ -1123,6 +1125,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             routing_tables=layer._expert_routing_tables(),
             per_token_activation=self.per_token_activation,
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
     def _restore_padded_moe_dims(self, layer: RoutedExperts) -> None:
@@ -1218,10 +1221,14 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
         is_checkpoint_mxfp8_serialized: bool,
         kv_cache_quant_algo: str | None,
         exclude_modules: list[str],
+        moe_quant_algo: str | None = None,
     ) -> None:
         super().__init__(exclude_modules)
         self.quant_method = "MXFP8"
         self.is_checkpoint_mxfp8_serialized = is_checkpoint_mxfp8_serialized
+        # MiniMax-M3.1 checkpoints keep MXFP8 linears but store routed experts
+        # as compressed-tensors NVFP4 (`moe_quant_algo: NVFP4`).
+        self.moe_quant_algo = moe_quant_algo
 
         if not is_checkpoint_mxfp8_serialized:
             raise ValueError(
@@ -1257,12 +1264,25 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
         # (same on-disk format as ModelOpt MXFP8); normalize to the ModelOpt
         # schema and reuse the shared parser.
         if "quantization" not in config and not config.get("quant_algo"):
+            moe_quant_algo = (config.get("moe_quant_algo") or "").upper() or None
+            if moe_quant_algo is not None and (
+                moe_quant_algo != "NVFP4"
+                or config.get("moe_quant_format") != "nvfp4-pack-quantized"
+                or config.get("group_size") != 16
+            ):
+                raise ValueError(
+                    "Unsupported MXFP8 checkpoint MoE quantization: "
+                    f"moe_quant_algo={config.get('moe_quant_algo')!r}, "
+                    f"moe_quant_format={config.get('moe_quant_format')!r}, "
+                    f"group_size={config.get('group_size')!r}."
+                )
             config = {
                 "quant_method": "modelopt",
                 "quantization": {
                     "quant_algo": "MXFP8",
                     "kv_cache_quant_algo": config.get("kv_cache_quant_algo"),
                     "exclude_modules": config.get("ignored_layers", []) or [],
+                    "moe_quant_algo": moe_quant_algo,
                 },
             }
         return cast("ModelOptMxFp8Config", super().from_config(config))
@@ -1296,7 +1316,40 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
             is_checkpoint_mxfp8_serialized,
             kv_cache_quant_method,
             exclude_modules,
+            moe_quant_algo=original_config.get("quantization", {}).get(
+                "moe_quant_algo"
+            ),
         )
+
+    def routed_expert_weight_key(self) -> QuantKey:
+        """The weight format the routed experts are stored in.
+
+        MXFP8, or NVFP4 (``moe_quant_algo: NVFP4``).
+        """
+        if self.moe_quant_algo != "NVFP4":
+            return kMxfp8Static
+        return kNvfp4Static
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        if (
+            self.moe_quant_algo == "NVFP4"
+            and isinstance(layer, RoutedExperts)
+            and not self.is_layer_excluded(prefix)
+        ):
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w4a4_nvfp4 import (  # noqa: E501
+                CompressedTensorsW4A4Nvfp4MoEMethod,
+            )
+
+            # Nothing in the checkpoint says how its FC1 input was
+            # quantized during QAT, so the model declares it.
+            return CompressedTensorsW4A4Nvfp4MoEMethod(
+                layer.moe_config,
+                layer_name=prefix,
+                activation_key=(layer.moe_config.qat_activation_key or kNvfp4Dynamic),
+            )
+        return super().get_quant_method(layer, prefix)
 
 
 class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
@@ -1497,6 +1550,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
         )
+        self.moe_kernel.fused_experts.keep_constants(layer)
 
         # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
         # experts would dequant MXFP8->BF16 every forward step. Convert the
@@ -2682,21 +2736,12 @@ class ModelOptLinearMethod(LinearMethodBase):
                 )
             assert self.ctx.group_size is not None
             # Copies: the kernel may write its layout into the params in place.
-            layer.register_buffer(
-                "_nvfp4_weight_for_gather",
-                layer.weight.detach().clone(),
-                persistent=False,
-            )
-            layer.register_buffer(
-                "_nvfp4_weight_scale_for_gather",
-                layer.weight_scale.detach().clone(),
-                persistent=False,
-            )
-            layer.register_buffer(
-                "_nvfp4_weight_global_scale_for_gather",
-                layer.weight_global_scale.detach().clone(),
-                persistent=False,
-            )
+            for name, src in (
+                ("_nvfp4_weight_for_gather", layer.weight),
+                ("_nvfp4_weight_scale_for_gather", layer.weight_scale),
+                ("_nvfp4_weight_global_scale_for_gather", layer.weight_global_scale),
+            ):
+                refill_derived(layer, name, src.detach().clone())
             layer._nvfp4_group_size_for_gather = self.ctx.group_size
         self.kernel.process_weights_after_loading(layer)
 

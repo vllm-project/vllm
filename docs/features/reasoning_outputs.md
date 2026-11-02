@@ -308,6 +308,8 @@ curl http://localhost:8000/v1/chat/completions \
   }'
 ```
 
+The Responses API (`/v1/responses`) accepts the same `thinking_token_budget` field.
+
 ### Offline Inference
 
 ```python
