@@ -25,6 +25,9 @@ from typing import Any
 import regex as re
 import torch
 
+from vllm.platforms import current_platform
+from vllm.profiler.wrapper import get_default_torch_profiler_activities
+
 _GPU_CATEGORIES = ("kernel", "gpu_memcpy", "gpu_memset")
 # Kernels named after a generic launcher are identified by their first
 # template argument instead.
@@ -155,17 +158,24 @@ def profile_graph(
     """
 
     def run() -> None:
-        torch.cuda.profiler.start()
-        with torch.cuda.nvtx.range(f"forward/{name}"):
+        # `cudaProfilerStart`/`Stop` and NVTX ranges are CUDA-only (for
+        # Nsight Systems); other accelerators just replay.
+        if current_platform.is_xpu():
             for _ in range(replays):
                 graph.replay()
                 torch.accelerator.synchronize()
-        torch.cuda.profiler.stop()
+        else:
+            torch.cuda.profiler.start()
+            with torch.cuda.nvtx.range(f"forward/{name}"):
+                for _ in range(replays):
+                    graph.replay()
+                    torch.accelerator.synchronize()
+            torch.cuda.profiler.stop()
 
     if prefix is None:
         run()
         return None
-    activities = [torch.profiler.ProfilerActivity.CUDA]
+    activities = get_default_torch_profiler_activities()
     with torch.profiler.profile(activities=activities) as prof:
         run()
     trace = f"{prefix}.trace.json.gz"
