@@ -42,7 +42,19 @@ if current_platform.is_rocm():
 else:
     _ON_GFX950 = False
 
-from .fused_indexer_q import _fp32x2_to_fp4x2, _fp32x2_to_fp4x2_rocm
+from .fused_indexer_q import _fp32x2_to_fp4x2
+
+
+@triton.jit
+def _fp32x2_to_fp4x2_rocm(x_lo, x_hi):
+    return tl.inline_asm_elementwise(
+        "v_cvt_scalef32_pk_fp4_f32 $0, $1, $2, $3",
+        constraints="=v,v,v,v",
+        args=[x_lo, x_hi, 1.0],
+        dtype=tl.int32,
+        is_pure=True,
+        pack=1,
+    ).to(tl.uint8)
 
 
 def compress_norm_rope_store_triton(
@@ -934,7 +946,11 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     SCALE_DIM: tl.constexpr,  # HEAD_SIZE // QUANT_BLOCK = 4 ue8m0 bytes/token
     KV_BLOCK_STRIDE: tl.constexpr,
     MX_SCALE: tl.constexpr,  # unused for MXFP4 (kept for signature parity)
-    PRESHUFFLE: tl.constexpr = False,
+    # ROCm: write aiter's `k_norm_rope_mxfp4_cache` bytes in its shuffled order.
+    AITER_LAYOUT: tl.constexpr = False,
+    N_PER_TILE: tl.constexpr = 1,
+    D_PER_TILE: tl.constexpr = 1,
+    SCALE_LANES: tl.constexpr = 1,
 ):
     """Fused compress → RMSNorm → RoPE → MXFP4 quant → store.
 
@@ -1004,12 +1020,16 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     )
 
     compressed_kv = tl.sum(kv * score, axis=0)  # [TRITON_BLOCK_SIZE] fp32
+    if AITER_LAYOUT:
+        compressed_kv = compressed_kv.to(tl.bfloat16).to(tl.float32)
 
     # ── RMSNorm (fp32 throughout) ──────────────────────────────────────
     rms_w = tl.load(rms_norm_weight_ptr + block, mask=mask, other=0.0)
     variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_SIZE
     rrms = tl.rsqrt(variance + rms_norm_eps)
     normed = compressed_kv * rrms * rms_w
+    if AITER_LAYOUT:
+        normed = normed.to(tl.bfloat16).to(tl.float32)
 
     # ── KV cache pointers (segregated: values first, then scales) ────
     kv_slot_idx = tl.load(kv_slot_mapping_ptr + token_idx)
@@ -1068,41 +1088,49 @@ def _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn(
     )
     amax = tl.maximum(amax, 6.0 * (2**-126))
 
-    # ue8m0 block scale: 2^ceil(log2(amax / 6.0)), stored as (exp + 127) byte.
-    log2_ratio = tl.ceil(tl.log2(amax * (1.0 / 6.0)))
-    log2_ratio = tl.minimum(tl.maximum(log2_ratio, -127.0), 127.0)
-    inv_scale = tl.exp2(-log2_ratio)
-    ue8m0 = (log2_ratio + 127.0).to(tl.uint8)  # [N_QUANT_BLOCKS]
-
-    inv_scale_col = tl.reshape(inv_scale, (N_QUANT_BLOCKS, 1))
-    if PRESHUFFLE:
+    if AITER_LAYOUT:
+        # aiter's exact ceil scale from the exponent bits, and gfx950's packer.
+        bits = (amax * (1.0 / 6.0)).to(tl.uint32, bitcast=True)
+        exponent = (bits + 0x7FFFFF) >> 23
+        ue8m0 = exponent.to(tl.uint8)
+        inv_scale = ((254 - exponent) << 23).to(tl.float32, bitcast=True)
+        inv_scale_col = tl.reshape(inv_scale, (N_QUANT_BLOCKS, 1))
         packed = _fp32x2_to_fp4x2_rocm(even_2d * inv_scale_col, odd_2d * inv_scale_col)
     else:
-        packed = _fp32x2_to_fp4x2(even_2d * inv_scale_col, odd_2d * inv_scale_col)
+        # ue8m0 block scale: 2^ceil(log2(amax / 6.0)), stored as (exp + 127).
+        log2_ratio = tl.ceil(tl.log2(amax * (1.0 / 6.0)))
+        log2_ratio = tl.minimum(tl.maximum(log2_ratio, -127.0), 127.0)
+        inv_scale = tl.exp2(-log2_ratio)
+        ue8m0 = (log2_ratio + 127.0).to(tl.uint8)  # [N_QUANT_BLOCKS]
+        inv_scale_col = tl.reshape(inv_scale, (N_QUANT_BLOCKS, 1))
+        packed = _fp32x2_to_fp4x2(
+            even_2d * inv_scale_col, odd_2d * inv_scale_col
+        )  # (N_BLOCKS, HALF_BLOCK) uint8
     packed_flat = tl.reshape(packed, (TOKEN_STRIDE,))
 
-    packed_idx = tl.arange(0, TOKEN_STRIDE)
+    byte = tl.arange(0, TOKEN_STRIDE)
     scale_idx = tl.arange(0, SCALE_DIM)
-    if PRESHUFFLE:
-        tl.static_assert(HEAD_SIZE == 128 and QUANT_BLOCK == 32)
-        value_offset = (
-            (packed_idx // HALF_BLOCK) * kv_cache_block_size * HALF_BLOCK
-            + kv_pos_in_block * HALF_BLOCK
-            + packed_idx % HALF_BLOCK
+    if AITER_LAYOUT:
+        S_HI: tl.constexpr = SCALE_DIM // SCALE_LANES
+        group = kv_pos_in_block // N_PER_TILE
+        lane = kv_pos_in_block % N_PER_TILE
+        value_off = (
+            group * (N_PER_TILE * TOKEN_STRIDE)
+            + byte // D_PER_TILE * (N_PER_TILE * D_PER_TILE)
+            + lane * D_PER_TILE
+            + byte % D_PER_TILE
         )
-        scale_offset = (
-            kv_cache_block_size * TOKEN_STRIDE
-            + scale_idx * kv_cache_block_size
-            + (kv_pos_in_block % 16) * 4
-            + kv_pos_in_block // 16
+        scale_off = (
+            group * (N_PER_TILE * SCALE_DIM)
+            + scale_idx % SCALE_LANES * (N_PER_TILE * S_HI)
+            + lane * S_HI
+            + scale_idx // SCALE_LANES
         )
     else:
-        value_offset = kv_pos_in_block * TOKEN_STRIDE + packed_idx
-        scale_offset = (
-            kv_cache_block_size * TOKEN_STRIDE + kv_pos_in_block * SCALE_DIM + scale_idx
-        )
-    tl.store(cache_block_ptr + value_offset, packed_flat)
-    tl.store(cache_block_ptr + scale_offset, ue8m0)
+        value_off = kv_pos_in_block * TOKEN_STRIDE + byte
+        scale_off = kv_pos_in_block * SCALE_DIM + scale_idx
+    tl.store(cache_block_ptr + value_off, packed_flat)
+    tl.store(cache_block_ptr + kv_cache_block_size * TOKEN_STRIDE + scale_off, ue8m0)
 
 
 class FusedKVCompressNormRopeInsertIndexerTritonKernel(
@@ -1126,6 +1154,10 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         kv_cache_block_size: int
         kv_block_stride: int
         mx_scale: bool
+        # aiter's (n_per_tile, d_per_tile, scale_lanes) K page order; 0 = linear.
+        n_per_tile: int = 0
+        d_per_tile: int = 0
+        scale_lanes: int = 0
 
     # Canonical kernel for the launcher's arg_names mapping; the launched
     # variant (fp8/mxfp4, same arg_names) is picked per call in __call__.
@@ -1146,6 +1178,9 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         runtime_token_stride: int | None = None,
         runtime_scale_dim: int | None = None,
         runtime_kv_block_stride: int | None = None,
+        n_per_tile: int = 0,
+        d_per_tile: int = 0,
+        scale_lanes: int = 0,
     ) -> CompileKey:
         overlap = compress_ratio == 4
         default_quant_block = 32 if use_fp4_cache else 128
@@ -1206,6 +1241,9 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             kv_cache_block_size=kv_cache_block_size,
             kv_block_stride=kv_block_stride,
             mx_scale=not use_fp4_cache and mqa_logits_use_mx_scales(),
+            n_per_tile=n_per_tile,
+            d_per_tile=d_per_tile,
+            scale_lanes=scale_lanes,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -1217,23 +1255,25 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         from vllm.v1.attention.backends.mla.indexer import (
             dsa_indexer_uses_fp4,
         )
-        from vllm.v1.attention.backends.mla.rocm_flydsl_mxfp4_indexer import (
-            rocm_flydsl_mxfp4_indexer_enabled,
-        )
 
         use_fp4_cache = dsa_indexer_uses_fp4(vllm_config)
-        # On ROCm only the FlyDSL indexer writes MXFP4 K with this kernel;
-        # aiter's Triton paged indexer writes it with aiter's own op.
-        if (
-            use_fp4_cache
-            and current_platform.is_rocm()
-            and not rocm_flydsl_mxfp4_indexer_enabled(vllm_config)
-        ):
-            return []
         head_dim = int(getattr(hf_config, "index_head_dim", 0) or 0)
         rope_head_dim = int(getattr(hf_config, "qk_rope_head_dim", 0) or 0)
         if head_dim <= 0 or rope_head_dim <= 0 or cache_block_size <= 0:
             return []
+        aiter_layout = (0, 0, 0)
+        if use_fp4_cache and current_platform.is_rocm():
+            # The page order of aiter's paged MXFP4 MQA-logits kernel.
+            from vllm.v1.attention.ops.rocm_paged_mxfp4_indexer import (
+                rocm_paged_mxfp4_cache_layout,
+            )
+
+            num_heads = int(getattr(hf_config, "index_n_heads", 0) or 0)
+            if num_heads <= 0:
+                return []
+            aiter_layout = rocm_paged_mxfp4_cache_layout(
+                num_heads, head_dim, cache_block_size // 4
+            )
 
         cache_dtype = vllm_config.cache_config.cache_dtype
         cache_alignment = 576 if cache_dtype == "fp8_ds_mla" else 512
@@ -1245,21 +1285,29 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             compress_ratio=4,
             cache_block_size=cache_block_size,
             cache_alignment=cache_alignment,
+            n_per_tile=aiter_layout[0],
+            d_per_tile=aiter_layout[1],
+            scale_lanes=aiter_layout[2],
         )
 
     def warmup_inputs(self, compile_key: CompileKey) -> dict[str, Any]:
         fp32_ptr = TritonWarmupTensor(torch.float32, shape=(1, 1))
         int32_ptr = TritonWarmupTensor(torch.int32)
         int64_ptr = TritonWarmupTensor(torch.int64)
+        # Both caches view the KV pool, which is past ROCm's 2 GB pointer range.
+        pool_bytes = 0 if compile_key.n_per_tile == 0 else 1 << 32
         # kv_cache supplies kv_cache_block_size (shape[1]) and KV_BLOCK_STRIDE
         # (stride(0)); reproduce both so warmup and launch specialize identically.
         kv_cache = TritonWarmupTensor(
             torch.uint8,
             shape=(1, compile_key.kv_cache_block_size, 1),
             strides=(compile_key.kv_block_stride, 1, 1),
+            ptr_range_bytes=pool_bytes,
         )
         return dict(
-            state_cache=fp32_ptr,
+            state_cache=TritonWarmupTensor(
+                torch.float32, shape=(1, 1), ptr_range_bytes=pool_bytes
+            ),
             num_actual=1,
             token_to_req_indices=int32_ptr,
             positions=int64_ptr,
@@ -1284,6 +1332,9 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             quant_block=compile_key.quant_block,
             token_stride=compile_key.token_stride,
             scale_dim=compile_key.scale_dim,
+            n_per_tile=compile_key.n_per_tile,
+            d_per_tile=compile_key.d_per_tile,
+            scale_lanes=compile_key.scale_lanes,
         )
 
     @kernel_launcher
@@ -1312,13 +1363,18 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
         quant_block: int,
         token_stride: int,
         scale_dim: int,
+        n_per_tile: int = 0,
+        d_per_tile: int = 0,
+        scale_lanes: int = 0,
     ) -> LaunchSpec:
-        if (
-            use_fp4_cache
-            and current_platform.is_rocm()
-            and (not _ON_GFX950 or head_dim != 128 or kv_cache.shape[1] != 64)
-        ):
-            raise ValueError("ROCm MXFP4 indexer K requires gfx950, D=128, page=64")
+        layout_kwargs = {}
+        if n_per_tile:
+            layout_kwargs = dict(
+                AITER_LAYOUT=True,
+                N_PER_TILE=n_per_tile,
+                D_PER_TILE=d_per_tile,
+                SCALE_LANES=scale_lanes,
+            )
         return (num_actual,), dict(
             kernel=(
                 _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn
@@ -1344,8 +1400,8 @@ class FusedKVCompressNormRopeInsertIndexerTritonKernel(
             SCALE_DIM=scale_dim,
             KV_BLOCK_STRIDE=kv_cache.stride(0),
             MX_SCALE=not use_fp4_cache and mqa_logits_use_mx_scales(),
-            **({"PRESHUFFLE": current_platform.is_rocm()} if use_fp4_cache else {}),
             num_warps=1,
+            **layout_kwargs,
             **pdl_kwargs,
         )
 

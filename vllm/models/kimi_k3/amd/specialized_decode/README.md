@@ -31,12 +31,16 @@ TP8 on MI355X with all 256 CUs, decode context parallel 1 or 8, speculative
 decoding with at most 7 speculative tokens, Model Runner V2, BF16 conv / FP32
 recurrent KDA states.
 
+KV transfer support is limited to built-in MoRIIO READ and WRITE consumers.
+Keep the producer on `decode_backend=auto` and use matching cache layouts.
+
 If you request the specialized decode for anything else, startup fails with one
 `ValueError` that lists every unsupported setting:
 
 - **Config, in the model's `__init__`:** pipeline, data, expert or prefill
-  context parallelism, EPLB, DBO, LoRA, KV connectors, routed-expert capture,
-  sleep mode, CPU weight offload, weight updates, no speculative decoding,
+  context parallelism, EPLB, DBO, LoRA, unsupported KV connectors,
+  routed-expert capture, sleep mode, CPU weight offload, weight updates,
+  no speculative decoding,
   adaptive verification, dynamic speculative decoding, ReplaySSM / RecoverSSM,
   the V1 model runner, `STOCK_TORCH_COMPILE`, another model's shapes, another GPU.
 - **Loaded weights, when the model state builds the executor:** each kernel
