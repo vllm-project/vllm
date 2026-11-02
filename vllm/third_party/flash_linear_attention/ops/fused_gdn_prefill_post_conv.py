@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import tl, tldevice, triton
 
 
 @triton.jit
@@ -152,7 +152,7 @@ def _fused_post_conv_kernel(
         g_vals = -tl.exp(A_log_val) * sp
 
         if OUTPUT_G_EXP:
-            g_vals = tl.exp(g_vals)
+            g_vals = tldevice.exp(g_vals)
 
         beta_vals = tl.sigmoid(b_vals)
 
