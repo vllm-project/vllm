@@ -1431,6 +1431,22 @@ class GPUModelRunner(
                 # Replace the existing block IDs with the new ones.
                 req_state.block_ids = new_block_ids
 
+            if req_id in req_data.redo_prompt_logprobs_req_ids:
+                # The dropped stale output carried this request's completed
+                # prompt logprobs; register the requirement again for the
+                # re-run prefill (#61490).
+                prompt_logprobs = (
+                    req_state.sampling_params.prompt_logprobs
+                    if req_state.sampling_params
+                    else None
+                )
+                if prompt_logprobs is not None:
+                    self.num_prompt_logprobs[req_id] = (
+                        self.input_batch.vocab_size
+                        if prompt_logprobs == -1
+                        else prompt_logprobs
+                    )
+
             if req_index is None:
                 # The request is not in the persistent batch.
                 # The request was either preempted and resumed later, or was not
@@ -5271,8 +5287,12 @@ class GPUModelRunner(
                 logprobs_tensors = LogprobsTensors.empty_cpu(
                     num_prompt_tokens - 1, num_prompt_logprobs + 1
                 )
+                # Seed the selected-token column with a sentinel that is never a
+                # real gathered id so unwritten rows are detectable (#61490).
+                logprobs_tensors.logprob_token_ids[:, 0].fill_(-1)
                 request.in_progress_prompt_logprobs_cpu = logprobs_tensors
 
+            assert logprobs_tensors is not None
             # Determine number of logits to retrieve.
             start_idx = request.num_computed_tokens
             start_tok = start_idx + 1
@@ -5338,6 +5358,26 @@ class GPUModelRunner(
         # Must synchronize the non-blocking GPU->CPU transfers.
         if prompt_logprobs_dict:
             self._sync_device()
+
+        # Coverage diagnostic, checked only after the D2H sync above so the CPU
+        # tensors reflect this chunk's copies. Running it in the loop flagged
+        # every normal single-chunk prefill as unwritten, because the rows still
+        # held the -1 sentinel until the copy landed. A row still holding the
+        # sentinel after the sync was genuinely skipped, e.g. by a prefix-cache
+        # hit the redo failed to ignore (#61490).
+        for req_id, tensors in prompt_logprobs_dict.items():
+            assert tensors is not None
+            unwritten = (tensors.logprob_token_ids[:, 0] == -1).nonzero()
+            if unwritten.numel():
+                positions = unwritten.flatten().tolist()
+                logger.warning(
+                    "Request %s: %d prompt-logprobs row(s) never written "
+                    "(first uncovered positions %s). These rows cannot be "
+                    "valid; the prefill did not recompute the whole prompt.",
+                    req_id,
+                    len(positions),
+                    positions[:8],
+                )
 
         return prompt_logprobs_dict
 

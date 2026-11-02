@@ -425,3 +425,24 @@ def test_logprobs_count_stable_across_k():
     assert len(top4) == 4
     assert len(top10) == 10
     assert top4[" true"] == top10[" true"]
+
+
+def test_convert_ids_survives_overflow_token_id():
+    """A garbage id from an unwritten logprobs row must not crash decode (#61490)."""
+
+    class _OverflowTokenizer(_MockTokenizer):
+        def decode(self, ids, skip_special_tokens=False):
+            for tid in ids:
+                if tid < 0 or tid > 2**31:
+                    raise OverflowError("number too small to fit in target type")
+            return super().decode(ids, skip_special_tokens)
+
+    tok = cast(
+        TokenizerLike,
+        _OverflowTokenizer(
+            raw_tokens={0: "▁ok", 1: "a"},
+            decoded_tokens={0: "ok", 1: "a"},
+        ),
+    )
+    result = convert_ids_list_to_tokens(tok, [0, -1, 1])
+    assert result == [" ok", "", "a"]
