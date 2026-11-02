@@ -16,7 +16,7 @@ from vllm.inputs import (
     split_enc_dec_input,
 )
 from vllm.logger import init_logger
-from vllm.lora.request import LoRARequest
+from vllm.lora.request import LoRARequest, LoRARequestLike
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -284,7 +284,7 @@ class InputProcessor:
         sampling_params.stop_token_ids = []
         sampling_params._all_stop_token_ids = set()
 
-    def _validate_lora(self, lora_request: LoRARequest | None) -> None:
+    def _validate_lora(self, lora_request: LoRARequestLike | None) -> None:
         if lora_request is None:
             return
 
@@ -306,7 +306,7 @@ class InputProcessor:
     def _get_mm_identifier(
         self,
         mm_hash: str,
-        lora_request: LoRARequest | None,
+        lora_request: LoRARequestLike | None,
     ) -> str:
         """When enable_tower_connector_lora is True, multi-modal embeddings
         vary depending on the LoRA request. Therefore, the mm_hash must be
