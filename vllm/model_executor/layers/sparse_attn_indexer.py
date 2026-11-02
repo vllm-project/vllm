@@ -90,12 +90,28 @@ def _top_k_per_row_prefill(
     top_k: int,
 ) -> None:
     if envs.VLLM_BATCH_INVARIANT:
-        deep_select_topk(
-            logits[:num_rows],
-            top_k,
-            end=row_ends[:num_rows],
-            output_idx=indices[:num_rows],
-        )
+        if current_platform.is_device_capability_family(100):
+            deep_select_topk(
+                logits[:num_rows],
+                top_k,
+                end=row_ends[:num_rows],
+                output_idx=indices[:num_rows],
+            )
+        else:
+            from flashinfer.topk import TopKTieBreak, top_k_ragged_transform
+
+            starts = row_starts[:num_rows]
+            selected = top_k_ragged_transform(
+                logits[:num_rows],
+                torch.zeros_like(starts),
+                row_ends[:num_rows] - starts,
+                top_k,
+                deterministic=True,
+                tie_break=TopKTieBreak.LARGE,
+                dsa_graph_safe=True,
+                row_starts=starts,
+            )
+            indices[:num_rows].copy_(selected)
         return
     ops.top_k_per_row_prefill(
         logits,

@@ -2527,6 +2527,11 @@ def test_batch_invariant_sparse_indexer_reuses_deep_select(monkeypatch) -> None:
 
     monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
     monkeypatch.setattr(sparse_attn_indexer, "deep_select_topk", fake_deep_select)
+    monkeypatch.setattr(
+        sparse_attn_indexer.current_platform,
+        "is_device_capability_family",
+        lambda major: major == 100,
+    )
 
     logits = torch.zeros((2, 16))
     sparse_attn_indexer._top_k_per_row_prefill(
@@ -2541,6 +2546,37 @@ def test_batch_invariant_sparse_indexer_reuses_deep_select(monkeypatch) -> None:
     )
 
     assert calls == [4]
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
+def test_batch_invariant_sparse_indexer_flashinfer_fallback(monkeypatch) -> None:
+    from vllm import envs
+    from vllm.model_executor.layers import sparse_attn_indexer
+
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setattr(
+        sparse_attn_indexer.current_platform,
+        "is_device_capability_family",
+        lambda _: False,
+    )
+    logits = torch.ones((2, 1024), dtype=torch.float32, device="cuda")
+    starts = torch.tensor([0, 17], dtype=torch.int32, device="cuda")
+    ends = starts + 512
+    indices = torch.empty((2, 64), dtype=torch.int32, device="cuda")
+
+    def run():
+        sparse_attn_indexer._top_k_per_row_prefill(
+            logits, starts, ends, indices, 2, logits.stride(0), 1, 64
+        )
+
+    run()
+    expected = torch.arange(448, 512, dtype=torch.int32, device="cuda").expand(2, -1)
+    torch.testing.assert_close(indices, expected)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    graph.replay()
+    torch.testing.assert_close(indices, expected)
 
 
 def _has_flashinfer_topk() -> bool:
