@@ -304,6 +304,8 @@ if TYPE_CHECKING:
     VLLM_DEEPEP_V2_PREFER_OVERLAP: bool = False
     VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION: bool = False
     VLLM_DBO_COMM_SMS: int = 20
+    VLLM_PREFILL_HOLD_MS: float = 0.0
+    VLLM_PREFILL_HOLD_MIN_REQS: int = 0
     VLLM_PATTERN_MATCH_DEBUG: str | None = None
     VLLM_DEBUG_DUMP_PATH: str | None = None
     VLLM_ENABLE_INDUCTOR_MAX_AUTOTUNE: bool = True
@@ -2144,6 +2146,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
             and __import__("torch").version.hip is not None
             else "20",
         )
+    ),
+    # Time-bounded prefill hold in the V1 scheduler (0 = off). While decodes
+    # run, new requests wait until the oldest waiting request has waited this
+    # many milliseconds, so requests that arrive close together are prefilled
+    # in one large step. Trades TTFT (bounded by the hold) for throughput.
+    "VLLM_PREFILL_HOLD_MS": lambda: float(os.getenv("VLLM_PREFILL_HOLD_MS", "0")),
+    # Hold new prefills only while at least this many requests are in the
+    # engine (running + waiting); at low load the hold only adds latency.
+    "VLLM_PREFILL_HOLD_MIN_REQS": lambda: int(
+        os.getenv("VLLM_PREFILL_HOLD_MIN_REQS", "0")
     ),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
