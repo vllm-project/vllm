@@ -1203,7 +1203,9 @@ class BailingMoeV3MoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=True,
             quant_config=quant_config,
-            activation="silu",
+            activation=(
+                "swiglustep" if self.expert_swiglu_limit is not None else "silu"
+            ),
             swiglu_limit=self.expert_swiglu_limit,
             prefix=f"{prefix}.experts",
             scoring_func="sigmoid",
