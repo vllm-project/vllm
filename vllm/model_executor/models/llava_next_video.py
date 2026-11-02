@@ -339,6 +339,16 @@ class LlavaNextVideoForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
+        vision_encoder_info = get_vision_encoder_info(config)
+        self.patch_grid_length = vision_encoder_info.get_patch_grid_length()
+        self.pooled_grid_length = math.ceil(
+            self.patch_grid_length / config.spatial_pool_stride
+        )
+        image_size = vision_encoder_info.get_image_size()
+        self.tower_tokens_per_frame = vision_encoder_info.get_num_image_tokens(
+            image_width=image_size, image_height=image_size
+        )
+
         with self._mark_tower_model(vllm_config, "video"):
             # Initialize the vision tower only up to the required feature layer
             self.vision_tower = init_vision_tower_for_llava(
@@ -500,24 +510,16 @@ class LlavaNextVideoForConditionalGeneration(
         # contributes `pooled_grid_length ** 2` tokens after the language
         # model's placeholder count, but `tower_tokens_per_frame` tokens
         # inside the vision encoder (including CLIP's CLS token).
-        encoder_info = get_vision_encoder_info(self.config)
-        image_size = encoder_info.get_image_size()
-        tower_tokens_per_frame = encoder_info.get_num_image_tokens(
-            image_width=image_size, image_height=image_size
-        )
-        pooled_grid_length = math.ceil(
-            encoder_info.get_patch_grid_length() / self.config.spatial_pool_stride
-        )
-        pooled_tokens_per_frame = pooled_grid_length**2
+        pooled_tokens_per_frame = self.pooled_grid_length**2
         if (
             num_mm_embeds <= 0
             or pooled_tokens_per_frame <= 0
-            or tower_tokens_per_frame <= 0
+            or self.tower_tokens_per_frame <= 0
         ):
             return 0, 0
 
         num_frames = num_mm_embeds // pooled_tokens_per_frame
         return (
-            num_frames * tower_tokens_per_frame,
+            num_frames * self.tower_tokens_per_frame,
             num_frames * pooled_tokens_per_frame,
         )
