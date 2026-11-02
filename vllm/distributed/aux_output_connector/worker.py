@@ -169,22 +169,7 @@ class AuxOutputWorkerConnector:
         if not get_tp_group().is_first_rank:
             return
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        if self._routed_experts_capturer is not None:
-            self._r3_shape = self._routed_experts_capturer.shape_per_token
-            self._r3_dtype = np.dtype(self._routed_experts_capturer.output_dtype_name)
-            self._r3_nbytes = int(np.prod(self._r3_shape)) * self._r3_dtype.itemsize
-        if self._indexer is not None:
-            assert len(self._indexer.device_buffer) >= max_num_batched_tokens, (
-                "auxiliary-output capture capacity is smaller than the token budget"
-            )
-        shape_per_token: tuple[int, ...]
-        if self._indexer is None:
-            assert self._routed_experts_capturer is not None
-            shape_per_token = self._routed_experts_capturer.shape_per_token
-            dtype: np.dtype[Any] = self._r3_dtype
-        else:
-            shape_per_token = (self._r3_nbytes + self._indexer.fixed_bytes_per_token,)
-            dtype = np.dtype("uint8")
+        shape_per_token, dtype = self._get_storage_layout(max_num_batched_tokens)
         scheduler_block_size, hash_block_size = resolve_kv_cache_block_sizes(
             kv_cache_config, vllm_config
         )
@@ -220,6 +205,24 @@ class AuxOutputWorkerConnector:
             raise
         self._store = store
         self._buffer = buffer
+
+    def _get_storage_layout(
+        self, max_num_batched_tokens: int
+    ) -> tuple[tuple[int, ...], np.dtype[Any]]:
+        if self._routed_experts_capturer is not None:
+            self._r3_shape = self._routed_experts_capturer.shape_per_token
+            self._r3_dtype = np.dtype(self._routed_experts_capturer.output_dtype_name)
+            self._r3_nbytes = int(np.prod(self._r3_shape)) * self._r3_dtype.itemsize
+        if self._indexer is None:
+            assert self._routed_experts_capturer is not None
+            return self._r3_shape, self._r3_dtype
+        assert len(self._indexer.device_buffer) >= max_num_batched_tokens, (
+            "auxiliary-output capture capacity is smaller than the token budget"
+        )
+        return (
+            (self._r3_nbytes + self._indexer.fixed_bytes_per_token,),
+            np.dtype("uint8"),
+        )
 
     def prepare_output(self, input_batch: InputBatch) -> PendingAuxOutput | None:
         """Snapshot one step's R3 tensor for asynchronous CPU transfer."""
@@ -363,8 +366,21 @@ class AuxOutputWorkerConnector:
 
             if sampled > 0 and emit_start <= token_end:
                 if emit_start >= capture_start:
-                    outputs[request_id] = self._make_output(
-                        emit_start, rows[emit_start - capture_start :]
+                    output_slice = slice(
+                        start + emit_start - capture_start, end - rejected
+                    )
+                    outputs[request_id] = AuxRequestOutput(
+                        token_start=emit_start,
+                        routed_rows=(
+                            pending.routed_experts[output_slice]
+                            if pending.routed_experts is not None
+                            else None
+                        ),
+                        indexer_rows=(
+                            pending.indexer[output_slice]
+                            if pending.indexer is not None
+                            else None
+                        ),
                     )
                     state.emit_cursor = token_end
                 else:
@@ -401,35 +417,40 @@ class AuxOutputWorkerConnector:
     def _make_output(self, token_start: int, rows: np.ndarray) -> AuxRequestOutput:
         if self._indexer is None:
             return AuxRequestOutput(token_start=token_start, routed_rows=rows)
-        n = len(rows)
         routed_rows = None
-        if self._routed_experts_capturer is not None:
-            # Both artifacts share each packed row, so their slices are not
-            # contiguous; copy before reinterpreting the dtype.
-            routed_rows = (
-                rows[:, : self._r3_nbytes]
-                .copy()
-                .view(self._r3_dtype)
-                .reshape(n, *self._r3_shape)
+        combined = self._routed_experts_capturer is not None
+        if combined:
+            routed_rows = self._unpack_rows(
+                rows[:, : self._r3_nbytes],
+                self._r3_dtype,
+                self._r3_shape,
+                copy=True,
             )
-            indexer = (
-                rows[:, self._r3_nbytes :]
-                .copy()
-                .view(np.int32)
-                .reshape(n, *self._indexer.shape_per_token)
-            )
-        else:
-            # A single artifact covers the whole row, so the typed view of this
-            # step's host copy is the output. Store-backed rows are read-only
-            # bytes, so keep the public array writable.
-            indexer = rows.view(np.int32).reshape(n, *self._indexer.shape_per_token)
-            if not indexer.flags.writeable:
-                indexer = indexer.copy()
+        indexer = self._unpack_rows(
+            rows[:, self._r3_nbytes :],
+            np.dtype("int32"),
+            self._indexer.shape_per_token,
+            copy=combined,
+        )
         return AuxRequestOutput(
             token_start=token_start,
             routed_rows=routed_rows,
             indexer_rows=indexer,
         )
+
+    @staticmethod
+    def _unpack_rows(
+        rows: np.ndarray,
+        dtype: np.dtype[Any],
+        shape_per_token: tuple[int, ...],
+        *,
+        copy: bool,
+    ) -> np.ndarray:
+        # Detach packed artifacts into contiguous arrays and keep store-backed
+        # outputs writable. A writable single-artifact array can remain a view.
+        if copy or not rows.flags.writeable:
+            rows = rows.copy()
+        return rows.view(dtype).reshape(len(rows), *shape_per_token)
 
     def _publish_blocks(
         self,

@@ -416,7 +416,7 @@ def test_worker_rejects_invalid_rejected_token_count():
     worker.close()
 
 
-def _process_output(
+def _prepare_output(
     worker,
     step,
     rows,
@@ -456,7 +456,11 @@ def _process_output(
     )
     assert pending is not None
     pending.enqueue_cpu_copy(num_sampled, num_rejected)
-    return worker.process_output(pending)
+    return pending
+
+
+def _process_output(worker, *args, **kwargs):
+    return _prepare_output(worker, *args, **kwargs).process_output()
 
 
 def test_worker_ignores_cudagraph_query_padding():
@@ -2273,6 +2277,59 @@ def test_two_pending_steps_keep_independent_indexer_snapshots():
     assert first_snapshot[0, 0, 0].item() == 2
     assert second_snapshot[0, 0, 0].item() == 3
     worker.close()
+
+
+@pytest.mark.parametrize(
+    ("enable_r3", "enable_indexer"), [(True, False), (False, True), (True, True)]
+)
+def test_current_step_outputs_reuse_only_accepted_host_rows(enable_r3, enable_indexer):
+    worker = _make_worker(
+        2,
+        indexer_shape=(3, 2) if enable_indexer else None,
+        enable_r3=enable_r3,
+    )
+    routed = np.arange(42, dtype=_DTYPE).reshape(7, *_SHAPE)
+    indexer = np.arange(42, dtype=np.int32).reshape(7, 3, 2) - 1
+    step = _metadata(
+        0,
+        [
+            _request_metadata("first", 0, 3, 1, []),
+            _request_metadata("second", 0, 4, 1, []),
+        ],
+        {},
+    )
+    pending = _prepare_output(
+        worker,
+        step,
+        routed,
+        ["first", "second"],
+        np.array([1, 2]),
+        indexer_rows=indexer,
+    )
+
+    outputs = pending.process_output()
+
+    for request_id, expected_slice in (("first", slice(1, 2)), ("second", slice(4, 5))):
+        output = outputs[request_id]
+        assert output.token_start == 1
+        for actual, host, expected in (
+            (output.routed_rows, pending.routed_experts, routed),
+            (output.indexer_rows, pending.indexer, indexer),
+        ):
+            if host is None:
+                assert actual is None
+            else:
+                assert actual is not None
+                assert np.shares_memory(actual, host)
+                assert actual.flags.c_contiguous and actual.flags.writeable
+                np.testing.assert_array_equal(actual, expected[expected_slice])
+
+    del pending
+    worker.close()
+    if enable_indexer:
+        np.testing.assert_array_equal(outputs["second"].indexer_rows, indexer[4:5])
+    if enable_r3:
+        np.testing.assert_array_equal(outputs["second"].routed_rows, routed[4:5])
 
 
 def test_indexer_only_output_is_a_typed_view_of_the_host_rows():
