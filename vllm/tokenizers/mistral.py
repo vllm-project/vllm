@@ -439,7 +439,7 @@ class MistralTokenizer(TokenizerLike):
     def convert_tokens_to_ids(self, tokens: str | list[str]) -> int | list[int]:
         return self.transformers_tokenizer.convert_tokens_to_ids(tokens)
 
-    def convert_tokens_to_string(self, tokens: Sequence[str | bytes]) -> str:
+    def convert_tokens_to_string(self, tokens: list[str]) -> str:
         to_decode_special_tokens = {
             SpecialTokens.tool_calls,
             SpecialTokens.args,
@@ -467,8 +467,7 @@ class MistralTokenizer(TokenizerLike):
             decoded_list: list[str] = []
             decoded = ""
 
-            # Only Tekken produces bytes pieces.
-            for token in cast(Sequence[str], tokens):
+            for token in tokens:
                 if token in to_decode_special_tokens:
                     if regular_tokens:
                         decoded_list.append(
@@ -493,14 +492,15 @@ class MistralTokenizer(TokenizerLike):
         self,
         ids: Sequence[int],
         skip_special_tokens: bool = False,
-    ) -> list[str | bytes]:
-        if skip_special_tokens:
-            ids = self._drop_skipped_special_tokens(ids)
-        if self.is_tekken:
-            return tekken_convert_ids_to_tokens(self.tokenizer, ids)
-        return [self.tokenizer.id_to_piece(token_id) for token_id in ids]
+    ) -> list[str]:
+        if not skip_special_tokens:
+            if self.is_tekken:
+                # Tekken tokenizer returns byte-fallback as bytes
+                return cast(
+                    list[str], tekken_convert_ids_to_tokens(self.tokenizer, ids)
+                )
+            return [self.tokenizer.id_to_piece(token_id) for token_id in ids]
 
-    def _drop_skipped_special_tokens(self, ids: Sequence[int]) -> list[int]:
         non_skip_special_tokens_ids = {
             self.tokenizer.get_special_token(SpecialTokens.tool_calls),
         }
@@ -519,11 +519,30 @@ class MistralTokenizer(TokenizerLike):
                     self.tokenizer.get_special_token(think_token)
                 )
 
-        return [
+        ids_kept = [
             i
             for i in ids
             if i in non_skip_special_tokens_ids or not self._is_special_token_id(i)
         ]
+
+        # We filtered unwanted special tokens so we can decode the rest.
+        tokens = [self.tokenizer.id_to_piece(token_id) for token_id in ids_kept]
+
+        if any("�" in t for t in tokens) and self.is_tekken:
+            # if a decoded token contains the replacement character, then the
+            # token has an incomplete UTF-8 character so we must use bytes
+            # See: https://github.com/vllm-project/vllm/pull/8640
+            #      https://github.com/vllm-project/vllm/pull/9625
+            # if underlying tokenizer is sentencepiece, we just add "�".
+            # We filtered unwanted special tokens so we can decode the rest.
+            tokens = [
+                self.tokenizer.id_to_byte_piece(token_id, SpecialTokenPolicy.KEEP)
+                if token_id not in self._special_token_ids_set
+                else self.tokenizer.decode([token_id], SpecialTokenPolicy.KEEP)
+                for token_id in ids_kept
+            ]
+
+        return tokens
 
     @property
     def supports_grammar(self) -> bool:
