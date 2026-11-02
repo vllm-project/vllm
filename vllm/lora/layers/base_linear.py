@@ -16,6 +16,7 @@ from vllm.forward_context import (
     get_forward_context,
     is_forward_context_available,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     LinearBase,
@@ -24,11 +25,14 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
 from vllm.utils.torch_utils import direct_register_custom_op
 
 from .base import BaseLayerWithLoRA
 from .utils import _get_lora_aux_cuda_stream, _get_lora_device
+
+logger = init_logger(__name__)
 
 if envs.VLLM_LORA_ENABLE_DUAL_STREAM:
 
@@ -231,7 +235,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             x = x.flatten(0, 1)
 
         route_mapping = self.punica_wrapper.lora_route_mapping
-        if route_mapping is not None:
+        if self.punica_wrapper.routed_lora_graph_mode:
+            output = self._apply_routed_lora_kernel(x, output)
+        elif route_mapping is not None:
             output = self._apply_routed_lora_to_output(x, output, route_mapping)
         else:
             lora_output: torch.Tensor | None = self.punica_wrapper.add_lora_linear(
@@ -261,6 +267,9 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
         token_lora_indices, token_lora_weights = self._validate_routed_lora_mapping(
             x, route_mapping
         )
+        route_tensors = self.punica_wrapper.lora_route_tensors
+        if route_tensors is not None and self._can_use_routed_lora_kernel(x, output):
+            return self._apply_routed_lora_kernel(x, output)
 
         offset = 0
         for slice_idx, output_slice in enumerate(self.output_slices):
@@ -282,6 +291,63 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
             offset += output_slice
 
         return output
+
+    def _apply_routed_lora_kernel(
+        self, x: torch.Tensor, output: torch.Tensor
+    ) -> torch.Tensor:
+        from vllm.lora.ops.triton_ops.routed_lora_op import routed_lora
+
+        tensors = self.punica_wrapper.lora_route_tensors
+        assert tensors is not None
+        # An active plan contains at least one token, even in a padded batch.
+        plans = tensors.plan_lora_indices[: x.shape[0]]
+        offset = 0
+        for slice_idx, size in enumerate(self.output_slices):
+            routed_lora(
+                x,
+                self.lora_a_stacked[slice_idx],
+                self.lora_b_stacked[slice_idx],
+                output,
+                tensors.token_lora_weights,
+                plans,
+                tensors.plan_token_indices,
+                tensors.plan_token_start_loc,
+                offset,
+                self.punica_wrapper.routed_lora_graph_mode,
+            )
+            offset += size
+        return output
+
+    def _can_use_routed_lora_kernel(
+        self, x: torch.Tensor, output: torch.Tensor
+    ) -> bool:
+        if not current_platform.is_cuda() or not HAS_TRITON:
+            return False
+        from vllm.lora.ops.triton_ops.routed_lora_op import can_implement_routed_lora
+
+        tensors = self.punica_wrapper.lora_route_tensors
+        if tensors is None:
+            return False
+        offset = 0
+        for slice_idx, size in enumerate(self.output_slices):
+            supported, reason = can_implement_routed_lora(
+                x,
+                self.lora_a_stacked[slice_idx],
+                self.lora_b_stacked[slice_idx],
+                output,
+                tensors.token_lora_weights,
+                tensors.plan_lora_indices,
+                tensors.plan_token_indices,
+                tensors.plan_token_start_loc,
+                offset,
+            )
+            if not supported:
+                logger.debug_once(
+                    "Using routed LoRA reference implementation: %s", reason
+                )
+                return False
+            offset += size
+        return True
 
     @staticmethod
     def _validate_routed_lora_mapping(

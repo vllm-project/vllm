@@ -11,7 +11,12 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from .utils import compute_meta, convert_mapping, convert_route_mapping
+from .utils import (
+    RoutedLoRATensors,
+    compute_meta,
+    convert_mapping,
+    convert_route_mapping,
+)
 
 if TYPE_CHECKING:
     # avoid circuit import
@@ -159,8 +164,9 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.batch_size: int = -1
         self.is_prefill = False
         self.no_lora = False
-        self._lora_route_indices: torch.Tensor | None = None
-        self._lora_route_weights: torch.Tensor | None = None
+        self._lora_route_tensors: RoutedLoRATensors | None = None
+        self._lora_route_buffers: RoutedLoRATensors | None = None
+        self.routed_lora_graph_mode = False
 
     def _update_base_metadata(
         self,
@@ -277,9 +283,16 @@ class PunicaWrapperBase(PunicaWrapperABC):
 
     @property
     def lora_route_mapping(self) -> tuple[torch.Tensor, torch.Tensor] | None:
-        if self._lora_route_indices is None or self._lora_route_weights is None:
+        if self._lora_route_tensors is None:
             return None
-        return self._lora_route_indices, self._lora_route_weights
+        return (
+            self._lora_route_tensors.token_lora_indices,
+            self._lora_route_tensors.token_lora_weights,
+        )
+
+    @property
+    def lora_route_tensors(self) -> RoutedLoRATensors | None:
+        return self._lora_route_tensors
 
     def update_metadata(
         self,
@@ -292,22 +305,39 @@ class PunicaWrapperBase(PunicaWrapperABC):
         from vllm.lora.layers import LoRARouteMapping
 
         if isinstance(mapping, LoRARouteMapping):
-            self._lora_route_indices, self._lora_route_weights = convert_route_mapping(
+            self._lora_route_tensors = convert_route_mapping(
                 mapping, lora_index_to_id, self.device
             )
             mapping = mapping.scalar_fallback_mapping()
         else:
-            self._lora_route_indices = None
-            self._lora_route_weights = None
+            self._lora_route_tensors = None
+
+        if self._lora_route_buffers is not None:
+            if self._lora_route_tensors is None:
+                route_mapping = LoRARouteMapping(
+                    token_lora_ids=tuple(
+                        (lora_id,) for lora_id in mapping.index_mapping
+                    ),
+                    token_lora_weights=tuple(
+                        (1.0 if lora_id > 0 else 0.0,)
+                        for lora_id in mapping.index_mapping
+                    ),
+                    prompt_mapping=mapping.prompt_mapping,
+                    is_prefill=mapping.is_prefill,
+                    type=mapping.type,
+                )
+                self._lora_route_tensors = convert_route_mapping(
+                    route_mapping, lora_index_to_id, self.device
+                )
+            self._lora_route_buffers.copy_(self._lora_route_tensors)
+            self._lora_route_tensors = self._lora_route_buffers
 
         self._update_base_metadata(mapping, lora_index_to_id, max_loras, vocab_size)
 
-        if mapping.is_prefill:
-            # Update metadata required for prefill-related operators.
+        self.is_prefill = mapping.is_prefill
+        if mapping.is_prefill and not self.routed_lora_graph_mode:
+            # Routed CUDA graphs do not consume the legacy SGMV metadata.
             self._update_prefill_metadata(self.token_lora_indices)
-            self.is_prefill = True
-        else:
-            self.is_prefill = False
 
     @abstractmethod
     def add_shrink(

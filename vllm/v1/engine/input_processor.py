@@ -310,8 +310,25 @@ class InputProcessor:
         if isinstance(lora_request, LoRARoutingRequest):
             if self.model_config.runner_type != "generate":
                 raise VLLMValidationError("Routed LoRA only supports generation")
-            if not self.model_config.enforce_eager:
-                raise VLLMValidationError("Routed LoRA requires enforce_eager=True")
+            if (
+                self.vllm_config.parallel_config.use_ubatching
+                or self.vllm_config.parallel_config.prefill_context_parallel_size > 1
+            ):
+                raise VLLMValidationError(
+                    "Routed LoRA does not support microbatching or prefill "
+                    "context parallelism. Disable these options."
+                )
+            if not self.model_config.enforce_eager and (
+                not current_platform.is_cuda()
+                or self.lora_config.max_loras_per_request < 2
+                or self.lora_config.fully_sharded_loras
+                or self.lora_config.max_lora_rank > 128
+            ):
+                raise VLLMValidationError(
+                    "Routed LoRA CUDA graphs require NVIDIA CUDA, "
+                    "max_loras_per_request >= 2, rank <= 128, and "
+                    "non-fully-sharded LoRA. Otherwise use enforce_eager=True."
+                )
             if self.model_config.is_multimodal_model:
                 raise VLLMValidationError("Routed LoRA supports text-only models")
 
