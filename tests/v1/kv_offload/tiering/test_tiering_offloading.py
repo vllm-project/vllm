@@ -10,6 +10,7 @@ These tests verify:
 5. Eviction coordination between tiers
 """
 
+import os
 import threading
 from collections.abc import Iterable
 from unittest.mock import MagicMock, patch
@@ -42,6 +43,7 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec, CPUOffloadingInfo
+from vllm.v1.kv_offload.tiering.backpressure import EMABackpressureDetector
 from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     SecondaryTierManager,
@@ -50,6 +52,7 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -1991,3 +1994,60 @@ def test_tiering_spec_rejects_a_tier_that_declares_the_reserved_tier_label():
         pytest.raises(AssertionError, match="reserved label 'tier'"),
     ):
         TieringOffloadingSpec.config_info_keys({"secondary_tiers": tier_configs})
+
+
+def test_cascade_store_feeds_backpressure_only_written_bytes(tmp_path, monkeypatch):
+    """Stores reaching the fs tier through the TieringOffloadingManager feed the
+    backpressure detector the bytes they wrote: a fully new batch counts in
+    full, a partially published one only its new blocks, and a batch already
+    on disk is not a latency sample at all."""
+    # Buffered I/O, so the small mock rows need no page alignment.
+    monkeypatch.setattr(
+        "vllm.v1.kv_offload.tiering.fs.manager.probe_o_direct", lambda _dir: False
+    )
+    spec = MagicMock()
+    spec.config = make_offloading_config()
+    spec.blocks_per_chunk = 1
+    primary = CPUPrimaryTierOffloadingManager(
+        num_chunks=8, mmap_region=_mock_mmap_region(8)
+    )
+    detector = EMABackpressureDetector(high_water_s=1.0, low_water_s=0.5)
+    tier = FileSystemTierManager(
+        offloading_spec=spec,
+        primary_kv_view=primary.get_kv_memoryview(),
+        tier_type="fs",
+        root_dir=str(tmp_path),
+        backpressure_detector=detector,
+    )
+    manager = TieringOffloadingManager(primary_tier=primary, secondary_tiers=[tier])
+    block_size = tier._block_size
+
+    update_bytes: list[int] = []
+    real_update = detector.update
+
+    def recording_update(submit_time: float, num_bytes: int) -> None:
+        update_bytes.append(num_bytes)
+        real_update(submit_time, num_bytes)
+
+    detector.update = recording_update  # type: ignore[method-assign]
+
+    # Blocks another instance already published to the shared directory.
+    for k in to_keys([3, 5, 6]):
+        path = tier.file_mapper.get_file_name(k)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(bytes(block_size))
+
+    try:
+        manager.on_new_request(_CTX)
+        for keys in (to_keys([1, 2]), to_keys([3, 4]), to_keys([5, 6])):
+            assert manager.prepare_store(keys, _CTX) is not None
+            manager.complete_store(keys, _CTX)  # cascades to the fs tier
+            tier.drain_jobs()
+            manager._process_finished_jobs()
+    finally:
+        tier.shutdown()
+
+    assert update_bytes == [2 * block_size, block_size, 0]
+    # The store that wrote nothing contributes no latency sample.
+    assert detector._completions == 2
