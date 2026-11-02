@@ -110,6 +110,8 @@ def get_deepseek_v41_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 drop_thinking=kwargs.get("drop_thinking", True),
                 reasoning_effort=effort,
                 image_order=image_order,
+                add_generation_prompt=kwargs.get("add_generation_prompt", True),
+                continue_final_message=kwargs.get("continue_final_message", False),
             )
             if kwargs.get("tokenize", True):
                 tokenizer_kwargs = {
