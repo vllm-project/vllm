@@ -377,16 +377,21 @@ void rejection_random_sample_kernel_impl(
       int64_t token_idx = start_idx + pos;
       int64_t draft_id = draft_ids_ptr[token_idx];
 
-      float p = target_probs_ptr[token_idx * target_stride + draft_id];
-      float q =
-          no_draft_probs
-              ? 1.0f
-              : draft_probs_ptr[token_idx * draft_probs_stride + draft_id];
-      float uniform_p = uniform_probs_ptr[token_idx];
+      // -1 is used for padded draft token ids that should be rejected.
+      bool accepted = false;
+      if (draft_id >= 0) {
+        float p = target_probs_ptr[token_idx * target_stride + draft_id];
+        float q =
+            no_draft_probs
+                ? 1.0f
+                : draft_probs_ptr[token_idx * draft_probs_stride + draft_id];
+        float uniform_p = uniform_probs_ptr[token_idx];
 
-      float ratio = (q > 0.0f) ? (p / q) : 0.0f;
+        float ratio = (q > 0.0f) ? (p / q) : 0.0f;
+        accepted = ratio >= uniform_p;
+      }
 
-      if (ratio >= uniform_p) {
+      if (accepted) {
         out_ptr[req_idx * out_stride + pos] = draft_id;
       } else {
         out_ptr[req_idx * out_stride + pos] = recovered_ids_ptr[token_idx];
