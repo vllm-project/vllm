@@ -63,7 +63,7 @@ class IndexerSnapshot:
 def _get_indexer_capture_sources(
     model: torch.nn.Module, num_layers: int
 ) -> list[tuple[int, int, IndexerCaptureSource]]:
-    sources = []
+    sources: list[tuple[int, int, IndexerCaptureSource]] = []
     for module in model.modules():
         if not isinstance(module, IndexerCaptureSource):
             continue
@@ -113,7 +113,7 @@ class IndexerCapturer:
         }
         self.shape_per_token = (len(layer_ids), topk)
         self.fixed_bytes_per_token = len(layer_ids) * topk * 4
-        self._sources: list[IndexerCaptureSource] = []
+        self._bindings: list[tuple[IndexerCaptureSource, IndexerCaptureSink]] = []
         self._closed = False
         model_config = config.model_config
         identity = json.dumps(
@@ -163,11 +163,13 @@ class IndexerCapturer:
         self._free_snapshot_slots.append(slot)
 
     def close(self) -> None:
+        """Unbind this capturer's sinks and release its buffers."""
         if self._closed:
             return
-        for source in self._sources:
-            source.set_indexer_capture_sink(None)
-        self._sources.clear()
+        for source, sink in reversed(self._bindings):
+            if source.indexer_capture is sink:
+                source.set_indexer_capture_sink(None)
+        self._bindings.clear()
         self._snapshot_rows.clear()
         self._free_snapshot_slots.clear()
         del self.device_buffer
@@ -195,10 +197,9 @@ def bind_indexer_capturer(
     try:
         for layer_id, _, source in sources:
             column = capturer.source_columns[layer_id]
-            capturer._sources.append(source)
-            source.set_indexer_capture_sink(
-                IndexerCaptureSink(capturer.device_buffer[:, column])
-            )
+            sink = IndexerCaptureSink(capturer.device_buffer[:, column])
+            capturer._bindings.append((source, sink))
+            source.set_indexer_capture_sink(sink)
     except Exception:
         capturer.close()
         raise

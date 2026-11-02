@@ -208,3 +208,23 @@ def test_capture_helper_requires_a_buffer_for_a_bound_sink():
     sink = IndexerCaptureSink(torch.empty((2, 2), dtype=torch.int32))
     with pytest.raises(AssertionError):
         capture_indexer_topk(sink, None, 2)
+
+
+class _RejectingSource(CaptureSource):
+    def set_indexer_capture_sink(self, sink):
+        if sink is not None:
+            raise RuntimeError("sink rejected")
+        super().set_indexer_capture_sink(sink)
+
+
+def test_bind_rolls_back_sinks_installed_before_a_failure(capture_config):
+    first = CaptureSource(2)
+    rejecting = _RejectingSource(5)
+    model = torch.nn.ModuleList([first, rejecting])
+    capture = IndexerCapturer(model, capture_config)
+
+    with pytest.raises(RuntimeError, match="sink rejected"):
+        bind_indexer_capturer(model, capture)
+
+    assert first.indexer_capture is None
+    assert rejecting.indexer_capture is None

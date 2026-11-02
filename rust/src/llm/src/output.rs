@@ -527,7 +527,7 @@ fn take_aux_output_rows(
     };
     let row_shape = first.shape.get(1..);
     let mut num_rows = 0;
-    let mut data = Vec::new();
+    let mut num_bytes = 0;
     for chunk in &chunks {
         if chunk.shape.is_empty() || chunk.dtype != first.dtype || chunk.shape.get(1..) != row_shape
         {
@@ -537,6 +537,10 @@ fn take_aux_output_rows(
             });
         }
         num_rows += chunk.shape[0];
+        num_bytes += chunk.data.as_raw_view().expect("resolved on decode").len();
+    }
+    let mut data = Vec::with_capacity(num_bytes);
+    for chunk in &chunks {
         data.extend_from_slice(chunk.data.as_raw_view().expect("resolved on decode"));
     }
     let mut shape = first.shape.clone();
@@ -706,5 +710,36 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn auxiliary_rows_concatenate_in_stream_order() {
+        let mut chunks = vec![
+            WireNdArray::from_i32(vec![2, 3, 2], (0..12).collect()).unwrap(),
+            WireNdArray::from_i32(vec![1, 3, 2], (100..106).collect()).unwrap(),
+        ];
+        let dtype = chunks[0].dtype.clone();
+
+        let merged = take_aux_output_rows(&mut chunks, "req", "indexer_topk")
+            .unwrap()
+            .expect("merged rows");
+
+        assert_eq!(merged.shape, vec![3, 3, 2]);
+        assert_eq!(merged.dtype, dtype);
+        let bytes = merged.data.as_raw_view().expect("resolved rows");
+        let values: Vec<i32> = bytes
+            .chunks_exact(4)
+            .map(|chunk| i32::from_ne_bytes(chunk.try_into().expect("i32 chunk")))
+            .collect();
+        assert_eq!(values, (0..12).chain(100..106).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn auxiliary_rows_without_chunks_are_absent() {
+        let mut chunks = Vec::new();
+
+        let rows = take_aux_output_rows(&mut chunks, "req", "routed_experts").unwrap();
+
+        assert!(rows.is_none());
     }
 }

@@ -31,10 +31,7 @@ class AuxOutputConfig:
         from vllm.config.utils import hash_factors
 
         factors: dict[str, object] = {
-            "enable_return_routed_experts": self.enable_return_routed_experts
+            "enable_return_routed_experts": self.enable_return_routed_experts,
+            "enable_return_indexer_topk": self.enable_return_indexer_topk,
         }
-        if self.enable_return_indexer_topk:
-            factors.update(
-                enable_return_indexer_topk=True,
-            )
         return hash_factors(factors)

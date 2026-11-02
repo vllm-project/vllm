@@ -200,7 +200,6 @@ def _make_worker(
         object_nbytes=object_nbytes,
     )
     worker = object.__new__(AuxOutputWorkerConnector)
-    worker._unbind_capturer = None
     worker._indexer = (
         SimpleNamespace(
             shape_per_token=indexer_shape,
@@ -212,6 +211,7 @@ def _make_worker(
         if indexer_shape
         else None
     )
+    worker._routed_experts_capturer = Mock() if enable_r3 else None
     worker._r3_nbytes = r3_nbytes
     worker._r3_dtype = _DTYPE
     worker._r3_shape = _SHAPE
@@ -271,20 +271,20 @@ def test_non_output_rank_skips_capture_snapshot():
     worker._indexer = None
     worker._store = None
     worker._buffer = None
-    worker._capturer = Mock()
+    worker._routed_experts_capturer = Mock()
     worker._step_metadata = Mock()
     assert worker.prepare_output(_input_batch([], np.array([]), np.array([]))) is None
-    worker._capturer.snapshot_routing_data.assert_not_called()
+    worker._routed_experts_capturer.snapshot_routing_data.assert_not_called()
 
 
 def test_worker_skips_aux_outputs_for_internal_warmup_step():
     worker = _make_worker(1)
-    worker._capturer = Mock()
+    worker._routed_experts_capturer = Mock()
 
     worker.begin_step(None)
 
     assert worker.prepare_output(_input_batch([], np.array([]), np.array([]))) is None
-    worker._capturer.snapshot_routing_data.assert_not_called()
+    worker._routed_experts_capturer.snapshot_routing_data.assert_not_called()
     worker.close()
 
 
@@ -298,8 +298,8 @@ def test_next_step_does_not_consume_pending_output(monkeypatch):
         _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
     )
     rows = torch.ones((1, *_SHAPE), dtype=torch.uint8)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = rows
+    worker._routed_experts_capturer = Mock()
+    worker._routed_experts_capturer.snapshot_routing_data.return_value = rows
     process_output = Mock(wraps=worker.process_output)
     monkeypatch.setattr(worker, "process_output", process_output)
     pending = worker.prepare_output(
@@ -340,8 +340,10 @@ def test_finished_request_teardown_waits_for_pending_output(num_pending):
     """Terminal cleanup waits for every outstanding output, not just the first."""
     worker = _make_worker(1)
     rows = np.arange(4 * 3 * 2, dtype=np.uint8).reshape(4, *_SHAPE)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+    worker._routed_experts_capturer = Mock()
+    worker._routed_experts_capturer.snapshot_routing_data.return_value = (
+        torch.from_numpy(rows)
+    )
     pending_outputs = []
     for i in range(num_pending):
         request = _request_metadata("request", 4 * i, 4, 4 * i, [bytes([i]) * 4])
@@ -371,9 +373,9 @@ def test_finished_request_teardown_waits_for_pending_output(num_pending):
 
 def test_pending_outputs_bounded_by_max_concurrent_batches():
     worker = _make_worker(1, max_concurrent_batches=2)
-    worker._capturer = Mock()
-    worker._capturer.snapshot_routing_data.side_effect = lambda num_rows: torch.zeros(
-        (num_rows, *_SHAPE), dtype=torch.uint8
+    worker._routed_experts_capturer = Mock()
+    worker._routed_experts_capturer.snapshot_routing_data.side_effect = (
+        lambda num_rows: torch.zeros((num_rows, *_SHAPE), dtype=torch.uint8)
     )
     metadata = _metadata(0, [_request_metadata("request", 0, 1, 0, [])], {}).metadata
     batch = _input_batch(["request"], np.array([0]), np.array([0, 1]))
@@ -428,10 +430,12 @@ def _process_output(
     if token_starts is None or num_tokens is None:
         assert isinstance(step, _WorkerStep)
         token_starts, num_tokens = _execution_ranges(step, request_ids)
-    worker._capturer = None
+    worker._routed_experts_capturer = None
     if worker._r3_nbytes:
-        worker._capturer = Mock()
-        worker._capturer.snapshot_routing_data.return_value = torch.from_numpy(rows)
+        worker._routed_experts_capturer = Mock()
+        worker._routed_experts_capturer.snapshot_routing_data.return_value = (
+            torch.from_numpy(rows)
+        )
     if worker._indexer is not None:
         worker._indexer.snapshot = lambda n: SimpleNamespace(
             rows=torch.from_numpy(indexer_rows[:n].copy()),
@@ -2223,3 +2227,159 @@ def test_worker_retains_kv_cache_blocks_in_the_sending_generation():
     step.metadata.released_block_hashes = PackedBlockHashes(_HASHES[1], 32)
     _begin_step(worker, step)
     assert not store._references
+
+
+class _SnapshotIndexer:
+    shape_per_token = (2, 2)
+    fixed_bytes_per_token = 16
+    namespace = "fake-indexer"
+
+    def __init__(self):
+        self.released = []
+
+    def snapshot(self, num_rows):
+        rows = torch.full((num_rows, 2, 2), num_rows, dtype=torch.int32)
+        return SimpleNamespace(rows=rows, slot=num_rows)
+
+    def release_snapshot(self, slot):
+        self.released.append(slot)
+
+    def close(self):
+        pass
+
+
+def test_two_pending_steps_keep_independent_indexer_snapshots():
+    worker = _make_worker(2, indexer_shape=(2, 2), enable_r3=False)
+    worker._indexer = _SnapshotIndexer()
+    worker.begin_step(
+        _metadata(0, [_request_metadata("request", 0, 3, 0, [])], {}).metadata
+    )
+
+    first = worker.prepare_output(
+        _input_batch(["request"], np.array([0]), np.array([0, 2]))
+    )
+    second = worker.prepare_output(
+        _input_batch(["request"], np.array([2]), np.array([0, 3]))
+    )
+
+    assert first.indexer_snapshot is not None and second.indexer_snapshot is not None
+    assert first.indexer_snapshot.data_ptr() != second.indexer_snapshot.data_ptr()
+    assert first.indexer_snapshot[0, 0, 0].item() == 2
+    assert second.indexer_snapshot[0, 0, 0].item() == 3
+    worker.close()
+
+
+def test_indexer_only_output_is_a_typed_view_of_the_host_rows():
+    indexer_shape = (3, 2)
+    worker = _make_worker(1, indexer_shape=indexer_shape, enable_r3=False)
+    typed = np.arange(12, dtype=np.int32).reshape(2, *indexer_shape)
+
+    output = worker._make_output(0, typed.view(np.uint8).reshape(2, -1))
+
+    assert output.routed_rows is None
+    assert output.indexer_rows.dtype == np.int32
+    assert output.indexer_rows.shape == (2, *indexer_shape)
+    assert not output.indexer_rows.flags.owndata
+    np.testing.assert_array_equal(output.indexer_rows, typed)
+
+
+def test_indexer_only_output_copies_read_only_store_rows():
+    indexer_shape = (3, 2)
+    worker = _make_worker(1, indexer_shape=indexer_shape, enable_r3=False)
+    typed = np.arange(12, dtype=np.int32).reshape(2, *indexer_shape)
+    packed = typed.view(np.uint8).reshape(2, -1)
+    packed.setflags(write=False)
+
+    output = worker._make_output(0, packed)
+
+    assert output.indexer_rows.flags.writeable
+    np.testing.assert_array_equal(output.indexer_rows, typed)
+
+
+def test_combined_output_artifacts_are_independent_copies():
+    indexer_shape = (3, 2)
+    worker = _make_worker(1, indexer_shape=indexer_shape, enable_r3=True)
+    routed = np.arange(12, dtype=_DTYPE).reshape(2, *_SHAPE)
+    indexer = np.arange(12, dtype=np.int32).reshape(2, *indexer_shape)
+    packed = np.concatenate(
+        (routed.reshape(2, -1), indexer.view(np.uint8).reshape(2, -1)), axis=1
+    )
+
+    output = worker._make_output(0, packed)
+
+    np.testing.assert_array_equal(output.routed_rows, routed)
+    np.testing.assert_array_equal(output.indexer_rows, indexer)
+    assert not np.shares_memory(output.routed_rows, output.indexer_rows)
+    assert not np.shares_memory(output.routed_rows, packed)
+    assert not np.shares_memory(output.indexer_rows, packed)
+    output.indexer_rows[:] = -1
+    np.testing.assert_array_equal(output.routed_rows, routed)
+
+
+def test_connector_close_is_idempotent():
+    worker = _make_worker(1)
+    worker.close()
+    worker.close()
+    assert worker._store is None
+    assert worker._buffer is None
+    assert worker._routed_experts_capturer is None
+    assert worker._indexer is None
+
+
+def test_connector_rolls_back_routed_experts_when_indexer_capture_fails(monkeypatch):
+    import vllm.distributed.aux_output_connector.worker as aux_worker
+
+    routed = Mock()
+    monkeypatch.setattr(aux_worker, "RoutedExpertsCapturer", Mock(return_value=routed))
+    monkeypatch.setattr(aux_worker, "bind_routed_experts_capturer", Mock())
+    monkeypatch.setattr(
+        aux_worker,
+        "IndexerCapturer",
+        Mock(side_effect=RuntimeError("indexer init failed")),
+    )
+    monkeypatch.setattr(
+        aux_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=True),
+    )
+    config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(
+            enable_return_routed_experts=True, enable_return_indexer_topk=True
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+        max_concurrent_batches=2,
+    )
+
+    with pytest.raises(RuntimeError, match="indexer init failed"):
+        AuxOutputWorkerConnector(vllm_config=config, model=Mock())
+
+    routed.close.assert_called_once()
+
+
+def test_connector_rolls_back_capture_when_routed_experts_binding_fails(monkeypatch):
+    import vllm.distributed.aux_output_connector.worker as aux_worker
+
+    routed = Mock()
+    monkeypatch.setattr(aux_worker, "RoutedExpertsCapturer", Mock(return_value=routed))
+    monkeypatch.setattr(
+        aux_worker,
+        "bind_routed_experts_capturer",
+        Mock(side_effect=ValueError("no supported MoE router")),
+    )
+    monkeypatch.setattr(
+        aux_worker,
+        "get_tp_group",
+        lambda: SimpleNamespace(is_first_rank=True),
+    )
+    config = SimpleNamespace(
+        aux_output_config=SimpleNamespace(
+            enable_return_routed_experts=True, enable_return_indexer_topk=False
+        ),
+        scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
+        max_concurrent_batches=2,
+    )
+
+    with pytest.raises(ValueError, match="no supported MoE router"):
+        AuxOutputWorkerConnector(vllm_config=config, model=Mock())
+
+    routed.close.assert_called_once()
