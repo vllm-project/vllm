@@ -91,6 +91,7 @@ from vllm.v1.watermarking.spec_decode import (
 )
 from vllm.v1.worker.block_table import get_block_table_width
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
+from vllm.v1.worker.extensible_kv_cache import ExtensibleKVCache
 from vllm.v1.worker.gpu import pcp_manager as pcp
 from vllm.v1.worker.gpu.async_utils import (
     AsyncOutput,
@@ -641,11 +642,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         kv_cache_config: KVCacheConfig,
         is_profiling: bool = False,
         kv_cache_allocation_context: AbstractContextManager | None = None,
+        extensible: bool = False,
     ) -> None:
+        """Initialize the KV cache and everything that depends on its layout.
+
+        With `extensible=True`, num_blocks is a capacity: address space is
+        reserved for it but only the null block is committed before capture.
+        """
         # GPUWorker finalizes the PD interleave before KV cache initialization.
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+        self.extensible_kv_cache: ExtensibleKVCache | None = None
+        if extensible:
+            self.extensible_kv_cache = ExtensibleKVCache(kv_cache_config, self.device)
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:
@@ -807,6 +817,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # to its own attention support.
             self.speculator.init_cudagraph_manager(cudagraph_mode)
 
+        allocate_fn = None
+        if self.extensible_kv_cache is not None:
+            allocate_fn = self.extensible_kv_cache.allocate
+
         # Capture warmup providers that depend on allocated KV-cache strides.
         with self.jit_warmup_registry.activate():
             kv_caches_dict = init_kv_cache(
@@ -824,6 +838,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     + getattr(self.speculator, "attn_groups", [])
                     for g in groups
                 ),
+                allocate=allocate_fn,
             )
         self.kv_caches = [
             cache for cache in kv_caches_dict.values() if cache.device == self.device
@@ -1092,6 +1107,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> int:
         """Estimate the GPU memory required to capture CUDA graphs."""
+        if self.cache_config.enable_extensible_kv_cache:
+            # The extensible KV cache measures the capture footprint after warmup.
+            return 0
         # Runs before the KV cache exists, outside compile_or_warm_up_model.
         with self.eplb.suppress():
             return _profile_cudagraph_memory(self)
@@ -1935,11 +1953,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     input_batch, valid_dummy_state_slots
                 )
                 if context_len:
+                    if self.extensible_kv_cache is not None:
+                        num_blocks = self.extensible_kv_cache.num_committed_blocks
+                    else:
+                        num_blocks = self.kv_cache_config.num_blocks
                     set_dummy_context(
                         input_batch,
                         self.block_tables,
                         context_len,
-                        self.kv_cache_config.num_blocks,
+                        num_blocks,
                         self.max_model_len,
                         input_block_tables=block_tables,
                     )
@@ -2461,6 +2483,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if hasattr(self, "model"):
             clear_layer_kv_caches(self.model.modules())
             del self.model
+        # Its views do not keep it alive, and the runner can outlive shutdown
+        # (an in-process engine), so unmap the extensible KV cache explicitly.
+        if (kv_cache := getattr(self, "extensible_kv_cache", None)) is not None:
+            kv_cache.free()
+            self.extensible_kv_cache = None
 
         gc.collect()
         torch.accelerator.empty_cache()
