@@ -105,6 +105,7 @@ class EngineCoreRequest(
     abort_immediately: bool = False
     session_id: str | None = None
     kv_hints: KvHintsEnvelope | None = None
+    block_hashes: list[bytes] | None = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,7 @@ request = EngineCoreRequest(
             )
         ],
     ),
+    block_hashes=[b"\x01" * 32, b"\x02" * 32],
 )
 
 # All defaults -> empty map. Regression guard for the sparse-map decode.
@@ -499,6 +501,14 @@ class KVEventsConfig:
 
 
 @dataclass
+class PrefixHashConfig:
+    hash_algo: str
+    hash_block_size: int
+    none_hash: bytes
+    num_lookahead_tokens: int = 0
+
+
+@dataclass
 class EngineCoreReadyResponse:
     max_model_len: int
     num_gpu_blocks: int
@@ -524,6 +534,8 @@ class EngineCoreReadyResponse:
     enable_sleep_mode: bool = False
     supports_draft_weight_updates: bool = False
     effective_attention_block_size: int | None = None
+    vllm_config: dict | None = None
+    prefix_hash_config: PrefixHashConfig | None = None
 
 
 ready_response = EngineCoreReadyResponse(
@@ -548,6 +560,12 @@ ready_response = EngineCoreReadyResponse(
     enable_sleep_mode=True,
     supports_draft_weight_updates=True,
     effective_attention_block_size=64,
+    prefix_hash_config=PrefixHashConfig(
+        hash_algo="sha256",
+        hash_block_size=16,
+        none_hash=bytes(range(32)),
+        num_lookahead_tokens=1,
+    ),
     kv_events_config=KVEventsConfig(
         enable_kv_cache_events=True,
         publisher="zmq",
@@ -558,6 +576,12 @@ ready_response = EngineCoreReadyResponse(
         max_queue_size=100_000,
         topic="kv",
     ),
+    vllm_config={
+        "model_config": {"model": "test-model", "max_model_len": 32768},
+        "cache_config": {"num_gpu_blocks": 1000, "gpu_memory_utilization": 0.9},
+        "parallel_config": {"_api_process_count": 1, "_api_process_rank": -1},
+        "speculative_config": None,
+    },
 )
 
 nixl_stats = {
@@ -566,8 +590,10 @@ nixl_stats = {
     "bytes_transferred": [4096, 8192],
     "num_descriptors": [2, 4],
     "num_failed_transfers": [],
-    "num_failed_notifications": [],
+    "num_failed_notifications": [1],
+    "num_failed_handshakes": [1],
     "num_kv_expired_reqs": [1],
+    "num_notifications_after_expiry": [2],
 }
 mooncake_stats = {
     "load_get": [
@@ -588,10 +614,16 @@ mooncake_transfer_stats = {
     "num_failed_recvs": [],
     "num_kv_expired_reqs": [1],
 }
+# `UMBPStoreConnectorStats.data`: interval counters keyed by operation.
+umbp_stats = {
+    "load": {"submitted": 3, "completed": 2, "failed": 1, "num_bytes": 8192},
+    "store": {"submitted": 1, "completed": 1, "failed": 0, "num_bytes": 4096},
+}
 multi_connector_stats = {
     "NixlConnector": nixl_stats,
     "MooncakeConnector": mooncake_transfer_stats,
     "MooncakeStoreConnector": mooncake_stats,
+    "UMBPStoreConnector": umbp_stats,
     "UnsupportedConnector": {"sample_count": 1},
 }
 
@@ -617,6 +649,7 @@ print(
 print(msgspec.msgpack.encode(nixl_stats).hex())
 print(msgspec.msgpack.encode(mooncake_stats).hex())
 print(msgspec.msgpack.encode(mooncake_transfer_stats).hex())
+print(msgspec.msgpack.encode(umbp_stats).hex())
 print(msgspec.msgpack.encode(multi_connector_stats).hex())
 print(msgspec.msgpack.encode(ready_response).hex())
 print(extended_outputs_bytes.hex())

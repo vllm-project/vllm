@@ -207,7 +207,7 @@ class ShardedRDTWeightTransferInitInfo(WeightTransferInitInfo):
     expert name has this one-rank owner set), and combinations of the two — so
     the engine cuts each group's baked copies into one chunk per distinct class
     present and routes each chunk to that class's owner. Derived by the trainer
-    from ``WeightSource.held_names()``."""
+    from ``ParamMeta.owners``."""
 
     num_consumers: int = 0
     """Total consumer count across the fleet, for M:N routing. Authoritative when

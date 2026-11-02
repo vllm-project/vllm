@@ -28,6 +28,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheLayout,
     KVCacheSpec,
     MambaSpec,
+    get_kv_quant_mode,
 )
 
 if TYPE_CHECKING:
@@ -251,12 +252,21 @@ def get_supported_kv_cache_layouts(
     their order; otherwise the layout the most backends put first wins, ties
     keeping the enum order. An empty intersection is a hard error.
     """
-    supported_layouts_lists: list[Sequence[KVCacheLayout]] = [
-        layouts
-        for backend in backends
-        if (layouts := backend.supported_kv_cache_layouts()) is not None
-    ] or [_DEFAULT_LAYOUT_PREFERENCE]
+    return _merge_supported_layouts(
+        [
+            layouts
+            for backend in backends
+            if (layouts := backend.supported_kv_cache_layouts()) is not None
+        ]
+        or [_DEFAULT_LAYOUT_PREFERENCE]
+    )
 
+
+def _merge_supported_layouts(
+    supported_layouts_lists: Sequence[Sequence[KVCacheLayout]],
+) -> list[KVCacheLayout]:
+    """Layouts in every supported set, merged as in
+    ``get_supported_kv_cache_layouts``."""
     first = supported_layouts_lists[0]
     if all(layouts == first for layouts in supported_layouts_lists[1:]):
         return list(first)
@@ -298,8 +308,10 @@ def resolve_kv_cache_layout(
     """Resolve one KV cache layout for the whole model.
 
     Runs once in the engine core. Every worker reports the layouts its backends
-    support, most preferred first (``get_supported_kv_cache_layouts``); all
-    ranks run the same backends, so their lists must agree. Specs mixing HNC
+    support, most preferred first (``get_supported_kv_cache_layouts``). Pipeline
+    stages hold different layers, so their lists may differ; the candidates are
+    the layouts every worker supports, and the layout the most workers put first
+    wins. Workers whose backends declare nothing do not vote. Specs mixing HNC
     shapes narrow the candidates to block-compact layouts. An explicit
     ``VLLM_KV_CACHE_LAYOUT`` must be one of the candidates or resolution fails,
     with the legacy ``NHD``/``HND`` names as aliases for ``LBNHC``/``LBHNC``; the
@@ -316,10 +328,15 @@ def resolve_kv_cache_layout(
     assert supported_layouts and all(supported_layouts), (
         "No worker reported supported KV cache layouts."
     )
-    assert all(names == supported_layouts[0] for names in supported_layouts[1:]), (
-        f"Workers disagree on supported KV cache layouts: {supported_layouts}."
+    reported = [
+        tuple(_layout_from_name(name) for name in names) for names in supported_layouts
+    ]
+    # Workers where no backend declares a set report the default preference;
+    # like undeclared backends of one worker, they don't vote.
+    candidates = _merge_supported_layouts(
+        [layouts for layouts in reported if layouts != _DEFAULT_LAYOUT_PREFERENCE]
+        or reported
     )
-    candidates = [_layout_from_name(name) for name in supported_layouts[0]]
 
     # A block-compact layout means the block is densely packed in memory, so any mix of
     # specs can re-interpret HNC with different sizes as long as the total number of
@@ -357,6 +374,19 @@ def resolve_kv_cache_layout(
             raise ValueError(
                 "DCP with a replicated draft and mixed KV page sizes requires "
                 f"a block-outer KV cache layout; supported sets: {supported_layouts}."
+            )
+
+    # An extensible KV cache commits one contiguous run per layer only under a
+    # block-compact layout, which KV connectors need to register its memory.
+    if (
+        cache_config.enable_extensible_kv_cache
+        and vllm_config.kv_transfer_config is not None
+    ):
+        candidates = [m for m in candidates if m.is_block_compact]
+        if not candidates:
+            raise ValueError(
+                "KV connectors with the extensible KV cache need a block-compact "
+                f"layout, but none is in every supported set: {supported_layouts}."
             )
 
     if (requested := envs.VLLM_KV_CACHE_LAYOUT) is not None:
@@ -429,6 +459,43 @@ def get_per_layer_parameters(
         )
 
     return per_layer_params
+
+
+def _kv_cache_read_encoding(cache_dtype: str | None) -> str | None:
+    # NVFP4 scale-search variants only differ in the store kernel.
+    if cache_dtype == "fp8":
+        return "fp8_e4m3"
+    if cache_dtype is not None and get_kv_quant_mode(cache_dtype).is_nvfp4:
+        return "nvfp4"
+    return cache_dtype
+
+
+def get_kv_cache_dtype_from_layers(
+    vllm_config: VllmConfig, layer_names: list[str]
+) -> str | None:
+    """Resolve the KV read encoding shared by an attention group.
+
+    Attention groups are split by spec, which separates quantization modes but
+    not encodings that share a storage layout (e.g. fp8_e4m3 vs fp8_e5m2).
+    Those must not be mixed within one group.
+    """
+    layers = get_layers_from_vllm_config(
+        vllm_config,
+        AttentionLayerBase,  # type: ignore[type-abstract]
+        layer_names,
+    )
+    cache_dtypes = {
+        _kv_cache_read_encoding(getattr(layer, "kv_cache_dtype", None))
+        for layer in layers.values()
+    }
+    if not cache_dtypes:
+        return None
+    if len(cache_dtypes) != 1:
+        raise ValueError(
+            "All layers in one attention group must share the same KV cache "
+            f"dtype; got {cache_dtypes} for {layer_names}."
+        )
+    return cache_dtypes.pop()
 
 
 def get_num_attention_heads_from_layers(

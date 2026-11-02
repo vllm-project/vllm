@@ -24,9 +24,11 @@ import queue
 import signal
 import sys
 import threading
+import time
 import typing
 from collections.abc import Sequence
 from itertools import product
+from multiprocessing.connection import wait
 from multiprocessing.process import BaseProcess
 
 from fastapi import FastAPI
@@ -324,7 +326,7 @@ class PreloadSubcommand(CLISubcommand):
                 return None
             return host, base_port + offset
 
-        procs = []
+        procs: list[BaseProcess] = []
         for group_index, (is_draft, config, init_method) in enumerate(groups):
             # Draft daemons live past the target group's port block so both
             # roles can be reached over a single seed host:base_port.
@@ -371,58 +373,79 @@ class PreloadSubcommand(CLISubcommand):
                 args.weight_cache_health_port,
                 health_state,
             )
-        for proc in procs:
-            proc.start()
+        shutdown_requested = False
+        exit_code = 0
 
         def _shutdown(signum, frame):
-            if health_server is not None:
-                health_server.should_exit = True
-            for proc in procs:
-                proc.terminate()
+            nonlocal shutdown_requested, exit_code
+            shutdown_requested = True
+            exit_code = 128 + signum
 
         signal.signal(signal.SIGINT, _shutdown)
         signal.signal(signal.SIGTERM, _shutdown)
 
-        ready: set[tuple[str, int]] = set()
-        while len(ready) < len(expected_ready):
-            try:
-                ready.add(ready_queue.get(timeout=1.0))
-            except queue.Empty:
+        started: list[BaseProcess] = []
+        try:
+            for proc in procs:
+                if shutdown_requested:
+                    break
+                proc.start()
+                started.append(proc)
+
+            ready: set[tuple[str, int]] = set()
+            while not shutdown_requested:
                 dead = [p for p in procs if p.exitcode is not None]
                 if dead:
                     logger.error(
-                        "Weight cache daemon rank(s) exited during startup "
+                        "Weight cache daemon rank(s) exited during %s "
                         "(exitcodes=%s); shutting down.",
+                        "serving" if ready == expected_ready else "startup",
                         [p.exitcode for p in dead],
                     )
-                    for proc in procs:
-                        proc.terminate()
-                    for proc in procs:
-                        proc.join()
-                    if health_server is not None:
-                        health_server.should_exit = True
-                    if health_thread is not None:
-                        health_thread.join()
-                    sys.exit(max((p.exitcode or 0) for p in procs))
-        health_state.mark_ready()
-        socket_dir_msg = args.weight_cache_socket_dir or "the default socket dir"
-        logger.info_once(
-            "===== Weight cache daemon READY: node %d/%d serving %d local "
-            "rank(s) x %d role(s) in %s =====",
-            node_rank,
-            nnodes,
-            local_world_size,
-            len(groups),
-            socket_dir_msg,
-        )
-
-        for proc in procs:
-            proc.join()
-        if health_server is not None:
-            health_server.should_exit = True
-        if health_thread is not None:
-            health_thread.join()
-        sys.exit(max(proc.exitcode or 0 for proc in procs))
+                    # Preserve the failure before terminating healthy siblings.
+                    # A clean rank exit is also unexpected while serving.
+                    failure = next((code for p in dead if (code := p.exitcode)), 1)
+                    exit_code = 128 - failure if failure < 0 else failure
+                    break
+                if ready == expected_ready:
+                    wait([p.sentinel for p in procs], timeout=1.0)
+                    continue
+                try:
+                    ready.add(ready_queue.get(timeout=1.0))
+                except queue.Empty:
+                    continue
+                if ready == expected_ready:
+                    health_state.mark_ready()
+                    socket_dir_msg = (
+                        args.weight_cache_socket_dir or "the default socket dir"
+                    )
+                    logger.info_once(
+                        "===== Weight cache daemon READY: node %d/%d serving %d "
+                        "local rank(s) x %d role(s) in %s =====",
+                        node_rank,
+                        nnodes,
+                        local_world_size,
+                        len(groups),
+                        socket_dir_msg,
+                    )
+        finally:
+            if health_server is not None:
+                health_server.should_exit = True
+            for proc in started:
+                if proc.is_alive():
+                    proc.terminate()
+            deadline = time.monotonic() + 10.0
+            for proc in started:
+                proc.join(timeout=max(0.0, deadline - time.monotonic()))
+            for proc in started:
+                if proc.is_alive():
+                    proc.kill()
+            for proc in started:
+                proc.join()
+            if health_thread is not None:
+                health_thread.join()
+            ready_queue.close()
+        sys.exit(exit_code)
 
     def subparser_init(
         self, subparsers: argparse._SubParsersAction

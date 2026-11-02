@@ -16,6 +16,9 @@ the copies of the weights that the model makes at load, at steps of 6, 8 and 42
 rows, and replays the steps in one CUDA graph. The real model's numerics on
 gfx942 are checked by ``test_dsv41_mono_layers.py``."""
 
+import shutil
+import subprocess
+
 import pytest
 import ray
 import torch
@@ -562,12 +565,29 @@ def _check_layers(rank: int, tp: int, device) -> None:
 
 
 @pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
-@pytest.mark.parametrize("tp", [2, 4])
+@pytest.mark.parametrize("tp", [2, 4, 8])
 def test_mono_decode_layer_matches_vllm(monkeypatch: pytest.MonkeyPatch, tp: int):
     if torch.accelerator.device_count() < tp:
         pytest.skip(f"needs {tp} GPUs")
     pytest.importorskip("flydsl")
     multi_process_parallel(monkeypatch, tp, 1, _mono_numerics)
+
+
+@pytest.mark.skipif(not _on_cdna4(), reason="the mono kernels target CDNA4")
+@pytest.mark.skipif(not shutil.which("llvm-objdump"), reason="needs llvm-objdump")
+def test_mono_decode_k2_tp4_no_scratch(monkeypatch: pytest.MonkeyPatch):
+    """TP4 K2 at 14 rows, where the MoE push's peer bases spilled: no scratch."""
+    flyc = pytest.importorskip("flydsl.compiler")
+    from vllm.models.deepseek_v41.amd.mono.layer import MonoBuild, build_mono_k2
+    from vllm.models.minimax_m3.amd.specialized_decode.mono.residency import code_object
+
+    monkeypatch.setenv("COMPILE_ONLY", "1")
+    monkeypatch.setenv("FLYDSL_RUNTIME_ENABLE_CACHE", "0")
+    k2 = build_mono_k2(MonoBuild(14, 4, 2))
+    flyc.compile(k2, *[0] * (k2.func.__code__.co_argcount - 1))
+    elf = code_object(k2._last_compiled[1]._ir_text)
+    isa = subprocess.check_output(["llvm-objdump", "-d", "-"], input=elf)
+    assert b"scratch_" not in isa
 
 
 # ---------------------------------------------------------------- gfx942

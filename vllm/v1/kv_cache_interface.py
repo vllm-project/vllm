@@ -1068,6 +1068,7 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
             dtype=specs[0].dtype,
             dcp_sharded=specs[0].dcp_sharded,
             max_tp_shards=specs[0].max_tp_shards,
+            kv_quant_mode=specs[0].kv_quant_mode,
             page_size_padded=specs[0].page_size_padded,
             num_head_slots=specs[0].num_head_slots,
             state_content_bytes=specs[0].state_content_bytes,
@@ -1170,11 +1171,16 @@ def get_mamba_prefill_checkpoint_position(
     num_tokens: int,
     hash_block_size: int,
     drop_eagle_block: bool,
+    num_hash_lookahead_tokens: int = 0,
 ) -> int:
     """Return the reusable Mamba checkpoint boundary for a prefill."""
-    # Without EAGLE, leave one token to recompute on resend.
+    # Leave tokens for logits recomputation and the checkpoint's hash.
     # EAGLE's block drop already leaves tokens to recompute.
-    proof_limit = num_tokens if drop_eagle_block else num_tokens - 1
+    proof_limit = (
+        num_tokens
+        if drop_eagle_block
+        else num_tokens - max(1, num_hash_lookahead_tokens)
+    )
     checkpoint_position = proof_limit // hash_block_size * hash_block_size
     if drop_eagle_block:
         checkpoint_position -= hash_block_size
