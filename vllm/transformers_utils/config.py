@@ -131,6 +131,7 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
+    dory="DoryConfig",
     dots3_note="Dots3NoteConfig",
     k3_dspark="K3DSparkConfig",
     funaudiochat="FunAudioChatConfig",
@@ -153,8 +154,10 @@ _CONFIG_REGISTRY: dict[str, type[PreTrainedConfig]] = LazyConfigDict(
     midashenglm="MiDashengLMConfig",
     minimax_m3_vl="MiniMaxM3Config",
     minimax_m3_mtp="MiniMaxM3MTPConfig",
+    ming_v3_asr="MingV3ASRConfig",
     moondream3="Moondream3Config",
     moss_transcribe_diarize="MossTranscribeDiarizeConfig",
+    nemo_speechlm="Nemotron3_5TranscribeConfig",
     eagle="EAGLEConfig",
     speculators="SpeculatorsConfig",
     openvla="OpenVLAConfig",
@@ -841,6 +844,9 @@ def maybe_override_with_speculators(
 
     # Speculators format detected - process overrides
     from vllm.transformers_utils.configs.speculators.base import SpeculatorsConfig
+    from vllm.v1.worker.gpu.spec_decode.speculator_config import (
+        get_custom_speculator_config_class,
+    )
 
     speculative_config = SpeculatorsConfig.extract_vllm_speculative_config(
         config_dict=config_dict
@@ -851,8 +857,17 @@ def maybe_override_with_speculators(
     if isinstance(vllm_speculative_config, dict):
         speculative_config.update(vllm_speculative_config)
 
-    # Lock fields dictated by the speculators format
-    speculative_config["method"] = speculators_method
+    # Lock fields dictated by the speculators format, except for a custom
+    # method based on the checkpoint's.
+    custom_config_cls = get_custom_speculator_config_class(speculative_config["method"])
+    if custom_config_cls is None:
+        speculative_config["method"] = speculators_method
+    elif custom_config_cls.base_method != speculators_method:
+        raise ValueError(
+            f"Speculative method '{speculative_config['method']}' is based on "
+            f"'{custom_config_cls.base_method}', but the speculators "
+            f"checkpoint {model} is for '{speculators_method}'."
+        )
     speculative_config["model"] = model
 
     # Override model and tokenizer with the verifier model from config

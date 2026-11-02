@@ -91,6 +91,9 @@ from vllm.model_executor.kernels.linear.mxfp4.marlin import (
 from vllm.model_executor.kernels.linear.mxfp4.pytorch import (
     TorchMxFp4LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mxfp4.rdna3_hip import (
+    Rdna3W4A8MxFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mxfp4.xpu import (
     XPUMxFp4LinearKernel,
 )
@@ -241,7 +244,10 @@ from vllm.model_executor.layers.quantization.utils.humming import (
     prefers_humming,
     prioritize_humming,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Static,
+)
 from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
@@ -625,6 +631,7 @@ _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
         EmulationMxfp4LinearKernel,
     ],
     PlatformEnum.ROCM: [
+        Rdna3W4A8MxFp4LinearKernel,
         AiterMxfp4LinearKernel,
         EmulationMxfp4LinearKernel,
     ],
@@ -829,6 +836,9 @@ def fp8_scaled_mm_is_batch_invariant(
     kernel: FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel,
 ) -> bool:
     """Whether a row's output from the kernel is independent of the other rows."""
+    # Weight-only here, and Humming honors VLLM_BATCH_INVARIANT itself.
+    if isinstance(kernel, HummingFP8ScaledMMLinearKernel):
+        return True
     if not isinstance(
         kernel, (CutlassFP8ScaledMMLinearKernel, TritonFP8ScaledMMLinearKernel)
     ):
@@ -1003,11 +1013,45 @@ def init_mxfp8_linear_kernel(
     )
 
 
+def _user_linear_activation_override() -> QuantKey | None:
+    """User's linear activation override from quantization_config, or None."""
+    from vllm.config import get_current_vllm_config_or_none
+    from vllm.config.quantization import QuantizationConfigArgs
+
+    config = get_current_vllm_config_or_none()
+    if config is None or config.model_config is None:
+        return None
+    args = config.model_config.quantization_config
+    if not isinstance(args, QuantizationConfigArgs) or args.linear is None:
+        return None
+    return args.linear.activation
+
+
+def _resolve_linear_activation_key(
+    model_activation_key: QuantKey | None,
+) -> QuantKey | None:
+    """Apply ``--quantization-config.linear.activation`` to the checkpoint's
+    activation key. The override wins: it may replace a checkpoint's MXFP4
+    activations with a format a kernel computes directly (e.g. int8)."""
+    user_override = _user_linear_activation_override()
+    if user_override is None or user_override == model_activation_key:
+        return model_activation_key
+    if model_activation_key is not None:
+        logger.warning_once(
+            "Checkpoint declares linear activation=%s; using "
+            "quantization_config.linear.activation=%s instead.",
+            model_activation_key,
+            user_override,
+        )
+    return user_override
+
+
 def init_mxfp4_linear_kernel(
     activation_quant_key: QuantKey | None = None,
 ) -> MxFp4LinearKernel:
     """Select and instantiate the best MXFP4 linear kernel for the
     current platform."""
+    activation_quant_key = _resolve_linear_activation_key(activation_quant_key)
     config = MxFp4LinearLayerConfig(
         activation_quant_key=activation_quant_key,
     )
@@ -1033,6 +1077,13 @@ def init_mxfp4_linear_kernel(
         is_supported, reason = kernel_cls.is_supported()
         if not is_supported:
             failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        if not kernel_cls._supports_quant_scheme(kMxfp4Static, activation_quant_key):
+            failure_reasons.append(
+                f"{kernel_cls.__name__}: quantization scheme "
+                f"{kMxfp4Static}x{activation_quant_key} not supported"
+            )
             continue
 
         can_implement, reason = kernel_cls.can_implement(config)
@@ -1151,41 +1202,34 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
         HummingNvFp4LinearKernel,
     )
 
-    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
-    # batch-invariant CUTLASS implementation when available, otherwise fall
-    # back to emulation. It overrides --linear-backend.
+    # VLLM_BATCH_INVARIANT forces deterministic execution: Humming for W4A16,
+    # otherwise CUTLASS, or emulation where CUTLASS is unsupported. It
+    # overrides --linear-backend.
     force_kernel: type[NvFp4LinearKernel] | None = None
     quantization = "nvfp4_w4a16" if use_a16 else "nvfp4_w4a4"
     linear_backend = _get_linear_backend(quantization=quantization)
     if envs.VLLM_BATCH_INVARIANT:
-        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
-        if bi_supported:
-            if linear_backend not in ("auto", "cutlass"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the CUTLASS backend for deterministic execution.",
-                    linear_backend,
-                )
+        if use_a16:
+            force_kernel, bi_backend = HummingNvFp4LinearKernel, "humming"
+        else:
+            cutlass_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+            if cutlass_supported:
+                force_kernel, bi_backend = CutlassNvFp4LinearKernel, "cutlass"
             else:
                 logger.info_once(
-                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
-                    "CUTLASS backend for deterministic execution."
+                    "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                    "kernel is not supported on this platform; falling back to "
+                    "emulation for deterministic execution. Reason: %s",
+                    reason,
                 )
-            force_kernel = CutlassNvFp4LinearKernel
-        else:
-            if linear_backend not in ("auto", "emulation"):
-                logger.warning_once(
-                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
-                    "using the emulation backend for deterministic execution.",
-                    linear_backend,
-                )
-            logger.info_once(
-                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
-                "kernel is not supported on this platform; falling back to "
-                "emulation for deterministic execution. Reason: %s",
-                reason,
+                force_kernel, bi_backend = EmulationNvFp4LinearKernel, "emulation"
+        if linear_backend not in ("auto", bi_backend):
+            logger.warning_once(
+                "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; using the "
+                "%s backend for deterministic execution.",
+                linear_backend,
+                bi_backend,
             )
-            force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto" and use_a16:
         _cc = current_platform.get_device_capability()
         compute_capability = _cc.to_int() if _cc is not None else None
@@ -1271,8 +1315,8 @@ def register_linear_kernel(
     Args:
         kernel_class (type): The kernel class to register.
         platform (PlatformEnum): The platform for which this kernel is applicable.
-        kernel_type (str): The type of the kernel, either "mp", "int8", or "fp8".
-            Defaults to "mp".
+        kernel_type (str): The type of the kernel, either "mp", "int8", "fp8",
+            "fp8_block", "mxfp8", "nvfp4", "mxfp4" or "mxfp6". Defaults to "mp".
 
     Raises:
         ValueError: If the kernel_type is not recognized.
@@ -1290,6 +1334,10 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_FP8_KERNELS:
             _POSSIBLE_FP8_KERNELS[platform] = []
         _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "fp8_block":
+        if platform not in _POSSIBLE_FP8_BLOCK_KERNELS:
+            _POSSIBLE_FP8_BLOCK_KERNELS[platform] = []
+        _POSSIBLE_FP8_BLOCK_KERNELS[platform].append(kernel_class)
     elif kernel_type == "mxfp8":
         if platform not in _POSSIBLE_MXFP8_KERNELS:
             _POSSIBLE_MXFP8_KERNELS[platform] = []
@@ -1373,6 +1421,7 @@ __all__ = [
     "EmulationMxfp4LinearKernel",
     "FlashInferMxFp4LinearKernel",
     "MarlinMxFp4LinearKernel",
+    "Rdna3W4A8MxFp4LinearKernel",
     "FlashInferCutedslMxfp8LinearKernel",
     "FlashInferCutlassMxfp8LinearKernel",
     "FlashInferTrtllmMxfp8LinearKernel",

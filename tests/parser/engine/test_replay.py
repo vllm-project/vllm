@@ -72,6 +72,11 @@ def _discover_parsers() -> list[_ParserInfo]:
             continue
         # Concrete parsers supply parser_engine_config themselves
         cfg = obj(bare_tok, None).parser_engine_config  # type: ignore[call-arg]
+        if cfg.name == "llama_json":
+            # Llama JSON uses a semicolon-separated collection with no
+            # TOOL_END terminal. Dedicated coverage lives in
+            # test_llama_json.py.
+            continue
         if cfg.name not in _BUILDERS:
             missing_builders.append(f"{obj.__name__} (config.name={cfg.name!r})")
             continue

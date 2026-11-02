@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import abstractmethod
+from collections.abc import Callable, Iterator
 
 import torch
 
@@ -12,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.moe_output import UnfinalizedMoEOutput
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import triton_weight
 from vllm.model_executor.layers.quantization.online.requantization import (
     OnlineRequantizationMixin,
 )
@@ -46,14 +48,17 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         layer.weight_block_size = None
 
         if self.requantization_source is not None:
+            # In case FSE is used, shared experts slots are initialized on RoutedExperts
+            # online quant method, the source only holds the routed experts.
             self.create_requantization_source_weights(
                 layer,
-                num_experts,
+                num_experts - layer.expert_map_manager.num_fused_shared_experts,
                 layer.moe_config.hidden_dim_unpadded,
                 layer.moe_config.intermediate_size_per_partition_unpadded,
                 params_dtype,
                 **extra_weight_attrs,
             )
+            layer.num_experts = num_experts
             return
 
         # Fused gate_up_proj (column parallel) — full precision on meta device
@@ -118,22 +123,95 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
     def get_weights_for_quantization(
         self, layer: torch.nn.Module
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the high precision ``(w13, w2)`` of all local experts."""
         if self.requantization_source is None:
             return layer.w13_weight, layer.w2_weight
+        w13, w2 = self.quantize_weights(layer, lambda w13, w2: (w13, w2))
+        return w13, w2
 
-        weights = self.requantization_source.dequantize_weight(layer)
-        if not isinstance(weights, tuple):
-            raise TypeError("MoE requantization requires w13 and w2 weight tensors.")
+    def iter_weights_for_quantization(
+        self, layer: torch.nn.Module
+    ) -> Iterator[tuple[slice, torch.Tensor, torch.Tensor]]:
+        """Yield ``(experts, w13, w2)`` for groups of experts to quantize.
 
-        w13, w2 = weights
+        The source dequantizes in chunks to bound staging memory. Without a source,
+        all routed experts are yielded at once. Fused shared experts come last.
+        """
+        num_shared = layer.expert_map_manager.num_fused_shared_experts
+        num_routed = layer.local_num_experts - num_shared
 
+        source = self.requantization_source
+        if source is None:
+            # These include the fused shared experts slots, never staged here.
+            yield slice(0, num_routed), layer.w13_weight, layer.w2_weight
+        else:
+            chunks = source.dequantize_weight(layer)
+            if isinstance(chunks, torch.Tensor):
+                raise TypeError("MoE requantization requires w13 and w2 weights.")
+            for experts, w13, w2 in chunks:
+                yield (
+                    experts,
+                    *self._pad_requantized_weights(
+                        layer, w13, w2, experts.stop - experts.start
+                    ),
+                )
+
+        if num_shared > 0:
+            loader = layer.shared_expert_online_loader
+            shared_w13, shared_w2 = loader.dequantize_staging(layer)
+            loader.release_staging(layer)
+            yield (
+                slice(num_routed, num_routed + num_shared),
+                *self._pad_requantized_weights(
+                    layer,
+                    shared_w13.to(layer.orig_dtype),
+                    shared_w2.to(layer.orig_dtype),
+                    num_shared,
+                ),
+            )
+
+    def quantize_weights(
+        self,
+        layer: torch.nn.Module,
+        quantize: Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, ...]],
+    ) -> tuple[torch.Tensor, ...]:
+        """Quantize the layer's weights one group of experts at a time.
+
+        Args:
+            layer: Layer to quantize.
+            quantize: Maps ``(w13, w2)`` of a group of experts to tensors, e.g.
+                ``(w13, w13_scale, w2, w2_scale)``.
+
+        Returns:
+            The ``quantize`` outputs for all local experts.
+
+        """
+        num_experts = layer.local_num_experts
+        outputs: list[torch.Tensor] | None = None
+        for experts, w13, w2 in self.iter_weights_for_quantization(layer):
+            quantized = quantize(w13, w2)
+            if outputs is None:
+                if w13.shape[0] == num_experts:
+                    return quantized
+                outputs = [t.new_empty((num_experts, *t.shape[1:])) for t in quantized]
+            for output, tensor in zip(outputs, quantized):
+                output[experts] = tensor
+        assert outputs is not None
+        return tuple(outputs)
+
+    def _pad_requantized_weights(
+        self,
+        layer: torch.nn.Module,
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        num_experts: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         config = layer.moe_config
         hidden_size = config.hidden_dim_unpadded
         intermediate_size = config.intermediate_size_per_partition_unpadded
         target_hidden_size = config.hidden_dim
         target_intermediate_size = config.intermediate_size_per_partition
 
-        num_experts = layer.local_num_experts
         num_shards = self.moe.w13_num_shards
 
         if w13.shape != (num_experts, num_shards * intermediate_size, hidden_size):
@@ -237,8 +315,8 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             x,
-            layer.w13_weight,
-            layer.w2_weight,
+            triton_weight(layer, "w13_weight"),
+            triton_weight(layer, "w2_weight"),
             router_logits,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
@@ -264,8 +342,8 @@ class OnlineMoEMethodBase(OnlineRequantizationMixin, FusedMoEMethodBase):
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,
-            layer.w13_weight,
-            layer.w2_weight,
+            triton_weight(layer, "w13_weight"),
+            triton_weight(layer, "w2_weight"),
             topk_weights,
             topk_ids,
             activation=layer.activation,

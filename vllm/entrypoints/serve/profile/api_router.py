@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import Any
+
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict
@@ -26,6 +28,7 @@ class StartProfileRequest(BaseModel):
     profile_prefix: str | None = None
     delay_iterations: int | None = None
     max_iterations: int | None = None
+    profiler_kwargs: dict[str, Any] | None = None
 
 
 def engine_client(request: Request) -> EngineClient:
