@@ -23,7 +23,8 @@ import numpy as np
 import torch
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.inputs import PromptType, TokensPrompt
+from vllm.config.speech_to_text import SpeechToTextParams
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.parse import MultiModalDataItems
@@ -31,9 +32,7 @@ from vllm.multimodal.processing import ProcessorInputs, TimingContext
 from vllm.multimodal.processing.processor import (
     MultiModalProcessingResult,
     PlaceholderFeaturesInfo,
-    cached_encode,
 )
-from vllm.tokenizers import cached_tokenizer_from_config
 from vllm.transformers_utils.processor import cached_processor_from_config
 
 from .interfaces import SupportsRealtime
@@ -185,11 +184,13 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
         audio_stream: AsyncGenerator[np.ndarray, None],
         input_stream: asyncio.Queue[list[int]],
         model_config: ModelConfig,
+        language: str | None = None,
+        request_prompt: str = "",
     ) -> AsyncGenerator[PromptType, None]:
         processor = cached_processor_from_config(model_config)
         feature_extractor = processor.feature_extractor
         sampling_rate = feature_extractor.sampling_rate
-        tokenizer = cached_tokenizer_from_config(model_config)
+        stt_config = cls.get_speech_to_text_config(model_config, "transcribe")
 
         # Use a small segment size for low-latency streaming.
         segment_duration_s = 5.0
@@ -198,28 +199,26 @@ class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealt
             segment_duration_s=segment_duration_s,
         )
 
-        audio_placeholder = cls.get_placeholder_str("audio", 0)
-        prompt_template = (
-            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n<|im_start|>assistant\n"
-        )
-
-        prompt_token_ids = cached_encode(tokenizer, prompt_template)
+        def get_prompt(audio: np.ndarray) -> PromptType:
+            return cls.get_generation_prompt(
+                SpeechToTextParams(
+                    audio=audio,
+                    stt_config=stt_config,
+                    model_config=model_config,
+                    language=language,
+                    request_prompt=request_prompt,
+                )
+            )
 
         async for audio_chunk in audio_stream:
             buffer.write_audio(audio_chunk)
 
             while (segment := buffer.read_audio()) is not None:
-                yield TokensPrompt(
-                    prompt_token_ids=prompt_token_ids,
-                    multi_modal_data={"audio": segment},
-                )
+                yield get_prompt(segment)
 
         remaining = buffer.flush()
         if remaining is not None and len(remaining) > 0:
-            yield TokensPrompt(
-                prompt_token_ids=prompt_token_ids,
-                multi_modal_data={"audio": remaining},
-            )
+            yield get_prompt(remaining)
 
     @classmethod
     def get_speech_to_text_config(
