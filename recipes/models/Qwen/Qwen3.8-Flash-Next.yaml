@@ -145,21 +145,6 @@ variants:
     label: "NVFP4 (RedHatAI)"
     vram_minimum_gb: 130
     description: "RedHatAI NVFP4 MoE expert weights and activations; non-expert weights retain BF16 precision"
-          - "--distributed-executor-backend"
-          - "mp"
-          - "-cc.mode"
-          - "none"
-          - "-cc.cudagraph_mode"
-          - "full_decode_only"
-      rtx_pro_6000_4x:
-        extra_args:
-          - "--max-num-seqs"
-          - "16"
-          - "--gpu-memory-utilization"
-          - "0.95"
-          - "--max-num-batched-tokens"
-          - "8192"
-          - "--enable-prefix-caching"
   bf16:
     model_id: "Qwen/Qwen3.8-Flash-Next"
     precision: bf16
