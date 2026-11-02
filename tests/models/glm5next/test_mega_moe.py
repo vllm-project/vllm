@@ -13,10 +13,11 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MegaMoEActivation,
 )
 from vllm.model_executor.model_loader.reload import (
-    finalize_layerwise_reload,
-    initialize_layerwise_reload,
+    finish_reload,
     record_metadata_for_reloading,
+    start_reload,
 )
+from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.models.glm5next.nvidia.mega_moe import (
     Glm5NextMegaMoEExperts,
     requant_block_fp8_to_ue8m0,
@@ -301,26 +302,42 @@ def test_block_fp8_shared_expert_is_fused_and_requantized():
     _assert_layout(_shared(experts), _expected_shared(ckpt))
 
 
-def test_layerwise_reload_requantizes_into_the_kernel_tensors():
-    """Reload and weight transfer restore the layer on meta, buffer every load,
-    replay it once the layer is complete and finish with the model's
+class _Model(torch.nn.Module):
+    """Finishes a load the way the GLM model, wrapper and MTP drafter do."""
+
+    def __init__(self):
+        super().__init__()
+        self.experts = _experts()
+
+    def process_weights_after_loading(self):
+        self.experts.requantize_block_fp8()
+
+
+@pytest.mark.parametrize("mode", ["layerwise", "direct"])
+def test_reload_requantizes_into_the_kernel_tensors(monkeypatch, mode):
+    """A reload writes the block-FP8 shards and finishes with the model's
     process_weights_after_loading; the kernel tensors keep their storage."""
-    experts = _experts()
-    record_metadata_for_reloading(experts)
+    monkeypatch.setenv("VLLM_RELOAD_MODE", mode)
+    model_config = SimpleNamespace(
+        word_embeddings_untied_by_checkpoint=False, quantization=None
+    )
+    device = torch.get_default_device()
+    model = _Model()
+    experts = model.experts
+    record_metadata_for_reloading(model)
     _load_shuffled(experts, _checkpoint(4, seed=0), seed=0)
     _load_shared(experts, _shared_checkpoint(seed=0))
-    experts.requantize_block_fp8()
+    process_weights_after_loading(model, model_config, device)  # type: ignore[arg-type]
     storage = {n: p.data_ptr() for n, p in experts.named_parameters()}
 
     ckpt, shared_ckpt = _checkpoint(4, seed=1), _shared_checkpoint(seed=1)
-    initialize_layerwise_reload(experts)
+    start_reload(model)
     _load_shuffled(experts, ckpt, seed=1)
     _load_shared(experts, shared_ckpt)
-    # Every loaded tensor is in, so the layer was replayed without waiting for
-    # finalize: the derived kernel scales do not count as missing loads.
+    # Every loaded tensor is in, so the layer is not meta any more: the derived
+    # kernel scales do not count as missing loads.
     assert not experts.w13_weight.is_meta
-    finalize_layerwise_reload(experts, None)  # type: ignore[arg-type]
-    experts.requantize_block_fp8()
+    finish_reload(model, model_config, device)  # type: ignore[arg-type]
 
     _assert_layout(_routed(experts), _expected_routed(ckpt))
     _assert_layout(_shared(experts), _expected_shared(shared_ckpt))
