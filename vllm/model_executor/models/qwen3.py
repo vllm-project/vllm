@@ -28,6 +28,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from transformers import Qwen3Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -181,16 +182,14 @@ class Qwen3Attention(nn.Module):
 class Qwen3DecoderLayer(nn.Module):
     def __init__(
         self,
-        vllm_config: VllmConfig,
+        config: Qwen3Config,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         per_layer_sliding_window: int | None = None,
         mrope_positions_factor: int = 4,
     ) -> None:
         super().__init__()
-
-        config = vllm_config.model_config.hf_config.get_text_config()
-        cache_config = vllm_config.cache_config
-        quant_config = self.get_quant_config(vllm_config)
 
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
@@ -198,7 +197,7 @@ class Qwen3DecoderLayer(nn.Module):
             config, "dual_chunk_attention_config", None
         )
 
-        is_pp_enable = vllm_config.parallel_config.pipeline_parallel_size > 1
+        is_pp_enable = get_pp_group().world_size > 1
         self_defer = not is_pp_enable
 
         # By default, Qwen3 uses causal attention as it is a decoder-only model.
@@ -276,10 +275,6 @@ class Qwen3DecoderLayer(nn.Module):
             else Scatter.FULL,
         )
         return hidden_states, residual
-
-    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
-        """Get quantization config for this layer. Override in subclasses."""
-        return vllm_config.quant_config
 
 
 ALL_DECODER_LAYER_TYPES = {
