@@ -82,6 +82,19 @@ if triton_kernels_version is not None:
         )
 
 
+def store_params_in_triton(layer: torch.nn.Module, **tensors) -> None:
+    """Back each loaded param and its triton_kernels tensor by one storage, so the
+    param keeps its loaded bytes without a second copy of the data."""
+    for name, tensor in tensors.items():
+        replace_parameter(layer, name, tensor.storage.data)
+        tensor.storage.data = getattr(layer, name).data
+
+
+def triton_weight(layer: torch.nn.Module, name: str):
+    """The triton_kernels tensor stored for weight `name`, else the param."""
+    return getattr(layer, f"{name}_triton", getattr(layer, name))
+
+
 def _pack_deepgemm_mxfp4_scales(
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
@@ -1433,8 +1446,7 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             flex_ctx=FlexCtx(rhs_data=w2_flex, lhs_data=lhs_data2),
         )
 
-        del layer.w13_weight
-        del layer.w2_weight
+        store_params_in_triton(layer, w13_weight=w13_weight, w2_weight=w2_weight)
 
         return (
             w13_weight,
@@ -1467,13 +1479,14 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
             **_mx_scale_kwargs(w2_scale), flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
-        # The original mxfp4 block scales have been swizzled into the
-        # precision configs above and are no longer read by the kernel, so
-        # drop the now-dead weight/scale Parameters to free their memory.
-        del layer.w13_weight
-        del layer.w2_weight
-        del layer.w13_weight_scale
-        del layer.w2_weight_scale
+        # The swizzled weights and scales live in the params' storage.
+        store_params_in_triton(
+            layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=w13_scale,
+            w2_weight_scale=w2_scale,
+        )
 
         return (
             w13_weight,
@@ -1929,13 +1942,14 @@ def convert_weight_to_mxfp4_moe_kernel_format(
             **_mx_scale_kwargs(w2_scale), flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
-        # The original mxfp4 block scales have been swizzled into the
-        # precision configs above and are no longer read by the kernel, so
-        # drop the now-dead weight/scale Parameters to free their memory.
-        del layer.w13_weight
-        del layer.w2_weight
-        del layer.w13_weight_scale
-        del layer.w2_weight_scale
+        # The swizzled weights and scales live in the params' storage.
+        store_params_in_triton(
+            layer,
+            w13_weight=w13_weight,
+            w2_weight=w2_weight,
+            w13_weight_scale=w13_scale,
+            w2_weight_scale=w2_scale,
+        )
 
         return (
             w13_weight,
