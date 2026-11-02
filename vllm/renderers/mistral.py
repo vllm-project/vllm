@@ -61,6 +61,26 @@ def _get_chat_template_kwargs(params: ChatParams) -> dict[str, Any]:
     return kwargs
 
 
+def _convert_developer_to_system(
+    messages: list[ChatCompletionMessageParam],
+) -> list[ChatCompletionMessageParam]:
+    """Map ``developer`` role to ``system`` for mistral-common compatibility.
+
+    mistral-common only accepts system/user/assistant/tool roles.  The
+    ``developer`` role (OpenAI's successor to ``system``) is semantically
+    equivalent, so we fold it into ``system`` before tokenization.
+    """
+    converted: list[ChatCompletionMessageParam] = []
+    for msg in messages:
+        if msg.get("role") == "developer":
+            new_msg = dict(msg)
+            new_msg["role"] = "system"
+            converted.append(new_msg)  # type: ignore[arg-type]
+        else:
+            converted.append(msg)
+    return converted
+
+
 class MistralRenderer(BaseRenderer[MistralTokenizer]):
     def __init__(
         self,
@@ -78,6 +98,13 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
+        if any(msg.get("role") == "developer" for msg in messages):
+            messages = _convert_developer_to_system(messages)
+            logger.info_once(
+                "mistral-common does not support the 'developer' message "
+                "role. Converting developer messages to 'system' role.",
+            )
+
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
@@ -104,6 +131,13 @@ class MistralRenderer(BaseRenderer[MistralTokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
+        if any(msg.get("role") == "developer" for msg in messages):
+            messages = _convert_developer_to_system(messages)
+            logger.info_once(
+                "mistral-common does not support the 'developer' message "
+                "role. Converting developer messages to 'system' role.",
+            )
+
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
