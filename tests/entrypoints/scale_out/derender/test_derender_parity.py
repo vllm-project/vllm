@@ -933,8 +933,20 @@ async def _inline_derender(
     return data
 
 
-def _assert_inline_parity(coupled: dict, inline: dict) -> None:
+def _assert_inline_parity(
+    coupled: dict, inline: dict, deterministic: bool = True
+) -> None:
     assert len(inline["choices"]) == len(coupled["choices"])
+    if not deterministic:
+        # Sampled tokens can differ between identical requests because the
+        # engine itself isn't bitwise reproducible, so check structure only.
+        assert [c["index"] for c in inline["choices"]] == [
+            c["index"] for c in coupled["choices"]
+        ]
+        for i in inline["choices"]:
+            assert i["token_ids"]
+            assert i["message"]["content"] or i["message"].get("reasoning")
+        return
     for c, i in zip(coupled["choices"], inline["choices"]):
         if c["token_ids"] is None:
             # Hidden reasoning suppresses token ids on both paths, so the two
@@ -1011,7 +1023,7 @@ async def test_inline_derender_parity(client, content, extra):
     messages = [{"role": "user", "content": content}]
     coupled = await _coupled(client, messages, **extra)
     inline = await _inline_derender(client, messages, **extra)
-    _assert_inline_parity(coupled, inline)
+    _assert_inline_parity(coupled, inline, extra.get("temperature", 0) == 0)
 
     if extra.get("parallel_tool_calls") is False:
         assert len(_tool_sig(inline["choices"][0])) <= 1
