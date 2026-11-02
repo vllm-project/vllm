@@ -32,6 +32,7 @@ master_allocated_bytes 2147483648
 master_allocated_bytes_per_segment{segment="a"} 1073741824
 master_mem_processing_bytes 536870912
 master_mem_leased_bytes{tenant="x y"} 268435456
+master_put_start_discarded_staging_size 268435456
 """
 
 
@@ -91,6 +92,7 @@ def test_parse_master_metrics_picks_memory_gauges():
         "allocated_bytes": 2 * GiB,
         "processing_bytes": GiB // 2,
         "leased_bytes": GiB // 4,
+        "discarded_bytes": GiB // 4,
     }
 
 
@@ -101,8 +103,14 @@ def test_usage_fractions_from_full_snapshot():
         "occupancy": 0.5,
         "write_usage": 0.125,
         "read_usage": 0.0625,
-        "usage": 0.1875,
+        "usage": 0.25,
     }
+
+
+def test_usage_without_discarded_staging_gauge():
+    snapshot = {"capacity_bytes": 4 * GiB, "processing_bytes": GiB, "leased_bytes": GiB}
+
+    assert master_usage_fractions(snapshot)["usage"] == 0.5
 
 
 def test_unpatched_master_reports_occupancy_only():
@@ -155,7 +163,7 @@ def test_prom_usage_gauges_track_master_without_engine_steps(master_url):
 
     for engine in ("0", "1"):
         labels = {"engine": engine}
-        assert _sample("vllm:mooncake_store_cache_usage_perc", labels) == 0.1875
+        assert _sample("vllm:mooncake_store_cache_usage_perc", labels) == 0.25
         assert _sample("vllm:mooncake_store_cache_write_usage_perc", labels) == 0.125
         assert _sample("vllm:mooncake_store_cache_read_usage_perc", labels) == 0.0625
         assert _sample("vllm:mooncake_store_cache_occupancy_perc", labels) == 0.5

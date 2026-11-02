@@ -45,14 +45,16 @@ _MASTER_GAUGES = {
     "master_allocated_bytes": "allocated_bytes",
     "master_mem_processing_bytes": "processing_bytes",
     "master_mem_leased_bytes": "leased_bytes",
+    "master_put_start_discarded_staging_size": "discarded_bytes",
 }
 
 
 def master_usage_fractions(snapshot: dict[str, Any]) -> dict[str, float]:
     """Store usage fractions from one master memory snapshot.
 
-    ``usage`` counts memory eviction cannot reclaim now: puts in flight plus
-    data under a read lease. ``occupancy`` also counts evictable data.
+    ``usage`` counts memory eviction cannot reclaim now: puts in flight, data
+    under a read lease, and displaced replicas awaiting deferred release.
+    ``occupancy`` also counts evictable data.
     """
     capacity = float(snapshot.get("capacity_bytes", 0))
     if capacity <= 0:
@@ -67,7 +69,8 @@ def master_usage_fractions(snapshot: dict[str, Any]) -> dict[str, float]:
     if leased is not None:
         fractions["read_usage"] = leased / capacity
     if processing is not None and leased is not None:
-        fractions["usage"] = (processing + leased) / capacity
+        discarded = snapshot.get("discarded_bytes", 0)
+        fractions["usage"] = (processing + leased + discarded) / capacity
     return fractions
 
 
@@ -246,7 +249,8 @@ class MooncakeStorePromMetrics(KVConnectorPromMetrics):
         )
         gauge_docs = {
             "usage": "Fraction of Mooncake store memory eviction cannot "
-            "reclaim now: puts in flight plus data under a read lease.",
+            "reclaim now: puts in flight, data under a read lease, and "
+            "displaced replicas awaiting deferred release.",
             "write_usage": "Fraction of Mooncake store memory held by puts in flight.",
             "read_usage": "Fraction of Mooncake store memory held by "
             "complete data under an unexpired read lease.",
