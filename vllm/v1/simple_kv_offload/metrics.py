@@ -71,9 +71,8 @@ class SimpleCPUOffloadStats(KVConnectorStats):
             _StatsKey.DATA:  {name: {labelvalues: value, ...}, ...},
         }
 
-    Counter values are summed when aggregating, gauge values keep the
-    latest snapshot, and unlabeled metrics use `()` as their
-    labelvalues tuple.
+    Counter values are summed when aggregating, gauge values keep the latest snapshot,
+    and unlabeled metrics use `()` as their labelvalues tuple.
     """
 
     def __post_init__(self):

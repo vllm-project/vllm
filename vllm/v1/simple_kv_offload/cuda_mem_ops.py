@@ -24,9 +24,8 @@ CU_MEMCPY_SRC_ACCESS_ORDER_ANY = 3
 def pin_tensor(tensor: torch.Tensor) -> None:
     """Pin a CPU tensor via cudaHostRegister.
 
-    This bypasses PyTorch's CUDACachingHostAllocator which rounds
-    every `pin_memory=True` allocation up to the next power of 2
-    (e.g. 100 GB becomes 128 GB).
+    This bypasses PyTorch's CUDACachingHostAllocator which rounds every
+    `pin_memory=True` allocation up to the next power of 2 (e.g. 100 GB becomes 128 GB).
     """
     err = torch.cuda.cudart().cudaHostRegister(tensor.data_ptr(), tensor.nbytes, 0)
     if err.value != 0:

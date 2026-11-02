@@ -68,11 +68,10 @@ class _RequiredToolCallSpan:
     """Where one element of a `tool_choice="required"` array sits in the text.
 
     The model output for `tool_choice="required"` is a JSON array of
-    `{"name": ..., "parameters": ...}` objects. `name` is only set once
-    its string value is closed and decodes as JSON; `name_end` is the
-    offset just past that closing quote. `args_start`/`args_end` are the
-    character offsets of the `parameters` value (`args_end` is `None`
-    while the value is still being generated).
+    `{"name": ..., "parameters": ...}` objects. `name` is only set once its string value
+    is closed and decodes as JSON; `name_end` is the offset just past that closing
+    quote. `args_start`/`args_end` are the character offsets of the `parameters` value
+    (`args_end` is `None` while the value is still being generated).
 
     All offsets are prefix-stable: scanning any prefix of the text yields the
     same spans truncated to that prefix. That is what lets one scan of the
@@ -114,11 +113,10 @@ _AFTER_VALUE = 6
 def _scan_required_tool_calls(text: str) -> list[_RequiredToolCallSpan]:
     """Locate every tool call of a (possibly partial) required-tool-call array.
 
-    A single string- and nesting-aware pass over `text` that records, for
-    each top-level array element, its `name` (once complete) and the
-    character span of its `parameters` value. Text after the closing `]`
-    of the array is ignored. Only the element level of the array is
-    interpreted, so braces, brackets and quotes inside nested values and
+    A single string- and nesting-aware pass over `text` that records, for each top-level
+    array element, its `name` (once complete) and the character span of its `parameters`
+    value. Text after the closing `]` of the array is ignored. Only the element level of
+    the array is interpreted, so braces, brackets and quotes inside nested values and
     strings cannot confuse it.
     """
     spans: list[_RequiredToolCallSpan] = []
@@ -234,13 +232,12 @@ def extract_required_tool_call_streaming(
 ) -> tuple[DeltaMessage | None, bool]:
     """Stream the tool calls of a `tool_choice="required"` JSON array.
 
-    `previous_text` must be a prefix of `current_text` (the accumulated
-    text before and after this delta). Every array element that has something
-    not yet sent is emitted, in array order, so a delta may carry several
-    `DeltaToolCall` entries: the first chunk of a call carries its id, name
-    and the arguments generated so far; later chunks carry only new argument
-    text. What was already sent is read off the same scan, since the spans
-    are prefix-stable, so no state is needed beyond the two texts.
+    `previous_text` must be a prefix of `current_text` (the accumulated text before and
+    after this delta). Every array element that has something not yet sent is emitted,
+    in array order, so a delta may carry several `DeltaToolCall` entries: the first
+    chunk of a call carries its id, name and the arguments generated so far; later
+    chunks carry only new argument text. What was already sent is read off the same
+    scan, since the spans are prefix-stable, so no state is needed beyond the two texts.
 
     Returns the delta (`None` when nothing is new) and whether at least one
     call has been announced so far.

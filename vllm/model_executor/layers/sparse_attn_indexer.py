@@ -116,15 +116,14 @@ def _merge_dcp_topk_global(
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
-    `topk_indices` are this rank's local top-K positions into its 1/N KV
-    shard. A token in the global top-K must also be in its owning rank's local
-    top-K (at most `topk_tokens - 1` tokens rank globally above it, hence at
-    most that many on its own rank), so exchanging only the per-rank local
-    candidates is exact -- equivalent to all-gathering the full logit matrix,
-    but it ships `dcp_world_size * topk_tokens` candidates instead of the whole
-    score row. Overwrites `topk_indices` with global token ids (`-1` for
-    padding); the attention backend localizes them back to physical slots per
-    rank.
+    `topk_indices` are this rank's local top-K positions into its 1/N KV shard. A token
+    in the global top-K must also be in its owning rank's local top-K (at most
+    `topk_tokens - 1` tokens rank globally above it, hence at most that many on its own
+    rank), so exchanging only the per-rank local candidates is exact -- equivalent to
+    all-gathering the full logit matrix, but it ships `dcp_world_size * topk_tokens`
+    candidates instead of the whole score row. Overwrites `topk_indices` with global
+    token ids (`-1` for padding); the attention backend localizes them back to physical
+    slots per rank.
     """
     if dcp_world_size <= 1:
         return
@@ -1340,11 +1339,10 @@ class SparseAttnIndexer(CustomOp):
         eager gather step, no per-request Python loop.
 
         `prefill_metadata.chunks` always has exactly one entry here:
-        `DeepseekV4CPUIndexerMetadataBuilder` overrides the base chunk
-        split to always return the whole step's prefill batch as one
-        chunk, since the base chunking only bounds CUDA/XPU's dense M*N
-        logits tensor and flat K-gather workspace, neither of which this
-        paged kernel allocates.
+        `DeepseekV4CPUIndexerMetadataBuilder` overrides the base chunk split to always
+        return the whole step's prefill batch as one chunk, since the base chunking only
+        bounds CUDA/XPU's dense M*N logits tensor and flat K-gather workspace, neither
+        of which this paged kernel allocates.
         """
         assert not self.use_fp4_cache, (
             "CPU sparse indexer doesn't support fp4 cache yet"

@@ -135,8 +135,7 @@ class AttentionStep:
         step: "DecodeStep",
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """`_run_parallel_input_projections`, with the side projections left
-        unjoined on aux streams 0 and 1; `_prepare` joins each at its first
-        reader."""
+        unjoined on aux streams 0 and 1; `_prepare` joins each at its first reader."""
         attn = self.attn
         aux_gemm = self.aux_gemm and step.low_batch
         aux_fns: list[Callable[[], torch.Tensor] | None] = [None, None]
@@ -196,12 +195,11 @@ class AttentionStep:
         """`_prepare_and_attn` up to the indexer, with the indexer inputs on
         side streams.
 
-        From the moment `qr` is ready, aux stream 2 runs the indexer query
-        (`wq_b`, then RoPE/quantize once the weights GEMM is done) and aux
-        stream 0, after its `kv_score` GEMM, the compressor and the index
-        key; the current stream runs the main query and KV insertion, then the
-        compressed-cache insertion once the latent is ready. Returns the query
-        and the indexer query, its scale and weights.
+        From the moment `qr` is ready, aux stream 2 runs the indexer query (`wq_b`, then
+        RoPE/quantize once the weights GEMM is done) and aux stream 0, after its
+        `kv_score` GEMM, the compressor and the index key; the current stream runs the
+        main query and KV insertion, then the compressed-cache insertion once the latent
+        is ready. Returns the query and the indexer query, its scale and weights.
         """
         attn = self.attn
         indexer, compressor = attn.indexer, attn.compressor

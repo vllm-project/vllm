@@ -151,11 +151,10 @@ def fill_mm_prefix_query_ranges(
     `[start, end]` bounds of the bidirectional range that query token `i`
     belongs to, or `(-1, -1)` when it is outside every range.
 
-    mm_prefix ranges never overlap, so "query and key share a range" is
-    equivalent to "the key lies inside the query's own range". The kernel
-    therefore needs no key-side lookup, and this metadata is sized by scheduled
-    query tokens rather than by context length -- bounded by
-    `max_num_batched_tokens` instead of `num_seqs * max_seq_len`.
+    mm_prefix ranges never overlap, so "query and key share a range" is equivalent to
+    "the key lies inside the query's own range". The kernel therefore needs no key-side
+    lookup, and this metadata is sized by scheduled query tokens rather than by context
+    length -- bounded by `max_num_batched_tokens` instead of `num_seqs * max_seq_len`.
 
     Ranges are absolute prompt positions and may extend past the tokens
     scheduled so far under chunked prefill; the portion outside the current
@@ -307,19 +306,17 @@ def resolve_kv_cache_layout(
 ) -> KVCacheLayout:
     """Resolve one KV cache layout for the whole model.
 
-    Runs once in the engine core. Every worker reports the layouts its backends
-    support, most preferred first (`get_supported_kv_cache_layouts`). Pipeline
-    stages hold different layers, so their lists may differ; the candidates are
-    the layouts every worker supports, and the layout the most workers put first
-    wins. Workers whose backends declare nothing do not vote. Specs mixing HNC
-    shapes narrow the candidates to block-compact layouts. An explicit
-    `VLLM_KV_CACHE_LAYOUT` must be one of the candidates or resolution fails,
-    with the legacy `NHD`/`HND` names as aliases for `LBNHC`/`LBHNC`; the
-    connector's preference is used when compatible and dropped with a warning
-    otherwise. A layout already present on `cache_config` wins outright, and
-    the result is recorded there (see `CacheConfig.kv_cache_layout`); it
-    reaches workers through the `set_kv_cache_layout` RPC and
-    `KVCacheConfig.kv_cache_layout`.
+    Runs once in the engine core. Every worker reports the layouts its backends support,
+    most preferred first (`get_supported_kv_cache_layouts`). Pipeline stages hold
+    different layers, so their lists may differ; the candidates are the layouts every
+    worker supports, and the layout the most workers put first wins. Workers whose
+    backends declare nothing do not vote. Specs mixing HNC shapes narrow the candidates
+    to block-compact layouts. An explicit `VLLM_KV_CACHE_LAYOUT` must be one of the
+    candidates or resolution fails, with the legacy `NHD`/`HND` names as aliases for
+    `LBNHC`/`LBHNC`; the connector's preference is used when compatible and dropped with
+    a warning otherwise. A layout already present on `cache_config` wins outright, and
+    the result is recorded there (see `CacheConfig.kv_cache_layout`); it reaches workers
+    through the `set_kv_cache_layout` RPC and `KVCacheConfig.kv_cache_layout`.
     """
     cache_config = vllm_config.cache_config
     if cache_config.kv_cache_layout is not None:
@@ -503,11 +500,10 @@ def get_num_attention_heads_from_layers(
 ) -> int | None:
     """Per-TP-rank `num_heads` shared by the named Attention layers.
 
-    Use in metadata builders whose plan-time allocations depend on the
-    head count: the model-wide `get_num_attention_heads()` is wrong
-    for models with non-uniform per-layer head counts. All layers in
-    one attention group must agree on `num_heads`; this is asserted.
-    Returns `None` when no matching Attention layer is found.
+    Use in metadata builders whose plan-time allocations depend on the head count: the
+    model-wide `get_num_attention_heads()` is wrong for models with non-uniform
+    per-layer head counts. All layers in one attention group must agree on `num_heads`;
+    this is asserted. Returns `None` when no matching Attention layer is found.
     """
     attn_layers = get_layers_from_vllm_config(
         vllm_config,
@@ -1309,24 +1305,22 @@ def _mamba_align_block_table_kernel(
     Two annotations above are load-bearing and easy to drop by accident:
 
     `block_table_stride_0: tl.int64`
-        Without it `req_idx * block_table_stride_0` is computed in i32 --
-        `program_id` is i32 and Triton specializes a stride below 2^31 to
-        i32 -- so the product wraps once a row offset reaches 2^31 elements
-        (a 4096 x 625000 table faults from row 3436 on MI355X).
-        `torch.gather`, which this replaces, indexes in 64-bit and has no
-        such limit, so narrowing it would be a regression.
-        `mamba_utils.py:43` annotates its row stride the same way.
+        Without it `req_idx * block_table_stride_0` is computed in i32 -- `program_id`
+        is i32 and Triton specializes a stride below 2^31 to i32 -- so the product wraps
+        once a row offset reaches 2^31 elements (a 4096 x 625000 table faults from row
+        3436 on MI355X). `torch.gather`, which this replaces, indexes in 64-bit and has
+        no such limit, so narrowing it would be a regression. `mamba_utils.py:43`
+        annotates its row stride the same way.
 
     `do_not_specialize_on_alignment` on the three pointers
-        Triton puts pointer alignment in the specialization key, and the MRV1
-        DBO path hands this kernel `seq_lens[request_slice]` /
-        `block_table_tensor[request_slice]` VIEWS (ubatch_utils.py:278/316).
-        When a ubatch starts at a request index that is not a multiple of 4
-        the view is differently aligned and a fresh variant JIT-compiles
-        mid-step -- 25-28 ms cold, ~1.5 ms warm, and an error under
-        `jit_monitor_mode=error`. The torch expression this replaced never
-        compiled anything, so that recompile would be a regression introduced
-        by this change.
+        Triton puts pointer alignment in the specialization key, and the MRV1 DBO path
+        hands this kernel `seq_lens[request_slice]` /
+        `block_table_tensor[request_slice]` VIEWS (ubatch_utils.py:278/316). When a
+        ubatch starts at a request index that is not a multiple of 4 the view is
+        differently aligned and a fresh variant JIT-compiles mid-step -- 25-28 ms cold,
+        ~1.5 ms warm, and an error under `jit_monitor_mode=error`. The torch expression
+        this replaced never compiled anything, so that recompile would be a regression
+        introduced by this change.
     """
     req_idx = tl.program_id(0)
     seq_len = tl.load(seq_lens_ptr + req_idx * seq_lens_stride)

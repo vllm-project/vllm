@@ -499,13 +499,12 @@ class _QuadFinalizePublishDeviceKernel:
 class _LamportMHCDeviceKernel:
     """FlashInfer's `_LamportResidualRMSNormDeviceKernel` with mHC.
 
-    The residual add and residual copy become the mHC post-mix of the hc
-    streams, stored as the residual output, and their pre-mix collapse, which
-    the unchanged RMSNorm normalizes. With `quantize`, the normalized output
-    is also written as MXFP8 with swizzled 128x4 UE8M0 scales, including the
-    zero scales of the padding rows up to a multiple of 128. With
-    `residual_only`, only the residual output is written; the pre-mix, gamma
-    and normalized output are unused.
+    The residual add and residual copy become the mHC post-mix of the hc streams, stored
+    as the residual output, and their pre-mix collapse, which the unchanged RMSNorm
+    normalizes. With `quantize`, the normalized output is also written as MXFP8 with
+    swizzled 128x4 UE8M0 scales, including the zero scales of the padding rows up to a
+    multiple of 128. With `residual_only`, only the residual output is written; the
+    pre-mix, gamma and normalized output are unused.
     """
 
     def __init__(
@@ -930,16 +929,14 @@ class _LamportMHCDeviceKernel:
 class AllReduceMHC:
     """Lamport TP all-reduce fused with mHC post, collapse and RMSNorm.
 
-    `__call__` reduces `x` across the TP group, writes the post-mixed hc
-    streams and the normalized collapse, and leaves the next mixes to the
-    caller. `finalize` does the same for an unfinalized MoE output, folding
-    the top-k reduction and the shared-expert add into the publish. Each
-    instance owns a Lamport mailbox; construction is collective over the TP
-    group. With `quantize_layer_input`, both also accept `mxfp8_out`
-    buffers that receive the normalized collapse as MXFP8. With
-    `residual_only`, both also accept `pre` and `norm_weight` of None and
-    then write only the post-mixed streams, for a consumer that collapses them
-    itself.
+    `__call__` reduces `x` across the TP group, writes the post-mixed hc streams and the
+    normalized collapse, and leaves the next mixes to the caller. `finalize` does the
+    same for an unfinalized MoE output, folding the top-k reduction and the
+    shared-expert add into the publish. Each instance owns a Lamport mailbox;
+    construction is collective over the TP group. With `quantize_layer_input`, both also
+    accept `mxfp8_out` buffers that receive the normalized collapse as MXFP8. With
+    `residual_only`, both also accept `pre` and `norm_weight` of None and then write
+    only the post-mixed streams, for a consumer that collapses them itself.
     """
 
     def __init__(

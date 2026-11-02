@@ -353,13 +353,12 @@ class ParserEngine(Parser):
     ) -> tuple[str, bool]:
         """Return the prefix of *json_str* up to the last top-level value.
 
-        Middle values (followed by a comma) are stable across streaming
-        ticks and included.  The trailing value is excluded for non-string
-        values because type coercion may change its serialised form between
-        ticks, which would violate the `startswith(prev)` prefix invariant.
-        String values for keys in `string_keys` are prefix-stable, so stream
-        their unterminated content instead of buffering long arguments until
-        the closing tag arrives.
+        Middle values (followed by a comma) are stable across streaming ticks and
+        included. The trailing value is excluded for non-string values because type
+        coercion may change its serialised form between ticks, which would violate the
+        `startswith(prev)` prefix invariant. String values for keys in `string_keys` are
+        prefix-stable, so stream their unterminated content instead of buffering long
+        arguments until the closing tag arrives.
 
         Also returns whether the returned prefix stops inside that trailing
         string, so streamed text may be appended to it.  This holds even when
@@ -440,10 +439,9 @@ class ParserEngine(Parser):
     def _fix_arg_types(self, args_json: str, func_name: str) -> str:
         """Correct parameter types using the tool schema.
 
-        String values are coerced via :func:`coerce_to_schema_type`.
-        Nested objects and arrays are recursed into when the schema
-        defines `properties` or `items`.  Without a schema, values
-        stay as strings.
+        String values are coerced via :func:`coerce_to_schema_type`. Nested objects and
+        arrays are recursed into when the schema defines `properties` or `items`.
+        Without a schema, values stay as strings.
         """
         if not self._tools or not func_name:
             return args_json

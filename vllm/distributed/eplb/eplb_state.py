@@ -785,10 +785,9 @@ class EplbState:
     ) -> None:
         """Propagate shared tensors to every :class:`EplbLayerState`.
 
-        Allocates `should_record_tensor` on the first call and then
-        assigns both it and `num_unpadded_tokens_tensors` to every
-        MoE layer's :class:`EplbLayerState`.  All layers reference the
-        **same** objects so a single update is visible everywhere.
+        Allocates `should_record_tensor` on the first call and then assigns both it and
+        `num_unpadded_tokens_tensors` to every MoE layer's :class:`EplbLayerState`. All
+        layers reference the **same** objects so a single update is visible everywhere.
 
         Must be called after :meth:`model.set_eplb_state` so that each
         layer's `eplb_state` is already populated.

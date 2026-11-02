@@ -150,9 +150,8 @@ class Gemma4MTPMaskedEmbedder(nn.Module):
 class Gemma4MTPAttention(nn.Module):
     """Q-only attention for Gemma4 MTP layers.
 
-    K/V come from the target model's KV cache via
-    `kv_sharing_target_layer_name` (set by the proposer after
-    model construction).
+    K/V come from the target model's KV cache via `kv_sharing_target_layer_name` (set by
+    the proposer after model construction).
     """
 
     def __init__(

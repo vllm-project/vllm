@@ -2,21 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Unlimited-OCR model compatible with HuggingFace weights.
 
-Unlimited-OCR (`baidu/Unlimited-OCR`) shares
-the exact DeepSeek-OCR (gundam, `base_size=1024` / `image_size=640` / crop)
-vision stack: a DeepEncoder (SAM-ViT-B + CLIP-L) followed by a linear MLP
-projector, with the same image-token tiling layout. The only difference is the
-language backbone, which is a DeepSeek-V2 *MoE* (64 routed + 2 shared experts,
-`first_k_dense_replace=1`) that uses plain multi-head attention
-(`use_mla=False`, `qk_nope_head_dim == qk_rope_head_dim == 0`) instead of
-the dense MLA decoder used by DeepSeek-OCR.
+Unlimited-OCR (`baidu/Unlimited-OCR`) shares the exact DeepSeek-OCR (gundam,
+`base_size=1024` / `image_size=640` / crop) vision stack: a DeepEncoder (SAM-ViT-B +
+CLIP-L) followed by a linear MLP projector, with the same image-token tiling layout. The
+only difference is the language backbone, which is a DeepSeek-V2 *MoE* (64 routed + 2
+shared experts, `first_k_dense_replace=1`) that uses plain multi-head attention
+(`use_mla=False`, `qk_nope_head_dim == qk_rope_head_dim == 0`) instead of the dense MLA
+decoder used by DeepSeek-OCR.
 
-vLLM's `DeepseekV2DecoderLayer` already dispatches to the plain-MHA
-`DeepseekAttention` whenever `qk_nope_head_dim == qk_rope_head_dim == 0` and
-builds the MoE blocks straight from the config, so the whole DeepSeek-OCR
-multimodal wrapper can be reused verbatim. Model-specific config (language
-backbone architecture, FlexAttention for R-SWA, vision encoder backend, and
-`rswa_window`) is applied in `UnlimitedOCRForCausalLMConfig`.
+vLLM's `DeepseekV2DecoderLayer` already dispatches to the plain-MHA `DeepseekAttention`
+whenever `qk_nope_head_dim == qk_rope_head_dim == 0` and builds the MoE blocks straight
+from the config, so the whole DeepSeek-OCR multimodal wrapper can be reused verbatim.
+Model-specific config (language backbone architecture, FlexAttention for R-SWA, vision
+encoder backend, and `rswa_window`) is applied in `UnlimitedOCRForCausalLMConfig`.
 
 Attention backend: the reference applies Reference Sliding Window Attention
 (R-SWA) -- the prompt/image tokens form a globally-visible prefix while the
@@ -172,10 +170,9 @@ class UnlimitedOCRMultiModalProcessor(DeepseekOCRMultiModalProcessor):
     """Multimodal processor for Unlimited-OCR.
 
     Disables crop mode for multi-image requests (to stay consistent with
-    `UnlimitedOCRProcessor.tokenize_with_images`), and -- since that makes the
-    per-image output depend on the request's image count -- bypasses the
-    per-item processing cache for multi-image requests, exactly like
-    `DeepseekVL2MultiModalProcessor`.
+    `UnlimitedOCRProcessor.tokenize_with_images`), and -- since that makes the per-image
+    output depend on the request's image count -- bypasses the per-item processing cache
+    for multi-image requests, exactly like `DeepseekVL2MultiModalProcessor`.
 
     DeepSeek-OCR does *not* apply either of these.
     """

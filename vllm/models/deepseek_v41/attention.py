@@ -146,15 +146,14 @@ def _resolve_dsv4_kv_cache_dtype(
 ) -> tuple[CacheDType | str, torch.dtype]:
     """Map `(layout, --kv-cache-dtype)` to `(cache_dtype_str, torch_dtype)`.
 
-    Both layouts are paged; they differ in the per-token block format. The
-    packed formats are `uint8`-backed: `fp8_ds_mla` is UE8M0 block-scaled
-    fp8 throughout, `nvfp4_ds_mla` keeps that sliding-window record and
-    stores the compressed cache as NVFP4. An unspecific `--kv-cache-dtype`
-    (`auto` / `fp8`) resolves to `packed_kv_cache_dtype`, the record this
-    layer's kernel prefers, and the canonical string is written back onto
-    `cache_config` so the page-size specs pick the right per-token slot.
-    Plain-row backends store each token's KV row in its element dtype: bf16 or
-    per-tensor FP8 E4M3.
+    Both layouts are paged; they differ in the per-token block format. The packed
+    formats are `uint8`-backed: `fp8_ds_mla` is UE8M0 block-scaled fp8 throughout,
+    `nvfp4_ds_mla` keeps that sliding-window record and stores the compressed cache as
+    NVFP4. An unspecific `--kv-cache-dtype` (`auto` / `fp8`) resolves to
+    `packed_kv_cache_dtype`, the record this layer's kernel prefers, and the canonical
+    string is written back onto `cache_config` so the page-size specs pick the right
+    per-token slot. Plain-row backends store each token's KV row in its element dtype:
+    bf16 or per-tensor FP8 E4M3.
     """
     if use_fp8_ds_mla_layout:
         if kv_cache_dtype in ("auto", "fp8"):
@@ -185,12 +184,10 @@ def _resolve_dsv4_kv_cache_dtype(
 class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     """DeepseekV4 MLA attention layer.
 
-    The platform-specific sparse-MLA forward (`forward_mqa` /
-    `get_padded_num_q_heads` / `_o_proj` / `backend_cls`) is provided by a
-    subclass — `DeepseekV4FlashMLAAttention` /
-    `DeepseekV4FlashInferSM120Attention` /
-    `DeepseekV4FlashInferMLAAttention` (CUDA) or
-    `DeepseekV41ROCMAiterMLAAttention` (ROCm) — selected by the platform-specific
+    The platform-specific sparse-MLA forward (`forward_mqa` / `get_padded_num_q_heads` /
+    `_o_proj` / `backend_cls`) is provided by a subclass — `DeepseekV4FlashMLAAttention`
+    / `DeepseekV4FlashInferSM120Attention` / `DeepseekV4FlashInferMLAAttention` (CUDA)
+    or `DeepseekV41ROCMAiterMLAAttention` (ROCm) — selected by the platform-specific
     deepseek_v41 model module. The base is never instantiated directly.
     """
 
@@ -237,8 +234,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         The layer allocates the q/output buffers at
         `[N, get_padded_num_q_heads(n_local_heads), head_dim]`. Must satisfy
-        `result >= num_heads`. Backends with no padding constraint return
-        `num_heads`.
+        `result >= num_heads`. Backends with no padding constraint return `num_heads`.
         """
         raise NotImplementedError
 
@@ -770,10 +766,9 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
     def _wo_b_proj(self, z: torch.Tensor | QuantizedActivation) -> torch.Tensor:
         """Apply `wo_b`; with GEMM-RS bound, also reduce-scatter the result.
 
-        Every `_o_proj` implementation projects through this so the decoder
-        layer sees one contract: when `gemm_rs` is bound the output is
-        already the local sequence-parallel shard, otherwise it is the
-        unreduced TP partial.
+        Every `_o_proj` implementation projects through this so the decoder layer sees
+        one contract: when `gemm_rs` is bound the output is already the local
+        sequence-parallel shard, otherwise it is the unreduced TP partial.
         """
         if self.gemm_rs is None:
             return self.wo_b(z)

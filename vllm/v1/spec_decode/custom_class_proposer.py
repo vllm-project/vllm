@@ -12,10 +12,9 @@ logger = init_logger(__name__)
 def create_custom_proposer(vllm_config: VllmConfig):
     """Load and instantiate a user-provided proposer class.
 
-    The class path is read from `speculative_config.model`
-    (e.g., `"my_module.MyCustomProposer"`).  The class is
-    imported, instantiated with *vllm_config*, and returned
-    directly so the caller can use it without any wrapper.
+    The class path is read from `speculative_config.model` (e.g.,
+    `"my_module.MyCustomProposer"`). The class is imported, instantiated with
+    *vllm_config*, and returned directly so the caller can use it without any wrapper.
 
     The returned object must expose a callable `propose` method.
     """

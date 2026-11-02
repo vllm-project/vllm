@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The layer kernels: each takes and returns what
-`KimiDecoderLayer.forward` does with AttnRes, `(prefix_sum, block_residual,
-prefix_delta)`.
+"""The layer kernels: each takes and returns what `KimiDecoderLayer.forward` does with
+AttnRes, `(prefix_sum, block_residual, prefix_delta)`.
 
 - `WholeLayer` (KDA layers): K1 (AttnRes, in_proj, f_b, spec conv, the KDA
   recurrence, the gated norm) writes o_proj's input; K2 runs o_proj, its

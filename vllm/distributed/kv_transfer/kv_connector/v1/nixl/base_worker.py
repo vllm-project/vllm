@@ -131,13 +131,12 @@ def _share_storage_and_block_stride(caches: list[torch.Tensor]) -> bool:
 class _RegionPairs:
     """How a peer's KV regions transfer with the local ones.
 
-    Pairs come from the layers both sides hold (`region_members`): pair `k`
-    moves the peer's region `remote[k]` and local region `local[k]` at
-    cache group `group[k]`'s blocks. A region shared by several cache groups
-    pairs once per group it holds a layer of, so which layers share a region
-    may differ between the two sides. `remote` indexes `remote_regions`,
-    the peer's regions that pair (in its order), which are the ones its
-    descriptor list holds.
+    Pairs come from the layers both sides hold (`region_members`): pair `k` moves the
+    peer's region `remote[k]` and local region `local[k]` at cache group `group[k]`'s
+    blocks. A region shared by several cache groups pairs once per group it holds a
+    layer of, so which layers share a region may differ between the two sides. `remote`
+    indexes `remote_regions`, the peer's regions that pair (in its order), which are the
+    ones its descriptor list holds.
     """
 
     remote: list[int]
@@ -1465,11 +1464,10 @@ class NixlBaseConnectorWorker:
     ) -> Future[tuple[dict[tuple[int, int], str], float]] | None:
         """Ensure a handshake is in-flight (or already done) for *engine_id*.
 
-        Returns the `Future` if a handshake is pending (or was just
-        started), or `None` if the handshake already completed
-        successfully.  Callers can attach per-request callbacks to the
-        returned future.
-        Failures to handshake are logged and the request is marked as failed.
+        Returns the `Future` if a handshake is pending (or was just started), or `None`
+        if the handshake already completed successfully. Callers can attach per-request
+        callbacks to the returned future. Failures to handshake are logged and the
+        request is marked as failed.
         """
         self._evict_stale_engines()
         with self._handshake_lock:
@@ -3082,14 +3080,13 @@ class NixlBaseConnectorWorker:
             * kv_cache_postprocess_blksize_and_layout => convert from small
               block size to large block size and convert from HND to NHD
 
-        The transfer only covers `covered_sub_blocks` remote-sized
-        sub-blocks of each request's local attention blocks; the rest was
-        clipped, either by remote-block pairing (block-size ratio) or by the
-        hetero-ppl front trim in `_apply_prefix_caching`. Those blocks were
-        excluded from the scheduler's alloc-time KV zeroing (which would race
-        the RDMA write), so everything past the covered range is zeroed here.
-        Stale bytes would otherwise surface as garbage or NaNs once decode
-        grows into the untransferred tail.
+        The transfer only covers `covered_sub_blocks` remote-sized sub-blocks of each
+        request's local attention blocks; the rest was clipped, either by remote-block
+        pairing (block-size ratio) or by the hetero-ppl front trim in
+        `_apply_prefix_caching`. Those blocks were excluded from the scheduler's
+        alloc-time KV zeroing (which would race the RDMA write), so everything past the
+        covered range is zeroed here. Stale bytes would otherwise surface as garbage or
+        NaNs once decode grows into the untransferred tail.
         """
         if len(self.device_kv_caches) == 0:
             return
@@ -3607,11 +3604,10 @@ class NixlBaseConnectorWorker:
     ) -> tuple[BlockIds, BlockIds]:
         """Map attention-group block ids to remote-block granularity.
 
-        Each local attention block is split into `block_size_ratio`
-        sub-blocks paired 1:1 with remote blocks. Sub-blocks beyond the
-        remote list — the untransferred tail of the last local block — are
-        clipped here and zeroed in the receive post-process. Mamba state
-        blocks are indivisible and transfer 1:1, unexpanded.
+        Each local attention block is split into `block_size_ratio` sub-blocks paired
+        1:1 with remote blocks. Sub-blocks beyond the remote list — the untransferred
+        tail of the last local block — are clipped here and zeroed in the receive
+        post-process. Mamba state blocks are indivisible and transfer 1:1, unexpanded.
 
         ex: remote (prefill) block ids with block_size 4:
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]

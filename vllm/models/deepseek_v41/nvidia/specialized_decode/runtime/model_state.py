@@ -7,9 +7,8 @@
 - the decode executor, built and warmed up once the weights are loaded (the
   model runner creates the model state after loading the target and draft
   models, and before memory profiling);
-- CUDA graphs of the attention metadata builds of FULL decode steps
-  (`metadata_graphs`), recorded with the inner CUDA graphs and replayed in
-  place of the eager build;
+- CUDA graphs of the attention metadata builds of FULL decode steps (`metadata_graphs`),
+  recorded with the inner CUDA graphs and replayed in place of the eager build;
 - no replay-start upload for decode steps whose starts are known to be zero.
 """
 

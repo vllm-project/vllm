@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """CUDA graphs of the attention metadata builds of FULL decode steps.
 
-A FULL CUDA graph replays the forward only: before every replay the runner
-still builds the attention metadata on the host, which refreshes the persistent
-buffers the graph reads. For small decode batches that build costs about as
-much as the replay. `AttnMetadataCudaGraphs` records, during CUDA graph
-capture, the build of every uniform decode batch shape that a FULL decode graph
-serves, and replays it on the steps of that shape, returning the metadata
-objects captured with it. A step of a shape without a recording builds its
-metadata eagerly.
+A FULL CUDA graph replays the forward only: before every replay the runner still builds
+the attention metadata on the host, which refreshes the persistent buffers the graph
+reads. For small decode batches that build costs about as much as the replay.
+`AttnMetadataCudaGraphs` records, during CUDA graph capture, the build of every uniform
+decode batch shape that a FULL decode graph serves, and replays it on the steps of that
+shape, returning the metadata objects captured with it. A step of a shape without a
+recording builds its metadata eagerly.
 """
 
 from collections.abc import Callable, Sequence
@@ -74,10 +73,9 @@ class AttnMetadataCudaGraphs:
     def key(input_batch: InputBatch, cudagraph_mode: CUDAGraphMode) -> GraphKey | None:
         """The graph key of a step whose metadata build can be recorded, or None.
 
-        Only FULL steps of uniform decodes qualify; their key fixes every host
-        value the build reads. Under adaptive verification (`max_query_len`
-        set) the device splits the drafts, so the host query lengths are only
-        bounds.
+        Only FULL steps of uniform decodes qualify; their key fixes every host value the
+        build reads. Under adaptive verification (`max_query_len` set) the device splits
+        the drafts, so the host query lengths are only bounds.
         """
         if (
             cudagraph_mode != CUDAGraphMode.FULL
@@ -99,9 +97,8 @@ class AttnMetadataCudaGraphs:
         """The keys of the decode steps the FULL decode graphs serve, largest
         first.
 
-        As in `CudaGraphManager`, each capture size rounds up to whole
-        requests of the decode query length, and a step runs the smallest graph
-        that holds its requests.
+        As in `CudaGraphManager`, each capture size rounds up to whole requests of the
+        decode query length, and a step runs the smallest graph that holds its requests.
         """
         config = self._vllm_config.compilation_config
         query_len = self._decode_query_len
