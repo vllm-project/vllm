@@ -139,6 +139,13 @@ class SamplingStates:
             logits, top_k, top_p, has_topp_only_rows=has_topp_only_rows
         )
 
+    def masks_logits(self, req_idx: int) -> bool:
+        """Whether min-p, top-k or top-p can set some of this request's logits
+        to -inf."""
+        return self.temperature.np[req_idx] != 0.0 and bool(
+            self.needs_restriction[req_idx]
+        )
+
     def any_greedy(self, idx_mapping_np: np.ndarray) -> bool:
         return bool(np.any(self.temperature.np[idx_mapping_np] == 0.0))
 

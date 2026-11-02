@@ -188,6 +188,7 @@ def test_fly_verifies_processed_logits(
             ),
             use_fp64_gumbel=False,
             trace_replay_state=None,
+            may_mask_logits=np.zeros(1, dtype=bool),
         ),
         num_speculative_steps=1,
     )
@@ -482,6 +483,7 @@ def test_replay_on_off_preserves_rejection_sampling_and_rng(monkeypatch):
         use_fp64_gumbel=False,
         apply_sampling_params=lambda logits, *_: logits,
         trace_replay_state=None,
+        may_mask_logits=np.zeros(num_reqs, dtype=bool),
     )
     rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps)
     pos = torch.arange(12, dtype=torch.int32, device=device)

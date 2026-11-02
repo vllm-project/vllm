@@ -1095,6 +1095,7 @@ def _resample_kernel(
     SCALE_TARGET_LOGITS: tl.constexpr,
     target_topp_thresh_ptr,
     MASK_TARGET_LOGITS: tl.constexpr,
+    SKIP_MASKED_BLOCKS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -1140,6 +1141,21 @@ def _resample_kernel(
         )
     else:
         scaled_target_logits = target_logits
+
+    if SKIP_MASKED_BLOCKS and tl.max(target_logits, axis=0) == float("-inf"):
+        # No target token survives in this block (e.g. top-k/top-p masked it),
+        # so neither does the residual: skip the draft load and the Gumbel draw.
+        tl.store(
+            resampled_local_argmax_ptr
+            + req_idx * resampled_local_argmax_stride
+            + block_idx,
+            block_idx * BLOCK_SIZE,
+        )
+        tl.store(
+            resampled_local_max_ptr + req_idx * resampled_local_max_stride + block_idx,
+            float("-inf"),
+        )
+        return
 
     # Compute the residual logits to resample the rejected token from.
     is_watermarked = False
@@ -1394,6 +1410,7 @@ def rejection_sample(
     # [num_logits] fp64 log-sum-exp of the (masked, scaled) target logits; skips
     # the target half of the stats pass. Greedy rows may hold anything.
     target_lse: torch.Tensor | None = None,
+    skip_masked_vocab_blocks: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
     assert target_topp_thresh is None or (
@@ -1713,6 +1730,7 @@ def rejection_sample(
         SCALE_TARGET_LOGITS=scale_target_logits,
         target_topp_thresh_ptr=target_topp_thresh,
         MASK_TARGET_LOGITS=target_topp_thresh is not None,
+        SKIP_MASKED_BLOCKS=skip_masked_vocab_blocks,
     )
 
     # Insert the resampled tokens into the output sampled.
