@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import queue
 import threading
+from collections import OrderedDict
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
@@ -214,6 +216,7 @@ def _bare_worker() -> MooncakeConnectorWorker:
     test are populated; role flags and async_zmq_ctx keep __del__'s shutdown
     path a no-op."""
     worker = MooncakeConnectorWorker.__new__(MooncakeConnectorWorker)
+    worker._bound_raw_submissions = False
     worker.xfer_stats = MooncakeKVConnectorStats()
     worker.engine = MagicMock()
     worker.async_zmq_ctx = MagicMock()
@@ -275,6 +278,8 @@ def test_expired_request_bumps_counter():
     import asyncio
 
     worker = _bare_worker()
+    worker._kv_lease_duration = None
+    worker._expired_transfer_ids = OrderedDict()
     worker.reqs_need_send = {
         "tid1": SendBlockMeta(
             p_req_id="req1",
@@ -285,9 +290,9 @@ def test_expired_request_bumps_counter():
             sending=0,
         ),
     }
-    worker.finished_sending_reqs = set()
+    worker._finished_sending = queue.SimpleQueue()
 
-    asyncio.run(worker.fetch_finished_sending_reqs())
+    worker._sweep_expired_sends()
 
     assert worker.xfer_stats.data["num_kv_expired_reqs"] == [1]
     # Expired transfer also cleaned out of reqs_need_send.
