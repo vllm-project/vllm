@@ -116,6 +116,7 @@ assert NA + GEMV_CTAS <= BLOCKS and NA == 8 * GSL
 
 _STREAM = fx.Stream(None)
 REGIONS = ("part", "wgt", "msq", "xrdy", "proj", "qk", "onrm")
+TAG_BATCH = 14  # tagged-row specs a poll batch (56 registers; ``poll_rows_to_lds``)
 # every mono source file: in every build's JIT cache key
 _SOURCES = source_digest(".")
 
@@ -406,6 +407,9 @@ def stage_mix(c, task):
     c0 = task * COLS
     nw = s * (ns + 1)
     assert nw <= MSQ0 and 8 * s <= THREADS
+    # read here, not in a traced branch (a method call on ``c`` there makes
+    # FlyDSL carry ``c`` as branch state)
+    tag_x = c.get("tag_x", False)
     for i in range_constexpr((nw + THREADS - 1) // THREADS):
         w = tid + THREADS * i
         if w < nw:
@@ -452,8 +456,39 @@ def stage_mix(c, task):
         xw = bf4_words([mixed[j] * r * wn[j] for j in range(4)])
         if mine:
             at = (t * HIDDEN + c0 + cc) // 2
+            if const_expr(tag_x):
+                # K2 (``layer.OPT_TAG_X``): the rows also as tagged pairs,
+                # which the router and latent GEMVs poll (no XRDY wait)
+                c["put_words"](c["xt"], at, [xw[0], xw[1]])
             bo.buffer_store(xw, rsrc(c["xbuf"]), at, cache_modifier=CM_DEV)
     publish(c["put"], c["xrdy"], task, fx.Int32(1), tid == 0)
+    gpu.barrier()
+
+
+@traced
+def poll_rows_to_lds(c, region, k, n, xl, xrow, ldk, k0, t0):
+    """``gemv.rows_to_lds`` from tagged pairs: columns k0 .. k0 + k of rows
+    t0 .. t0 + n of the [S, ldk] bf16 rows a producer put as (word, tag) pairs
+    into ``region``, polled (two pairs a spec, every thread's specs one batch)
+    -> LDS rows 0 .. n - 1."""
+    tid = c["tid"]
+    quads = n * k // 4  # 4 bf16 = 2 pairs a spec
+    per = (quads + THREADS - 1) // THREADS
+    # a batch at most TAG_BATCH specs (4 registers each), stored before the next
+    for b0 in range_constexpr(0, per, TAG_BATCH):
+        ii = list(range(b0, min(per, b0 + TAG_BATCH)))
+        es = [fx.min(tid + THREADS * i, quads - 1) for i in ii]
+        tk = [(e // (k // 4), e % (k // 4) * 4) for e in es]
+        got = c["poll"](
+            [(region, ((t0 + t) * ldk + k0 + kk) // 2, 2) for t, kk in tk],
+            batch=len(ii),
+        )
+        for j in range_constexpr(len(ii)):
+            t, kk = tk[j]
+            if tid + THREADS * ii[j] < quads:
+                fx.ptr_store(
+                    fx.Vector.from_elements(got[j], fx.Int32), xl + (t * xrow + kk) // 2
+                )
     gpu.barrier()
 
 

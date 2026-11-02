@@ -44,7 +44,14 @@ from flydsl.expr.typing import T, as_ir_value
 
 from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.back import (
     peer_at,
+    sent_item,
+    sent_ix,
+    sent_on,
+    sent_sum,
     two_shot,
+)
+from vllm.models.kimi_k3.amd.specialized_decode.mono.attention.kda import (
+    poll_rows_to_lds,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.mx import (
     FP4,
@@ -83,7 +90,13 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import (
     pair_layout,
 )
 from vllm.models.kimi_k3.amd.specialized_decode.mono.common.ranks import sum_partials
-from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import publish
+from vllm.models.kimi_k3.amd.specialized_decode.mono.common.sync import (
+    poll_sent,
+    publish,
+    put_sent,
+    rearm_sent,
+    sent_word,
+)
 from vllm.models.kimi_k3.amd.specialized_decode.mono.stages import gemv as gemv
 
 REGIONS = (
@@ -217,6 +230,11 @@ def f32_of(w):
     return w.bitcast(fx.Float32)
 
 
+def tag_x_on(c):
+    """``layer.OPT_TAG_X``, a plain call (see ``back.sent_on``)."""
+    return c.get("tag_x", False)
+
+
 def tanh_libm(x):
     """The ``tanhf`` of x to a few ulp: (1 - e) / (1 + e), e = exp(-2|x|), x's sign."""
     e = hw_exp2(abs(x) * fx.Float32(-2.0 * LOG2E))
@@ -299,6 +317,15 @@ def early_out(c, kind, i, q, red, t0, n):
             v0 = bf16_round(row_sum(red, 2 * rp, tl))
             v1 = bf16_round(row_sum(red, 2 * rp + 1, tl))
             c["put_bf"](c["sgu"], (t0 + tl) * 2 * SI + i * ROWS + 2 * rp, [v0, v1])
+    elif const_expr((kind == 0) and rlogp_on(c)):
+        # (OPT_RLOG_PARTS) Every part's fp32 partial straight to
+        # every rank's RLOGP (the route sums them), no part-0 hop
+        if tid < ROWS * n:
+            r = tid % ROWS
+            t = t0 + tid // ROWS
+            v = row_sum(red, r, tid // ROWS)
+            for p in range_constexpr(TP):
+                c["put"](c["rlogp"][p], rlogp_pair(c["rank"], q, s, t, i * ROWS + r), v)
     else:
         parts = R_PARTS if kind == 0 else L_PARTS
         region = c["rpart"] if kind == 0 else c["lpart"]
@@ -425,7 +452,12 @@ def early_compute(c, kind, i, q, ops):
     s, tid, lane, wave, red = c["S"], c["tid"], c["lane"], c["wave"], c["red"]
     klen, _ = early_shape(kind)
     xrow = klen + gemv.LDS_PAD
-    if const_expr(c.get("xflags") is not None):
+    # (OPT_TAG_X) The router's and the latent's x rows polled as
+    # tagged pairs (the shared gate/up keeps XRDY and the plain rows)
+    tagged = tag_x_on(c) and kind < 2
+    if const_expr(tagged):
+        src, cm = None, 0
+    elif const_expr(c.get("xflags") is not None):
         if tid < c["xflags"]:
             c["poll"]([(c["xrdy"], tid, 1)])
         gpu.barrier()
@@ -434,9 +466,12 @@ def early_compute(c, kind, i, q, ops):
         src, cm = c["args"]["x"], 0
     # a tile of x rows at a time, the weights held over them
     for t0, n in gemv.token_tiles(s, gemv.tile_rows(klen)):
-        gemv.rows_to_lds(
-            tid, src, klen, n, c["xl"], xrow, cm, ldk=HIDDEN, k0=q * klen, t0=t0
-        )
+        if const_expr(tagged):
+            poll_rows_to_lds(c, c["xt"], klen, n, c["xl"], xrow, HIDDEN, q * klen, t0)
+        else:
+            gemv.rows_to_lds(
+                tid, src, klen, n, c["xl"], xrow, cm, ldk=HIDDEN, k0=q * klen, t0=t0
+            )
         acc = gemv.mfmas(lane, wave, c["xl"], xrow, klen, n, ops)
         fx.ptr_store(acc, red + (wave * 64 + lane) * 4)
         gpu.barrier()
@@ -494,6 +529,42 @@ def _route_out(c, t, red, sel, rank, me, ms):
 
 
 @traced
+def route_parts(c, t):
+    """(OPT_RLOG_PARTS) Token t's router partials (every rank's 4 K
+    parts, RLOGP) -> LDS ``vals`` [part][expert], wave q < R_PARTS polling part
+    q (one batch: the 14 experts of its lane); ``stage_route`` sums each
+    expert's parts in part order, as the router's part 0 did."""
+    s, lane, wave = c["S"], c["lane"], c["wave"]
+    if wave < R_PARTS:
+        per = E // 64
+        specs = []
+        for i in range_constexpr(per):
+            e = lane + 64 * i
+            src = e // (E // TP)
+            specs.append(
+                (c["rlogp_own"], rlogp_pair(src, wave, s, t, e % (E // TP)), 1)
+            )
+        got = c["poll"](specs, batch=per)
+        for i in range_constexpr(per):
+            fx.ptr_store(f32_of(got[i][0]), c["vals"] + (wave * E + lane + 64 * i))
+    gpu.barrier()
+
+
+def rlogp_pair(src, q, s, t, r):
+    """(OPT_RLOG_PARTS) RLOGP's pair of (source rank, K part q,
+    token t, the rank's router row r)."""
+    return ((src * R_PARTS + q) * s + t) * (E // TP) + r
+
+
+def rlogp_on(c):
+    return c.get("rlog_parts", False)
+
+
+def batch_on(c):
+    return c.get("batch", False)
+
+
+@traced
 def stage_route(c, t):
     """Token t (wave 0): 896 logits, 14 a lane (expert lane + 64 i) -> sigmoid
     (v_rcp) + bias -> the top-16 by (key desc, lower expert first) -> the
@@ -510,17 +581,33 @@ def stage_route(c, t):
         per = E // 64
         # the bias loads in flight across the poll
         bias = [bo_ld_f32(a["bias"], lane + 64 * i) for i in range(per)]
-        specs = []
-        for i in range_constexpr(per):
-            e = lane + 64 * i
-            src = e // (E // TP)
-            specs.append(
-                (c["peer"]["rlog_own"], (src * s + t) * (E // TP) + e % (E // TP), 1)
-            )
-        got = c["poll"](specs)
+        if const_expr(rlogp_on(c)):
+            # (OPT_RLOG_PARTS) The parts' sums from LDS (``route_parts``)
+            lgs = []
+            for i in range_constexpr(per):
+                e = lane + 64 * i
+                v = fx.ptr_load(c["vals"] + e)
+                for q in range_constexpr(1, R_PARTS):
+                    v = v + fx.ptr_load(c["vals"] + (q * E + e))
+                lgs.append(v)
+        else:
+            specs = []
+            for i in range_constexpr(per):
+                e = lane + 64 * i
+                src = e // (E // TP)
+                specs.append(
+                    (
+                        c["peer"]["rlog_own"],
+                        (src * s + t) * (E // TP) + e % (E // TP),
+                        1,
+                    )
+                )
+            # (OPT_BATCH) One batch (POLL_MAX would split the 14)
+            got = c["poll"](specs, batch=per) if batch_on(c) else c["poll"](specs)
+            lgs = [f32_of(got[i][0]) for i in range(per)]
         keys, sigs = [], []
         for i in range_constexpr(per):
-            lg = f32_of(got[i][0])
+            lg = lgs[i]
             sg = hw_rcp(fx.Float32(1.0) + hw_exp2(lg * fx.Float32(-LOG2E)))
             sc = sg + bias[i]
             # a NaN logit (a warmup's garbage row) ranks last
@@ -987,17 +1074,23 @@ def load_inter(c):
     s, tid = c["S"], c["tid"]
     nw = s * TOPK * 48
     per = (nw + THREADS - 1) // THREADS
-    got = c["poll"](
-        [(c["inter"], fx.min(tid + THREADS * i, nw - 1), 1) for i in range(per)]
-    )
+    nc = s * TOPK * UG_GROUPS
+    perc = (nc + THREADS - 1) // THREADS
+    ispecs = [(c["inter"], fx.min(tid + THREADS * i, nw - 1), 1) for i in range(per)]
+    cspecs = [(c["isc"], fx.min(tid + THREADS * i, nc - 1), 1) for i in range(perc)]
+    if const_expr(batch_on(c) and per + perc <= 16):
+        # (OPT_BATCH) INTER and ISC in one poll batch (one round
+        # trip once the last ug task landed, not two)
+        both = c["poll"](ispecs + cspecs, batch=per + perc)
+        got, gc = both[:per], both[per:]
+    else:
+        got = c["poll"](ispecs)
+        gc = None
     for i in range_constexpr(per):
         if tid + THREADS * i < nw:
             fx.ptr_store(got[i][0], c["interq"] + (tid + THREADS * i))
-    nc = s * TOPK * UG_GROUPS
-    perc = (nc + THREADS - 1) // THREADS
-    gc = c["poll"](
-        [(c["isc"], fx.min(tid + THREADS * i, nc - 1), 1) for i in range(perc)]
-    )
+    if const_expr(gc is None):
+        gc = c["poll"](cspecs)
     for i in range_constexpr(perc):
         if tid + THREADS * i < nc:
             fx.ptr_store(gc[i][0], c["intsc"] + (tid + THREADS * i))
@@ -1145,12 +1238,19 @@ def stage_down(c, rgd, nt, ops0):
                 at = (tt * TOPK + k) * ROWS + 2 * rp
                 y0 = bf16_round(y0 + fx.ptr_load(c["contrib"] + at))
                 y1 = bf16_round(y1 + fx.ptr_load(c["contrib"] + (at + 1)))
-            for p in range_constexpr(TP):
-                c["put_bf"](
-                    c["peer"]["latr"][p],
-                    (c["rank"] * s + tt) * LAT + rgd * ROWS + 2 * rp,
-                    [y0, y1],
-                )
+            if const_expr(sent_on(c, "latr")):
+                # (OPT_SENT_LATR) Plain words to the sentinel region
+                si = sent_ix(c["rank"], rgd * ROWS + 2 * rp, tt, s, LAT)
+                word = sent_word(bf16_pair(y0, y1))
+                for p in range_constexpr(TP):
+                    put_sent(c["latrs_peer"][p], si, word)
+            else:
+                for p in range_constexpr(TP):
+                    c["put_bf"](
+                        c["peer"]["latr"][p],
+                        (c["rank"] * s + tt) * LAT + rgd * ROWS + 2 * rp,
+                        [y0, y1],
+                    )
     gpu.barrier()
 
 
@@ -1242,7 +1342,16 @@ def sdown_tile(c, j, ops, t0, n):
             )
         else:
             at = (c["rank"] * s + tt) * HIDDEN + j * ROWS + 2 * rp
-            if const_expr(two_shot(s)):
+            if const_expr(sent_on(c, "final")):
+                # (OPT_SENT_FINAL) Plain words to the sentinel region
+                si = sent_ix(c["rank"], j * ROWS + 2 * rp, tt, s, HIDDEN)
+                word = sent_word(bf16_pair(v0, v1))
+                if const_expr(two_shot(s)):
+                    put_sent(peer_at(c["finals_peer"], j // UP_TASKS), si, word)
+                else:
+                    for p in range_constexpr(TP):
+                        put_sent(c["finals_peer"][p], si, word)
+            elif const_expr(two_shot(s)):
                 # to the columns' owner only: its up reduces them
                 c["put_bf"](peer_at(c["peer"]["final"], j // UP_TASKS), at, [v0, v1])
             else:
@@ -1261,6 +1370,28 @@ def run_sdown(c, bid, w_sd):
         for k in range(bid - DOWN_TASKS, UP_TASKS, BLOCKS - DOWN_TASKS):
             j = (k + lo) % SD_TASKS
             stage_sdown(c, j, gemv.loads(c["lane"], c["wave"], w_sd, j * ROWS, SI))
+
+
+@traced
+def run_sdown_first(c, bid, w_sd):
+    """(OPT_SDOWN_FIRST) ``run_sdown``'s tasks (the up stage polls
+    their SHRDY) on CTAs 224 .., each CTA's two tasks' weights issued before H
+    is polled, ahead of its ``run_sdown_rest`` tasks (which only the final
+    reduce waits on). Placement only: the same tasks, the same arithmetic."""
+    lo = c["rank"] * UP_TASKS
+    nsd = BLOCKS - DOWN_TASKS  # 32
+    if bid >= DOWN_TASKS:
+        k0 = bid - DOWN_TASKS
+        k1 = fx.min(k0 + nsd, UP_TASKS - 1)
+        j0 = (k0 + lo) % SD_TASKS
+        j1 = (k1 + lo) % SD_TASKS
+        ops0 = gemv.loads(c["lane"], c["wave"], w_sd, j0 * ROWS, SI)
+        ops1 = gemv.loads(c["lane"], c["wave"], w_sd, j1 * ROWS, SI)
+        load_h(c)
+        stage_sdown(c, j0, ops0)
+        if k0 + nsd < UP_TASKS:
+            stage_sdown(c, j1, ops1)
+    assert UP_TASKS <= 2 * (BLOCKS - DOWN_TASKS)
 
 
 @traced
@@ -1309,14 +1440,24 @@ def stage_lnorm(c, t):
         for d in range(2)
     ]
     # every chunk's TP partials in one poll batch
-    got = c["poll"](
-        [
-            (c["peer"]["latr_own"], ((src * s + t) * LAT + col) // 2, 1)
-            for col in cols
-            for src in range(TP)
-        ],
-        batch=nch * TP,
-    )
+    sidx = [sent_ix(src, col, t, s, LAT) for col in cols for src in range(TP)]
+    # a dead chunk is chunk 27's clamped copy: another wave's
+    slive = [lives[i] for i in range(nch) for _ in range(TP)]
+    if const_expr(sent_on(c, "latr")):
+        # (OPT_SENT_LATR) The sentinel words, as [pair] lists;
+        # re-armed after the LN rows are out
+        got = [
+            [w] for w in poll_sent(c["mb"], c["latrs_own"], sidx, slive, rearm=False)
+        ]
+    else:
+        got = c["poll"](
+            [
+                (c["peer"]["latr_own"], ((src * s + t) * LAT + col) // 2, 1)
+                for col in cols
+                for src in range(TP)
+            ],
+            batch=nch * TP,
+        )
     vals = []
     for i in range_constexpr(nch):
         acc0, acc1 = bf2_f32(got[i * TP][0])
@@ -1348,6 +1489,8 @@ def stage_lnorm(c, t):
                 y, rsrc(c["ln"]), (t * LAT + cols[i]) // 2, cache_modifier=CM_DEV
             )
     publish(c["put"], c["lnrdy"], t, fx.Int32(1), tid == 0)
+    if const_expr(sent_on(c, "latr")):
+        rearm_sent(c["latrs_own"], sidx, slive)
     gpu.barrier()
 
 
@@ -1385,10 +1528,17 @@ def stage_up(c, j, tile=None):
     s, tid, lane, wave = c["S"], c["tid"], c["lane"], c["wave"]
     a = c["args"]
     ops = gemv.loads(lane, wave, a["w_up"], j * ROWS, LAT)
-    if tid < s:
-        c["poll"]([(c["lnrdy"], tid, 1)])
-    if tid == 0:
-        c["poll"]([(c["shrdy"], j, 1)])
+    if const_expr(batch_on(c)):
+        # (OPT_BATCH) thread 0's two flags in one poll batch
+        if tid == 0:
+            c["poll"]([(c["lnrdy"], 0, 1), (c["shrdy"], j, 1)])
+        if (tid > 0) & (tid < s):
+            c["poll"]([(c["lnrdy"], tid, 1)])
+    else:
+        if tid < s:
+            c["poll"]([(c["lnrdy"], tid, 1)])
+        if tid == 0:
+            c["poll"]([(c["shrdy"], j, 1)])
     gpu.barrier()
     if const_expr(tile is None):
         for t0, n in gemv.token_tiles(s, gemv.tile_rows(LAT)):
@@ -1424,7 +1574,34 @@ def up_tile(c, j, ops, t0, n):
         v0 = bf16_round(bf_lo(w) + row_sum(red, 2 * rp, tl))
         v1 = bf16_round(bf_hi(w) + row_sum(red, 2 * rp + 1, tl))
         at = (c["rank"] * s + tt) * HIDDEN + row0 + 2 * rp
-        if const_expr(two_shot(s)):
+        if const_expr(sent_on(c, "final")):
+            # (OPT_SENT_FINAL) The sentinel region; this rank's own word
+            # through the region too (rank order, as the tagged pairs)
+            col = row0 + 2 * rp
+            si = sent_ix(c["rank"], col, tt, s, HIDDEN)
+            word = sent_word(bf16_pair(v0, v1))
+            if const_expr(two_shot(s)):
+                put_sent(c["finals_own"], si, word)
+                lo, hi = sent_sum(c, c["finals_own"], col, tt, HIDDEN, rearm=False)
+                y = fx.Vector.from_elements([lo, hi], fx.Float32).to(fx.BFloat16)
+                bo.buffer_store(
+                    y.bitcast(fx.Int32)[0],
+                    rsrc(c["args"]["out"]),
+                    (tt * HIDDEN + col) // 2,
+                )
+                word = sent_word(bf16_pair(lo, hi))
+                for p in range_constexpr(TP):
+                    if p != c["rank"]:
+                        put_sent(c["finals_peer"][p], si, word)
+                # after this thread's pushes
+                rearm_sent(
+                    c["finals_own"],
+                    [sent_ix(src, col, tt, s, HIDDEN) for src in range(TP)],
+                )
+            else:
+                for p in range_constexpr(TP):
+                    put_sent(c["finals_peer"][p], si, word)
+        elif const_expr(two_shot(s)):
             # this rank owns the columns: its slot, the ranks' sum in rank order
             # (as ``stage_reduce``) -> out, and to the other ranks' slot [rank]
             c["put_bf"](c["peer"]["final_own"], at, [v0, v1])
@@ -1460,10 +1637,22 @@ def stage_reduce(c, j):
         if const_expr(two_shot(s)):
             live = live & (j * 128 // UP_N != c["rank"])
         if live:
-            t = idx // 64
-            cp = idx % 64
+            if const_expr(sent_on(c, "final")):
+                t, cp = sent_item(idx, s)
+            else:
+                t = idx // 64
+                cp = idx % 64
             col = j * 128 + 2 * cp
-            if const_expr(two_shot(s)):
+            if const_expr(sent_on(c, "final") and two_shot(s)):
+                # (OPT_SENT_FINAL) The owner's sum in its sentinel
+                # slot; every round's words re-armed after the last round
+                si = sent_ix(j * 128 // UP_N, col, t, s, HIDDEN)
+                lo, hi = bf2_f32(
+                    poll_sent(c["mb"], c["finals_own"], [si], rearm=False)[0]
+                )
+            elif const_expr(sent_on(c, "final")):
+                lo, hi = sent_sum(c, c["finals_own"], col, t, HIDDEN, rearm=False)
+            elif const_expr(two_shot(s)):
                 # the owner's up reduced the columns: its slot [owner]
                 at = ((j * 128 // UP_N) * s + t) * HIDDEN + col
                 lo, hi = bf2_f32(
@@ -1482,6 +1671,26 @@ def stage_reduce(c, j):
                 .bitcast(fx.Int32)[0]
             )
             bo.buffer_store(w, rsrc(c["args"]["out"]), (t * HIDDEN + col) // 2)
+    if const_expr(sent_on(c, "final")):
+        # (OPT_SENT_FINAL) The words every round read, re-armed
+        # after the last round's poll (not between the rounds' polls)
+        for i in range_constexpr((s * 64 + THREADS - 1) // THREADS):
+            idx = tid + THREADS * i
+            live = idx < s * 64
+            if const_expr(two_shot(s)):
+                live = live & (j * 128 // UP_N != c["rank"])
+            if live:
+                t, cp = sent_item(idx, s)
+                col = j * 128 + 2 * cp
+                if const_expr(two_shot(s)):
+                    rearm_sent(
+                        c["finals_own"], [sent_ix(j * 128 // UP_N, col, t, s, HIDDEN)]
+                    )
+                else:
+                    rearm_sent(
+                        c["finals_own"],
+                        [sent_ix(src, col, t, s, HIDDEN) for src in range(TP)],
+                    )
     gpu.barrier()
 
 

@@ -97,7 +97,41 @@ TL_POINTS = 18  # + 14 the fused M1b's push, 15 INTER loaded, 16 down done,
 
 assert E0 + k2b.R_TASKS + k2b.L_TASKS <= BLOCKS and k2b.G_TASKS <= E0 - O0
 
-REGIONS = ("part", "wgt", "msq", "xrdy", "ar", "crdy", "cmb", "ardy") + k2b.REGIONS
+REGIONS: tuple[str, ...] = (
+    "part",
+    "wgt",
+    "msq",
+    "xrdy",
+    "ar",
+    "crdy",
+    "cmb",
+    "ardy",
+) + k2b.REGIONS
+# the all-reduce sentinel regions, RLOGP and the tagged rows (``K2Build.opt``),
+# past every region above
+REGIONS = REGIONS + ("ars", "latrs", "finals", "xt", "rlogp")
+
+# K2 options (``K2Build.opt``), all bit-exact vs opt=0; K2_OPT is the default.
+#   1 / 16 / 32  o_proj / latent / final all-reduce via sentinel regions
+#                (plain bf16 pair words, reader re-arms; ``sync.put_sent``)
+#   2    MLP AttnRes slice loads issued before the all-reduce poll
+#   8    x rows also as tagged pairs to the router / latent GEMVs (no XRDY)
+#   64   shared-down tasks that up waits on run first
+#   256  router K parts push fp32 partials to every rank's RLOGP
+#   512  batched polls (route, down, up)
+OPT_SENT = 1
+OPT_PRELOAD = 2
+OPT_TAG_X = 8
+OPT_SENT_LATR = 16
+OPT_SENT_FINAL = 32
+OPT_SENTS = OPT_SENT | OPT_SENT_LATR | OPT_SENT_FINAL
+OPT_SDOWN_FIRST = 64
+OPT_RLOG_PARTS = 256
+OPT_BATCH = 512
+K2_OPT = (
+    OPT_SENTS | OPT_PRELOAD | OPT_TAG_X | OPT_SDOWN_FIRST | OPT_RLOG_PARTS | OPT_BATCH
+)
+SENT_ROWS = 16  # the served widths (runtime.MAX_ROWS)
 
 _STREAM = fx.Stream(None)
 
@@ -130,6 +164,107 @@ class K2Build:
     # partials stored device-scope, a flag a CTA (``ardy``) the combine polls
     m1c: bool = False
     m1c_wide: bool = False  # M1c's ``wide`` (its KV pool over 4 GiB, ``k2_launch``)
+    # the OPT_* bits
+    opt: int = K2_OPT
+
+
+def k2_sent(key: K2Build) -> bool:
+    """(OPT_SENTS) Whether build ``key``'s all-reduces go through the sentinel
+    regions. The one predicate the push and the reduce of every one of them
+    use: a push the reduce does not take would leave words neither polled nor
+    re-armed, and the next launch's reader would hang."""
+    return bool(key.opt & OPT_SENTS) and key.tokens <= SENT_ROWS
+
+
+def sent_layout() -> dict:
+    """(OPT_SENTS) One layer parity's sentinel regions, name -> (byte
+    offset, bytes): a word a (rank, bf16 pair, row), SENT_ROWS rows."""
+    n = {
+        "ars": TP_ * SENT_ROWS * HIDDEN // 2 * 4,
+        "latrs": TP_ * SENT_ROWS * k2b.LAT // 2 * 4,
+        "finals": TP_ * SENT_ROWS * HIDDEN // 2 * 4,
+    }
+    out, off = {}, 0
+    for name, b in n.items():
+        out[name] = (off, b)
+        off += -(-b // 256) * 256
+    return out
+
+
+def sent_half_bytes() -> int:
+    return max(o + n for o, n in sent_layout().values())
+
+
+def sent_offset() -> int:
+    """(OPT_SENTS) Byte offset (from the kernels' peer base) of the sentinel
+    regions: past K2's regions and M1's at their largest (DCP8), so no other
+    region moves. Two layer parities."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import mla
+
+    end = (
+        peer_bytes(k2b.MAX_S)
+        + mla.peer_bytes(k2b.MAX_S, TP_)
+        + m1b.peer_bytes(k2b.MAX_S, TP_)
+    )
+    return -(-end // 4096) * 4096
+
+
+def sent_bytes() -> int:
+    return 2 * sent_half_bytes()
+
+
+def rlogp_half_bytes() -> int:
+    """(OPT_RLOG_PARTS) One epoch parity's RLOGP, tagged pairs
+    [src rank][part][token][router row], SENT_ROWS rows."""
+    return TP_ * k2b.R_PARTS * SENT_ROWS * (k2b.E // TP_) * 8
+
+
+def rlogp_offset() -> int:
+    return -(-(sent_offset() + sent_bytes()) // 4096) * 4096
+
+
+def extra_peer_end() -> int:
+    """The end (from the kernels' peer base) of every region the OPT_* bits
+    add to the peer buffer."""
+    return rlogp_offset() + 2 * rlogp_half_bytes()
+
+
+def k2_rlogp(key: K2Build) -> bool:
+    if not (key.opt & OPT_RLOG_PARTS) or key.tokens > SENT_ROWS:
+        return False
+    vextra = key.tokens * COLS * 4
+    return vals_words(key.tokens, key.nblocks + 1, vextra) >= k2b.R_PARTS * k2b.E
+
+
+def tag_layout() -> dict:
+    """(OPT_TAG_X) The tagged rows' scratch region (name -> (byte offset,
+    bytes)), past every launch's layout at its largest (K1's, M1a's,
+    K2's: as ``MonoRunner`` sizes the scratch), so no other launch's plain
+    word sits where these keep tags."""
+    from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import kda, mla
+
+    S = k2b.MAX_S
+    end = max(
+        kda.scratch_bytes(
+            kda.KdaPreBuild(tokens=S, qlen=S, nblocks=8, delta=True, state_len=3 + S)
+        ),
+        scratch_bytes(K2Build(tokens=S, nblocks=8)),
+        mla.scratch_bytes(mla.MlaPreBuild(tokens=S, nblocks=8, delta=True)),
+    )
+    # + 1 MiB: a fused K2's M1b flags (``crdy``) can outgrow the unfused key's
+    off = -(-(end + (1 << 20)) // 4096) * 4096
+    return {"xt": (off, S * HIDDEN // 2 * 8)}
+
+
+def tag_end() -> int:
+    return max(o + n for o, n in tag_layout().values())
+
+
+# set by the runner once it has allocated (and filled) the regions: a launch
+# whose build uses them without them asserts, as out-of-bounds peer stores would
+# corrupt another rank's memory
+SENT_READY = False
+TAG_READY = False
 
 
 ABI = KernelAbi(
@@ -395,6 +530,8 @@ def build(key: K2Build):
         name += f"_sp{key.m1b_splits}" if key.m1b_splits else ""
         name += "_c" if key.m1c else ""
         name += "w" if key.m1c_wide else ""
+    if key.opt:
+        name += f"_o{key.opt}"
     if key.fault_rank >= 0:
         name += (
             f"_f{key.fault_rank}_{key.fault_epoch}_{key.fault_layer}_{key.fault_ticks}"
@@ -561,6 +698,31 @@ def build(key: K2Build):
                 "out": out,
             },
         }
+        # the OPT_* bits' switches and regions
+        c["tag_x"] = bool(key.opt & OPT_TAG_X)
+        c["batch"] = bool(key.opt & OPT_BATCH)
+        rlogp = k2_rlogp(key)
+        c["rlog_parts"] = rlogp
+        if const_expr(rlogp):
+            roff = rlogp_offset()
+            rhalf = fx.Int64(par) * rlogp_half_bytes()
+            c["rlogp"] = [shift(preg(b, roff, "rlogp"), rhalf) for b in bases]
+            c["rlogp_own"] = shift(preg(own, roff, "rlogp"), rhalf)
+        if const_expr(key.opt & OPT_TAG_X):
+            c["xt"] = sreg(scratch, tag_layout()["xt"][0], "xt")
+        sent = k2_sent(key)
+        if const_expr(sent):
+            # this layer parity's sentinel regions
+            lpar = fx.Int64(layer % 2) * sent_half_bytes()
+            sl = sent_layout()
+            c["sent_ar"] = bool(key.opt & OPT_SENT)
+            c["sent_latr"] = bool(key.opt & OPT_SENT_LATR)
+            c["sent_final"] = bool(key.opt & OPT_SENT_FINAL)
+            c["mb"] = mb
+            for region in ("ars", "latrs", "finals"):
+                off = sent_offset() + sl[region][0]
+                c[region + "_peer"] = [shift(preg(b, off, region), lpar) for b in bases]
+                c[region + "_own"] = shift(preg(own, off, region), lpar)
         for region in (
             "part",
             "wgt",
@@ -683,13 +845,23 @@ def build(key: K2Build):
                 k2b.early_compute(c, 2, gi, 0, k2b.early_loads(c, 2, gi, 0))
         # ---- AttnRes: the reduced o_proj -> x; then route / SiTU
         if bid < NA:
-            k2a.stage_reduce(c, bid)
-            stamp(on, tls, tid, 1)
-            stage_slice(c, bid)
+            if const_expr(key.opt & OPT_PRELOAD):
+                # the slice's loads before the AR poll
+                sld = k2a.slice_loads(c, bid)
+                k2a.stage_reduce(c, bid)
+                stamp(on, tls, tid, 1)
+                k2a.stage_slice_pre(c, bid, sld)
+            else:
+                k2a.stage_reduce(c, bid)
+                stamp(on, tls, tid, 1)
+                stage_slice(c, bid)
             stamp(on, tls, tid, 2)
             stage_gates(c, bid)
             stamp(on, tls, tid, 8)
             stage_mix(c, bid)
+            if const_expr(sent and (key.opt & OPT_SENT)):
+                # the sentinel words stage_reduce read, off its critical path
+                k2a.rearm_ar(c, bid)
             stamp(on, tls, tid, 9)
             # the shared SiTU of token t on CTA (t + H0) % 56, first: SGU lands
             # before the logits
@@ -700,6 +872,8 @@ def build(key: K2Build):
             stamp(on, tls, tid, 13)
             for rr in range_constexpr((s + NA - 1) // NA):
                 if bid + NA * rr < s:
+                    if const_expr(rlogp):
+                        k2b.route_parts(c, bid + NA * rr)
                     k2b.stage_route(c, bid + NA * rr)
             stamp(on, tls, tid, 10)
         if bid >= NA:
@@ -733,8 +907,12 @@ def build(key: K2Build):
             stamp(on, tls, tid, 15)
             k2b.stage_down(c, bid, nt, dops)
             stamp(on, tls, tid, 16)
-        k2b.run_sdown_rest(c, bid, w_sd)
-        k2b.run_sdown(c, bid, w_sd)
+        if const_expr(key.opt & OPT_SDOWN_FIRST):
+            k2b.run_sdown_first(c, bid, w_sd)
+            k2b.run_sdown_rest(c, bid, w_sd)
+        else:
+            k2b.run_sdown_rest(c, bid, w_sd)
+            k2b.run_sdown(c, bid, w_sd)
         stamp(on, tls, tid, 4)
         if (bid >= k2b.LN0) & (bid < k2b.LN0 + k2b.LN_TASKS):
             k2b.run_lnorm(c, bid)
@@ -911,6 +1089,13 @@ def k2_launch(
     scale, kv_scale), its partials M1b's o / lse (split 0's views)."""
     assert (m1b_in is not None) == (key.m1b_qlen > 0)
     assert (m1c_in is not None) == key.m1c
+    # the regions the OPT_* bits use exist
+    assert SENT_READY or not (k2_sent(key) or k2_rlogp(key)), (
+        "OPT_SENTS / OPT_RLOG_PARTS without the runner's peer regions"
+    )
+    assert TAG_READY or not (key.opt & OPT_TAG_X), (
+        "OPT_TAG_X without the runner's region"
+    )
     if m1c_in is not None and m1c.wide_kv(m1c_in["kv"]):
         key = replace(key, m1c_wide=True)
     f = build(key)

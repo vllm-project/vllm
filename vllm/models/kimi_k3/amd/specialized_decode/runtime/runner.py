@@ -49,10 +49,13 @@ class MonoRunner:
                 mla.scratch_bytes(
                     mla.MlaPreBuild(tokens=MAX_TOKENS, nblocks=8, delta=True)
                 ),
+                # K2's tagged x rows (layer.OPT_TAG_X), past every layout
+                layer.tag_end(),
             ),
             dtype=torch.uint8,
             device=device,
         )
+        layer.TAG_READY = True
         self.epoch = torch.zeros(1, dtype=torch.int32, device=device)
         self.health = torch.zeros(HEALTH_WORDS, dtype=torch.int32, device=device)
 
@@ -73,8 +76,16 @@ class MonoRunner:
             + self.mla_post_off
             + (mla_back.peer_bytes(MAX_TOKENS, self.dcp) if m1 else 0)
         )
+        # K2's sentinel regions (layer.OPT_SENTS, all ones, both layer
+        # parities) and RLOGP (layer.OPT_RLOG_PARTS), past every other region
+        sent_lo = PEER_HEAD + layer.sent_offset()
+        nbytes = max(nbytes, PEER_HEAD + layer.extra_peer_end())
         self.peers = PeerBuffer(nbytes, tp.cpu_group, self.rank, tp.world_size, device)
         self.peers.bytes.zero_()
+        self.peers.bytes[sent_lo : sent_lo + layer.sent_bytes()].fill_(0xFF)
+        torch.accelerator.synchronize()
+        torch.distributed.barrier(group=tp.cpu_group)
+        layer.SENT_READY = True
         self.peer_table = self.peers.addresses + PEER_HEAD
         self.alarm = int(self.peers.addresses[0].item()) + 4 * self.rank
         self.flags = self.peers.bytes[: 4 * tp.world_size].view(torch.int32)
