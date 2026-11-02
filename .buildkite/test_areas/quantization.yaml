@@ -2,6 +2,24 @@ group: Quantization
 depends_on:
   - image-build
 steps:
+- label: ":nvidia: (L4) ModelOpt block codecs"
+  key: modelopt-block-codecs-test
+  device: l4
+  num_devices: 1
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - vllm/config/kernel.py
+  - vllm/model_executor/layers/quantization/modelopt.py
+  - vllm/model_executor/layers/quantization/modelopt_block_quant.py
+  - vllm/model_executor/layers/quantization/modelopt_block_quant_triton.py
+  - vllm/model_executor/layers/fused_moe/experts/modelopt_block_triton_moe.py
+  - vllm/model_executor/warmup/modelopt_block_triton_warmup.py
+  - tests/quantization/test_modelopt.py
+  commands:
+    - >-
+      pytest -v -s quantization/test_modelopt.py
+      -k 'block_triton_dense_cache_matches_uncached or block_quant_backend_selection'
+
 # Disabled until torchao transitive dependencies are locked.
 # - label: ":nvidia: (H200 MIG 35GB) Quantization"
 #   device: h200_35gb
