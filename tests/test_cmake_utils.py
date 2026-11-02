@@ -7,6 +7,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _get_cmake_bin() -> str:
     cmake = shutil.which("cmake")
@@ -29,6 +31,39 @@ cuda_archs_loose_intersection(
   actual "10.0f;10.7f" "10.7")
 if(NOT "${{actual}}" STREQUAL "10.7f")
   message(FATAL_ERROR "Expected 10.7f, got '${{actual}}'")
+endif()
+"""
+    )
+
+    subprocess.run([_get_cmake_bin(), "-P", script], check=True)
+
+
+@pytest.mark.parametrize("suffix", ["a", "f"])
+def test_plain_arch_kept_when_suffixed_variant_also_requested(
+    tmp_path: Path, suffix: str
+):
+    """Keep a requested plain arch alongside its suffixed variant."""
+    repo_root = Path(__file__).parents[1]
+    script = tmp_path / "test_plain_and_suffixed.cmake"
+    script.write_text(
+        f"""
+cmake_minimum_required(VERSION 3.26)
+include("{repo_root / "cmake" / "utils.cmake"}")
+cuda_archs_loose_intersection(
+  actual "7.5;8.0;8.6;8.7;8.9;9.0;10.0;11.0;12.0"
+         "7.5;8.0;8.6;8.7;8.9;9.0a;10.0;10.0{suffix};12.0;12.1")
+foreach(expected 7.5 8.0 8.6 8.7 8.9 9.0a 10.0 10.0{suffix} 12.0)
+  if(NOT "${{expected}}" IN_LIST actual)
+    message(FATAL_ERROR "Expected '${{expected}}' in '${{actual}}'")
+  endif()
+endforeach()
+# 9.0a was requested without a plain 9.0, so the plain arch must not appear.
+if("9.0" IN_LIST actual)
+  message(FATAL_ERROR "Did not expect plain '9.0' in '${{actual}}'")
+endif()
+list(LENGTH actual actual_len)
+if(NOT actual_len EQUAL 9)
+  message(FATAL_ERROR "Expected 9 entries, got '${{actual}}'")
 endif()
 """
     )
