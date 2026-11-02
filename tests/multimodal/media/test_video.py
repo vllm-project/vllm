@@ -87,6 +87,48 @@ def test_video_media_io_kwargs(monkeypatch: pytest.MonkeyPatch):
             _ = videoio.load_bytes(b"test")
 
 
+@VIDEO_LOADER_REGISTRY.register("record_num_frames")
+class RecordNumFramesVideoLoader(VideoLoader):
+    @classmethod
+    def load_bytes(cls, data: bytes, num_frames: int = -1, **kwargs):
+        return np.zeros((1, 2, 2, 3), dtype=np.uint8), {"num_frames": num_frames}
+
+
+@VIDEO_LOADER_REGISTRY.register("record_num_frames_fps_default")
+class RecordNumFramesFpsDefaultVideoLoader(RecordNumFramesVideoLoader):
+    default_num_frames = -1
+
+
+@pytest.mark.parametrize(
+    "backend, num_frames, expected",
+    [
+        # Unset: each loader's own default is forwarded.
+        ("record_num_frames", None, 32),
+        ("record_num_frames_fps_default", None, -1),
+        # Explicit values are forwarded unchanged.
+        ("record_num_frames", 10, 10),
+        ("record_num_frames_fps_default", 10, 10),
+    ],
+)
+def test_video_media_io_num_frames_default(
+    backend: str, num_frames: int | None, expected: int
+):
+    kwargs = {} if num_frames is None else {"num_frames": num_frames}
+    videoio = VideoMediaIO(ImageMediaIO(), video_backend=backend, **kwargs)
+    _, metadata = videoio.load_bytes(b"test").media
+    assert metadata["num_frames"] == expected
+
+
+def test_video_media_io_jpeg_frames_default_cap():
+    imageio = ImageMediaIO()
+    frame = imageio.encode_base64(Image.new("RGB", (2, 2)), image_format="JPEG")
+    data = ",".join([frame] * 40)
+
+    videoio = VideoMediaIO(imageio, video_backend="record_num_frames_fps_default")
+    frames, _ = videoio.load_base64("video/jpeg", data).media
+    assert len(frames) == 32
+
+
 @pytest.mark.parametrize("is_color", [True, False])
 @pytest.mark.parametrize("fourcc, ext", [("mp4v", "mp4"), ("XVID", "avi")])
 def test_opencv_video_io_colorspace(tmp_path, is_color: bool, fourcc: str, ext: str):
