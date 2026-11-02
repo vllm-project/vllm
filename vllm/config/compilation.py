@@ -177,6 +177,12 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
+
+    fi_allreduce_standalone_max_size_mb: float | None = None
+    """The threshold of the communicated tensor sizes under which
+    vllm should use standalone FlashInfer allreduce. Specified as a
+    float in MB. Unspecified retains the topology-tuned standalone
+    cutoff and then the existing world-size default."""
     # TODO(luka) better pass enabling system.
 
     def flashinfer_max_size(self, world_size: int) -> int | None:
