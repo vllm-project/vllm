@@ -13,7 +13,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
-from tests.kernels.utils import torch_moe
+from tests.kernels.utils import torch_experts
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -60,7 +60,11 @@ MNK_FACTORS = [
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", [128])
-@pytest.mark.parametrize("topk", [8])
+@pytest.mark.parametrize(
+    "topk,apply_router_weight_on_input",
+    [(8, False), (1, True)],
+    ids=["output-weight", "input-weight"],
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @torch.inference_mode()
 def test_trtllm_bf16_moe_modular_no_graph(
@@ -69,6 +73,7 @@ def test_trtllm_bf16_moe_modular_no_graph(
     k: int,
     e: int,
     topk: int,
+    apply_router_weight_on_input: bool,
     dtype: torch.dtype,
     workspace_init,
 ):
@@ -88,6 +93,8 @@ def test_trtllm_bf16_moe_modular_no_graph(
         topk_weights, topk_ids = torch.topk(scores, topk)
         topk_weights = topk_weights.contiguous()
         topk_ids = topk_ids.to(torch.int32).contiguous()
+        if apply_router_weight_on_input:
+            topk_weights.fill_(0.5)
 
         moe_config = FusedMoEConfig(
             num_experts=e,
@@ -127,24 +134,33 @@ def test_trtllm_bf16_moe_modular_no_graph(
             ),
         )
 
-        trtllm_output = trtllm_experts.apply(
-            hidden_states=a,
-            w1=trtllm_w1,
-            w2=trtllm_w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            activation=MoEActivation.SILU,
-            global_num_experts=e,
-            expert_map=None,
-            apply_router_weight_on_input=False,
-        )
+        def invoke(hidden_states, weights, on_input):
+            return trtllm_experts.apply(
+                hidden_states=hidden_states,
+                w1=trtllm_w1,
+                w2=trtllm_w2,
+                topk_weights=weights,
+                topk_ids=topk_ids,
+                activation=MoEActivation.SILU,
+                global_num_experts=e,
+                expert_map=None,
+                apply_router_weight_on_input=on_input,
+            )
 
-        torch_output = torch_moe(
+        trtllm_output = invoke(a, topk_weights, apply_router_weight_on_input).clone()
+        if apply_router_weight_on_input:
+            prescaled_output = invoke(
+                a * topk_weights.to(a.dtype), torch.ones_like(topk_weights), False
+            )
+            torch.testing.assert_close(trtllm_output, prescaled_output)
+
+        torch_output = torch_experts(
             a,
             reference_w1,
             reference_w2,
-            score,
-            topk,
+            topk_weights,
+            topk_ids,
+            apply_router_weights_on_input=apply_router_weight_on_input,
             activation=MoEActivation.SILU,
         )
 
