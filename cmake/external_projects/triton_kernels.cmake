@@ -20,10 +20,10 @@ else()
   endif()
   # Fetch the source archive of the pinned revision instead of git-cloning the
   # whole Triton repo: FetchContent cannot shallow-clone a raw commit sha, so a
-  # clone downloads ~443 MB of history to install a few .py files, while this
-  # archive is a 7.7 MB download. docker/Dockerfile.rocm prefetches the same
-  # archive for TRITON_KERNELS_SRC_DIR, so Docker and non-Docker builds get
-  # identical sources; keep the URL form in sync with that Dockerfile.
+  # clone pulls ~406 MiB of history (443 MB on disk) to install a few .py files,
+  # while this archive is a 7.7 MB download. docker/Dockerfile.rocm prefetches
+  # the same archive for TRITON_KERNELS_SRC_DIR, so Docker and non-Docker builds
+  # get identical sources; keep the URL form in sync with that Dockerfile.
   string(REGEX REPLACE "\\.git$" "" TRITON_REPO_URL "${TRITON_GIT}")
   string(REPLACE "https://github.com/" "https://codeload.github.com/"
          TRITON_REPO_URL "${TRITON_REPO_URL}")
