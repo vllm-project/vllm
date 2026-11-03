@@ -35,7 +35,9 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.parallel_state import get_tp_group
+from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
+from vllm.model_executor.models.interfaces import supports_fp32_logits_gather
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.gpu.sample.batch_shard import (
     all_to_all_vocab_shards,
@@ -100,8 +102,13 @@ class DSparkSpeculator(DFlashSpeculator):
         # Whether the markov bias is fused into the Gumbel sample kernel.
         self._fuse_markov_bias: bool = False
 
+        # Whether the target model opts in with SupportsFP32LogitsGather; set
+        # in load_model (see _compute_draft_logits).
+        self.fused_logits_gather = False
+
     def load_model(self, target_model: torch.nn.Module) -> None:
         super().load_model(target_model)
+        self.fused_logits_gather = supports_fp32_logits_gather(target_model)
         tp_size = get_tp_group().world_size
         if tp_size > 1 and batch_sharded_sampling_enabled(
             self.vllm_config, target_model
@@ -187,6 +194,24 @@ class DSparkSpeculator(DFlashSpeculator):
     def supports_batch_sharded_draft_logits(self) -> bool:
         # A model's own sample_sequential kernels write the full-size cache.
         return not hasattr(self.model, "sample_sequential")
+
+    def _compute_draft_logits(self, sample_hidden: torch.Tensor) -> torch.Tensor:
+        """The draft model's base logits of ``sample_hidden``.
+
+        When the target model opts in with `SupportsFP32LogitsGather`, they
+        are computed under a forward context whose ``logits_gather_dtype``
+        has `LogitsProcessor` gather them in one fused pass, in the head's
+        dtype (bitwise main's logits). FP32 would save no copy: the Markov
+        bias is added in the head's dtype and the Gumbel sampler upcasts in
+        its kernel. Other models compute them as on main. The choice depends
+        only on the target model, so a captured draft graph replays it.
+        """
+        if not self.fused_logits_gather:
+            return self.model.compute_draft_logits(sample_hidden)
+        with set_forward_context(
+            None, self.vllm_config, logits_gather_dtype=sample_hidden.dtype
+        ):
+            return self.model.compute_draft_logits(sample_hidden)
 
     def _sample_logits(
         self,
@@ -275,7 +300,7 @@ class DSparkSpeculator(DFlashSpeculator):
         # Per-(req, position) head hidden, ordered (req, step).
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
         # Draft-vocab logits; sampled ids are remapped to target vocab below.
-        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = self._compute_draft_logits(sample_hidden)
         vocab_size = base_logits.shape[-1]
         base_logits = base_logits.view(num_reqs, n_spec, vocab_size)
 
@@ -425,7 +450,7 @@ class DSparkSpeculator(DFlashSpeculator):
         n_spec = self.num_speculative_steps
         num_sample = num_reqs * n_spec
         sample_hidden = head_hidden[self.sample_indices[:num_sample]]
-        base_logits = self.model.compute_draft_logits(sample_hidden)
+        base_logits = self._compute_draft_logits(sample_hidden)
         base_logits = base_logits.view(num_reqs, n_spec, -1)
         base_values, draft_indices = base_logits.topk(self._draft_topk, dim=-1)
         # Reuse the dense backbone output as the normal sampler's input. Fill
