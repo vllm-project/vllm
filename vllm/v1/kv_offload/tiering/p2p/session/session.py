@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -45,6 +45,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
     ServerRole,
+    StoreDrainResult,
     StoreResult,
 )
 
@@ -147,6 +148,7 @@ class P2PSession:
 
         # First cause recorded by _mark_dead; see death_reason.
         self._death_reason: str | None = None
+        self._accept_buffered_terminals = True
         self._peer_fault_at: float | None = None
         self._abort_ack_fault: str | None = None
         self._registration_fault: str | None = None
@@ -275,6 +277,12 @@ class P2PSession:
     ) -> None:
         """New blocks stored locally — match against pending fetch demand."""
         self._server.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
+
+    def drain_stores(
+        self, kv_request_ids: Iterable[str] | None = None
+    ) -> StoreDrainResult:
+        """Withdraw queued stores, optionally for fetches arriving during drain."""
+        return self._server.drain_stores(kv_request_ids)
 
     def finish_request(self, kv_request_id: str) -> None:
         """Called when the request is finishing locally.
@@ -536,17 +544,24 @@ class P2PSession:
         """Mark the connection dead, recording the first cause."""
         if self._conn is None:
             return
+        if reason != "peer disconnected":
+            self._accept_buffered_terminals = False
         if self._death_reason is None:
             self._death_reason = reason
         self._conn.mark_dead()
 
     def _dispatch_message(self, msg: dict) -> None:
-        # Drop messages buffered before disconnect: a poll batch can
-        # contain msg-after-DisconnectMsg, and dispatching them would
-        # mutate state on a dead session.
-        if self._conn is not None and not self._conn.alive:
-            return
         msg_type = msg.get(TYPE_KEY) if isinstance(msg, dict) else None
+        # Buffered terminals can still settle loads after disconnect.
+        if (
+            self._conn is not None
+            and not self._conn.alive
+            and (
+                not self._accept_buffered_terminals
+                or msg_type not in (TransferDoneMsg.TYPE, AbortAckMsg.TYPE)
+            )
+        ):
+            return
         if msg_type == ConnectMsg.TYPE:
             self._on_connect(msg)
         elif msg_type == ConnectAckMsg.TYPE:
