@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import math
 from enum import Enum
 from typing import Any
 
@@ -45,6 +46,8 @@ MB = 1024 * KB
 
 class QuickAllReduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 8]
+    # AITER's FlyDSL reduce-scatter and all-gather take whole 32 KiB tiles.
+    _SP_TILE_BYTES = 32 * KB
     _SUPPORTED_DTYPES = [torch.float16, torch.bfloat16]
     # The following data is based on kernel tests.
     # In this order [FP, INT8, INT6, INT4, INT3].
@@ -91,6 +94,7 @@ class QuickAllReduce:
         """
         self.disabled = True
         self._flydsl_int4: Any = None
+        self._flydsl_sp = False
         if not self._rocm_arch_available():
             logger.debug(
                 "Custom quick allreduce is only supported on ROCm MI300 series."
@@ -184,6 +188,7 @@ class QuickAllReduce:
             return
 
         if regime_str == "NONE":
+            self._warn_sp_quick_reduce_inactive()
             logger.debug(
                 "Custom quick allreduce is disabled based "
                 "on env variable "
@@ -262,11 +267,21 @@ class QuickAllReduce:
         self._flydsl_int4 = self._init_flydsl_int4(vllm_config)
         self.disabled = False
 
+    @staticmethod
+    def _warn_sp_quick_reduce_inactive() -> None:
+        if envs.VLLM_ROCM_SP_QUICK_REDUCE:
+            logger.warning(
+                "VLLM_ROCM_SP_QUICK_REDUCE needs "
+                "VLLM_ROCM_QUICK_REDUCE_QUANTIZATION=INT4 and AITER's FlyDSL "
+                "QuickReduce; the sequence-parallel collectives stay exact."
+            )
+
     def _init_flydsl_int4(self, vllm_config) -> Any:
         if (
             self.qr_quant_level != QuickReduceRegime.INT4
             or not rocm_aiter_ops.is_flydsl_quick_reduce_available()
         ):
+            self._warn_sp_quick_reduce_inactive()
             return None
         flydsl_int4 = rocm_aiter_ops.create_flydsl_quick_all_reduce_int4(
             group=self.group,
@@ -278,6 +293,7 @@ class QuickAllReduce:
         # out of the first prefill and out of CUDA graph capture.
         warmup = torch.empty(MB, dtype=torch.bfloat16, device=self.device)
         flydsl_int4.compile(warmup, torch.empty_like(warmup))
+        self._flydsl_sp = self._init_flydsl_sp(flydsl_int4, warmup)
         torch.accelerator.synchronize(self.device)
         logger.info(
             "Using AITER FlyDSL INT4 QuickReduce for BF16 payloads; other "
@@ -293,6 +309,35 @@ class QuickAllReduce:
                 "separate RMSNorm, so the fusion does nothing for them."
             )
         return flydsl_int4
+
+    def _init_flydsl_sp(self, flydsl_int4: Any, warmup: torch.Tensor) -> bool:
+        """Enable the sequence-parallel reduce-scatter and all-gather.
+
+        They share the all-reduce object's inbox and colors, so the opt-in
+        switch is the only extra condition. Only TP2 was validated for
+        accuracy. Like `compile`, `compile_sp` launches both collectives on
+        every rank, which keeps the JIT out of the first prefill and out of
+        CUDA graph capture.
+        """
+        if not envs.VLLM_ROCM_SP_QUICK_REDUCE:
+            return False
+        if self.world_size != 2 or not all(
+            hasattr(flydsl_int4, name)
+            for name in ("reduce_scatter", "all_gather", "compile_sp")
+        ):
+            logger.warning(
+                "VLLM_ROCM_SP_QUICK_REDUCE is set, but FlyDSL QuickReduce "
+                "reduce-scatter and all-gather need TP2 and an AITER with "
+                "QuickAllReduceInt4.reduce_scatter/all_gather; the sequence-"
+                "parallel collectives stay exact."
+            )
+            return False
+        flydsl_int4.compile_sp(warmup, torch.empty_like(warmup[: warmup.numel() // 2]))
+        logger.info(
+            "Using AITER FlyDSL INT4 QuickReduce for the sequence-parallel "
+            "reduce-scatter and all-gather of BF16 payloads."
+        )
+        return True
 
     @staticmethod
     def _get_qr_min_size(qr_max_size: int | None) -> int | None:
@@ -395,6 +440,95 @@ class QuickAllReduce:
     def uses_flydsl_int4(self, inp: torch.Tensor) -> bool:
         """Whether `all_reduce` runs `inp` through FlyDSL QuickReduce."""
         return self.should_quick_allreduce(inp) and self._use_flydsl_int4(inp)
+
+    def _sp_chunk_rows(self, inp: torch.Tensor, chunk: int) -> int | None:
+        """Rows per rank, padded to whole tiles, or None to stay exact.
+
+        The kernels move whole `_SP_TILE_BYTES` tiles per full tensor, so each
+        rank's block is zero-padded to a multiple of `unit` rows. The decision
+        depends on shapes only: every rank of the group reaches the same one.
+        """
+        if (
+            not self._flydsl_sp
+            or self.disabled
+            or inp.dtype != torch.bfloat16
+            or inp.ndim != 2
+            or not inp.is_contiguous()
+        ):
+            return None
+        row_bytes = inp.shape[1] * inp.element_size()
+        unit = self._SP_TILE_BYTES // math.gcd(self._SP_TILE_BYTES, row_bytes)
+        padded = -(-chunk // unit) * unit
+        full_bytes = self.world_size * padded * row_bytes
+        min_size = self.qr_min_size
+        if min_size is None:
+            min_size = self._QR_MIN_SIZE[(torch.bfloat16, self.world_size)][
+                QuickReduceRegime.INT4.value
+            ]
+        quantization_min_size = self.qr_quantization_min_size
+        if (
+            full_bytes < min_size
+            or full_bytes > self.qr_max_size
+            or (
+                quantization_min_size is not None and full_bytes < quantization_min_size
+            )
+        ):
+            return None
+        return padded
+
+    @staticmethod
+    def _aligned(tensor: torch.Tensor) -> torch.Tensor:
+        """The kernels need 16-byte-aligned buffers. A misaligned view is
+        copied, not refused, so that every rank still takes the same path."""
+        return tensor if tensor.data_ptr() % 16 == 0 else tensor.clone()
+
+    def quick_reduce_scatter(self, inp: torch.Tensor) -> torch.Tensor | None:
+        """INT4 reduce-scatter of `inp` [T, H] (T % world_size == 0): this
+        rank's contiguous block of the sum, or None when not eligible.
+
+        Every partial, this rank's own included, goes through the codec.
+        """
+        if inp.ndim != 2 or inp.shape[0] % self.world_size:
+            return None
+        chunk = inp.shape[0] // self.world_size
+        padded = self._sp_chunk_rows(inp, chunk)
+        if padded is None:
+            return None
+        src = inp
+        if padded != chunk:
+            src = inp.new_zeros(self.world_size * padded, inp.shape[1])
+            for rank in range(self.world_size):
+                src[rank * padded : rank * padded + chunk] = inp[
+                    rank * chunk : (rank + 1) * chunk
+                ]
+        out = torch.empty(padded, inp.shape[1], dtype=inp.dtype, device=inp.device)
+        self._flydsl_int4.reduce_scatter(self._aligned(src), out)
+        return out if padded == chunk else out[:chunk].contiguous()
+
+    def quick_all_gather(self, inp: torch.Tensor) -> torch.Tensor | None:
+        """INT4 all-gather of `inp` [T / world_size, H] in rank order, or None
+        when not eligible. Every rank holds bitwise-equal output."""
+        if inp.ndim != 2:
+            return None
+        chunk = inp.shape[0]
+        padded = self._sp_chunk_rows(inp, chunk)
+        if padded is None:
+            return None
+        src = inp
+        if padded != chunk:
+            src = torch.cat([inp, inp.new_zeros(padded - chunk, inp.shape[1])])
+        out = torch.empty(
+            self.world_size * padded, inp.shape[1], dtype=inp.dtype, device=inp.device
+        )
+        self._flydsl_int4.all_gather(self._aligned(src), out)
+        if padded == chunk:
+            return out
+        return torch.cat(
+            [
+                out[rank * padded : rank * padded + chunk]
+                for rank in range(self.world_size)
+            ]
+        )
 
     def _get_qr_quant_level(self, inp: torch.Tensor) -> int:
         quantization_min_size = self.qr_quantization_min_size

@@ -22,6 +22,12 @@ def _custom_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
     return None if collective is None else collective(x)
 
 
+def _quick_collective(name: str, x: torch.Tensor) -> torch.Tensor | None:
+    device_communicator = get_tp_group().device_communicator
+    collective = getattr(device_communicator, name, None)
+    return None if collective is None else collective(x)
+
+
 @lru_cache
 def is_sequence_parallel_active(
     is_enabled: bool, num_tokens: int, min_tokens: int = 0
@@ -53,6 +59,24 @@ def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     if output is not None:
         return output
     return tensor_model_parallel_reduce_scatter(x, 0)
+
+
+def sp_all_gather_quantized(x: torch.Tensor) -> torch.Tensor:
+    """`sp_all_gather` through INT4 QuickReduce when it is enabled and the
+    shape qualifies (lossy); the exact path otherwise."""
+    output = _quick_collective("quick_all_gather", x)
+    return output if output is not None else sp_all_gather(x)
+
+
+def sp_reduce_scatter_quantized(x: torch.Tensor) -> torch.Tensor:
+    """`sp_reduce_scatter` through INT4 QuickReduce, as above."""
+    assert x.ndim == 2
+    tp_size = get_tensor_model_parallel_world_size()
+    sp_pad = (-x.shape[0]) % tp_size
+    if sp_pad > 0:
+        x = torch.nn.functional.pad(x, (0, 0, 0, sp_pad))
+    output = _quick_collective("quick_reduce_scatter", x)
+    return output if output is not None else sp_reduce_scatter(x)
 
 
 def sp_shard(x: torch.Tensor) -> torch.Tensor:

@@ -35,10 +35,41 @@ direct_register_custom_op(
 )
 
 
+def _sp_all_gather_fake(x: torch.Tensor) -> torch.Tensor:
+    return x.new_empty(
+        (x.shape[0] * get_tensor_model_parallel_world_size(), *x.shape[1:])
+    )
+
+
+# The QuickReduce launch is a Python call into AITER, which Dynamo cannot trace.
+direct_register_custom_op(
+    op_name="sp_reduce_scatter_quantized",
+    op_func=common_sp.sp_reduce_scatter_quantized,
+    fake_impl=_sp_local_fake,
+)
+direct_register_custom_op(
+    op_name="sp_all_gather_quantized",
+    op_func=common_sp.sp_all_gather_quantized,
+    fake_impl=_sp_all_gather_fake,
+)
+
+
 def sp_reduce_scatter(x: torch.Tensor) -> torch.Tensor:
     if torch.compiler.is_compiling():
         return torch.ops.vllm.sp_reduce_scatter(x)
     return common_sp.sp_reduce_scatter(x)
+
+
+def sp_reduce_scatter_quantized(x: torch.Tensor) -> torch.Tensor:
+    if torch.compiler.is_compiling():
+        return torch.ops.vllm.sp_reduce_scatter_quantized(x)
+    return common_sp.sp_reduce_scatter_quantized(x)
+
+
+def sp_all_gather_quantized(x: torch.Tensor) -> torch.Tensor:
+    if torch.compiler.is_compiling():
+        return torch.ops.vllm.sp_all_gather_quantized(x)
+    return common_sp.sp_all_gather_quantized(x)
 
 
 def sp_shard(x: torch.Tensor) -> torch.Tensor:
