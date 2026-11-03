@@ -73,6 +73,10 @@ what may differ.
 
 ## Configuration Notes
 
+For hybrid SSM/Mamba models, follow the
+[hybrid-model setup requirements](nixl_connector_usage.md#hybrid-ssmmamba-models),
+including `VLLM_SSM_CONV_STATE_LAYOUT=DS` on both P and D.
+
 ### What must match between P and D
 
 By default, a **compatibility hash** is checked during handshake. P and D instances must agree on:
