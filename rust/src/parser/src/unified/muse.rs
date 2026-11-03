@@ -42,9 +42,8 @@ use winnow::prelude::*;
 use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
-use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
+use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput, token_id};
 use crate::tool::{Tool, ToolCallDelta};
-use crate::unified::parsing_failed;
 use crate::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 
 const START: &str = "<|start|>";
@@ -276,7 +275,7 @@ impl UnifiedParser for MuseUnifiedParser {
             MuseMode::Reasoning => output.push_reasoning(self.buffer.take()),
             MuseMode::Skip | MuseMode::Done => self.buffer.clear(),
             MuseMode::Tool { .. } => {
-                return Err(parsing_failed!("incomplete Muse tool call"));
+                return Err(UnifiedParserError::IncompleteToolCall { parser: "Muse" });
             }
         }
 
