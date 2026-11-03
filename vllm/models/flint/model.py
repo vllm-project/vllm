@@ -308,22 +308,28 @@ class FlintAttention(nn.Module):
         # The fused kernel writes the KV cache itself (in the FlashInfer layout)
         # and then calls the attention backend directly. Imported here so the
         # module imports on platforms without FlashInfer.
-        from vllm.v1.attention.backends.flashinfer import (
-            FlashInferImpl,
-            FlashInferMetadata,
-            FlashInferTrtllmAPIDecode,
-        )
+        try:
+            from vllm.v1.attention.backends.flashinfer import (
+                FlashInferImpl,
+                FlashInferMetadata,
+                FlashInferTrtllmAPIDecode,
+            )
+        except ImportError:
+            # ROCm lacks FlashInfer support
+            FlashInferImpl = None
 
         impl = self.attn.impl
-        assert isinstance(impl, FlashInferImpl), "Flint requires FlashInfer attention"
-        self._metadata_cls = FlashInferMetadata
-        self._decode_cls = FlashInferTrtllmAPIDecode
-        assert get_current_vllm_config().model_config.dtype == torch.bfloat16
-        assert self.attn.kv_cache_dtype in ("auto", "bfloat16")
-        assert impl.kv_sharing_target_layer_name is None
-        self.impl = impl
-        # Flint decode attention and the fused low-latency decode path.
-        self.flint_decode = _flint_kernels(quant_config)
+        if FlashInferImpl is not None and isinstance(impl, FlashInferImpl):
+            self._metadata_cls = FlashInferMetadata
+            self._decode_cls = FlashInferTrtllmAPIDecode
+            assert get_current_vllm_config().model_config.dtype == torch.bfloat16
+            assert self.attn.kv_cache_dtype in ("auto", "bfloat16")
+            assert impl.kv_sharing_target_layer_name is None
+            self.impl = impl
+            # Flint decode attention and the fused low-latency decode path.
+            self.flint_decode = _flint_kernels(quant_config)
+        else:
+            self.flint_decode = False
         # Largest pure-decode batch served by the Flint kernel; beyond it
         # FlashInfer is faster on the full-attention layers at long context.
         self.max_decode_batch = 64 if is_sliding else 8
