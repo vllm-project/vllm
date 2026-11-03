@@ -96,7 +96,8 @@ class QuantSpec:
     along the input dimension of both the weight and the activation before
     quantization (see `InputHadamardLinearMethod`). The GEMM result is
     unchanged up to quantization error, which the rotation shrinks by spreading
-    outliers across each block. Linear layers only; validated with MXFP4."""
+    outliers across each block. Linear layers and MXFP4 MoE; validated with
+    MXFP4."""
 
     @field_validator("hadamard_size")
     @classmethod
@@ -236,6 +237,11 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # MoE stays unquantized (no `moe` field).
     "mxfp4_hadamard32": QuantizationConfigArgs(
         linear=QuantSpec(weight=kMxfp4Static, hadamard_size=32),
+    ),
+    # MXFP4 W4A4 MoE with a 32-wide Hadamard rotation on Humming; linear stays
+    # unquantized (no `linear` field).
+    "mxfp4_hadamard32_moe": QuantizationConfigArgs(
+        moe=QuantSpec(weight=kMxfp4Static, hadamard_size=32),
     ),
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(

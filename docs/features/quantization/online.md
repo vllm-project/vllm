@@ -53,6 +53,7 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
 | `mxfp4_hadamard32` | `mxfp4`, with the weight rotated along its input dimension by a 32-wide block Hadamard matrix before quantization | `mxfp4`, with activations rotated by the same matrix before quantization | Linear only. The rotation is orthogonal, so the GEMM is unchanged up to quantization error, which it shrinks by spreading outliers across each 32-element block. The activation rotation runs in PyTorch before the selected MXFP4 linear backend. |
+| `mxfp4_hadamard32_moe` | `mxfp4` on MoE experts, with the weight rotated by a 32-wide block Hadamard matrix before quantization | `mxfp4` on MoE experts, with activations rotated by the same matrix inside Humming's input quantization | MoE only; linear layers stay unquantized. Requires SM 100+ and the Humming MoE backend. The accuracy gain from the rotation is model-dependent. |
 
 ## Advanced Configuration
 
@@ -69,6 +70,7 @@ quantization_config:
   moe:
     weight: <name>
     activation: <name>
+    hadamard_size: 32   # optional power of two, mxfp4 on Humming only: see `mxfp4_hadamard32_moe`
   ignore: [<layer-name-or-regex-or-fnmatch-pattern>, ...]
 ```
 

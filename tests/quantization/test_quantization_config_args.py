@@ -290,7 +290,7 @@ def test_hadamard_size_must_be_power_of_two(size):
     "linear,moe",
     [
         ({"weight": "fp8_per_block_static", "hadamard_size": 32}, None),
-        (None, {"weight": kMxfp4Static, "hadamard_size": 32}),
+        (None, {"weight": "fp8_per_block_static", "hadamard_size": 32}),
     ],
 )
 def test_hadamard_size_not_implemented_for_unvalidated_methods(linear, moe):
@@ -298,3 +298,21 @@ def test_hadamard_size_not_implemented_for_unvalidated_methods(linear, moe):
     layer_cls = LinearBase if linear is not None else RoutedExperts
     with pytest.raises(NotImplementedError, match="hadamard_size"):
         config.resolve_quant_method_cls(layer_cls, "model.layers.0.mlp.down_proj")
+
+
+def test_mxfp4_hadamard32_moe_routes_experts_and_leaves_linear_unquantized():
+    """The MoE rotation needs the Humming method; dense layers stay in bf16."""
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4HadamardOnlineMoEMethod,
+    )
+
+    args = resolve_quantization_config("mxfp4_hadamard32_moe", None)
+    assert args is not None
+    assert args.linear is None
+    config = OnlineQuantizationConfig(args)
+    resolved = config.resolve_quant_method_cls(
+        RoutedExperts, "model.layers.0.mlp.experts"
+    )
+    assert resolved is not None
+    assert resolved[-1] is Mxfp4HadamardOnlineMoEMethod
+    assert config.resolve_quant_method_cls(LinearBase, "model.layers.0.o_proj") is None
