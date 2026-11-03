@@ -112,6 +112,7 @@ class _OffloadEventMetadata(
     group_idx: int
     kv_cache_spec: OffloadingEventGroupSpec
     active_residencies: int
+    lookahead_token_ids: tuple[tuple[int, ...], ...] | None = None
 
 
 def describes_group(group_config: "GroupOffloadConfig") -> bool:
@@ -160,8 +161,10 @@ class OffloadingEventsTracker:
         self,
         config: OffloadingKVEventsConfig,
         group_specs: dict[int, OffloadingEventGroupSpec] | None = None,
+        num_hash_lookahead_tokens: int = 0,
     ):
         self.config = config
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Static classification survives resets and never asserts prefix residency.
         self._group_specs = group_specs or {}
         self.self_describing_enabled = (
@@ -289,6 +292,9 @@ class OffloadingEventsTracker:
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
             token_ids=tuple(req.all_token_ids[chunk_start:boundary_tokens]),
+            lookahead_token_ids=self._lookahead_tokens(
+                req, chunk_start, boundary_tokens, tokens_per_hash
+            ),
             block_size=tokens_per_hash,
             lora_id=lora_id,
             lora_name=lora_name,
@@ -335,6 +341,18 @@ class OffloadingEventsTracker:
         """Drop all tracked state; pending payloads are stale after a
         manager cache reset."""
         self._pending_event_metadata.clear()
+
+    def _lookahead_tokens(
+        self, req: Request, start: int, end: int, block_size: int
+    ) -> tuple[tuple[int, ...], ...] | None:
+        length = self.num_hash_lookahead_tokens
+        if not length:
+            return None
+        assert end + length <= req.num_tokens
+        return tuple(
+            tuple(req.all_token_ids[i : i + length])
+            for i in range(start + block_size, end + 1, block_size)
+        )
 
     def _build_event_metadata(
         self,
@@ -401,6 +419,9 @@ class OffloadingEventsTracker:
             block_hashes=tuple(chunk_hashes),
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
+            lookahead_token_ids=self._lookahead_tokens(
+                req, tok_start, tok_end, group_config.tokens_per_block
+            ),
             block_size=group_config.tokens_per_block,
             lora_id=lora_id,
             lora_name=lora_name,
@@ -483,6 +504,11 @@ class OffloadingEventsTracker:
                     else None
                 ),
                 token_ids=list(meta.token_ids),
+                lookahead_token_ids=(
+                    [list(tokens) for tokens in meta.lookahead_token_ids]
+                    if meta.lookahead_token_ids is not None
+                    else None
+                ),
                 block_size=meta.block_size,
                 lora_id=meta.lora_id,
                 medium=_MEDIUM_TO_EVENT_STR[event.medium],
