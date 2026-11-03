@@ -1620,6 +1620,7 @@ def test_modelopt_block_quant_loads_expert_blocks_with_aligned_tp_slices(
     layer = torch.nn.Module()
     layer.layer_name = "model.layers.0.mlp.experts"
     layer.is_fused_checkpoint_transposed = False
+    layer.shared_expert_online_loader = None
     layer._orient_fused_weight = RoutedExperts._orient_fused_weight
     layer.get_expert_mapping = lambda **kwargs: (
         RoutedExperts.build_expert_params_mapping(
