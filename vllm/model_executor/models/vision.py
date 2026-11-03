@@ -482,7 +482,13 @@ def run_dp_sharded_mrope_vision_model(
     # to work
     max_len_per_rank = max(grouped_pixel_values_len) // embed_dim_reduction_factor
     local_grid_thw_list = [grid_thw_list[i] for i in image_idxs_local]
-    embed_dtype = next(vision_model.parameters()).dtype
+    # A rank without images must send the dtype the model returns. Use the
+    # model's compute dtype when it declares one: a tower can keep its first
+    # parameter in higher precision (e.g. MiniMax-M3's fp32 patch embedding),
+    # and an fp32 empty output next to bf16 outputs hangs the all-gather below.
+    embed_dtype = (
+        getattr(vision_model, "dtype", None) or next(vision_model.parameters()).dtype
+    )
 
     # Run the vision model on the local pixel_values_local
     if rope_type == "rope_2d":
