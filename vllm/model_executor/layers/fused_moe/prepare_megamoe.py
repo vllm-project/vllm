@@ -21,8 +21,6 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 
 _E8M0_SCALE_DTYPES = (torch.uint8, torch.float8_e8m0fnu)
-# Inverse of the FP8 E4M3 range.
-_INV_FP8_MAX = tl.constexpr(1.0 / 448.0)
 # Inverse of the NVFP4 range: E2M1 max (6) times E4M3 max (448).
 _INV_NVFP4_MAX = tl.constexpr(1.0 / 2688.0)
 
@@ -41,8 +39,8 @@ def _quantize_fp8_groups(
     amax = tl.max(hidden_groups, axis=2)
     amax = tl.maximum(amax, 1.0e-4)
 
-    # Multiply by 1/448 like DeepGEMM's cast, so FP32 scales match bit for bit.
-    scale = amax * _INV_FP8_MAX
+    # Divide correctly rounded like DeepGEMM's cast, so FP32 scales match bit for bit.
+    scale = tl.math.div_rn(amax, 448.0)
     if USE_UE8M0:
         scale_bits = scale.to(tl.uint32, bitcast=True)
         scale_exp = ((scale_bits >> 23) & 0xFF) + ((scale_bits & 0x7FFFFF) != 0).to(
