@@ -161,3 +161,30 @@ raise SystemExit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
     env = os.environ | {"VLLM_WORKER_MULTIPROC_METHOD": "fork"}
     result = subprocess.run([sys.executable, "-c", script], env=env, timeout=180)
     assert result.returncode == 0
+
+
+def test_spawn_mode_skips_the_libgomp_release_on_fork():
+    """A child that imports vLLM after its parent used OpenMP inherits a pool
+    without its threads, and joining them hangs. Spawn mode must not try."""
+    script = """
+import os
+import signal
+import torch
+
+torch.set_num_threads(4)
+x = torch.randn(1024, 1024)
+torch.einsum("in,jn->ij", x, x)
+pid = os.fork()
+if pid == 0:
+    signal.alarm(60)
+    import vllm.utils.system_utils  # noqa: F401
+
+    grandchild = os.fork()
+    if grandchild == 0:
+        os._exit(0)
+    os._exit(os.waitstatus_to_exitcode(os.waitpid(grandchild, 0)[1]))
+raise SystemExit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+"""
+    env = os.environ | {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"}
+    result = subprocess.run([sys.executable, "-c", script], env=env, timeout=180)
+    assert result.returncode == 0

@@ -186,8 +186,14 @@ def _release_libgomp_threads() -> None:
             ctypes.CDLL(path).omp_pause_resource_all(_OMP_PAUSE_HARD)
 
 
+def _release_libgomp_threads_before_fork() -> None:
+    # In spawn mode, vLLM's engine processes do not inherit this process's state.
+    if envs.VLLM_WORKER_MULTIPROC_METHOD == "fork":
+        _release_libgomp_threads()
+
+
 if hasattr(os, "register_at_fork"):
-    os.register_at_fork(before=_release_libgomp_threads)
+    os.register_at_fork(before=_release_libgomp_threads_before_fork)
 
 
 def get_mp_context():
