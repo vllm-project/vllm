@@ -491,6 +491,21 @@ def process_audio(audio: Any) -> tuple:
     )
 
 
+def process_synthetic_audio(audio: Any) -> Mapping[str, Any]:
+    """Wrap synthetic WAV bytes (dict with a 'bytes' key) into the
+    `input_audio` content item CustomAudioDataset already uses."""
+    if isinstance(audio, dict) and "bytes" in audio:
+        audio_base64 = base64.b64encode(audio["bytes"]).decode("utf-8")
+        return {
+            "type": "input_audio",
+            "input_audio": {"data": audio_base64, "format": "wav"},
+        }
+    raise ValueError(
+        f"Invalid audio input {audio}. Must be a dictionary with raw audio "
+        "bytes in the form of `{'bytes': raw_audio_bytes}`."
+    )
+
+
 def gen_prompt_decode_to_target_len(
     tokenizer: TokenizerLike,
     token_sequence: list[int],
@@ -897,36 +912,37 @@ class RandomDatasetForReranking(RandomDataset):
 
 
 class RandomMultiModalDataset(RandomDataset):
-    """Synthetic multimodal dataset (text + images) that extends RandomDataset.
+    """Synthetic multimodal dataset (text + images + video + audio) that
+    extends RandomDataset.
 
     Status:
     - Images: supported via synthetic RGB data.
     - Video: supported via synthetic RGB data.
-    - Audio: not yet supported.
+    - Audio: supported via synthetic WAV data.
 
     Sampling overview:
     1) Number of items per request is sampled uniformly from the integer range
        [floor(n·(1−r)), ceil(n·(1+r))], where n is the base count and r is
        `num_mm_items_range_ratio` in [0, 1]. r=0 keeps it fixed; r=1 allows 0.
        The maximum is further clamped to the sum of per-modality limits.
-    2) Each item’s modality and shape is sampled from `bucket_config`, a dict
-       mapping (height, width, num_frames) → probability. We treat
-       `num_frames`=1 as image and `num_frames` > 1 as video.
-       Entries with zero probability are removed and the rest are renormalized
-       to sum to 1.
+    2) Each item's modality and shape is sampled from `bucket_config`, a dict
+       mapping a 3-tuple → probability: (height, width, num_frames) for
+       image/video (`num_frames`=1 is image, >1 is video), or
+       (0, duration_seconds, num_channels) for audio (leading `0` marks it as
+       audio). Entries with zero probability are removed and the rest are
+       renormalized to sum to 1.
     3) Per-modality hard caps are enforced via `limit_mm_per_prompt`.
        When a modality reaches its cap, all of its buckets are excluded and the
        remaining probabilities are renormalized.
 
     Example bucket configuration:
-    {(256, 256, 1): 0.5, (720, 1280, 1): 0.4, (720, 1280, 16): 0.1}
-      - Two image buckets (`num_frames`=1) and one video bucket
-      (`num_frames`=16).
-    OBS.: Only image sampling is supported for now.
+    {(256, 256, 1): 0.4, (720, 1280, 1): 0.3, (720, 1280, 16): 0.2, (0, 5, 1): 0.1}
+      - Two image buckets (`num_frames`=1), one video bucket (`num_frames`=16),
+      and one audio bucket (5 seconds, mono).
     """
 
     IS_MULTIMODAL = True
-    DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 1}
+    DEFAULT_LIMIT_MM_PER_PROMPT = {"image": 255, "video": 1, "audio": 1}
 
     DEFAULT_BASE_ITEMS_PER_REQUEST = 1
     DEFAULT_NUM_MM_ITEMS_RANGE_RATIO = 0.0
@@ -994,9 +1010,28 @@ class RandomMultiModalDataset(RandomDataset):
 
             return {"bytes": temp_path.read_bytes()}
 
+    def generate_synthetic_audio(self, duration: int, num_channels: int) -> dict:
+        """Generate synthetic audio with random values.
+
+        Creates `duration` seconds of random audio at 48kHz, encodes it to
+        WAV format, and returns the content as bytes.
+        """
+        sample_rate = 48000
+        num_samples = int(sample_rate * duration)
+        audio_data = self._rng.uniform(-0.5, 0.5, (num_samples, num_channels))
+        audio_data = np.clip(audio_data, -1.0, 1.0)
+
+        buffer = BytesIO()
+        sf.write(buffer, audio_data, sample_rate, format="WAV")
+        buffer.seek(0)
+
+        return {"bytes": buffer.read()}
+
     def map_config_to_modality(self, config: tuple[int, int, int]) -> str:
         """Map the configuration to the modality."""
-        if config[-1] == 1:
+        if config[0] == 0:
+            return "audio"
+        elif config[-1] == 1:
             return "image"
         elif config[-1] > 1:
             return "video"
@@ -1027,20 +1062,25 @@ class RandomMultiModalDataset(RandomDataset):
         self,
         mm_item_config: tuple[int, int, int],
     ) -> Mapping[str, Any]:
-        """Create synthetic images and videos and
-        apply process_image/process_video respectively.
+        """Create synthetic images, videos, and audio and
+        apply process_image/process_video/process_synthetic_audio respectively.
         This follows the OpenAI API chat completions
         https://github.com/openai/openai-python
         """
-        if self.map_config_to_modality(mm_item_config) == "image":
+        modality = self.map_config_to_modality(mm_item_config)
+        if modality == "image":
             return process_image(
                 self.generate_synthetic_image(mm_item_config[1], mm_item_config[0])
             )
-        elif self.map_config_to_modality(mm_item_config) == "video":
+        elif modality == "video":
             return process_video(
                 self.generate_synthetic_video(
                     mm_item_config[1], mm_item_config[0], mm_item_config[2]
                 )
+            )
+        elif modality == "audio":
+            return process_synthetic_audio(
+                self.generate_synthetic_audio(mm_item_config[1], mm_item_config[2])
             )
         else:
             raise ValueError(f"Invalid multimodal item configuration: {mm_item_config}")
@@ -1982,7 +2022,6 @@ def add_random_multimodal_dataset_args(
             "count is clamped to the sum of these limits. When a modality "
             "reaches its cap, its buckets are excluded and probabilities are "
             "renormalized."
-            "OBS.: Only image sampling is supported for now."
         ),
     )
 
@@ -2023,17 +2062,16 @@ def add_random_multimodal_dataset_args(
         help=(
             "The bucket config is a dictionary mapping a multimodal item"
             "sampling configuration to a probability."
-            "Currently allows for 2 modalities: images and videos. "
-            "An bucket key is a tuple of (height, width, num_frames)"
+            "Allows for 3 modalities: images, videos, and audio. "
+            "A bucket key is a tuple of 3 ints: (height, width, num_frames) "
+            "for images (num_frames=1) and videos (num_frames>1), or "
+            "(0, duration_seconds, num_channels) for audio (leading 0). "
             "The value is the probability of sampling that specific item. "
-            "Example: "
-            "--random-mm-bucket-config "
-            "{(256, 256, 1): 0.5, (720, 1280, 1): 0.4, (720, 1280, 16): 0.10} "
-            "First item: images with resolution 256x256 w.p. 0.5"
-            "Second item: images with resolution 720x1280 w.p. 0.4 "
-            "Third item: videos with resolution 720x1280 and 16 frames w.p. 0.1"
+            "Example: --random-mm-bucket-config "
+            "{(256, 256, 1): 0.4, (720, 1280, 1): 0.3, (720, 1280, 16): 0.2, "
+            "(0, 5, 1): 0.1} -- a 256x256 image, a 720x1280 image, a "
+            "720x1280/16-frame video, and a 5-second mono audio clip. "
             "OBS.: If the probabilities do not sum to 1, they are normalized."
-            "OBS bis.: Only image sampling is supported for now."
         ),
     )
 
