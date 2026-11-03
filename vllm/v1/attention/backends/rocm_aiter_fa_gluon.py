@@ -118,6 +118,49 @@ class AiterFlashAttentionGluonImpl(AiterFlashAttentionImpl):
             and self.sinks is None
             and self.alibi_slopes is None
         )
+        self._output_gate: torch.Tensor | None = None
+        self._gated_tokens = 0
+
+    def fused_output_gate_supported(self) -> bool:
+        return self.use_gluon_decode and bool(
+            rocm_aiter_ops.pa_decode_gluon_supports_output_gate()
+        )
+
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+        kv_cache: torch.Tensor,
+        attn_metadata: AiterFlashAttentionMetadata,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        output_gate: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """output_gate: [num_tokens, num_heads, head_size]; when set, output is
+        attention * sigmoid(output_gate)."""
+        self._output_gate, self._gated_tokens = output_gate, 0
+        try:
+            super().forward(
+                layer,
+                query,
+                key,
+                value,
+                kv_cache,
+                attn_metadata,
+                output=output,
+                output_scale=output_scale,
+                output_block_scale=output_block_scale,
+            )
+        finally:
+            self._output_gate = None
+        if output_gate is not None and attn_metadata is not None:
+            start, end = self._gated_tokens, attn_metadata.num_actual_tokens
+            if start < end:
+                output[start:end].mul_(torch.sigmoid(output_gate[start:end]))
+        return output
 
     def _decode_shuffle_layout(
         self,
@@ -150,6 +193,9 @@ class AiterFlashAttentionGluonImpl(AiterFlashAttentionImpl):
         num_heads = query.shape[1]
         x = 16 // key_cache.element_size()
         splits = get_recommended_splits(num_decodes, num_kv_heads)
+        gate_kwargs = {}
+        if self._output_gate is not None and splits > 1:
+            gate_kwargs["output_gate"] = self._output_gate[:num_decode_tokens]
         partial_shape = (num_decodes, num_kv_heads, splits, num_heads // num_kv_heads)
         exp_sums = torch.empty(partial_shape, dtype=torch.float32, device=query.device)
         pa_decode_gluon(
@@ -180,4 +226,7 @@ class AiterFlashAttentionGluonImpl(AiterFlashAttentionImpl):
             sinks=None,
             sliding_window=0,
             ps=True,
+            **gate_kwargs,
         )
+        if gate_kwargs:
+            self._gated_tokens = num_decode_tokens
