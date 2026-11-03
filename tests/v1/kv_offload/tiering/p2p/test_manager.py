@@ -797,6 +797,40 @@ class TestOnRequestFinished:
         assert bound.finishes == ["req-1"]
         assert "req-1" not in mgr._kv_to_session
 
+    @pytest.mark.parametrize("shared_session", [False, True])
+    @pytest.mark.parametrize("shared_request_id", [False, True])
+    def test_dual_role_finish_cleans_both_sessions(
+        self, shared_session, shared_request_id
+    ):
+        """Finish each distinct session/request pair exactly once."""
+        mgr = _make_manager()
+        source = _FakeSession(peer_id="source:1", connected=True)
+        decoder = (
+            source
+            if shared_session
+            else _FakeSession(peer_id="decoder:2", connected=True)
+        )
+        source_id = "req-1"
+        dest_id = source_id if shared_request_id else "req-2"
+        mgr._sessions[source.peer_id] = source
+        mgr._sessions[decoder.peer_id] = decoder
+        mgr._kv_to_session[dest_id] = decoder
+        params = _remote_kv_source_kv_params(
+            remote_host="source", remote_port=1, kv_request_id=source_id
+        )
+        params["remote_decoder"] = {"kv_request_id": dest_id}
+
+        mgr.on_request_finished(_req_context(kv_params=params))
+
+        if shared_session:
+            assert source.finishes == (
+                [source_id] if shared_request_id else [source_id, dest_id]
+            )
+        else:
+            assert source.finishes == [source_id]
+            assert decoder.finishes == [dest_id]
+        assert dest_id not in mgr._kv_to_session
+
     def test_prefiller_unbound_id_leaves_batches_parked(self):
         """Prefiller-side finish for an id with parked unbound batches
         and no session binding is a no-op on `_unbound_stores`. The
