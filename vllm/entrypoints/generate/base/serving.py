@@ -2,14 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
 import time
-from collections.abc import Awaitable, Mapping
+from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
-from starlette.datastructures import Headers
 
 from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
@@ -33,11 +32,6 @@ from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
-from vllm.tracing import (
-    contains_trace_headers,
-    extract_trace_headers,
-    log_tracing_disabled_warning,
-)
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -216,25 +210,7 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         self, e: GenerationError
     ) -> str:
         """Convert GenerationError to streaming error response."""
-        return self.create_streaming_error_response(
-            str(e),
-            err_type="InternalServerError",
-            status_code=e.status_code,
-        )
-
-    async def _get_trace_headers(
-        self,
-        headers: Headers,
-    ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
-
-        if is_tracing_enabled:
-            return extract_trace_headers(headers)
-
-        if contains_trace_headers(headers):
-            log_tracing_disabled_warning()
-
-        return None
+        return self.create_streaming_error_response(e)
 
     @staticmethod
     def _get_data_parallel_rank(raw_request: Request | None) -> int | None:
@@ -374,6 +350,32 @@ def decode_token_ids(
         token_str = next(decoded)
         out.append((token_str, list(token_str.encode("utf-8", errors="replace"))))
     return out
+
+
+def chat_top_logprobs_limit(
+    top_logprobs: int | None, return_all: bool = False
+) -> int | None:
+    """How many of a position's logprob candidates `/v1/chat/completions`
+    returns, in the engine's order (sampled token first): the first
+    ``top_logprobs``, none when it is unset, and all of them (``None``) for
+    ``top_logprobs=-1`` or ``logprob_token_ids`` (``return_all``). Shared with
+    chat derender so the two cannot drift."""
+    if return_all or top_logprobs == -1:
+        return None
+    return top_logprobs or 0
+
+
+def completion_top_logprobs_limit(
+    logprobs: int | None, return_all: bool = False
+) -> int | None:
+    """How many of a position's logprob candidates `/v1/completions` returns:
+    the first ``logprobs + 1`` (the OpenAI completions convention), and all of
+    them (``None``) for ``logprobs=-1``, ``logprob_token_ids`` (``return_all``)
+    or when ``logprobs`` is unset. Shared with completions derender so the two
+    cannot drift."""
+    if return_all or logprobs is None or logprobs == -1:
+        return None
+    return max(logprobs + 1, 0)
 
 
 def clamp_prompt_logprobs(

@@ -115,8 +115,13 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu[req_index].fill_(1)
         if self._align_mode:
             # Seed the running state block from the resumed/prefilled position.
+            # The column is in mamba blocks. cache_config.block_size is the
+            # min over prefix-cacheable groups, so a drafter group with its own
+            # smaller block (e.g. DFlash) pulls it below mamba_block_size.
+            mamba_block_size = self.cache_config.mamba_block_size
+            assert mamba_block_size is not None
             self._mamba_state_idx_gpu[req_index].fill_(
-                (new_req_data.num_computed_tokens - 1) // self.cache_config.block_size
+                (new_req_data.num_computed_tokens - 1) // mamba_block_size
             )
 
     def _get_mamba_group_info(
@@ -283,7 +288,14 @@ class MambaHybridModelState(DefaultModelState):
             # Test request state, not num_scheduled_tokens == draft_count+1:
             # adaptive rewrites num_scheduled_tokens to an even split, so that
             # equality rarely holds and would demote every verify row to decode.
-            is_decode = ~is_prefilling_np & (input_batch.num_scheduled_tokens > 0)
+            is_decode = (
+                ~is_prefilling_np
+                & (input_batch.num_scheduled_tokens > 0)
+                & (
+                    input_batch.num_scheduled_tokens
+                    <= self.vllm_config.num_speculative_tokens + 1
+                )
+            )
             num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
                 is_decode, num_draft_tokens_per_req, -1
             )

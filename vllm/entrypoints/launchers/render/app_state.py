@@ -5,8 +5,7 @@ from argparse import Namespace
 from starlette.datastructures import State
 
 from vllm.config import VllmConfig
-from vllm.entrypoints.chat_utils import load_chat_template
-from vllm.entrypoints.launchers.cli_args import resolve_default_chat_template_kwargs
+from vllm.entrypoints.common.cli_args import resolve_default_chat_template_kwargs
 from vllm.entrypoints.mcp.tool_server import init_tool_server
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
@@ -15,6 +14,7 @@ from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.plugins.endpoint_plugins.interface import init_endpoint_plugins_state
 from vllm.renderers import renderer_from_config
+from vllm.renderers.chat_utils import load_chat_template
 from vllm.renderers.online_derenderer import OnlineDerenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 
@@ -74,6 +74,7 @@ async def init_render_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
     )
     state.online_renderer.warmup()
@@ -91,6 +92,7 @@ async def init_render_app_state(
         tool_strict_level=args.tool_strict_level,
         reasoning_parser=reasoning_parser,
         default_chat_template_kwargs=default_chat_template_kwargs,
+        reasoning_effort_map=args.reasoning_effort_map,
         log_error_stack=args.log_error_stack,
     )
 
@@ -105,7 +107,11 @@ async def init_render_app_state(
         trust_request_chat_template=args.trust_request_chat_template,
     )
 
-    init_render_state(state, request_logger)
+    init_render_state(
+        state,
+        request_logger,
+        disabled_thinking_effort=args.anthropic_disabled_thinking_effort,
+    )
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
