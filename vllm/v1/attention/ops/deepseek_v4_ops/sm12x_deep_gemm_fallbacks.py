@@ -346,14 +346,17 @@ def _fp8_mqa_logits_sm12x(
     weights: torch.Tensor,
     cu_seqlen_ks: torch.Tensor,
     cu_seqlen_ke: torch.Tensor,
-    clean_logits: bool,
+    max_seqlen_k: int,
 ) -> torch.Tensor:
+    """Serve DeepGEMM's compressed-logits contract: row ``i`` holds K positions
+    ``[cu_seqlen_ks[i], cu_seqlen_ke[i])`` from column zero, tail uncleaned."""
     q_values, q_scale = q
+    clean_logits = False
     profile = _CudaProfileRegion(
         "indexer.mqa_logits",
         q_shape=tuple(q_values.shape),
         kv_shape=tuple(kv[0].shape),
-        clean_logits=clean_logits,
+        max_seqlen_k=max_seqlen_k,
         q_scale="set" if q_scale is not None else "none",
     )
     profile.start()
@@ -382,8 +385,20 @@ def _fp8_mqa_logits_sm12x(
         result = _fp8_mqa_logits_torch(
             q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
         )
+    result = _compress_mqa_logits(result, cu_seqlen_ks, max_seqlen_k)
     profile.stop()
     return result
+
+
+def _compress_mqa_logits(
+    logits: torch.Tensor, cu_seqlen_ks: torch.Tensor, max_seqlen_k: int
+) -> torch.Tensor:
+    num_rows, seq_len_kv = logits.shape
+    if num_rows == 0 or seq_len_kv == 0 or max_seqlen_k == 0:
+        return logits.new_empty((num_rows, max_seqlen_k))
+    cols = torch.arange(max_seqlen_k, device=logits.device)
+    cols = cu_seqlen_ks.to(torch.long).unsqueeze(1) + cols.unsqueeze(0)
+    return logits.gather(1, cols.clamp_(max=seq_len_kv - 1))
 
 
 def _fp8_paged_mqa_logits_torch(

@@ -714,7 +714,7 @@ def fp8_fp4_mqa_logits(
             )
 
             return _fp8_mqa_logits_sm12x(
-                q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
+                q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, max_seqlen_k
             )
         return _missing()
     return _fp8_fp4_mqa_logits_impl(
