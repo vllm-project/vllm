@@ -23,9 +23,11 @@ from vllm.inputs import (
     MultiModalHashes,
     MultiModalInput,
     MultiModalPlaceholders,
+    mm_input,
 )
 from vllm.multimodal.inputs import (
     MultiModalKwargsItem,
+    MultiModalKwargsItems,
     MultiModalKwargsOptionalItems,
     PlaceholderRange,
 )
@@ -138,6 +140,30 @@ def rebuild_mm_placeholders(
         ]
         for modality, ranges in mm_placeholders.items()
     }
+
+
+def engine_input_from_features(
+    token_ids: list[int],
+    features: MultiModalFeatures,
+    *,
+    cache_salt: str | None = None,
+) -> MultiModalInput:
+    """Build the processed engine input described by wire-format features.
+
+    Items without inline data stay `None` and are resolved from the processor
+    cache on admission, unless `features.requires_kv` is set, in which case the
+    engine requires existing decoder KV for every item instead.
+    """
+    engine_input = mm_input(
+        prompt_token_ids=list(token_ids),
+        mm_kwargs=MultiModalKwargsItems(mm_kwargs_from_features(features)),
+        mm_hashes=features.mm_hashes,
+        mm_placeholders=rebuild_mm_placeholders(features.mm_placeholders),
+        cache_salt=cache_salt,
+    )
+    if features.requires_kv:
+        engine_input["mm_requires_kv"] = True
+    return engine_input
 
 
 def placeholder_ranges_from_engine_input(
