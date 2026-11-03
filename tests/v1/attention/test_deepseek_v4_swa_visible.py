@@ -940,7 +940,8 @@ def test_prefix_cache_replays_the_swa_window(
     tests/v1/core/test_prefix_replay.py already checks that a
     bounded-replay SWA spec makes a prefix hit recompute the window.
     This is the spec the attention layer actually publishes. Forcing
-    the window back into the prefix cache, on CDNA4 or off it, fails here.
+    the window back into the prefix cache, on CDNA3 or CDNA4 or off them,
+    fails here.
     The replay_start clamp used by the gather kernels is covered by
     test_builder_replay_start_bounds_prefill_window_and_gather.
     """
