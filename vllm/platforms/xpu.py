@@ -152,6 +152,13 @@ class XPUPlatform(Platform):
                 f"block_size={block_size}. Supported: "
                 f"{FlashAttentionBackend.get_supported_kernel_block_sizes()}."
             )
+        if block_size is not None and block_size % 64 != 0:
+            logger.warning_once(
+                "block_size=%d is supported by Flash Attention on XPU but is not "
+                "a multiple of 64, which is the tuned path; performance may be "
+                "lower.",
+                block_size,
+            )
         logger.info_once("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
