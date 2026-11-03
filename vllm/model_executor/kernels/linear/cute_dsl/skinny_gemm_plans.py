@@ -61,8 +61,8 @@ SM121_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     },
 }
 
-# Hopper, measured on GLM-5.3-Flash local shapes at TP=4 (H200) and TP=8 (H100
-# and H200).
+# Hopper, measured on H100 and H200 with GLM-5.3-Flash local shapes at TP=4 and
+# TP=8.
 SM90_SKINNY_GEMM_PLANS: dict[tuple[int, int], SkinnyGemmPlan] = {
     # Indexer fused wk + weights projection (replicated).
     (160, 4096): {

@@ -161,7 +161,9 @@ steps:
   - vllm/model_executor/kernels/linear/cute_dsl/skinny_gemm_plans.py
   - vllm/model_executor/kernels/linear/cute_dsl/skinny_gemm.py
   - vllm/model_executor/kernels/linear/cute_dsl/_skinny_gemm.py
+  - vllm/model_executor/layers/linear.py
   - vllm/model_executor/layers/utils.py
+  - vllm/model_executor/layers/vocab_parallel_embedding.py
   - tests/kernels/test_bf16_skinny_gemm.py
   commands:
     - pytest -v -s kernels/test_bf16_skinny_gemm.py
