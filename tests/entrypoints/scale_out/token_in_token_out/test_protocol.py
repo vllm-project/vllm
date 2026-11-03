@@ -92,6 +92,23 @@ def test_internal_instance_construction_treats_all_as_provided():
     assert req.is_sampling_param_provided("top_p")
 
 
+def test_dump_roundtrip_keeps_default_max_tokens_provided():
+    """``/render`` returns ``model_dump()`` of a request built from a resolved
+    ``SamplingParams``. ``max_tokens=16`` equals the dataclass default, which
+    ``omit_defaults`` leaves out; it must still reach generate as provided."""
+    sp = SamplingParams(max_tokens=16)
+    req = GenerateRequest(token_ids=[1, 2, 3], sampling_params=sp)
+    dumped = req.model_dump()
+    assert dumped["sampling_params"]["max_tokens"] == 16
+    parsed = GenerateRequest.model_validate(json.loads(json.dumps(dumped)))
+    assert parsed.sampling_params.max_tokens == 16
+    assert parsed.is_sampling_param_provided("max_tokens")
+
+    # A body that omitted ``max_tokens`` still omits it after a round trip.
+    req = GenerateRequest.model_validate(_base_payload())
+    assert "max_tokens" not in req.model_dump()["sampling_params"]
+
+
 def test_multimodal_features_reject_mismatched_parallel_fields():
     with pytest.raises(ValueError, match="same length"):
         MultiModalFeatures(
