@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import tl, tldevice, triton
+from vllm.triton_utils import tl, triton
 from vllm.v1.spec_decode.fly import compute_fly_entropy
 from vllm.v1.worker.gpu.sample.gumbel import (
     gumbel_block_argmax,
@@ -28,6 +28,112 @@ def _compute_max_and_sumexp(logits):
 
 
 @triton.jit
+def _compute_max_and_sumexp_excluding_max(logits):
+    # Leaves one max element (its exp(0) = 1) out of the sum, so that a
+    # runner-up far below the max is not rounded away by 1 + eps in fp32
+    # (Barron, "A Fix for Softmax"): the other elements plus the other ties.
+    max = tl.max(logits, axis=0)
+    at_max = logits == max
+    sumexp = tl.sum(tl.where(at_max, 0.0, tl.exp(logits - max))) + (
+        tl.sum(at_max.to(tl.float32)) - 1.0
+    )
+    sumexp = tl.where(max > float("-inf"), sumexp, 0.0)
+    return max, sumexp
+
+
+@triton.jit
+def _scale_target_logits(
+    logits, logit_idx, temp, target_topp_thresh_ptr, MASK_TARGET_LOGITS: tl.constexpr
+):
+    """Raw target logits as the sampler would have left them: -inf below the
+    row's top-p cutoff (compared on the raw values), then x / T rounded to
+    nearest, which is how topp_cutoffs_lse scales them."""
+    if MASK_TARGET_LOGITS:
+        thresh = tl.load(target_topp_thresh_ptr + logit_idx)
+        logits = tl.where(logits >= thresh, logits, float("-inf"))
+    if temp != 1.0:
+        logits = _div_rn_by_scalar(logits, temp)
+    return logits
+
+
+@triton.jit
+def _div_rn_by_scalar(x, t):
+    # tl.div_rn(x, t) for one t across a block, at a fraction of its per-element
+    # cost: x * RN(1/t) corrected once by its exact FMA remainder rounds to
+    # nearest (Markstein) for |x| >= 2^-100. A zero remainder keeps the sign of
+    # zero and infinities pass through.
+    r = tl.div_rn(1.0, t)
+    q = x * r
+    e = tl.fma(-q, t, x)
+    return tl.where((e == 0.0) | (tl.abs(q) == float("inf")), q, tl.fma(e, r, q))
+
+
+@triton.jit
+def _log1p_fp32(r):
+    # log(1 + r) for r >= 0 as big + small in fp32: 2 * atanh(t) with
+    # t = r / (2 + r) < 1/3 while r < 1 (relative precision as r -> 0), and
+    # e * ln2 + log(m) with m in [sqrt(1/2), sqrt(2)) past that, where
+    # big = e * ln2_hi is exact (ln2_hi has 7 trailing zero bits; e < 128).
+    s = 1.0 + r
+    bits = s.to(tl.int32, bitcast=True)
+    e = (bits >> 23) - 127
+    m = ((bits & 0x7FFFFF) | 0x3F800000).to(tl.float32, bitcast=True)
+    big_m = m > 1.4142135
+    m = tl.where(big_m, m * 0.5, m)
+    e += big_m.to(tl.int32)
+    small_r = r < 1.0
+    e = tl.where(small_r, 0, e).to(tl.float32)
+    t = tl.where(small_r, tl.div_rn(r, 2.0 + r), tl.div_rn(m - 1.0, m + 1.0))
+    t2 = t * t
+    series = 1.0 / 15.0
+    series = 1.0 / 13.0 + t2 * series
+    series = 1.0 / 11.0 + t2 * series
+    series = 1.0 / 9.0 + t2 * series
+    series = 1.0 / 7.0 + t2 * series
+    series = 1.0 / 5.0 + t2 * series
+    series = 1.0 / 3.0 + t2 * series
+    series = 1.0 + t2 * series
+    return e * 0.69313812255859375, e * 9.05800061445916e-06 + 2.0 * t * series
+
+
+@triton.jit
+def _two_sum(a, b):
+    s = a + b
+    b_virtual = s - a
+    return s, (a - (s - b_virtual)) + (b - b_virtual)
+
+
+@triton.jit
+def _one_minus_exp(x):
+    # 1 - exp(x) for x <= 0, keeping its relative precision as x -> 0, where
+    # 1 - exp(x) in fp32 would cancel.
+    series = 1.0 + x / 9.0
+    series = 1.0 + x / 8.0 * series
+    series = 1.0 + x / 7.0 * series
+    series = 1.0 + x / 6.0 * series
+    series = 1.0 + x / 5.0 * series
+    series = 1.0 + x / 4.0 * series
+    series = 1.0 + x / 3.0 * series
+    series = 1.0 + x / 2.0 * series
+    return tl.where(x > -0.5, -x * series, 1.0 - tl.exp(x))
+
+
+@triton.jit
+def _lse_parts(lse):
+    # An fp64 log-sum-exp as the unevaluated fp32 sum hi + lo.
+    hi = lse.to(tl.float32)
+    return hi, (lse - hi.to(tl.float64)).to(tl.float32)
+
+
+@triton.jit
+def _minus_lse(x, lse_hi, lse_lo):
+    # x - lse in fp32 for lse = hi + lo, without fp64 math (a small fraction of
+    # fp32 throughput on some GPUs): x - hi is exact for tokens near the max,
+    # where the precision matters.
+    return (x - lse_hi) - lse_lo
+
+
+@triton.jit
 def _compute_global_logsumexp(
     local_max_ptr,
     local_max_stride,
@@ -50,8 +156,24 @@ def _compute_global_logsumexp(
         other=0.0,
     )
     global_max = tl.max(maxes, axis=0)
-    global_lse = global_max + tl.log(tl.sum(sumexps * tl.exp(maxes - global_max)))
-    return global_lse
+    # At global_max ~= 25, fp32 ULP (~3e-6) rounds away log(sum_term) whenever
+    # the runner-up trails the max by >~14 in logit-space, silently collapsing a
+    # near-1.0 probability to exactly 1.0; and 1.0 + 8e-7 in fp32 already loses
+    # the 8e-7 at ULP(1.0). So the sum leaves out the max token's 1 and takes
+    # log1p of the rest, and the result is hi + lo == global_max + log1p(rest)
+    # exactly (TwoSum). The block sums already leave out their own max's 1, so
+    # every other block adds it back. This runs in every program of the
+    # per-block kernels, so it stays in fp32.
+    max_block = tl.argmax(maxes, axis=0)
+    terms = tl.where(
+        blocks == max_block,
+        sumexps,
+        (1.0 + sumexps) * tl.exp(maxes - global_max),
+    )
+    log_big, log_small = _log1p_fp32(tl.sum(terms, axis=0))
+    hi, err_big = _two_sum(global_max, log_big)
+    hi, err_small = _two_sum(hi, log_small)
+    return hi, err_big + err_small
 
 
 @triton.jit
@@ -67,9 +189,13 @@ def _compute_global_residual_mass(
     target_local_sumexp_stride,
     draft_token,
     logit_idx,
+    temp,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
+    target_topp_thresh_ptr,
+    MASK_TARGET_LOGITS: tl.constexpr,
 ):
     if HAS_DRAFT_LOGITS:
         blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
@@ -84,7 +210,7 @@ def _compute_global_residual_mass(
         # One-hot draft. M_s is a point mass at this draft token
         # so the residual mass reduces to the closed form:
         #   p * (1 - M_b(draft_token)).
-        target_lse = _compute_global_logsumexp(
+        target_lse_hi, target_lse_lo = _compute_global_logsumexp(
             target_local_max_ptr,
             target_local_max_stride,
             target_local_sumexp_ptr,
@@ -96,8 +222,19 @@ def _compute_global_residual_mass(
         target_logit = tl.load(
             target_logits_ptr + logit_idx * target_logits_stride + draft_token,
         ).to(tl.float32)
-        m_b = tl.exp(target_logit - target_lse)
-        return prefix_joint_ratio * (1.0 - m_b)
+        if SCALE_TARGET_LOGITS:
+            # target_logits is raw (caller didn't pre-divide by temperature);
+            # this call site is only reached when temp != 0 (see the
+            # USE_BLOCK_VERIFICATION branch in _rejection_kernel).
+            target_logit = _scale_target_logits(
+                target_logit,
+                logit_idx,
+                temp,
+                target_topp_thresh_ptr,
+                MASK_TARGET_LOGITS,
+            )
+        log_p = _minus_lse(target_logit, target_lse_hi, target_lse_lo)
+        return prefix_joint_ratio * _one_minus_exp(log_p)
 
 
 @triton.jit
@@ -154,13 +291,24 @@ def _compute_global_logprobs_and_logsumexp(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
+    target_topp_thresh_ptr,
+    MASK_TARGET_LOGITS: tl.constexpr,
 ):
     target_logit = tl.load(
         target_logits_ptr + logit_idx * target_logits_stride + token,
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
-    target_lse = _compute_global_logsumexp(
+    if SCALE_TARGET_LOGITS:
+        # target_logits is raw; every caller of this helper only reaches it
+        # when temp != 0 (see _compute_cumulative_log_p_kernel,
+        # _compute_local_residual_mass_kernel and the non-greedy branch of
+        # _rejection_kernel).
+        target_logit = _scale_target_logits(
+            target_logit, logit_idx, temp, target_topp_thresh_ptr, MASK_TARGET_LOGITS
+        )
+    target_lse_hi, target_lse_lo = _compute_global_logsumexp(
         target_local_max_ptr,
         target_local_max_stride,
         target_local_sumexp_ptr,
@@ -169,7 +317,8 @@ def _compute_global_logprobs_and_logsumexp(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
     )
-    target_log_prob = target_logit - target_lse
+    target_log_prob = _minus_lse(target_logit, target_lse_hi, target_lse_lo)
+    target_lse = target_lse_hi.to(tl.float64) + target_lse_lo.to(tl.float64)
     if HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
         draft_logit = (
@@ -186,7 +335,7 @@ def _compute_global_logprobs_and_logsumexp(
             ).to(tl.float32)
             / temp
         )
-        draft_lse = _compute_global_logsumexp(
+        draft_lse_hi, draft_lse_lo = _compute_global_logsumexp(
             draft_local_max_ptr,
             draft_local_max_stride,
             draft_local_sumexp_ptr,
@@ -195,11 +344,12 @@ def _compute_global_logprobs_and_logsumexp(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
         )
-        draft_log_prob = draft_logit - draft_lse
+        draft_log_prob = _minus_lse(draft_logit, draft_lse_hi, draft_lse_lo)
+        draft_lse = draft_lse_hi.to(tl.float64) + draft_lse_lo.to(tl.float64)
     else:
         # One-hot draft: q(token) = 1, log_q = 0.
-        draft_log_prob = 0.0
-        draft_lse = 0.0
+        draft_log_prob = tl.zeros((), tl.float32)
+        draft_lse = tl.zeros((), tl.float64)
     return target_log_prob, draft_log_prob, target_lse, draft_lse
 
 
@@ -245,10 +395,16 @@ def _compute_local_logits_stats_kernel(
     expanded_local_pos_ptr,
     # [max_num_reqs]
     temp_ptr,
+    # [num_logits] fp64, read when HAS_TARGET_LSE
+    target_lse_ptr,
     vocab_size,
     num_logits,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    HAS_TARGET_LSE: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
+    target_topp_thresh_ptr,
+    MASK_TARGET_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
 
@@ -284,23 +440,59 @@ def _compute_local_logits_stats_kernel(
             value,
         )
     else:
-        # Get local target max and summed exponentials.
-        target_logits = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
-            mask=mask,
-            other=float("-inf"),
-        ).to(tl.float32)
-        target_max, target_sumexp = _compute_max_and_sumexp(target_logits)
-        tl.store(
-            target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
-            target_max,
-        )
-        tl.store(
-            target_local_sumexp_ptr
-            + logit_idx * target_local_sumexp_stride
-            + block_idx,
-            target_sumexp,
-        )
+        if HAS_TARGET_LSE:
+            # The fp64 log-sum-exp L as two fp32 partials, (hi, 1) and
+            # (hi + log(L - hi), 1) with hi just below L, which the global
+            # combine reproduces to ~5e-12 relative. Block sums leave out
+            # the block's max, so both store 0.
+            target_lse = tl.load(target_lse_ptr + logit_idx)
+            hi = (target_lse - tl.abs(target_lse) * 2.384185791015625e-07).to(
+                tl.float32
+            )
+            rest_max = hi + tl.log((target_lse - hi.to(tl.float64)).to(tl.float32))
+            tl.store(
+                target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
+                tl.where(
+                    block_idx == 0,
+                    hi,
+                    tl.where(block_idx == 1, rest_max, float("-inf")),
+                ),
+            )
+            tl.store(
+                target_local_sumexp_ptr
+                + logit_idx * target_local_sumexp_stride
+                + block_idx,
+                0.0,
+            )
+        else:
+            # Get local target max and summed exponentials.
+            target_logits = tl.load(
+                target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
+                mask=mask,
+                other=float("-inf"),
+            ).to(tl.float32)
+            if SCALE_TARGET_LOGITS:
+                # target_logits is raw; temp != 0 is guaranteed in this branch.
+                target_logits = _scale_target_logits(
+                    target_logits,
+                    logit_idx,
+                    temp,
+                    target_topp_thresh_ptr,
+                    MASK_TARGET_LOGITS,
+                )
+            target_max, target_sumexp = _compute_max_and_sumexp_excluding_max(
+                target_logits
+            )
+            tl.store(
+                target_local_max_ptr + logit_idx * target_local_max_stride + block_idx,
+                target_max,
+            )
+            tl.store(
+                target_local_sumexp_ptr
+                + logit_idx * target_local_sumexp_stride
+                + block_idx,
+                target_sumexp,
+            )
         if HAS_DRAFT_LOGITS:
             # Get local draft max and summed exponentials. draft_logits is
             # stored pre-temperature, so apply scale first.
@@ -318,7 +510,9 @@ def _compute_local_logits_stats_kernel(
                 ).to(tl.float32)
                 / temp
             )
-            draft_max, draft_sumexp = _compute_max_and_sumexp(draft_logits)
+            draft_max, draft_sumexp = _compute_max_and_sumexp_excluding_max(
+                draft_logits
+            )
             tl.store(
                 draft_local_max_ptr + logit_idx * draft_local_max_stride + block_idx,
                 draft_max,
@@ -366,6 +560,9 @@ def _compute_cumulative_log_p_kernel(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
+    target_topp_thresh_ptr,
+    MASK_TARGET_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -408,9 +605,14 @@ def _compute_cumulative_log_p_kernel(
                     vocab_num_blocks,
                     PADDED_VOCAB_NUM_BLOCKS,
                     HAS_DRAFT_LOGITS,
+                    SCALE_TARGET_LOGITS,
+                    target_topp_thresh_ptr,
+                    MASK_TARGET_LOGITS,
                 )
             )
-            log_p = tl.minimum(log_p + (target_logprob - draft_logprob), 0.0)
+            log_p = tl.minimum(
+                log_p + (target_logprob - draft_logprob).to(tl.float32), 0.0
+            )
         tl.store(cumulative_log_p_ptr + logit_idx, log_p)
 
 
@@ -454,6 +656,9 @@ def _compute_local_residual_mass_kernel(
     vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
+    target_topp_thresh_ptr,
+    MASK_TARGET_LOGITS: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     # Adaptive verification can end before num_speculative_steps.
@@ -503,13 +708,16 @@ def _compute_local_residual_mass_kernel(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
         True,  # HAS_DRAFT_LOGITS
+        SCALE_TARGET_LOGITS,
+        target_topp_thresh_ptr,
+        MASK_TARGET_LOGITS,
     )
 
     # Compute the residual mass: max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0)
     p = tl.exp(tl.load(cumulative_log_p_ptr + logit_idx - 1).to(tl.float32))
     m_b = tl.exp(target_log_probs)
     m_s = tl.exp(draft_log_probs)
-    partial = tl.sum(tl.maximum(p * m_b - m_s, 0.0), axis=0)
+    partial = tl.sum(tl.maximum(p * m_b - m_s, 0.0), axis=0).to(tl.float32)
     tl.store(
         local_residual_mass_ptr + logit_idx * local_residual_mass_stride + block_idx,
         partial,
@@ -578,6 +786,9 @@ def _rejection_kernel(
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
     FLY_WINDOW_SIZE: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
+    target_topp_thresh_ptr,
+    MASK_TARGET_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -592,8 +803,8 @@ def _rejection_kernel(
     # Freeze the accepted prefix and recovery stats until the window is confirmed.
     pending_rejection = tl.full((), -1, tl.int64)
     rejected_argmax = tl.full((), 0, tl.int64)
-    target_lse = 0.0
-    draft_lse = 0.0
+    target_lse = tl.zeros((), tl.float64)
+    draft_lse = tl.zeros((), tl.float64)
     verifying = True
     for i in range(num_draft_tokens):
         logit_idx = start_idx + i
@@ -665,9 +876,13 @@ def _rejection_kernel(
                         target_local_sumexp_stride,
                         next_draft_token,
                         logit_idx + 1,
+                        temp,
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
+                        SCALE_TARGET_LOGITS,
+                        target_topp_thresh_ptr,
+                        MASK_TARGET_LOGITS,
                     )
                     denom = residual_mass + 1.0 - prefix_joint_ratio
                     h = tl.where(denom > 0.0, residual_mass / denom, 1.0)
@@ -702,6 +917,9 @@ def _rejection_kernel(
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
+                        SCALE_TARGET_LOGITS,
+                        target_topp_thresh_ptr,
+                        MASK_TARGET_LOGITS,
                     )
                 )
                 if FLY_WINDOW_SIZE == 0 or pending_rejection < 0:
@@ -761,7 +979,7 @@ def _rejection_kernel(
         # Compute the target and draft log exponential sums for the
         # rejected token.
         rejected_idx = start_idx + accepted_length
-        target_lse = _compute_global_logsumexp(
+        lse_hi, lse_lo = _compute_global_logsumexp(
             target_local_max_ptr,
             target_local_max_stride,
             target_local_sumexp_ptr,
@@ -770,8 +988,9 @@ def _rejection_kernel(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
         )
+        target_lse = lse_hi.to(tl.float64) + lse_lo.to(tl.float64)
         if HAS_DRAFT_LOGITS:
-            draft_lse = _compute_global_logsumexp(
+            lse_hi, lse_lo = _compute_global_logsumexp(
                 draft_local_max_ptr,
                 draft_local_max_stride,
                 draft_local_sumexp_ptr,
@@ -780,6 +999,7 @@ def _rejection_kernel(
                 vocab_num_blocks,
                 PADDED_VOCAB_NUM_BLOCKS,
             )
+            draft_lse = lse_hi.to(tl.float64) + lse_lo.to(tl.float64)
     tl.store(target_rejected_logsumexp_ptr + req_idx, target_lse)
     tl.store(draft_rejected_logsumexp_ptr + req_idx, draft_lse)
 
@@ -872,6 +1092,9 @@ def _resample_kernel(
     CONTEXT_WIDTH: tl.constexpr,
     WATERMARK: tl.constexpr,
     DEDUPLICATE_CONTEXTS: tl.constexpr,
+    SCALE_TARGET_LOGITS: tl.constexpr,
+    target_topp_thresh_ptr,
+    MASK_TARGET_LOGITS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     resample_idx = tl.load(rejected_step_ptr + req_idx)
@@ -902,6 +1125,21 @@ def _resample_kernel(
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
+    if SCALE_TARGET_LOGITS:
+        # target_logits is raw. is_bonus can reach here with temp == 0 (the
+        # bonus token always resamples), so guard the divide; the greedy
+        # case only uses this result through an argmax, which a positive
+        # scale factor never changes.
+        safe_temp = tl.where(temp == 0.0, 1.0, temp)
+        scaled_target_logits = _scale_target_logits(
+            target_logits,
+            resample_token_idx,
+            safe_temp,
+            target_topp_thresh_ptr,
+            MASK_TARGET_LOGITS,
+        )
+    else:
+        scaled_target_logits = target_logits
 
     # Compute the residual logits to resample the rejected token from.
     is_watermarked = False
@@ -926,7 +1164,7 @@ def _resample_kernel(
     if is_bonus or not is_valid_rejected_draft:
         # Bonus token (no rejections) or -1 placeholder token. In either case,
         # directly use the target logits.
-        residual_logits = target_logits
+        residual_logits = scaled_target_logits
     elif HAS_DRAFT_LOGITS:
         # draft_logits is stored pre-temperature, so apply scale first.
         draft_logits = (
@@ -945,7 +1183,10 @@ def _resample_kernel(
         )
         target_lse = tl.load(target_rejected_logsumexp_ptr + req_idx)
         draft_lse = tl.load(draft_rejected_logsumexp_ptr + req_idx)
-        target_log_probs = target_logits - target_lse
+        target_lse_hi, target_lse_lo = _lse_parts(target_lse)
+        target_log_probs = _minus_lse(
+            scaled_target_logits, target_lse_hi, target_lse_lo
+        )
         if USE_BLOCK_VERIFICATION:
             # Block residual is:
             #   max(p_tau * M_b(x) - M_s(x), 0) / Z.
@@ -957,17 +1198,20 @@ def _resample_kernel(
                     tl.float32
                 )
             target_log_probs += log_p_tau
-        draft_log_probs = draft_logits - draft_lse
+        draft_lse_hi, draft_lse_lo = _lse_parts(draft_lse)
+        draft_log_probs = _minus_lse(draft_logits, draft_lse_hi, draft_lse_lo)
         # Compute the residual:
         #   r(x) = max(p(x) - q(x), 0)
         # Gumbel sampling needs logits, so we compute it in log space:
         #   log(r(x)) = log(max(exp(log_p(x)) - exp(log_q(x)), 0))
         # The more numerically stable form is:
-        #   log(max(exp(a) - exp(b), 0)) = a + log(max(1 - exp(b - a), 0))
-        ratio = tl.exp(draft_log_probs - target_log_probs)
+        #   log(max(exp(a) - exp(b), 0)) = a + log(1 - exp(b - a)) if b < a
+        # with 1 - exp(b - a) kept nonzero where exp(b - a) rounds to 1 in fp32.
+        # b = -inf gives a; a = -inf with b >= a, and NaN, fail b - a < 0.
+        delta = draft_log_probs - target_log_probs
         residual_logits = tl.where(
-            ratio < 1.0,
-            target_log_probs + tldevice.log1p(-ratio),
+            delta < 0.0,
+            target_log_probs + tl.log(_one_minus_exp(tl.minimum(delta, 0.0))),
             float("-inf"),
         ).to(tl.float32)
     else:
@@ -980,7 +1224,7 @@ def _resample_kernel(
         # and does not need to be applied.
         residual_logits = tl.where(
             block != rejected_draft_token,
-            target_logits,
+            scaled_target_logits,
             float("-inf"),
         ).to(tl.float32)
 
@@ -1138,8 +1382,25 @@ def rejection_sample(
     fly_window_size: int = 0,
     fly_entropy_threshold: float = 0.3,
     fly_entropy_top_k: int = 3,
+    # If True (default), target_logits has already been divided by
+    # temperature by the caller, matching historical behavior. If False,
+    # target_logits is raw and every kernel below divides by temperature
+    # itself on load -- the same "scale on load" convention already used
+    # for draft_logits here -- so a caller can skip materializing a
+    # temperature-scaled FP32 copy of the full logits tensor.
+    target_logits_pre_scaled: bool = True,
+    # [num_logits] per-row top-p cutoffs on the raw logits (topp_cutoffs_lse).
+    target_topp_thresh: torch.Tensor | None = None,
+    # [num_logits] fp64 log-sum-exp of the (masked, scaled) target logits; skips
+    # the target half of the stats pass. Greedy rows may hold anything.
+    target_lse: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert target_logits.ndim == 2 and target_logits.stride(-1) == 1
+    assert target_topp_thresh is None or (
+        not target_logits_pre_scaled
+        and target_topp_thresh.dtype == torch.float32
+        and target_topp_thresh.shape == target_logits.shape[:1]
+    ), "target_topp_thresh applies to raw target logits, one fp32 cutoff per row"
     draft_logits = None
     draft_logits_row_mapping = None
     if draft_logits_cache is not None:
@@ -1148,6 +1409,7 @@ def rejection_sample(
     assert draft_logits is None or (
         draft_logits.ndim == 3 and draft_logits.stride(-1) == 1
     )
+    scale_target_logits = not target_logits_pre_scaled
     num_reqs = cu_num_logits.shape[0] - 1
     num_logits, vocab_size = target_logits.shape
 
@@ -1192,10 +1454,14 @@ def rejection_sample(
         # In some cases (e.g. MiMo v2.5 Pro + DFlash) the target model's
         # vocab size is larger than the draft's due to padding.
         vocab_size = min(vocab_size, draft_logits.size(-1))
+    if vocab_size < target_logits.shape[-1]:
+        # A precomputed log-sum-exp spans the target columns dropped here.
+        target_lse = None
 
     fly_entropy = None
     if fly_window_size > 0:
         assert synthetic_conditional_rates is None and not use_block_verification
+        assert target_logits_pre_scaled, "FLy's entropy needs processed logits"
         fly_entropy = compute_fly_entropy(
             target_logits[:, :vocab_size], fly_entropy_top_k, from_logits=True
         )
@@ -1209,6 +1475,12 @@ def rejection_sample(
     target_local_argmax = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.int64
     )
+    assert target_lse is None or (
+        target_lse.dtype == torch.float64 and target_lse.shape == (num_logits,)
+    )
+    if vocab_num_blocks < 2:
+        # A precomputed log-sum-exp is handed over as two block partials.
+        target_lse = None
     target_local_max = target_logits.new_empty(
         num_logits, vocab_num_blocks, dtype=torch.float32
     )
@@ -1241,10 +1513,15 @@ def rejection_sample(
         expanded_idx_mapping,
         expanded_local_pos,
         temperature,
+        target_lse,
         vocab_size,
         num_logits,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        HAS_TARGET_LSE=target_lse is not None,
+        SCALE_TARGET_LOGITS=scale_target_logits,
+        target_topp_thresh_ptr=target_topp_thresh,
+        MASK_TARGET_LOGITS=target_topp_thresh is not None,
     )
 
     # Precompute the running joint ratio and residual mass for block
@@ -1281,6 +1558,9 @@ def rejection_sample(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
             HAS_DRAFT_LOGITS=has_draft_logits,
+            SCALE_TARGET_LOGITS=scale_target_logits,
+            target_topp_thresh_ptr=target_topp_thresh,
+            MASK_TARGET_LOGITS=target_topp_thresh is not None,
             num_warps=1,
         )
 
@@ -1319,6 +1599,9 @@ def rejection_sample(
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                SCALE_TARGET_LOGITS=scale_target_logits,
+                target_topp_thresh_ptr=target_topp_thresh,
+                MASK_TARGET_LOGITS=target_topp_thresh is not None,
             )
         else:
             local_residual_mass = None
@@ -1332,8 +1615,8 @@ def rejection_sample(
         num_reqs, num_speculative_steps + 1, dtype=torch.int64
     )
     num_sampled = sampled.new_empty(num_reqs, dtype=torch.int32)
-    target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
-    draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float32)
+    target_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float64)
+    draft_rejected_logsumexp = target_logits.new_empty(num_reqs, dtype=torch.float64)
     _rejection_kernel[(num_reqs,)](
         sampled,
         sampled.stride(0),
@@ -1374,6 +1657,9 @@ def rejection_sample(
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
         FLY_WINDOW_SIZE=fly_window_size,
+        SCALE_TARGET_LOGITS=scale_target_logits,
+        target_topp_thresh_ptr=target_topp_thresh,
+        MASK_TARGET_LOGITS=target_topp_thresh is not None,
         num_warps=1,
     )
 
@@ -1424,6 +1710,9 @@ def rejection_sample(
         CONTEXT_WIDTH=context_width,
         WATERMARK=watermark,
         DEDUPLICATE_CONTEXTS=watermarking_skip_mask is not None,
+        SCALE_TARGET_LOGITS=scale_target_logits,
+        target_topp_thresh_ptr=target_topp_thresh,
+        MASK_TARGET_LOGITS=target_topp_thresh is not None,
     )
 
     # Insert the resampled tokens into the output sampled.
