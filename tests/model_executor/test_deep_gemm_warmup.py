@@ -13,6 +13,56 @@ from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
 from vllm.model_executor.warmup import deep_gemm_warmup
 
 
+@pytest.fixture
+def uncached_deep_gemm_import():
+    from vllm.utils import deep_gemm
+
+    deep_gemm._load_deep_gemm.cache_clear()
+    yield
+    deep_gemm._load_deep_gemm.cache_clear()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize("vendored", [False, True])
+@pytest.mark.usefixtures("uncached_deep_gemm_import")
+def test_bi_rejects_deep_gemm_without_deterministic_control(monkeypatch, vendored):
+    """A missing BI API must not be swallowed as an optional import failure."""
+    from vllm import envs
+    from vllm.utils import deep_gemm
+
+    module = SimpleNamespace()
+
+    def import_module(name):
+        if name == "deep_gemm" and vendored:
+            raise ImportError("use vendored module")
+        return module
+
+    monkeypatch.setattr(deep_gemm.importlib, "import_module", import_module)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    assert deep_gemm._import_deep_gemm() is module
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    with pytest.raises(RuntimeError, match="use_deterministic_algorithms"):
+        deep_gemm._import_deep_gemm()
+
+
+@pytest.mark.cpu_test
+@pytest.mark.usefixtures("uncached_deep_gemm_import")
+def test_bi_configures_the_imported_deep_gemm_provider(monkeypatch):
+    """MHC and grouped experts share the selected library's numerical mode."""
+    from vllm import envs
+    from vllm.utils import deep_gemm
+
+    calls: list[bool] = []
+    module = SimpleNamespace(use_deterministic_algorithms=calls.append)
+    monkeypatch.setattr(deep_gemm.importlib, "import_module", lambda _: module)
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", False)
+    assert deep_gemm._import_deep_gemm() is module
+    assert calls == []
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    assert deep_gemm._import_deep_gemm() is module
+    assert calls == [True]
+
+
 def _block_fp8_layer(n: int, k: int, scale_name: str = "weight_scale"):
     layer = SimpleNamespace(
         weight=torch.empty((n, k), dtype=torch.float8_e4m3fn),

@@ -363,6 +363,13 @@ class DeepseekV4IndexerBackend(DeepseekV32IndexerBackend):
 
 
 class DeepseekV41IndexerBackend(DeepseekV4IndexerBackend):
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        """SM100 proof: test_ds41_flashmla_cr2_indexer_bi_batch_chunk_pd_graph."""
+        return cls is DeepseekV41IndexerBackend and (
+            current_platform.is_device_capability_family(100)
+        )
+
     @staticmethod
     def get_name() -> str:
         return "DEEPSEEK_V41_INDEXER"
