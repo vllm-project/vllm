@@ -1232,6 +1232,37 @@ def test_divergent_local_hybrid_hit_capability_is_conservative():
     assert mixed.supports_divergent_local_hybrid_hits is False
 
 
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("top_role", "child_roles", "consumer", "producer"),
+    [
+        ("kv_producer", ["kv_producer", "kv_both"], True, True),
+        ("kv_producer", ["kv_producer", "kv_producer"], False, True),
+        ("kv_consumer", ["kv_consumer", "kv_both"], True, True),
+        ("kv_both", ["kv_producer"], False, True),
+    ],
+    ids=["loading-child", "pure-producers", "saving-child", "no-loading-child"],
+)
+def test_multi_connector_role_follows_children(
+    top_role, child_roles, consumer, producer
+):
+    """MultiConnector does not pass its own kv_role to its connectors, so their
+    roles decide whether it loads KV (e.g. whether the scheduler defers freeing
+    blocks) and whether it saves KV."""
+    config = KVTransferConfig(
+        kv_connector="MultiConnector",
+        kv_role=top_role,
+        kv_connector_extra_config={
+            "connectors": [
+                {"kv_connector": "ExampleConnector", "kv_role": role}
+                for role in child_roles
+            ]
+        },
+    )
+    assert config.is_kv_consumer is consumer
+    assert config.is_kv_producer is producer
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="Requires GPU to instantiate LLM"
 )

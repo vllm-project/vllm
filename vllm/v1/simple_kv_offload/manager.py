@@ -245,6 +245,9 @@ class SimpleCPUOffloadScheduler:
         self._pending_cpu_hits: dict[
             str, tuple[tuple[list[KVCacheBlock], ...], int, int]
         ] = {}
+        # Eager mode: local prefix length from get_num_new_matched_tokens(),
+        # whose CPU copy update_state_after_alloc() refreshes.
+        self._pending_local_hits: dict[str, int] = {}
 
         # Store metadata
         self._lazy_mode = lazy_offload
@@ -342,10 +345,15 @@ class SimpleCPUOffloadScheduler:
         """GPU blocks to keep available (free/offloaded) per step in lazy mode."""
         WATERMARK_RATIO = 1.0  # Reserve larger space to avoid running out of GPU blocks
         target = 0
-        for g in kv_cache_config.prefix_cacheable_groups:
+        for g in kv_cache_config.kv_cache_groups:
             spec = g.kv_cache_spec
             block_size = resolve_dcp_kv_block_size(spec, cp_world_size)
-            if isinstance(spec, MambaSpec):
+            if not spec.prefix_cacheable:
+                # Bounded-replay SWA (DSV4.1) is never offloaded, but its blocks for
+                # each scheduled token come from the same free queue.
+                if isinstance(spec, SlidingWindowSpec):
+                    target += cdiv(max_num_batched_tokens, block_size)
+            elif isinstance(spec, MambaSpec):
                 target += 2
             elif isinstance(spec, SlidingWindowSpec):
                 target += cdiv(spec.sliding_window, block_size) + 1
@@ -368,9 +376,15 @@ class SimpleCPUOffloadScheduler:
         # is dropped first.
         if stale := self._pending_cpu_hits.pop(request.request_id, None):
             self._free_pending_cpu_hit(stale)
+        self._pending_local_hits.pop(request.request_id, None)
 
-        if request.skip_reading_prefix_cache:
+        if request.skip_reading_external_kv:
             return 0, False
+
+        if num_computed_tokens and not self._lazy_mode:
+            # Refreshed at admission: a request waiting for blocks repeats
+            # this lookup every step.
+            self._pending_local_hits[request.request_id] = num_computed_tokens
 
         if num_computed_tokens % self.block_size != 0:
             # Transfers are whole-block copies, so an external suffix cannot
@@ -443,6 +457,16 @@ class SimpleCPUOffloadScheduler:
                 block_ids=tuple([] for _ in range(num_groups)),
                 num_stored_blocks=[0] * num_groups,
             )
+
+        if num_local_tokens := self._pending_local_hits.pop(req_id, None):
+            # Eager CPU is inclusive: a GPU prefix hit also uses the CPU copy,
+            # but eager stores skip it, so move it to the MRU end here.
+            prefix_hit, _, _ = self.cpu_coordinator.find_longest_cache_hit(
+                request.block_hashes, num_local_tokens
+            )
+            prefix_blocks = [b for grp in prefix_hit for b in grp if not b.is_null]
+            self.cpu_block_pool.touch(prefix_blocks)
+            self.cpu_block_pool.free_blocks(reversed(prefix_blocks))
 
         # Pop the CPU hit cached by get_num_new_matched_tokens(). The
         # found blocks were pinned there to survive LRU eviction in the window
@@ -1227,6 +1251,7 @@ class SimpleCPUOffloadScheduler:
         pending = self._pending_cpu_hits.pop(req_id, None)
         if pending is not None:
             self._free_pending_cpu_hit(pending)
+        self._pending_local_hits.pop(req_id, None)
 
         # Handle load: defer cleanup if load is in-flight
         load_state = self._reqs_to_load.get(req_id)
@@ -1430,6 +1455,7 @@ class SimpleCPUOffloadScheduler:
         for pending in self._pending_cpu_hits.values():
             self._free_pending_cpu_hit(pending)
         self._pending_cpu_hits.clear()
+        self._pending_local_hits.clear()
 
         self._abandoned_store_event_to_blocks.update(self._store_event_to_blocks)
         for transfer in self._pending_finished_stores:

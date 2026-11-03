@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING
 
 from vllm.entrypoints.generate.base.protocol import DeltaMessage
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
-from vllm.v1.token_buffer import rfind_token_sequences
+from vllm.v1.token_buffer import rfind_token_sequences, rfind_tokens
 
 if TYPE_CHECKING:
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -40,6 +40,9 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
         super().__init__(tokenizer, *args, **kwargs)
         self._start_token_ids = self._encode_marker(self.start_token)
         self._end_token_ids = self._encode_marker(self.end_token)
+        # The chat template opens every message, including the generation
+        # prompt, with this token.
+        self._message_begin_token_id = self.vocab.get("]~b]")
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
         self._initial_in_reasoning = chat_kwargs.get("thinking_mode") == "enabled"
         self._reasoning_ended_streaming = False
@@ -109,6 +112,14 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             if tuple(token_ids[-prefix_len:]) == tuple(marker_ids[:prefix_len]):
                 return True
         return False
+
+    def _last_message_ids(self, input_ids: Sequence[int]) -> Sequence[int]:
+        # The system message's thinking instructions and earlier turns contain
+        # reasoning markers; only the last message (the generation prompt)
+        # tells whether generation starts inside reasoning. Output-only ids
+        # contain no message-begin token and are returned whole.
+        i = rfind_tokens(input_ids, (self._message_begin_token_id,))
+        return input_ids[i + 1 :] if i >= 0 else input_ids
 
     @staticmethod
     def _strip_partial_marker_suffix(text: str, marker: str) -> str:
@@ -197,6 +208,7 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
             return False
 
         delta_ids = tuple(delta_ids)
+        input_ids = self._last_message_ids(input_ids)
         if self._contains_token_sequence(delta_ids, self._end_token_ids):
             return True
         if self._contains_token_sequence(input_ids, self._end_token_ids):
@@ -306,6 +318,7 @@ class MiniMaxM3ReasoningParser(BaseThinkingReasoningParser):
     def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         # Ended if the newest marker is an end marker (a start wins a tie).
         _, k = rfind_token_sequences(
-            input_ids, (self._start_token_ids, self._end_token_ids)
+            self._last_message_ids(input_ids),
+            (self._start_token_ids, self._end_token_ids),
         )
         return k == 1
