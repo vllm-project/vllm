@@ -113,6 +113,8 @@ from vllm.v1.worker.extensible_kv_cache import (
     extend_kv_cache,
     kv_cache_lent_for_weight_update,
     measure_kv_cache_blocks,
+    pad_kv_cache_segments,
+    registers_kv_cache_memory,
 )
 from vllm.v1.worker.sentinel.gpu_worker_sentinel import WorkerSentinel
 from vllm.v1.worker.startup_plan import (
@@ -257,6 +259,8 @@ class Worker(WorkerBase):
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
+        # Update targets (is_draft) whose weights may be incomplete.
+        self._incomplete_weight_updates: set[bool] = set()
         self._weight_update_is_draft = False
         # Set by the engine while a pause has emptied the KV cache.
         self._kv_cache_reclaimable = False
@@ -953,6 +957,12 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         allocation_context = self._maybe_get_memory_pool_context(tag="kv_cache")
         if self.cache_config.enable_extensible_kv_cache:
+            if registers_kv_cache_memory(self.vllm_config):
+                kv_cache_config = pad_kv_cache_segments(
+                    kv_cache_config,
+                    self.cache_config.get_resolved_kv_cache_layout(),
+                    granule_size(torch.accelerator.current_device_index()),
+                )
             # The connector is created in `extend_kv_cache`, once the
             # memory it registers is final.
             self._kv_cache_config = kv_cache_config
@@ -1024,10 +1034,6 @@ class Worker(WorkerBase):
         ):
             return reason or "another rank cannot use it"
         return None
-
-    def kv_cache_commit_granule(self) -> int:
-        """Bytes one physical KV cache commit is rounded to on this device."""
-        return granule_size(torch.accelerator.current_device_index())
 
     def disable_extensible_kv_cache(self) -> None:
         self.cache_config.enable_extensible_kv_cache = False
@@ -1227,6 +1233,27 @@ class Worker(WorkerBase):
                 self.model_runner._dummy_pooler_run(hidden_states)
             else:
                 self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+
+        if (
+            self.use_v2_model_runner
+            and get_pp_group().is_last_rank
+            and not self.model_runner.is_pooling_model
+        ):
+            # MRV2 counterpart of the V1 warm-up above: keep the sampler's
+            # max-batch buffers (e.g. the fp32 logits copy) cached after the
+            # empty_cache() in capture_model(), so later steps reuse them
+            # instead of reserving a new, larger block at each new batch size.
+            max_num_reqs = min(
+                self.scheduler_config.max_num_seqs,
+                self.scheduler_config.max_num_batched_tokens,
+            )
+            # Take the hidden states from a dummy forward pass, as V1 does, so they
+            # have the LM head's input size (e.g. OPT projects to a smaller size).
+            _, sample_hidden_states = self.model_runner._dummy_run(
+                num_tokens=max_num_reqs, skip_eplb=True
+            )
+            self.model_runner._dummy_sampler_run(hidden_states=sample_hidden_states)
+            del sample_hidden_states
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
@@ -1694,6 +1721,9 @@ class Worker(WorkerBase):
         if self.weight_transfer_engine is not None:
             self.weight_transfer_engine.shutdown()
 
+    def has_incomplete_weight_update(self) -> bool:
+        return bool(self._incomplete_weight_updates)
+
     def start_weight_update(self) -> None:
         """Start a new weight update session.
 
@@ -1735,6 +1765,9 @@ class Worker(WorkerBase):
                 # Load through the unquantized target head, as without
                 # draft_lm_head_quantization; finish re-derives the copies.
                 share_source_lm_heads(draft_model)
+            # Starting may already move weights; only a successful finish
+            # restores them.
+            self._incomplete_weight_updates.add(is_draft)
             self.weight_transfer_engine.start_weight_update()
         except BaseException:
             self.weight_transfer_engine.reset_weight_update_target()
@@ -1822,6 +1855,7 @@ class Worker(WorkerBase):
             finally:
                 self._weight_update_kv_cache_loan.close()
             self._end_weight_update(refresh=True)
+            self._incomplete_weight_updates.discard(self._weight_update_is_draft)
 
         # Weight transfer bypasses GPUModelRunner.reload_weights().
         if not self._weight_update_is_draft:
