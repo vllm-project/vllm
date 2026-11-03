@@ -47,6 +47,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from vllm import envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
@@ -1536,6 +1537,27 @@ def _engram_unpack_fp8_kernel(
     tl.store(scales + layer * scales_stride + offset, scale)
 
 
+def _all_to_all_rows(
+    out: torch.Tensor, rows: torch.Tensor, group: GroupCoordinator
+) -> None:
+    """Equal-split all-to-all over the Engram DP group.
+
+    Under batch invariance the torch NCCL communicator inherits the pinned
+    one-channel, one-thread NCCL settings; the group's PyNccl communicator was
+    created without them, and a pure copy is exact for any NCCL setting.
+    """
+    comm = getattr(group.device_communicator, "pynccl_comm", None)
+    if not envs.VLLM_BATCH_INVARIANT or comm is None or comm.disabled:
+        torch.distributed.all_to_all_single(out, rows, group=group.device_group)
+        return
+    sends, recvs = rows.chunk(group.world_size), out.chunk(group.world_size)
+    comm.group_start()
+    for peer in range(group.world_size):
+        comm.send(sends[peer], peer)
+        comm.recv(recvs[peer], peer)
+    comm.group_end()
+
+
 class EngramBatch(nn.Module):
     """Stage every Engram layer's WKV input as MXFP8 with one exchange.
 
@@ -1629,7 +1651,7 @@ class EngramBatch(nn.Module):
             group = get_engram_dp_group()
             assert group is not None
             sent, rows = rows, self.exchanged_rows[: rows.shape[0]]
-            torch.distributed.all_to_all_single(rows, sent, group=group.device_group)
+            _all_to_all_rows(rows, sent, group)
         table = self.layers[0].embed_tokens
         heads = table.n_hash_cols
         grid = (triton.cdiv(slot, 128) * 128 * heads // 16, len(self.layers))
