@@ -101,6 +101,25 @@ class DeviceMemoryProfiler:
         gc.collect()
 
 
+def device_memory_info(device: torch.types.Device = None) -> tuple[int, int]:
+    """Free and total device memory in bytes, like
+    `torch.accelerator.get_memory_info`, with the free memory corrected on
+    integrated GPUs.
+
+    On UMA (Unified Memory Architecture) platforms where CPU and GPU share
+    physical memory (e.g. GH200, DGX Spark, Jetson Orin), cudaMemGetInfo
+    underreports free memory because it does not account for reclaimable OS
+    memory (page cache, buffers), which a device allocation does reclaim.
+    psutil reports the true available memory there.
+    https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
+    """
+    free_memory, total_memory = torch.accelerator.get_memory_info(device)
+    index = torch.device(device).index if device is not None else None
+    if current_platform.is_integrated_gpu(index):
+        free_memory = psutil.virtual_memory().available
+    return free_memory, total_memory
+
+
 @dataclass
 class MemorySnapshot:
     """Memory snapshot."""
@@ -140,15 +159,7 @@ class MemorySnapshot:
         self.torch_peak = stats.get("allocated_bytes.all.peak", 0)
         self.torch_allocated = stats.get("allocated_bytes.all.current", 0)
 
-        self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)
-        if current_platform.is_integrated_gpu(device.index):
-            # On UMA (Unified Memory Architecture) platforms where CPU and
-            # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin),
-            # cudaMemGetInfo underreports free memory because it does not
-            # account for reclaimable OS memory (page cache, buffers).
-            # Use psutil to get the true available memory.
-            # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
-            self.free_memory = psutil.virtual_memory().available
+        self.free_memory, self.total_memory = device_memory_info(device)
 
         self.cuda_memory = self.total_memory - self.free_memory
 
