@@ -5,7 +5,8 @@ vocab slice and the dtype cast, bitwise. LogitsProcessor uses it only when the
 forward context carries a gather dtype, which the model runner sets only for a
 model that opts in with SupportsFP32LogitsGather: FP32 when the step's
 consumer (the sampler, or the rejection sampler on a step with drafts) wants
-FP32 logits, else the head's dtype."""
+FP32 logits, else the head's dtype. The DSpark speculator sets it, to the
+head's dtype, around its draft logits when the target model opts in."""
 
 import dataclasses
 from contextlib import AbstractContextManager, nullcontext
@@ -92,6 +93,7 @@ def _worker(local_rank: int, world_size: int, port: int):
 
         _check_logits_processor(config, world_size, device)
         _check_model_opt_in(config, world_size, device)
+        _check_dspark_draft_opt_in(config, world_size, device)
 
 
 class UnfusedLogitsProcessor(LogitsProcessor):
@@ -261,3 +263,57 @@ def test_fp32_logits_gather_opt_in_flags():
 
     assert supports_fp32_logits_gather(MiniMaxM3SparseForCausalLM)
     assert supports_fp32_logits_gather(MiniMaxM3SparseForConditionalGeneration)
+
+
+class DraftModel(nn.Module):
+    """A DSpark draft head: compute_draft_logits returns the logits
+    processor's output."""
+
+    def __init__(self, lm_head: nn.Module, processor: LogitsProcessor):
+        super().__init__()
+        self.lm_head = lm_head
+        self.logits_processor = processor
+
+    def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states)
+
+
+def _check_dspark_draft_opt_in(
+    config: VllmConfig, world_size: int, device: torch.device
+):
+    """DSpark draft logits: as on main unless the target model opts in, then
+    the fused gather in the head's dtype, bitwise main's logits, eagerly and
+    replayed from a CUDA graph."""
+    from vllm.distributed.parallel_state import graph_capture
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    vocab_size, lm_head, hidden_states = _make_lm_head(world_size, device)
+    main = DraftModel(lm_head, UnfusedLogitsProcessor(vocab_size, scale=0.5))
+    draft = DraftModel(lm_head, LogitsProcessor(vocab_size, scale=0.5))
+    for target_cls in (PassthroughModel, OptedInModel):
+        target = target_cls(lm_head, LogitsProcessor(vocab_size))
+        opted_in = target_cls is OptedInModel
+        # A real speculator needs a draft checkpoint; _compute_draft_logits
+        # reads only these attributes (load_model sets the flag likewise).
+        speculator = DSparkSpeculator.__new__(DSparkSpeculator)
+        speculator.vllm_config = config
+        speculator.model = draft
+        speculator.fused_logits_gather = supports_fp32_logits_gather(target)
+
+        logits = speculator._compute_draft_logits(hidden_states)
+        assert logits.dtype == torch.bfloat16
+        assert torch.equal(logits, main.compute_draft_logits(hidden_states))
+        assert logits.is_contiguous() == opted_in
+
+        # Captured as in the speculator's FULL draft graph: the gather chosen
+        # at capture is the one replayed.
+        static_hidden = hidden_states.clone()
+        graph = torch.cuda.CUDAGraph()
+        with graph_capture(device) as ctx, torch.cuda.graph(graph, stream=ctx.stream):
+            graph_logits = speculator._compute_draft_logits(static_hidden)
+        static_hidden.copy_(hidden_states.flip(0))
+        graph.replay()
+        torch.accelerator.synchronize()
+        expected = main.compute_draft_logits(hidden_states.flip(0))
+        assert torch.equal(graph_logits, expected)
+        assert graph_logits.is_contiguous() == opted_in
