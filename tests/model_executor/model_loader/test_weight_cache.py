@@ -437,6 +437,10 @@ MODELOPT_FP8_CASE = ModelCase(
 )
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="ModelOpt FP8 CUTLASS weight cache requires SM89+",
+)
 def test_ipc_cache_modelopt_fp8(vllm_runner, tmp_path, monkeypatch):
     """Serialized ModelOpt FP8 tensors survive repeated IPC attachment."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")

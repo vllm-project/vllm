@@ -2776,7 +2776,6 @@ class ModelOptLinearMethod(LinearMethodBase):
                     f"{type(self.kernel).__name__} cannot use pre-processed weights"
                 )
             if self.spec.weight in (kFp8StaticTensorSym, kFp8StaticTokenSym):
-                # IPC restores transposed tensors, but not this Python metadata.
                 layer.processed_weight_dims = (0, 1)
             return
         self.fmt.pre_process(layer)
