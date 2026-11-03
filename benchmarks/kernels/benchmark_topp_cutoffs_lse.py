@@ -45,7 +45,7 @@ def main(args) -> None:
             spikes = torch.randint(0, vocab, (rows, 4), device="cuda")
             logits.scatter_(1, spikes, 12 + torch.rand(rows, 4, device="cuda") * 6)
             logits = logits.to(torch.bfloat16)
-            idx = torch.arange(rows, dtype=torch.int32, device="cuda")
+            idx = torch.arange(rows, dtype=torch.int64, device="cuda")
             temp = torch.full((rows,), args.temperature, device="cuda")
             top_p = torch.full((rows,), args.top_p, device="cuda")
 

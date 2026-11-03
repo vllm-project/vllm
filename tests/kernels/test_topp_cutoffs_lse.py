@@ -27,7 +27,7 @@ DEVICE = "cuda"
 
 
 def _params(num_rows: int, temperature: float, top_p: float):
-    idx = torch.arange(num_rows, dtype=torch.int32, device=DEVICE)
+    idx = torch.arange(num_rows, dtype=torch.int64, device=DEVICE)
     temp = torch.full((num_rows,), temperature, device=DEVICE)
     p = torch.full((num_rows,), top_p, device=DEVICE)
     return idx, temp, p
@@ -122,7 +122,7 @@ def test_row_kinds(cluster_size: int):
     logits = _logits(5, vocab_size)
     logits[3] = float("-inf")  # no finite logit
     logits[4, 7] = float("inf")
-    idx = torch.arange(5, dtype=torch.int32, device=DEVICE)
+    idx = torch.arange(5, dtype=torch.int64, device=DEVICE)
     # Greedy, top_p = 1, top_p < 1, then the two special rows.
     temp = torch.tensor([0.0, 0.8, 0.8, 1.0, 1.0], device=DEVICE)
     p = torch.tensor([0.9, 1.0, 0.9, 0.9, 0.9], device=DEVICE)
