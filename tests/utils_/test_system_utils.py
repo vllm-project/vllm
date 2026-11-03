@@ -188,3 +188,36 @@ raise SystemExit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
     env = os.environ | {"VLLM_WORKER_MULTIPROC_METHOD": "spawn"}
     result = subprocess.run([sys.executable, "-c", script], env=env, timeout=180)
     assert result.returncode == 0
+
+
+def test_llm_starts_in_process_forked_after_openmp():
+    """`LLM` must start and generate in a process forked after its parent used
+    OpenMP: its engine is forked from that process, which has no worker threads."""
+    script = """
+import os
+import signal
+import torch
+from vllm import LLM, SamplingParams
+
+torch.set_num_threads(4)
+x = torch.randn(1024, 1024)
+torch.einsum("in,jn->ij", x, x)
+pid = os.fork()
+if pid == 0:
+    signal.alarm(900)
+    llm = LLM(
+        model="hmellor/tiny-random-LlamaForCausalLM",
+        enforce_eager=True,
+        gpu_memory_utilization=0.2,
+        max_model_len=64,
+    )
+    params = SamplingParams(max_tokens=2, ignore_eos=True)
+    outputs = llm.generate("Hello", params, use_tqdm=False)
+    assert len(outputs[0].outputs[0].token_ids) == 2
+    llm.llm_engine.engine_core.shutdown()
+    os._exit(0)
+raise SystemExit(os.waitstatus_to_exitcode(os.waitpid(pid, 0)[1]))
+"""
+    env = os.environ | {"VLLM_WORKER_MULTIPROC_METHOD": "fork"}
+    result = subprocess.run([sys.executable, "-c", script], env=env, timeout=1000)
+    assert result.returncode == 0
