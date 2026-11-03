@@ -259,7 +259,7 @@ class MediaConnector:
             return None
         # Touch mtime for LRU ordering
         try:
-            cache_path.touch()
+            os.utime(cache_path, None)
             return cache_path.read_bytes()
         except OSError:
             return None
