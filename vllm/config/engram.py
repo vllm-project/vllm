@@ -37,6 +37,13 @@ class EngramConfig:
     cpu_offload: bool = True
     """Store embedding weights in pinned CPU memory for UVA lookup."""
 
+    disk_offload: bool = False
+    """Keep the tables in the checkpoint's safetensors files and read each
+    step's rows on the host instead of allocating the table in device or pinned
+    host memory (useful on unified-memory GPUs, where pinned memory comes out of
+    the same pool as the weights). Replaces cpu_offload. Supported for Qwen4Exp
+    PLE tables on CUDA and DeepSeek V4.1 Engram tables."""
+
     embedding_across_dp: bool = False
     """Shard embeddings across TP and all DP ranks when enabled.
     Otherwise, each DP rank has a separate TP-sharded embedding replica."""
@@ -44,30 +51,24 @@ class EngramConfig:
     dp_shared_memory: bool | None = None
     """Share CPU-offloaded embedding weights between co-located
     DP replicas. Each node stores one copy of every TP shard, reducing host
-    memory without per-step Engram DP collectives. Requires sufficient
-    /dev/shm capacity and a shared IPC namespace. Defaults to enabled whenever
-    the other settings allow it, falling back to per-replica tables when DP
-    replicas are not co-located on one node or /dev/shm cannot hold them."""
+    memory without per-step Engram DP collectives. Uses host-NUMA cuMem shared
+    by FABRIC handle where supported, else /dev/shm (which then needs capacity
+    and a shared IPC namespace). Defaults to enabled whenever the other settings
+    allow it, falling back to per-replica tables when DP replicas are not
+    co-located on one node or the host cannot hold them."""
 
     use_thp: bool = False
     """Back private CPU-offloaded tables with transparent huge pages (best
     effort, falls back to ordinary pinned pages). Prefaulting the tables at
-    startup takes longer. Requires cpu_offload without dp_shared_memory."""
-
-    disk_offload: bool = False
-    """Leave the tables in the checkpoint's safetensors files and read the rows
-    each step needs through the OS page cache. Neither device nor pinned host
-    memory holds the tables, which matters where pinned memory comes out of the
-    same pool as device memory (unified-memory APUs). Replaces cpu_offload.
-    DeepSeek V4.1 only."""
+    startup takes longer. Requires cpu_offload without dp_shared_memory.
+    Always on for private tables on ROCm."""
 
     @model_validator(mode="after")
     def _validate_shared_memory(self) -> Self:
         if self.disk_offload:
-            if self.dp_shared_memory or self.use_thp or self.embedding_across_dp:
+            if self.dp_shared_memory or self.use_thp:
                 raise ValueError(
-                    "disk_offload cannot be combined with dp_shared_memory, "
-                    "use_thp or embedding_across_dp"
+                    "disk_offload cannot be combined with dp_shared_memory or use_thp"
                 )
             # The tables stay on disk, so there is no host copy to offload.
             self.cpu_offload = False
@@ -95,8 +96,18 @@ class EngramConfig:
                 "EngramConfig requires a model with supported Engram "
                 "embeddings and non-empty n-gram layer ids."
             )
-        if self.disk_offload and model_config.architecture != "DeepseekV41ForCausalLM":
-            raise ValueError("disk_offload supports DeepSeek V4.1 Engram tables only.")
+        if self.disk_offload:
+            from vllm.platforms import current_platform
+
+            if field == "ple_layer_ids":
+                if not current_platform.is_cuda():
+                    raise ValueError("Qwen4Exp disk_offload requires CUDA")
+            elif self.embedding_across_dp:
+                # Each DeepSeek V4.1 rank reads only its own TP rows.
+                raise ValueError(
+                    "DeepSeek V4.1 disk_offload cannot be combined with "
+                    "embedding_across_dp"
+                )
 
     def resolve_dp_shared_memory(self, parallel_config: "ParallelConfig") -> None:
         """Share host tables by default wherever the configuration permits."""
@@ -110,8 +121,6 @@ class EngramConfig:
 
     def verify_parallel_config(self, parallel_config: "ParallelConfig") -> None:
         """Reject unsupported embedding parallel topologies."""
-        if self.disk_offload and parallel_config.enable_elastic_ep:
-            raise ValueError("disk_offload is not supported with elastic EP.")
         if self.dp_shared_memory:
             if parallel_config.data_parallel_size <= 1:
                 raise ValueError("dp_shared_memory requires data_parallel_size > 1.")
@@ -125,6 +134,8 @@ class EngramConfig:
             raise ValueError(
                 "Engram embedding_across_dp is not supported with elastic EP yet."
             )
+        if self.disk_offload and parallel_config.enable_elastic_ep:
+            raise ValueError("disk_offload is not supported with elastic EP.")
 
     def get_parallel_size(self, parallel_config: "ParallelConfig") -> int:
         """Derive the embedding group size from the parallel configuration."""
