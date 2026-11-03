@@ -1049,7 +1049,8 @@ def frontend_block_hashes(
     block_hashes = request.block_hashes
     if block_hashes is None:
         return None
-    prompt_len = len(request.prompt_token_ids) if request.prompt_token_ids else 0
+    prompt_ids = request.prompt_token_ids
+    prompt_len = len(prompt_ids) if prompt_ids is not None else 0
     # The engine hashes a block once its lookahead tokens exist too.
     if prefix_hash_config is None or len(block_hashes) != (
         max(prompt_len - prefix_hash_config.num_lookahead_tokens, 0)

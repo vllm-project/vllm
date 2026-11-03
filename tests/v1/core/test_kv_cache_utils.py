@@ -8,6 +8,7 @@ from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any, cast
 
+import numpy as np
 import pytest
 import torch
 
@@ -1074,7 +1075,7 @@ def test_frontend_block_hashes_count_check():
     def frontend_hashes(config, num_hashes):
         request = EngineCoreRequest(
             request_id="0",
-            prompt_token_ids=list(range(10)),
+            prompt_token_ids=np.arange(10, dtype=np.int32),
             mm_features=None,
             sampling_params=SamplingParams(),
             pooling_params=None,

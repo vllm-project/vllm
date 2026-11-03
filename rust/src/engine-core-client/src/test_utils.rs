@@ -16,7 +16,6 @@ use crate::mock_engine::{
     MockEngineConfig, MockEngineDataSockets, connect_to_bootstrapped_frontend, connect_to_frontend,
     connect_to_hybrid_frontends, default_ready_response,
 };
-use crate::protocol::dtype::{Endianness, TensorDtype};
 use crate::protocol::handshake::{EngineCoreReadyResponse, HandshakeInitMessage};
 use crate::protocol::request::EngineCoreRequest;
 
@@ -35,17 +34,7 @@ pub fn decode_add_request(frames: &[Bytes]) -> EngineCoreRequest {
 /// [`decode_add_request`].
 pub fn decode_prompt_token_ids(request: &EngineCoreRequest) -> Option<Vec<u32>> {
     let ids = request.prompt_token_ids.as_ref()?;
-    assert!(matches!(
-        ids.dtype.scalar,
-        TensorDtype::U32 | TensorDtype::I32
-    ));
-    let bytes = ids.data.as_raw_view().expect("prompt token ids are inline");
-    let decode = match ids.dtype.endianness {
-        Endianness::Little => u32::from_le_bytes,
-        Endianness::Big => u32::from_be_bytes,
-        Endianness::Native => u32::from_ne_bytes,
-    };
-    Some(bytes.chunks_exact(4).map(|c| decode(c.try_into().unwrap())).collect())
+    Some(ids.to_u32_vec().expect("prompt token ids are inline 32-bit integers"))
 }
 
 /// Per-test IPC endpoint namespace backed by a unique temporary directory.
