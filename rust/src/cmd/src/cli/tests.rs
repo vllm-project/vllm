@@ -363,6 +363,36 @@ fn serve_args_auto_forward_enable_lora_to_python() {
 }
 
 #[test]
+fn serve_args_accept_python_underscore_flag_names() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--served_model_name",
+        "qwen",
+        "--max_model_len=1024",
+        "--enforce_eager",
+        "--kv_transfer_config.kv_role",
+        "kv_both",
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.served_model_name, ["qwen"]);
+    assert_eq!(args.managed_engine.max_model_len.as_deref(), Some("1024"));
+    expect![[r#"
+        [
+            "--enforce-eager",
+            "--kv-transfer-config.kv_role",
+            "kv_both",
+        ]
+    "#]]
+    .assert_debug_eq(&args.managed_engine.python_args);
+}
+
+#[test]
 fn serve_args_forward_shutdown_timeout_to_managed_engine() {
     let cli = Cli::try_parse_from([
         "vllm-rs",

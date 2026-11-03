@@ -299,10 +299,20 @@ fn normalize_python_arg_aliases(args: &[OsString]) -> Vec<OsString> {
         .map(|arg| {
             let text = arg.to_string_lossy();
             normalize_python_multi_char_alias(&text)
+                .or_else(|| normalize_python_long_flag_name(&text))
                 .map(Into::into)
                 .unwrap_or_else(|| arg.clone())
         })
         .collect()
+}
+
+/// Python's `FlexibleArgumentParser` accepts underscores in long flag names
+/// (`--served_model_name`), replacing them with dashes up to the first `.` or
+/// `=`, so keys of dotted config forms keep their underscores.
+fn normalize_python_long_flag_name(arg: &str) -> Option<String> {
+    let rest = arg.strip_prefix("--")?;
+    let (name, tail) = rest.split_at(rest.find(['.', '=']).unwrap_or(rest.len()));
+    name.contains('_').then(|| format!("--{}{tail}", name.replace('_', "-")))
 }
 
 fn normalize_python_multi_char_alias(arg: &str) -> Option<String> {
