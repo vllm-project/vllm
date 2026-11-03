@@ -1305,7 +1305,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     self._max_num_seqs,
                     holder.num_layers,
                     self.num_kv_heads,
-                    torch.cuda.mem_get_info(kv_cache.device)[0],
+                    torch.accelerator.get_memory_info(kv_cache.device)[0],
                 )
             holder.win = oscar_kv.OscarWindow(
                 fmt, kv_cache.shape[0], page, rows, kv_cache.device
