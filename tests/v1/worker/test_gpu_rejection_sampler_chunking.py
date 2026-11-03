@@ -29,6 +29,8 @@ def _make_input_batch(
     device: torch.device,
 ) -> SimpleNamespace:
     """Minimal InputBatch fields read by RejectionSampler._verify_in_chunks."""
+    # int64 index mappings, as the model runner builds them.
+    idx_mapping_np = idx_mapping_np.astype(np.int64)
     num_reqs = len(idx_mapping_np)
     num_logits_per_req = np.diff(cu_num_logits_np)
     return SimpleNamespace(

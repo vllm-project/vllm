@@ -11,9 +11,11 @@ from safetensors.torch import save_file
 
 from tests.utils import single_gpu_only
 from vllm import SamplingParams
+from vllm import _custom_ops as ops
 from vllm.model_executor.model_loader.weight_utils import download_weights_from_hf
 from vllm.platforms import current_platform
 from vllm.v1.metrics.reader import Vector
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import _supports_topp_cutoffs
 
 from ...utils import (
     assert_request_outputs_match,
@@ -223,3 +225,42 @@ def test_mtp_draft_lm_head_quantization_survives_sleep_and_reload(
             context="after weight reload",
         )
         assert al == pytest.approx(ref_al, rel=0.03)
+
+
+@single_gpu_only
+def test_mtp_top_p_requests_verify_on_raw_logits(
+    monkeypatch: pytest.MonkeyPatch, vllm_runner
+):
+    """Temperature + top-p requests must serve, verifying through
+    topp_cutoffs_lse on the raw logits wherever the GPU supports it, with the
+    index mappings the model runner builds."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    # Keep the engine in this process so the op calls can be counted.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    num_calls = 0
+    topp_cutoffs_lse = ops.topp_cutoffs_lse
+
+    def counted_topp_cutoffs_lse(*args, **kwargs):
+        nonlocal num_calls
+        num_calls += 1
+        return topp_cutoffs_lse(*args, **kwargs)
+
+    monkeypatch.setattr(ops, "topp_cutoffs_lse", counted_topp_cutoffs_lse)
+    with vllm_runner(
+        "Qwen/Qwen3.5-0.8B-Base",
+        block_size=None,
+        enable_chunked_prefill=None,
+        max_model_len=2048,
+        limit_mm_per_prompt={"image": 0, "video": 0},
+        speculative_config={"method": "mtp", "num_speculative_tokens": 3},
+        disable_log_stats=False,
+    ) as runner:
+        outputs = runner.llm.chat(
+            get_test_prompts(mm_enabled=False, num_prompts=16),
+            SamplingParams(temperature=1.0, top_p=0.95, seed=0, max_tokens=32),
+        )
+        acceptance_len = compute_acceptance_len(runner.llm.get_metrics())
+
+    assert all(output.outputs[0].token_ids for output in outputs)
+    assert acceptance_len > 1.0
+    assert (num_calls > 0) == _supports_topp_cutoffs()
