@@ -10,7 +10,9 @@ Between ``begin`` and a successful ``finish`` the model must not run; there is
 no rollback, the next full update repairs it.
 
 Delivery contract (not checked here): an update delivers every checkpoint
-tensor of each module whose PWAL changes its layout or is not idempotent.
+tensor of each module whose PWAL changes its layout or is not idempotent, and
+every checkpoint tensor loaded into a padded parameter (`mark_padded`), which
+``begin`` refills whole.
 """
 
 from collections.abc import Iterator
@@ -209,6 +211,11 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
+        if getattr(t, "has_padding", False):
+            # Restore the cold-start padding the loaders skip (PWAL left its
+            # output there). Erases the data region too: every checkpoint
+            # tensor loaded into `t` must be resent, none may be excluded.
+            t.data.fill_(getattr(t, "padding_value", 0))
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )

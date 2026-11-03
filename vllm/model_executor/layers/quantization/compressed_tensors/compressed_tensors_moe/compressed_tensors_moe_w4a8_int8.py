@@ -148,7 +148,11 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(
             w13_s,
-            {"quant_method": "channel" if g == -1 else "group", **extra_weight_attrs},
+            {
+                "quant_method": "channel" if g == -1 else "group",
+                "padding_value": 1,
+                **extra_weight_attrs,
+            },
         )
         layer.register_parameter("w13_weight_scale", w13_s)
 
@@ -157,7 +161,11 @@ class CompressedTensorsW4A8Int8MoEMethod(CompressedTensorsMoEMethod):
         )
         set_weight_attrs(
             w2_s,
-            {"quant_method": "channel" if g == -1 else "group", **extra_weight_attrs},
+            {
+                "quant_method": "channel" if g == -1 else "group",
+                "padding_value": 1,
+                **extra_weight_attrs,
+            },
         )
         layer.register_parameter("w2_weight_scale", w2_s)
 

@@ -37,7 +37,7 @@ from vllm.distributed import (
 from vllm.model_executor.kernels.linear.cute_dsl import ll_bf16
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import mark_padded, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, tldevice, triton
 from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
@@ -634,6 +634,8 @@ class InklingMoE(nn.Module):
                     f"checkpoint shard for {name} has {logical_half} rows per "
                     f"gate/up half, but destination only has {dst_half}"
                 )
+            if logical_half < dst_half:
+                mark_padded(param)
             for gid, lid in slots.items():
                 slab = weight[gid].narrow(
                     0,
@@ -662,6 +664,8 @@ class InklingMoE(nn.Module):
                     f"checkpoint shard for {name} has width {shard}, but "
                     f"destination only has {param.shape[2]}"
                 )
+            if shard < param.shape[2]:
+                mark_padded(param)
             for gid, lid in slots.items():
                 param.data[lid, :, :shard].copy_(
                     weight[gid].narrow(1, tp_rank * shard, shard)

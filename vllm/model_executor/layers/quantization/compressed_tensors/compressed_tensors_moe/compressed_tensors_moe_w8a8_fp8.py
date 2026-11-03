@@ -205,8 +205,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
             )
-            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+            set_weight_attrs(
+                w13_weight_scale, {**extra_weight_attrs, "padding_value": 1}
+            )
+            set_weight_attrs(
+                w2_weight_scale, {**extra_weight_attrs, "padding_value": 1}
+            )
 
         elif self.weight_quant.strategy == QuantizationStrategy.BLOCK:
             w13_weight_scale = torch.nn.Parameter(
@@ -234,8 +238,12 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             extra_weight_attrs.update(
                 {"quant_method": FusedMoeWeightScaleSupported.BLOCK.value}
             )
-            set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-            set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+            set_weight_attrs(
+                w13_weight_scale, {**extra_weight_attrs, "padding_value": 1}
+            )
+            set_weight_attrs(
+                w2_weight_scale, {**extra_weight_attrs, "padding_value": 1}
+            )
 
         # INPUT_SCALES
         if self.static_input_scales:

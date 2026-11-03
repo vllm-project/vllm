@@ -150,3 +150,34 @@ def test_streamed_quantized_expert_layout(case: str) -> None:
 
     assert _load(experts, "w13_weight", loaded_weight, "gpt_oss_w13")
     assert torch.equal(experts.w13_weight[0], expected)
+
+
+def test_direct_reload_restores_streamed_expert_padding() -> None:
+    """The last TP rank holds fewer intermediate columns than its padded
+    parameter; a direct reload resets the rest to zero, as at cold start."""
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        record_checkpoint_layout,
+    )
+
+    model = torch.nn.Module()
+    model.experts = _TestExperts("w2_weight", (2, 3, 3), tp_rank=1)
+    checkpoint = {
+        3: torch.arange(12, dtype=torch.float32).reshape(4, 3) + 1,
+        7: torch.arange(12, dtype=torch.float32).reshape(4, 3) + 20,
+    }
+
+    def load():
+        for expert_id, weight in checkpoint.items():
+            assert _load(model.experts, "w2_weight", weight, "gpt_oss_w2", expert_id)
+
+    load()
+    record_checkpoint_layout(model)
+    cold = model.experts.w2_weight.clone()
+    assert torch.count_nonzero(cold[:, :, 1:]) == 0
+    model.experts.w2_weight.data.fill_(7)  # stands in for post-load processing
+
+    begin_direct_reload(model)
+    load()
+
+    assert torch.equal(model.experts.w2_weight, cold)

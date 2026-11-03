@@ -71,6 +71,18 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
+def mark_padded(param: torch.Tensor | None) -> None:
+    """Record that a weight loader leaves part of ``param`` unwritten: padding
+    past the checkpoint tensor (e.g. a rounded-up hidden or intermediate size).
+
+    Sticky (set at cold start). A direct reload refills such a parameter with
+    its ``padding_value`` attribute (default 0; 1 for ones-initialized scales),
+    the ``create_weights`` initial value, before the loaders rewrite the
+    checkpoint region."""
+    if param is not None:
+        param.has_padding = True
+
+
 @functools.cache
 def _is_integrated_gpu(device: torch.device) -> bool:
     return device.type == "cuda" and current_platform.is_integrated_gpu(device.index)

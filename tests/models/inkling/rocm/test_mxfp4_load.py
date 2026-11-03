@@ -65,3 +65,46 @@ def test_unflattens_quark_scales_and_preserves_scale_padding():
     assert torch.all(routed.w13_weight_scale[:, 7] == 1)
     torch.testing.assert_close(routed.w2_weight_scale[:, :, :2], w2_scale[:, :, 2:4])
     assert torch.all(routed.w2_weight_scale[:, :, 2] == 1)
+
+
+def test_direct_reload_restores_aiter_padding():
+    """A direct reload resets the AITER padding (zero weights, 0x01 scales, as
+    Quark OCP_MX creates them) instead of keeping post-processed bytes."""
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        record_checkpoint_layout,
+    )
+    from vllm.model_executor.utils import set_weight_attrs
+
+    moe, fake = _fake_moe()
+    # A module tree so the reload sees the parameters.
+    routed = nn.Module()
+    routed.moe_config = fake.moe_config
+    for name in ("w13_weight", "w2_weight", "w13_weight_scale", "w2_weight_scale"):
+        routed.register_parameter(name, getattr(fake, name))
+    set_weight_attrs(routed.w13_weight_scale, {"padding_value": 1})
+    set_weight_attrs(routed.w2_weight_scale, {"padding_value": 1})
+    moe.experts = nn.Module()
+    moe.experts.routed_experts = routed
+    checkpoint = {
+        "experts.w13_weight": torch.arange(96, dtype=torch.uint8).view(4, 12, 2),
+        "experts.w2_weight": torch.arange(80, dtype=torch.uint8).view(4, 5, 4),
+        "experts.w13_weight_scale": torch.arange(96, dtype=torch.uint8).view(48, 2),
+        "experts.w2_weight_scale": torch.arange(80, dtype=torch.uint8).view(20, 4),
+    }
+
+    def load():
+        for name, weight in checkpoint.items():
+            moe.load_expert_weight(name, weight)
+
+    load()
+    record_checkpoint_layout(moe)
+    cold = {name: p.clone() for name, p in routed.named_parameters()}
+    for p in routed.parameters():
+        p.data.fill_(7)  # stands in for post-load processing (shuffling)
+
+    begin_direct_reload(moe)
+    load()
+
+    for name, p in routed.named_parameters():
+        torch.testing.assert_close(p, cold[name], rtol=0, atol=0)
