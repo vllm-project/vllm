@@ -1183,7 +1183,7 @@ presets:
     strategy: single_node_tp
     workload: "Agentic (InferenceX AgentX)"
     description: "TP8 + DCP8 on one B300 node with the Inferact DSpark draft (K7 at concurrency 1, K5 at 4-8, K3 at 12-28) and an embedded RDMA Mooncake DRAM store."
-    source: { label: "InferenceX #4381", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4381", key: "kimik3-fp4-b300-vllm-agentic-dspark", revision: 809f7045172ea5effde45cef7cbe02918f25f968 }
+    source: { label: "InferenceX #4381", href: "https://github.com/SemiAnalysisAI/InferenceX/pull/4381", key: "kimik3-fp4-b300-vllm-agentic-dspark", revision: fcb19d5730733bb9931be22ec98154198fbfe5c0 }
     image: "vllm/vllm-openai@sha256:8c1434bfee7d7626eef78ef70600434ffba4a1b8813cb1d1c8707ad25f47035e"
     # vLLM's own Python frontend. The draft is in args (TOKENSPEED_MLA attention,
     # Inferact checkpoint), so the generic Spec decoding toggle stays off.
@@ -1294,9 +1294,18 @@ presets:
         json_args:
           "--compilation-config": { cudagraph_capture_sizes: [4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 52, 56, 60, 64, 68, 72, 76, 80, 84, 88, 92, 96, 100, 104, 108, 112, 116, 120, 124, 128, 132, 136, 140, 144, 148, 152, 156, 160, 164, 168, 172, 176, 180, 184, 188, 192, 196, 200, 204, 208, 212, 216, 220, 224, 228, 232, 236, 240, 244, 248, 252, 256, 512, 1024, 2048, 4096, 8192] }
     runbook: |
-      The B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-b300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4381](https://github.com/SemiAnalysisAI/InferenceX/pull/4381), pinned to [`809f704`](https://github.com/SemiAnalysisAI/InferenceX/tree/809f7045172ea5effde45cef7cbe02918f25f968/inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/kimik3/vllm/b300-fp4-mtp)) serves the default `moonshotai/Kimi-K3` checkpoint (MXFP4 weights) on one 8-GPU B300 node with DSpark speculative decoding and an embedded Mooncake DRAM tier. It is a benchmark configuration; the settings in this preset are its production-useful parts. Draft length falls with concurrency (K7 at 1, K5 at 4-8, K3 at 12-28), and each point sets `--max-num-seqs` to twice the concurrency with CUDA graphs covering `(1 + K) x 1..max-num-seqs` tokens. Throughput runs use InferenceX's golden acceptance lengths for DSpark (3.84, 3.62 and 3.00 for K7, K5 and K3).
+      The B300 AgentX lane in [SemiAnalysis InferenceX](https://inferencex.semianalysis.com/) (`kimik3-fp4-b300-vllm-agentic-dspark`, [SemiAnalysisAI/InferenceX#4381](https://github.com/SemiAnalysisAI/InferenceX/pull/4381), pinned to [`fcb19d5`](https://github.com/SemiAnalysisAI/InferenceX/tree/fcb19d5730733bb9931be22ec98154198fbfe5c0/inferencex-e2e/benchmarks/single_node/srt-slurm-recipes/kimik3/vllm/b300-fp4-mtp)) serves the default `moonshotai/Kimi-K3` checkpoint (MXFP4 weights) on one 8-GPU B300 node with DSpark speculative decoding and an embedded Mooncake DRAM tier. It is a benchmark configuration; the settings in this preset are its production-useful parts. Draft length falls with concurrency (K7 at 1, K5 at 4-8, K3 at 12-28), and each point sets `--max-num-seqs` to twice the concurrency with CUDA graphs covering `(1 + K) x 1..max-num-seqs` tokens. Throughput runs use InferenceX's golden acceptance lengths for DSpark (3.84, 3.62 and 3.00 for K7, K5 and K3).
 
       **Mooncake store.** The builder's **Mooncake** option renders the master and store config with a 100GB segment, which is the default. The lane gives each of the 8 TP ranks a 256GB `global_segment_size` and a 4GB `local_buffer_size`, 2,080 GiB of DRAM across the node in total, so raise the segment above the default only when the node has that much pinned memory to spare. The lane's master sets `--eviction_high_watermark_ratio=0.95 --eviction_ratio=0.10`, matching the builder, and leaves the lease TTL at the Mooncake default. The store runs embedded over RDMA with `P2PHANDSHAKE` metadata. Pin `device_name` to one ACTIVE InfiniBand port driven by `mlx5_core`: this lane's ranks use a single rail because the rails are isolated from each other, so a port that is down or an EFA `rdmap*` device (no RC queue pairs) fails registration. An InfiniBand port addresses peers with GID index 0 (`MC_GID_INDEX=0`).
+
+      **Bundled Mooncake.** The image already bundles `mooncake-transfer-engine-cuda13==0.3.13.post1`, which provides the `mooncake.store` Python client. The workers and the Mooncake master both use that copy, so do not `pip install` or upgrade Mooncake in the container, and skip the builder's generic `uv pip install 'mooncake-transfer-engine>=0.3.10'` step when you run the pinned image: a reinstall replaces the version the lane qualified. Verify it inside the image, on every node, before starting the master and the workers:
+
+      ```bash
+      python3 -c "from importlib.metadata import version; print(version('mooncake-transfer-engine-cuda13'))"   # 0.3.13.post1
+      python3 -c "from mooncake.store import MooncakeDistributedStore; print('mooncake.store ok')"
+      ```
+
+      The lane's worker setup script runs both checks and fails the worker when the version differs or the import fails; its Mooncake master service runs the import check before it starts.
 
       **Kept out of the preset.** `--disable-uvicorn-access-log`, `PYTHONNOUSERSITE=1` and the benchmark client variables are InferenceX harness or logging controls with no serving effect. `--moe-backend auto` is vLLM's default selection and is stated only to match the lane. The lane's `RDMAV_DRIVERS` and `WITH_NVIDIA_PEERMEM=0` are specific to the DSXE cluster (a host-library mount for its `libmlx5` verbs provider, and peermem not loaded) and apply only on nodes with the same setup.
 
