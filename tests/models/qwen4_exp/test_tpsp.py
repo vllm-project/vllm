@@ -245,10 +245,11 @@ def _check_compiled_sp_ops(module) -> None:
     # second module would silently reuse the first module's trace.
     torch._dynamo.reset()
 
-    def collectives(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        gathered = sp_all_gather(module.sp_shard(x) * 2)[: x.shape[0]]
-        reduced = sp_all_gather(module.sp_reduce_scatter(x))[: x.shape[0]]
-        return gathered, reduced
+    def collectives(x: torch.Tensor) -> tuple[torch.Tensor, ...]:
+        outputs = [sp_all_gather(module.sp_shard(x) * 2)[: x.shape[0]]]
+        if hasattr(module, "sp_reduce_scatter"):
+            outputs.append(sp_all_gather(module.sp_reduce_scatter(x))[: x.shape[0]])
+        return tuple(outputs)
 
     # vLLM drops Dynamo guards, so one trace must serve every token count.
     compiled = torch.compile(
@@ -286,10 +287,10 @@ def _run_sp(rank: int, port: int, moe_sp: bool, compiled_ops: bool = False) -> N
                 if moe_sp:
                     _check_moe_sp(rank, config)
                 elif compiled_ops:
-                    from vllm.models.qwen4_exp.amd import ple_layer
+                    from vllm.models.qwen4_exp.amd import mtp, ple_layer
 
-                    # Both modules shard tokens inside the compiled backbone.
-                    for module in (qwen4_model, ple_layer):
+                    # These modules shard tokens inside the compiled models.
+                    for module in (qwen4_model, ple_layer, mtp):
                         _check_compiled_sp_ops(module)
                 else:
                     _check_decoder_ple(rank)
@@ -314,5 +315,5 @@ def test_moe_sp_equivalence(monkeypatch) -> None:
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm-only SP ops")
 @multi_gpu_test(num_gpus=2)
 def test_compiled_sp_ops_handle_untraced_token_counts() -> None:
-    """Compiled SP padding in the model and PLE must not specialize on trace size."""
+    """Compiled SP padding in the model, PLE and MTP must not specialize."""
     mp.spawn(_run_sp, args=(get_open_port(), False, True), nprocs=2)
