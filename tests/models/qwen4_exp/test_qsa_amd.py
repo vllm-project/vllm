@@ -520,8 +520,8 @@ class _KernelSpy:
 
 
 def _force_rows_kernel(monkeypatch: pytest.MonkeyPatch) -> _KernelSpy:
-    # The per-row path is gfx942 only, but the kernel runs on any ROCm arch.
-    monkeypatch.setattr(qsa_ops, "_on_gfx942", lambda: True)
+    # The per-row path is CDNA3/4 only, but the kernel runs on any ROCm arch.
+    monkeypatch.setattr(qsa_ops, "_rows_kernel_profile", lambda: (32, 32, 4))
     spy = _KernelSpy(qsa_ops._qsa_mqa_paged_rows_kernel)
     monkeypatch.setattr(qsa_ops, "_qsa_mqa_paged_rows_kernel", spy)
     return spy
