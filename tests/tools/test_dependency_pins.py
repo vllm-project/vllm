@@ -164,8 +164,8 @@ def test_rocm_source_rebuild_verifies_requirement_hashes(
     )
     assert match is not None
     command = re.sub(r"--mount=\S+\s*\\\n\s*", "", match.group(1))
-    command = command.replace("/r/test.txt", str(requirements))
     command = command.replace("/tmp/", str(tmp_path) + "/")
+    command = command.replace("/r/test.txt", str(requirements))
     command = command.replace(
         "python3 -m pip install",
         f"{shlex.quote(sys.executable)} -m pip --isolated install "
