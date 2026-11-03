@@ -1013,7 +1013,7 @@ template <int C, bool kWrap>
 __global__ void __launch_bounds__(kThreads, 1)
     topp_hist_cluster_kernel(const __nv_bfloat16* __restrict__ logits,
                              int64_t stride, int vocab,
-                             const int32_t* __restrict__ expanded_idx_mapping,
+                             const int64_t* __restrict__ expanded_idx_mapping,
                              const float* __restrict__ temperature,
                              const float* __restrict__ top_p_ptr,
                              float* __restrict__ thresh,
@@ -1041,7 +1041,7 @@ __global__ void __launch_bounds__(kThreads, 1)
   uint4 cur[kBatch];
   load_batch(cur, p4, 0, nvec, tid);
 
-  const int req = expanded_idx_mapping[row];
+  const int req = static_cast<int>(expanded_idx_mapping[row]);
   const float temp = temperature[req];
   const float top_p = top_p_ptr[req];
   if (temp == 0.0f) {
@@ -1343,7 +1343,7 @@ void launch(const torch::stable::Tensor& logits,
       &cfg, &topp_hist_cluster_kernel<C, kWrap>,
       reinterpret_cast<const __nv_bfloat16*>(logits.const_data_ptr()),
       logits.stride(0), static_cast<int>(logits.size(1)),
-      expanded_idx_mapping.const_data_ptr<int32_t>(),
+      expanded_idx_mapping.const_data_ptr<int64_t>(),
       temperature.const_data_ptr<float>(), top_p.const_data_ptr<float>(),
       thresh.mutable_data_ptr<float>(), lse.mutable_data_ptr<double>(),
       force_fallback);
@@ -1413,8 +1413,8 @@ void topp_cutoffs_lse(const torch::stable::Tensor& logits,
   STD_TORCH_CHECK(logits.scalar_type() == ScalarType::BFloat16,
                   "logits must be bf16");
   STD_TORCH_CHECK(logits.stride(1) == 1, "logits must have unit vocab stride");
-  STD_TORCH_CHECK(expanded_idx_mapping.scalar_type() == ScalarType::Int,
-                  "expanded_idx_mapping must be int32");
+  STD_TORCH_CHECK(expanded_idx_mapping.scalar_type() == ScalarType::Long,
+                  "expanded_idx_mapping must be int64");
   STD_TORCH_CHECK(temperature.scalar_type() == ScalarType::Float &&
                       top_p.scalar_type() == ScalarType::Float,
                   "temperature and top_p must be fp32");
