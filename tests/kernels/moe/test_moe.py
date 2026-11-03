@@ -109,6 +109,34 @@ def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None
     assert captured_scale.data_ptr() == a_scale.data_ptr()
 
 
+def test_triton_moe_launcher_rejects_noncontiguous_topk_weights() -> None:
+    wide_topk_weights = torch.ones((2, 4))
+    topk_weights = wide_topk_weights[:, :2]
+    assert not topk_weights.is_contiguous()
+
+    with pytest.raises(ValueError, match="topk_weights must be contiguous"):
+        fused_moe_module.invoke_fused_moe_triton_kernel(
+            A=torch.ones((2, 1)),
+            B=torch.ones((1, 1, 1)),
+            C=torch.empty((2, 2, 1)),
+            A_scale=None,
+            B_scale=None,
+            topk_weights=topk_weights,
+            sorted_token_ids=None,
+            expert_ids=torch.zeros(1, dtype=torch.int32),
+            num_tokens_post_padded=torch.ones(1, dtype=torch.int32),
+            mul_routed_weight=True,
+            top_k=2,
+            config={"BLOCK_SIZE_M": 1, "BLOCK_SIZE_N": 1, "BLOCK_SIZE_K": 1},
+            compute_type=tl.float32,
+            use_fp8_w8a8=False,
+            use_int8_w8a8=False,
+            use_int8_w8a16=False,
+            use_int4_w4a16=False,
+            per_channel_quant=False,
+        )
+
+
 def iterative_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
