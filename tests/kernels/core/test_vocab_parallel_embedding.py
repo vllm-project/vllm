@@ -9,6 +9,8 @@ each rank, and summing the per-rank outputs (what the all-reduce does)
 reconstructs a full-table lookup.
 """
 
+from unittest.mock import Mock
+
 import pytest
 import torch
 
@@ -124,3 +126,43 @@ def test_rank_sum_is_full_lookup(tp_size):
         total += _fused(ids, _shard(full_table, si, rows, dtype), si)
 
     torch.testing.assert_close(total, full_table[ids.long()], atol=0.0, rtol=0.0)
+
+
+@requires_cuda
+@torch.inference_mode()
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float8_e4m3fn])
+@pytest.mark.parametrize("use_fused", [False, True])
+def test_embedding_optionally_reduces_output(dtype, use_fused, default_vllm_config):
+    """SP's deferred reduction preserves masked contributions and their dtype."""
+    with torch.device("cuda"):
+        values = torch.arange(128 * 16).reshape(128, 16)
+        table = ((values % 29 - 14) / 16).to(dtype)
+        ids = torch.tensor([0, 63, 64, 127, 12])
+        expected = table[ids].float()
+        for rank in range(2):
+            local = expected.clone()
+            local[ids // 64 != rank] = 0
+            remote = (expected - local).to(dtype)
+            group = Mock(world_size=2, rank_in_group=rank)
+            # Model the other vocabulary owner's contribution, including FP8 bytes.
+            group.all_reduce.side_effect = lambda output, remote=remote: (
+                output + remote.view(output.dtype)
+            )
+            for reduce_results in (True, False):
+                embedding = VocabParallelEmbedding(
+                    128,
+                    16,
+                    params_dtype=dtype,
+                    parallel_group=group,
+                    reduce_results=reduce_results,
+                )
+                embedding.use_fused_embedding = use_fused
+                embedding.weight_loader(embedding.get_parameter("weight"), table)
+                actual = embedding(ids)
+                assert actual.dtype == dtype
+                torch.testing.assert_close(
+                    actual.float(),
+                    expected if reduce_results else local,
+                    atol=0,
+                    rtol=0,
+                )

@@ -44,6 +44,11 @@ pub struct ManagedEngineConfig {
     /// The per-node replica count is forwarded separately in `python_args` as
     /// `--data-parallel-size-local`.
     pub data_parallel_size: usize,
+    /// Handshake endpoint of the colocated frontend when it serves only this
+    /// node's engines (hybrid or external DP LB). The engines then also
+    /// handshake there for their input/output addresses, after fetching the
+    /// coordinator and DP rendezvous from the frontend owning rank 0.
+    pub client_handshake_address: Option<String>,
     /// Extra CLI arguments forwarded verbatim to Python vLLM.
     pub python_args: Vec<String>,
 }
@@ -52,6 +57,14 @@ impl ManagedEngineConfig {
     /// Render the handshake address that the Rust frontend should dial.
     pub fn handshake_address(&self) -> String {
         format!("tcp://{}:{}", self.handshake_host, self.handshake_port)
+    }
+
+    /// Env vars every managed engine needs when serving the Rust frontend:
+    /// `VLLM_USE_RUST_FRONTEND=1` tells Python vLLM to keep frontend-side
+    /// multimodal normalization (`mm_device_do_normalize = False`,
+    /// vllm/config/model.py) instead of expecting raw uint8 pixels.
+    pub fn rust_frontend_envs() -> Vec<(String, String)> {
+        vec![("VLLM_USE_RUST_FRONTEND".to_string(), "1".to_string())]
     }
 
     /// Build the concrete Python command line for the managed headless engine.
@@ -68,8 +81,12 @@ impl ManagedEngineConfig {
             .arg("--data-parallel-rpc-port")
             .arg(self.handshake_port.to_string())
             .arg("--data-parallel-size")
-            .arg(self.data_parallel_size.to_string())
-            .args(&self.python_args);
+            .arg(self.data_parallel_size.to_string());
+        if let Some(client_handshake_address) = &self.client_handshake_address {
+            command.arg("--headless-client-handshake-address").arg(client_handshake_address);
+        }
+        command.args(&self.python_args);
+        command.envs(Self::rust_frontend_envs());
         command
     }
 }
@@ -218,6 +235,7 @@ mod tests {
             handshake_host: "127.0.0.1".to_string(),
             handshake_port: 62100,
             data_parallel_size: 4,
+            client_handshake_address: None,
             python_args: vec![
                 "--data-parallel-size-local".to_string(),
                 "2".to_string(),
@@ -256,6 +274,32 @@ mod tests {
             ]
         "#]]
         .assert_debug_eq(&args);
+
+        let envs = command.get_envs().collect::<Vec<_>>();
+        expect![[r#"
+            [
+                (
+                    "VLLM_USE_RUST_FRONTEND",
+                    Some(
+                        "1",
+                    ),
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&envs);
+    }
+
+    #[test]
+    fn rust_frontend_envs_include_rust_frontend_flag() {
+        expect![[r#"
+            [
+                (
+                    "VLLM_USE_RUST_FRONTEND",
+                    "1",
+                ),
+            ]
+        "#]]
+        .assert_debug_eq(&ManagedEngineConfig::rust_frontend_envs());
     }
 
     #[test]
