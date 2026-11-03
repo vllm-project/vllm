@@ -10,29 +10,32 @@ Granite 4.2 emits tool calls in an XML format::
     </function>
     </tool_call>
 
-alongside ``<think>``/``</think>`` reasoning. :class:`GraniteThinkingParser`
-already drives both reasoning and this tool-call format in a single engine, so
-this parser is a thin subclass of it: it inherits the exact same grammar,
-argument converter and streaming logic, and is exposed as a standalone
-``--tool-call-parser`` separate from the reasoning parser.
+Granite 4.2 shares the Nemotron V3 tool-call and reasoning format, so this
+parser subclasses :class:`NemotronV3Parser` to reuse its grammar, argument
+converter and streaming logic, exposed as a standalone ``--tool-call-parser``.
 
-Because the tool-call extraction is inherited unchanged, future fixes to the
-shared grammar flow in automatically. The parser works on its own: it extracts
-tool calls correctly whether or not ``--reasoning-parser granite_thinking_parser``
-is also configured, in both thinking modes.
+It deliberately does NOT subclass :class:`GraniteThinkingParser`: that parser
+strips a leading newline from content (to clean up the chat template's
+``\\n</think>\\n`` markup), which is a reasoning-side concern. A tool parser
+running on its own (no reasoning parser) must leave content untouched, so the
+leading-newline handling stays in the reasoning parser where it belongs.
+
+Because the tool-call extraction is inherited unchanged, fixes to the shared
+grammar flow in automatically. The parser works on its own, with any reasoning
+parser, or with none, in both thinking modes.
 """
 
 from __future__ import annotations
 
-from vllm.parser.granite_thinking import GraniteThinkingParser
+from vllm.parser.nemotron_v3 import NemotronV3Parser
 
 
-class GraniteToolCallParser(GraniteThinkingParser):
+class GraniteToolCallParser(NemotronV3Parser):
     """Granite 4.2 tool-call parser.
 
-    Subclass of :class:`GraniteThinkingParser` that reuses its engine (Granite
-    reasoning + Granite XML tool calls) and exposes it as a standalone tool
-    parser. The reasoning-side overrides inherited from the parent only affect
-    the reasoning adapter; the tool adapter generated from this class extracts
-    tool calls through the shared grammar.
+    Subclass of :class:`NemotronV3Parser` (whose tool-call and reasoning format
+    Granite 4.2 shares) exposed as a standalone tool parser. The tool adapter
+    generated from this class extracts tool calls through the shared grammar;
+    reasoning/content splitting, when enabled, is handled by the separately
+    configured reasoning parser.
     """
