@@ -238,6 +238,15 @@ def is_aiter_found_and_supported_on_rdna4() -> bool:
     return False
 
 
+def is_aiter_found_and_supported_on_rdna() -> bool:
+    """RDNA (gfx11 + gfx12) analog of `is_aiter_found_and_supported()`."""
+    if current_platform.is_rocm() and IS_AITER_FOUND:
+        from vllm.platforms.rocm import on_rdna
+
+        return on_rdna()
+    return False
+
+
 def _triton_gemm_config_is_tuned(config_name: str, N: int, K: int) -> bool:
     from aiter.ops.triton.utils.gemm_config_utils import get_gemm_config
 
@@ -2121,6 +2130,41 @@ _GFX950_DSV4_NATIVE_MAX_COLUMNS = 1024 * 1024
 _GFX950_DSA_AITER_MIN_PREFILL_SEQ_LEN = 32 * 1024
 
 
+def _flat_sigmoid_bias_topk_is_profitable(
+    gating_output: "torch.Tensor",
+    correction_bias: "torch.Tensor",
+    topk_weights: "torch.Tensor",
+    topk_ids: "torch.Tensor",
+    num_expert_group: int,
+    topk_group: int,
+) -> bool:
+    """Replace the grouped kernel with a register-resident Triton top-k when
+    the grouping eliminates nothing and the call is being captured into a
+    CUDA graph.
+
+    The Triton kernel wins on device time under graph replay but loses eagerly,
+    where it is a Triton launch from Python against a single C++ dispatch --
+    measured at -1.8% to -3.5% end-to-end throughput with --enforce-eager.
+    Stream capture is the test because it holds for every graph vLLM records,
+    FULL and PIECEWISE, under either model runner, while the forward context's
+    cudagraph_runtime_mode reads NONE during the V2 model runner's FULL capture.
+    """
+    from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
+        can_use_sigmoid_bias_flat_topk,
+    )
+
+    if not torch.cuda.is_current_stream_capturing():
+        return False
+    return can_use_sigmoid_bias_flat_topk(
+        gating_output,
+        correction_bias,
+        topk_weights,
+        topk_ids,
+        num_expert_group,
+        topk_group,
+    )
+
+
 class rocm_aiter_ops:
     """ROCm AITER operations wrapper for AMD GPU acceleration in vLLM.
 
@@ -2290,20 +2334,20 @@ class rocm_aiter_ops:
 
     @classmethod
     def is_rdna_aiter_enabled(cls) -> bool:
-        """AITER on RDNA4 (gfx12): library present, arch is rdna4, and the user
-        enabled aiter. Only aiter's Triton kernels exist on gfx12 (no CK build),
-        so this deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella
-        and gates only the Triton paths rdna4 uses. The gfx12 analog of
+        """AITER on RDNA: library present, arch is RDNA, and the user enabled
+        aiter. Only aiter's Triton kernels exist on RDNA (no CK build), so this
+        deliberately stays off the gfx9/CK `@if_aiter_supported` umbrella and
+        gates only the Triton paths RDNA uses. The RDNA analog of
         `is_enabled()`."""
         if not current_platform.is_rocm() or not IS_AITER_FOUND:
             return False
-        from vllm.platforms.rocm import on_rdna4
+        from vllm.platforms.rocm import on_rdna
 
-        return on_rdna4() and cls._AITER_ENABLED
+        return on_rdna() and cls._AITER_ENABLED
 
     @classmethod
     def is_rdna_linear_enabled(cls) -> bool:
-        """RDNA4 (gfx12) analog of is_linear_enabled() (aiter Triton blockscale)."""
+        """RDNA analog of is_linear_enabled() (aiter Triton blockscale)."""
         return cls.is_rdna_aiter_enabled() and cls._LINEAR_ENABLED
 
     @classmethod
@@ -2840,8 +2884,8 @@ class rocm_aiter_ops:
         )
 
     @classmethod
-    def is_rdna_gdn_triton_kernels_available(cls) -> bool:
-        """RDNA4 (gfx12) analog of are_gdn_triton_kernels_available()."""
+    def are_rdna_gdn_triton_kernels_available(cls) -> bool:
+        """RDNA analog of are_gdn_triton_kernels_available()."""
         return cls.is_rdna_aiter_enabled() and cls._gdn_triton_kernels_importable()
 
     @classmethod
@@ -3024,16 +3068,16 @@ class rocm_aiter_ops:
         global _OPS_REGISTERED
 
         if not (
-            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna4()
+            is_aiter_found_and_supported() or is_aiter_found_and_supported_on_rdna()
         ):
             if not current_platform.is_rocm():
                 return
 
-            from vllm.platforms.rocm import on_gfx11, on_gfx950
+            from vllm.platforms.rocm import on_gfx950
 
-            # This op has self-contained Triton/C++ implementations on gfx11
-            # and gfx950.  Only its optional top-k fast path comes from aiter.
-            if (on_gfx11() or on_gfx950()) and not _OPS_REGISTERED:
+            # This op has self-contained Triton/C++ implementations on gfx950.
+            # Only its optional top-k fast path comes from aiter.
+            if on_gfx950() and not _OPS_REGISTERED:
                 direct_register_custom_op(
                     op_name="rocm_aiter_sparse_attn_indexer",
                     op_func=rocm_aiter_sparse_attn_indexer,
@@ -3700,6 +3744,27 @@ class rocm_aiter_ops:
     ) -> None:
         if correction_bias.dtype != gating_output.dtype:
             correction_bias = correction_bias.to(gating_output.dtype)
+        if _flat_sigmoid_bias_topk_is_profitable(
+            gating_output,
+            correction_bias,
+            topk_weights,
+            topk_ids,
+            num_expert_group,
+            topk_group,
+        ):
+            from vllm.model_executor.layers.fused_moe.router.rocm_sigmoid_bias_flat_topk import (  # noqa: E501
+                sigmoid_bias_flat_topk,
+            )
+
+            sigmoid_bias_flat_topk(
+                gating_output,
+                correction_bias,
+                topk_weights,
+                topk_ids,
+                need_renorm,
+                routed_scaling_factor,
+            )
+            return
         torch.ops.vllm.rocm_aiter_biased_grouped_topk(
             gating_output,
             correction_bias,
