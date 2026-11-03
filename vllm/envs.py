@@ -982,7 +982,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DISTRIBUTED_USE_SPLIT_GROUP", "0"))
     ),
     # Use dedicated multiprocess context for workers.
-    # Both spawn and fork work
+    # Both spawn and fork work. In fork mode, vLLM joins libgomp's worker threads
+    # before every os.fork in the process.
     "VLLM_WORKER_MULTIPROC_METHOD": env_with_choices(
         "VLLM_WORKER_MULTIPROC_METHOD", "fork", ["spawn", "fork"]
     ),
