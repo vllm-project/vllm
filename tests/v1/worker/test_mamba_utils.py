@@ -589,7 +589,6 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
             block_size=16,
             shapes=mixer.get_state_shape(),
             dtypes=mixer.get_state_dtype(),
-            state_alignment=16,
             page_size_padded=128,
         )
         for mixer in mixers
@@ -641,15 +640,14 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
     conv_shape = (8, 6) if is_conv_state_dim_first() else (6, 8)
     spec = MambaSpec(
         block_size=16,
-        shapes=(conv_shape, (1, 4, 4), (1, 20, 4), (1, 20), (1, 20, 4)),
+        shapes=(conv_shape, (1, 4, 4), (1, 20, 4), (1, 20, 4), (1, 20)),
         dtypes=(
             torch.bfloat16,
             torch.float32,
             torch.bfloat16,
-            torch.float32,
             torch.bfloat16,
+            torch.float32,
         ),
-        state_alignment=16,
         block_stride_alignment=16,
     )
     spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
@@ -997,6 +995,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
     mixer = SimpleNamespace(
         kv_cache=[torch.empty(3, 1, device=device), state, x_ring, dt_ring, B_ring],
         A=-torch.ones(heads, device=device),
+        use_flashinfer_replayssm=False,
         _replayssm_ring_start=starts,
         _replayssm_prev_num_accepted=committed,
         replayssm_buffer_len=16,

@@ -1447,7 +1447,6 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.use_replayssm = True
         self.use_flashinfer_replayssm = backend == MambaBackendEnum.FLASHINFER
         self.use_replayssm_trackers = self.use_flashinfer_replayssm
-        self.state_alignment = 16
         self.mamba_config = MambaConfig(backend=backend)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
@@ -1473,7 +1472,6 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
         shapes=mixers[0].get_state_shape(),
         dtypes=mixers[0].get_state_dtype(),
         page_size_padded=128,
-        state_alignment=16,
         block_stride_alignment=16,
     )
     groups = [
@@ -1549,7 +1547,6 @@ def test_rebind_kv_cache_keeps_replayssm_trackers():
         shapes=mixers[0].get_state_shape(),
         dtypes=mixers[0].get_state_dtype(),
         page_size_padded=128,
-        state_alignment=16,
     )
     config = KVCacheConfig(
         num_blocks=8,
@@ -1604,7 +1601,6 @@ def test_triton_replayssm_plans_in_first_layer_of_each_group():
         shapes=mixers[0].get_state_shape(),
         dtypes=mixers[0].get_state_dtype(),
         page_size_padded=128,
-        state_alignment=16,
     )
     # Group order differs from execution order.
     config = KVCacheConfig(
