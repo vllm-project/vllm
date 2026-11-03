@@ -135,14 +135,25 @@ def minimax_m3_nvfp4_sparse_decode_fly(
     assert fp8_out == (out_scale is not None) and fp8_out == (output is None)
     assert q.dtype == torch.bfloat16
     assert q.is_contiguous()
-    if fp8_out:
+    if out_q is not None and out_scale is not None:
         assert out_q.dtype == torch.float8_e4m3fn and out_scale.dtype == torch.uint8
         assert out_q.is_contiguous() and out_scale.is_contiguous()
         assert out_q.shape[0] >= rows and out_q.shape[1] == num_heads * head_dim
         assert out_scale.shape[0] >= rows
         assert out_scale.shape[1] == num_heads * head_dim // 32
+        out_ptr, out_q_ptr, out_scale_ptr = (
+            q.data_ptr(),
+            out_q.data_ptr(),
+            out_scale.data_ptr(),
+        )
     else:
+        assert output is not None
         assert output.dtype == torch.bfloat16 and output.is_contiguous()
+        out_ptr, out_q_ptr, out_scale_ptr = (
+            output.data_ptr(),
+            q.data_ptr(),
+            q.data_ptr(),
+        )
     assert kv_cache.dtype == torch.uint8 and kv_cache.stride(1) == _kernel.BLK * 72
     assert kv_cache.stride(3) == 1 and kv_cache.stride(0) < 2**31
     assert topk_idx.dtype == torch.int32 and topk_idx.shape[0] == num_kv_heads
@@ -178,9 +189,9 @@ def minimax_m3_nvfp4_sparse_decode_fly(
         topk_idx.data_ptr(),
         block_table.data_ptr(),
         seq_lens.data_ptr(),
-        q.data_ptr() if fp8_out else output.data_ptr(),
-        out_q.data_ptr() if fp8_out else q.data_ptr(),
-        out_scale.data_ptr() if fp8_out else q.data_ptr(),
+        out_ptr,
+        out_q_ptr,
+        out_scale_ptr,
         ks.data_ptr(),
         vs.data_ptr(),
         nvfp4_e4m3_lut(q.device).data_ptr(),

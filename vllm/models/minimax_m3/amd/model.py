@@ -1179,8 +1179,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
                 qkv, positions, fwd_slot_mapping
             )
             output = torch.empty_like(q)
-            attn_output = self._run_attention(q, index_q, output)
-            output, _ = self.o_proj(attn_output)
+            gfx942_attn = self._run_attention(q, index_q, output)
+            output, _ = self.o_proj(gfx942_attn)
             return output
 
         main_slot_mapping = fwd_slot_mapping[self.layer_name]
@@ -1424,8 +1424,8 @@ class MiniMaxM3SparseAttention(nn.Module, AttentionLayerBase):
         ctx = get_forward_context()
         if ctx.cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE:
             return False
-        md = ctx.attn_metadata
-        md = md.get(self.layer_name) if isinstance(md, dict) else None
+        all_md = ctx.attn_metadata
+        md = all_md.get(self.layer_name) if isinstance(all_md, dict) else None
         return (
             isinstance(md, MiniMaxM3SparseMetadata)
             and md.num_prefills == 0
