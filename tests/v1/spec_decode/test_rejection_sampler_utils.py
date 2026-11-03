@@ -958,32 +958,53 @@ def test_all_nan_target_logits_in_range(temperature: float):
     assert (sampled[valid] < vocab_size).all()
 
 
+@pytest.mark.parametrize("topp_on_load", [False, True])
 @pytest.mark.parametrize("has_draft_logits", [False, True])
 @pytest.mark.parametrize("use_fp64", [False, True])
 def test_skip_masked_vocab_blocks_is_bitwise_identical(
-    has_draft_logits: bool, use_fp64: bool
+    topp_on_load: bool, has_draft_logits: bool, use_fp64: bool
 ):
     """skip_masked_vocab_blocks lets the resample kernel skip vocab blocks whose
     target logits are all -inf (e.g. masked by top-k/top-p). The sampled tokens
-    must match the unskipped path exactly.
+    must match the unskipped path exactly, including when the kernels apply
+    top-p cutoffs to raw logits as they load them.
     """
     torch.manual_seed(0)
     device = "cuda"
     K = 3
     vocab_size = 4 * 8192
     target_logits_1d = torch.randn(vocab_size, device=device)
-    target_logits_1d[8192 : 3 * 8192] = float("-inf")  # two whole blocks
-    target_logits_1d[3 * 8192 + 100 :] = float("-inf")  # most of the last one
+    masked = torch.zeros(vocab_size, dtype=torch.bool, device=device)
+    masked[8192 : 3 * 8192] = True  # two whole blocks
+    masked[3 * 8192 + 100 :] = True  # most of the last one
+    temperature = 0.73 if topp_on_load else 1.0
+    if topp_on_load:
+        # Finite raw bf16 logits that fall below every row's cutoff on load.
+        target_logits_1d = torch.where(masked, target_logits_1d - 40, target_logits_1d)
+        target_logits_1d = target_logits_1d.to(torch.bfloat16).float()
+    else:
+        target_logits_1d[masked] = float("-inf")
     draft_logits_1d = torch.randn(vocab_size, device=device)
     inputs = _build_rejection_sample_inputs(
-        target_logits_1d, draft_logits_1d, K, temperature=1.0, num_trials=256
+        target_logits_1d, draft_logits_1d, K, temperature=temperature, num_trials=256
     )
     if not has_draft_logits:
         inputs["draft_logits"] = None
+    on_load = {}
+    if topp_on_load:
+        target_logits = inputs["target_logits"].to(torch.bfloat16)
+        inputs["target_logits"] = target_logits
+        on_load = dict(
+            target_logits_pre_scaled=False,
+            target_topp_thresh=target_logits.new_full(
+                target_logits.shape[:1], -20.0, dtype=torch.float32
+            ),
+        )
 
     def run(skip: bool) -> tuple[torch.Tensor, torch.Tensor]:
         return _rejection_sample(
             **inputs,
+            **on_load,
             num_speculative_steps=K,
             use_fp64=use_fp64,
             skip_masked_vocab_blocks=skip,

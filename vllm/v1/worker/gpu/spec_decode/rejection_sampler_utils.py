@@ -1009,9 +1009,10 @@ def _resample_kernel(
     else:
         scaled_target_logits = target_logits
 
-    if SKIP_MASKED_BLOCKS and tl.max(target_logits, axis=0) == float("-inf"):
-        # No target token survives in this block (e.g. top-k/top-p masked it),
-        # so neither does the residual: skip the draft load and the Gumbel draw.
+    if SKIP_MASKED_BLOCKS and tl.max(scaled_target_logits, axis=0) == float("-inf"):
+        # No target token survives in this block (e.g. top-k/top-p masked it,
+        # up front or on load), so neither does the residual: skip the draft
+        # load and the Gumbel draw.
         tl.store(
             resampled_local_argmax_ptr
             + req_idx * resampled_local_argmax_stride
