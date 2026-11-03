@@ -46,7 +46,7 @@ V = ("weight", shard((HEAD, HIDDEN), "v"))
 def test_qkv_reports_shards_the_checkpoint_never_filled():
     layer = make_qkv()
     load(layer, Q)
-    assert layer.pop_missing_shards() == ["k", "v"]
+    assert layer.pop_missing_shards() == ["weight.k", "weight.v"]
 
     load(layer, Q, K, V)
     assert layer.pop_missing_shards() == []
@@ -64,7 +64,14 @@ def test_record_is_per_load_so_a_reload_cannot_coast_on_the_first():
     assert layer.pop_missing_shards() == []
 
     load(layer, K, V)
-    assert layer.pop_missing_shards() == ["q"]
+    assert layer.pop_missing_shards() == ["weight.q"]
+
+
+def test_each_parameter_is_checked_on_its_own():
+    """A complete weight must not hide a bias that is missing a shard."""
+    layer = make_qkv()
+    load(layer, Q, K, V, ("bias", shard((2 * HEAD,), "q")))
+    assert layer.pop_missing_shards() == ["bias.k", "bias.v"]
 
 
 def test_shard_with_no_rows_is_never_expected():
@@ -82,7 +89,7 @@ def test_unknown_shard_id_is_rejected():
 def test_merged_column_tuple_shard_is_one_span():
     layer = MergedColumnParallelLinear(HIDDEN, [4, 4, 4], bias=False)
     load(layer, ("weight", shard((8, HIDDEN), (0, 1))))
-    assert layer.pop_missing_shards() == [2]
+    assert layer.pop_missing_shards() == ["weight.2"]
 
     load(
         layer, ("weight", shard((8, HIDDEN), (0, 1))), ("weight", shard((4, HIDDEN), 2))
@@ -99,5 +106,5 @@ def test_loader_lists_missing_shards_as_weights_not_loaded():
     loader = DefaultModelLoader(LoadConfig())
     with pytest.raises(ValueError, match="not initialized from checkpoint") as exc:
         loader.track_weights_loading(model, loaded)
-    assert "'layer.qkv_proj.k'" in str(exc.value)
-    assert "'layer.qkv_proj.v'" in str(exc.value)
+    assert "'layer.qkv_proj.weight.k'" in str(exc.value)
+    assert "'layer.qkv_proj.weight.v'" in str(exc.value)

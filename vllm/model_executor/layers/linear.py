@@ -690,23 +690,24 @@ class StackedColumnParallelLinear(ColumnParallelLinear):
     """Column-parallel linear whose weight is several checkpoint tensors stacked
     along the output dimension, each addressed by a shard id.
 
-    Keeps track of which shards a load delivered so the loader can reject a
-    weight that was only partly filled.
+    Keeps track of which shards a load delivered to each parameter so the loader
+    can reject a parameter that was only partly filled.
     """
 
-    shard_ids: tuple
+    shard_ids: tuple[str | int, ...]
     """Every shard this layer can receive."""
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
-        self.loaded_shard_ids: set = set()
+        self.loaded_shard_ids: dict[str, set[str | int]] = {}
 
     def _get_shard_size_mapping(self, loaded_shard_id: Any) -> int | None:
         """Rows of this rank's parameter that belong to the shard."""
         raise NotImplementedError
 
-    def validate_shard_id(self, shard_id: Any) -> bool:
-        """Check `shard_id` names shards of this layer and record them as loaded."""
+    def validate_shard_id(self, shard_id: Any, param: Parameter | None = None) -> bool:
+        """Check `shard_id` names shards of this layer and, if `param` is given,
+        record them as loaded into it."""
         if shard_id is None:
             # Already stacked on disk, so one tensor fills every shard.
             shards = self.shard_ids
@@ -719,23 +720,25 @@ class StackedColumnParallelLinear(ColumnParallelLinear):
                 f"Shard id for {type(self).__name__} should be one of "
                 f"{self.shard_ids}, got shard id {shard_id}."
             )
-        self.loaded_shard_ids.update(shards)
+        if param is not None:
+            name = next((n for n, p in self.named_parameters() if p is param), None)
+            if name is not None:
+                self.loaded_shard_ids.setdefault(name, set()).update(shards)
         return True
 
-    def pop_missing_shards(self) -> list:
-        """Shards this load never filled, then forget the record so the next
-        load starts fresh.
+    def pop_missing_shards(self) -> list[str]:
+        """`<param>.<shard>` for each shard this load never filled, then forget
+        the record so the next load starts fresh.
 
-        A shard with no rows on this rank is never expected, and a layer
+        A shard with no rows on this rank is never expected, and a parameter
         nothing was loaded into is left to the loader's parameter-level check.
         """
-        loaded, self.loaded_shard_ids = self.loaded_shard_ids, set()
-        if not loaded:
-            return []
+        loaded, self.loaded_shard_ids = self.loaded_shard_ids, {}
         return [
-            shard
+            f"{name}.{shard}"
+            for name, shards in loaded.items()
             for shard in self.shard_ids
-            if shard not in loaded and self._get_shard_size_mapping(shard)
+            if shard not in shards and self._get_shard_size_mapping(shard)
         ]
 
 
@@ -802,7 +805,7 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
     def _get_shard_size_mapping(self, loaded_shard_id: int) -> int:
         return self.output_sizes[loaded_shard_id] // self.tp_size
 
-    def validate_shard_id(self, shard_id: Any) -> bool:
+    def validate_shard_id(self, shard_id: Any, param: Parameter | None = None) -> bool:
         if isinstance(shard_id, tuple) and any(
             b - a != 1 for a, b in zip(shard_id[:-1], shard_id[1:])
         ):
@@ -810,7 +813,7 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
                 "Shard id with multiple indices should be consecutive. "
                 f"Got shard id {shard_id}."
             )
-        return super().validate_shard_id(shard_id)
+        return super().validate_shard_id(shard_id, param)
 
     def weight_loader(
         self,
@@ -818,7 +821,7 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
@@ -966,7 +969,7 @@ class MergedColumnParallelLinear(StackedColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
         if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
             if isinstance(param, PerTensorScaleParameter):
                 if isinstance(loaded_shard_id, tuple):
@@ -1207,7 +1210,7 @@ class QKVParallelLinear(StackedColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: str | None = None,
     ):
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
         if loaded_shard_id is None:  # special case for certain models
             if isinstance(param, PerTensorScaleParameter):
                 # When weights are already fused on disk (e.g. Phi-3's
@@ -1251,7 +1254,7 @@ class QKVParallelLinear(StackedColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: str | None = None,
     ):
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
 
         param_data = param.data
         output_dim = getattr(param, "output_dim", None)
@@ -1522,7 +1525,7 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: str | None = None,
     ) -> None:
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
         # Index checkpoints are never pre-fused on disk; a shard id is always given.
         assert loaded_shard_id in self.shard_ids
 
@@ -1559,7 +1562,7 @@ class MinimaxM3QKVParallelLinearWithIndexer(QKVParallelLinear):
     ) -> None:
         # Unquantized (bf16) path. MXFP8 checkpoints use weight_loader_v2; this
         # keeps an unquantized load correct too.
-        self.validate_shard_id(loaded_shard_id)
+        self.validate_shard_id(loaded_shard_id, param)
         assert loaded_shard_id in self.shard_ids
         output_dim = getattr(param, "output_dim", None)
         assert output_dim is not None
