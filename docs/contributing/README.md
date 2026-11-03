@@ -367,6 +367,15 @@ review process:
   The bot reports the lag and warns that outdated CI configuration may cause
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
+- A PR targeting `main` that changes `docker/Dockerfile.rocm_base` or
+  `tools/vllm-rocm/therock_wheels.py` must have its ROCm base image cached
+  before it merges, so `main` and other PRs reuse it instead of rebuilding it.
+  Once Buildkite CI is green and the PR is approved, a member of
+  `@vllm-project/vllm-ci-maintainers` comments `/amd-ci cache`. That build
+  copies the images the PR's own CI built when they match `main` with the PR
+  merged, and builds the rest. The `rocm-base-cache` status tracks it, and
+  `pre-commit` fails until it passes, then re-runs by itself. Later commits keep
+  the cache valid unless they or `main` change those two files.
 - Retrying or cancelling builds does not check branch freshness.
 - Apart from that merge, these commands do not modify your branch or enforce
   merge requirements. Direct Buildkite launches are outside this workflow.

@@ -13,15 +13,17 @@
 #   ci       Build and push this build's per-commit test image.
 #   release  Release image + wheels from source into the release repo (release pipeline, AWS agents).
 #   release-base  Only the release stack and runtime (a serialized step, so one run builds a new key).
-#   prebuild Only the stack, from main with the stack inputs of an approved PR merged into main
-#            (ROCM_PREBUILD_PR/SHA). ci-infra runs it on the trusted queue; main reuses it if Ks matches.
+#   prebuild Only the stack, from main with the stack inputs of a PR merged into main
+#            (ROCM_PREBUILD_PR/SHA): `/amd-ci cache` starts it in a main build of AMD CI, and
+#            main reuses it if Ks matches.
 #
 # Stack: rocm (TheRock ROCm 10). Force a stack rebuild: bump ARG REFRESH
 #        in docker/Dockerfile.rocm_base
 #
 # Trust: ROCM_CI_REPO is set by ci-infra (CI) or release-pipeline.yaml (release).
 #   Trusted main builds: rocm/vllm-ci
-#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it)
+#   PR / fork builds:    rocm/vllm-dev    (pr<N>- tags and caches; trusted builds never read it,
+#                                          but prebuild copies a maintainer-stamped PR's images)
 #   Other untrusted:     rocm/vllm-dev    (br-<branch>-<hash>- tags and caches: nightlies, branch builds)
 #   Release pipeline:    its ECR repo     (never reads rocm/vllm-ci or its cache: it builds the
 #                                          stack and runtime from source, with only its own ECR cache;
@@ -69,11 +71,14 @@ esac
 # prebuild: everything but the two stack inputs stays main's, this script and the bake file included.
 if [[ $MODE == prebuild ]]; then
   [[ $REPO == "$TRUSTED" ]] || { echo "prebuild only pushes to $TRUSTED" >&2; exit 2; }
+  # Its own cache ref, which main never reads: main takes only the stack-rocm-<Ks> image from it.
+  CACHE_TO=$CACHE:prebuild-pr${ROCM_PREBUILD_PR:?}-
   git fetch -q origin +refs/heads/main:refs/rocm-prebuild/main \
     "+refs/pull/${ROCM_PREBUILD_PR:?}/head:refs/rocm-prebuild/pr"
-  [[ $(git rev-parse refs/rocm-prebuild/pr) == "${ROCM_PREBUILD_SHA:?}" ]] \
-    || { echo "#$ROCM_PREBUILD_PR moved past the approved $ROCM_PREBUILD_SHA" >&2; exit 1; }
   [[ $(git rev-parse --is-shallow-repository) == false ]] || git fetch -q --unshallow origin
+  # Later commits (e.g. merges of main) may follow it; a force-push past it may not.
+  git merge-base --is-ancestor "${ROCM_PREBUILD_SHA:?}" refs/rocm-prebuild/pr \
+    || { echo "$ROCM_PREBUILD_SHA is no longer on #$ROCM_PREBUILD_PR" >&2; exit 1; }
   mb=$(git merge-base refs/rocm-prebuild/main "$ROCM_PREBUILD_SHA")
   for f in "$SDF" tools/vllm-rocm/therock_wheels.py; do   # each as merged into current main
     git show "$mb:$f" > "$f.base" 2>/dev/null || : > "$f.base"   # not there yet: empty
@@ -317,6 +322,39 @@ case $MODE in
     ;;
 
   prebuild)
+    # ROCM_PREBUILD_IMAGES: the digests the PR's CI build of ROCM_PREBUILD_SHA recorded. They are
+    # copied when that commit built them with main's recipe and their keys are this merge's, the
+    # runtime images only along with the stack they were built on; anything left is built.
+    # They came from a PR build: the maintainer's /amd-ci cache vouches for them.
+    declare -A copy=()
+    for ref in ${ROCM_PREBUILD_IMAGES:-}; do
+      [[ $ref =~ ^rocm/vllm-dev:pr${ROCM_PREBUILD_PR}-([a-z0-9-]+)@sha256:[0-9a-f]{64}$ ]] \
+        && copy[${BASH_REMATCH[1]}]=$ref \
+        || echo "Ignoring $ref: not a pinned image of #$ROCM_PREBUILD_PR" >&2
+    done
+    if ((${#copy[@]})) && ! git diff --quiet refs/rocm-prebuild/main "$ROCM_PREBUILD_SHA" -- \
+        .buildkite/scripts/rocm/build.sh docker/docker-bake-rocm.hcl; then
+      echo "Not copying: $ROCM_PREBUILD_SHA builds with another build.sh or bake file than main" >&2
+      copy=()
+    fi
+    copied_stack=0
+    # -wheels first: ensure takes the stack tag as the pair being complete.
+    for tag in "stack-$STACK-$Ks-wheels" "stack-$STACK-$Ks" "runtime-$STACK-$Kr" "test-deps-$STACK-$Kr"; do
+      ref=${copy[$tag]:-}
+      [[ -n $ref ]] || continue
+      [[ $tag == stack-* ]] || ((copied_stack)) || continue
+      if digest "$TRUSTED:$tag" >/dev/null; then   # a registry error exits 75 there
+        echo "$TRUSTED:$tag already exists" >&2
+        continue
+      fi
+      echo "--- :docker: Copying $ref to $TRUSTED:$tag" >&2
+      docker buildx imagetools create -t "$TRUSTED:$tag" "$ref" || exit 75   # registry error
+      [[ $tag != "stack-$STACK-$Ks" ]] || copied_stack=1
+    done
+    for tag in "${!copy[@]}"; do
+      [[ $tag == @(stack-$STACK-$Ks|stack-$STACK-$Ks-wheels|runtime-$STACK-$Kr|test-deps-$STACK-$Kr) ]] \
+        || echo "Not copying ${copy[$tag]}: its key is not this merge's" >&2
+    done
     ensure base "stack-$STACK-$Ks" -wheels
     ;;
 

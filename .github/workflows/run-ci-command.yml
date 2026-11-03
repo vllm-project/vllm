@@ -9,9 +9,11 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: write
   contents: read
   issues: write
   pull-requests: write
+  statuses: write
 
 jobs:
   run-ci-command:
@@ -38,6 +40,7 @@ jobs:
           BUILDKITE_AMD_PIPELINE: amd-ci
           BUILDKITE_ORGANIZATION: vllm
           BUILDKITE_PIPELINE: ci
+          CI_MAINTAINERS_TOKEN: ${{ secrets.CI_MAINTAINERS_TOKEN }}
           CI_TRUSTED_USERS: ${{ vars.CI_TRUSTED_USERS }}
           GH_BRANCH_UPDATE_TOKEN: ${{ secrets.CI_BRANCH_UPDATE_TOKEN }}
           GH_TOKEN: ${{ github.token }}

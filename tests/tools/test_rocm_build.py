@@ -4,7 +4,9 @@
 build-context file the keyed Dockerfile parts read, or editing that file would
 ship a stale image."""
 
+import hashlib
 import os
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -61,7 +63,11 @@ def run_build(
     stderr, calls). `existing` are the image refs the registry already has.
     FAILURE=bake|missing|upload breaks the kernel symbol map; FAILURE=registry
     makes every registry lookup fail, FAILURE=pushed only lookups of pushed refs."""
-    (tmp_path / "docker").symlink_to(ROOT / "docker")
+    if mode == "prebuild":  # it rewrites the stack inputs in the checkout
+        shutil.copytree(ROOT / "docker", tmp_path / "docker")
+        (tmp_path / "tools/vllm-rocm").mkdir(parents=True)
+    else:
+        (tmp_path / "docker").symlink_to(ROOT / "docker")
     fake = tmp_path / "bin"
     fake.mkdir()
     calls = tmp_path / "calls"
@@ -75,6 +81,7 @@ case $1 in
   rev-parse) [[ $2 == HEAD ]] && echo "${HEAD_REV:-c1}" || echo "${2%%^*}" ;;
   log) echo 0 ;;
   archive) tar -ch docker ;;
+  diff) exit "${RECIPE_DIFF:-0}" ;;
 esac
 """
     )
@@ -94,6 +101,7 @@ case $2 in
       echo "Digest: sha256:$(printf '0%.0s' {1..64})"
     else
       echo "create ${@: -1}" >> "$CALLS"
+      echo "$5" >> "$REGISTRY"
     fi ;;
   bake)
     echo "bake ${*:5}" >> "$CALLS"
@@ -287,3 +295,78 @@ def test_only_release_builders_share_the_host_network(tmp_path, mode):
     name = "vllm-rocm-release" if mode == "release" else "vllm-rocm"
     assert builder.startswith(f"builder --name {name} ")
     assert ("network=host" in builder) == (mode == "release"), stderr
+
+
+KS = hashlib.sha256(b"layers: zstd-3, mtimes kept\n").hexdigest()[:16]  # fake git
+PIN = "@sha256:" + "a" * 64
+
+
+def run_prebuild(tmp_path: Path, images: list[str], **env: str):
+    return run_build(
+        tmp_path,
+        "prebuild",
+        ROCM_PREBUILD_PR="7",
+        ROCM_PREBUILD_SHA="a" * 40,
+        ROCM_PREBUILD_IMAGES=" ".join(images),
+        **env,
+    )
+
+
+def copies(calls: list[str]) -> list[str]:
+    return [
+        call.removeprefix("create ") for call in calls if call.startswith("create ")
+    ]
+
+
+def test_prebuild_copies_only_the_pr_images_with_this_merges_keys(tmp_path):
+    stack = f"rocm/vllm-dev:pr7-stack-rocm-{KS}{PIN}"
+    wheels = f"rocm/vllm-dev:pr7-stack-rocm-{KS}-wheels{PIN}"
+    status, stderr, calls = run_prebuild(
+        tmp_path,
+        [
+            stack,
+            wheels,
+            f"rocm/vllm-dev:pr7-runtime-rocm-{'0' * 16}{PIN}",  # another key
+            f"rocm/vllm-dev:pr8-test-deps-rocm-{KS}{PIN}",  # another PR
+            f"ghcr.io/x/vllm-dev:pr7-stack-rocm-{KS}{PIN}",  # another repo
+            f"rocm/vllm-dev:pr7-stack-rocm-{KS}",  # not pinned
+        ],
+    )
+    assert status == 0, stderr
+    # -wheels first: the stack tag marks the pair complete.
+    assert copies(calls) == [wheels, stack]
+    assert not any(call.startswith("bake") for call in calls)
+    assert stderr.count("its key is not this merge's") == 1
+    assert stderr.count("not a pinned image of #7") == 3
+
+
+def test_prebuild_copies_runtime_images_only_with_their_stack(tmp_path):
+    stack = f"rocm/vllm-dev:pr7-stack-rocm-{KS}{PIN}"
+    wheels = f"rocm/vllm-dev:pr7-stack-rocm-{KS}-wheels{PIN}"
+    kr = "f" * 16
+    runtime = f"rocm/vllm-dev:pr7-runtime-rocm-{kr}{PIN}"
+    # The trusted stack already exists: a PR runtime built on another stack digest
+    # must not be paired with it.
+    status, stderr, calls = run_build(
+        tmp_path,
+        "prebuild",
+        existing=(f"rocm/vllm-ci:stack-rocm-{KS}",),
+        ROCM_PREBUILD_PR="7",
+        ROCM_PREBUILD_SHA="a" * 40,
+        ROCM_PREBUILD_IMAGES=" ".join([wheels, stack, runtime]),
+    )
+    assert status == 0, stderr
+    assert not any("runtime" in ref for ref in copies(calls))
+
+
+def test_prebuild_copies_nothing_built_with_another_recipe(tmp_path):
+    status, stderr, calls = run_prebuild(
+        tmp_path,
+        [f"rocm/vllm-dev:pr7-stack-rocm-{KS}{PIN}"],
+        RECIPE_DIFF="1",
+    )
+    assert status == 0, stderr
+    assert "another build.sh or bake file" in stderr
+    assert not copies(calls)
+    (tag,) = built_tags(calls, stderr)
+    assert tag.startswith("rocm/vllm-ci:stack-rocm-")
