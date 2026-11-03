@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from copy import copy
 from typing import Any
 
 import torch
@@ -87,9 +88,34 @@ class TargetDependentARSpeculator(DraftModelSpeculator):
         super()._configure_decode_metadata_update()
 
     def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        prefill_config = self.vllm_config
+        cap = self.speculative_config.draft_prefill_cudagraph_max_tokens
+        if cap is not None and cudagraph_mode.has_piecewise_cudagraphs():
+            if cap < self.max_num_reqs * (self.num_speculative_steps + 1):
+                raise ValueError(
+                    "draft_prefill_cudagraph_max_tokens must preserve FULL decode "
+                    "coverage: max_num_seqs * (num_speculative_tokens + 1)"
+                )
+            compilation = copy(self.vllm_config.compilation_config)
+            sizes = [n for n in compilation.cudagraph_capture_sizes or () if n <= cap]
+            if not sizes:
+                raise ValueError(
+                    "No configured draft prefill CUDA graph capture sizes fit "
+                    "draft_prefill_cudagraph_max_tokens"
+                )
+            compilation.cudagraph_capture_sizes = sizes
+            # FULL descriptors can round above the last retained size.
+            # Keep their original upper bound while limiting mixed captures.
+            prefill_config = copy(self.vllm_config)
+            prefill_config.compilation_config = compilation
+        elif cap is not None:
+            logger.warning_once(
+                "draft_prefill_cudagraph_max_tokens has no effect without "
+                "PIECEWISE CUDA graphs."
+            )
         # Initialize cudagraph manager for draft prefill (draft position 0).
         self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
-            self.vllm_config,
+            prefill_config,
             self.device,
             cudagraph_mode,
             self.num_speculative_steps + 1,

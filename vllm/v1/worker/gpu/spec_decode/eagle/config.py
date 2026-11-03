@@ -34,7 +34,9 @@ def check_draft_lm_head_quantization(spec: SpeculativeConfig) -> None:
 class EagleSpeculatorConfig(DraftModelSpeculatorConfig):
     base_method = "eagle"
     speculator_class = "vllm.v1.worker.gpu.spec_decode.eagle.speculator.EagleSpeculator"
-    supported_options = frozenset({"draft_lm_head_quantization"})
+    supported_options = frozenset(
+        {"draft_lm_head_quantization", "draft_prefill_cudagraph_max_tokens"}
+    )
     uses_target_hidden_states = True
     supports_watermarking = True
 
