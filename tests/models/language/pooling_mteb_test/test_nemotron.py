@@ -39,6 +39,14 @@ RERANK_MODELS = [
         is_prefix_caching_supported=False,
         is_chunked_prefill_supported=False,
     ),
+    # Declares its score template in its Sentence Transformers config, so no
+    # chat template is passed.
+    RerankModelInfo(
+        "nvidia/llama-nemotron-rerank-vl-1b-v2",
+        architecture="LlamaNemotronVLForSequenceClassification",
+        mteb_score=0.33919,
+        mteb_tol=1e-2,
+    ),
 ]
 
 

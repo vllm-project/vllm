@@ -1,13 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-from collections.abc import Iterable
 from math import prod
 from typing import TYPE_CHECKING
 
+import regex as re
 import torch
 import torch.nn.functional as F
-from torch import nn
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -40,7 +39,6 @@ from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import 
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     per_tensor_dequantize,
 )
-from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
@@ -52,10 +50,23 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+# Matches any layer-qualified module path (e.g.
+# ``model.layers.5.mlp.shared_expert`` or
+# ``model.language_model.model.layers.5.mlp.shared_expert``) so skip reasons
+# are reported once per cause instead of once per layer.
+_LAYER_MODULE_PATH_RE = re.compile(r"(?:[\w]+\.)*(?:layers|mtp)\.\d+\.[\w.]*")
+
+
+def _normalize_skip_reason(reason: str) -> str:
+    return _LAYER_MODULE_PATH_RE.sub("<shared_expert>", reason)
+
+
 def resolve_layer_fused_shared_expert(
     quant_config: "QuantizationConfig | None",
     prefix: str,
     shared_expert_name: str = "shared_experts",
+    moe_backend: str | None = None,
+    disable_under_ep: bool = False,
 ) -> bool:
     """Resolve whether AITER fused shared-expert execution is enabled.
 
@@ -63,6 +74,10 @@ def resolve_layer_fused_shared_expert(
         quant_config: Model quantization configuration.
         prefix: MoE module prefix.
         shared_expert_name: Shared-expert module name under ``prefix``.
+        moe_backend: MoE backend that runs the fused shared expert.
+        disable_under_ep: Whether this model family does not support FSE under
+            expert parallelism. Kept as an explicit call-site policy instead of
+            branching on model type here.
 
     Returns:
         Whether AITER fused shared experts are enabled.
@@ -74,15 +89,31 @@ def resolve_layer_fused_shared_expert(
     # NOTE: is_fusion_moe_shared_experts_enabled is decorated with @if_aiter_supported
     # that returns None if AITER is not available.
     fse_requested = bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
-    fse_compatible, fse_reason = (
-        is_shared_expert_quant_fse_compatible(
+
+    # TODO: should it be disabled for all models?
+    skip_reason: str | None = None
+    if fse_requested and disable_under_ep:
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        parallel_config = (
+            vllm_config.parallel_config if vllm_config is not None else None
+        )
+        if parallel_config is not None and parallel_config.enable_expert_parallel:
+            fse_requested = False
+            skip_reason = "expert parallelism is enabled"
+
+    if fse_requested:
+        fse_compatible, fse_reason = is_shared_expert_quant_fse_compatible(
             quant_config,
             f"{prefix}.experts",
             f"{prefix}.{shared_expert_name}",
+            moe_backend=moe_backend,
         )
-        if fse_requested
-        else (True, None)
-    )
+        if not fse_compatible:
+            skip_reason = fse_reason or "unknown reason"
+    else:
+        fse_compatible = True
     is_fused_shared_expert_enabled = fse_requested and fse_compatible
 
     # In online shared_expert quantization is used, register it to
@@ -118,50 +149,16 @@ def resolve_layer_fused_shared_expert(
                     quant_key_str,
                     target_pattern,
                 )
-    if fse_requested and not is_fused_shared_expert_enabled:
-        logger.warning(
+    if skip_reason is not None:
+        # Keep the full per-layer reason at debug level; the warning below is
+        # deduplicated by cause so a long model logs it once.
+        logger.debug("Skipping shared-expert fusion at %s: %s", prefix, skip_reason)
+        logger.warning_once(
             "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is enabled but "
-            "cannot be enabled - skipping for this layer: %s.",
-            fse_reason,
+            "cannot be enabled - skipping shared-expert fusion: %s.",
+            _normalize_skip_reason(skip_reason),
         )
     return is_fused_shared_expert_enabled
-
-
-def is_model_fused_shared_expert_compatible(
-    layers: nn.ModuleList | Iterable[nn.Module],
-    moe_cls: type[nn.Module],
-    moe_name: str,
-) -> bool:
-    """Resolve one fused-shared-expert state for a model's MoE layers."""
-
-    def get_moe_layer(layer: nn.Module) -> nn.Module | None:
-        for name in moe_name.split("."):
-            layer = getattr(layer, name, None)
-            if layer is None:
-                return None
-        return layer
-
-    moe_layers = (
-        moe_layer
-        for layer in layers
-        if not isinstance(layer, PPMissingLayer)
-        and (moe_layer := get_moe_layer(layer)) is not None
-        and isinstance(moe_layer, moe_cls)
-    )
-
-    enabled = [
-        getattr(layer, "is_fused_shared_expert_enabled", False) for layer in moe_layers
-    ]
-    enabled_count = sum(enabled)
-    disabled_count = len(enabled) - enabled_count
-    if enabled_count > 0 and disabled_count > 0:
-        raise NotImplementedError(
-            "Fused shared experts must be enabled for all MoE layers; found "
-            f"{enabled_count} enabled and {disabled_count} disabled layers. "
-            "Per-layer fused shared experts is not yet supported. Please open "
-            "an issue."
-        )
-    return enabled_count > 0 and disabled_count == 0
 
 
 @triton.jit
@@ -235,6 +232,73 @@ def count_expert_num_tokens(
     return expert_num_tokens
 
 
+@triton.jit
+def _remap_topk_to_local_kernel(
+    topk_ids_ptr,  # [n] global expert IDs (-1 = invalid)
+    expert_map_ptr,  # [num_experts] global->local (-1 for non-local)
+    out_ptr,  # [n] local expert IDs (-1 for invalid/non-local)
+    n_elements,
+    BLOCK: tl.constexpr,
+    OUT_INT32: tl.constexpr,
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    mask = offs < n_elements
+    tid = tl.load(topk_ids_ptr + offs, mask=mask, other=-1)
+    # Gather expert_map[tid] for valid (tid >= 0); clamp the index so invalid
+    # rows don't read OOB, then select -1 for them. Matches
+    # torch.where(tid >= 0, expert_map[clamp(tid, 0)], -1) -- preserving -1 (a
+    # plain expert_map[-1] would wrap to a valid local id and misroute).
+    valid = tid >= 0
+    idx = tl.where(valid, tid, 0)
+    local = tl.load(expert_map_ptr + idx, mask=mask, other=-1)
+    if OUT_INT32:
+        out = tl.where(valid, local, -1)
+    else:
+        out = tl.where(valid, local.to(tl.int64), -1)
+    tl.store(out_ptr + offs, out, mask=mask)
+
+
+def remap_topk_to_local(
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    *,
+    out_dtype: torch.dtype = torch.int64,
+) -> torch.Tensor:
+    """Map global expert ids to local ids; non-local or invalid routes become -1.
+
+    Replaces ``torch.where(topk_ids >= 0, expert_map[topk_ids.clamp(min=0)], -1)``
+    with one kernel. Returns a NEW tensor -- the caller keeps the original
+    ``topk_ids`` as ``global_topk_ids``, so this must not write in place.
+
+    Args:
+        topk_ids: Global expert ids; -1 marks invalid slots. Must be contiguous;
+            the Triton kernel indexes by flat ``numel()`` offsets.
+        expert_map: Global-to-local mapping; -1 marks non-local experts.
+        out_dtype: Output dtype, ``torch.int32`` or ``torch.int64``.
+
+    Returns:
+        Remapped local expert ids with the same shape as ``topk_ids``.
+
+    """
+    if out_dtype not in (torch.int32, torch.int64):
+        raise ValueError(f"out_dtype must be int32 or int64, got {out_dtype}")
+    assert topk_ids.is_contiguous()
+    out = torch.empty(topk_ids.shape, dtype=out_dtype, device=topk_ids.device)
+    n = topk_ids.numel()
+    BLOCK = 1024
+    grid = (triton.cdiv(n, BLOCK),)
+    _remap_topk_to_local_kernel[grid](
+        topk_ids,
+        expert_map,
+        out,
+        n,
+        BLOCK=BLOCK,
+        OUT_INT32=out_dtype == torch.int32,
+    )
+    return out
+
+
 def _resize_cache(x: torch.Tensor, v: tuple[int, ...]) -> torch.Tensor:
     """Shrink the given tensor and apply the given view to it.  This is
     used to resize the intermediate fused_moe caches.
@@ -258,6 +322,7 @@ def _fp8_quantize(
     A_scale: torch.Tensor | None,
     per_act_token: bool,
     block_shape: list[int] | None = None,
+    is_scale_transposed: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Perform fp8 quantization on the inputs.  If a block_shape
     is provided, the output will be blocked.
@@ -272,7 +337,9 @@ def _fp8_quantize(
         assert not per_act_token
         assert len(block_shape) == 2
         _, block_k = block_shape[0], block_shape[1]
-        A, A_scale = per_token_group_quant_fp8(A, block_k)
+        A, A_scale = per_token_group_quant_fp8(
+            A, block_k, column_major_scales=is_scale_transposed
+        )
         assert cdiv(A.size(-1), block_k) == A_scale.size(-1)
 
     return A, A_scale
@@ -395,6 +462,7 @@ def moe_kernel_quantize_input(
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
     is_scale_swizzled: bool = True,
+    is_scale_transposed: bool = False,
     quantization_emulation: bool = False,
     mx_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -402,7 +470,9 @@ def moe_kernel_quantize_input(
         if quantization_emulation:
             return _fp8_quantize_dequantize(A, A_scale)
         else:
-            return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
+            return _fp8_quantize(
+                A, A_scale, per_act_token_quant, block_shape, is_scale_transposed
+            )
     elif quant_dtype == torch.int8:
         if quantization_emulation:
             raise NotImplementedError(

@@ -39,6 +39,9 @@ _R = TypeVar("_R")
 class CompilationTimes(NamedTuple):
     language_model: float
     encoder: float
+    num_kv_blocks: int | None = None
+    """KV cache blocks that fit in the memory measured after warmup, reported
+    by workers with an extensible KV cache."""
 
 
 class WorkerBase:
@@ -109,18 +112,37 @@ class WorkerBase:
         backends = get_current_attn_backends(self.vllm_config)
         return [layout.name for layout in get_supported_kv_cache_layouts(backends)]
 
-    def set_kv_cache_layout(self, kv_cache_layout: str) -> None:
-        """Adopt the KV cache layout resolved by the engine core."""
+    def set_kv_cache_layout(
+        self, kv_cache_layout: str, cp_kv_cache_interleave_size: int
+    ) -> None:
+        """Assign the KV cache layout and CP interleave size resolved by the core."""
         record_kv_cache_layout(self.vllm_config.cache_config, kv_cache_layout)
+        self.vllm_config.parallel_config.cp_kv_cache_interleave_size = (
+            cp_kv_cache_interleave_size
+        )
 
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
 
         Returns:
-            Compilation times (language_model, encoder) in seconds.
+            Compilation times (language_model, encoder) in seconds, and the
+            measured KV cache size for an extensible KV cache.
 
         """
         raise NotImplementedError
+
+    def extensible_kv_cache_unsupported_reason(self) -> str | None:
+        """Why this worker cannot back an extensible KV cache, or None."""
+        return f"{type(self).__name__} does not support the extensible KV cache"
+
+    def disable_extensible_kv_cache(self) -> None:
+        self.vllm_config.cache_config.enable_extensible_kv_cache = False
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        """Commit the final size of an extensible KV cache."""
+        raise NotImplementedError(
+            f"{type(self).__name__} does not support the extensible KV cache."
+        )
 
     def check_health(self) -> None:
         """Basic health check (override for device-specific checks)."""
@@ -157,6 +179,11 @@ class WorkerBase:
         """Whether this worker can update its configured speculative model."""
         return False
 
+    def has_incomplete_weight_update(self) -> bool:
+        """Whether a weight update started and has not finished successfully,
+        so the model weights may be incomplete."""
+        return False
+
     def apply_model(self, fn: Callable[[nn.Module], _R]) -> _R:
         """Apply a function on the model inside this worker."""
         return fn(self.get_model())
@@ -186,12 +213,6 @@ class WorkerBase:
         self, grammar_output: GrammarOutput
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         """Should be called immediately after execute_model iff it returned None."""
-        raise NotImplementedError
-
-    def get_cache_block_size_bytes(self) -> int:
-        """Return the size of a single cache block, in bytes. Used in
-        speculative decoding.
-        """
         raise NotImplementedError
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
@@ -244,9 +265,17 @@ class WorkerWrapperBase:
         # Initialized after init_worker is called
         self.worker: WorkerBase
         self.vllm_config: VllmConfig
+        self._worker_extension_cls: type | None = None
 
     def shutdown(self) -> None:
         if self.worker is not None:
+            hook = getattr(self._worker_extension_cls, "destroy_worker_extension", None)
+            if callable(hook):
+                try:
+                    hook(self.worker)
+                except Exception:
+                    # Don't raise: callers still need to run their own teardown.
+                    logger.exception("Worker extension destroy hook failed.")
             self.worker.shutdown()
 
     def update_environment_variables(
@@ -293,6 +322,7 @@ class WorkerWrapperBase:
                 "and pass the qualified name of the class as a string."
             )
 
+        worker_extension_cls: type | None = None
         if parallel_config.worker_extension_cls:
             worker_extension_cls = resolve_obj_by_qualname(
                 parallel_config.worker_extension_cls
@@ -336,6 +366,7 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
+            self._worker_extension_cls = worker_extension_cls
 
     def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
@@ -343,11 +374,20 @@ class WorkerWrapperBase:
         with set_current_vllm_config(self.vllm_config):
             self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        # The KV connector created here reads the current config.
+        assert self.vllm_config is not None
+        with set_current_vllm_config(self.vllm_config):
+            self.worker.extend_kv_cache(num_blocks)  # type: ignore
+
     def init_device(self):
         assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):
             # To make vLLM config available during device initialization
             self.worker.init_device()  # type: ignore
+            hook = getattr(self._worker_extension_cls, "init_worker_extension", None)
+            if callable(hook):
+                hook(self.worker)
 
     def __getattr__(self, attr: str):
         return getattr(self.worker, attr)

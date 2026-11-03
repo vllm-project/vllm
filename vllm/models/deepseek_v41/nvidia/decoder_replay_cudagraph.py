@@ -10,7 +10,7 @@ import torch
 
 from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
 from vllm.config import CUDAGraphMode, VllmConfig
-from vllm.config.kernel import MEGA_MOE_BACKENDS
+from vllm.config.kernel import NATIVE_MEGA_MOE_BACKENDS
 from vllm.forward_context import get_forward_context, override_forward_context
 from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -56,8 +56,9 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         config, act = vllm_config.model_config.hf_config, vllm_config.model_config.dtype
         assert isinstance(act, torch.dtype)
         hc, h, f32 = config.hc_mult, config.hidden_size, torch.float32
-        mega_moe = vllm_config.kernel_config.moe_backend in MEGA_MOE_BACKENDS
-        ids = torch.int64 if mega_moe else torch.int32
+        # DeepseekV4Model.forward casts input_ids to int64 for native MegaMoE only.
+        native = vllm_config.kernel_config.moe_backend in NATIVE_MEGA_MOE_BACKENDS
+        ids = torch.int64 if native else torch.int32
         # hidden_states, positions, input_ids, pre_mix, post_mix, res_mix, residual
         shapes = [(h,), (), (), (hc,), (hc, 1), (hc, hc), (hc, h)]
         dtypes = [act, torch.int64, ids, f32, f32, f32, act]
@@ -67,9 +68,21 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
         ]
 
     def capture_replay_graphs(
-        self, prepare: Callable[[BatchExecutionDescriptor], None]
+        self,
+        prepare: Callable[[BatchExecutionDescriptor], None],
+        stream: torch.cuda.Stream | None = None,
     ) -> None:
-        """Capture each size on the replay batch ``prepare`` sets on the layers."""
+        """Capture each size on the replay batch ``prepare`` sets on the layers.
+
+        On the model graphs' ``stream`` they share its free blocks of the graph
+        pool: a replay graph runs in a model graph's eager break, after it has
+        gathered its inputs into ``input_buffers`` and before the model graph
+        reads its outputs from the break's own buffers, so no model graph
+        tensor in the pool is live while it runs. Aux hidden states captured
+        before the replay layers would be, so with those it keeps its own.
+        """
+        if self.layers.has_early_aux():
+            stream = None
 
         def create_forward_fn(desc: BatchExecutionDescriptor, warmup: bool):
             prepare(desc)
@@ -85,7 +98,7 @@ class DecoderReplayCudaGraphManager(CudaGraphManager):
 
             return forward_fn
 
-        self.capture(create_forward_fn, "Capturing decoder replay CUDA graphs")
+        self.capture(create_forward_fn, "Capturing decoder replay CUDA graphs", stream)
         self.layers.replay_batch = None
 
     def run(self, rows: torch.Tensor, inputs: tuple) -> tuple[torch.Tensor, ...]:

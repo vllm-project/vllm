@@ -5,12 +5,12 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.generate.base.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.renderers.chat_utils import make_tool_call_id
 from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
