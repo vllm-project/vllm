@@ -6,12 +6,13 @@ from types import SimpleNamespace
 
 import pytest
 
+import vllm.utils.deep_gemm as deep_gemm
 from vllm.config import AttentionConfig
 from vllm.model_executor.models.config import MODELS_CONFIG_MAP
 
 
 @pytest.mark.parametrize(
-    "arch,default",
+    "arch,sm100_default",
     [
         ("DeepseekV32ForCausalLM", "bfloat16"),
         ("DeepseekV4ForCausalLM", "bfloat16"),
@@ -20,10 +21,12 @@ from vllm.model_executor.models.config import MODELS_CONFIG_MAP
         ("Glm5NextForCausalLM", "float32"),
     ],
 )
+@pytest.mark.parametrize("sm100", [True, False])
 @pytest.mark.parametrize("requested", ["auto", "float32", "bfloat16"])
 def test_indexer_logits_dtype_follows_model_default_unless_set(
-    arch: str, default: str, requested: str
+    monkeypatch, arch: str, sm100_default: str, sm100: bool, requested: str
 ) -> None:
+    monkeypatch.setattr(deep_gemm, "mqa_logits_use_mx_scales", lambda: sm100)
     attention_config = AttentionConfig(
         indexer_logits_dtype=requested, indexer_sparse_logits=False
     )
@@ -42,5 +45,6 @@ def test_indexer_logits_dtype_follows_model_default_unless_set(
     MODELS_CONFIG_MAP[arch].verify_and_update_config(vllm_config)
 
     # The indexer layers resolve a remaining "auto" to float32.
+    default = sm100_default if sm100 else "float32"
     expected = default if requested == "auto" else requested
     assert attention_config.resolve_indexer_logits_dtype("float32") == expected
