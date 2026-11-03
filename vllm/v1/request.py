@@ -292,6 +292,16 @@ class Request:
         if self._block_hasher is not None:
             self.block_hashes.extend(self._block_hasher(self))
 
+    def truncate_block_hashes(
+        self, hash_block_size: int, num_hash_lookahead_tokens: int = 0
+    ) -> None:
+        """Discard hashes invalidated by truncating the request's tokens."""
+        num_valid_hashes = (
+            max(0, self.num_tokens - num_hash_lookahead_tokens) // hash_block_size
+        )
+        del self.block_hashes[num_valid_hashes:]
+        self._prompt_embeds_per_block_hashes.clear()
+
     @property
     def use_structured_output(self) -> bool:
         return self.structured_output_request is not None

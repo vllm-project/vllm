@@ -947,11 +947,11 @@ def test_dsa_models_default_to_mrv2_and_breakable_cudagraph(
     try:
         assert VllmConfig.use_v2_model_runner.fget(config)
         assert VllmConfig._maybe_enable_breakable_cudagraph(config)
-        assert is_breakable_cudagraph_enabled()
+        assert is_breakable_cudagraph_enabled(config.compilation_config)
+        assert "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
         assert config.compilation_config.mode == CompilationMode.NONE
         assert config.compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
     finally:
-        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
         default_breakable_cudagraph_architectures.cache_clear()
 
 
@@ -991,10 +991,11 @@ def test_breakable_cudagraph_platform_default(
 
     try:
         assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
+        assert config.compilation_config.use_breakable_cudagraph is expected
         if expected:
             assert config.compilation_config.mode == CompilationMode.NONE
+        assert "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
     finally:
-        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
         default_breakable_cudagraph_architectures.cache_clear()
 
 
@@ -1050,10 +1051,79 @@ def test_batch_invariant_breakable_cudagraph(
     config.compilation_config = CompilationConfig()
     try:
         assert config._maybe_enable_breakable_cudagraph() is expected
+        assert config.compilation_config.use_breakable_cudagraph is expected
         if expected:
             assert config.compilation_config.mode == CompilationMode.NONE
     finally:
-        os.environ.pop("VLLM_USE_BREAKABLE_CUDAGRAPH", None)
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+def _breakable_resolution_stub(architecture: str):
+    config = SimpleNamespace(
+        model_config=SimpleNamespace(architectures=[architecture]),
+        compilation_config=CompilationConfig(),
+    )
+    config._uses_breakable_cudagraph_by_default = lambda: (
+        VllmConfig._uses_breakable_cudagraph_by_default(config)
+    )
+    return config
+
+
+def test_breakable_cudagraph_resolution_is_per_config(monkeypatch):
+    """Resolving breakable CUDA graphs for one model must not set
+    VLLM_USE_BREAKABLE_CUDAGRAPH process-wide or affect later configs."""
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+
+    monkeypatch.delenv("VLLM_USE_BREAKABLE_CUDAGRAPH", raising=False)
+    monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: True)
+    default_breakable_cudagraph_architectures.cache_clear()
+
+    try:
+        qwen35 = _breakable_resolution_stub("Qwen3_5ForCausalLM")
+        assert VllmConfig._maybe_enable_breakable_cudagraph(qwen35) is True
+        assert qwen35.compilation_config.use_breakable_cudagraph is True
+        assert qwen35.compilation_config.mode == CompilationMode.NONE
+        assert "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
+
+        # A later config for a compiled-by-default model is unaffected.
+        qwen25_vl = _breakable_resolution_stub("Qwen2_5_VLForConditionalGeneration")
+        assert VllmConfig._maybe_enable_breakable_cudagraph(qwen25_vl) is False
+        assert qwen25_vl.compilation_config.use_breakable_cudagraph is False
+        assert qwen25_vl.compilation_config.mode is None
+    finally:
+        default_breakable_cudagraph_architectures.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("architecture", "env_value", "expected"),
+    [
+        # Explicit opt-out wins over the breakable-by-default architecture.
+        ("Qwen3_5ForCausalLM", "0", False),
+        ("Qwen3_5ForCausalLM", "1", True),
+        # Explicit opt-in enables breakable graphs for any architecture.
+        ("Qwen2_5_VLForConditionalGeneration", "1", True),
+        ("Qwen2_5_VLForConditionalGeneration", "0", False),
+    ],
+)
+def test_breakable_cudagraph_env_override(
+    monkeypatch, architecture, env_value, expected
+):
+    from vllm.config.vllm import default_breakable_cudagraph_architectures
+
+    monkeypatch.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", env_value)
+    monkeypatch.delenv("VLLM_BATCH_INVARIANT", raising=False)
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: False)
+    default_breakable_cudagraph_architectures.cache_clear()
+
+    try:
+        config = _breakable_resolution_stub(architecture)
+        assert VllmConfig._maybe_enable_breakable_cudagraph(config) is expected
+        assert config.compilation_config.use_breakable_cudagraph is expected
+        if expected:
+            assert config.compilation_config.mode == CompilationMode.NONE
+    finally:
         default_breakable_cudagraph_architectures.cache_clear()
 
 
@@ -1079,7 +1149,9 @@ def test_dsa_models_select_matching_mtp(model_type, expected_architecture):
     assert hf_config.architectures == [expected_architecture]
 
 
-@pytest.mark.parametrize("method", ["extract_hidden_states", "ngram", "ngram_gpu"])
+@pytest.mark.parametrize(
+    "method", ["extract_hidden_states", "ngram", "ngram_gpu", "suffix"]
+)
 def test_v2_model_runner_supports_speculative_method(method):
     config = VllmConfig()
     config.speculative_config = cast(
@@ -1092,6 +1164,25 @@ def test_v2_model_runner_supports_speculative_method(method):
     )
 
     assert config._get_v2_model_runner_unsupported_features() == []
+
+
+def test_suffix_config_without_arctic_inference(monkeypatch):
+    """Suffix decoding config no longer needs Arctic Inference: Model Runner
+    V2 runs it on the GPU, and the V1 proposer checks for Arctic itself."""
+    from vllm.utils.import_utils import _has_module
+
+    # Make arctic_inference unimportable, whichever way a check looks for it.
+    monkeypatch.setitem(sys.modules, "arctic_inference", None)
+    _has_module.cache_clear()
+    try:
+        config = SpeculativeConfig(method="suffix")
+    finally:
+        _has_module.cache_clear()
+    assert config.num_speculative_tokens == 8
+    shallow = SpeculativeConfig(method="suffix", suffix_decoding_max_tree_depth=4)
+    assert shallow.num_speculative_tokens == 4
+    with pytest.raises(ValueError, match="suffix_decoding_corpus_tokens"):
+        SpeculativeConfig(method="suffix", suffix_decoding_corpus_tokens=-1)
 
 
 @pytest.mark.parametrize("use_heterogeneous_vocab", [False, True])
