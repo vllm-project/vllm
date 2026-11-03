@@ -432,7 +432,7 @@ FROM dev AS csrc-inputs
 COPY setup.py pyproject.toml vllm/envs.py /in/
 RUN cd /in && mkdir -p /out/vllm && : > /out/vllm/__init__.py \
     && awk '/^\[/ { keep = /^\[(project|tool\.setuptools)/ } keep' pyproject.toml > /out/pyproject.toml \
-    && python3 - <<'EOF'
+    && PYTHONDONTWRITEBYTECODE=1 python3 - <<'EOF'
 import ast, re
 setup, body = open("setup.py").read(), ast.parse(open("envs.py").read()).body
 def names(n):
