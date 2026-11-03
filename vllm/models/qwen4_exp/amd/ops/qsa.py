@@ -892,12 +892,16 @@ def qsa_sparse_paged_attention(
     else:
         block_n, target_splits, partial_warps = 64, 1, 2
         if current_platform.is_rocm():
-            from vllm.platforms.rocm import on_gfx942
+            from vllm.platforms.rocm import get_cdna_version
 
-            # On gfx942 (MI325X), BLOCK_N=32 is ~2x faster with BLOCK_M=16
-            # but ~5x slower with BLOCK_M=8.
-            if on_gfx942() and block_m >= 16:
+            # One warp per program is faster on CDNA3 and CDNA4, except BF16
+            # K/V with BLOCK_M >= 16 on CDNA3, where BLOCK_N=32 is faster
+            # (BLOCK_N=32 with one warp faults there).
+            cdna_version = get_cdna_version()
+            if cdna_version == 3 and block_m >= 16 and not is_fp8:
                 block_n = 32
+            elif cdna_version in (3, 4):
+                partial_warps = 1
     # gfx942 and gfx950 have a 64 KiB LDS limit. One software-pipelining
     # stage keeps the wide TP4 tile within that shared-memory budget.
     partial_stages = 1 if current_platform.is_rocm() else 2
