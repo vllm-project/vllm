@@ -356,7 +356,7 @@ class FlashAttentionBackend(AttentionBackend):
     @staticmethod
     def _get_xpu_kernel_block_sizes() -> list[int | MultipleOf]:
         # XPU kernels run any multiple of 16, but only multiples of 64 reliably
-        # hit compiled kernels; other sizes may fall back to a slow reference
+        # hit compiled kernels; other sizes may not be perf optimized
         # path. Block-size heuristics (composite preferred size, SWA and
         # skip-layer sizing) pick the smallest supported size, so advertise 16
         # only when the user explicitly asked for a non-64-multiple block size.
