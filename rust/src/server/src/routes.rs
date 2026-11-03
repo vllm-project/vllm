@@ -102,6 +102,13 @@ fn runtime_lora_updating_enabled() -> bool {
         .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
+fn cohere_api_enabled() -> bool {
+    std::env::var("VLLM_ENABLE_COHERE_API")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .is_some_and(|value| value != 0)
+}
+
 /// Optional route families, each enabled by a CLI flag or an environment
 /// variable as in the Python frontend.
 #[derive(Debug, Clone, Copy, Default)]
@@ -112,6 +119,8 @@ struct RouteGates {
     runtime_lora_updating: bool,
     /// `--enable-scale-out`: scale-out routes, which answer 403 when disabled.
     scale_out: bool,
+    /// `VLLM_ENABLE_COHERE_API`: Cohere v2 chat routes.
+    cohere_api: bool,
 }
 
 impl RouteGates {
@@ -120,6 +129,7 @@ impl RouteGates {
             dev_mode: server_dev_mode_enabled(),
             runtime_lora_updating: runtime_lora_updating_enabled(),
             scale_out: state.api_server_options.enable_scale_out,
+            cohere_api: cohere_api_enabled(),
         }
     }
 }
@@ -179,6 +189,14 @@ fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
         router = router.route("/inference/v1/generate", post(disabled_scale_out));
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
             router = router.route(path, post(disabled_scale_out));
+        }
+    }
+
+    if gates.cohere_api {
+        // TODO: implement the Cohere v2 chat API.
+        router = router.route("/cohere/v2/chat", post(not_supported));
+        if gates.scale_out {
+            router = router.route("/cohere/v2/chat/render", post(not_supported));
         }
     }
 
