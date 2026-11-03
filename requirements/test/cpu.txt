@@ -1190,7 +1190,7 @@ torch==2.14.0+cpu
     #   xgrammar
 torch-abi-audit==0.0.1
     # via -r requirements/test/cuda.in
-torchaudio==2.11.0+cpu
+torchaudio==2.11.1+cpu
     # via
     #   -r requirements/test/cuda.in
     #   encodec
