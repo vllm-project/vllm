@@ -395,9 +395,7 @@ pub async fn decoded_text_event_stream(
             return Ok(());
         }
 
-        if intermediate
-            && (!decoded.text.is_empty() || !new_token_ids.is_empty() || decoded_logprobs.is_some())
-        {
+        if intermediate {
             y.yield_ok(DecodedTextEvent::TextDelta {
                 decoded,
                 sampled: SampledDelta {
@@ -518,6 +516,47 @@ mod tests {
         assert_eq!(progress.request_id, "request");
         assert_eq!(progress.sequence, 1);
         assert_eq!(progress.remaining_compute_tokens, 1);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                DecodedTextEvent::PrefillProgress(_),
+                DecodedTextEvent::Start { .. },
+                DecodedTextEvent::TextDelta {
+                    finished: Some(_),
+                    ..
+                }
+            ]
+        ));
+    }
+
+    #[tokio::test]
+    async fn empty_ordinary_output_remains_a_stream_event() {
+        let first = GenerateOutput::for_test(Some(Arc::from([1, 2])), vec![], None);
+        let terminal =
+            GenerateOutput::for_test(None, ascii_tokens("a"), Some(FinishReason::Length));
+        let events = decoded_text_event_stream(
+            "request".into(),
+            Arc::new(TestTokenizer::new()),
+            stream::iter([Ok(first), Ok(terminal)]),
+            TextDecodeOptions::default(),
+            true,
+        )
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                DecodedTextEvent::Start { .. },
+                DecodedTextEvent::TextDelta { finished: None, .. },
+                DecodedTextEvent::TextDelta {
+                    finished: Some(_),
+                    ..
+                }
+            ]
+        ));
     }
 
     /// Convert ASCII string to token IDs (one byte per token).
