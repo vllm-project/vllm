@@ -292,7 +292,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_scale", w13_scale)
-        set_weight_attrs(w13_scale, extra_weight_attrs)
+        set_weight_attrs(w13_scale, {**extra_weight_attrs, "padding_value": 1})
 
         w2_scale = torch.nn.Parameter(
             torch.ones(
@@ -308,7 +308,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_scale)
-        set_weight_attrs(w2_scale, extra_weight_attrs)
+        set_weight_attrs(w2_scale, {**extra_weight_attrs, "padding_value": 1})
 
         if not self.symmetric:
             w13_zp = torch.nn.Parameter(

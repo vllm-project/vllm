@@ -154,8 +154,8 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.CHANNEL.value}
         )
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w13_weight_scale, {**extra_weight_attrs, "padding_value": 1})
+        set_weight_attrs(w2_weight_scale, {**extra_weight_attrs, "padding_value": 1})
 
         # INPUT_SCALES
         assert not self.static_input_scales

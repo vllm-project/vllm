@@ -10,7 +10,9 @@ Between ``begin`` and a successful ``finish`` the model must not run; there is
 no rollback, the next full update repairs it.
 
 Delivery contract (not checked here): an update delivers every checkpoint
-tensor of each module whose PWAL changes its layout or is not idempotent.
+tensor of each module whose PWAL changes its layout or is not idempotent, and
+every checkpoint tensor loaded into a padded parameter (`mark_padded`), which
+``begin`` refills whole.
 """
 
 from collections.abc import Iterator
@@ -120,7 +122,8 @@ def record_checkpoint_layout(model: torch.nn.Module) -> None:
     for _, t in _loadable_tensors(model):
         if not t.is_meta and not hasattr(t, "_ckpt"):
             attrs = {k: t.__dict__[k] for k in _LOADER_ATTRS if k in t.__dict__}
-            t._ckpt = (model._ckpt_owner, _layout(t), attrs)
+            storage = t.untyped_storage().data_ptr()
+            t._ckpt = (model._ckpt_owner, _layout(t), attrs, storage)
     # every name, aliases included: post-load processing may replace either
     model._ckpt_param_names = frozenset(
         name
@@ -173,6 +176,8 @@ def _checkpoint_views(
             )
         shape, stride, dtype, offset = ckpt[1]
         storage = t.untyped_storage()
+        if storage.data_ptr() != ckpt[3]:  # moved, e.g. `set_` into a fused buffer
+            offset = t.storage_offset()
         span = 0 if 0 in shape else 1 + sum((n - 1) * s for n, s in zip(shape, stride))
         need = (offset + span) * dtype.itemsize
         if need > storage.nbytes():
@@ -206,6 +211,11 @@ def begin_direct_reload(model: torch.nn.Module) -> None:
         for k in _LOADER_ATTRS:
             t.__dict__.pop(k, None)
         t.__dict__.update(t._ckpt[2])
+        if getattr(t, "has_padding", False):
+            # Restore the cold-start padding the loaders skip (PWAL left its
+            # output there). Erases the data region too: every checkpoint
+            # tensor loaded into `t` must be resent, none may be excluded.
+            t.data.fill_(getattr(t, "padding_value", 0))
     logger.info(
         "direct reload: %d tensors viewed back to checkpoint layout", len(views)
     )

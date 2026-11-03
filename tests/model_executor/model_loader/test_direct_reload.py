@@ -11,9 +11,7 @@ post-load processing has the hazards found on real models:
     registered as a retired parameter (NVFP4 ``weight_scale_2``);
 (e) post-load processing that must never run on converted bytes (packing);
 (f) post-load processing grows a weight (padding): a reload writes it into
-    the existing storage to keep its address;
-(g) the loader writes a smaller checkpoint slice and records the rest as
-    padding (MoE experts), which post-load processing reads.
+    the existing storage to keep its address.
 
 Invariant: a reload equals a cold start on the new weights, at the startup
 addresses.
@@ -37,11 +35,7 @@ from vllm.model_executor.model_loader.reload.direct import (
 )
 from vllm.model_executor.model_loader.utils import process_weights_after_loading
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.utils import (
-    mark_padding,
-    replace_parameter,
-    retire_parameter,
-)
+from vllm.model_executor.utils import replace_parameter, retire_parameter
 
 _MODEL_CONFIG = SimpleNamespace(
     word_embeddings_untied_by_checkpoint=False, quantization=None, dtype=torch.bfloat16
@@ -108,9 +102,7 @@ _SHAPES = {
     "nvfp4.weight_scale_2": ((), torch.float32),
     "engram.weight": ((3, 5), torch.bfloat16),
     "pad.weight": ((4, 4), torch.bfloat16),
-    "moe.weight": ((4, 4), torch.bfloat16),
 }
-_MOE_PADDING = 2  # (g): columns of moe.weight left out of the checkpoint
 _PWAL = {
     "attn.kv_b": None,
     "proj": _transpose,
@@ -118,7 +110,6 @@ _PWAL = {
     "nvfp4": _consume_scale_2,
     "engram": _pack,
     "pad": _pad,
-    "moe": _transpose,
 }
 
 
@@ -140,17 +131,8 @@ class _ToyModel(torch.nn.Module):
                 if not hasattr(parent, part):
                     parent.add_module(part, _Layer(_PWAL[".".join(path[: i + 1])]))
                 parent = getattr(parent, part)
-            if name == "moe.weight":
-                shape = (shape[0], shape[1] + _MOE_PADDING)
             param = torch.nn.Parameter(torch.empty(shape, dtype=dtype), False)
             parent.register_parameter(local, param)
-
-        def load_moe(param, weight):  # (g): as RoutedExperts' loaders
-            cols = weight.shape[-1]
-            mark_padding(self.moe, "weight", param.data[:, cols:], 0)
-            param.data[:, :cols].copy_(weight)
-
-        self.moe.weight.weight_loader = load_moe
 
     def load_weights(self, weights):
         params = dict(self.named_parameters())
@@ -266,7 +248,6 @@ class TestReloadEqualsColdStart:
             ["nvfp4.weight", "nvfp4.global_scale"],
             ["engram.weight"],
             ["pad.weight"],
-            ["moe.weight"],
         ],
         ids=[
             "a-parent-derived",
@@ -275,7 +256,6 @@ class TestReloadEqualsColdStart:
             "d-consumed-scale",
             "e-not-idempotent",
             "f-grows",
-            "g-padding",
         ],
     )
     def test_new_checkpoint_hazard(self, names):
@@ -309,8 +289,9 @@ class TestRefusals:
     def test_refused_begin_leaves_the_model_untouched(self):
         # proj is viewed back first, in module order; mimo's storage is short
         model = _cold_start(_checkpoint())
-        owner, (_, _, dtype, offset), attrs = model.mimo.weight._ckpt
-        model.mimo.weight._ckpt = (owner, ((64, 64), (64, 1), dtype, offset), attrs)
+        owner, (_, _, dtype, offset), attrs, storage = model.mimo.weight._ckpt
+        layout = ((64, 64), (64, 1), dtype, offset)
+        model.mimo.weight._ckpt = (owner, layout, attrs, storage)
         before = _state(model)
         with pytest.raises(RuntimeError, match="checkpoint layout needs"):
             begin_direct_reload(model)
@@ -478,6 +459,26 @@ def test_reload_keeps_address_of_padded_or_emptied_weight(monkeypatch, fn):
         )
 
     monkeypatch.setattr(_ToyModel, "__init__", with_fn)
+    model = _cold_start(_checkpoint())
+    ptrs = _ptrs(_state(model))
+    _reload(model, _checkpoint(1.01))
+    _assert_same(_state(model), _state(_cold_start(_checkpoint(1.01))))
+    assert _ptrs(_state(model)) == ptrs
+
+
+def test_reload_into_weight_moved_to_an_offset(monkeypatch):
+    def move(layer):  # DeepSeek-V4 ROCm GEMM fusion: `set_` into a shared buffer
+        w = layer.weight
+        if w.storage_offset() == 0:  # once; reloads refill it there
+            w.data = torch.cat((torch.zeros_like(w), w))[len(w) :]
+
+    init = _ToyModel.__init__
+
+    def with_move(self):
+        init(self)
+        self.proj.quant_method = _Method(move)
+
+    monkeypatch.setattr(_ToyModel, "__init__", with_move)
     model = _cold_start(_checkpoint())
     ptrs = _ptrs(_state(model))
     _reload(model, _checkpoint(1.01))

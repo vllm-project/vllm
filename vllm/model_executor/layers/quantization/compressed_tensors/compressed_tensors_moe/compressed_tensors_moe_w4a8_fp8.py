@@ -132,8 +132,8 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         extra_weight_attrs.update(
             {"quant_method": FusedMoeWeightScaleSupported.GROUP.value}
         )
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w13_weight_scale, {**extra_weight_attrs, "padding_value": 1})
+        set_weight_attrs(w2_weight_scale, {**extra_weight_attrs, "padding_value": 1})
 
         # weight shapes
         w2_weight_shape = torch.nn.Parameter(

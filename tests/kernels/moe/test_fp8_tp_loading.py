@@ -14,7 +14,6 @@ from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.layers.quantization import fp8 as fp8_module
 from vllm.model_executor.layers.quantization.fp8 import Fp8Config
-from vllm.model_executor.utils import fill_padding
 
 
 def _make_fp8_tp_experts(
@@ -86,9 +85,7 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
     monkeypatch, tp_size, batched, intermediate_size
 ):
     """All ranks reconstruct the original dequantized projections, including
-    padding-only ranks. Reloading must clear stale weights and scales: the
-    loader records the padding and `fill_padding` (run before post-load
-    processing) writes it.
+    padding-only ranks. Reloading must clear stale weights and scales.
     """
     generator = torch.Generator().manual_seed(42)
     weights = {
@@ -143,7 +140,6 @@ def test_fp8_block_aligned_tp_preserves_checkpoint(
                                 expert,
                                 return_success=True,
                             )
-            fill_padding(layer)
             w = getattr(layer, f"{prefix}_weight").float()
             s = getattr(layer, f"{prefix}_weight_scale_inv")
             if name in ("w1", "w3"):
@@ -292,7 +288,6 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
                     param_name = f"{prefix}_{suffix}"
                     param = getattr(layer, param_name)
                     param.weight_loader(param, checkpoint, param_name, name, 0)
-            fill_padding(layer)
             method = layer.quant_method
             method.process_weights_after_loading(layer)
             assert method.is_monolithic
@@ -315,3 +310,65 @@ def test_fp8_block_aligned_tp_flashinfer_matches_unsharded(
             f"unsharded_fi_vs_triton_l2={cross_backend_l2.item():.6f}"
         )
         assert relative_l2 < 0.01, relative_l2.item()
+
+
+def test_direct_reload_restores_intermediate_padding(monkeypatch):
+    """A direct reload resets the padding the loaders skip to its cold-start
+    value (zero weights, unit block scales) instead of keeping what post-load
+    processing left in the storage.
+    """
+    from vllm.model_executor.model_loader.reload.direct import (
+        begin_direct_reload,
+        record_checkpoint_layout,
+    )
+
+    # Intermediate rounded up from 256 to 384 per rank, as MXFP4/TRT-LLM do.
+    layer = _make_fp8_tp_experts(
+        monkeypatch,
+        1,
+        0,
+        intermediate_size=256,
+        config_overrides={"intermediate_size_per_partition": 384},
+    )
+    model = torch.nn.Module()
+    model.experts = layer
+    generator = torch.Generator().manual_seed(0)
+    shapes = {"w1": (2, 256, 256), "w3": (2, 256, 256), "w2": (2, 256, 256)}
+    checkpoint = {
+        name: (
+            torch.randn(shape, generator=generator).to(torch.float8_e4m3fn),
+            torch.rand(2, shape[1] // 128, shape[2] // 128, generator=generator) + 2,
+        )
+        for name, shape in shapes.items()
+    }
+
+    def load():
+        for name, tensors in checkpoint.items():
+            prefix = "w2" if name == "w2" else "w13"
+            for suffix, tensor in zip(("weight", "weight_scale_inv"), tensors):
+                param = getattr(layer, f"{prefix}_{suffix}")
+                assert param.weight_loader(
+                    param, tensor, f"{prefix}_{suffix}", name, 0, return_success=True
+                )
+
+    def padding(name, t):  # the trailing third of each intermediate span
+        if name.startswith("w13"):
+            t = t.unflatten(1, (2, -1)).transpose(2, -1)
+        return t[..., t.shape[-1] * 2 // 3 :]
+
+    load()
+    record_checkpoint_layout(model)
+    cold = {name: p.clone() for name, p in layer.named_parameters()}
+    for name, p in cold.items():
+        initial = 1 if "scale" in name else 0
+        if initial:
+            assert torch.all(padding(name, p) == 1)
+        padding(name, p).fill_(initial)  # weights are torch.empty
+    for p in layer.parameters():
+        p.data.fill_(7)  # stands in for post-load processing output
+
+    begin_direct_reload(model)
+    load()
+
+    for name, p in layer.named_parameters():
+        torch.testing.assert_close(p.float(), cold[name].float(), rtol=0, atol=0)

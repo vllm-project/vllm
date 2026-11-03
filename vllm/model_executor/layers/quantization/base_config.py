@@ -84,8 +84,6 @@ class QuantizeMethodBase(ABC):
         """Process the weight after loading.
 
         This can be used for example, to transpose weights for computation.
-        Callers outside model loading and reload must call
-        `vllm.model_executor.utils.fill_padding(layer)` first.
         """
         return
 
@@ -362,6 +360,11 @@ def resolve_quant_method(
         if online_target is None:
             # The checkpoint quant method is applied as there is no online override.
             return base_quant_method
+        if online_target[3].hadamard_size is not None:
+            raise NotImplementedError(
+                f"{prefix}: online hadamard_size on an already quantized layer "
+                "(requantization) is not supported yet."
+            )
 
         online_quant_method = online_config.get_quant_method(layer, prefix)
 

@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from pathlib import Path
 
 import pytest
 import torch
+from safetensors.torch import safe_open, save_file
 
 from vllm.model_executor.kernels.linear.mixed_precision.MPLinearKernel import (
     MPLinearKernel,
@@ -14,10 +16,9 @@ from vllm.model_executor.parameter import (
     permute_param_layout_,
 )
 from vllm.model_executor.utils import (
-    fill_padding,
+    copy_weight_,
     get_live_param,
     kernel_parameters,
-    mark_padding,
     move_parameter,
     refill_derived,
     replace_parameter,
@@ -427,24 +428,68 @@ def test_transposed_kept_param_keeps_checkpoint_dims(single_rank_tp: None) -> No
     assert (weight.input_dim, weight.output_dim) == (1, 0)
 
 
-def test_padding_records_only_the_latest_load() -> None:
-    """Another loader may split a parameter differently: a fill writes only the
-    padding the latest load left out, never data an earlier load called padding."""
-    layer = torch.nn.Module()
-    for name in ("w", "v"):
-        layer.register_parameter(
-            name, torch.nn.Parameter(torch.zeros(8), requires_grad=False)
-        )
-    mark_padding(layer, "w", layer.w.data[4:], 0)
-    mark_padding(layer, "v", layer.v.data[4:], 0)
-    fill_padding(layer)
+@pytest.fixture
+def prefault_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Take the integrated-GPU path of `copy_weight_` without a GPU."""
+    monkeypatch.setattr(
+        "vllm.model_executor.utils._is_integrated_gpu", lambda device: True
+    )
 
-    layer.w.data.fill_(7)  # a load that writes 6 elements of w and all of v
-    layer.v.data.fill_(7)
-    mark_padding(layer, "w", layer.w.data[6:], 0)
-    fill_padding(layer)
-    assert layer.w.tolist() == [7] * 6 + [0] * 2
-    assert layer.v.tolist() == [7] * 8
+
+@pytest.mark.parametrize(
+    "src",
+    [
+        torch.tensor(0.5),
+        torch.empty(0, 8),
+        torch.randn(64, 1024).to(torch.bfloat16),
+        torch.randint(0, 256, (64, 1024), dtype=torch.uint8).view(torch.float8_e4m3fn),
+        torch.randn(64, 1024).narrow(1, 512, 512),
+        torch.arange(2, dtype=torch.float32)[::2],
+    ],
+    ids=["0d", "empty", "bf16", "fp8", "dim1_narrow", "strided_1elem"],
+)
+def test_copy_weight_prefault_copies_exact_bytes(
+    prefault_on: None, src: torch.Tensor
+) -> None:
+    """The touch only runs on integrated GPUs, which CI doesn't have. It must
+    accept the shapes and dtypes weight loaders pass and leave the copy
+    unchanged.
+    """
+    dst = torch.empty_like(src, memory_format=torch.contiguous_format)
+    copy_weight_(dst, src)
+    expected = src.clone(memory_format=torch.contiguous_format)
+    assert torch.equal(
+        dst.reshape(-1).view(torch.uint8), expected.reshape(-1).view(torch.uint8)
+    )
+
+
+def test_copy_weight_prefault_maps_the_mmap_view(
+    prefault_on: None, tmp_path: Path
+) -> None:
+    """Every page of the safetensors view must be mapped before the copy: a
+    host-to-device copy that takes those faults itself is the slow path on
+    integrated GPUs (#58726). The meta destination keeps the copy itself from
+    reading the source.
+    """
+    path = str((tmp_path / "w.safetensors").resolve())
+    save_file({"w": torch.randn(1 << 20)}, path)
+
+    def mapped_bytes() -> int:
+        total, in_file = 0, False
+        with open("/proc/self/smaps") as smaps:
+            for line in smaps:
+                fields = line.split()
+                if ":" not in fields[0]:
+                    in_file = fields[-1] == path
+                elif in_file and fields[0] == "Rss:":
+                    total += int(fields[1]) * 1024
+        return total
+
+    with safe_open(path, framework="pt") as f:
+        src = f.get_tensor("w")
+        assert mapped_bytes() < src.nbytes
+        copy_weight_(torch.empty_like(src, device="meta"), src)
+        assert mapped_bytes() >= src.nbytes
 
 
 @pytest.mark.parametrize(
