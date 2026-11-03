@@ -1629,7 +1629,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--skip-chat-template",
         action="store_true",
-        help="Skip applying chat template to prompt for datasets that support it.",
+        help="Skip applying chat template to prompt for datasets that support it. "
+        "Always skipped for chat backends, which apply the template themselves.",
     )
     parser.add_argument(
         "--enable-multimodal-chat",
@@ -2049,6 +2050,10 @@ def _parse_range_ratio(value: str) -> RangeRatio:
         return json.loads(value)
 
 
+# Backends whose endpoint applies the chat template to the prompt it receives.
+CHAT_TEMPLATE_BACKENDS = ("openai-chat", "openai-responses", "vllm-chat")
+
+
 def get_samples(
     args,
     tokenizer: TokenizerLike | None,
@@ -2057,6 +2062,12 @@ def get_samples(
 ) -> list[SampleRequest]:
     if not hasattr(args, "request_id_prefix"):
         args.request_id_prefix = ""
+
+    # Chat backends render the chat template themselves (the server, or
+    # LLM.chat for throughput), so a client-side render would apply it twice.
+    skip_chat_template = getattr(args, "skip_chat_template", False) or (
+        getattr(args, "backend", None) in CHAT_TEMPLATE_BACKENDS
+    )
 
     if hasattr(args, "random_range_ratio") and isinstance(args.random_range_ratio, str):
         args.random_range_ratio = _parse_range_ratio(args.random_range_ratio)
@@ -2071,7 +2082,7 @@ def get_samples(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
             output_len=args.custom_output_len,
-            skip_chat_template=args.skip_chat_template,
+            skip_chat_template=skip_chat_template,
             chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
@@ -2267,7 +2278,7 @@ def get_samples(
             enable_multimodal_chat=args.enable_multimodal_chat,
             request_id_prefix=args.request_id_prefix,
             no_oversample=args.no_oversample,
-            skip_chat_template=args.skip_chat_template,
+            skip_chat_template=skip_chat_template,
             **hf_kwargs,
         )
 
@@ -2296,6 +2307,7 @@ def get_samples(
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.spec_bench_output_len,
+                skip_chat_template=skip_chat_template,
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
@@ -2392,7 +2404,7 @@ def get_samples(
                 num_requests=args.num_prompts,
                 tokenizer=tokenizer,
                 output_len=args.speed_bench_output_len,
-                skip_chat_template=args.skip_chat_template,
+                skip_chat_template=skip_chat_template,
                 chat_template_kwargs=getattr(args, "chat_template_kwargs", None),
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
