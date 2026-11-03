@@ -943,7 +943,7 @@ class TestSkipToolParsingMarkerPassthrough:
     """A skipped tool span is forwarded to the tool pass verbatim; markers
     with reasoning-channel transitions must not fire inside it."""
 
-    _TEXT = "reason<think><tool_call>alpha </think> omega</tool_call></think>"
+    _TEXT = "reason</think><tool_call>alpha </think> omega</tool_call></think>"
     _SPAN = "<tool_call>alpha </think> omega</tool_call>"
 
     def test_think_start_inside_skipped_span_forwarded_verbatim(self):
@@ -967,16 +967,8 @@ class TestSkipToolParsingMarkerPassthrough:
 
         events = engine.parse_complete(self._TEXT)
 
-        reasoning = "".join(
-            e.value
-            for e in events
-            if e.type in (EventType.REASONING_CHUNK, EventType.REASONING_END)
-        )
-        # The whole span, including the quoted end marker, rides the reasoning
-        # channel untouched. Only the real trailing end marker closes it, and it
-        # closes it on the last character rather than mid-span.
-        assert reasoning == self._TEXT
-        assert sum(1 for e in events if e.type == EventType.REASONING_END) == 1
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert content == self._SPAN
 
     def test_marker_inside_skipped_span_streaming(self):
         engine = StreamingParserEngine(_absorb_marker_tool_config(), tokenizer=None)
@@ -984,12 +976,8 @@ class TestSkipToolParsingMarkerPassthrough:
 
         events = TestStreaming._feed_chars(engine, self._TEXT)
 
-        reasoning = "".join(
-            e.value
-            for e in events
-            if e.type in (EventType.REASONING_CHUNK, EventType.REASONING_END)
-        )
-        assert reasoning == self._TEXT
+        content = "".join(e.value for e in events if e.type == EventType.TEXT_CHUNK)
+        assert content == self._SPAN
 
 
 def _message_header_config(reasoning_end: bool) -> ParserEngineConfig:

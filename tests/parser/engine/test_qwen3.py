@@ -128,6 +128,30 @@ class TestNonStreaming:
         args = json.loads(result.tool_calls[0].function.arguments)
         assert args == {}
 
+    def test_tool_opener_mentioned_in_reasoning_does_not_hold_content(
+        self, mock_request
+    ):
+        tokenizer = make_mock_tokenizer(
+            {
+                "<think>": 100,
+                "</think>": 101,
+                TOOL_CALL_START: 102,
+                TOOL_CALL_END: 103,
+            }
+        )
+        reasoning_engine = ParserEngine(
+            tokenizer, parser_engine_config=qwen3_config(thinking=True)
+        )
+        reasoning_engine.skip_tool_parsing = True
+        text = (
+            "<think>I could call <function=get_weather> here.</think>\n\nIt is sunny."
+        )
+
+        reasoning, content = reasoning_engine.extract_reasoning(text, mock_request)
+
+        assert reasoning == "I could call <function=get_weather> here."
+        assert content == "\n\nIt is sunny."
+
     def test_think_marker_quoted_in_parameter_survives_reasoning_pass(
         self, mock_request
     ):
