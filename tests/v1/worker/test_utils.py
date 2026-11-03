@@ -43,8 +43,7 @@ from vllm.v1.kv_cache_interface import (
     MambaSpec,
 )
 from vllm.v1.worker.replayssm_utils import (
-    get_replayssm_block_copy_tensors,
-    initialize_replayssm_ring_trackers,
+    assign_replayssm_decode_planners,
 )
 from vllm.v1.worker.utils import (
     allocate_kv_cache,
@@ -1374,14 +1373,13 @@ class _TestReplaySSMMixer(MambaMixer2):
         self.use_replayssm = True
         self.use_flashinfer_replayssm = backend == MambaBackendEnum.FLASHINFER
         self.mamba_config = MambaConfig(backend=backend)
-        self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
-        self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
 
     def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        return ((2,), (3,), (4,), (5,), (6,))
+        # conv, ssm, x, B, dt and the (ring_start, num_committed) trackers.
+        return ((2,), (3,), (4,), (5,), (6,), (2,))
 
     def get_state_dtype(self) -> tuple[torch.dtype, ...]:
-        return (torch.float32,) * 5
+        return (torch.float32,) * 5 + (torch.int32,)
 
 
 @pytest.mark.parametrize("layout", [KVCacheLayout.LBNHC, KVCacheLayout.BLHNC])
@@ -1416,21 +1414,11 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
     pages = {name: pages[name] for name in reversed(names)}
     runner_pages: list[torch.Tensor] = []
     bind_kv_cache(pages, ctx, runner_pages)
-    initialize_replayssm_ring_trackers(kv_config, ctx)
     # ROCm rounds the shared allocation up to a 4 KiB RDMA page.
     expected_storage_size = 4096 if current_platform.is_rocm() else budget
     assert pages[names[0]].untyped_storage().nbytes() == expected_storage_size
     for mixer in mixers:
-        assert len(mixer.kv_cache) == 5
-    assert mixers[0]._replayssm_ring_start is mixers[2]._replayssm_ring_start
-    assert (
-        mixers[0]._replayssm_prev_num_accepted is mixers[2]._replayssm_prev_num_accepted
-    )
-    assert mixers[0]._replayssm_ring_start is not mixers[1]._replayssm_ring_start
-    extra = get_replayssm_block_copy_tensors(ctx)
-    assert len({tensor.data_ptr() for tensor in extra}) == 4
-    assert all(tensor.is_contiguous() and tensor.shape == (4,) for tensor in extra)
-    assert all(torch.count_nonzero(tensor) == 0 for tensor in extra)
+        assert len(mixer.kv_cache) == 6
 
     # Group A owns block 1; group B owns block 2 in the same backing storage.
     for state in mixers[1].kv_cache:
@@ -1441,81 +1429,19 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
     for index, state in enumerate(states, start=1):
         assert torch.all(state[1] == index)
     assert all(torch.all(state[2] == 99) for state in mixers[1].kv_cache)
-    for index, tensor in enumerate(
-        (mixers[0]._replayssm_ring_start, mixers[0]._replayssm_prev_num_accepted),
-        start=7,
-    ):
-        tensor[1] = index
+    # The ring trackers are page state 5, so a plain page copy moves them.
+    mixers[0].kv_cache[5][1] = torch.tensor([7, 8], dtype=torch.int32)
     before = {name: page.clone() for name, page in pages.items()}
-    copy_kv_cache_blocks_inplace([*runner_pages, *extra], 4, [KVCacheBlockCopy(1, 3)])
+    copy_kv_cache_blocks_inplace(runner_pages, 4, [KVCacheBlockCopy(1, 3)])
     for name, page in pages.items():
         assert torch.equal(page[3], before[name][1])
         assert torch.equal(page[:3], before[name][:3])
-    assert mixers[2]._replayssm_ring_start[3] == 7
-    assert mixers[2]._replayssm_prev_num_accepted[3] == 8
-    assert torch.count_nonzero(mixers[1]._replayssm_ring_start) == 0
-    assert torch.count_nonzero(mixers[1]._replayssm_prev_num_accepted) == 0
+    assert mixers[0].kv_cache[5][3].tolist() == [7, 8]
+    assert torch.all(mixers[1].kv_cache[5][2] == 99)
 
     clear_layer_kv_caches(mixers)
     for mixer in mixers:
         assert not mixer.kv_cache
-        assert mixer._replayssm_ring_start.numel() == 0
-        assert mixer._replayssm_prev_num_accepted.numel() == 0
-
-
-def test_rebind_kv_cache_keeps_replayssm_trackers():
-    """Cache resizing preserves the tracker addresses captured by CUDA graphs."""
-    mixers = [_TestReplaySSMMixer() for _ in range(2)]
-    names = [f"layers.{i}.mixer" for i in range(2)]
-    ctx = dict(zip(names, mixers))
-    spec = MambaSpec(
-        block_size=16,
-        shapes=mixers[0].get_state_shape(),
-        dtypes=mixers[0].get_state_dtype(),
-        page_size_padded=128,
-    )
-    config = KVCacheConfig(
-        num_blocks=8,
-        kv_cache_tensors=[],
-        kv_cache_groups=[KVCacheGroupSpec(names, spec)],
-    )
-    pages = {name: torch.zeros((9, 1, 1, 128), dtype=torch.int8) for name in names}
-
-    def bind(num_blocks):
-        config.num_blocks = num_blocks
-        bind_kv_cache_to_layers(
-            {n: page[:num_blocks] for n, page in pages.items()}, ctx
-        )
-        initialize_replayssm_ring_trackers(config, ctx)
-
-    bind(8)
-    ring_start = mixers[0]._replayssm_ring_start
-    prev_accepted = mixers[0]._replayssm_prev_num_accepted
-    ring_start[3] = 7
-    prev_accepted[3] = 2
-    for num_blocks in (8, 5):
-        bind(num_blocks)
-        for mixer in mixers:
-            for actual, original in (
-                (mixer._replayssm_ring_start, ring_start),
-                (mixer._replayssm_prev_num_accepted, prev_accepted),
-            ):
-                assert actual.data_ptr() == original.data_ptr()
-                assert actual.shape == (num_blocks,)
-                assert torch.equal(actual, original[:num_blocks])
-        assert mixers[0]._replayssm_ring_start is mixers[1]._replayssm_ring_start
-        assert (
-            mixers[0]._replayssm_prev_num_accepted
-            is mixers[1]._replayssm_prev_num_accepted
-        )
-
-    bind(9)
-    assert mixers[0]._replayssm_ring_start.data_ptr() != ring_start.data_ptr()
-    assert mixers[0]._replayssm_prev_num_accepted.data_ptr() != prev_accepted.data_ptr()
-    assert all(
-        tensor.shape == (9,) and torch.count_nonzero(tensor) == 0
-        for tensor in get_replayssm_block_copy_tensors(ctx)
-    )
 
 
 def test_triton_replayssm_plans_in_first_layer_of_each_group():
@@ -1540,13 +1466,9 @@ def test_triton_replayssm_plans_in_first_layer_of_each_group():
     bind_kv_cache_to_layers(
         {name: torch.zeros((4, 1, 1, 128), dtype=torch.int8) for name in names}, ctx
     )
-    initialize_replayssm_ring_trackers(config, ctx)
+    assign_replayssm_decode_planners(config, ctx)
 
-    assert mixers[0]._replayssm_ring_start is mixers[2]._replayssm_ring_start
-    assert mixers[0]._replayssm_ring_start is not mixers[1]._replayssm_ring_start
-    assert mixers[0]._replayssm_ring_start.shape == (4,)
     assert [m._plans_replayssm_decode for m in mixers] == [True, True, False]
-    assert get_replayssm_block_copy_tensors(ctx) == []
 
 
 def test_bind_kv_cache(default_vllm_config):
