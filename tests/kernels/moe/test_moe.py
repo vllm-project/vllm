@@ -255,6 +255,15 @@ def test_xpu_qwen3_5_missing_provider_fallback(xpu_qwen3_5_moe, monkeypatch):
 
 @pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
 @pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
+def test_xpu_qwen3_5_unsupported_device_fallback(xpu_qwen3_5_moe, monkeypatch):
+    """An installed fused provider must fall back on unsupported architectures."""
+    monkeypatch.setattr(torch.ops._xpu_C, "is_xe2_arch", lambda _: False)
+    monkeypatch.setattr(torch.ops._xpu_C, "is_xe3_arch", lambda _: False)
+    _check_xpu_qwen3_5_decode(xpu_qwen3_5_moe, 1, should_fuse=False)
+
+
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="Requires XPU execution")
+@pytest.mark.parametrize("xpu_qwen3_5_moe", [(torch.float16, True)], indirect=True)
 def test_xpu_qwen3_5_provider_import_failure_cached(xpu_qwen3_5_moe, monkeypatch):
     """Repeated eligible decode falls back without repeated import failures."""
     from vllm.models.qwen3_5.xpu.specialized_decode.moe import MoEStep

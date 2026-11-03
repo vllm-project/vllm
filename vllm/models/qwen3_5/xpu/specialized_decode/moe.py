@@ -50,6 +50,7 @@ class MoEStep:
             self.top_k,
             self.hidden_dim,
             self._weights[1].shape[1],
+            device=self._weights[0].device,
         ):
             return
         self._weights = prepare_weights(self.block)
