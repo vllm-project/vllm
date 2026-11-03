@@ -19,6 +19,7 @@ from vllm.v1.worker.gpu.spec_decode.draft_logits import DraftLogitsCache
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler import (
     RejectionSampler,
     _iter_request_chunks,
+    get_max_chunk_logits,
 )
 
 
@@ -285,6 +286,75 @@ def test_get_logprobs_dims_with_only_token_ids():
     assert sampler.get_logprobs_dims(idx_mapping_np) == (1, 3)
     sampler = _make_sampler_with_token_ids("raw_logprobs", {}, NO_LOGPROBS, device)
     assert sampler.get_logprobs_dims(idx_mapping_np) is None
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_max_verify_logits_bounds_only_steps_that_copy_logits():
+    """Chunks bound the FP32 copy of the logits that sampling params and logprobs
+    make; a batch that makes none is verified whole (unbounded)."""
+    device = torch.device("cuda")
+    vocab_size = 1 << 17
+    limit = get_max_chunk_logits(vocab_size)
+    idx_mapping_np = np.array([3, 0], dtype=np.int32)
+    sampler = _make_sampler_with_token_ids("raw_logprobs", {}, NO_LOGPROBS, device)
+    sampler.needs_logits_processing = np.zeros(4, dtype=bool)
+    rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps=3)
+
+    def max_verify_logits():
+        return rejection_sampler.max_verify_logits(idx_mapping_np, vocab_size)
+
+    assert max_verify_logits() is None
+    sampler.needs_logits_processing[2] = True  # not in the batch
+    assert max_verify_logits() is None
+    sampler.needs_logits_processing[0] = True
+    assert max_verify_logits() == limit
+    sampler.needs_logits_processing[0] = False
+    rejection_sampler.fly_window_size = 4
+    assert max_verify_logits() == limit
+    rejection_sampler.fly_window_size = 0
+    rejection_sampler.sampler = _make_sampler_with_token_ids(
+        "raw_logprobs", {0: [5]}, NO_LOGPROBS, device
+    )
+    rejection_sampler.sampler.needs_logits_processing = np.zeros(4, dtype=bool)
+    assert max_verify_logits() == limit
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")
+def test_unbounded_adaptive_verification_runs_one_chunk():
+    """Without a chunk bound, compacted adaptive-verification logits of any size
+    are verified in one call, whatever the stale host layout says."""
+    device = torch.device("cuda")
+    vocab_size = 17
+    idx_mapping_np = np.array([3, 0, 2, 1], dtype=np.int32)
+    input_batch = _make_input_batch(
+        np.array([0, 3, 4, 8, 10], dtype=np.int32), idx_mapping_np, device
+    )
+    input_batch.cu_num_logits_np = np.arange(0, 17, 4, dtype=np.int32)
+    sampler = _make_sampler_with_token_ids("raw_logprobs", {}, NO_LOGPROBS, device)
+    rejection_sampler = _make_rejection_sampler(sampler, num_speculative_steps=3)
+    rejection_sampler.enable_adaptive_verification = True
+    calls = []
+    fake_verify = _fake_verify(device, vocab_size)
+
+    def counting_verify(self, logits, *args):
+        calls.append(logits.shape[0])
+        return fake_verify(self, logits, *args)
+
+    rejection_sampler._verify = MethodType(  # type: ignore[method-assign]
+        counting_verify, rejection_sampler
+    )
+    sampled, num_sampled, _, _ = rejection_sampler._verify_in_chunks(
+        torch.randn(10, vocab_size, device=device),
+        input_batch,
+        draft_logits=None,
+        draft_sampled=torch.arange(10, device=device),
+        pos=torch.arange(10, device=device),
+        max_chunk_logits=None,
+        logprobs_dims=None,
+    )
+    assert calls == [10]
+    assert num_sampled.tolist() == [3, 1, 4, 2]
+    assert sampled.shape[0] == 4
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="Requires CUDA")

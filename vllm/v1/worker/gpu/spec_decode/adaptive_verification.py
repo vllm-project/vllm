@@ -230,7 +230,6 @@ class AdaptiveVerificationManager:
         req_states: "RequestState",
         query_start_loc: torch.Tensor,
         num_bonus_tokens: int,
-        max_total_logits: int,
         copy_admitted_drafts_to_host: bool = False,
     ):
         self.req_states = req_states
@@ -239,10 +238,6 @@ class AdaptiveVerificationManager:
         self._copy_stream = torch.cuda.Stream(device)
 
         self.num_bonus_tokens = num_bonus_tokens
-        # Rejection sampling verifies logits in one contiguous chunk; the
-        # chunked path indexes by scheduled (untrimmed) offsets and cannot
-        # address the compacted layout, so the budget must fit one chunk.
-        self._max_total_logits = max_total_logits
         self.query_start_loc = query_start_loc
         self.cost_tables: tuple[np.ndarray, np.ndarray] | None = None
         # Largest cudagraph-captured token count; above it nothing pads.
@@ -400,8 +395,14 @@ class AdaptiveVerificationManager:
         self,
         num_tokens_per_req: dict[str, int],
         draft_tokens: dict[str, list[int]],
+        max_total_logits: int | None,
     ) -> int:
         """Token count once the draft budget is trimmed to fit.
+
+        Rejection sampling verifies logits in one contiguous chunk; the chunked
+        path indexes by scheduled (untrimmed) offsets and cannot address the
+        compacted layout, so a step whose verification is chunked
+        (max_total_logits not None) must fit one chunk.
 
         Stashes the chosen budget in ``_batch_budget`` for the compaction and
         reallocation that follow in the same step.
@@ -429,10 +430,12 @@ class AdaptiveVerificationManager:
         valid = steps[None, :] < scheduled_drafts[:, None]
         scores = np.sort(survival_probability[valid])[::-1]
         num_non_draft_tokens_total = int(num_non_draft_tokens.sum())
-        max_draft_budget = min(
-            int(scheduled_drafts.sum()),
-            max(0, self._max_total_logits - num_reqs * self.num_bonus_tokens),
-        )
+        max_draft_budget = int(scheduled_drafts.sum())
+        if max_total_logits is not None:
+            max_draft_budget = min(
+                max_draft_budget,
+                max(0, max_total_logits - num_reqs * self.num_bonus_tokens),
+            )
         scores = scores[:max_draft_budget]
         draft_cost_ms, verify_cost_ms = self.cost_tables
         num_sampling_requests = np.count_nonzero(
@@ -589,7 +592,6 @@ def maybe_create_adaptive_verification_manager(
     req_states: "RequestState",
     query_start_loc: torch.Tensor,
     num_bonus_tokens: int,
-    max_total_logits: int,
     vllm_config: "VllmConfig",
     target_layer_names: set[str] | None = None,
     additional_attn_cg_support: tuple[AttentionCGSupport, str | None] | None = None,
@@ -641,6 +643,5 @@ def maybe_create_adaptive_verification_manager(
         req_states,
         query_start_loc,
         num_bonus_tokens,
-        max_total_logits=max_total_logits,
         copy_admitted_drafts_to_host=copy_admitted_drafts_to_host,
     )

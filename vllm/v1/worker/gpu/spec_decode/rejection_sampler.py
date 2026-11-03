@@ -180,6 +180,23 @@ class RejectionSampler:
             assert spec_config.fly_window_size is not None
             self.fly_window_size = spec_config.fly_window_size
 
+    def max_verify_logits(
+        self, idx_mapping_np: np.ndarray, vocab_size: int
+    ) -> int | None:
+        """Most logits rows one verification chunk may hold for these requests,
+        or None when verifying them makes no per-row FP32 copy of the logits.
+        """
+        sampler = self.sampler
+        if (
+            np.any(sampler.needs_logits_processing[idx_mapping_np])
+            or sampler.get_logprobs_dims(idx_mapping_np) is not None
+            or sampler.return_sampling_mask
+            or self.fly_window_size > 0
+            or self.watermark_key is not None
+        ):
+            return get_max_chunk_logits(vocab_size)
+        return None
+
     def _get_logprobs_tensors(
         self,
         sampled: torch.Tensor,
@@ -313,7 +330,7 @@ class RejectionSampler:
         draft_logits: DraftLogitsCache | None,
         draft_sampled: torch.Tensor,
         pos: torch.Tensor,
-        max_chunk_logits: int,
+        max_chunk_logits: int | None,
         logprobs_dims: tuple[int, int] | None,
     ) -> tuple[
         torch.Tensor,
@@ -325,7 +342,7 @@ class RejectionSampler:
         use_processed_logits = self.sampler.logprobs_mode in PROCESSED_LOGPROBS_MODES
         num_reqs = input_batch.num_reqs
 
-        if logits.shape[0] <= max_chunk_logits:
+        if max_chunk_logits is None or logits.shape[0] <= max_chunk_logits:
             # One chunk covers the batch. Adaptive verification compacts the logits
             # without updating cu_num_logits_np (it keeps the pre-compacted layout),
             # so the stale sums must not pick chunk boundaries; its budget cap
@@ -441,7 +458,9 @@ class RejectionSampler:
         )
 
         logprobs_dims = self.sampler.get_logprobs_dims(input_batch.idx_mapping_np)
-        chunk_logit_limit = get_max_chunk_logits(logits.shape[1])
+        chunk_logit_limit = self.max_verify_logits(
+            input_batch.idx_mapping_np, logits.shape[1]
+        )
         (
             sampled,
             num_sampled,
