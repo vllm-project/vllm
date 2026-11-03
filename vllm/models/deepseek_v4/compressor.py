@@ -119,6 +119,8 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             self.pcp_positions = torch.empty(
                 max_tokens, dtype=torch.int64, device=self.device
             )
+            self.pcp_local_req_indices = torch.empty_like(self.token_to_req_indices)
+            self.pcp_local_block_table: torch.Tensor | None = None
             self.pcp_block_table: torch.Tensor | None = None
 
     def build(
@@ -162,25 +164,37 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         group = get_pcp_group()
         local_tokens = metadata.slot_mapping.numel() // self.pcp_size
         max_reqs = 2 * self.vllm_config.scheduler_config.max_num_seqs
-        table = metadata.block_table.new_zeros(
-            (max_reqs, metadata.block_table.shape[1])
-        )
+        # Capture/profile batches bypass partitioning and have uniform requests.
+        gather_num_reqs = cm.pcp_gather_num_reqs
+        if gather_num_reqs is None:
+            gather_num_reqs = cm.num_reqs
+        assert cm.num_reqs <= gather_num_reqs <= max_reqs
+        if self.pcp_local_block_table is None:
+            self.pcp_local_block_table = metadata.block_table.new_empty(
+                (max_reqs, metadata.block_table.shape[1])
+            )
+            self.pcp_block_table = metadata.block_table.new_empty(
+                (max_reqs * self.pcp_size, metadata.block_table.shape[1])
+            )
+        table = self.pcp_local_block_table[:gather_num_reqs]
+        table.zero_()
         table[: cm.num_reqs] = metadata.block_table[: cm.num_reqs]
         assert metadata.token_to_req_indices is not None
-        req_indices = metadata.token_to_req_indices.new_zeros(local_tokens)
+        req_indices = self.pcp_local_req_indices[:local_tokens]
+        req_indices.zero_()
         req_indices[: cm.num_actual_tokens] = metadata.token_to_req_indices
-        req_indices += group.rank_in_group * max_reqs
+        req_indices += group.rank_in_group * gather_num_reqs
         assert cm.positions is not None
         gathered_table = group.all_gather(table, dim=0)
-        if self.pcp_block_table is None:
-            self.pcp_block_table = torch.empty_like(gathered_table)
-        self.pcp_block_table.copy_(gathered_table).clamp_(min=0)
+        assert self.pcp_block_table is not None
+        pcp_block_table = self.pcp_block_table[: gather_num_reqs * self.pcp_size]
+        pcp_block_table.copy_(gathered_table).clamp_(min=0)
         num_tokens = local_tokens * self.pcp_size
         pcp_req_indices = self.pcp_token_to_req_indices[:num_tokens]
         pcp_positions = self.pcp_positions[:num_tokens]
         pcp_req_indices.copy_(group.all_gather(req_indices, dim=0))
         pcp_positions.copy_(group.all_gather(cm.positions, dim=0))
-        metadata.block_table = self.pcp_block_table
+        metadata.block_table = pcp_block_table
         metadata.token_to_req_indices = pcp_req_indices
         metadata.cache_positions = pcp_positions
         # Local decode prefixes and C128 boundaries do not describe the

@@ -12,6 +12,7 @@ steps:
   - vllm/models/deepseek_v41/
   - vllm/model_executor/layers/fused_moe/runner/moe_runner.py
   - vllm/model_executor/layers/sparse_attn_indexer.py
+  - vllm/v1/attention/backend.py
   - vllm/v1/attention/backends/mla/
   - vllm/v1/attention/ops/sparse_swa.py
   - vllm/v1/worker/gpu/

@@ -266,6 +266,40 @@ def test_partition_padding_is_derived_from_batch_descriptor(
 
     assert local_batch.num_tokens_after_padding == expected_tokens
     assert local_batch.num_reqs_after_padding == expected_reqs
+    assert local_batch.pcp is not None
+    assert local_batch.pcp.gather_num_reqs == expected_reqs
+
+
+@pytest.mark.parametrize("rank", [0, 3])
+@pytest.mark.parametrize("num_requests", [1, 5])
+@pytest.mark.parametrize(
+    "mode", [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+)
+def test_pcp_gather_rows_cover_uneven_and_empty_ranks(rank, num_requests, mode):
+    device = torch.device("cuda:0")
+    manager = PCPManager(
+        pcp_world_size=4,
+        pcp_rank=rank,
+        device=device,
+        shard_decode_requests=True,
+        max_num_reqs=8,
+        max_num_tokens=16,
+    )
+    global_batch = _make_global_decode_batch(
+        [16] * num_requests, InputBuffers(8, 16, device), device
+    )
+    local_batch = manager.partition_batch(
+        global_batch,
+        BatchExecutionDescriptor(
+            cg_mode=mode,
+            num_tokens=8,
+            num_reqs=4 if mode == CUDAGraphMode.FULL else None,
+        ),
+    )
+    assert local_batch.pcp is not None
+    expected = 4 if mode == CUDAGraphMode.FULL else (num_requests + 3) // 4
+    assert local_batch.pcp.gather_num_reqs == expected
+    assert local_batch.num_reqs_after_padding <= expected
 
 
 def test_dummy_draft_does_not_reuse_previous_graph_batch():
