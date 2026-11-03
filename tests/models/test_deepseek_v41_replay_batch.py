@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 import torch
 
+import vllm.envs as envs
 from vllm.config import CUDAGraphMode
 from vllm.forward_context import (
     BatchDescriptor,
@@ -181,6 +182,63 @@ def test_replay_batch_keeps_each_request_window(state):
     assert context.dp_metadata is None and not context.is_padding.any()
 
 
+def test_exact_replay_keeps_more_rows_than_the_window(state):
+    """Batch invariance keeps enough trailing rows for the full forward's
+    last-window outputs; their KV window starts at the first kept row."""
+    kept_rows = 200
+    state.decoder_replay_layers.kept_rows = kept_rows
+    state.decoder_replay_layers.stage_rows = [kept_rows]
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    replay, build = _prepare(state, batch, CUDAGraphMode.NONE)
+    assert replay is not None
+    rows = [0, *range(301 - kept_rows, 301), *range(301, 401)]
+    assert replay.rows.tolist() == rows
+    assert build.batch.query_start_loc_np.tolist() == [0, 1, 1 + kept_rows, 301]
+    assert build.replay_start.tolist() == [0, 300 - kept_rows, 0]
+
+
+def test_exact_replay_stages_keep_fewer_rows(monkeypatch, state):
+    """Layer-wise exact replay: each later stage keeps fewer trailing rows, picks
+    them out of the previous stage's rows, and reads no window KV below them."""
+    layers = DecoderReplayLayers(
+        WINDOW,
+        MagicMock(),
+        MagicMock(),
+        set(),
+        "swa_first",
+        kept_rows=200,
+        stage_rows=[200, WINDOW],
+        run_stage=MagicMock(),
+        stage_metadata_prefixes=[set(), set()],
+    )
+    staged = DeepseekV41ModelState(
+        state.vllm_config,
+        SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers),
+        None,
+        DEVICE,
+    )
+    staged.builds = state.builds  # type: ignore[attr-defined]
+    batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
+    staged.prepare_attn(
+        batch, CUDAGraphMode.NONE, BLOCK_TABLES, _slot_mappings(401), [], GROUPS
+    )
+    replay = layers.replay_batch
+    assert replay is not None and len(replay.stages) == 1
+    rows0 = [0, *range(101, 301), *range(301, 401)]
+    rows1 = [0, *range(173, 301), *range(301, 401)]
+    stage = replay.stages[0]
+    assert replay.rows.tolist() == rows0 and stage.rows.tolist() == rows1
+    assert stage.select.tolist() == [rows0.index(row) for row in rows1]
+    # Builds: stage 0 (and its first layer's SWA), then stage 1.
+    build0, build1 = state.builds[-3], state.builds[-1]
+    assert build0.replay_start.tolist() == [0, 100, 0]
+    assert build1.replay_start.tolist() == [0, 300 - WINDOW, 0]
+    assert build1.batch.query_start_loc_np.tolist() == [0, 1, 1 + WINDOW, 229]
+    assert torch.equal(build1.batch.positions[:229], batch.positions[stage.rows])
+    assert torch.equal(build1.slot_mappings, _slot_mappings(401)[:, stage.rows])
+    assert stage.forward_context.batch_descriptor.num_tokens == 229
+
+
 def test_replay_context_restores_tp_routing_rows(state):
     """Capture uses the compact replay batch's size, not the outer batch's."""
     batch = _input_batch(QUERY_LENS, SEQ_LENS, PREFILLING)
@@ -216,6 +274,140 @@ def test_replay_batch_keeps_device_decode_boundaries(state):
     assert replay is not None
     assert replay.rows.tolist() == [0, 1, 2, 3, *range(304 - WINDOW, 304)]
     assert build.batch.query_start_loc.tolist() == [0, 1, 4, 4 + WINDOW]
+
+
+def _replay_gather_case(kept_rows, prev_kept_rows=None):
+    """A batch of decodes and prefills, trimmed to their last ``kept_rows``
+    rows (and, for a later stage, the previous stage's ``prev_kept_rows``)."""
+    query_lens = [1, 300, 100, 5000, 7, 129]
+    seq_lens = [500, 300, 300, 9000, 7, 4000]
+    trims = [False, True, False, True, True, True]
+
+    def dropped(rows):
+        kept = [min(q, rows) if t else q for q, t in zip(query_lens, trims)]
+        return torch.tensor(
+            [0, *np.cumsum([q - k for q, k in zip(query_lens, kept)])],
+            dtype=torch.int32,
+            device=DEVICE,
+        ), sum(kept)
+
+    dropped_before, num_kept = dropped(kept_rows)
+    prev = dropped(prev_kept_rows)[0] if prev_kept_rows else None
+    num_tokens = sum(query_lens)
+    gen = torch.Generator().manual_seed(kept_rows)
+    inputs = dict(
+        query_start_loc=torch.tensor(
+            [0, *np.cumsum(query_lens)], dtype=torch.int32, device=DEVICE
+        ),
+        dropped_before=dropped_before,
+        seq_lens=torch.tensor(seq_lens, dtype=torch.int32, device=DEVICE),
+        replay_start=torch.tensor(
+            [0, 10, 0, 6000, 0, 3990], dtype=torch.int32, device=DEVICE
+        ),
+        positions=torch.randint(1 << 40, (num_tokens,), generator=gen).to(DEVICE),
+        slot_mappings=torch.randint(1 << 40, (3, num_tokens), generator=gen).to(DEVICE),
+    )
+    return inputs, len(query_lens), num_kept, prev
+
+
+def _gather_reference(inputs, num_reqs, kept_rows, prev):
+    qsl, dropped = inputs["query_start_loc"].tolist(), inputs["dropped_before"]
+    dropped = dropped.tolist()
+    rows, kept_qsl, kv_start, select = [], [0] * (num_reqs + 1), [], []
+    for r in range(num_reqs):
+        begin, end = qsl[r], qsl[r + 1]
+        kept_begin, kept_end = begin - dropped[r], end - dropped[r + 1]
+        kept_qsl[0] = kept_begin if r == 0 else kept_qsl[0]
+        kept_qsl[r + 1] = kept_end
+        start = int(inputs["replay_start"][r])
+        if kept_end - kept_begin < end - begin:
+            start = max(start, int(inputs["seq_lens"][r]) - kept_rows)
+        kv_start.append(start)
+        first = end - (kept_end - kept_begin)
+        rows += [first + i for i in range(kept_end - kept_begin)]
+        if prev is not None:
+            select += [
+                first + i - int(prev[r + 1]) for i in range(kept_end - kept_begin)
+            ]
+    return rows, kept_qsl, kv_start, select
+
+
+@pytest.mark.parametrize(
+    "kept_rows,prev_kept_rows", [(WINDOW, None), (2541, None), (1001, 2541)]
+)
+def test_bi_gather_replay_batch_matches_reference(kept_rows, prev_kept_rows):
+    """The batch-invariant replay gather keeps each request's trailing rows,
+    their positions, slot mappings and window KV start, and for a later stage
+    each row's index among the previous stage's rows. At one stage of the
+    window it writes exactly what the Triton gather writes."""
+    from vllm.model_executor.kernels.batch_invariant import (
+        batch_invariant_quant_kernel_available,
+        gather_replay_batch,
+    )
+    from vllm.models.deepseek_v41.nvidia import model_state
+
+    if not batch_invariant_quant_kernel_available():
+        pytest.skip("needs the batch-invariant extension")
+    inputs, num_reqs, num_kept, prev = _replay_gather_case(kept_rows, prev_kept_rows)
+
+    def outputs():
+        num_tokens = inputs["positions"].shape[0]
+        return dict(
+            rows=torch.full((num_tokens,), -5, dtype=torch.int64, device=DEVICE),
+            kept_query_start_loc=torch.full(
+                (num_reqs + 1,), -5, dtype=torch.int32, device=DEVICE
+            ),
+            kept_positions=torch.full((num_tokens,), -5, device=DEVICE).long(),
+            kept_slot_mappings=torch.full((3, num_tokens), -5, device=DEVICE).long(),
+            kept_kv_start=torch.full((num_reqs,), -5, dtype=torch.int32).to(DEVICE),
+        )
+
+    out = outputs()
+    select = None if prev is None else torch.full_like(out["rows"], -5)
+    gather_replay_batch(
+        **inputs,
+        num_reqs=num_reqs,
+        kept_rows=kept_rows,
+        **out,
+        prev_dropped_before=prev,
+        select=select,
+    )
+    rows, kept_qsl, kv_start, ref_select = _gather_reference(
+        inputs, num_reqs, kept_rows, prev
+    )
+    assert out["rows"][:num_kept].tolist() == rows
+    assert out["kept_query_start_loc"].tolist() == kept_qsl
+    assert out["kept_kv_start"].tolist() == kv_start
+    row_index = torch.tensor(rows, device=DEVICE)
+    assert torch.equal(out["kept_positions"][:num_kept], inputs["positions"][row_index])
+    assert torch.equal(
+        out["kept_slot_mappings"][:, :num_kept],
+        inputs["slot_mappings"][:, row_index],
+    )
+    if select is not None:
+        assert select[:num_kept].tolist() == ref_select
+    if kept_rows == WINDOW:
+        triton_out = outputs()
+        model_state._gather_replay_batch_kernel[(num_reqs,)](
+            inputs["query_start_loc"],
+            inputs["dropped_before"],
+            inputs["seq_lens"],
+            inputs["replay_start"],
+            inputs["positions"],
+            inputs["slot_mappings"],
+            inputs["slot_mappings"].stride(0),
+            triton_out["rows"],
+            triton_out["kept_query_start_loc"],
+            triton_out["kept_positions"],
+            triton_out["kept_slot_mappings"],
+            triton_out["kept_slot_mappings"].stride(0),
+            triton_out["kept_kv_start"],
+            WINDOW,
+            NUM_GROUPS=3,
+            BLOCK=1024,
+        )
+        for name, value in triton_out.items():
+            assert torch.equal(out[name], value), name
 
 
 def test_prompt_logprobs_requests_keep_their_rows(state):
@@ -497,7 +689,13 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
     cfg.parallel_config.prefill_context_parallel_size = 1
     cfg.compilation_config.fast_moe_cold_start = False
     cfg.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-    layers = SimpleNamespace(window=WINDOW, replay_batch=None, metadata_prefixes=set())
+    layers = SimpleNamespace(
+        window=WINDOW,
+        kept_rows=WINDOW,
+        stage_rows=[WINDOW],
+        replay_batch=None,
+        metadata_prefixes=set(),
+    )
     model = SimpleNamespace(token_lookback_depth=0, decoder_replay_layers=layers)
     groups = SimpleNamespace(
         kv_cache_groups=[
@@ -532,12 +730,15 @@ def test_zero_prefix_window_warms_gather_and_skips_pad(monkeypatch):
         groups,
     )
     assert state._replay[0] == 0
-    assert calls == {"pad_warmup": 0, "gather_warmup": 1, "pad_launch": 0}
+    # Batch invariance gathers with the CUDA op, which needs no warmup.
+    gather_warmups = 0 if envs.VLLM_BATCH_INVARIANT else 1
+    assert calls == {"pad_warmup": 0, "gather_warmup": gather_warmups, "pad_launch": 0}
     assert state._replay_start[:1].tolist() == [16]
 
 
 def test_dp_ranks_pad_to_one_replay_graph(dp_state):
-    """Every rank pads its replay batch to the graph fitting the largest rank's."""
+    """Every rank pads its replay batch to the graph fitting the largest rank's,
+    and marks the padding rows so MoE does not dispatch them."""
     dp_state.replay_cudagraphs = MagicMock()
     dp_state.replay_cudagraphs.dispatch.return_value = BatchExecutionDescriptor(
         CUDAGraphMode.PIECEWISE, 512, None
@@ -553,3 +754,7 @@ def test_dp_ranks_pad_to_one_replay_graph(dp_state):
     assert is_padding[len(REPLAY_ROWS) :].all()
     dp_metadata = replay.forward_context.dp_metadata
     assert dp_metadata.num_tokens_across_dp_cpu.tolist() == [512, 512]
+    num_rows = len(REPLAY_ROWS)
+    assert replay.forward_context.is_padding.tolist() == [False] * num_rows + [True] * (
+        512 - num_rows
+    )
