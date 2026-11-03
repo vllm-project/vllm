@@ -599,6 +599,8 @@ pub struct ResponseUsage {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputTokensDetails {
     pub cached_tokens: usize,
+    /// Prompt tokens newly written to the prefix cache.
+    pub cache_write_tokens: usize,
     /// vLLM extension: per-turn token counts, populated only by multi-turn
     /// builtin-tool execution. Always empty in this single-turn frontend.
     pub input_tokens_per_turn: Vec<usize>,
@@ -834,6 +836,7 @@ mod tests {
                 input_tokens: 3,
                 input_tokens_details: InputTokensDetails {
                     cached_tokens: 1,
+                    cache_write_tokens: 2,
                     input_tokens_per_turn: vec![],
                     cached_tokens_per_turn: vec![],
                 },
@@ -899,6 +902,7 @@ mod tests {
                 "input_tokens": 3,
                 "input_tokens_details": {
                   "cached_tokens": 1,
+                  "cache_write_tokens": 2,
                   "input_tokens_per_turn": [],
                   "cached_tokens_per_turn": []
                 },

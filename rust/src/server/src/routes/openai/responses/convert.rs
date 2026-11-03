@@ -667,6 +667,7 @@ pub(crate) fn build_usage(usage: &vllm_chat::ChatTokenUsage) -> ResponseUsage {
         input_tokens: usage.prompt_token_count,
         input_tokens_details: InputTokensDetails {
             cached_tokens: usage.prompt_cache_usage.cached_token_count,
+            cache_write_tokens: usage.prompt_cache_usage.cache_creation_token_count,
             input_tokens_per_turn: vec![],
             cached_tokens_per_turn: vec![],
         },
@@ -802,20 +803,21 @@ mod tests {
     }
 
     #[test]
-    fn usage_preserves_reasoning_and_cached_token_counts() {
+    fn usage_preserves_reasoning_and_prompt_cache_token_counts() {
         let usage = build_usage(&ChatTokenUsage {
             engine: TokenUsage {
                 prompt_token_count: 5,
                 output_token_count: 7,
                 prompt_cache_usage: vllm_llm::PromptCacheUsage {
                     cached_token_count: 3,
-                    cache_creation_token_count: 2,
+                    cache_creation_token_count: 4,
                 },
             },
             reasoning_tokens: 2,
         });
 
         assert_eq!(usage.input_tokens_details.cached_tokens, 3);
+        assert_eq!(usage.input_tokens_details.cache_write_tokens, 4);
         assert_eq!(usage.output_tokens_details.reasoning_tokens, 2);
         assert_eq!(usage.total_tokens, 12);
     }

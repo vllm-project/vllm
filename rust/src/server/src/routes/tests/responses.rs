@@ -252,6 +252,10 @@ async fn responses_non_streaming_text_input_returns_response_object() {
     assert_eq!(json["usage"]["output_tokens"], 3);
     assert_eq!(json["usage"]["total_tokens"], 25);
     assert_eq!(json["usage"]["input_tokens_details"]["cached_tokens"], 0);
+    assert_eq!(
+        json["usage"]["input_tokens_details"]["cache_write_tokens"],
+        0
+    );
 
     // Echoed request metadata with OpenAI defaults applied.
     assert_eq!(json["background"], false);
