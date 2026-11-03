@@ -288,7 +288,6 @@ class SimpleCPUOffloadWorker:
         if pin_memory:
             pin_tensor(self.shared_region.base_tensor)
             self.shared_region.is_pinned = True
-        self.num_cpu_blocks *= self.handshake_metadata.local_size
 
     def shutdown(self) -> None:
         if self._backend is not None:

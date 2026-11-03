@@ -30,6 +30,7 @@ from tests.v1.kv_connector.unit.test_kv_connector_lifecycle import (
     _make_empty_scheduler_output,
 )
 from vllm.config import CacheConfig
+from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
 from vllm.distributed.kv_transfer.kv_connector.v1.simple_cpu_offload_connector import (
     SimpleCPUOffloadConnector,
 )
@@ -127,12 +128,16 @@ def _shared_dp_dma_process(
     if mismatch and rank == 1:
         config.cache_config.prefix_caching_hash_algo = "sha256_cbor"
     kv_cache_config = _make_kv_cache_config(4, num_groups=2)
-    worker = SimpleCPUOffloadWorker(
-        config,
-        kv_cache_config,
-        _BYTES_PER_BLOCK * 8,
-        cpu_offload_shared=True,
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_connector_extra_config = {
+        "cpu_offload_shared": True,
+        "cpu_bytes_to_use_per_rank": _BYTES_PER_BLOCK * 8,
+    }
+    connector = SimpleCPUOffloadConnector(
+        config, KVConnectorRole.WORKER, kv_cache_config
     )
+    worker = connector.worker_handler
+    assert worker is not None
     gpu_caches = allocate_kv_cache(
         kv_cache_config, torch.device("cuda"), KVCacheLayout.LBNHC
     )
@@ -146,9 +151,14 @@ def _shared_dp_dma_process(
         ):
             if mismatch:
                 with pytest.raises(ValueError, match="DP hash/model/KV layout"):
-                    worker.register_kv_caches(gpu_caches)
+                    connector.register_kv_caches(gpu_caches)
                 return
-            worker.register_kv_caches(gpu_caches)
+            connector.register_kv_caches(gpu_caches)
+        assert worker.handshake_metadata is not None
+        assert connector.get_aligned_num_cpu_blocks() == 4
+        assert worker.handshake_metadata.blocks_per_rank == 4
+        assert worker.cpu_kv_caches is not None
+        assert all(cache.shape[0] == 8 for cache in worker.cpu_kv_caches.values())
         assert worker.shared_region is not None
         assert worker.shared_region.is_pinned
         assert not os.path.exists(worker.shared_region.mmap_path)
