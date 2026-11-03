@@ -1336,7 +1336,7 @@ class SparseAttnIndexer(CustomOp):
         parallel_config = vllm_config.parallel_config
         self.topk_backend = vllm_config.kernel_config.sparse_indexer_topk_backend
         self.logits_dtype = STR_DTYPE_TO_TORCH_DTYPE[
-            vllm_config.attention_config.indexer_logits_dtype
+            vllm_config.attention_config.resolve_indexer_logits_dtype("float32")
         ]
         self._parallel_config = parallel_config
         self.dcp_world_size = parallel_config.decode_context_parallel_size

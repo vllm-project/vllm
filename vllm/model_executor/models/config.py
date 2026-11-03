@@ -78,6 +78,11 @@ class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
             cache_config.cache_dtype = "auto"
             logger.info("Using bfloat16 kv-cache for DeepSeekV3.2")
 
+        attention_config = vllm_config.attention_config
+        attention_config.indexer_logits_dtype = (
+            attention_config.resolve_indexer_logits_dtype("bfloat16")
+        )
+
 
 class MiniMaxM3SparseConfig(VerifyAndUpdateConfig):
     @staticmethod
@@ -530,6 +535,9 @@ class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
             attention_config.indexer_sparse_logits = _indexer_sparse_logits_supported(
                 vllm_config
             )
+        attention_config.indexer_logits_dtype = (
+            attention_config.resolve_indexer_logits_dtype("bfloat16")
+        )
 
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:

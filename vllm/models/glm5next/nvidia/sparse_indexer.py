@@ -805,7 +805,9 @@ class SparseAttnIndexerKpool(CustomOp):
             else "auto"
         )
         self.logits_dtype = (
-            STR_DTYPE_TO_TORCH_DTYPE[_cfg.attention_config.indexer_logits_dtype]
+            STR_DTYPE_TO_TORCH_DTYPE[
+                _cfg.attention_config.resolve_indexer_logits_dtype("float32")
+            ]
             if _cfg is not None
             else torch.float32
         )
