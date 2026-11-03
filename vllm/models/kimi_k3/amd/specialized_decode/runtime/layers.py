@@ -57,8 +57,9 @@ def _k2_key(layer, runner: MonoRunner, tokens: int, reset: bool, m1b: bool = Fal
 
 def m1c_at(runner: MonoRunner, width: int) -> bool:
     """``runner.m1c`` at this width: M1c's KV splits must share out evenly over
-    the requests (qlen 4 has 80: a 12-row width, 3 requests, runs the asm
-    decode instead)."""
+    the requests (qlen 4 has 80: a 12-row width, 3 requests, can't). DCP1 runs
+    M1c only, so startup refuses a max_num_seqs with such a width
+    (``runtime.step_reasons``)."""
     from vllm.models.kimi_k3.amd.specialized_decode.mono.attention import (
         mla_attn_geom,
     )
