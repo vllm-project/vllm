@@ -61,6 +61,7 @@ if TYPE_CHECKING:
     VLLM_XLA_CHECK_RECOMPILATION: bool = False
     VLLM_USE_FUSED_MQA_TOPK: bool = True
     VLLM_SPARSE_INDEXER_MAX_LOGITS_MB: int = 512
+    VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB: int = 2048
     VLLM_ADAPTIVE_VERIFICATION_PROFILE_CONTEXT_LEN: int = 8192
     VLLM_XPU_PP_MICROBATCH: bool = True
     VLLM_DISTRIBUTED_USE_SPLIT_GROUP: bool = False
@@ -243,10 +244,11 @@ if TYPE_CHECKING:
     VLLM_P2P_HANDSHAKE_TIMEOUT_S: int = 30
     VLLM_P2P_IDLE_TIMEOUT_S: int = 300
     VLLM_P2P_TRANSFER_STALL_TIMEOUT_S: float = 20.0
-    VLLM_EC_SIDE_CHANNEL_HOST: str = "localhost"
-    VLLM_EC_SIDE_CHANNEL_PORT: int = 5601
+    VLLM_EC_SIDE_CHANNEL_HOST: str = ""
+    VLLM_EC_SIDE_CHANNEL_PORT: int = 0
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
+    VLLM_MOONCAKE_STORE_SELECTIVE_LEASE: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
     MOONCAKE_PREFERRED_SEGMENT: str | None = None
@@ -1132,6 +1134,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_SPARSE_INDEXER_MAX_LOGITS_MB": lambda: int(
         os.getenv("VLLM_SPARSE_INDEXER_MAX_LOGITS_MB", "512")
     ),
+    # Per-chunk BF16 decode logits budget (MiB) for the SM100 sparse indexer;
+    # 0 disables decode chunking.
+    "VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB": lambda: int(
+        os.getenv("VLLM_SPARSE_INDEXER_MAX_DECODE_LOGITS_MB", "2048")
+    ),
     # KV context length each adaptive-verification profiling request pretends to
     # carry, so the profiled step reads a realistic amount of cache.
     # Raise it for long-context deployments, where step cost is dominated by
@@ -1816,15 +1823,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_P2P_TRANSFER_STALL_TIMEOUT_S": lambda: float(
         os.getenv("VLLM_P2P_TRANSFER_STALL_TIMEOUT_S", "20")
     ),
-    # IP address used for the EC connector's ZMQ side channel
-    # (producer ROUTER bind, consumer DEALER dial).
-    "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv(
-        "VLLM_EC_SIDE_CHANNEL_HOST", "localhost"
-    ),
-    # Port for the EC connector's ZMQ side channel; advertised to peers
-    # via `ec_transfer_params.peer_port` on the producer's response.
+    # Optional EC control address override; otherwise use get_ip().
+    "VLLM_EC_SIDE_CHANNEL_HOST": lambda: os.getenv("VLLM_EC_SIDE_CHANNEL_HOST", ""),
+    # EC control base port plus DP index. Zero requests an OS-assigned port.
     "VLLM_EC_SIDE_CHANNEL_PORT": lambda: int(
-        os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "5601")
+        os.getenv("VLLM_EC_SIDE_CHANNEL_PORT", "0")
     ),
     # Per-request timeout (seconds) when a prefiller worker registers with
     # the Mooncake bootstrap server.
@@ -1838,6 +1841,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Log per-batch memory/disk tier breakdown on external GETs.
     "VLLM_MOONCAKE_STORE_TIER_LOG": lambda: (
         os.getenv("VLLM_MOONCAKE_STORE_TIER_LOG", "False").lower() in ("true", "1")
+    ),
+    # Probe prefix-lookup keys without a read lease and lease only the keys the
+    # hit loads. Requires Mooncake >= 0.3.14.
+    "VLLM_MOONCAKE_STORE_SELECTIVE_LEASE": lambda: (
+        os.getenv("VLLM_MOONCAKE_STORE_SELECTIVE_LEASE", "False").lower()
+        in ("true", "1")
     ),
     # Number of parallel KV-load receive threads per worker rank. Lets the
     # per-request control overhead (Python prep + master key lookup) of one
