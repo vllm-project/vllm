@@ -42,6 +42,16 @@ static bool on_gfx115x_int4() {
   return result;
 }
 
+// Callers check it before on_gfx115x_int4(), which matches gfx1151 too.
+static bool on_gfx1151_int4() {
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    return std::string(dprops->gcnArchName).find("gfx1151") !=
+           std::string::npos;
+  }();
+  return result;
+}
+
 #if defined(NDEBUG)
   #undef NDEBUG
   #include <assert.h>
@@ -1077,56 +1087,139 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
   else                                                       \
     WVSPLITK_INT4G_CHUNKED(_YTILE, _UNRL, _N, 128, _HAS_ZP)
 
-#define WVSPLIT_INT4G_TILE(_sYT, __N, _HAS_ZP)                                \
-  {                                                                           \
-    if (K_in * N_in > max_lds_len && !on_gfx115x_int4()) {                    \
-      /* Off gfx115x only the medium kernel serves this, up to 1.2x LDS. */   \
-      if (_sYT < 30)                                                          \
-        WVSPLIT_INT4G_GS(4, 2, __N, _HAS_ZP)                                  \
-      else                                                                    \
-        WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                                  \
-    } else if (K_in * N_in > max_lds_len) {                                   \
-      if (_sYT < 30)                                                          \
-        WVSPLIT_INT4G_GS_CHUNKED(4, 2, __N, _HAS_ZP)                          \
-      else if (mindiv_int4(M_in, CuCount * 4, 16) < 16)                       \
-        WVSPLIT_INT4G_GS_CHUNKED(2, 2, __N, _HAS_ZP)                          \
-      else                                                                    \
-        WVSPLIT_INT4G_GS_CHUNKED(4, 1, __N, _HAS_ZP)                          \
-    } else if (on_gfx115x_int4() && __N >= 3 && _sYT >= 40 && K_in >= 4096 && \
-               mindiv_int4(M_in, CuCount * 4, 16) < 16)                       \
-      /* YTILE = 4 is better here, but mindiv_int4 can trim WvPrGrp           \
-         harder at YTILE = 4 than at YTILE = 2, and idle wave rows            \
-         cost more than the tile gains. The K bound keeps this off            \
-         shallow rows, where the k1 loop cannot amortise the extra            \
-         m-tiles. */                                                          \
-      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                                    \
-    else if (__N >= 4 && _sYT >= 480)                                         \
-      WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                                    \
-    else if (__N >= 3 && _sYT >= 40)                                          \
-      WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                                    \
-    else if (__N >= 3 && _sYT < 40 && (K_in <= 2048 || K_in >= 4096))         \
-      WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                                    \
-    else if (__N >= 3 && _sYT < 40)                                           \
-      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                                    \
-    else if (__N >= 2)                                                        \
-      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                                    \
-    else if (on_gfx115x_int4() && __N == 1 && K_in == 4096)                   \
-      /* A_CHUNK = 32 doubles the per-thread load granularity, and a          \
-         K = 4096 row has the work to amortise it. _W stays at 16             \
-         because A_CHUNK = 32 with _W = 32 spills. */                         \
-      WVSPLIT_INT4G_GS_W_AC(1, 4, 16, 32, __N, _HAS_ZP)                       \
-    else if (on_gfx115x_int4() && __N == 1 && !(_HAS_ZP) &&                   \
-             K_in % (32 * 32 * 8) == 0)                                       \
-      /* Deep-K rows dividing this tuple's K step exactly, where UNRL = 8     \
-         gives each row a 4 KB contiguous run. A K leaving a large ragged     \
-         tail has too few k1 iterations to hide it. Symmetric only: the       \
-         tuple sits at the edge of the register budget and the zero-point     \
-         lookup pushes it over, costing 13.5% asymmetric at K = 8192. */      \
-      WVSPLIT_INT4G_GS_W_AC(2, 8, 16, 32, __N, _HAS_ZP)                       \
-    else if (_sYT >= 30)                                                      \
-      WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                                    \
-    else                                                                      \
-      WVSPLIT_INT4G_GS(1, 4, __N, _HAS_ZP)                                    \
+// Per-target tuples; a case they do not cover falls back to the generic
+// tiles below.  Each returns from the caller once it launches.
+#define WVSPLIT_INT4G_GFX1151(__N, _HAS_ZP)               \
+  if constexpr (__N == 1) {                               \
+    if (K_in <= 8192 && M_in >= 512) {                    \
+      WVSPLIT_INT4G_GS_W_AC(2, 1, 32, 32, __N, _HAS_ZP)   \
+      return;                                             \
+    }                                                     \
+  } else if constexpr (__N == 2) {                        \
+    if (K_in <= 1536 || M_in >= 4096) {                   \
+      WVSPLIT_INT4G_GS_W_AC(2, 1, 32, 16, __N, _HAS_ZP)   \
+      return;                                             \
+    }                                                     \
+  } else if constexpr (__N == 3 || __N == 4) {            \
+    if (M_in >= 256) {                                    \
+      if (M_in >= 512) {                                  \
+        WVSPLIT_INT4G_GS_W_AC(2, 1, 32, 16, __N, _HAS_ZP) \
+      } else {                                            \
+        WVSPLIT_INT4G_GS_W_AC(1, 2, 16, 16, __N, _HAS_ZP) \
+      }                                                   \
+      return;                                             \
+    }                                                     \
+  } else if constexpr (__N == 5 && !(_HAS_ZP)) {          \
+    if (M_in >= 2048) {                                   \
+      WVSPLIT_INT4G_GS_W_AC(2, 1, 32, 16, __N, _HAS_ZP)   \
+      return;                                             \
+    }                                                     \
+  }
+
+#define WVSPLIT_INT4G_GFX115X(__N, _HAS_ZP)                              \
+  if constexpr (__N == 1) {                                              \
+    if (K_in >= 512 && K_in <= ((_HAS_ZP) && bf16_int4 ? 3584 : 8192)) { \
+      if (M_in >= 1024) {                                                \
+        WVSPLIT_INT4G_GS_W_AC(2, 2, 32, 32, __N, _HAS_ZP)                \
+        return;                                                          \
+      } else if (M_in >= 256 && (K_in <= 4096 || (_HAS_ZP))) {           \
+        WVSPLIT_INT4G_GS_W_AC(1, 2, 16, 32, __N, _HAS_ZP)                \
+        return;                                                          \
+      }                                                                  \
+    }                                                                    \
+  } else if constexpr (__N == 2 && !bf16_int4) {                         \
+    if (K_in >= 1024 && K_in <= 2048) {                                  \
+      if (K_in > 1536) {                                                 \
+        WVSPLIT_INT4G_GS_W_AC(4, 2, 12, 32, __N, _HAS_ZP)                \
+      } else {                                                           \
+        WVSPLIT_INT4G_GS_W_AC(4, 1, 32, 16, __N, _HAS_ZP)                \
+      }                                                                  \
+      return;                                                            \
+    }                                                                    \
+  } else if constexpr (__N == 3 && !bf16_int4) {                         \
+    if (M_in >= 256 && M_in < 2048) {                                    \
+      WVSPLIT_INT4G_GS_W_AC(2, 2, 16, 32, __N, _HAS_ZP)                  \
+      return;                                                            \
+    }                                                                    \
+  } else if constexpr (__N == 4 && !((_HAS_ZP) && bf16_int4)) {          \
+    if (M_in >= 256 && K_in >= 512 && K_in <= 2048) {                    \
+      if (M_in >= 2048) {                                                \
+        WVSPLIT_INT4G_GS_W_AC(2, 1, 32, 16, __N, _HAS_ZP)                \
+      } else {                                                           \
+        WVSPLIT_INT4G_GS_W_AC(2, 1, 12, 32, __N, _HAS_ZP)                \
+      }                                                                  \
+      return;                                                            \
+    }                                                                    \
+  } else if constexpr (__N == 5) {                                       \
+    if (M_in >= 1024 && K_in >= 1024) {                                  \
+      WVSPLIT_INT4G_GS_W_AC(4, 1, 12, 16, __N, _HAS_ZP)                  \
+      return;                                                            \
+    }                                                                    \
+  }
+
+#define WVSPLIT_INT4G_TILE(_sYT, __N, _HAS_ZP)                                 \
+  {                                                                            \
+    [[maybe_unused]] constexpr bool bf16_int4 =                                \
+        std::is_same_v<fptype, __hip_bfloat16>;                                \
+    if (K_in * N_in <= max_lds_len) {                                          \
+      if (on_gfx1151_int4()) {                                                 \
+        WVSPLIT_INT4G_GFX1151(__N, _HAS_ZP)                                    \
+      } else if (on_gfx115x_int4()) {                                          \
+        WVSPLIT_INT4G_GFX115X(__N, _HAS_ZP)                                    \
+      }                                                                        \
+    }                                                                          \
+    if (K_in * N_in > max_lds_len && !on_gfx115x_int4()) {                     \
+      /* Off gfx115x only the medium kernel serves this, up to 1.2x LDS. */    \
+      if (_sYT < 30)                                                           \
+        WVSPLIT_INT4G_GS(4, 2, __N, _HAS_ZP)                                   \
+      else                                                                     \
+        WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                                   \
+    } else if (K_in * N_in > max_lds_len) {                                    \
+      if (_sYT < 30)                                                           \
+        WVSPLIT_INT4G_GS_CHUNKED(4, 2, __N, _HAS_ZP)                           \
+      else if (mindiv_int4(M_in, CuCount * 4, 16) < 16)                        \
+        WVSPLIT_INT4G_GS_CHUNKED(2, 2, __N, _HAS_ZP)                           \
+      else                                                                     \
+        WVSPLIT_INT4G_GS_CHUNKED(4, 1, __N, _HAS_ZP)                           \
+    } else if (on_gfx115x_int4() && __N >= 3 && _sYT >= 40 && K_in >= 4096 &&  \
+               mindiv_int4(M_in, CuCount * 4, 16) < 16)                        \
+      /* YTILE = 4 is better here, but mindiv_int4 can trim WvPrGrp            \
+         harder at YTILE = 4 than at YTILE = 2, and idle wave rows             \
+         cost more than the tile gains. The K bound keeps this off             \
+         shallow rows, where the k1 loop cannot amortise the extra             \
+         m-tiles. */                                                           \
+      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                                     \
+    else if (__N >= 4 && _sYT >= 480)                                          \
+      WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                                     \
+    else if (__N >= 3 && _sYT >= 40)                                           \
+      WVSPLIT_INT4G_GS(4, 1, __N, _HAS_ZP)                                     \
+    else if (__N >= 3 && _sYT < 40 && (K_in <= 2048 || K_in >= 4096))          \
+      WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                                     \
+    else if (__N >= 3 && _sYT < 40)                                            \
+      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                                     \
+    else if (__N >= 2)                                                         \
+      WVSPLIT_INT4G_GS(2, 2, __N, _HAS_ZP)                                     \
+    else if constexpr (__N == 1) {                                             \
+      /* N >= 2 never gets here, so these tiles are not built for it. */       \
+      if (on_gfx115x_int4() && K_in == 4096)                                   \
+        /* A_CHUNK = 32 doubles the per-thread load granularity, and a         \
+           K = 4096 row has the work to amortise it. _W stays at 16            \
+           because A_CHUNK = 32 with _W = 32 spills. */                        \
+        WVSPLIT_INT4G_GS_W_AC(1, 4, 16, 32, __N, _HAS_ZP)                      \
+      else if (on_gfx115x_int4() && !(_HAS_ZP) && K_in % (32 * 32 * 8) == 0) { \
+        /* Deep-K rows dividing this tuple's K step exactly, where UNRL = 8    \
+           gives each row a 4 KB contiguous run. A K leaving a large ragged    \
+           tail has too few k1 iterations to hide it. Symmetric only: the      \
+           tuple sits at the edge of the register budget and the zero-point    \
+           lookup pushes it over, costing 13.5% asymmetric at K = 8192. */     \
+        if constexpr (!(_HAS_ZP)) {                                            \
+          WVSPLIT_INT4G_GS_W_AC(2, 8, 16, 32, __N, _HAS_ZP)                    \
+        }                                                                      \
+      } else if (_sYT >= 30)                                                   \
+        WVSPLIT_INT4G_GS(2, 4, __N, _HAS_ZP)                                   \
+      else                                                                     \
+        WVSPLIT_INT4G_GS(1, 4, __N, _HAS_ZP)                                   \
+    }                                                                          \
   }
 
 // Inner dispatch: shared by both symmetric and asymmetric paths
@@ -1182,6 +1275,8 @@ torch::Tensor wvSplitK_int4_g(const at::Tensor& in_a, const at::Tensor& in_b,
 #undef WVSPLITK_INT4G_LAUNCH_CHUNKED
 #undef WVSPLITK_INT4G_CHUNKED
 #undef WVSPLIT_INT4G_GS_CHUNKED
+#undef WVSPLIT_INT4G_GFX1151
+#undef WVSPLIT_INT4G_GFX115X
 #undef WVSPLIT_INT4G_TILE
 #undef WVSPLIT_INT4G_DISPATCH
 
