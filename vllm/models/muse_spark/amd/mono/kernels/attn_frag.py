@@ -123,11 +123,13 @@ def default_cpg(NR, swa):
     return BLOCKS // g
 
 
-def make(NR, swa, maxk=VLLM_MAX_KEYS):
+def make(NR, swa, maxk=VLLM_MAX_KEYS, nq=NQ, qcm=0, kvcm=None):
     """The fragment for NR requests; swa = SWA (window 2048) or full attention. It stages enough
-    page ids a CTA for maxk keys a request (PGN)."""
+    page ids a CTA for maxk keys a request (PGN). nq < NQ: nq query rows a request (q / out row
+    nq req + tok; query slots tok >= nq are padding, not stored); qcm / kvcm: the q / K / V load
+    cache policies (a launch that wrote q and the KV itself reads them at device scope)."""
     # K / V load cache policy: cached for SWA, nontemporal for full
-    KCM = 0 if swa else CM_NT
+    KCM = (0 if swa else CM_NT) if kvcm is None else kvcm
 
     G = NR * HKV
     CPG = default_cpg(NR, swa)
@@ -194,7 +196,7 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
     def geom(d, req):
         """Run-time key-tile range of request req (uniform)."""
         seq_len = uniform(ld_i32(d.used, req))
-        ctx = seq_len - NQ
+        ctx = seq_len - nq
         if const_expr(swa):
             lo = fx.max(ctx - WIN + 1, 0)
         else:
@@ -366,9 +368,10 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                 qb = [
                     ld_vec(
                         d.q,
-                        ((NQ * req + tok) * (NH * HD) + head * HD + 32 * c + 8 * g)
+                        ((nq * req + tok) * (NH * HD) + head * HD + 32 * c + 8 * g)
                         // 2,
                         4,
+                        qcm,
                     ).bitcast(fx.BFloat16)
                     for c in range(2)
                 ]
@@ -487,6 +490,22 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
         a, b = permlane_swap(off, v.bitcast(fx.Int32), v.bitcast(fx.Int32))
         return a.bitcast(fx.Float32), b.bitcast(fx.Float32)
 
+    def store_row(d, tag, req, tok, head, dq, w2):
+        """Merged output row (req, tok), head ``head``, d-quad dq: attn_o and the tagged pairs."""
+        bo.buffer_store(
+            w2,
+            rsrc(d.out),
+            ((nq * req + tok) * (NH * HD) + head * HD + 4 * dq) // 2,
+            cache_modifier=CM_DEV,
+        )
+        mb_put2(
+            tag,
+            d.part + fx.Int64(P_AO),
+            ((nq * req + tok) * (NH * HD) + head * HD + 4 * dq) // 2,
+            w2[0],
+            w2[1],
+        )
+
     @traced
     def merge(d, tag, health, tid, bid, lane, wave, L):
         if const_expr(STR > 1):
@@ -587,19 +606,11 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                     [bf16_pair(A[0] * f, A[1] * f), bf16_pair(A[2] * f, A[3] * f)],
                     fx.Int32,
                 )
-                bo.buffer_store(
-                    w2,
-                    rsrc(d.out),
-                    ((NQ * req + tok) * (NH * HD) + head * HD + 4 * dq) // 2,
-                    cache_modifier=CM_DEV,
-                )
-                mb_put2(
-                    tag,
-                    d.part + fx.Int64(P_AO),
-                    ((NQ * req + tok) * (NH * HD) + head * HD + 4 * dq) // 2,
-                    w2[0],
-                    w2[1],
-                )
+                if const_expr(nq == NQ):
+                    store_row(d, tag, req, tok, head, dq, w2)
+                else:
+                    if tok < nq:  # query slot nq .. NQ - 1 of a request: padding
+                        store_row(d, tag, req, tok, head, dq, w2)
                 rocdl.s_waitcnt(vmcnt=0, expcnt=0, lgkmcnt=0)
                 if tt == 0:
                     mb_put(tag, d.part + fx.Int64(P_IF), item, fx.Int32(1))
@@ -614,7 +625,9 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
     return SimpleNamespace(
         Lds=Lds,
         run=run,
-        key=f"attnfrag_nr{NR}_{'swa' if swa else 'full'}_c{CPG}_p{PD}_k{KCM}_{_SRC_HASH}",
+        key=f"attnfrag_nr{NR}_{'swa' if swa else 'full'}_c{CPG}_p{PD}_k{KCM}"
+        + (f"_q{nq}_qc{qcm}" if (nq, qcm) != (NQ, 0) else "")
+        + f"_{_SRC_HASH}",
     )
 
 
