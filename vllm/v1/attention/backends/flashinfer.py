@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
 )
+from vllm.model_executor.utils import refill_derived
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
@@ -2161,15 +2162,8 @@ class FlashInferImpl(AttentionImpl):
 
     # FlashInfer requires attention sinks to be float32
     def process_weights_after_loading(self, act_dtype: torch.dtype):
-        source_sinks = self._sinks_source
-        if source_sinks is None:
-            return
-        if source_sinks.dtype == torch.float32:
-            self.sinks = source_sinks
-        elif self.sinks is None or self.sinks.dtype != torch.float32:
-            self.sinks = source_sinks.to(torch.float32)
-        else:
-            self.sinks.copy_(source_sinks)
+        if self._sinks_source is not None:
+            refill_derived(self, "sinks", self._sinks_source.to(torch.float32))
 
     def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
         bmm1_scale = self.scale

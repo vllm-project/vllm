@@ -15,6 +15,7 @@ import torch
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.utils import refill_derived
 from vllm.model_executor.warmup.cutedsl_warmup import (
     CuTeDSLCompileUnit,
     register_cutedsl_warmup_provider,
@@ -843,15 +844,8 @@ class B12xPagedAttentionImpl(AttentionImpl[B12xPagedMetadata]):
 
     def process_weights_after_loading(self, act_dtype: torch.dtype) -> None:
         del act_dtype
-        source_sinks = self._sinks_source
-        if source_sinks is None:
-            return
-        if source_sinks.dtype == torch.float32:
-            self.sinks = source_sinks
-        elif self.sinks is None or self.sinks.dtype != torch.float32:
-            self.sinks = source_sinks.to(torch.float32)
-        else:
-            self.sinks.copy_(source_sinks)
+        if self._sinks_source is not None:
+            refill_derived(self, "sinks", self._sinks_source.to(torch.float32))
 
     def _prepare_fp8_descales(
         self,
