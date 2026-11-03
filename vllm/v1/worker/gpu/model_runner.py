@@ -30,7 +30,10 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.compilation.breakable_cudagraph import BreakableCUDAGraphWrapper
+from vllm.compilation.breakable_cudagraph import (
+    BreakableCUDAGraphWrapper,
+    is_breakable_cudagraph_enabled,
+)
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.wrapper import compile_model_with_stock_torch
@@ -776,7 +779,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             use_replayssm=self.cache_config.use_replayssm,
         )
         piecewise_capture_available = bool(
-            envs.VLLM_USE_BREAKABLE_CUDAGRAPH or has_compiled_submodule(self.model)
+            is_breakable_cudagraph_enabled(self.vllm_config.compilation_config)
+            or has_compiled_submodule(self.model)
         )
         if self.adaptive_verification is not None:
             self.compilation_config.cudagraph_mode = resolve_adaptive_cudagraph_mode(
@@ -1241,6 +1245,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pooling_runner is not None:
             # Preempted docs keep their query-use reservation until rescheduled.
             self.pooling_runner.on_requests_finished(finished_req_ids)
+        if self.speculator is not None and finished_req_ids:
+            self.speculator.on_requests_finished(finished_req_ids)
         preempted_req_ids = scheduler_output.preempted_req_ids
         if preempted_req_ids:
             finished_req_ids = finished_req_ids.union(preempted_req_ids)
@@ -1285,6 +1291,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_index = self.req_states.req_id_to_index[req_id]
             if self.adaptive_verification is not None:
                 self.adaptive_verification.add_request(req_index)
+            if self.speculator is not None:
+                self.speculator.add_request(req_index)
 
             if self.pooling_runner is not None:
                 assert new_req_data.pooling_params is not None
