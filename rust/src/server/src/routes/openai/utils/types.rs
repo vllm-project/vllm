@@ -7,6 +7,7 @@ use indexmap::IndexMap;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::Value;
+use vllm_chat::ChatTool;
 use vllm_llm::{PromptCacheUsage, TokenUsage};
 
 // ============================================================================
@@ -337,7 +338,7 @@ fn default_function_tool_type() -> String {
 }
 
 #[serde_with::skip_serializing_none]
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 pub struct Function {
     pub name: String,
     pub description: Option<String>,
@@ -348,6 +349,25 @@ pub struct Function {
     /// Whether the schema is loaded on demand via tool search (vLLM extension,
     /// mirroring the OpenAI Responses and Anthropic Messages field).
     pub defer_loading: Option<bool>,
+}
+
+impl From<Function> for ChatTool {
+    fn from(function: Function) -> Self {
+        let Function {
+            name,
+            description,
+            parameters,
+            strict,
+            defer_loading,
+        } = function;
+        Self {
+            name,
+            description,
+            parameters,
+            strict,
+            defer_loading,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -383,7 +403,7 @@ pub struct FunctionCallDelta {
 }
 
 /// Tool choice value for simple string options.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolChoiceValue {
     Auto,
@@ -416,13 +436,13 @@ impl Default for ToolChoice {
 }
 
 /// Function choice specification for `ToolChoice::Function`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct FunctionChoice {
     pub name: String,
 }
 
 /// Tool reference for `ToolChoice::AllowedTools`.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ToolReference {
