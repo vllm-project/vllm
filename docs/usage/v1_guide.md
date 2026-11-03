@@ -77,9 +77,30 @@ For each item, its support in vLLM V1 falls into one of the following states:
     and decode phases.
 
 The V1 scheduler supports multiple scheduling policies, including First-Come,
-First-Served (FCFS) and priority-based scheduling (where requests are processed
-based on assigned priority, with FCFS as a tie-breaker), configurable via the
-`--scheduling-policy` argument.
+First-Served (FCFS), priority-based scheduling (where requests are processed
+based on assigned priority, with FCFS as a tie-breaker), and `residual_sjf`.
+`residual_sjf` is for decoder-only models: it orders waiting requests by their
+estimated remaining prefill work after prefix-cache hits (for multimodal
+requests the estimate counts placeholder tokens, not encoder work). A
+request that waits for `--residual-sjf-max-wait-ms` (10,000 by default) is
+promoted in FCFS order. KV-holding requests retain their admission priority.
+Ranking uses nonblocking connector estimates when available, including completed
+Mooncake lookups started by `lookup_async` and `lookup_prefetch_limit`. It does
+not start lookups or reserve transfers. MultiConnector follows its first-hit
+order; an unknown earlier child prevents using a later child's estimate.
+
+Local hit estimates are cached while waiting and refreshed after admission
+attempts, request-content/progress changes, preemption, and cache reset. They
+may become stale when other requests populate or evict KV; actual admission
+always revalidates available blocks. An unknown external estimate preserves
+the local estimate. Ranking estimates compute work, not network transfer time.
+Queue selection still scans waiting candidates; measure scheduler CPU time
+separately for deep queues.
+
+The max-wait value controls the mean/tail tradeoff: smaller values behave
+closer to FCFS (flatter tail), larger values improve mean TTFT/E2E at the
+cost of P95/P99. Start at 1/2 to 1/3 of the target P95 wait and adjust
+after load testing against the P99 budget.
 
 ### Hardware
 

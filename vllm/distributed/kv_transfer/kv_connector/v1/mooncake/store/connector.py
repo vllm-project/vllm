@@ -218,12 +218,15 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
 
         Closes the worker's MooncakeDistributedStore handle so its
         TransferEngine and RDMA registrations are released. Invoked from the
-        engine's explicit shutdown path and as a backstop from ``__del__``;
-        a no-op on the scheduler role, which holds no store handle.
+        engine's explicit shutdown path and as a backstop from ``__del__``.
+        The scheduler role closes its lookup client, including unadopted work.
         """
         worker = getattr(self, "connector_worker", None)
         if worker is not None:
             worker.close()
+        scheduler = getattr(self, "connector_scheduler", None)
+        if scheduler is not None:
+            scheduler.client.close()
 
     def __del__(self):
         self.shutdown()
@@ -231,6 +234,20 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
     # ============================================================
     # Scheduler-side methods
     # ============================================================
+
+    def on_preschedule_request(self, request: Request) -> object | None:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.start_lookup_prefetch(request)
+
+    def cancel_preschedule_request(self, request: Request) -> None:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.cancel_lookup_prefetch(request)
+
+    def get_num_cached_tokens(
+        self, request: Request, num_computed_tokens: int
+    ) -> int | None:
+        assert self.connector_scheduler is not None
+        return self.connector_scheduler.get_num_cached_tokens(request)
 
     def get_num_new_matched_tokens(
         self,
@@ -284,6 +301,9 @@ class MooncakeStoreConnector(KVConnectorBase_V1, SupportsHMA):
         request: Request,
         block_ids: tuple[list[int], ...],
     ) -> tuple[bool, dict[str, Any] | None]:
+        assert self.connector_scheduler is not None
+        self.connector_scheduler.cancel_lookup_prefetch(request)
+        self.connector_scheduler.client.discard(request.request_id)
         # An in-flight store job holds its own reference on the blocks it reads,
         # so a finishing request never has to defer freeing them.
         return False, None
