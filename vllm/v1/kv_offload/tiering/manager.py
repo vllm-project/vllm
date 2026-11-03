@@ -112,13 +112,57 @@ PrimaryAllocFn = Callable[
 class TieringTransferJob(TransferJob):
     """TransferJob whose keys/chunk_ids are memoized in ``_keys_chunks``.
 
-    ``None`` means the claim has not been (successfully) materialized yet.
+    A promotion job passes ``alloc_fn`` and materializes lazily, on the
+    tier's first access, by claiming primary slots through it. A cascade
+    job passes ``chunk_ids`` instead and is materialized at construction.
+    ``_keys_chunks is None`` means the claim has not been materialized yet.
     """
 
-    _keys_chunks: tuple[Collection[OffloadKey], np.ndarray] | None = None
+    def __init__(
+        self,
+        job_id: JobId,
+        req_context: ReqContext,
+        keys: Collection[OffloadKey],
+        is_promotion: bool,
+        alloc_fn: PrimaryAllocFn | None = None,
+        chunk_ids: np.ndarray | None = None,
+    ):
+        super().__init__(job_id, req_context, is_promotion=is_promotion)
+        self.requested_keys = keys
+        self._alloc_fn = alloc_fn
+        self._is_alloc_failed = False
+        self._keys_chunks: tuple[Collection[OffloadKey], np.ndarray] | None = None
+
+        if is_promotion:
+            assert alloc_fn is not None and chunk_ids is None, (
+                "Promotion jobs materialize lazily"
+            )
+        else:
+            # Materialized at construction
+            assert chunk_ids is not None and alloc_fn is None, (
+                "Cascade jobs must materialize at construction"
+            )
+            assert len(chunk_ids) == len(keys), "Mismatch between chunk IDs and keys"
+            self._keys_chunks = (keys, chunk_ids)
 
     def is_materialized(self) -> bool:
         return self._keys_chunks is not None
+
+    def materialize(self) -> bool:
+        if not self.is_promotion:
+            # Cascade jobs materialize at construction
+            return True
+
+        assert self._keys_chunks is None and not self._is_alloc_failed, (
+            f"TransferJob {self.job_id} materialized more than once"
+        )
+        assert self._alloc_fn is not None
+        alloc = self._alloc_fn(self.requested_keys, self.req_context)
+        if alloc is None:
+            self._is_alloc_failed = True
+            return False
+        self._keys_chunks = alloc
+        return True
 
     @property
     def keys(self) -> Collection[OffloadKey]:
@@ -131,49 +175,6 @@ class TieringTransferJob(TransferJob):
         if self._keys_chunks is None:
             raise ValueError("TransferJob not materialized; call materialize() first")
         return self._keys_chunks[1]
-
-
-class PromotionTransferJob(TieringTransferJob):
-    def __init__(
-        self,
-        job_id: JobId,
-        req_context: ReqContext,
-        keys: Collection[OffloadKey],
-        alloc_fn: PrimaryAllocFn,
-    ):
-        super().__init__(job_id, req_context, is_promotion=True)
-        self.requested_keys = keys
-        self._alloc_fn = alloc_fn
-        self._is_alloc_failed = False
-
-    def materialize(self) -> bool:
-        assert self._keys_chunks is None and not self._is_alloc_failed, (
-            f"PromotionTransferJob {self.job_id} materialized more than once"
-        )
-
-        # Attempt materialization
-        assert self._alloc_fn is not None
-        alloc = self._alloc_fn(self.requested_keys, self.req_context)
-        if alloc is None:
-            self._is_alloc_failed = True
-            return False
-        self._keys_chunks = alloc
-        return True
-
-
-class CascadeTransferJob(TieringTransferJob):
-    def __init__(
-        self,
-        job_id: JobId,
-        req_context: ReqContext,
-        keys: Collection[OffloadKey],
-        chunk_ids: np.ndarray,
-    ):
-        super().__init__(job_id, req_context, is_promotion=False)
-        self._keys_chunks: tuple[Collection[OffloadKey], np.ndarray] = (keys, chunk_ids)
-
-    def materialize(self) -> bool:
-        return True
 
 
 class JobMetadata(NamedTuple):
@@ -661,7 +662,6 @@ class TieringOffloadingManager(OffloadingManager):
                         del load_sources[key]
 
         # Clear in-flight promotion keys book-keeping.
-        assert isinstance(transfer_job, PromotionTransferJob)
         self._inflight_promotion_keys.difference_update(transfer_job.requested_keys)
 
         if not transfer_job.is_materialized():
@@ -956,7 +956,7 @@ class TieringOffloadingManager(OffloadingManager):
         _inflight_promotion_keys (so subsequent lookups within the same step
         see it as in-flight), and _flush_pending_promotions() later submits
         one batched job per (tier, request). Primary slots are allocated
-        lazily by PromotionTransferJob.materialize(), when the tier first
+        lazily by TieringTransferJob.materialize(), when the tier first
         needs them.
 
         Args:
@@ -1003,7 +1003,8 @@ class TieringOffloadingManager(OffloadingManager):
             alloc_fn = functools.partial(self._promotion_allocation, tier_idx)
             for entry in pending_by_ctx.values():
                 job_id = self._next_job_id()
-                job_metadata = PromotionTransferJob(
+                job_metadata = TieringTransferJob(
+                    is_promotion=True,
                     job_id=job_id,
                     req_context=entry.req_context,
                     keys=entry.keys,
@@ -1239,7 +1240,8 @@ class TieringOffloadingManager(OffloadingManager):
         primary_chunks_spec = self.primary_tier.prepare_read(keys, req_context)
         assert isinstance(primary_chunks_spec, CPULoadStoreSpec)
         job_id = self._next_job_id()
-        job_metadata = CascadeTransferJob(
+        job_metadata = TieringTransferJob(
+            is_promotion=False,
             job_id=job_id,
             req_context=req_context,
             keys=keys,

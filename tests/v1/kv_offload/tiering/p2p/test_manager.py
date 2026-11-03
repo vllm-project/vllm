@@ -39,10 +39,9 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.manager import (
-    CascadeTransferJob,
     CPUPrimaryTierOffloadingManager,
-    PromotionTransferJob,
     TieringOffloadingManager,
+    TieringTransferJob,
 )
 from vllm.v1.kv_offload.tiering.p2p import manager as manager_module
 from vllm.v1.kv_offload.tiering.p2p.manager import (
@@ -131,10 +130,11 @@ def _job_metadata(
         keys = [OffloadKey(b"key1")]
     if chunk_ids is None:
         chunk_ids = list(range(len(keys)))
-    return CascadeTransferJob(
+    return TieringTransferJob(
         job_id=job_id,
         keys=keys,
         chunk_ids=np.array(chunk_ids),
+        is_promotion=False,
         req_context=_req_context(kv_params),
     )
 
@@ -625,9 +625,10 @@ class TestPromotionLatency:
             tiering_manager._metrics.on_promotion_allocated(0, 1)
             return (list(keys), np.array([0]))
 
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
             job_id=42,
             keys=[OffloadKey(b"key1")],
+            is_promotion=True,
             req_context=_req_context(_remote_prefiller_kv_params()),
             alloc_fn=primary_alloc_fn,
         )
@@ -711,10 +712,11 @@ def test_timed_out_load_holds_chunks_until_abort_ack(monkeypatch, manager_lock):
         tiering._metrics.on_promotion_allocated(0, len(chunk_ids))
         return (list(keys), chunk_ids)
 
-    job = PromotionTransferJob(
+    job = TieringTransferJob(
         job_id=7,
-        req_context=ctx,
         keys=[key],
+        is_promotion=True,
+        req_context=ctx,
         alloc_fn=alloc_fn,
     )
     tiering._register_job(job, tier_idx=0)
@@ -3239,10 +3241,11 @@ class TestIdleWhileServingPeers:
                 return (list(keys), np.array([0], dtype=np.int32))
 
             consumer.submit_load(
-                PromotionTransferJob(
+                TieringTransferJob(
                     job_id=7,
-                    req_context=ctx,
                     keys=[key],
+                    is_promotion=True,
+                    req_context=ctx,
                     alloc_fn=alloc_fn,
                 )
             )

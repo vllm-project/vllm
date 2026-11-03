@@ -14,9 +14,8 @@ from vllm.v1.kv_offload.tiering.base import (
     TieringOffloadingMetrics,
 )
 from vllm.v1.kv_offload.tiering.manager import (
-    CascadeTransferJob,
     JobMetadata,
-    PromotionTransferJob,
+    TieringTransferJob,
 )
 from vllm.v1.kv_offload.tiering.metrics import TieringMetricsTracker
 
@@ -34,14 +33,29 @@ def create_promotion_job(
     *,
     tracker: TieringMetricsTracker,
     tier_idx: int,
-) -> PromotionTransferJob:
-    """Build a PromotionTransferJob that materializes to the given chunk ids."""
+) -> TieringTransferJob:
+    """Build a TieringTransferJob that materializes to the given chunk ids."""
 
     def primary_alloc_fn(keys, ctx):
         tracker.on_promotion_allocated(tier_idx, len(chunk_ids))
         return (list(keys), np.array(chunk_ids, dtype=np.int32))
 
-    return PromotionTransferJob(job_id, _CTX, keys, alloc_fn=primary_alloc_fn)
+    return TieringTransferJob(
+        job_id, _CTX, keys, is_promotion=True, alloc_fn=primary_alloc_fn
+    )
+
+
+def create_cascade_job(
+    job_id: int, keys: list, chunk_ids: list[int]
+) -> TieringTransferJob:
+    """Build a TieringTransferJob materialized to the given chunk ids."""
+    return TieringTransferJob(
+        job_id,
+        _CTX,
+        keys,
+        is_promotion=False,
+        chunk_ids=np.array(chunk_ids, dtype=np.int32),
+    )
 
 
 def test_tiering_metrics_tracker_records_lookup_metrics():
@@ -126,18 +140,12 @@ def test_tiering_metrics_tracker_records_finished_job_metrics():
         range(4)
     )
     jobs = [
-        JobMetadata(
-            CascadeTransferJob(0, _CTX, [cascade_key], np.array([0])),
-            0,
-        ),
+        JobMetadata(create_cascade_job(0, [cascade_key], [0]), 0),
         JobMetadata(
             create_promotion_job(1, [promotion_key], [1], tracker=tracker, tier_idx=0),
             0,
         ),
-        JobMetadata(
-            CascadeTransferJob(2, _CTX, [failed_cascade_key], np.array([2])),
-            0,
-        ),
+        JobMetadata(create_cascade_job(2, [failed_cascade_key], [2]), 0),
         JobMetadata(
             create_promotion_job(
                 3, [failed_promotion_key], [3], tracker=tracker, tier_idx=0
@@ -227,10 +235,7 @@ def test_tiering_metrics_tracker_reports_active_job_and_primary_usage_gauges():
         num_primary_chunks=6,
         primary_chunk_size=16,
     )
-    fs_job = JobMetadata(
-        CascadeTransferJob(0, _CTX, to_keys([0, 1]), np.array([0, 1])),
-        0,
-    )
+    fs_job = JobMetadata(create_cascade_job(0, to_keys([0, 1]), [0, 1]), 0)
     p2p_job = JobMetadata(
         create_promotion_job(
             1, to_keys([2, 3, 4]), [2, 3, 4], tracker=tracker, tier_idx=1
@@ -299,10 +304,7 @@ def test_tiering_metrics_tracker_records_promotion_latency_histogram(monkeypatch
     observations = stats.data["data"][TieringOffloadingMetrics.PROMOTION_LATENCY]
     assert observations == {("2:p2p", "success"): [1.5]}
 
-    cascade_job = JobMetadata(
-        CascadeTransferJob(1, _CTX, to_keys([2]), np.array([2])),
-        1,
-    )
+    cascade_job = JobMetadata(create_cascade_job(1, to_keys([2]), [2]), 1)
     tracker.on_job_registered(
         cascade_job, is_job_materialized=cascade_job.transfer_job.is_materialized()
     )

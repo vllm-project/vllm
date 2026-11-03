@@ -62,10 +62,9 @@ from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManag
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.fs.manager import FileSystemTierManager
 from vllm.v1.kv_offload.tiering.manager import (
-    CascadeTransferJob,
     CPUPrimaryTierOffloadingManager,
-    PromotionTransferJob,
     TieringOffloadingManager,
+    TieringTransferJob,
 )
 from vllm.v1.kv_offload.tiering.spec import TieringOffloadingSpec
 from vllm.v1.metrics.cache_hit_source import CacheHitSource
@@ -252,7 +251,8 @@ def test_tiering_manager_aggregates_secondary_stats(manager_lock):
 def _make_deferred_promotion_job(alloc_fn, keys=None):
     if keys is None:
         keys = to_keys([1, 2])
-    return PromotionTransferJob(
+    return TieringTransferJob(
+        is_promotion=True,
         job_id=1,
         req_context=_CTX,
         keys=keys,
@@ -260,7 +260,7 @@ def _make_deferred_promotion_job(alloc_fn, keys=None):
     )
 
 
-class TestPromotionTransferJob:
+class TestTieringTransferJobPromotion:
     def test_materialization_contract(self):
         """A deferred job is not materialized until materialize(); after a
         successful materialize() the keys/chunk_ids properties return the
@@ -313,14 +313,18 @@ class TestPromotionTransferJob:
         assert call_count[0] == 1
 
 
-class TestCascadeTransferJob:
+class TestTieringTransferJobCascade:
     def test_claim_available_immediately(self):
         """Cascades are materialized at construction; keys/chunk_ids are
         claim readbacks."""
         keys = to_keys([1])
         chunk_ids = np.array([0], dtype=np.int32)
-        job = CascadeTransferJob(
-            job_id=1, req_context=_CTX, keys=keys, chunk_ids=chunk_ids
+        job = TieringTransferJob(
+            is_promotion=False,
+            job_id=1,
+            req_context=_CTX,
+            keys=keys,
+            chunk_ids=chunk_ids,
         )
 
         assert list(job.keys) == keys
@@ -457,7 +461,8 @@ class TestTieringOffloadingManager:
             self.manager._metrics.on_promotion_allocated(0, 2)
             return keys, np.array([0, 1], dtype=np.int32)
 
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
+            is_promotion=True,
             job_id=job_id,
             req_context=_CTX,
             keys=to_keys([1, 2]),
@@ -489,8 +494,12 @@ class TestTieringOffloadingManager:
             self.manager._metrics.on_promotion_allocated(0, 1)
             return (keys, np.array([0], dtype=np.int32))
 
-        job = PromotionTransferJob(
-            job_id=job_id, req_context=_CTX, keys=to_keys([1]), alloc_fn=alloc_fn_impl
+        job = TieringTransferJob(
+            is_promotion=True,
+            job_id=job_id,
+            req_context=_CTX,
+            keys=to_keys([1]),
+            alloc_fn=alloc_fn_impl,
         )
 
         self.manager._register_job(job, 0)

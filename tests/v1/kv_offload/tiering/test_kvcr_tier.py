@@ -45,8 +45,7 @@ from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
 from vllm.v1.kv_offload.tiering.kvcr import manager as kvcr_manager
 from vllm.v1.kv_offload.tiering.kvcr.manager import KVCRSecondaryTierManager
 from vllm.v1.kv_offload.tiering.manager import (
-    CascadeTransferJob,
-    PromotionTransferJob,
+    TieringTransferJob,
 )
 
 
@@ -176,12 +175,12 @@ def _job(
     key: OffloadKey | None = None,
     chunk_id: int = 0,
 ) -> TransferJob:
-    keys = [key if key is not None else OffloadKey(b"k0")]
     chunk_ids = np.array([chunk_id], dtype=np.int64)
-    return PromotionTransferJob(
+    return TieringTransferJob(
         job_id=job_id,
+        keys=[key if key is not None else OffloadKey(b"k0")],
+        is_promotion=True,
         req_context=req_context,
-        keys=keys,
         alloc_fn=lambda keys, ctx: (list(keys), chunk_ids),
     )
 
@@ -194,8 +193,12 @@ def _store_job(
 ) -> TransferJob:
     keys = [key if key is not None else OffloadKey(b"k0")]
     chunk_ids = np.array([chunk_id], dtype=np.int64)
-    return CascadeTransferJob(
-        job_id=job_id, req_context=req_context, keys=keys, chunk_ids=chunk_ids
+    return TieringTransferJob(
+        job_id=job_id,
+        req_context=req_context,
+        keys=keys,
+        is_promotion=False,
+        chunk_ids=chunk_ids,
     )
 
 
@@ -505,10 +508,9 @@ def test_kvcr_tier_maps_query_status(monkeypatch, status, expected):
     [
         (None, [1, 3], True),
         ((b"k2", b"k0"), [3, 1], True),
-        (None, [1], False),
         ((b"k0", b"other"), [1, 3], False),
     ],
-    ids=["original-keys", "reordered-keys", "short-chunks", "unexpected-key"],
+    ids=["original-keys", "reordered-keys", "unexpected-key"],
 )
 def test_kvcr_tier_serves_primary_pin_request(
     monkeypatch, job_keys, chunk_ids, success
@@ -529,11 +531,12 @@ def test_kvcr_tier_serves_primary_pin_request(
             return LookupResult.HIT if key in hit_keys else LookupResult.MISS
 
         def create_store_job(self, requested_keys, req_context):
-            return CascadeTransferJob(
+            return TieringTransferJob(
                 11,
                 req_context,
                 list(requested_keys if job_keys is None else job_keys),
-                np.array(chunk_ids, dtype=np.int32),
+                is_promotion=False,
+                chunk_ids=np.array(chunk_ids, dtype=np.int32),
             )
 
         def on_request_finished(self, req_context):
@@ -707,10 +710,11 @@ def test_kvcr_tier_accumulates_block_results(monkeypatch, successes, expected):
     tier = _make_tier(monkeypatch, kvcr)
     keys = [OffloadKey(b"k0"), OffloadKey(b"k1")]
     tier.submit_load(
-        PromotionTransferJob(
+        TieringTransferJob(
             job_id=13,
-            req_context=ReqContext(req_id="req"),
             keys=keys,
+            is_promotion=True,
+            req_context=ReqContext(req_id="req"),
             alloc_fn=lambda keys, ctx: (
                 list(keys),
                 np.array([0, 1], dtype=np.int64),

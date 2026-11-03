@@ -42,8 +42,7 @@ from vllm.v1.kv_offload.tiering.fs.manager import (
 )
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
 from vllm.v1.kv_offload.tiering.manager import (
-    CascadeTransferJob,
-    PromotionTransferJob,
+    TieringTransferJob,
 )
 
 # ---------------------------------------------------------------------------
@@ -120,7 +119,8 @@ def make_job(
         chunk_ids = list(range(len(keys)))
     if is_promotion:
         chunk_ids_list = list(chunk_ids)
-        return PromotionTransferJob(
+        return TieringTransferJob(
+            is_promotion=True,
             job_id=job_id,
             req_context=_CTX,
             keys=keys,
@@ -129,7 +129,8 @@ def make_job(
                 np.array(chunk_ids_list, dtype=np.int32),
             ),
         )
-    return CascadeTransferJob(
+    return TieringTransferJob(
+        is_promotion=False,
         job_id=job_id,
         keys=keys,
         chunk_ids=np.array(chunk_ids, dtype=np.int64),
@@ -1090,7 +1091,8 @@ class TestFSPromotion:
         tier.submit_store(make_job(1, [key(1)], [0]))
         drain(tier)
 
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
+            is_promotion=True,
             job_id=2,
             req_context=_CTX,
             keys=[key(1)],
@@ -1106,7 +1108,8 @@ class TestFSPromotion:
         """alloc_fn returning None → materialize() redeems to None and the job
         finishes with zero keys."""
         tier, _ = fs_tier
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
+            is_promotion=True,
             job_id=42,
             req_context=_CTX,
             keys=[key(1), key(2)],
@@ -1140,7 +1143,8 @@ class TestFSPromotion:
         drain(tier)
 
         # None cached
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
+            is_promotion=True,
             job_id=10,
             req_context=_CTX,
             keys=all_keys,
@@ -1157,7 +1161,8 @@ class TestFSPromotion:
 
         # Half cached
         uncached = all_keys[2:]
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
+            is_promotion=True,
             job_id=11,
             req_context=_CTX,
             keys=all_keys,
@@ -1173,11 +1178,12 @@ class TestFSPromotion:
         assert list(job.chunk_ids) == [0, 1]
 
         # All cached
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
+            is_promotion=True,
             job_id=12,
             req_context=_CTX,
             keys=all_keys,
-            alloc_fn=lambda req_keys, ctx: ([], []),
+            alloc_fn=lambda req_keys, ctx: ([], np.array([], dtype=np.int32)),
         )
         tier.submit_load(job)
         result = drain(tier)[0]
@@ -1201,7 +1207,8 @@ class TestFSPromotion:
         tier.submit_store(make_job(1, all_keys, [0, 1, 2, 3]))
         drain(tier)
 
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
+            is_promotion=True,
             job_id=20,
             req_context=_CTX,
             keys=all_keys,
@@ -1224,7 +1231,8 @@ class TestFSPromotion:
             if os.path.exists(path):
                 os.remove(path)
 
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
+            is_promotion=True,
             job_id=21,
             req_context=_CTX,
             keys=all_keys,
@@ -1249,7 +1257,8 @@ class TestFSPromotion:
             if os.path.exists(path):
                 os.remove(path)
 
-        job = PromotionTransferJob(
+        job = TieringTransferJob(
+            is_promotion=True,
             job_id=22,
             req_context=_CTX,
             keys=all_keys,
