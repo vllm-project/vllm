@@ -804,7 +804,8 @@ def test_qwen4_exp_hopper_plans_are_valid() -> None:
         ((9, 0), qwen4_exp_gemm.QWEN4_EXP_SM90_GEMM_PLANS),
         ((12, 1), qwen4_exp_gemm.QWEN4_EXP_SM121_GEMM_PLANS),
         ((12, 0), {}),
-        ((8, 0), {}),
+        ((8, 0), qwen4_exp_gemm.QWEN4_EXP_SM80_GEMM_PLANS),
+        ((8, 6), {}),
     ],
 )
 def test_qwen4_exp_gemm_capability_routing(
