@@ -54,7 +54,7 @@ logger = init_logger(__name__)
 # the allocator could serve it, and adversarial workloads reached up to 45%.
 # ROCr also maps kernel scratch outside the allocator when a kernel first needs
 # it, so ROCm keeps a larger floor.
-KV_CACHE_MARGIN_FLOOR_BYTES = (2 if current_platform.is_rocm() else 1) << 30
+KV_CACHE_MARGIN_FLOOR_BYTES = (3 if current_platform.is_rocm() else 1) << 30
 KV_CACHE_MARGIN_FRACTION = 0.75
 # Part of the margin kept for allocations outside torch's caching allocator
 # (kernel scratch, NCCL/RCCL buffers, lazily loaded code objects); the
