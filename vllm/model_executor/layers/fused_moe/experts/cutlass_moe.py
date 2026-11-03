@@ -837,27 +837,35 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         )
 
 
-# B200 route/cache sweeps found fanout consistently faster from M=58 for the
-# GLM-5.3 MXFP4 shape.
+# Fallback for shapes outside the measured selector ranges below.
 MXFP4_QUANTIZE_ONCE_MIN_TOKENS = 58
+MXFP4_TOP2_QUANTIZE_ONCE_MIN_TOKENS = 80
+MXFP4_TOP4_QUANTIZE_ONCE_MIN_TOKENS = 96
 MXFP4_GATHER_BLOCK_SIZE_OVERRIDE = 192
 MXFP4_GATHER_BLOCK_SIZE_MIN_TOKENS = 19
 MXFP4_GATHER_BLOCK_SIZE_MAX_TOKENS = 27
 
 
-def _select_mxfp4_input_quantization(
-    m: int,
-) -> tuple[bool, int]:
-    """Return the current M-based MXFP4 input-kernel choice and block size."""
+def _select_mxfp4_input_quantization(m: int, topk: int) -> tuple[bool, int]:
+    """Select MXFP4 input quantization from M and top-k."""
+    if topk == 1:
+        return False, 0
+    if topk == 2:
+        return m >= MXFP4_TOP2_QUANTIZE_ONCE_MIN_TOKENS, 0
+    if topk == 4:
+        return m >= MXFP4_TOP4_QUANTIZE_ONCE_MIN_TOKENS, 0
+
     use_fanout = m >= MXFP4_QUANTIZE_ONCE_MIN_TOKENS
     if use_fanout:
         return True, 0
 
-    block_size = (
-        MXFP4_GATHER_BLOCK_SIZE_OVERRIDE
-        if MXFP4_GATHER_BLOCK_SIZE_MIN_TOKENS <= m <= MXFP4_GATHER_BLOCK_SIZE_MAX_TOKENS
-        else 0
+    use_192_gather = (
+        topk == 8
+        and MXFP4_GATHER_BLOCK_SIZE_MIN_TOKENS
+        <= m
+        <= MXFP4_GATHER_BLOCK_SIZE_MAX_TOKENS
     )
+    block_size = MXFP4_GATHER_BLOCK_SIZE_OVERRIDE if use_192_gather else 0
     return False, block_size
 
 
@@ -948,7 +956,9 @@ def run_cutlass_moe_mxfp4(
         sorted_expert_ids=sorted_expert_ids,
     )
 
-    use_fanout, gather_block_size_override = _select_mxfp4_input_quantization(m)
+    use_fanout, gather_block_size_override = _select_mxfp4_input_quantization(
+        m, num_topk
+    )
 
     if use_fanout:
         rep_a_fp4, rep_a_blockscale = ops.mxfp4_experts_quantize_once_fanout(

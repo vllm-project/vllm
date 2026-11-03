@@ -220,16 +220,33 @@ def is_b200_supported() -> bool:
 def test_mxfp4_input_quantization_dispatch_boundaries(
     m: int, expected_fanout: bool, expected_gather_block_size: int
 ):
-    """The current M-based MXFP4 dispatch changes at the tuned boundaries."""
-    assert _select_mxfp4_input_quantization(m) == (
+    """Unmeasured shapes retain the legacy M-based dispatch boundaries."""
+    assert _select_mxfp4_input_quantization(m, 8) == (
         expected_fanout,
         expected_gather_block_size,
     )
 
 
-def test_mxfp4_input_quantization_falls_back_to_gather_below_cutoff():
-    """The automatic selector uses gather below the fanout cutoff."""
-    assert _select_mxfp4_input_quantization(57) == (False, 0)
+@pytest.mark.parametrize(("topk", "min_tokens"), [(2, 80), (4, 96)])
+def test_mxfp4_measured_selector_thresholds(topk: int, min_tokens: int):
+    """Shared conservative M thresholds cover the measured K range."""
+    assert _select_mxfp4_input_quantization(min_tokens - 1, topk) == (False, 0)
+    assert _select_mxfp4_input_quantization(min_tokens, topk) == (True, 0)
+
+
+def test_mxfp4_topk1_stays_on_gather():
+    """Top-k 1 keeps gather because fanout cannot avoid repeated quantization."""
+    for m in (1, 57, 58, 128, 512):
+        assert _select_mxfp4_input_quantization(m, 1) == (False, 0)
+
+
+def test_mxfp4_selector_uses_auto_gather_except_for_topk8_override():
+    """M<58 uses auto gather for tuned top-k values and 192 threads for top-k8."""
+    assert _select_mxfp4_input_quantization(24, 1) == (False, 0)
+    assert _select_mxfp4_input_quantization(24, 2) == (False, 0)
+    assert _select_mxfp4_input_quantization(24, 4) == (False, 0)
+    assert _select_mxfp4_input_quantization(24, 8) == (False, 192)
+    assert _select_mxfp4_input_quantization(58, 3) == (True, 0)
 
 
 def compute_ref_output(
