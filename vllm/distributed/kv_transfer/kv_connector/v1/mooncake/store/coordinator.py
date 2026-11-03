@@ -89,6 +89,7 @@ class MooncakeStoreCoordinator:
         use_eagle: bool = False,
         retention_interval: int | None = None,
         enable_partial_hash_hits: bool = False,
+        num_hash_lookahead_tokens: int = 0,
     ) -> None:
         # Match core's alignment requirements for prefix-cacheable groups.
         assert all(
@@ -115,7 +116,10 @@ class MooncakeStoreCoordinator:
         self.lcm_block_size = scheduler_block_size
         # Core's decision: whether hits land on the hash unit, below the block.
         self.enable_partial_hash_hits = enable_partial_hash_hits
-        self.use_eagle = use_eagle
+        # Lookahead hashes key the drafter's KV past each block, so no group
+        # drops its trailing block.
+        self.use_eagle = use_eagle and not num_hash_lookahead_tokens
+        self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
         # Mirror vLLM core's KVCacheCoordinator.retention_interval.
         self.retention_interval = retention_interval
         self._verify_and_split_kv_cache_groups()
@@ -152,6 +156,7 @@ class MooncakeStoreCoordinator:
             scheduler_block_size,
             hash_block_size,
             use_eagle=spec_config is not None and spec_config.use_eagle_block_drop(),
+            num_hash_lookahead_tokens=vllm_config.num_hash_lookahead_tokens,
             retention_interval=kv_cache_config.prefix_cache_retention_interval,
             enable_partial_hash_hits=(
                 alignment is not None and alignment < scheduler_block_size
@@ -177,16 +182,17 @@ class MooncakeStoreCoordinator:
             assert manager_cls is not None, (
                 f"No manager registered for KVCacheSpec {spec}"
             )
+            drops_eagle_block = g.is_eagle_group and not self.num_hash_lookahead_tokens
             for idx, group in enumerate(attention_groups):
                 if group.spec == spec:
                     assert manager_cls is group.manager_cls
                     group.group_ids.append(i)
-                    if g.is_eagle_group and not group.use_eagle:
+                    if drops_eagle_block and not group.use_eagle:
                         attention_groups[idx] = group._replace(use_eagle=True)
                     break
             else:
                 attention_groups.append(
-                    StoreSpecGroup(spec, [i], manager_cls, g.is_eagle_group)
+                    StoreSpecGroup(spec, [i], manager_cls, drops_eagle_block)
                 )
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))

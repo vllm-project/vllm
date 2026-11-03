@@ -102,7 +102,10 @@ def _partial_tail_non_mamba_puts(
     # Core drops the Mamba checkpoint whenever EAGLE block drop is on, whichever
     # groups carry the eagle flag.
     boundary = get_mamba_prefill_checkpoint_position(
-        prompt_tokens, hash_block_size, coord.use_eagle
+        prompt_tokens,
+        hash_block_size,
+        coord.use_eagle,
+        coord.num_hash_lookahead_tokens,
     )
     # Any other sub-block Mamba hand-off is a shared-prefix junction. Its
     # attention KV, EAGLE proof included, ends on an attention block end no later
@@ -206,10 +209,12 @@ class MooncakeStoreScheduler:
 
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
-        self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
+        # Save progress starts when a request is scheduled for compute.
+        self._request_trackers: dict[str, RequestTracker] = {}
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
         self._finished_partial_tail_metas: dict[str, ReqMeta] = {}
+        self._finished_lookahead_metas: dict[str, ReqMeta] = {}
 
     def bind_gpu_block_pool(self, gpu_block_pool: BlockPool) -> None:
         self._gpu_block_pool = gpu_block_pool
@@ -325,8 +330,7 @@ class MooncakeStoreScheduler:
         preempted_ids = scheduler_output.preempted_req_ids or set()
         for req_id in preempted_ids:
             self.load_specs.pop(req_id, None)
-            if request_tracker := self._request_trackers.get(req_id):
-                request_tracker.reset()
+            self._request_trackers.pop(req_id, None)
             self._unfinished_requests.pop(req_id, None)
 
         meta = MooncakeStoreConnectorMetadata(
@@ -367,6 +371,7 @@ class MooncakeStoreScheduler:
             req_meta = ReqMeta.from_request_tracker(
                 request_tracker,
                 self._block_size,
+                self._hash_block_size,
                 load_spec=load_spec,
                 # A consumer may write decode KV without becoming a prefill
                 # producer. Loads are still carried by the same metadata.
@@ -421,6 +426,7 @@ class MooncakeStoreScheduler:
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
                         self._block_size,
+                        self._hash_block_size,
                         load_spec=load_spec,
                         skip_save=is_consumer,
                         block_hashes=request_real.block_hashes,
@@ -464,6 +470,7 @@ class MooncakeStoreScheduler:
                     req_meta = ReqMeta.from_request_tracker(
                         request_tracker,
                         self._block_size,
+                        self._hash_block_size,
                         load_spec=None,
                         skip_save=False,
                         block_hashes=unfinished_req.block_hashes,
@@ -496,10 +503,10 @@ class MooncakeStoreScheduler:
                     allocated_block_ids=block_ids,
                     num_saved_tokens=0,
                 )
-                self._request_trackers[request_id] = request_tracker
                 req_meta = ReqMeta.from_request_tracker(
                     request_tracker,
                     self._block_size,
+                    self._hash_block_size,
                     load_spec=load_spec,
                     skip_save=None,
                     block_hashes=unfinished_req.block_hashes,
@@ -526,9 +533,12 @@ class MooncakeStoreScheduler:
         for req_meta in self._finished_partial_tail_metas.values():
             meta.add_request(req_meta)
         self._finished_partial_tail_metas.clear()
+        for req_meta in self._finished_lookahead_metas.values():
+            meta.add_request(req_meta)
+        self._finished_lookahead_metas.clear()
 
         if not self._capacity_only:
-            self._reference_save_blocks(meta)
+            self._reference_save_blocks(meta.requests)
         return meta
 
     def _apply_current_save_block_ids(
@@ -554,7 +564,7 @@ class MooncakeStoreScheduler:
                 block_ids[group_id] for group_id in self._store_group_ids
             )
 
-    def _reference_save_blocks(self, meta: MooncakeStoreConnectorMetadata) -> None:
+    def _reference_save_blocks(self, requests: list[ReqMeta]) -> None:
         """Take a GPU block reference for every store job this step emits.
 
         The worker DMAs out of these blocks after the step that scheduled them,
@@ -565,7 +575,7 @@ class MooncakeStoreScheduler:
         coord = self._store_coord
         assert coord is not None
         block_sizes = [g.kv_cache_spec.block_size for g in coord.kv_cache_groups]
-        for req_meta in meta.requests:
+        for req_meta in requests:
             if not req_meta.can_save:
                 continue
             assert pool is not None, (
@@ -576,6 +586,15 @@ class MooncakeStoreScheduler:
                 continue
             if tail := _partial_tail_non_mamba_puts(coord, req_meta, block_sizes):
                 req_meta.boundary_puts = [*tail, *(req_meta.boundary_puts or [])]
+            if self.enable_kv_events and coord.num_hash_lookahead_tokens:
+                request, _ = self._unfinished_requests[req_meta.req_id]
+                req_meta.num_hash_lookahead_tokens = coord.num_hash_lookahead_tokens
+                req_meta.token_ids = list(
+                    request.all_token_ids[
+                        req_meta.token_ids_start : req_meta.token_len_chunk
+                        + coord.num_hash_lookahead_tokens
+                    ]
+                )
             req_meta.store_job_id = store_job_id = self._next_store_job_id
             self._next_store_job_id += 1
             block_ids = [put.block_id for put in req_meta.boundary_puts or []]
@@ -599,6 +618,48 @@ class MooncakeStoreScheduler:
                 continue
             self._pinned_saves[store_job_id] = (block_ids, self._num_workers)
             pool.touch([pool.blocks[block_id] for block_id in block_ids])
+
+    def register_finished_lookahead_save(
+        self,
+        request: Request,
+        block_ids: tuple[list[int], ...],
+    ) -> None:
+        """Pin and queue KV newly eligible for saving after the final hash update."""
+        if self.kv_role == "kv_consumer" and not self.save_decode_cache:
+            return
+        coord = self._store_coord
+        assert coord is not None
+        if not coord.num_hash_lookahead_tokens:
+            return
+        tracker = self._request_trackers.get(request.request_id)
+        if tracker is None or not any(block_ids):
+            return
+        save_limit = (
+            request.num_tokens if self.save_decode_cache else tracker.prefill_end_tokens
+        )
+        in_flight_tokens = (
+            request.num_in_flight_tokens - request.num_stale_output_tokens
+        )
+        completed_tokens = request.num_computed_tokens - in_flight_tokens
+        tracker.token_len = min(completed_tokens, save_limit)
+        if tracker.token_ids is not None:
+            tracker.token_ids = request.all_token_ids[: tracker.token_len]
+        req_meta = ReqMeta.from_request_tracker(
+            tracker,
+            self._block_size,
+            self._hash_block_size,
+            block_hashes=request.block_hashes,
+            num_prompt_tokens=request.num_prompt_tokens,
+        )
+        if req_meta is None:
+            return
+        assert request.request_id not in self._finished_lookahead_metas
+        req_meta.block_ids = tuple(
+            block_ids[group_id].copy() for group_id in self._store_group_ids
+        )
+        self._reference_save_blocks([req_meta])
+        if req_meta.store_job_id in self._pinned_saves:
+            self._finished_lookahead_metas[request.request_id] = req_meta
 
     def register_finished_partial_tail(
         self,
