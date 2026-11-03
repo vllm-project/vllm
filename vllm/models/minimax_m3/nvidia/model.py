@@ -707,8 +707,14 @@ class MiniMaxM3MoE(nn.Module):
         if self.use_low_batch_ffn:
             from vllm.models.minimax_m3.nvidia.specialized_decode.moe import (
                 build_low_batch_ffn,
+                unsupported_reason,
             )
 
+            if (reason := unsupported_reason(self)) is not None:
+                raise ValueError(
+                    "decode_backend=latency_specialized: the low-batch FFN cannot "
+                    f"take this MoE layer ({reason})."
+                )
             self.low_batch_ffn = build_low_batch_ffn(self)
 
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
@@ -1542,14 +1548,19 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             layer.fuse_input_allreduce = idx > 0 and prev_defers
             prev_defers = layer.ffn_all_reduce_deferred
         self.fuse_final_norm_allreduce = prev_defers
+        deferring = []
         if current_platform.is_cuda():
-            self._init_fused_moe_finalize(vllm_config)
+            deferring = self._init_fused_moe_finalize(vllm_config)
         if specialized_decode_config(vllm_config):
-            for layer in self.layers[self.start_layer : self.end_layer]:
-                if layer.is_moe_layer:
-                    layer.block_sparse_moe.use_low_batch_ffn = True
+            if not deferring:
+                raise ValueError(
+                    "decode_backend=latency_specialized needs MoE layers whose "
+                    "finalize the next layer's fused all-reduce + norm takes."
+                )
+            for moe in deferring:
+                moe.use_low_batch_ffn = True
 
-    def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> None:
+    def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> list["MiniMaxM3MoE"]:
         """Let small batches leave a MoE's top-k finalize to the next layer's
         input norm, which already fuses the TP all-reduce, and have it quantize
         the normed rows to the MXFP8 its qkv_proj reads.
@@ -1565,7 +1576,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         )
 
         if not supports_fused_moe_finalize(vllm_config):
-            return
+            return []
         layers = self.layers[self.start_layer : self.end_layer]
         deferring = [
             layer.block_sparse_moe
@@ -1576,7 +1587,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             and layer.block_sparse_moe.defer_finalize(FUSED_MOE_FINALIZE_MAX_TOKENS)
         ]
         if not deferring:
-            return
+            return []
         # The modular experts return the router's FP32 routing weights; the
         # monolithic kernel routes itself in BF16.
         experts_cls = getattr(
@@ -1594,6 +1605,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             FUSED_MOE_FINALIZE_MAX_TOKENS,
             len(deferring),
         )
+        return deferring
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

@@ -124,7 +124,8 @@ def specialized_decode_config(vllm_config: VllmConfig) -> bool:
         reason = "; ".join(missing) or "another tensor parallel rank to support it"
         raise ValueError(f"decode_backend=latency_specialized needs {reason}.")
     logger.info_once(
-        "MiniMax-M3 specialized decode on: the low-batch FFN runs in FULL-graph "
-        "decode steps of 1-8 rows."
+        "MiniMax-M3 specialized decode on: MoE layers that leave their finalize "
+        "to the next layer run the low-batch FFN in FULL-graph decode steps of "
+        "1-8 rows."
     )
     return True

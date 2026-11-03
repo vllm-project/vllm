@@ -30,6 +30,18 @@ The multicast check is per rank, so the ranks' results are combined with a MIN
 all-reduce over the TP group: if any rank misses a requirement, every rank
 raises.
 
+Two more checks follow, and they also raise on every rank, because the
+configuration decides both:
+
+- When the model is built, at least one MoE layer must leave its top-k finalize
+  to the next layer's fused kernel. Only those layers get the low-batch FFN;
+  the last MoE layer finalizes itself and stays stock.
+- Once the weights are processed, each of those layers must be able to take
+  the FFN (`moe.unsupported_reason`):
+  - TRT-LLM-gen monolithic NVFP4 experts with per-token activations;
+  - a FlashInfer MXFP8 shared expert;
+  - the SwiGLU-OAI constants the kernels are compiled with.
+
 ## Structure
 
 | Path | Contents |
@@ -60,8 +72,9 @@ copies).
 ## Dispatch
 
 `MiniMaxM3MoE.forward_unfinalized` runs the low-batch FFN only when it holds
-one, `accepts(x)` (1-8 contiguous BF16 rows, the bound weights) and the forward
-is being captured into a FULL CUDA graph (`captures_pure_decode`); every eager
-forward, PIECEWISE capture, prefill and larger batch runs the stock code. The
+one (the layers above), `accepts(x)` (1-8 contiguous BF16 rows, the bound
+weights) and the forward is being captured into a FULL CUDA graph
+(`captures_pure_decode`); every eager forward, PIECEWISE capture, prefill and
+larger batch runs the stock code. The
 gate reads host state only, nothing is read back from the GPU, and it is the
 same on every TP rank.

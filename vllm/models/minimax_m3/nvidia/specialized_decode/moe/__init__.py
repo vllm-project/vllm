@@ -488,7 +488,7 @@ def _sm_count(device_index: int) -> int:
     return torch.cuda.get_device_properties(device_index).multi_processor_count
 
 
-def _unsupported_reason(moe: torch.nn.Module) -> str | None:
+def unsupported_reason(moe: torch.nn.Module) -> str | None:
     """Why ``moe`` cannot take the low-batch FFN, or None."""
     from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
         TrtLlmNvFp4ExpertsMonolithic,
@@ -580,7 +580,7 @@ def build_low_batch_ffn(moe: torch.nn.Module) -> LowBatchFfn | None:
     """The low-batch FFN of a ``MiniMaxM3MoE`` with processed weights, or None
     when the layer cannot take it. Compiles the kernels (outside any CUDA
     graph capture)."""
-    reason = _unsupported_reason(moe)
+    reason = unsupported_reason(moe)
     if reason is not None:
         logger.warning_once("MiniMax-M3 low-batch FFN not used: %s.", reason)
         return None
