@@ -12,7 +12,7 @@ a fallback, which the engine sends in full through ``load_weights``.
 Engines call only ``LoadPlan.get_boxes`` and ``LoadPlan.get_dest``.
 """
 
-import itertools
+import heapq
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -106,8 +106,9 @@ def plan_loads(model: torch.nn.Module, metadata: "Iterable[ParamMeta]") -> LoadP
             f"(e.g. {lonely[:3]}); their loaders combine several checkpoint "
             "tensors. Move the combine into process_weights_after_loading."
         )
+    for name, reason in _overlaps(traced, stand_ins).items():
+        traced.reasons.setdefault(name, reason)
     entries = {name: _entry(meta, traced, stand_ins) for name, meta in metas.items()}
-    _check_overlap(traced, stand_ins)
     dests = {
         name: tuple((w.src, _dest(stand_ins, w, e.dtype)) for w in e.writes)
         for name, e in entries.items()
@@ -219,23 +220,27 @@ def _dest(stand_ins: StandIns, write: Write, dtype: torch.dtype) -> torch.Tensor
     return storage_view(storage, offset, r.shape, r.stride, dtype)
 
 
-def _check_overlap(traced: Traced, stand_ins: StandIns) -> None:
-    """Direct writes land in any order, so no two writes may share a byte."""
+def _overlaps(traced: Traced, stand_ins: StandIns) -> dict[str, str]:
+    """Names whose writes share a byte with another write: direct writes land
+    in any order, so these go through ``load_weights`` in arrival order."""
     runs: dict[int, list[tuple[int, int, str]]] = defaultdict(list)
     for name, copies in traced.copies.items():
         for c in copies:
             if c.storage in stand_ins.by_storage and 0 not in c.shape:
                 spans = byte_runs(c.byte_offset, c.shape, c.stride, c.dtype.itemsize)
                 runs[c.storage] += [(a, b, name) for a, b in spans]
-    for key, named in runs.items():
+    reasons: dict[str, str] = {}
+    for named in runs.values():
         named.sort()
-        for (_, stop, name), (start, _, other) in itertools.pairwise(named):
-            if start < stop:
-                target = stand_ins.by_storage[key]
-                raise RuntimeError(
-                    f"load plan: {name!r} and {other!r} (may) write the same "
-                    f"bytes of {target.module}.{target.tensor}"
-                )
+        active: list[tuple[int, str]] = []  # heap of (stop, name)
+        for start, stop, name in named:
+            while active and active[0][0] <= start:
+                heapq.heappop(active)
+            for _, other in active:
+                reasons.setdefault(name, f"writes overlap with {other!r}")
+                reasons.setdefault(other, f"writes overlap with {name!r}")
+            heapq.heappush(active, (stop, name))
+    return reasons
 
 
 def _nbytes(entry: Entry) -> int:

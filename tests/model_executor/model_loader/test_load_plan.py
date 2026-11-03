@@ -517,15 +517,23 @@ def test_paired_loader_is_refused(monkeypatch, keep_stash):
     assert model.pending == [] and not hasattr(model, "stash")
 
 
-def test_overlapping_writes_are_refused():
+def test_overlapping_writes_fall_back():
+    """Both tied names write the same storage: only they go through
+    ``load_weights``, in arrival order as at cold start."""
+
     def make():
         model = _toy_model()
-        model.skipped = frozenset()  # both tied names write the same storage
+        model.skipped = frozenset()
         return model
 
-    model = _cold_start(make, _checkpoint(_TOY_SHAPES, 0))
-    with pytest.raises(RuntimeError, match="write the same bytes"):
-        plan_loads(model, _metadata(_TOY_SHAPES))
+    _, plan = _check_plan_equals_cold_start(make, _TOY_SHAPES)
+    for name, other in (
+        ("embed.weight", "lm_head.weight"),
+        ("lm_head.weight", "embed.weight"),
+    ):
+        assert plan.get_dest(name) is None
+        assert plan.entries[name].reason == f"writes overlap with {other!r}"
+    assert plan.get_dest("proj.weight") is not None
 
 
 def test_layerwise_mode_is_refused(monkeypatch):
