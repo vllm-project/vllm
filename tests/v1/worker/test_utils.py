@@ -678,7 +678,7 @@ def test_hisparse_tail_restore_preserves_imported_rows(
             sum(cache.nbytes for cache in worker.host_caches)
         )
         request.addfinalizer(
-            lambda: hisparse_runtime_module.release_pinned_state([], [registered])
+            lambda: hisparse_runtime_module.release_pinned_state([registered])
         )
         host_caches = host_pool.view(torch.float32).view(2, 12, 2).unbind()
         for destination, source in zip(host_caches, worker.host_caches):
@@ -1354,9 +1354,8 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
     pool = hisparse_runtime_module.get_hisparse_host_pool(worker.vllm_config, None)
     released = False
 
-    def release_pinned_state(runtimes, pinned_host_pools, shared_host_region):
+    def release_pinned_state(pinned_host_pools, shared_host_region):
         nonlocal released
-        assert runtimes == []
         assert pinned_host_pools == []
         assert shared_host_region is worker.shared_host_region
         released = True
