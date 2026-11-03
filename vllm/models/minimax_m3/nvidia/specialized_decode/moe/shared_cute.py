@@ -46,6 +46,7 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_front_
 from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm_cute import (  # noqa: E501
     TILE,
     RoutedExpertGemm,
+    tile_scale_bytes,
 )
 
 from .front_cute import HIDDEN, INTERMEDIATE, local_amax
@@ -55,11 +56,6 @@ SPLITS = 12
 SPLIT_K = HIDDEN // SPLITS
 SF_VEC = 32
 ATOM_BYTES = 512  # one 128-row x 4-scale atom
-
-
-def tile_scale_bytes(k: int) -> int:
-    """Bytes of one 8-row tile's scales over ``k`` columns (one atom per 128)."""
-    return k // (4 * SF_VEC) * ATOM_BYTES
 
 
 @cute.jit

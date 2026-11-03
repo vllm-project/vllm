@@ -12,7 +12,6 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -109,9 +108,7 @@ def specialized_decode_config(vllm_config: VllmConfig) -> bool:
     )
 
     missing = unsupported(vllm_config)
-    if get_tensor_model_parallel_world_size() <= 1 or not supports_fused_moe_finalize(
-        vllm_config
-    ):
+    if not supports_fused_moe_finalize(vllm_config):
         missing.append(
             "tensor parallelism with the fused MoE finalize + all-reduce + norm "
             "(NVLink multicast on every rank)"

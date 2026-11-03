@@ -138,8 +138,8 @@ def _fill(moe, generator):
 
 
 def _inputs(kind, rows, generator, moe):
-    """BF16 rows routed in one of three ways; returns the router's bias and
-    gate weight to restore afterwards."""
+    """BF16 rows routed in one of three ways, and the router's bias and gate
+    weight to restore afterwards."""
     x = torch.randn(rows, HIDDEN, generator=generator, device=DEVICE) * 2
     saved = (moe.e_score_correction_bias.data.clone(), moe.gate.weight.data.clone())
     if kind == "one_expert_set":

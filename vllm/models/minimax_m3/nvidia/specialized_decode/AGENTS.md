@@ -47,7 +47,7 @@ configuration decides both:
 | Path | Contents |
 | --- | --- |
 | `__init__.py` | The setting, the startup checks, the per-call capture gate |
-| `moe/__init__.py` | `build_low_batch_ffn`, `LowBatchFfn` (`accepts`, `run`) |
+| `moe/__init__.py` | `build_low_batch_ffn`, `LowBatchFfn` (`accepts`, `run`), `unsupported_reason` |
 | `moe/front_cute.py` | Routing + per-token NVFP4 input + routing record in one launch; FC2's input quantization |
 | `moe/gemm_cute.py` | Routed FC1 (SwiGLU-OAI epilogue) and FC2 on persistent `tcgen05` NVFP4 GEMMs |
 | `moe/shared_cute.py` | The MXFP8 shared expert: input quantization, split-K FC1, SwiGLU-OAI + MXFP8, FC2 on the same GEMM |

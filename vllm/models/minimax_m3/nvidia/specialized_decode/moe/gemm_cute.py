@@ -43,7 +43,8 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm_c
     unshuffled_row,
 )
 
-SF_VEC = 16
+from .front_cute import SF_VEC
+
 # E4M3 1.0 in each byte: the scale of B rows past the input's end.
 UNIT_SCALES = 0x38383838
 

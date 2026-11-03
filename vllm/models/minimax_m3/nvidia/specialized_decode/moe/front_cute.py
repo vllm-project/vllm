@@ -45,12 +45,14 @@ from vllm.models.common.ops.moe_tail_fusion.primitives import (
 )
 from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_front_cute import (  # noqa: E501
     abs_max_bf16x2,
+    add_f32,
     bf16x2_max_to_f32,
     max_bf16x2,
     max_f32,
 )
 from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_route_cute import (  # noqa: E501
     MAX_EXPERTS,
+    TILE,
     WORDS,
     build_record,
     clear_scratch,
@@ -58,12 +60,10 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_route_
     zero_record,
 )
 
-HIDDEN = 6144
-INTERMEDIATE = 768
-EXPERTS = 128
-TOP_K = 4
+from .. import EXPERTS, HIDDEN, TOP_K
+from .. import INTERMEDIATE_PER_RANK as INTERMEDIATE
+
 MAX_ROWS = 8
-TILE = 8
 SF_VEC = 16
 THREADS = 768
 PER_LANE = EXPERTS // 32
@@ -237,12 +237,6 @@ def sigmoid_biased(logit, bias, *, loc=None, ip=None):
 def sub_f32(a, b, *, loc=None, ip=None) -> Float32:
     operands = [_f32(a, loc, ip), _f32(b, loc, ip)]
     return Float32(_asm(T.f32(), operands, "sub.f32 $0, $1, $2;", "=f,f,f", loc, ip))
-
-
-@dsl_user_op
-def add_f32(a, b, *, loc=None, ip=None) -> Float32:
-    operands = [_f32(a, loc, ip), _f32(b, loc, ip)]
-    return Float32(_asm(T.f32(), operands, "add.f32 $0, $1, $2;", "=f,f,f", loc, ip))
 
 
 @dsl_user_op

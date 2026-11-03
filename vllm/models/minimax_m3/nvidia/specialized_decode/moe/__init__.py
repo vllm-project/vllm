@@ -561,10 +561,10 @@ def unsupported_reason(moe: torch.nn.Module) -> str | None:
     ):
         # FlashInfer's MXFP8 linears keep K-major E4M3 weights and E8M0
         # scales in the 128x4 layout.
-        kernel = type(getattr(linear.quant_method, "kernel", None)).__name__
+        kernel_name = type(getattr(linear.quant_method, "kernel", None)).__name__
         weight, scale = linear.weight, getattr(linear, "weight_scale", None)
         if (
-            not (kernel.startswith("FlashInfer") and "Mxfp8" in kernel)
+            not (kernel_name.startswith("FlashInfer") and "Mxfp8" in kernel_name)
             or weight.dtype != torch.float8_e4m3fn
             or tuple(weight.t().shape) != (n, k)
             or not weight.t().is_contiguous()
@@ -572,7 +572,7 @@ def unsupported_reason(moe: torch.nn.Module) -> str | None:
             or scale.dtype != torch.uint8
             or scale.numel() != n * k // 32
         ):
-            return f"shared expert {kernel}"
+            return f"shared expert {kernel_name}"
     return None
 
 

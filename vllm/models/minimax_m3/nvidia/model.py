@@ -565,7 +565,8 @@ class MiniMaxM3MoE(nn.Module):
         )
 
         self.shared_experts: MiniMaxM3MLP | None = None
-        # Set by MiniMaxM3Model under decode_backend=latency_specialized.
+        # Under decode_backend=latency_specialized MiniMaxM3Model sets the flag,
+        # and process_weights_after_loading builds the low-batch FFN.
         self.use_low_batch_ffn = False
         self.low_batch_ffn: LowBatchFfn | None = None
         if self.use_mega_moe:
@@ -720,7 +721,7 @@ class MiniMaxM3MoE(nn.Module):
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
         """``forward`` with the routed top-k reduction and all-reduce left open."""
         ffn = self.low_batch_ffn
-        if ffn is not None and ffn.accepts(hidden_states) and captures_pure_decode():
+        if ffn is not None and captures_pure_decode() and ffn.accepts(hidden_states):
             return ffn.run(hidden_states)
         router_logits, _ = self.gate(hidden_states)
         # The runner's custom op returns tensors only, so run its body directly.
@@ -1548,9 +1549,11 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             layer.fuse_input_allreduce = idx > 0 and prev_defers
             prev_defers = layer.ffn_all_reduce_deferred
         self.fuse_final_norm_allreduce = prev_defers
-        deferring = []
-        if current_platform.is_cuda():
-            deferring = self._init_fused_moe_finalize(vllm_config)
+        deferring = (
+            self._init_fused_moe_finalize(vllm_config)
+            if current_platform.is_cuda()
+            else []
+        )
         if specialized_decode_config(vllm_config):
             if not deferring:
                 raise ValueError(
@@ -1560,7 +1563,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             for moe in deferring:
                 moe.use_low_batch_ffn = True
 
-    def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> list["MiniMaxM3MoE"]:
+    def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> list[MiniMaxM3MoE]:
         """Let small batches leave a MoE's top-k finalize to the next layer's
         input norm, which already fuses the TP all-reduce, and have it quantize
         the normed rows to the MXFP8 its qkv_proj reads.
@@ -1568,7 +1571,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         Each MoE whose successor can take the output gets the hint here, and
         ``defers_finalize`` decides per call. The final norm feeds the LM head
         in BF16, so the last layer keeps its own finalize. Builds a collective
-        kernel: every TP rank decides alike.
+        kernel: every TP rank decides alike. Returns the MoE layers that defer
+        (empty when none can).
         """
         from vllm.models.minimax_m3.nvidia.ops.finalize_allreduce_norm import (
             init_fused_moe_finalize,
