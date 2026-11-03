@@ -1618,10 +1618,14 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             self._graph_seq_lens is not None
             and self.dcp_world_size == 1
             and g_tot_seq_lens is None
-            and 0 < num_kernel_reqs <= self._graph_seq_lens.shape[0]
+            and num_kernel_reqs > 0
         )
         if fused_indptr:
             assert self._graph_seq_lens is not None
+            assert num_kernel_reqs <= self._graph_seq_lens.shape[0], (
+                f"{num_kernel_reqs} decode requests exceed the "
+                f"{self._graph_seq_lens.shape[0]}-request graph buffers"
+            )
             # Unused (never dereferenced) unless VARLEN.
             varlen_rows = (
                 (self._varlen_q_rows, self._varlen_o_rows)

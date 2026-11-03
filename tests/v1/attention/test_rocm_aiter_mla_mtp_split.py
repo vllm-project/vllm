@@ -1340,21 +1340,39 @@ def full_graph_decode_mocks(monkeypatch):
     monkeypatch.setattr(rocm_aiter_mla, "_aiter_mla_small_head_mode", lambda: "auto")
 
 
+def _large_batch_cases():
+    """Batches of 1, half and all of a large graph buffer: uniform with dummy
+    rows, mixed lengths, and mixed lengths under adaptive verification."""
+    gen = torch.Generator().manual_seed(0)
+    cases = []
+    for max_reqs in (64, 1024):
+        for num_reqs in (1, max_reqs // 2, max_reqs):
+            live = max(1, num_reqs // 2)
+            uniform = [4] * live + [0] * (num_reqs - live)
+            mixed = torch.randint(0, 5, (num_reqs,), generator=gen)
+            mixed[0] = 4
+            for qo_lens, varlen in ((uniform, False), (mixed.tolist(), False)):
+                cases.append((max_reqs, 4, qo_lens, varlen))
+            cases.append((max_reqs, 4, mixed.tolist(), True))
+    return cases
+
+
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="the fused indptr build is a Triton kernel"
 )
 @pytest.mark.parametrize(
-    "mtp_qlen,qo_lens,varlen",
+    "max_reqs,mtp_qlen,qo_lens,varlen",
     [
-        (1, [1, 1, 1], False),
-        (4, [4, 4, 0, 0], False),
-        (4, [3, 1, 4, 0], False),
-        (4, [4, 4, 0, 0], True),
-        (4, [3, 1, 4, 0], True),
+        (8, 1, [1, 1, 1], False),
+        (8, 4, [4, 4, 0, 0], False),
+        (8, 4, [3, 1, 4, 0], False),
+        (8, 4, [4, 4, 0, 0], True),
+        (8, 4, [3, 1, 4, 0], True),
+        *_large_batch_cases(),
     ],
 )
 def test_full_cudagraph_fused_decode_indptr_matches_eager(
-    full_graph_decode_mocks, mtp_qlen, qo_lens, varlen
+    full_graph_decode_mocks, max_reqs, mtp_qlen, qo_lens, varlen
 ):
     """A builder with the persistent seq_lens buffer takes the fused indptr
     build; one without it takes the eager ops. Both must hand out the same
@@ -1362,7 +1380,9 @@ def test_full_cudagraph_fused_decode_indptr_matches_eager(
     device = torch.device("cuda:0")
 
     def build(fused):
-        builder = _full_graph_builder(device, mtp_qlen, 8, varlen=varlen, fused=fused)
+        builder = _full_graph_builder(
+            device, mtp_qlen, max_reqs, varlen=varlen, fused=fused
+        )
         return builder, _full_graph_build_decode(builder, device, mtp_qlen, qo_lens)
 
     eager_builder, eager = build(fused=False)
@@ -1415,15 +1435,13 @@ def test_full_cudagraph_dcp_lens_keep_eager_indptr(
 @pytest.mark.skipif(
     not torch.cuda.is_available(), reason="the fused indptr build is a Triton kernel"
 )
-def test_full_cudagraph_oversize_batch_skips_fused_kernel(
-    full_graph_decode_mocks, monkeypatch
-):
+def test_full_cudagraph_oversize_batch_rejected(full_graph_decode_mocks, monkeypatch):
     """The fused kernel bounds its seq_lens store by num_reqs alone, so a batch
-    larger than the graph buffers must not reach it; the eager ops reject it."""
+    larger than the graph buffers must be rejected before it launches."""
     device = torch.device("cuda:0")
     monkeypatch.setattr(rocm_aiter_mla, "_build_decode_indptr_kernel", _MustNotLaunch())
     builder = _full_graph_builder(device, 1, 2, varlen=False, fused=True)
-    with pytest.raises(RuntimeError, match="size"):
+    with pytest.raises(AssertionError, match="exceed the 2-request graph buffers"):
         _full_graph_build_decode(builder, device, 1, [1, 1, 1])
 
 
