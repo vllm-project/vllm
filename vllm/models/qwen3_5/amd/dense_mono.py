@@ -764,7 +764,13 @@ class DenseMono:
                 device=dev,
             )
         self.epoch = torch.zeros(1, dtype=torch.int32, device=dev)
-        self.idx_buf = torch.empty(D.max_tokens(self.tp), dtype=torch.int32, device=dev)
+        # One row of state indices a GDN KV-cache group, filled once a step.
+        gdn = [i for i, layer in enumerate(self.model.layers) if _is_gdn(layer)]
+        self._first_gdn = gdn[0] if gdn else -1
+        self.idx_buf = torch.empty(
+            len(gdn) or 1, D.max_tokens(self.tp), dtype=torch.int32, device=dev
+        )
+        self._idx_rows: dict[tuple[int, int], torch.Tensor] = {}
         if self.k1:
             from vllm.models.qwen3_5.amd.mono import dense_gdn
 
@@ -890,11 +896,11 @@ class DenseMono:
         layer.mlp.forward = forward
 
     def _k1_from_normed(self, index, layer, x):
-        conv, ssm, idx = self._states(layer.linear_attn, x.size(0))
+        conv, ssm, idx = self._states(index, layer.linear_attn, x.size(0))
         core, _, out = self._k1(index, layer, conv, ssm, idx, x, None)
         return core, out
 
-    def _states(self, attn, rows: int):
+    def _states(self, index: int, attn, rows: int):
         from vllm.model_executor.layers.mamba.mamba_utils import is_conv_state_dim_first
         from vllm.models.qwen3_5.amd.mono import dense_gdn as K
 
@@ -908,10 +914,18 @@ class DenseMono:
             raise RuntimeError(
                 "VLLM_ROCM_MONO_DECODE K1 state indices do not cover this step"
             )
-        buf = self.idx_buf[:rows]
-        buf.copy_(idx[:rows])
-        # 0 is vLLM's null block. The kernel leaves a negative slot untouched.
-        buf.masked_fill_(buf == 0, -1)
+        # GDN layers of a KV-cache group share their state indices: map them
+        # once a step (the first GDN layer starts a step).
+        if index == self._first_gdn:
+            self._idx_rows.clear()
+        key = (idx.data_ptr(), rows)
+        buf = self._idx_rows.get(key)
+        if buf is None:
+            buf = self.idx_buf[len(self._idx_rows), :rows]
+            buf.copy_(idx[:rows])
+            # 0 is vLLM's null block. The kernel leaves a negative slot untouched.
+            buf.masked_fill_(buf == 0, -1)
+            self._idx_rows[key] = buf
         idx = buf
         conv = attn.kv_cache[0]
         if not is_conv_state_dim_first():
@@ -1209,7 +1223,7 @@ class DenseMono:
         layer = self.model.layers[index]
         k2 = rows <= self.k2_rows
         if self.k1 and rows <= self.k1_rows and _is_gdn(layer):
-            conv, ssm, idx = self._states(layer.linear_attn, rows)
+            conv, ssm, idx = self._states(index, layer.linear_attn, rows)
             core, res, _ = self._k1(index, layer, conv, ssm, idx, hidden, residual)
             if not k2:
                 core, _ = layer.linear_attn.out_proj(core)
@@ -1235,7 +1249,7 @@ class DenseMono:
         k1 = self.k1 and hidden.size(0) <= self.k1_rows
         for i, layer in enumerate(self.model.layers):
             if k1 and _is_gdn(layer):
-                conv, ssm, idx = self._states(layer.linear_attn, hidden.size(0))
+                conv, ssm, idx = self._states(i, layer.linear_attn, hidden.size(0))
                 core, res, _ = self._k1(i, layer, conv, ssm, idx, hidden, residual)
                 if not k2:
                     core, _ = layer.linear_attn.out_proj(core)
