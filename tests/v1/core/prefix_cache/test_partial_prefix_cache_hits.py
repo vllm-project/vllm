@@ -18,6 +18,7 @@ from vllm.model_executor.layers.mamba.checkpoint import (
     compute_mamba_prefill_checkpoints,
 )
 from vllm.utils.hashing import sha256
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_utils import (
     KVCacheBlockCopy,
     get_block_hash,
@@ -445,6 +446,81 @@ def test_hybrid_mamba_align_partial_hash_hit():
         in copies
     )
     assert manager.get_blocks("1").blocks[1][1].block_hash_num_tokens == 8
+
+
+def test_eagle_group_registers_unaligned_tail_under_partial_hash_hits():
+    """An EAGLE group must not re-floor what partial hash hits leaves un-floored.
+
+    `cache_blocks` decides once how far a request may be registered, and with
+    fine-grained partial hash hits that bound is the raw token count. The EAGLE
+    branch then re-derives its own bound for the lookahead block; if it rounds
+    down to `scheduler_block_size` again, everything between the last aligned
+    boundary and the tail stops being registered -- `(n % scheduler_block_size)
+    - manager.block_size` tokens per call, which is most of a segment whenever
+    the group's own block is much smaller than the scheduler block.
+    """
+    hash_block_size = 2
+    mamba_block_size = 4 * hash_block_size
+    kv_cache_config = KVCacheConfig(
+        num_blocks=40,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            new_kv_cache_group(
+                ["full"],
+                AttentionSpec(
+                    block_size=hash_block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float32,
+                ),
+            ),
+            new_kv_cache_group(
+                ["mamba"],
+                MambaSpec(
+                    block_size=mamba_block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                ),
+                MambaManager.config(mamba_cache_mode="align"),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=hash_block_size,
+    )
+    coordinator = manager.coordinator
+    assert coordinator.enable_partial_hash_hits
+    # The full-attention group is the EAGLE one, and its block is smaller than
+    # the scheduler block -- the geometry where re-flooring loses tokens.
+    eagle_manager = coordinator.single_type_managers[0]
+    eagle_manager.use_eagle = True
+    assert eagle_manager.block_size < coordinator.scheduler_block_size
+
+    # Deliberately not a multiple of the scheduler block, so the two bounds
+    # differ: floor(22/8)*8 + 2 = 18 against 22.
+    num_tokens = coordinator.scheduler_block_size * 2 + hash_block_size * 3
+    req = make_request("0", list(range(num_tokens)), hash_block_size, sha256)
+
+    recorded: list[int] = []
+    for single_type_manager in coordinator.single_type_managers:
+        original = single_type_manager.cache_blocks
+
+        def spy(request, num_tokens_to_cache, *args, _orig=original, **kwargs):
+            recorded.append(num_tokens_to_cache)
+            return _orig(request, num_tokens_to_cache, *args, **kwargs)
+
+        single_type_manager.cache_blocks = spy  # type: ignore[method-assign]
+
+    # allocate_slots caches on the way out, so this exercises the real path.
+    computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
+    assert manager.allocate_slots(req, num_tokens, num_computed, computed_blocks)
+
+    # Every group, EAGLE or not, may register the whole unaligned tail.
+    assert recorded == [num_tokens] * len(coordinator.single_type_managers)
+
 
 
 def test_hybrid_mamba_partial_tail_owner_uses_cow_on_continue():
@@ -1253,7 +1329,8 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
             return False, None
 
     scheduler = object.__new__(Scheduler)
-    scheduler.connector = _Connector()
+    connector = _Connector()
+    scheduler.connector = connector
     scheduler.vllm_config = SimpleNamespace(
         kv_transfer_config=SimpleNamespace(is_kv_producer=True)
     )
@@ -1276,7 +1353,7 @@ def test_connector_finish_registers_partial_tail_before_cleanup():
 
     assert delay_free is True
     assert kv_xfer_params is None
-    assert scheduler.connector.registered == (
+    assert connector.registered == (
         request,
         ([3], [9]),
         [(1, 9, 12)],
@@ -2299,6 +2376,7 @@ def test_resolved_cache_hit_alignment_matches_coordinator(with_sliding_window):
         parallel_config=SimpleNamespace(decode_context_parallel_size=1),
     )
 
+    assert isinstance(coordinator, HybridKVCacheCoordinator)
     assert coordinator.enable_partial_hash_hits != with_sliding_window
     assert (
         resolve_cache_hit_alignment_tokens(
@@ -2413,9 +2491,11 @@ def test_kpool_tail_supports_128_token_partial_hash_hits():
         hash_block_size=hash_block_size,
     )
 
-    assert manager.coordinator.scheduler_block_size == cache_block_size
-    assert manager.coordinator.hash_block_size == hash_block_size
-    assert manager.coordinator.enable_partial_hash_hits
+    coordinator = manager.coordinator
+    assert isinstance(coordinator, HybridKVCacheCoordinator)
+    assert coordinator.scheduler_block_size == cache_block_size
+    assert coordinator.hash_block_size == hash_block_size
+    assert coordinator.enable_partial_hash_hits
 
     shared_prefix = [10] * (12 * hash_block_size)
     req0 = make_request("0", shared_prefix + [11], hash_block_size, sha256)
