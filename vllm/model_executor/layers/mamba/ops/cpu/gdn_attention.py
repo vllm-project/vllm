@@ -135,6 +135,12 @@ def is_arm_bf16() -> bool:
     )
 
 
+def use_cpp_conv() -> bool:
+    """Whether the C++ causal conv1d kernels run; load-time weight packing agrees."""
+    # conv.cpp uses VDPBF16PS on x86, not AMX tiles, so any AVX-512BF16 CPU runs it.
+    return torch.cpu._is_avx512_bf16_supported() or is_arm_bf16()
+
+
 def cpu_gdn_attention_core(
     mixed_qkv: torch.Tensor,
     b: torch.Tensor,
@@ -225,13 +231,8 @@ def _cpu_gdn_attention_nonspec(
     assert state_indices_tensor is not None
     assert query_start_loc is not None
 
-    # C++ conv (conv.cpp) runs on aarch64 with bf16 support and on x86 uses VDPBF16PS,
-    # not AMX tiles, so it runs on any AVX-512BF16 CPU. The weights are packed on this
-    # same predicate at load time.
-    use_cpp_conv = torch.cpu._is_avx512_bf16_supported() or is_arm_bf16()
-
     conv_state = layer.kv_cache[0]
-    if use_cpp_conv:
+    if use_cpp_conv():
         if not is_conv_state_dim_first():
             conv_state = conv_state.transpose(1, 2)
     else:
@@ -519,8 +520,6 @@ def _spec_forward(
     seq_starts = spec_qsl_cpu[:-1]
     seq_lens = spec_qsl_cpu[1:] - spec_qsl_cpu[:-1]
 
-    is_amx = torch.cpu._is_amx_tile_supported()
-
     # ---- 1. Convolution (per-sequence rolling buffer) ----
     dim = mixed_qkv_spec.size(-1)
     bias = layer.conv1d.bias
@@ -529,7 +528,7 @@ def _spec_forward(
     # The native kernel appends the new tokens at the end of the buffer, which
     # is where the next step expects them only when every row is full-length.
     can_use_native_conv = (
-        (is_amx or is_arm_bf16())
+        use_cpp_conv()
         and width == 4
         and num_spec_decodes > 0
         and bool(torch.all(seq_lens == seq_lens[0]).item())
@@ -619,7 +618,7 @@ def _spec_aware_nonspec(
     assert query_start_loc is not None
     state_indices_tensor = state_indices_tensor.contiguous()
 
-    can_use_native_conv = torch.cpu._is_amx_tile_supported() or is_arm_bf16()
+    can_use_native_conv = use_cpp_conv()
 
     if not can_use_native_conv:
         conv_weights = _unpacked_conv_weight(layer)
@@ -763,8 +762,7 @@ def _spec_aware_nonspec_subset(
     assert has_initial_state is not None
     prefill_state_indices = prefill_state_indices.contiguous()
 
-    is_amx = torch.cpu._is_amx_tile_supported()
-    can_use_native_conv = is_amx or is_arm_bf16()
+    can_use_native_conv = use_cpp_conv()
 
     if can_use_native_conv:
         conv_out = _causal_conv1d_fwd_cpu(
