@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Deferred block release on the D side with a host-pinned KV cache: blocks of a
 finished request are reported free only after the guard event recorded GUARD_AGE
-steps later has completed; aborted requests and CPU staging keep the upstream path."""
+steps later has completed. Requests still receiving and CPU staging keep the
+upstream path."""
 
 import copy
 
@@ -96,6 +97,7 @@ def test_abort_during_recv_is_freed_once_on_recv():
     scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
     assert connector._reqs_to_release == []
     assert request.request_id in scheduler.requests  # the NIC may still write
+    assert connector._reqs_receiving == set()  # cleared when the request ended
 
     output = _with_kv_output(finished_recving={request.request_id})
     scheduler.update_from_output(scheduler.schedule(), output)
@@ -148,3 +150,53 @@ def test_cpu_kv_buffer_is_not_deferred():
     )
     assert connector._reqs_to_release == []
     assert request.request_id not in scheduler.requests
+
+
+def _received(scheduler, request):
+    """Drive a remote-prefill request until its pull has completed."""
+    scheduler.add_request(request)
+    scheduler.update_from_output(scheduler.schedule(), EMPTY_MODEL_RUNNER_OUTPUT)
+    output = _with_kv_output(finished_recving={request.request_id})
+    scheduler.update_from_output(scheduler.schedule(), output)
+
+
+def _release_by_worker(scheduler, connector, request):
+    """The worker reports the deferred release; the blocks are then freed once."""
+    assert connector._reqs_to_release == [request.request_id]
+    assert request.request_id in scheduler.requests
+    scheduler_output = scheduler.schedule()
+    assert connector._reqs_to_release == []
+    output = _with_kv_output(finished_sending={request.request_id})
+    scheduler.update_from_output(scheduler_output, output)
+    assert request.request_id not in scheduler.requests
+    assert_scheduler_empty(scheduler)
+
+
+def test_abort_during_decode_is_deferred():
+    """An abort after the pull has landed can race the drafter like a normal
+    finish, so it is deferred too."""
+    scheduler, connector = _host_pinned_d_scheduler()
+    request = create_request(request_id=4, num_tokens=40, do_remote_prefill=True)
+    _received(scheduler, request)
+    scheduler_output = scheduler.schedule()  # a decode step
+    scheduler.update_from_output(
+        scheduler_output, create_model_runner_output([request])
+    )
+    assert request.status == RequestStatus.RUNNING
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    _release_by_worker(scheduler, connector, request)
+
+
+def test_abort_after_recv_before_scheduling_is_deferred():
+    """Aborted with its pull complete but not yet scheduled: nothing more will
+    arrive for it, so the deferred release is its only completion."""
+    scheduler, connector = _host_pinned_d_scheduler()
+    request = create_request(request_id=5, num_tokens=40, do_remote_prefill=True)
+    scheduler.add_request(request)
+    scheduler.update_from_output(scheduler.schedule(), EMPTY_MODEL_RUNNER_OUTPUT)
+    output = _with_kv_output(finished_recving={request.request_id})
+    scheduler.update_from_output(scheduler.schedule(), output)
+    assert request.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+    assert connector._reqs_receiving == set()
+    scheduler.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
+    _release_by_worker(scheduler, connector, request)
