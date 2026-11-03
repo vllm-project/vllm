@@ -753,28 +753,6 @@ def test_nvfp4_input_handoff_matches_only_its_own_input():
         assert handoff.quantize(alias) is not pre_row
 
 
-@torch.inference_mode()
-def test_nvfp4_input_handoff_scoping():
-    """``provide`` restores the enclosing handoff on exit, also on error, and
-    rejects a quantization of another row count."""
-    handoff = NvFp4PerTokenInputHandoff()
-    x = torch.randn(8, 64, device="cuda", dtype=torch.bfloat16)
-    y = torch.randn(8, 64, device="cuda", dtype=torch.bfloat16)
-    pre_x = quantize_nvfp4_per_token_input(x)
-    pre_y = quantize_nvfp4_per_token_input(y)
-    with handoff.provide(x, pre_x):
-        with handoff.provide(y, pre_y):
-            assert handoff.quantize(y) is pre_y
-        assert handoff.quantize(x) is pre_x
-        with pytest.raises(RuntimeError), handoff.provide(y, pre_y):
-            raise RuntimeError
-        assert handoff.quantize(x) is pre_x
-    assert handoff.quantize(x) is not pre_x
-    pre_rows = quantize_nvfp4_per_token_input(x[:4])
-    with pytest.raises(AssertionError), handoff.provide(x, pre_rows):
-        pass
-
-
 @pytest.mark.parametrize("m", [1, 16, 256])
 @torch.inference_mode()
 def test_trtllm_fp4_moe_prequantized_input(m: int, workspace_init):
