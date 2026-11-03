@@ -419,13 +419,12 @@ def allocate_hisparse_host_pools(
             region.create_next_canonical_view(size).view(-1) for size in tensor_sizes
         ]
     except Exception:
-        release_pinned_state([], pinned, region)
+        release_pinned_state(pinned, region)
         raise
     return pools, pinned, region
 
 
 def release_pinned_state(
-    runtimes: list[HiSparseRuntime],
     pinned_host_pools: list[torch.Tensor],
     shared_host_region: SharedOffloadRegion | None = None,
 ) -> None:
@@ -466,8 +465,6 @@ def release_pinned_state(
                 time.perf_counter() - release_start,
             )
 
-    for runtime in runtimes:
-        runtime.unbind_cache()
     if shared_host_region is not None:
         shared_host_region.cleanup()
 
@@ -731,7 +728,6 @@ class HiSparseRuntime:
     ) -> None:
         self.backend = get_hisparse_backend()
         self.backend.check_available()
-        self.cache_ops: Any = None
         self.max_num_reqs = max_num_reqs
         self.row_width = row_width
         self.kv_dtype = kv_dtype
@@ -749,9 +745,6 @@ class HiSparseRuntime:
                 f"HiSparse requires 16-byte aligned KV rows, got {row_bytes}B."
             )
 
-        self._layer_ready_event: torch.Event | None = None
-        self._swap_staged = False
-        self._swap_step = 0
         self.is_group_leader = index_group is None
         if index_group is None:
             index_group = HiSparseIndexGroup(
@@ -770,21 +763,18 @@ class HiSparseRuntime:
         index_group.stats_row_bytes += row_bytes
 
         self.eager_host_mirror = config.eager_host_mirror
-        self.resident_source_index = -1
-        self.request_state_indices: torch.Tensor | None = None
-        self.host_pool: HiSparseHostPool | None = None
+        self._reset_binding_state()
 
     @property
     def host_cache(self) -> torch.Tensor:
         return self._host_cache
 
-    def unbind_cache(self) -> None:
-        """Restore the unbound state without unregistering the host pool."""
-        self.cache_ops = None
-        self.host_pool = None
-        self.request_state_indices = None
+    def _reset_binding_state(self) -> None:
+        self.cache_ops: Any = None
+        self.host_pool: HiSparseHostPool | None = None
+        self.request_state_indices: torch.Tensor | None = None
         self.resident_source_index = -1
-        self._layer_ready_event = None
+        self._layer_ready_event: torch.Event | None = None
         self._swap_staged = False
         self._swap_step = 0
         for name in (
@@ -796,6 +786,10 @@ class HiSparseRuntime:
         ):
             if hasattr(self, name):
                 delattr(self, name)
+
+    def unbind_cache(self) -> None:
+        """Restore the unbound state without unregistering the host pool."""
+        self._reset_binding_state()
 
     def bind_hot_cache(
         self,
@@ -819,8 +813,6 @@ class HiSparseRuntime:
         )
         self.hot_backing = raw_tensor
         self.hot_block_table = block_table
-        if self.is_group_leader:
-            self.reset_hot_state()
 
     def bind_source_cache(
         self,
@@ -1207,12 +1199,18 @@ class HiSparseCacheHandle:
     """Attention-facing handle for resident KV and sparse offload state."""
 
     def __init__(self, runtime: HiSparseRuntime) -> None:
+        self.runtime = runtime
+        # Speculator layers write their rows after the target forward.
+        self.draft_layer = False
+        self.index_group_caches: list[HiSparseCacheHandle] = [self]
+        self._reset_binding_state()
+
+    def _reset_binding_state(self) -> None:
         self.view: PagedCacheView | None = None
         self.residency: torch.Tensor | None = None
         self.block_table: torch.Tensor | None = None
         self.source_block_table: torch.Tensor | None = None
         self.slot_mapping: torch.Tensor | None = None
-        self.runtime = runtime
         self.dummy_batch = False
         self.decode_batch = False
         self.all_context_pages_resident = True
@@ -1222,26 +1220,10 @@ class HiSparseCacheHandle:
         self.host_mirror_required = False
         self.mirror_slot_mapping: torch.Tensor | None = None
         self.submit_layer_mirror: Callable[[], None] | None = None
-        # Speculator layers write their rows after the target forward.
-        self.draft_layer = False
-        self.index_group_caches: list[HiSparseCacheHandle] = [self]
 
     def unbind_cache(self) -> None:
         """Detach KV storage and per-binding metadata, retaining the index group."""
-        self.view = None
-        self.residency = None
-        self.block_table = None
-        self.source_block_table = None
-        self.slot_mapping = None
-        self.req_id_per_token = None
-        self.mirror_slot_mapping = None
-        self.submit_layer_mirror = None
-        self.dummy_batch = False
-        self.decode_batch = False
-        self.all_context_pages_resident = True
-        self.num_actual_tokens = 0
-        self.num_decode_tokens = 0
-        self.host_mirror_required = False
+        self._reset_binding_state()
         self.runtime.unbind_cache()
 
     def prepare_group_for_batch(self, attn_metadata: Any | None) -> None:

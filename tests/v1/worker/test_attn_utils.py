@@ -535,7 +535,7 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache():
     finally:
         torch.accelerator.synchronize()
         cache.unbind_cache()
-        release_pinned_state([runtime], pool.pinned, pool.shared_region)
+        release_pinned_state(pool.pinned, pool.shared_region)
         hisparse_runtime_module.drop_hisparse_host_pool(config)
 
 

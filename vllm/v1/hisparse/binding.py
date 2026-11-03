@@ -154,7 +154,8 @@ def init_hisparse_kv_cache(
         )
         return kv_caches
     except Exception:
-        release_pinned_state([], host_pool.pinned, host_pool.shared_region)
+        release_pinned_state(host_pool.pinned, host_pool.shared_region)
+        release_hisparse_profiling_cache(forward_context)
         drop_hisparse_host_pool(vllm_config)
         raise
 
@@ -170,13 +171,9 @@ def _get_hisparse_cache(
 
 def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
     """Detach the profiling caches but keep the host pool for the real KV cache."""
-    caches = {
-        id(cache): cache
-        for layer in forward_context.values()
-        if (cache := getattr(layer, "hisparse_cache", None)) is not None
-    }
-    for cache in caches.values():
-        cache.unbind_cache()
+    for layer in forward_context.values():
+        if (cache := getattr(layer, "hisparse_cache", None)) is not None:
+            cache.unbind_cache()
 
 
 def bind_hisparse_kv_caches(
