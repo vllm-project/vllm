@@ -26,7 +26,10 @@ from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import max_decode_query_len
 from vllm.v1.hisparse.backend import get_hisparse_backend
 from vllm.v1.hisparse.types import SparseKVResidencyUpdate
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 
 logger = init_logger(__name__)
 
@@ -48,6 +51,17 @@ def is_hisparse_decode_batch(attn_metadata: Any | None) -> bool:
         and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
         and attn_metadata.max_query_len == 1
         and attn_metadata.num_reqs == attn_metadata.num_actual_tokens
+    )
+
+
+def is_hisparse_group_prefetch_batch(attn_metadata: Any | None, max_rows: int) -> bool:
+    """Prefetch historical KV for a pure decode batch, including verification."""
+    return (
+        attn_metadata is not None
+        and 0 < attn_metadata.num_actual_tokens <= max_rows
+        and attn_metadata.num_decode_tokens == attn_metadata.num_actual_tokens
+        and 0 < attn_metadata.num_reqs <= attn_metadata.num_actual_tokens
+        and 0 < attn_metadata.max_query_len <= max_rows
     )
 
 
@@ -406,6 +420,7 @@ def allocate_hisparse_host_pools(
         barrier=tp_group.barrier,
         creator_memory_check=check_hisparse_host_memory,
         populate_shard=(tp_group.rank_in_group, tp_group.world_size),
+        num_segments=REGION_SEGMENTS,
     )
     pinned: list[torch.Tensor] = []
     try:
@@ -1037,7 +1052,7 @@ class HiSparseRuntime:
                 valid_counts_out=valid_counts_out,
             )
             runtimes = [self]
-            if resident.decode_batch:
+            if resident.prefetch_decode_group:
                 runtimes.extend(group.followers)
             for runtime in runtimes:
                 runtime._swap_rows(shared_rows)
@@ -1198,6 +1213,7 @@ class HiSparseCacheHandle:
         self.runtime = runtime
         self.dummy_batch = False
         self.decode_batch = False
+        self.prefetch_decode_group = False
         self.all_context_pages_resident = True
         self.num_actual_tokens = 0
         self.num_decode_tokens = 0
@@ -1227,6 +1243,11 @@ class HiSparseCacheHandle:
             attn_metadata.req_id_per_token if attn_metadata is not None else None
         )
         self.decode_batch = is_hisparse_decode_batch(attn_metadata)
+        # Verification can prefetch old host rows without publishing tentative
+        # writes. Resident writes and host mirroring keep their existing policy.
+        self.prefetch_decode_group = self.decode_batch or (
+            is_hisparse_group_prefetch_batch(attn_metadata, self.runtime.max_swap_rows)
+        )
         self.host_mirror_required = attn_metadata is not None and (
             not self.decode_batch or self.runtime.eager_host_mirror
         )
