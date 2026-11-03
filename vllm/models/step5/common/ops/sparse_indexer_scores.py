@@ -4,6 +4,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .sparse_indexer import DecodeIndexerMetadata
@@ -213,6 +214,7 @@ def _paged_scores_sm90(
     HEADS: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     TILE: tl.constexpr,
+    FNUZ: tl.constexpr,
 ):
     row = tl.program_id(0)
     batch = row // NEXT_N
@@ -233,7 +235,7 @@ def _paged_scores_sm90(
         + d[None, :],
         valid[:, None],
         other=0,
-    ).to(tl.float8e4nv, bitcast=True)
+    )
     query = tl.load(
         Q.to(tl.pointer_type(tl.uint8))
         + batch * Q_BATCH
@@ -242,8 +244,16 @@ def _paged_scores_sm90(
         + d[:, None],
         h[None, :] < HEADS,
         other=0,
-    ).to(tl.float8e4nv, bitcast=True)
-    dot = tl.dot(key, query, out_dtype=tl.float32, max_num_imprecise_acc=0)
+    )
+    if FNUZ:
+        # e4m3fn bits read as e4m3fnuz halve each operand (x4); 0x80 is fnuz NaN.
+        key = tl.where(key == 0x80, 0, key).to(tl.float8e4b8, bitcast=True)
+        query = tl.where(query == 0x80, 0, query).to(tl.float8e4b8, bitcast=True)
+        dot = tl.dot(key, query, out_dtype=tl.float32) * 4.0
+    else:
+        key = key.to(tl.float8e4nv, bitcast=True)
+        query = query.to(tl.float8e4nv, bitcast=True)
+        dot = tl.dot(key, query, out_dtype=tl.float32, max_num_imprecise_acc=0)
     dot = tl.maximum(dot, 0.0)
     weights = tl.load(W + row * W_ROW + h * W_HEAD, h < HEADS, other=0)
     # Match the four independent FP32 FMA chains used by the decode indexer.
@@ -315,6 +325,7 @@ def paged_mqa_logits_sm90(
             heads,
             kv_fused.shape[1],
             32,
+            FNUZ=current_platform.is_fp8_fnuz(),
             num_warps=4,
         )
     return output
