@@ -3,24 +3,28 @@
 
 //! Unified parser interface for reasoning and tool-call deltas.
 
+mod beam;
 mod combined;
 mod gemma4;
 mod hf;
 mod hy;
 mod inkling;
 mod kimi_k3;
+mod muse;
 
+pub use beam::BeamUnifiedParser;
 pub use combined::CombinedParser;
 pub use gemma4::Gemma4UnifiedParser;
-pub use hf::{HfTemplateError, HfUnifiedParser, ResponseTemplate};
+pub use hf::{HfPosition, HfTemplateError, HfUnifiedParser, ResponseTemplate};
 pub use hy::{HyV3UnifiedParser, HyV4UnifiedParser};
 pub use inkling::InklingUnifiedParser;
 pub use kimi_k3::KimiK3UnifiedParser;
+pub use muse::MuseUnifiedParser;
 use thiserror::Error;
 use thiserror_ext::Macro;
 use vllm_tokenizer::{DecodedText, DynTokenizer};
 
-use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext};
+use crate::output_grammar::{self, BuiltOutputGrammar, OutputGrammarContext, ToolStrictLevel};
 use crate::reasoning::ReasoningError;
 use crate::tool::{Tool, ToolCallDelta, ToolParserError, ToolParserEvent, ToolParserOutput};
 use crate::utils::SpecialToken;
@@ -240,6 +244,12 @@ pub trait UnifiedParser: Send {
     /// Return whether decoded output must preserve tokenizer special tokens.
     fn preserve_special_tokens(&self) -> bool {
         false
+    }
+
+    /// Return the tool strict level applied when the operator leaves
+    /// `--tool-strict-level` unset.
+    fn default_tool_strict_level(&self) -> ToolStrictLevel {
+        ToolStrictLevel::Auto
     }
 
     /// Build the request output grammar after prompt-based initialization.

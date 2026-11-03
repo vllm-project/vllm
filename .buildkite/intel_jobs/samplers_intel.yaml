@@ -18,7 +18,6 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/model_executor/layers
-  - vllm/sampling_metadata.py
   - tests/samplers
   - tests/conftest.py
   - vllm/entrypoints/generate/beam_search
@@ -45,7 +44,6 @@ steps:
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
   - vllm/model_executor/layers
-  - vllm/sampling_metadata.py
   - tests/samplers
   - tests/conftest.py
   - vllm/entrypoints/generate/beam_search

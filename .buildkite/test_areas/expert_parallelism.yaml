@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) EPLB Algorithm"
   key: eplb-algorithm
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_18gb
   working_dir: "/vllm-workspace/tests"
@@ -18,6 +19,7 @@ steps:
   - pytest -v -s distributed/test_eplb_utils.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) EPLB Algorithm"
       dind: false
       device: mi355_dpx
@@ -30,8 +32,11 @@ steps:
       - tests/distributed/test_eplb_utils.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (L4) EPLB Execution"
+- label: ":nvidia: (L4) [Nightly] EPLB Execution"
   key: eplb-execution
+  automatic_shard: true
+  # Nightly only: 4-GPU L4 pods wait behind smaller jobs on per-PR runs.
+  optional: true
   timeout_in_minutes: 25
   working_dir: "/vllm-workspace/tests"
   device: l4
@@ -44,6 +49,9 @@ steps:
   - pytest -v -s distributed/test_eplb_spec_decode.py
   mirror:
     amd:
+      automatic_shard: true
+      # Run on PRs even when the L4 step is optional (nightly only).
+      optional: false
       label: ":amd: (MI355) EPLB Execution"
       dind: false
       device: mi355_4
@@ -56,19 +64,22 @@ steps:
       - tests/distributed/test_eplb_spec_decode.py
       - vllm/platforms/rocm.py
 
-- label: ":nvidia: (H100) Elastic EP Scaling"
-  key: elastic-ep-scaling-test
-  timeout_in_minutes: 40
-  device: h100
-  working_dir: "/vllm-workspace/tests"
-  num_devices: 4
-  source_file_dependencies:
-  - vllm/distributed/
-  - "!vllm/distributed/kv_transfer/"
-  - vllm/engine/
-  - vllm/v1/executor/
-  - vllm/compilation/
-  - tests/distributed/
-  commands:
-  - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
-  - pytest -v -s distributed/test_elastic_ep.py
+# Disabled until the KV connectors installation is locked.
+# - label: ":nvidia: (H100) [Nightly] Elastic EP Scaling"
+#   key: elastic-ep-scaling-test
+#   # Nightly only: 4-GPU H100 pods wait behind smaller jobs on per-PR runs.
+#   optional: true
+#   timeout_in_minutes: 40
+#   device: h100
+#   working_dir: "/vllm-workspace/tests"
+#   num_devices: 4
+#   source_file_dependencies:
+#   - vllm/distributed/
+#   - "!vllm/distributed/kv_transfer/"
+#   - vllm/engine/
+#   - vllm/v1/executor/
+#   - vllm/compilation/
+#   - tests/distributed/
+#   commands:
+#   - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+#   - pytest -v -s distributed/test_elastic_ep.py

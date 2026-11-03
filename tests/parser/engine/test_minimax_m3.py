@@ -207,8 +207,10 @@ class TestStreaming:
 
         before_end, at_end = results[1][0], results[2][0]
         assert before_end is not None and before_end.tool_calls
-        assert before_end.tool_calls[0].function.name == "create_order"
-        assert not before_end.tool_calls[0].function.arguments
+        function = before_end.tool_calls[0].function
+        assert function is not None
+        assert function.name == "create_order"
+        assert not function.arguments
         assert collect_content(results) == "Sure. "
         assert json.loads(collect_tool_arguments([(at_end, "")])) == {
             "user_id": 42,

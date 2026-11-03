@@ -20,7 +20,10 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 
 
 def _all_workers_barrier() -> None:
@@ -125,6 +128,10 @@ class CPUOffloadingSpec(OffloadingSpec):
             # or |--- C0 (single copy) ---| *** maybe-pad *** |
             self.kv_bytes_per_chunk = aligned_kv_bytes_per_chunk
 
+        self.cpu_info = CPUOffloadingInfo.from_config(
+            config, self.num_chunks, self.kv_bytes_per_chunk
+        )
+
         # scheduler-side
         self._manager: OffloadingManager | None = None
 
@@ -161,6 +168,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 enable_events=self.kv_events_config.enable_kv_cache_events,
                 store_threshold=store_threshold,
                 max_tracker_size=max_tracker_size,
+                info=self.cpu_info,
             )
         return self._manager
 
@@ -188,6 +196,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
+                num_segments=REGION_SEGMENTS,
                 populate_shard=(
                     (worker_index, world_size) if self.replicated_layout else None
                 ),

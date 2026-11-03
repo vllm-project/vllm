@@ -117,8 +117,10 @@ pub struct EngineCoreOutput {
     /// of a newly scheduled prefill and elided for subsequent decode outputs.
     #[serde(default)]
     pub prefill_stats: Option<Box<PrefillStats>>,
+    /// Routed-expert rows `[num_rows, num_layers, top_k]` captured for this
+    /// output, when `enable_return_routed_experts` is on.
     #[serde(default)]
-    pub routed_experts: Option<Box<OpaqueValue>>,
+    pub routed_experts: Option<Box<WireNdArray>>,
     /// Number of NaNs seen in logits. Values above zero indicate corruption.
     #[serde(default)]
     pub num_nans_in_logits: u32,
@@ -143,6 +145,37 @@ pub struct EngineCoreOutput {
     /// the first output of a request that asked for them.
     #[serde(default)]
     pub prompt_token_id_logprobs: Option<Box<WireNdArray>>,
+    /// Request-level error sent with [`EngineCoreFinishReason::Error`], e.g.
+    /// when a paused engine rejects a request.
+    #[serde(default)]
+    pub error: Option<Box<RequestError>>,
+}
+
+/// A request-level error that does not mark the engine as unhealthy.
+///
+/// Python models this as a plain `@dataclass`, so it is serialized by msgspec
+/// as a map (named fields).
+///
+/// Original Python definition: `RequestError` in `vllm/outputs.py`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestError {
+    pub code: String,
+    pub message: String,
+    #[serde(default)]
+    pub retryable: bool,
+}
+
+impl RequestError {
+    /// `code` of an error caused by the request itself, e.g. a structured-output
+    /// constraint the engine's backend cannot compile. Python raises
+    /// `VLLMValidationError` for it.
+    pub const VALIDATION_ERROR: &str = "validation_error";
+
+    /// Whether the request itself is invalid, so frontends report a client
+    /// error.
+    pub fn is_validation_error(&self) -> bool {
+        self.code == Self::VALIDATION_ERROR
+    }
 }
 
 /// Raw per-sequence speculative-decoding accumulator.
@@ -194,6 +227,11 @@ impl EngineCoreOutput {
             value
                 .resolve_aux_frame(frames)
                 .map_err(|message| ext_value_decode!("prompt_token_id_logprobs: {message}"))?;
+        }
+        if let Some(value) = self.routed_experts.as_mut() {
+            value
+                .resolve_aux_frame(frames)
+                .map_err(|message| ext_value_decode!("routed_experts: {message}"))?;
         }
         Ok(())
     }
@@ -556,6 +594,7 @@ mod tests {
                             new_sampling_mask: None,
                             spec_decode_metrics: None,
                             prompt_token_id_logprobs: None,
+                            error: None,
                         },
                     ],
                     scheduler_stats: None,
