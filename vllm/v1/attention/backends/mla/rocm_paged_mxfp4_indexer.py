@@ -392,6 +392,7 @@ class RocmMxfp4IndexerMetadataBuilder(DeepseekV32IndexerMetadataBuilder):
         workspace_size: int,
         max_logits_bytes: int,
         request_offset: int = 0,
+        fused_mqa_topk_eligible: bool = False,
         m_split_tp_size: int = 1,
     ) -> list[tuple[slice, slice]]:
         assert m_split_tp_size == 1, (
