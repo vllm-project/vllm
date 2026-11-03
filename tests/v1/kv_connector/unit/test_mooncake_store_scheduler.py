@@ -170,7 +170,9 @@ def _make_new_scheduler_output(*, hash_block_size: int = 16) -> SimpleNamespace:
         num_prompt_tokens=32,
         prefill_token_ids=list(range(32)),
         block_ids=([0, 1],),
-        block_hashes=[BlockHash(f"h{i}".encode()) for i in range(32 // hash_block_size)],
+        block_hashes=[
+            BlockHash(f"h{i}".encode()) for i in range(32 // hash_block_size)
+        ],
     )
     return SimpleNamespace(
         request=request,
@@ -1543,7 +1545,9 @@ def test_partial_tail_follows_lookahead_checkpoint(
         req_id="req-0",
         token_len_chunk=0,
         block_ids=(list(range(1, 11)), [50, 51, 52, 53, 54]),
-        block_hashes=[bytes([i]) for i in range(max(0, 73 - num_lookahead) // 4)],
+        block_hashes=[
+            BlockHash(bytes([i])) for i in range(max(0, 73 - num_lookahead) // 4)
+        ],
         num_prompt_tokens=73,
         completed_token_len=73,
         boundary_puts=[BoundaryPut(1, 60, mamba_tail)],

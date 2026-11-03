@@ -24,6 +24,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector import (
     KVConnectorRole,
     MooncakeConnector,
+    MooncakeConnectorMetadata,
     MooncakeConnectorScheduler,
     MooncakeConnectorWorker,
     MooncakeXferMetadata,
@@ -179,6 +180,7 @@ def test_hybrid_gdn_remote_prefill_keeps_local_attention_prefix(
     scheduler.add_request(replay)
     output = scheduler.schedule()
 
+    assert isinstance(output.kv_connector_metadata, MooncakeConnectorMetadata)
     [pull] = output.kv_connector_metadata.reqs_to_recv["prefill-engine"].values()
     attn_pull, gdn_pull = pull.local_block_ids
     assert len(attn_pull) == expected_attn_pull_blocks
