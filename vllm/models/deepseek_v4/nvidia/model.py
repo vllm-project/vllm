@@ -36,6 +36,12 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     DeepGemmMegaMoEExperts,
     MegaMoEActivation,
 )
+from vllm.model_executor.layers.fused_moe.router.fused_gate import (
+    FusedGateConfig,
+    FusedGateMetadata,
+    default_fused_gate_backends,
+    select_fused_gate_backend,
+)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
     fused_topk_bias,
 )
@@ -85,7 +91,6 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
-from vllm.utils.deep_gemm import bf16_mega_gate
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -346,6 +351,7 @@ class DeepseekV4MoE(nn.Module):
         config,
         prefix: str,
     ) -> None:
+        self.fused_gate_backends = default_fused_gate_backends()
         self.ep_group = get_ep_group()
         self.ep_size = self.ep_group.world_size
         self.ep_rank = self.ep_group.rank_in_group
@@ -467,7 +473,30 @@ class DeepseekV4MoE(nn.Module):
         org_shape = hidden_states.shape
         # Small local padded batches favor GateLinear; 128-expert gates cross earlier.
         gate_threshold = 1 if self.gate.weight.shape[0] == 128 else 16
-        if hidden_states.shape[0] <= gate_threshold:
+        gate_config = None
+        gate_backend = None
+        if hidden_states.shape[0] > gate_threshold:
+            gate_config = FusedGateConfig(
+                top_k=self.n_activated_experts,
+                scoring_func=self.scoring_func,
+                renormalize=self.renormalize,
+                routed_scaling_factor=self.routed_scaling_factor,
+                bias=self.gate.e_score_correction_bias.data
+                if self.gate.e_score_correction_bias is not None
+                else None,
+                image_bias=bias_vl.data if bias_vl is not None else None,
+                has_hash_routing=self.gate.tid2eid is not None,
+                ep_rank=self.ep_rank,
+            )
+            gate_backend = select_fused_gate_backend(
+                self.fused_gate_backends,
+                hidden_states,
+                self.gate.weight,
+                gate_config,
+                # MegaMoE input staging handles padding after logical routing.
+                has_padding=False,
+            )
+        if gate_backend is None:
             router_logits, _ = self.gate(hidden_states)
             topk_weights, topk_ids = fused_topk_bias(
                 hidden_states=hidden_states,
@@ -503,21 +532,16 @@ class DeepseekV4MoE(nn.Module):
                 ]
                 fix_routing_mask = mega_gate_metadata.hash_token_mask
 
-            topk_weights, topk_ids = bf16_mega_gate(
-                hidden_states,
-                self.gate.weight,
-                self.n_activated_experts,
-                scoring_func=self.scoring_func,
-                routed_scaling_factor=self.routed_scaling_factor,
-                ep_rank=self.ep_rank,
-                bias=self.gate.e_score_correction_bias.data
-                if self.gate.e_score_correction_bias is not None
-                else None,
-                image_bias=bias_vl.data if bias_vl is not None else None,
+            assert gate_config is not None
+            routing_metadata = FusedGateMetadata(
                 image_token_mask=mega_gate_metadata.image_token_mask,
-                fix_routing_mask=fix_routing_mask,
-                unmapped_topk_idx=unmapped_topk_idx,
+                fixed_routing_mask=fix_routing_mask,
+                fixed_expert_ids=unmapped_topk_idx,
             )
+            plan = gate_backend.prepare(
+                hidden_states, self.gate.weight, gate_config, routing_metadata
+            )
+            topk_weights, topk_ids = plan.forward()
         final_hidden_states = self.experts(
             hidden_states, topk_weights, topk_ids, self.shared_experts
         )

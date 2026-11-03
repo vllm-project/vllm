@@ -427,21 +427,8 @@ class FusedTopKBiasRouter(BaseRouter):
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute routing using fused top-k with bias."""
-        topk_weights, topk_ids = fused_topk_bias(
-            hidden_states=hidden_states,
-            gating_output=router_logits,
-            scoring_func=self.scoring_func,
-            e_score_correction_bias=self.e_score_correction_bias.data
-            if self.e_score_correction_bias is not None
-            else None,
-            topk=self.top_k,
-            renormalize=self.renormalize,
-            indices_type=indices_type,
-            input_tokens=input_ids,
-            hash_indices_table=self._hash_indices_table,
-            routed_scaling_factor=self.routed_scaling_factor,
-            bias_vl=self.bias_vl.data if self.bias_vl is not None else None,
-            image_sentinel_lo=self.image_sentinel_lo,
+        topk_weights, topk_ids = self._compute_routed_topk(
+            hidden_states, router_logits, indices_type, input_ids=input_ids
         )
 
         if self.num_fused_shared_experts > 0:
@@ -464,3 +451,28 @@ class FusedTopKBiasRouter(BaseRouter):
             topk_weights = torch.cat([topk_weights, shared_w], dim=-1)
 
         return topk_weights, topk_ids
+
+    def _compute_routed_topk(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        indices_type: torch.dtype | None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return fused_topk_bias(
+            hidden_states=hidden_states,
+            gating_output=router_logits,
+            scoring_func=self.scoring_func,
+            e_score_correction_bias=self.e_score_correction_bias.data
+            if self.e_score_correction_bias is not None
+            else None,
+            topk=self.top_k,
+            renormalize=self.renormalize,
+            indices_type=indices_type,
+            input_tokens=input_ids,
+            hash_indices_table=self._hash_indices_table,
+            routed_scaling_factor=self.routed_scaling_factor,
+            bias_vl=self.bias_vl.data if self.bias_vl is not None else None,
+            image_sentinel_lo=self.image_sentinel_lo,
+        )
