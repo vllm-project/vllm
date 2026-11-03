@@ -939,15 +939,18 @@ def test_store_flush_failure_is_reported(server):
         worker.close()
 
 
-def _stalled_store(server, monkeypatch, release: threading.Event):
+def _stalled_store(server, monkeypatch, release: threading.Event) -> threading.Event:
     client = server.clients[0]
     put = client.batch_put_ranges_from_ptr
+    started = threading.Event()
 
     def blocking_put(*args):
-        release.wait(10)
+        started.set()
+        assert release.wait(10)
         return put(*args)
 
     monkeypatch.setattr(client, "batch_put_ranges_from_ptr", blocking_put)
+    return started
 
 
 def _block_plan(key: str, source: torch.Tensor) -> BlockTransferPlan:
@@ -959,38 +962,43 @@ def _block_plan(key: str, source: torch.Tensor) -> BlockTransferPlan:
 
 
 def test_stalled_store_stays_pending_and_refuses_new_transfers(server, monkeypatch):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(time, "monotonic", lambda: clock.now)
     worker = _runtime(timeout_ms=20).create_worker_handle("ns", RankTopology(), None)
     source = torch.arange(16, dtype=torch.uint8)
     worker.register_buffers({"layer0": source})
     release = threading.Event()
-    _stalled_store(server, monkeypatch, release)
+    started = _stalled_store(server, monkeypatch, release)
+    finished = threading.Event()
 
-    job = worker.store([_block_plan("slow", source)])
-    time.sleep(0.05)
+    try:
+        job = worker.store([_block_plan("slow", source)])
+        worker._futures[id(job)].add_done_callback(lambda _: finished.set())
+        assert started.wait(5)
+        clock.now += 1
 
-    # MORI still reads the source, so the job must not settle as failed.
-    assert worker.poll(job) is None
-    refused = worker.store([_block_plan("next", source)])
-    assert refused.status == TransferJobStatus.FAILED
-    assert refused.error.startswith(TRANSFER_NOT_ATTEMPTED)
-    refused = worker.store_blocks([BlockTransferPlan("next", 0, group_id=0)])
-    assert refused is not None and refused.status == TransferJobStatus.FAILED
-    load = worker.load([_block_plan("slow", source)])
-    assert load.status == TransferJobStatus.FAILED
+        # MORI still reads the source, so the job must not settle as failed.
+        assert worker.poll(job) is None
+        refused = worker.store([_block_plan("next", source)])
+        assert refused.status == TransferJobStatus.FAILED
+        assert refused.error.startswith(TRANSFER_NOT_ATTEMPTED)
+        refused = worker.store_blocks([BlockTransferPlan("next", 0, group_id=0)])
+        assert refused is not None and refused.status == TransferJobStatus.FAILED
+        load = worker.load([_block_plan("slow", source)])
+        assert load.status == TransferJobStatus.FAILED
 
-    release.set()
-    deadline = time.monotonic() + 5
-    result = worker.poll(job)
-    while result is None and time.monotonic() < deadline:
-        time.sleep(0.01)
+        release.set()
+        assert finished.wait(5)
         result = worker.poll(job)
-    assert result is not None and result.status == TransferJobStatus.COMPLETED
-    assert "slow" in server.objects
-    assert worker.store([_block_plan("after", source)]).status in (
-        TransferJobStatus.RUNNING,
-        TransferJobStatus.COMPLETED,
-    )
-    worker.close()
+        assert result is not None and result.status == TransferJobStatus.COMPLETED
+        assert "slow" in server.objects
+        assert worker.store([_block_plan("after", source)]).status in (
+            TransferJobStatus.RUNNING,
+            TransferJobStatus.COMPLETED,
+        )
+    finally:
+        release.set()
+        worker.close()
 
 
 def test_close_does_not_wait_for_a_stalled_store(server, monkeypatch):
@@ -998,14 +1006,18 @@ def test_close_does_not_wait_for_a_stalled_store(server, monkeypatch):
     source = torch.arange(16, dtype=torch.uint8)
     worker.register_buffers({"layer0": source})
     release = threading.Event()
-    _stalled_store(server, monkeypatch, release)
-    worker.store([_block_plan("slow", source)])
+    started = _stalled_store(server, monkeypatch, release)
+    try:
+        worker.store([_block_plan("slow", source)])
+        assert started.wait(5)
 
-    started = time.monotonic()
-    worker.close()
+        before_close = time.monotonic()
+        worker.close()
 
-    assert time.monotonic() - started < 2
-    release.set()
+        assert time.monotonic() - before_close < 2
+    finally:
+        release.set()
+        worker.close()
 
 
 def test_publish_rejects_an_incomplete_job(server):

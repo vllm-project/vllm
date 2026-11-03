@@ -9,13 +9,23 @@ import shutil
 import signal
 import subprocess
 import sys
-import time
+import traceback
 from pathlib import Path
 
 import pytest
 import torch
 
+import vllm.envs as envs
 from tests.utils import multi_gpu_marks
+from tests.v1.kv_connector.rocm_pd_accuracy_utils import _REVISIONS, QWEN_MODEL
+from tests.v1.kv_connector.umbp_integration.test_mori_token_e2e import (
+    BLOCK_SIZE,
+    PARAMS,
+    _assert_same_outputs,
+    _external_tokens,
+    _prompt,
+    _reset_gpu_prefix_cache,
+)
 from tests.v1.kv_connector.umbp_test_utils import mori_has_umbp
 from vllm.distributed.kv_transfer.kv_connector.v1.umbp.data import (
     BlockTransferPlan,
@@ -54,8 +64,8 @@ def _server_binary() -> str:
 
 
 @pytest.fixture
-def server(tmp_path):
-    address = f"unix://{tmp_path}/umbp.grpc.sock"
+def server(tmp_path, socket_dir):
+    address = f"unix://{socket_dir}/umbp.grpc.sock"
     env = dict(
         os.environ,
         UMBP_STANDALONE_ADDRESS=address,
@@ -73,6 +83,7 @@ def server(tmp_path):
                 process.wait(10)
             except subprocess.TimeoutExpired:
                 process.kill()
+                process.wait(10)
 
 
 class SimpleServer:
@@ -122,15 +133,22 @@ def _plans(cache: torch.Tensor, block_offset: int = 0) -> list[BlockTransferPlan
 
 
 def _producer(address: str, done) -> None:
-    torch.accelerator.set_device_index(0)
-    worker = _runtime(address).create_worker_handle("ns", RankTopology(), None)
-    source = _pattern("cuda:0")
-    worker.register_buffers({"kv": source})
-    stored = worker.wait(worker.store(_plans(source)))
-    assert stored.status is TransferJobStatus.COMPLETED, stored.error
-    worker.publish(stored)
-    worker.close()
-    done.put(True)
+    try:
+        torch.accelerator.set_device_index(0)
+        worker = _runtime(address).create_worker_handle("ns", RankTopology(), None)
+        try:
+            source = _pattern("cuda:0")
+            worker.register_buffers({"kv": source})
+            stored = worker.wait(worker.store(_plans(source)))
+            assert stored.status is TransferJobStatus.COMPLETED, stored.error
+            worker.publish(stored)
+        finally:
+            worker.close()
+    except Exception:
+        done.put(traceback.format_exc())
+        raise
+    else:
+        done.put(None)
 
 
 def _store_from_another_process(address: str) -> None:
@@ -138,9 +156,61 @@ def _store_from_another_process(address: str) -> None:
     done = context.Queue()
     producer = context.Process(target=_producer, args=(address, done))
     producer.start()
-    assert done.get(timeout=120)
-    producer.join(30)
-    assert producer.exitcode == 0
+    try:
+        error = done.get(timeout=120)
+        assert error is None, error
+        producer.join(30)
+        assert producer.exitcode == 0
+    finally:
+        if producer.is_alive():
+            producer.kill()
+            producer.join(10)
+        done.close()
+        done.join_thread()
+
+
+def test_engine_restores_after_writer_exits(server, vllm_runner, monkeypatch):
+    """A fresh engine restores real KV blocks after the writer shuts down."""
+    monkeypatch.setattr(envs, "VLLM_BATCH_INVARIANT", True)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    monkeypatch.setattr(envs, "VLLM_ENABLE_V1_MULTIPROCESSING", True)
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "1")
+    monkeypatch.setattr(envs, "VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+    runner_kwargs = dict(
+        model_name=QWEN_MODEL,
+        revision=_REVISIONS[QWEN_MODEL],
+        enforce_eager=True,
+        block_size=BLOCK_SIZE,
+        enable_prefix_caching=True,
+        disable_log_stats=False,
+        gpu_memory_utilization=0.1,
+        max_num_seqs=8,
+        max_num_batched_tokens=2048,
+        kv_transfer_config={
+            "kv_connector": "UMBPStoreConnector",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {
+                "mode": "standalone",
+                "endpoint": server.address,
+                "key_namespace": "engine-restart",
+                "startup_timeout_ms": 20000,
+            },
+        },
+    )
+    prompts = [
+        _prompt(seed, 4 * BLOCK_SIZE + tail)
+        for seed, tail in enumerate((1, 7, BLOCK_SIZE - 1))
+    ]
+    with vllm_runner(**runner_kwargs) as writer:
+        computed = writer.llm.generate(prompts, PARAMS, use_tqdm=False)
+        assert _external_tokens(writer.llm) == 0
+        _reset_gpu_prefix_cache(writer.llm)
+
+    with vllm_runner(**runner_kwargs) as reader:
+        restored = reader.llm.generate(prompts, PARAMS, use_tqdm=False)
+        assert _external_tokens(reader.llm) == 3 * 4 * BLOCK_SIZE
+        _assert_same_outputs(computed, restored)
 
 
 def test_objects_outlive_the_writer_and_restore_on_another_gpu(server):
@@ -190,13 +260,12 @@ def test_server_loss_degrades_to_misses_and_failed_transfers(server):
     worker.register_buffers({"kv": destination})
 
     server.kill()
-    time.sleep(1)
 
     assert list(scheduler.lookup(_KEYS)) == [False, False]
     loaded = worker.wait(worker.load(_plans(destination, block_offset=2)))
-    assert loaded.status is not TransferJobStatus.COMPLETED
+    assert loaded.status is TransferJobStatus.FAILED
     stored = worker.wait(worker.store(_plans(destination)))
-    assert stored.status is not TransferJobStatus.COMPLETED
+    assert stored.status is TransferJobStatus.FAILED
     assert scheduler.clear() is False
     worker.close()
     scheduler.close()
