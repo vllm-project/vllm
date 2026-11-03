@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Publish one checkpoint through vLLM's NCCL weight-transfer engine."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Publish an immutable Hugging Face checkpoint through vLLM's native NCCL WTE.
 
 This module intentionally has no trainer, Ray, VIME, Megatron, or Transformers
@@ -12,7 +15,6 @@ import hashlib
 import json
 import mmap
 import os
-import re
 import struct
 import time
 from collections.abc import Iterator
@@ -22,6 +24,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Literal
 
+import regex as re
 import requests
 import torch
 from safetensors import safe_open
@@ -497,7 +500,7 @@ class NcclCheckpointPublisher:
     def initialize(self) -> dict[str, Any]:
         if self.group is not None:
             raise RuntimeError("NCCL publisher is already initialized")
-        torch.cuda.set_device(self.device)
+        torch.accelerator.set_device_index(self.device)
         inference_world_size = self._get("/get_world_size")["world_size"]
         init_info = NCCLTrainerInitInfo(
             master_address=get_ip(),
@@ -558,7 +561,7 @@ class NcclCheckpointPublisher:
         self.client.set_target(target)
         with torch.inference_mode():
             bucket_results, timing = self._send_weights(source)
-        torch.cuda.synchronize(self.device)
+        torch.accelerator.synchronize(self.device)
         self.update_version += 1
         self.weight_epoch = weight_epoch
         return {
@@ -651,7 +654,7 @@ class NcclCheckpointPublisher:
                     )
                     # The RPC below only returns once the server has received
                     # this bucket, so waiting for the send here costs nothing.
-                    torch.cuda.synchronize(self.device)
+                    torch.accelerator.synchronize(self.device)
                     sent = time.perf_counter()
                     future.result()
                     returned = time.perf_counter()
@@ -953,7 +956,7 @@ def _materialize_bucket_for_device(
 ) -> tuple[list[tuple[str, torch.Tensor]], float]:
     """Materialize one bucket on a worker thread with an explicit CUDA device."""
     if device.type == "cuda":
-        torch.cuda.set_device(device)
+        torch.accelerator.set_device_index(device)
     started = time.perf_counter()
     if direct_file_expert_h2d and bucket.phase == "expert":
         direct_materialize = getattr(

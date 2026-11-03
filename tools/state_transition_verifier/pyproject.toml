@@ -3,7 +3,7 @@ name = "vllm-rl-day0-kit"
 version = "0.1.0"
 description = "Standalone vLLM weight-update publisher and RL source-snapshot tooling"
 requires-python = ">=3.10"
-dependencies = ["pyyaml", "requests"]
+dependencies = ["pyyaml", "regex", "requests"]
 
 [project.optional-dependencies]
 test = ["pytest"]

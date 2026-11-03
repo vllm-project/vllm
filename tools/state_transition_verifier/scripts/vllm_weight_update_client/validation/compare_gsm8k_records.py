@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Compare deterministic GSM8K records from two fixed-weight evaluations."""
 
 from __future__ import annotations

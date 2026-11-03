@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Create and verify clean source snapshots for RL experiments."""
 
 from __future__ import annotations
@@ -7,7 +10,6 @@ import argparse
 import hashlib
 import json
 import os
-import re
 import shlex
 import subprocess
 import sys
@@ -15,6 +17,8 @@ import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+import regex as re
 
 try:
     import yaml

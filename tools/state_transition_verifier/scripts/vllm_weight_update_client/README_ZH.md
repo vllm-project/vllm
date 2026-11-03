@@ -13,7 +13,7 @@ update；独立 DraftModel 使用单独的 draft manifest 和 `--enable-draft-up
 ## 文件
 
 | 文件 | 用途 |
-|---|---|
+| --- | --- |
 | `hf_checkpoint_nccl_publisher.py` | checkpoint manifest、canonical source、stateful NCCL publisher |
 | `run_vllm_weight_update.py` | 只执行一次 checkpoint NCCL weight update 的最小 CLI |
 | `run_vllm_lifecycle.sh` | 一次调用完成 VIME lifecycle 和 publisher 的 shell wrapper |

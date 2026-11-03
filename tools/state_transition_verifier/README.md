@@ -18,7 +18,7 @@ the transfer transaction to vLLM's trainer-side engine. No trainer, Ray, VIME,
 Megatron, or Transformers dependency — it talks to vLLM directly.
 
 | File | Purpose |
-|---|---|
+| --- | --- |
 | `hf_checkpoint_nccl_publisher.py` | Checkpoint manifest, canonical source, stateful NCCL publisher |
 | `run_vllm_weight_update.py` | Minimal CLI: one checkpoint NCCL weight-update transaction |
 | `run_vllm_lifecycle.sh` | Optional wrapper orchestrating pause / reset / sleep / wake / resume around the publisher |
@@ -82,7 +82,7 @@ Internal model codenames, cluster paths, registry namespaces, and host addresses
 were replaced with placeholders throughout the entire history:
 
 | Placeholder | Was |
-|---|---|
+| --- | --- |
 | `ModelA` / `modela`, `ModelB` / `modelb`, `DraftModel` | Internal model codenames |
 | `<registry>` | A private container registry namespace |
 | `/mnt/<shared-fs>`, `/path/to/vllm` | Cluster filesystem paths |

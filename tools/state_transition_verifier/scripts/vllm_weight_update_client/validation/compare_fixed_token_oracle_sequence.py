@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Compare repeated fixed-token oracles and the pre/post update boundary."""
 
 from __future__ import annotations

@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 """Where one weight-update transaction spends its time, seen from the publisher.
 
 Pure functions over the per-bucket records the publisher collects, so they can
