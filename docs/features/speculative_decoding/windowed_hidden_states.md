@@ -58,6 +58,11 @@ predicts token `p + 1`. Results contain only rows associated with delivered toke
 including when speculative proposals are rejected or the request stops early.
 If generation ends before the window, the skip reason is `ended_before_window`.
 If fewer than `min_rows` are available, the reason is `insufficient_rows`.
+Prompt segments must contain every requested row, regardless of `min_rows`;
+missing prompt rows return `prompt_rows_unavailable`. Inconsistent tensor fields
+across chunks return `tensor_fields_mismatch`. Both failures are request-local.
+Auxiliary-layer capture requires a speculator that produces auxiliary hidden
+states; requests without one are rejected during input validation.
 
 `result.tensors` holds CPU tensors keyed by name: `hidden_states`, plus
 `logprobs` and `logprob_token_ids` when `logprob_topk` is set (also available as
@@ -127,9 +132,15 @@ the sampler turns the final hidden rows into logits:
 `tie_word_embeddings` (whether the output head shares the input embedding).
 The logits are `soft_cap(h @ W_head.T)[:, :vocab_size] * logit_scale`, with
 soft-capping skipped when `soft_cap` is `None`.
-The contract is emitted only for the verified, unquantized Qwen3 implementation
-of `compute_logits` with a standard `LogitsProcessor`. It also identifies
+The contract is emitted only for the exact, unquantized `Qwen3ForCausalLM` class
+with its standard `compute_logits`, a standard `LogitsProcessor`, the default
+`ModelState.compute_sample_logits`, and LoRA disabled. Subclasses and custom
+projection paths do not receive a contract. It also identifies
 `lm_head_weight` (`lm_head.weight`, or `model.embed_tokens.weight` when tied).
+`served_model_name` is the public service alias; it is null when the configured
+name is a local path. `revision` is the configured revision and may be null.
+These fields are not content hashes; the caller must ensure the reconstruction head uses
+the same checkpoint contents, including any weight updates.
 Other model implementations can still return hidden tensors, but their contract
 is `None`; teacher payload scoring requires a supported reconstruction contract.
 Reconstruction is numerically equivalent but not guaranteed bitwise identical,
@@ -203,6 +214,10 @@ does not replace that export workflow.
 For correctness validation, compare full/window hidden values, generated tokens
 and raw logprobs. For performance validation, measure capture off, full, window
 and an unreachable window. Keep the GPU exclusive during timing and compare
-identical configurations.
+identical configurations. Also measure capture disabled with asynchronous
+scheduling: this feature requires synchronous scheduling for the entire engine,
+including requests outside the capture window or without a capture plan. Zero
+hidden-copy bytes outside the window do not imply the same throughput as an
+asynchronously scheduled deployment.
 For strict cross-run equality, set `VLLM_BATCH_INVARIANT=1` and record that setting
 with the results, since it can select different execution kernels.

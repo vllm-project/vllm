@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Exercise capture through LLM.generate and verify the hidden/token alignment."""
 
+import asyncio
 import os
 from dataclasses import asdict
 from typing import TYPE_CHECKING
@@ -33,12 +34,28 @@ def skip_reason(output):
 class HiddenCaptureReferenceExtension:
     model_runner: "GPUModelRunner"
 
+    def capture_contract(self):
+        connector = self.model_runner.aux_output_connector
+        assert connector is not None and connector._hidden is not None
+        return connector._hidden.logits_contract
+
+    def capture_pending_requests(self):
+        connector = self.model_runner.aux_output_connector
+        assert connector is not None and connector._hidden is not None
+        hidden = connector._hidden
+        return {
+            "plans": len(hidden.plans),
+            "settled": len(hidden.settled_ends),
+            "carry_empty": hidden.carry.empty(),
+        }
+
     @torch.no_grad()
     def capture_reference_logits(self, states):
         states = torch.tensor(states, device="cuda", dtype=torch.bfloat16)
         model = self.model_runner.model
         logits = model.compute_logits(states).float()
-        contract = self.model_runner.aux_output_connector._hidden.logits_contract
+        contract = self.capture_contract()
+        assert contract is not None
         rebuilt = torch.nn.functional.linear(states, model.lm_head.weight)
         if contract["soft_cap"] is not None:
             cap = contract["soft_cap"]
@@ -164,8 +181,16 @@ def test_hidden_windows_match_full_capture_and_raw_logits(
         aux_output_config={"enable_hidden_states": True},
         logprobs_mode="raw_logprobs",
         worker_extension_cls=f"{__name__}.HiddenCaptureReferenceExtension",
+        served_model_name="hidden-test-teacher",
     ) as runner:
         llm = runner.llm
+        contract = llm.collective_rpc("capture_contract")[0]
+        assert contract["served_model_name"] == "hidden-test-teacher"
+        assert contract["lm_head_weight"] == (
+            "model.embed_tokens.weight"
+            if contract["tie_word_embeddings"]
+            else "lm_head.weight"
+        )
         prompts = [
             {"prompt_token_ids": ids}
             for ids in ([100, 200, 300, 400], [500, 600, 700, 800])
@@ -323,9 +348,45 @@ def test_hidden_windows_match_full_capture_and_raw_logits(
 def test_prompt_capture_spans_chunked_prefill(vllm_runner, monkeypatch, kv_pressure):
     """Rows from prefill chunks that sample nothing are delivered at the end."""
     monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
     monkeypatch.delenv("VLLM_ALLOW_INSECURE_SERIALIZATION", raising=False)
+    model = os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B")
+    prompts = [
+        {"prompt_token_ids": list(range(100, 148))},
+        {"prompt_token_ids": list(range(200, 248))},
+    ]
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=48 if kv_pressure else 1,
+        min_tokens=48 if kv_pressure else 1,
+        ignore_eos=True,
+        extra_args={
+            "hidden_state_capture": {
+                "start": 2,
+                "end": 47,
+                "coordinate": "absolute",
+                "min_rows": 45,
+                "collection_id": "chunked",
+            }
+        },
+    )
     with vllm_runner(
-        os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+        model,
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=96,
+        max_num_seqs=2,
+        max_num_batched_tokens=128,
+        enable_prefix_caching=False,
+        async_scheduling=False,
+        aux_output_config={"enable_hidden_states": True},
+    ) as runner:
+        reference = [
+            hidden_result(output).hidden_states.clone()
+            for output in runner.llm.generate(prompts, params, use_tqdm=False)
+        ]
+    with vllm_runner(
+        model,
         dtype="bfloat16",
         enforce_eager=True,
         max_model_len=96 if kv_pressure else 64,
@@ -335,35 +396,16 @@ def test_prompt_capture_spans_chunked_prefill(vllm_runner, monkeypatch, kv_press
         disable_log_stats=False,
         max_num_batched_tokens=2 if kv_pressure else 16,
         enable_chunked_prefill=True,
+        enable_prefix_caching=False,
         async_scheduling=False,
         aux_output_config={"enable_hidden_states": True},
     ) as runner:
-        params = SamplingParams(
-            temperature=0,
-            max_tokens=48 if kv_pressure else 1,
-            min_tokens=48 if kv_pressure else 1,
-            ignore_eos=True,
-            extra_args={
-                "hidden_state_capture": {
-                    "start": 2,
-                    "end": 47,
-                    "coordinate": "absolute",
-                    "min_rows": 45,
-                    "collection_id": "chunked",
-                }
-            },
-        )
-        prompt = {"prompt_token_ids": list(range(100, 148))}
-        prompts = (
-            [prompt, {"prompt_token_ids": list(range(200, 248))}]
-            if kv_pressure
-            else [prompt] * 2
-        )
-        for output in runner.llm.generate(prompts, params, use_tqdm=False):
+        outputs = runner.llm.generate(prompts, params, use_tqdm=False)
+        for output, expected in zip(outputs, reference):
             result = hidden_result(output)
             assert skip_reason(output) is None
             np.testing.assert_array_equal(result.hidden_positions, np.arange(2, 47))
-            assert torch.isfinite(result.hidden_states).all()
+            torch.testing.assert_close(result.hidden_states, expected, atol=0, rtol=0)
 
         if kv_pressure:
             assert (
@@ -374,3 +416,186 @@ def test_prompt_capture_spans_chunked_prefill(vllm_runner, monkeypatch, kv_press
                 )
                 > 0
             )
+
+
+def test_prompt_capture_reuses_only_prefix_before_window(vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    prompt = {"prompt_token_ids": list(range(100, 228))}
+    params = SamplingParams(
+        temperature=0,
+        max_tokens=1,
+        extra_args={
+            "hidden_state_capture": {
+                "start": 64,
+                "end": 127,
+                "coordinate": "absolute",
+                "collection_id": "cached",
+            }
+        },
+    )
+    with vllm_runner(
+        os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=144,
+        max_num_seqs=1,
+        enable_prefix_caching=True,
+        async_scheduling=False,
+        aux_output_config={"enable_hidden_states": True},
+    ) as runner:
+        first = runner.llm.generate([prompt], params, use_tqdm=False)[0]
+        cached = runner.llm.generate([prompt], params, use_tqdm=False)[0]
+        assert first.num_cached_tokens == 0
+        assert 0 < cached.num_cached_tokens <= 64
+        np.testing.assert_array_equal(
+            hidden_result(cached).hidden_positions, np.arange(64, 127)
+        )
+        torch.testing.assert_close(
+            hidden_result(cached).hidden_states,
+            hidden_result(first).hidden_states,
+            atol=0,
+            rtol=0,
+        )
+
+
+def test_speculative_aux_windows_match_full_capture(vllm_runner, monkeypatch):
+    """DSpark auxiliary/final rows follow accepted tokens, including top-k."""
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
+    model = os.getenv("VLLM_TEST_SPEC_TARGET", "Qwen/Qwen3-4B")
+    draft = os.getenv("VLLM_TEST_SPEC_DRAFT", "deepseek-ai/dspark_qwen3_4b_block7")
+    layers = (2, 10, 18, 26, 34)
+    with vllm_runner(
+        model,
+        dtype="bfloat16",
+        enforce_eager=True,
+        max_model_len=96,
+        max_num_seqs=2,
+        enable_prefix_caching=False,
+        async_scheduling=False,
+        aux_output_config={"enable_hidden_states": True},
+        speculative_config={
+            "method": "dspark",
+            "model": draft,
+            "num_speculative_tokens": 7,
+        },
+    ) as runner:
+        prompts = [
+            {"prompt_token_ids": [100, 200, 300, 400]},
+            {"prompt_token_ids": [500, 600, 700, 800]},
+        ]
+
+        def generate(start, end):
+            plan = HiddenStateCapturePlan.from_window(
+                "",
+                4,
+                start,
+                end,
+                "spec",
+                min_rows=end - start,
+                aux_layer_ids=layers,
+                hidden_layout="aux_final",
+                logprob_topk=4,
+            )
+            return runner.llm.generate(
+                prompts,
+                SamplingParams(
+                    temperature=0,
+                    max_tokens=32,
+                    min_tokens=32,
+                    ignore_eos=True,
+                    extra_args={"hidden_state_capture": asdict(plan)},
+                ),
+                use_tqdm=False,
+            )
+
+        full = generate(0, 32)
+        window = generate(8, 16)
+        for before, after in zip(full, window):
+            assert before.outputs[0].token_ids == after.outputs[0].token_ids
+            result = hidden_result(after)
+            assert skip_reason(after) is None
+            assert result.layer_ids == layers
+            assert result.includes_final_layer
+            np.testing.assert_array_equal(result.hidden_positions, np.arange(11, 19))
+            for name, tensor in result.tensors.items():
+                torch.testing.assert_close(
+                    tensor, hidden_result(before).tensors[name][8:16], atol=0, rtol=0
+                )
+
+
+@pytest.mark.asyncio
+async def test_aborted_capture_releases_worker_state(monkeypatch):
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
+    engine = AsyncLLM.from_engine_args(
+        AsyncEngineArgs(
+            model=os.getenv("VLLM_TEST_MODEL", "Qwen/Qwen3-0.6B"),
+            dtype="bfloat16",
+            enforce_eager=True,
+            max_model_len=512,
+            max_num_seqs=1,
+            max_num_batched_tokens=32,
+            async_scheduling=False,
+            aux_output_config={"enable_hidden_states": True},
+            worker_extension_cls=f"{__name__}.HiddenCaptureReferenceExtension",
+            served_model_name="hidden-test-teacher",
+        )
+    )
+    try:
+        stream = engine.generate(
+            {"prompt_token_ids": list(range(100, 356))},
+            SamplingParams(
+                temperature=0,
+                max_tokens=128,
+                min_tokens=128,
+                ignore_eos=True,
+                extra_args={
+                    "hidden_state_capture": {
+                        "start": 0,
+                        "end": 255,
+                        "coordinate": "absolute",
+                        "collection_id": "abort",
+                    }
+                },
+            ),
+            "abort-capture",
+        )
+        first_output = asyncio.create_task(anext(stream))
+        try:
+            async with asyncio.timeout(10):
+                while True:
+                    states = await engine.collective_rpc("capture_pending_requests")
+                    if not states[0]["carry_empty"]:
+                        assert not first_output.done(), "prefill already emitted output"
+                        break
+                    assert not first_output.done(), "prefill carry was not observed"
+            await engine.abort("abort-capture")
+            first_output.cancel()
+            await asyncio.gather(first_output, return_exceptions=True)
+        finally:
+            if not first_output.done():
+                first_output.cancel()
+                await asyncio.gather(first_output, return_exceptions=True)
+        await stream.aclose()
+        # A normal request flushes terminal metadata to the worker and proves
+        # aborting capture does not disrupt other requests.
+        async for output in engine.generate(
+            {"prompt_token_ids": [100, 200, 300]},
+            SamplingParams(temperature=0, max_tokens=1),
+            "after-abort",
+        ):
+            if output.finished:
+                assert len(output.outputs[0].token_ids) == 1
+        assert await engine.collective_rpc("capture_pending_requests") == [
+            {
+                "plans": 0,
+                "settled": 0,
+                "carry_empty": True,
+            }
+        ]
+    finally:
+        engine.shutdown()

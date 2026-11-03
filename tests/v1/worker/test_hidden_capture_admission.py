@@ -21,6 +21,11 @@ def invalid_request(case):
             "hidden_state_capture": {"start": 0, "end": 1, "collection_id": "test"}
         },
     )
+    if case == "aux":
+        assert params.extra_args is not None
+        params.extra_args["hidden_state_capture"].update(
+            aux_layer_ids=[1], hidden_layout="aux_final"
+        )
     return EngineCoreRequest(
         request_id="capture",
         prompt_token_ids=[100, 200],
@@ -45,7 +50,7 @@ def test_direct_capture_admission_with_real_engine(vllm_runner, monkeypatch):
         async_scheduling=False,
         aux_output_config={"enable_hidden_states": True},
     ) as runner:
-        for case in ("n", "stop", "resumable"):
+        for case in ("n", "stop", "resumable", "aux"):
             with pytest.raises(VLLMValidationError):
                 runner.llm.llm_engine.add_request(
                     "capture", invalid_request(case), SamplingParams()
@@ -71,7 +76,7 @@ def test_async_capture_admission_with_real_engine(monkeypatch):
             )
         )
         try:
-            for case in ("n", "stop", "resumable"):
+            for case in ("n", "stop", "resumable", "aux"):
                 with pytest.raises(VLLMValidationError):
                     await engine.add_request(
                         "capture", invalid_request(case), SamplingParams()
@@ -124,6 +129,7 @@ def test_async_capture_admission_with_real_engine(monkeypatch):
                     if output.aux_outputs is not None
                 ]
                 assert len(captures) == 1
+                assert captures[0] is not None
                 assert captures[0].hidden_states.shape[0] == 2
                 assert outputs[-1].finished
         finally:

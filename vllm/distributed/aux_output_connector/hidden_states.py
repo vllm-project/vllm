@@ -12,8 +12,9 @@ settle with accepted tokens. Rows outside the range are never copied.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
+from pathlib import Path, PureWindowsPath
 from threading import Lock
 from time import perf_counter
 from typing import TYPE_CHECKING, Any, Literal
@@ -32,10 +33,15 @@ if TYPE_CHECKING:
     )
     from vllm.v1.request import Request
     from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
 
 HIDDEN_STATES = "hidden_states"
 LOGPROBS = "logprobs"
 LOGPROB_TOKEN_IDS = "logprob_token_ids"
+
+
+class InconsistentTensorFieldsError(ValueError):
+    """Capture chunks disagree on their tensor fields."""
 
 
 @dataclass(frozen=True)
@@ -167,6 +173,8 @@ class HiddenStateCaptureChunk:
     def accepted(self, end: int) -> HiddenStateCaptureChunk:
         """Keep rows whose predicted token has been delivered."""
         keep = self.positions < end
+        if keep.all():
+            return self
         index = torch.from_numpy(keep)
         return replace(
             self,
@@ -178,7 +186,9 @@ class HiddenStateCaptureChunk:
     def concat(cls, chunks: list[HiddenStateCaptureChunk]) -> HiddenStateCaptureChunk:
         if len(chunks) == 1:
             return chunks[0]
-        names = set.intersection(*(set(chunk.tensors) for chunk in chunks))
+        names = set(chunks[0].tensors)
+        if any(set(chunk.tensors) != names for chunk in chunks[1:]):
+            raise InconsistentTensorFieldsError("tensor_fields_mismatch")
         return cls(
             positions=np.concatenate([chunk.positions for chunk in chunks]),
             tensors={
@@ -353,24 +363,47 @@ class HiddenStateCaptureBuffer:
             self.settled_end = max(self.settled_end, int(chunk.positions.max()) + 1)
 
     def finish(self) -> HiddenStateCaptureResult | None:
+        plan = self.plan
+        prompt_end = min(plan.window_end_abs, plan.output_start)
         if not self.chunks:
+            if plan.window_start_abs < prompt_end:
+                self.error = "prompt_rows_unavailable"
             return None
         positions = np.concatenate([chunk.positions for chunk in self.chunks])
-        positions, unique_indices = np.unique(positions, return_index=True)
-        index = torch.from_numpy(unique_indices)
-        names = set.intersection(*(set(chunk.tensors) for chunk in self.chunks))
+        unique_indices = None
+        if np.any(positions[1:] <= positions[:-1]):
+            positions, unique_indices = np.unique(positions, return_index=True)
+        if plan.window_start_abs < prompt_end and not np.array_equal(
+            positions[positions < prompt_end],
+            np.arange(plan.window_start_abs, prompt_end),
+        ):
+            self.error = "prompt_rows_unavailable"
+            return None
+        names = set(self.chunks[0].tensors)
+        if HIDDEN_STATES not in names or any(
+            set(chunk.tensors) != names for chunk in self.chunks[1:]
+        ):
+            self.error = "tensor_fields_mismatch"
+            return None
         if self.plan.logprob_topk and not {LOGPROBS, LOGPROB_TOKEN_IDS} <= names:
             self.error = "logprob_rows_unavailable"
             return None
         if len(positions) < self.plan.min_rows:
             return None
-        plan = self.plan
+        tensors = (
+            self.chunks[0].tensors
+            if len(self.chunks) == 1
+            else {
+                name: torch.cat([chunk.tensors[name] for chunk in self.chunks])
+                for name in names
+            }
+        )
+        if unique_indices is not None:
+            index = torch.from_numpy(unique_indices)
+            tensors = {name: tensor[index] for name, tensor in tensors.items()}
         return HiddenStateCaptureResult(
             hidden_positions=positions,
-            tensors={
-                name: torch.cat([chunk.tensors[name] for chunk in self.chunks])[index]
-                for name in sorted(names)
-            },
+            tensors={name: tensors[name] for name in sorted(names)},
             hidden_position_start=int(positions[0]),
             hidden_position_end=int(positions[-1]) + 1,
             hidden_window_start=plan.window_start_abs,
@@ -475,6 +508,17 @@ def validate_capture_request(
         raise VLLMValidationError(
             "Hidden capture requires n=1, no stop strings or streaming input"
         )
+    if plan.aux_layer_ids:
+        from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+            requires_aux_hidden_states,
+        )
+
+        if config.speculative_config is None or not requires_aux_hidden_states(
+            config.speculative_config
+        ):
+            raise VLLMValidationError(
+                "Auxiliary hidden capture requires an auxiliary-layer speculator"
+            )
     if plan.logprob_topk > config.model_config.get_vocab_size():
         raise VLLMValidationError("logprob_topk exceeds the model vocabulary")
     maximum = config.model_config.max_logprobs
@@ -523,17 +567,21 @@ class HiddenCaptureCarry:
                 self._chunks.setdefault(request_id, []).append(chunk)
             for request_id, error in errors.items():
                 self._errors.setdefault(request_id, error)
-            released = {}
+            released: dict[str, tuple[HiddenStateCaptureChunk | None, str | None]] = {}
             for request_id in emitted:
                 parts = self._chunks.pop(request_id, None)
-                error = self._errors.pop(request_id, None)
-                if parts is None and error is None:
+                release_error = self._errors.pop(request_id, None)
+                if parts is None and release_error is None:
                     continue
-                chunk = None
+                released_chunk = None
                 if parts is not None:
-                    chunk = HiddenStateCaptureChunk.concat(parts)
-                    chunk.logits_contract = logits_contract
-                released[request_id] = (chunk, error)
+                    try:
+                        released_chunk = HiddenStateCaptureChunk.concat(parts)
+                    except InconsistentTensorFieldsError:
+                        release_error = release_error or "tensor_fields_mismatch"
+                    else:
+                        released_chunk.logits_contract = logits_contract
+                released[request_id] = (released_chunk, release_error)
             return released
 
     def discard(self, request_ids: Iterable[str]) -> None:
@@ -584,25 +632,68 @@ class PendingHiddenOutput:
         )
 
 
+def _supports_logits_reconstruction(
+    model_type: type[torch.nn.Module],
+    processor_type: type,
+    compute_logits: Callable[..., Any] | None,
+    *,
+    quantization: str | None,
+    lora_enabled: bool,
+    model_state_cls: type[ModelState],
+) -> bool:
+    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+    from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
+
+    return (
+        model_type is Qwen3ForCausalLM
+        and processor_type is LogitsProcessor
+        and compute_logits is Qwen3ForCausalLM.compute_logits
+        and quantization is None
+        and not lora_enabled
+        and model_state_cls.compute_sample_logits is ModelState.compute_sample_logits
+    )
+
+
+def _public_capture_model_name(name: str | list[str] | None) -> str | None:
+    if isinstance(name, list):
+        name = name[0] if name else None
+    if name and (
+        Path(name).is_absolute()
+        or PureWindowsPath(name).is_absolute()
+        or name.startswith(".")
+        or Path(name).exists()
+    ):
+        return None
+    return name
+
+
 def _logits_contract(
     model: torch.nn.Module, config: VllmConfig
 ) -> dict[str, Any] | None:
-    from vllm.model_executor.layers.logits_processor import LogitsProcessor
+    from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+    from vllm.v1.worker.gpu.model_states import resolve_model_state_cls
 
+    if type(model) is not Qwen3ForCausalLM:
+        return None
     processor = getattr(model, "logits_processor", None)
-    compute_logits = getattr(model, "compute_logits", None)
-    if (
-        type(processor) is not LogitsProcessor
-        or getattr(compute_logits, "__module__", None)
-        != "vllm.model_executor.models.qwen3"
-        or getattr(compute_logits, "__qualname__", None)
-        != "Qwen3ForCausalLM.compute_logits"
-        or config.model_config.quantization is not None
+    if not _supports_logits_reconstruction(
+        type(model),
+        type(processor),
+        getattr(model.compute_logits, "__func__", None),
+        quantization=config.model_config.quantization,
+        lora_enabled=config.lora_config is not None,
+        model_state_cls=resolve_model_state_cls(config, model),
     ):
         return None
+    assert processor is not None
     hf_config = config.model_config.hf_text_config
     tied = bool(getattr(hf_config, "tie_word_embeddings", False))
     return {
+        "served_model_name": _public_capture_model_name(
+            config.model_config.served_model_name
+        ),
+        "revision": config.model_config.revision,
         "lm_head_weight": "model.embed_tokens.weight" if tied else "lm_head.weight",
         "vocab_size": int(processor.org_vocab_size),
         "logit_scale": float(processor.scale),

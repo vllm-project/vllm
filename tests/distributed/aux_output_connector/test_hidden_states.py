@@ -289,10 +289,53 @@ def test_aux_outputs_keep_settled_fields_across_merges():
     )
 
 
-@pytest.mark.parametrize("quantized", [False, True])
-def test_logits_contract_excludes_custom_transforms(quantized, default_vllm_config):
-    from types import SimpleNamespace
+@pytest.mark.parametrize("positions", [[], [2, 3, 5, 6], [3, 4, 5, 6]])
+def test_prompt_capture_requires_every_requested_row(positions):
+    """min_rows permits early output stops, never missing prompt rows."""
+    plan = HiddenStateCapturePlan.from_window(
+        "r", 8, 2, 7, "prompt", coordinate="absolute"
+    )
+    buffer = HiddenStateCaptureBuffer(plan)
+    chunk = _chunk(positions, [[p] for p in positions]) if positions else None
+    assert buffer.update(chunk, 8, stopped=True) == (None, "prompt_rows_unavailable")
 
+
+def test_mixed_capture_requires_prompt_rows_but_allows_early_output_stop():
+    plan = HiddenStateCapturePlan.from_window(
+        "r", 5, 2, 9, "mixed", coordinate="absolute"
+    )
+    result, reason = HiddenStateCaptureBuffer(plan).update(
+        _chunk([2, 3, 4], [[2], [3], [4]]), 5, stopped=True
+    )
+    assert reason is None
+    np.testing.assert_array_equal(result.hidden_positions, [2, 3, 4])
+
+
+def test_prompt_carry_reports_inconsistent_tensor_fields():
+    carry = HiddenCaptureCarry()
+    first = _chunk([2], [[2]])
+    first.tensors["extra"] = torch.ones(1, 1)
+    assert carry.release({"r": first}, {}, []) == {}
+    assert carry.release({"r": _chunk([3], [[3]])}, {}, ["r"]) == {
+        "r": (None, "tensor_fields_mismatch")
+    }
+    assert carry.empty()
+
+
+def test_settlement_reports_inconsistent_tensor_fields():
+    buffer = HiddenStateCaptureBuffer(
+        HiddenStateCapturePlan.from_window("r", 1, 0, 2, "test")
+    )
+    first = _chunk([0], [[0]])
+    first.tensors["extra"] = torch.ones(1, 1)
+    assert buffer.update(first, 1, stopped=False) == (None, None)
+    assert buffer.update(_chunk([1], [[1]]), 2, stopped=True) == (
+        None,
+        "tensor_fields_mismatch",
+    )
+
+
+def test_logits_contract_excludes_custom_transforms(default_vllm_config):
     from vllm.distributed.aux_output_connector.hidden_states import _logits_contract
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
 
@@ -304,41 +347,70 @@ def test_logits_contract_excludes_custom_transforms(quantized, default_vllm_conf
         def compute_logits(self, hidden):
             return hidden + 1
 
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            quantization="fp8" if quantized else None,
-            hf_text_config=SimpleNamespace(tie_word_embeddings=False),
-        )
-    )
-    assert _logits_contract(CustomModel(), config) is None
+    assert _logits_contract(CustomModel(), default_vllm_config) is None
 
 
 @pytest.mark.parametrize(
-    "tied,quantization", [(False, None), (True, None), (False, "fp8")]
+    "case",
+    ["standard", "quantized", "lora", "state", "subclass", "processor", "transform"],
 )
-def test_qwen3_contract_identifies_checkpoint_head(
-    tied, quantization, default_vllm_config
-):
-    from types import SimpleNamespace
-
-    from vllm.distributed.aux_output_connector.hidden_states import _logits_contract
+def test_logits_reconstruction_support_is_explicit(case):
+    from vllm.distributed.aux_output_connector.hidden_states import (
+        _supports_logits_reconstruction,
+    )
     from vllm.model_executor.layers.logits_processor import LogitsProcessor
     from vllm.model_executor.models.qwen3 import Qwen3ForCausalLM
+    from vllm.v1.worker.gpu.model_states.interface import ModelState
 
-    model = Qwen3ForCausalLM.__new__(Qwen3ForCausalLM)
-    torch.nn.Module.__init__(model)
-    model.logits_processor = LogitsProcessor(8)
-    config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            quantization=quantization,
-            hf_text_config=SimpleNamespace(tie_word_embeddings=tied),
-        )
+    class CustomState(ModelState):
+        def compute_sample_logits(self, hidden_states):
+            return hidden_states
+
+    class CustomModel(Qwen3ForCausalLM):
+        pass
+
+    class CustomProcessor(LogitsProcessor):
+        pass
+
+    supported = _supports_logits_reconstruction(
+        CustomModel if case == "subclass" else Qwen3ForCausalLM,
+        CustomProcessor if case == "processor" else LogitsProcessor,
+        None if case == "transform" else Qwen3ForCausalLM.compute_logits,
+        quantization="fp8" if case == "quantized" else None,
+        lora_enabled=case == "lora",
+        model_state_cls=CustomState if case == "state" else ModelState,
     )
-    contract = _logits_contract(model, config)
-    if quantization:
-        assert contract is None
-    else:
-        assert contract["lm_head_weight"] == (
-            "model.embed_tokens.weight" if tied else "lm_head.weight"
-        )
-        assert contract["tie_word_embeddings"] == tied
+    assert supported == (case == "standard")
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        (None, None),
+        ([], None),
+        ("teacher", "teacher"),
+        (["teacher", "alias"], "teacher"),
+        ("Qwen/Qwen3-4B", "Qwen/Qwen3-4B"),
+        ("/data/model/Qwen3-4B", None),
+        (r"D:\models\Qwen3-4B", None),
+        ("./models/teacher", None),
+    ],
+)
+def test_capture_contract_does_not_publish_checkpoint_paths(name, expected):
+    from vllm.distributed.aux_output_connector.hidden_states import (
+        _public_capture_model_name,
+    )
+
+    assert _public_capture_model_name(name) == expected
+
+
+def test_capture_settlement_still_sorts_and_deduplicates_replayed_rows():
+    buffer = HiddenStateCaptureBuffer(
+        HiddenStateCapturePlan.from_window("r", 1, 0, 3, "replay", min_rows=3)
+    )
+    result, reason = buffer.update(
+        _chunk([2, 0, 1, 1], [[2], [0], [1], [99]]), 3, stopped=True
+    )
+    assert reason is None
+    np.testing.assert_array_equal(result.hidden_positions, [0, 1, 2])
+    torch.testing.assert_close(result.hidden_states, torch.tensor([[0], [1], [2]]))
