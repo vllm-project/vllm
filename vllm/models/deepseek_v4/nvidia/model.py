@@ -13,7 +13,6 @@ from vllm.config import VllmConfig
 from vllm.config.kernel import MEGA_MOE_BACKENDS, NATIVE_MEGA_MOE_BACKENDS
 from vllm.distributed import (
     get_ep_group,
-    get_pcp_group,
     get_pp_group,
     get_tensor_model_parallel_world_size,
 )
@@ -1011,13 +1010,6 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 )
             hidden_states = sp_shard(hidden_states)
             input_ids = sp_shard(input_ids)
-
-        if (
-            input_ids is not None
-            and self.parallel_config.prefill_context_parallel_size > 1
-            and not self.parallel_config.enable_expert_parallel
-        ):
-            input_ids = get_pcp_group().all_gather(input_ids, dim=0)
 
         mega_gate_metadata = None
         if self.use_native_mega_moe:
