@@ -1,12 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Startup workspace profiles for FlashInfer MegaMoE."""
+"""Startup tuning and fixed workspace profiles for FlashInfer MegaMoE."""
 
 from __future__ import annotations
 
+import json
+import os
 from bisect import bisect_left
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, fields, replace
+from enum import Enum
+from importlib.metadata import PackageNotFoundError, version
+from inspect import signature
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from weakref import WeakSet
 
@@ -29,6 +35,8 @@ logger = init_logger(__name__)
 class _ProfileContext:
     decode_tokens: int
     prefill_tokens: int
+    records: dict[str, Any] = field(default_factory=dict)
+    dirty: bool = False
 
 
 _active_context: _ProfileContext | None = None
@@ -86,29 +94,89 @@ def _decode_token_limit(runner: Any) -> int:
 
 @contextmanager
 def flashinfer_moe_ep_profile_token_context(
-    *, decode_tokens: int, prefill_tokens: int
+    *,
+    decode_tokens: int,
+    prefill_tokens: int,
+    cache_file: Path | None = None,
+    cache_identity: dict[str, Any] | None = None,
 ) -> Iterator[None]:
-    """Expose serving token limits while preparing persistent workspaces."""
+    """Share tuning results across layers and persist them between startups."""
     global _active_context
     previous = _active_context
-    _active_context = _ProfileContext(
-        decode_tokens=decode_tokens,
-        prefill_tokens=prefill_tokens,
-    )
+    context = _ProfileContext(decode_tokens, prefill_tokens)
+    leader = not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
+    identity = {"version": 1, "environment": cache_identity}
+    if cache_file is not None and leader:
+        try:
+            payload = json.loads(cache_file.read_text())
+            if (
+                isinstance(payload, dict)
+                and payload.get("identity") == identity
+                and isinstance(payload.get("records"), dict)
+            ):
+                context.records = payload["records"]
+        except (OSError, ValueError):
+            pass
+    _active_context = context
     try:
         yield
+        if cache_file is not None and leader and context.dirty:
+            from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+                write_flashinfer_autotune_cache,
+            )
+
+            try:
+                write_flashinfer_autotune_cache(
+                    cache_file,
+                    json.dumps(
+                        {"identity": identity, "records": context.records},
+                        sort_keys=True,
+                    ).encode(),
+                )
+            except OSError:
+                logger.warning("Could not save MegaMoE tuning cache %s", cache_file)
     finally:
         _active_context = previous
 
 
 @contextmanager
 def flashinfer_moe_ep_profile_context(runner: Any) -> Iterator[None]:
-    """Expose serving token limits during the startup memory-profile run."""
+    """Prepare fixed workspaces before measuring serving memory requirements."""
+    import flashinfer
+
+    from vllm.model_executor.warmup.flashinfer_autotune_cache import (
+        resolve_flashinfer_autotune_file,
+    )
+
+    packages: dict[str, str | None] = {}
+    for package in ("nvidia-cutlass-dsl", "apache-tvm-ffi", "nvshmem4py-cu13"):
+        try:
+            packages[package] = version(package)
+        except PackageNotFoundError:
+            packages[package] = None
+    device = torch.cuda.get_device_properties(torch.accelerator.current_device_index())
+    identity = {
+        "flashinfer": flashinfer.__version__,
+        "torch": torch.__version__,
+        "cuda": torch.version.cuda,
+        "device": [
+            device.name,
+            device.major,
+            device.minor,
+            device.multi_processor_count,
+        ],
+        "packages": packages,
+        "mega_use_ncu": os.environ.get("MEGA_USE_NCU", "0"),
+    }
     with flashinfer_moe_ep_profile_token_context(
         decode_tokens=_decode_token_limit(runner),
         prefill_tokens=_runner_limit(
             runner, "max_num_tokens", "max_num_batched_tokens"
         ),
+        cache_file=resolve_flashinfer_autotune_file(runner).with_name(
+            "megamoe_knobs_v1.json"
+        ),
+        cache_identity=identity,
     ):
         yield
 
@@ -118,18 +186,25 @@ def _profile_capacities(decode_tokens: int, prefill_tokens: int) -> tuple[int, .
 
 
 class FlashInferMoeEpProfiles:
-    """Prepare offline-tuned MegaMoE workspaces before CUDA Graph capture."""
+    """Tune once per geometry and retain fixed workspaces for serving."""
 
     def __init__(
-        self, layer: Any, bootstrap: Any, fleet: Any, *, sp_size: int = 1
+        self,
+        layer: Any,
+        bootstrap: Any,
+        fleet: Any,
+        *,
+        backend: Any,
+        sp_size: int = 1,
     ) -> None:
         if sp_size < 1:
             raise ValueError(f"sp_size must be positive, got {sp_size}")
         self.layer = layer
         self.bootstrap = bootstrap
         self.fleet = fleet
+        self.backend = backend
         self.sp_size = sp_size
-        self.workspaces: dict[int, list[tuple[int | None, Any]]] = {}
+        self.workspaces: dict[int, list[tuple[int, Any]]] = {}
         self.capacities: tuple[int, ...] = ()
         _profile_owners.add(self)
 
@@ -140,9 +215,71 @@ class FlashInferMoeEpProfiles:
 
     @staticmethod
     def is_supported(layer: Any) -> bool:
-        return callable(getattr(layer, "create_workspace", None)) and callable(
-            getattr(layer, "live_token_buckets", None)
+        create = getattr(layer, "create_workspace", None)
+        if not callable(create) or not callable(
+            getattr(layer, "get_tuned_knobs", None)
+        ):
+            return False
+        return {"live_tokens", "knobs"} <= signature(create).parameters.keys()
+
+    def _broadcast(self, value: Any) -> Any:
+        if self.bootstrap.world_size == 1:
+            return value
+        values = [value]
+        torch.distributed.broadcast_object_list(
+            values, group=self.bootstrap.process_group, group_src=0
         )
+        return values[0]
+
+    def _profile_key(self, capacity: int, tokens: int) -> str:
+        config = self.backend.megakernel
+        settings = {
+            item.name: (
+                getattr(config, item.name).value
+                if isinstance(getattr(config, item.name), Enum)
+                else getattr(config, item.name)
+            )
+            for item in fields(config)
+            if item.name
+            not in {
+                "knobs",
+                "input_norm_const",
+                "fc1_alpha",
+                "fc2_alpha",
+                "fc1_norm_const",
+            }
+        }
+        return json.dumps(
+            {
+                "backend": type(config).__name__,
+                "settings": settings,
+                "quantize_input": self.backend.quantize_input,
+                "world_size": self.bootstrap.world_size,
+                "hidden": self.fleet.token_hidden_size,
+                "experts": self.fleet.num_experts,
+                "capacity": capacity,
+                "live_tokens": tokens,
+            },
+            sort_keys=True,
+        )
+
+    def _tune(self, tensors: Any, capacity: int, tokens: int) -> dict[str, Any]:
+        temporary = type(self.layer)(
+            self.bootstrap,
+            replace(
+                self.fleet, max_tokens_per_rank=capacity, tuning_live_tokens=tokens
+            ),
+            None,
+            replace(
+                self.backend,
+                megakernel=replace(self.backend.megakernel, knobs="auto"),
+            ),
+        )
+        try:
+            temporary.warmup(tensors)
+            return temporary.get_tuned_knobs()
+        finally:
+            temporary.destroy()
 
     def _agree(self, value: Any) -> None:
         if self.bootstrap.world_size == 1:
@@ -200,36 +337,61 @@ class FlashInferMoeEpProfiles:
         if context is None:
             raise RuntimeError("MegaMoE profiles require the startup profile context")
 
-        self.capacities = _profile_capacities(
-            cdiv(context.decode_tokens, self.sp_size),
-            cdiv(context.prefill_tokens, self.sp_size),
-        )
+        if (
+            torch.distributed.is_initialized()
+            and self.bootstrap.world_size != torch.distributed.get_world_size()
+        ):
+            raise RuntimeError("MegaMoE startup tuning requires EP to span WORLD")
+        decode = max(1, cdiv(context.decode_tokens, self.sp_size))
+        prefill = max(1, cdiv(context.prefill_tokens, self.sp_size))
+        self.capacities = _profile_capacities(decode, prefill)
         self._agree(self.capacities)
         for capacity in self.capacities:
-            live_buckets = tuple(self.layer.live_token_buckets(capacity))
-            if any(tokens < 0 or tokens > capacity for tokens in live_buckets):
-                raise ValueError(
-                    f"invalid MegaMoE live-token buckets for capacity {capacity}: "
-                    f"{live_buckets}"
-                )
+            buckets = {capacity}
+            if capacity == decode:
+                buckets.update(1 << i for i in range(decode.bit_length()))
+            live_buckets = tuple(sorted(buckets))
             self._agree((capacity, live_buckets))
-            profiles: tuple[int | None, ...] = live_buckets or (None,)
             handles = []
-            for live_tokens in profiles:
+            for live_tokens in live_buckets:
+                inputs = self._profile_inputs(tensors, live_tokens)
+                key = self._profile_key(capacity, live_tokens)
+                knobs = self._broadcast(
+                    context.records.get(key) if self.bootstrap.rank == 0 else None
+                )
+                source = "cache hit"
+                if not isinstance(knobs, dict) or not knobs:
+                    knobs = self._broadcast(self._tune(inputs, capacity, live_tokens))
+                    if not isinstance(knobs, dict) or not knobs:
+                        raise RuntimeError(
+                            "MegaMoE autotune returned no selected knobs"
+                        )
+                    source = "tuned"
+                    context.records[key] = knobs
+                    context.dirty = True
+                # FlashInfer tactics contain tuple-valued tile/cluster shapes.
+                knobs = {
+                    name: tuple(value) if isinstance(value, list) else value
+                    for name, value in knobs.items()
+                }
                 workspace = self.layer.create_workspace(
-                    capacity, live_tokens=live_tokens
+                    capacity, live_tokens=live_tokens, knobs=knobs
                 )
-                warmup_tokens = live_tokens if live_tokens is not None else capacity
-                self.layer.warmup(
-                    self._profile_inputs(tensors, warmup_tokens),
-                    workspace=workspace,
-                )
+                self.layer.warmup(inputs, workspace=workspace)
                 handles.append((live_tokens, workspace))
+                if self.bootstrap.rank == 0:
+                    logger.info(
+                        "MegaMoE %s: capacity=%d live_tokens=%d knobs=%s",
+                        source,
+                        capacity,
+                        live_tokens,
+                        knobs,
+                    )
             self.workspaces[capacity] = handles
             logger.info(
                 "Prepared FlashInfer MegaMoE capacity=%d live_tokens=%s",
                 capacity,
-                live_buckets or "default",
+                live_buckets,
             )
 
     def _token_count(self, local_rows: int) -> int:
@@ -246,10 +408,7 @@ class FlashInferMoeEpProfiles:
 
     def _workspace(self, capacity: int, tokens: int) -> Any:
         handles = self.workspaces[capacity]
-        if handles[0][0] is None:
-            return handles[0][1]
-        buckets = [bucket for bucket, _ in handles if bucket is not None]
-        assert len(buckets) == len(handles)
+        buckets = [bucket for bucket, _ in handles]
         index = bisect_left(buckets, tokens)
         if index == len(handles):
             index -= 1

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 import torch
@@ -304,20 +304,35 @@ class FlashInferMoeEp:
             and spec.kernel == "cutedsl"
             and moe.moe_parallel_config.pcp_size == 1
             and not getattr(vllm_config.model_config, "enable_sleep_mode", False)
+            and not vllm_config.parallel_config.enable_elastic_ep
         )
-        if enable_profiles and not (
-            callable(getattr(api.MoEEpMegaLayer, "create_workspace", None))
-            and callable(getattr(api.MoEEpMegaLayer, "live_token_buckets", None))
+        if enable_profiles:
+            from vllm.model_executor.layers.fused_moe import (
+                flashinfer_moe_ep_profiles,
+            )
+
+            profile_cls = flashinfer_moe_ep_profiles.FlashInferMoeEpProfiles
+            if not profile_cls.is_supported(api.MoEEpMegaLayer):
+                logger.warning_once(
+                    "Installed FlashInfer lacks MegaMoE tuning knob APIs; "
+                    "using the default workspace for %s.",
+                    moe.moe_backend,
+                )
+                enable_profiles = False
+        if epilogue is None:
+            epilogue = FlashInferMoeEpEpilogue()
+        ep_group = get_ep_group()
+        if (
+            enable_profiles
+            and torch.distributed.is_initialized()
+            and ep_group.world_size != torch.distributed.get_world_size()
         ):
             logger.warning_once(
-                "Installed FlashInfer lacks MegaMoE workspace profiles; "
+                "MegaMoE startup tuning requires EP to span WORLD; "
                 "using the default workspace for %s.",
                 moe.moe_backend,
             )
             enable_profiles = False
-        if epilogue is None:
-            epilogue = FlashInferMoeEpEpilogue()
-        ep_group = get_ep_group()
         bootstrap = api.BootstrapConfig(
             world_size=ep_group.world_size,
             rank=ep_group.rank_in_group,
@@ -380,18 +395,17 @@ class FlashInferMoeEp:
         self._return_workspace_view = moe.routing_method is RoutingMethodType.DeepseekV4
         self._profiles = None
         if enable_profiles:
-            from vllm.model_executor.layers.fused_moe import (
-                flashinfer_moe_ep_profiles,
+            self._profiles = profile_cls(
+                self._mega_layer,
+                bootstrap,
+                fleet_params,
+                backend=replace(
+                    backend,
+                    preprocess_weights=False,
+                    transformed_weights=self._mega_layer._transformed,
+                ),
+                sp_size=moe.sp_size,
             )
-
-            profile_cls = flashinfer_moe_ep_profiles.FlashInferMoeEpProfiles
-            if profile_cls.is_supported(self._mega_layer):
-                self._profiles = profile_cls(
-                    self._mega_layer,
-                    bootstrap,
-                    fleet_params,
-                    sp_size=moe.sp_size,
-                )
 
     @property
     def can_overlap_shared_experts(self) -> bool:
