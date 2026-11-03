@@ -257,6 +257,18 @@ class EncoderCacheManager:
         """Get all cached multimodal input IDs for a request."""
         return self.request_cached_ids.get(request.request_id, set())
 
+    def drop_leading_inputs(self, request: Request, num_inputs: int) -> None:
+        """Free the request's first `num_inputs` inputs and shift the other input
+        ids down. Call it before removing those inputs from `mm_features`."""
+        for input_id in list(self.get_cached_input_ids(request)):
+            if input_id < num_inputs:
+                self.free_encoder_input(request, input_id)
+        cached_ids = self.request_cached_ids.get(request.request_id)
+        if cached_ids is not None:
+            self.request_cached_ids[request.request_id] = {
+                input_id - num_inputs for input_id in cached_ids
+            }
+
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         """Free the request's reference to the encoder input (`mm_data`).
 

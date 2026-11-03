@@ -656,6 +656,15 @@ class KVCacheManager:
             request_id, processed_computed_tokens, num_prompt_tokens
         )
 
+    def drop_leading_blocks(self, request_id: str, num_tokens: int) -> None:
+        """Remove the blocks of a request's first `num_tokens` tokens from its
+        block lists. They must already be freed (see `remove_skipped_blocks`)."""
+        for manager in self.coordinator.single_type_managers:
+            blocks = manager.req_to_blocks[request_id]
+            num_blocks = num_tokens // manager.block_size
+            assert all(block.is_null for block in blocks[:num_blocks])
+            del blocks[:num_blocks]
+
     def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
         """Pop the request's bookkeeping and return its blocks without
         returning them to the block pool. The caller must eventually free

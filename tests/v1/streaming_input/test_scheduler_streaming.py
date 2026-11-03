@@ -20,17 +20,20 @@ from vllm.multimodal.inputs import (
 )
 from vllm.sampling_params import SamplingParams
 from vllm.utils.hashing import sha256
+from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     hash_block_tokens,
     init_none_hash,
 )
+from vllm.v1.core.sched.reanchor import SessionReanchor
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.engine import FinishReason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.outputs import DraftTokenIds, LogprobsLists, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
@@ -787,3 +790,220 @@ def test_non_resumable_request_stays_dequeued_after_stop_while_preempted():
     assert request not in scheduler.kv_holding_waiting
     assert request not in scheduler.deferred_waiting
     assert "req" not in scheduler.schedule().num_scheduled_tokens
+
+
+def _unbounded_scheduler(max_model_len: int, margin: int | None = None, **kwargs):
+    """Window 64, block 16. Set after construction: the config refuses CPU."""
+    scheduler = create_async_scheduler(
+        block_size=16,
+        max_model_len=max_model_len,
+        kv_cache_spec=SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=64,
+        ),
+        **kwargs,
+    )
+    scheduler.scheduler_config.enable_unbounded_streaming_input = True
+    scheduler.scheduler_config.unbounded_streaming_input_margin_tokens = margin
+    scheduler.session_reanchor = SessionReanchor(
+        scheduler.scheduler_config,
+        scheduler.kv_cache_manager,
+        scheduler.encoder_cache_manager,
+        max_model_len,
+        scheduler.block_size,
+    )
+    return scheduler
+
+
+@pytest.mark.parametrize(
+    "max_model_len, margin, trigger",
+    [
+        (256, None, 160),  # half of 256 - 64
+        (96, None, 80),  # 2 blocks over the window
+        (95, None, 80),  # smallest legal without a margin
+        (256, 24, 232),
+        (256, 176, 80),  # one block between the window and the trigger
+    ],
+)
+def test_unbounded_trigger(max_model_len, margin, trigger):
+    scheduler = _unbounded_scheduler(max_model_len, margin)
+    assert scheduler.session_reanchor.trigger == trigger
+
+
+@pytest.mark.parametrize(
+    "max_model_len, margin, minimum",
+    [(64, None, 95), (32, None, 95), (94, None, 95), (256, 177, 257)],
+)
+def test_unbounded_rejects_max_model_len_too_small(max_model_len, margin, minimum):
+    with pytest.raises(ValueError, match=f"max_model_len >= {minimum} "):
+        _unbounded_scheduler(max_model_len, margin)
+
+
+@pytest.mark.parametrize("async_scheduling", [False, True])
+@pytest.mark.parametrize(
+    "chunk_tokens, max_tokens",
+    # (40, 1) computes more than one block per step: the blocks below the window
+    # are only freed when the next step allocates. 432 is the largest legal chunk:
+    # max_model_len - window - 1 block.
+    [(1, 1), (40, 1), (100, 8), (127, 2), (432, 1)],
+)
+def test_unbounded_session_stays_under_max_model_len(
+    chunk_tokens, max_tokens, async_scheduling
+):
+    max_model_len = 512
+    scheduler = _unbounded_scheduler(max_model_len, async_scheduling=async_scheduling)
+    num_chunks = 4 * max_model_len // chunk_tokens
+    shifted = 0
+    for _ in range(num_chunks):
+        scheduler.add_request(
+            DummyRequest(
+                "session", prompt_token_ids=[1] * chunk_tokens, max_tokens=max_tokens
+            )
+        )
+        session = scheduler.requests["session"]
+        while session.status != RequestStatus.WAITING_FOR_STREAMING_REQ:
+            output = scheduler.schedule()
+            assert session.num_tokens < max_model_len
+            shifted += (output.reanchor_reqs or {}).get("session", 0)
+            token_ids = [] if session.is_prefill_chunk else [2]
+            scheduler.update_from_output(output, _model_output("session", token_ids))
+
+    assert session.num_computed_tokens + shifted > max_model_len
+
+
+def test_unbounded_shift_keeps_the_window_of_a_step_in_flight():
+    """A stop can leave a step in flight. It runs at the frontier, so it reads what
+    the next step reads and the shift leaves its window in place."""
+    scheduler = _unbounded_scheduler(256, async_scheduling=True)
+    session = DummyRequest("session", prompt_token_ids=[1] * 176)
+    scheduler.add_request(session)
+    first = scheduler.schedule()
+    in_flight = scheduler.schedule()
+    scheduler.update_from_output(first, _model_output("session", [STOP_TOKEN]))
+    assert session.num_computed_tokens == 176
+    assert session.num_in_flight_tokens == 1
+
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[1]))
+    output = scheduler.schedule()
+
+    # The window of position 176 starts in the block of position 113.
+    assert output.reanchor_reqs == {"session": 112}
+    assert all(
+        not block.is_null
+        for block in scheduler.kv_cache_manager.get_blocks("session").blocks[0]
+    )
+    scheduler.update_from_output(in_flight, _model_output("session", [2]))
+    assert session.num_computed_tokens == 176 - 112 + 1
+    scheduler.update_from_output(output, _model_output("session", [2]))
+
+
+def test_unbounded_largest_chunk_fits_with_a_step_in_flight():
+    scheduler = _unbounded_scheduler(256, async_scheduling=True)
+    session = DummyRequest("session", prompt_token_ids=[1] * 96)
+    scheduler.add_request(session)
+    first = scheduler.schedule()
+    scheduler.schedule()
+    scheduler.update_from_output(first, _model_output("session", [STOP_TOKEN]))
+
+    # max_model_len - window - 1 block.
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[1] * 176))
+    output = scheduler.schedule()
+
+    assert output.reanchor_reqs == {"session": 32}
+    assert session.num_tokens == 240
+
+
+@pytest.mark.parametrize(
+    "chunk_tokens, num_tokens",
+    [
+        (20, 170),  # Fits: a plain re-prefill.
+        (120, 78),  # 270 - (269 - 64 rounded down to a block).
+    ],
+)
+def test_unbounded_chunk_on_a_preempted_session(chunk_tokens, num_tokens):
+    """A preempted session holds no keys, so nothing is rotated. If the re-prefill
+    would not fit under max_model_len, it starts past the oldest tokens."""
+    scheduler = _unbounded_scheduler(256, async_scheduling=True)
+    session = DummyRequest("session", prompt_token_ids=[1] * 150)
+    scheduler.add_request(session)
+    first = scheduler.schedule()
+    scheduler.schedule()
+    scheduler.running.remove(session)
+    scheduler._preempt_request(session, timestamp=0.0)
+    scheduler.update_from_output(first, _model_output("session", [STOP_TOKEN]))
+    assert session.num_computed_tokens == 0
+
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[1] * chunk_tokens))
+    output = scheduler.schedule()
+
+    assert output.reanchor_reqs is None
+    assert session.num_tokens == num_tokens
+    assert output.num_scheduled_tokens["session"] == num_tokens
+
+
+def _mm_feature(offset: int, identifier: str) -> MultiModalFeatureSpec:
+    return MultiModalFeatureSpec(
+        data=MultiModalKwargsItem.dummy(),
+        modality="audio",
+        identifier=identifier,
+        mm_position=PlaceholderRange(offset=offset, length=4),
+    )
+
+
+def _with_encoder_budget(scheduler):
+    scheduler.max_num_encoder_input_tokens = 100
+    scheduler.encoder_cache_manager = EncoderCacheManager(cache_size=100)
+    scheduler.session_reanchor.encoder_cache_manager = scheduler.encoder_cache_manager
+    return scheduler
+
+
+@pytest.mark.parametrize("use_v2_model_runner", [False, True])
+def test_unbounded_shift_drops_and_reindexes_mm_features(use_v2_model_runner):
+    scheduler = _with_encoder_budget(
+        _unbounded_scheduler(
+            256, async_scheduling=True, use_v2_model_runner=use_v2_model_runner
+        )
+    )
+    session = DummyRequest(
+        "session",
+        prompt_token_ids=[1] * 170,
+        mm_features=[_mm_feature(10, "dropped"), _mm_feature(166, "kept")],
+        max_tokens=1,
+    )
+    scheduler.add_request(session)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [2]))
+    # With async scheduling, the last feature is cached until the next step.
+    assert scheduler.encoder_cache_manager.request_cached_ids["session"] == {1}
+
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[1]))
+    output = scheduler.schedule()
+
+    assert output.reanchor_reqs == {"session": 96}
+    assert [f.identifier for f in session.mm_features] == ["kept"]
+    assert session.mm_features[0].mm_position.offset == 166 - 96
+    assert scheduler.encoder_cache_manager.request_cached_ids["session"] == {0}
+
+
+def test_unbounded_shift_drops_every_mm_feature():
+    """With no feature left there is nothing to install, so the encoder updates
+    must not keep the indices of the old list."""
+    scheduler = _with_encoder_budget(
+        _unbounded_scheduler(256, use_v2_model_runner=True)
+    )
+    session = DummyRequest(
+        "session",
+        prompt_token_ids=[1] * 170,
+        mm_features=[_mm_feature(10, "dropped")],
+        max_tokens=1,
+    )
+    scheduler.add_request(session)
+    scheduler.update_from_output(scheduler.schedule(), _model_output("session", [2]))
+
+    scheduler.add_request(DummyRequest("session", prompt_token_ids=[1]))
+    output = scheduler.schedule()
+
+    assert output.reanchor_reqs == {"session": 96}
+    assert session.mm_features == []
