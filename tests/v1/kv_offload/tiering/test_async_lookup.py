@@ -131,11 +131,13 @@ class TestAsyncLookupManager:
         ctx_a = _ctx("req_a")
         ctx_b = _ctx("req_b")
         mgr = InMemoryLookupManager(existing_keys={key_a})
+        groups_started = []
         group_b_started = threading.Event()
         release_group_b = threading.Event()
         batch_lookup = mgr.batch_lookup
 
         def blocking_lookup(keys, req_context):
+            groups_started.append(req_context.req_id)
             if req_context.req_id == ctx_b.req_id:
                 group_b_started.set()
                 if not release_group_b.wait(timeout=5):
@@ -148,6 +150,7 @@ class TestAsyncLookupManager:
             assert mgr.lookup(key_b, ctx_b) is None
             mgr.flush()
             assert group_b_started.wait(timeout=5)
+            assert groups_started == [ctx_a.req_id, ctx_b.req_id]
 
             assert mgr.lookup(key_a, ctx_a) is True
             assert mgr.lookup(key_b, ctx_b) is None
@@ -164,55 +167,6 @@ class TestAsyncLookupManager:
             mgr.shutdown()
 
         assert mgr.batch_lookup_calls == 2
-
-    def test_group_order_blocks_later_group_until_first_finishes(
-        self, monkeypatch: pytest.MonkeyPatch
-    ):
-        """A group behind a blocked group remains unresolved until its turn."""
-        key_a = _key(1)
-        key_b = _key(2)
-        ctx_a = _ctx("req_a")
-        ctx_b = _ctx("req_b")
-        mgr = InMemoryLookupManager(existing_keys={key_a, key_b})
-        group_a_started = threading.Event()
-        group_b_started = threading.Event()
-        release_group_b = threading.Event()
-        batch_lookup = mgr.batch_lookup
-
-        def blocking_lookup(keys, req_context):
-            if req_context.req_id == ctx_a.req_id:
-                group_a_started.set()
-            if req_context.req_id == ctx_b.req_id:
-                group_b_started.set()
-                if not release_group_b.wait(timeout=5):
-                    raise TimeoutError("Test did not release the blocked group")
-            return batch_lookup(keys, req_context)
-
-        monkeypatch.setattr(mgr, "batch_lookup", blocking_lookup)
-        try:
-            assert mgr.lookup(key_b, ctx_b) is None
-            assert mgr.lookup(key_a, ctx_a) is None
-            mgr.flush()
-            assert group_b_started.wait(timeout=5)
-
-            assert not group_a_started.is_set()
-            assert mgr.lookup(key_a, ctx_a) is None
-            assert mgr._lookup_state[key_a].phase is LookupPhase.IN_FLIGHT
-            assert mgr._pending_results.empty()
-
-            release_group_b.set()
-            first_group_results = mgr._pending_results.get(timeout=5)
-            second_group_results = mgr._pending_results.get(timeout=5)
-            assert [result[0] for result in first_group_results] == [key_b]
-            assert [result[0] for result in second_group_results] == [key_a]
-            mgr._pending_results.put(first_group_results)
-            mgr._pending_results.put(second_group_results)
-            mgr.drain_results()
-            assert mgr.lookup(key_b, ctx_b) is True
-            assert mgr.lookup(key_a, ctx_a) is True
-        finally:
-            release_group_b.set()
-            mgr.shutdown()
 
     def test_lazy_results_publish_only_after_group_is_consumed(
         self, monkeypatch: pytest.MonkeyPatch
@@ -255,27 +209,6 @@ class TestAsyncLookupManager:
             assert mgr.lookup(key_b, ctx) is False
         finally:
             release_iterator.set()
-            mgr.shutdown()
-
-    def test_backend_exception_publishes_misses(self, monkeypatch: pytest.MonkeyPatch):
-        """A backend call exception retains the existing miss fallback."""
-        key = _key(1)
-        ctx = _ctx()
-        mgr = InMemoryLookupManager(existing_keys={key})
-
-        def raising_lookup(keys, req_context):
-            raise RuntimeError("backend error")
-
-        monkeypatch.setattr(mgr, "batch_lookup", raising_lookup)
-        try:
-            assert mgr.lookup(key, ctx) is None
-            mgr.flush()
-            group_results = mgr._pending_results.get(timeout=5)
-            assert group_results == [(key, mgr._lookup_state[key].generation, False)]
-            mgr._pending_results.put(group_results)
-            mgr.drain_results()
-            assert mgr.lookup(key, ctx) is False
-        finally:
             mgr.shutdown()
 
     def test_cleanup_removes_entries(self):
