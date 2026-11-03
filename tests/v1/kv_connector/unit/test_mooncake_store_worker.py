@@ -864,6 +864,21 @@ def test_store_sending_thread_records_mooncake_metrics():
     assert stats.data["save_put"][0]["status"] == "ok"
 
 
+def test_store_sending_thread_records_existing_keys():
+    store = MagicMock()
+    store.batch_is_exist.return_value = [1, 0]
+    store.batch_put_from_multi_buffers.return_value = [256]
+    thread = _make_store_sending_thread(store)
+    stats = MooncakeStoreConnectorStats()
+    thread._record_operation_cb = stats.record_operation
+
+    _run_store_req(thread, _make_store_req("req-a", [b"a0", b"a1"]))
+
+    assert stats.data["save_exists"][0]["num_keys"] == 2
+    assert stats.data["save_exists"][0]["num_existing_keys"] == 1
+    assert stats.data["save_put"][0]["num_keys"] == 1
+
+
 def test_process_tokens_uses_mask_num_as_start_chunk():
     db = ChunkedTokenDatabase(
         KeyMetadata("test-model", 0, 0, 0, 0),

@@ -455,6 +455,7 @@ class KVTransferThread(threading.Thread):
         num_bytes: int = 0,
         status: str = "ok",
         num_failed_keys: int = 0,
+        num_existing_keys: int = 0,
     ) -> None:
         if self._record_operation_cb is None:
             return
@@ -465,6 +466,7 @@ class KVTransferThread(threading.Thread):
             num_bytes=num_bytes,
             status=status,
             num_failed_keys=num_failed_keys,
+            num_existing_keys=num_existing_keys,
         )
 
     def update_kv_event(self, events: list[BlockStored]):
@@ -750,8 +752,13 @@ class KVCacheStoreSendingThread(KVTransferThread):
                 e,
             )
             return False
-        self._record_operation("save_exists", exists_start, len(keys))
         missing = [i for i, e in enumerate(exists) if e != 1]
+        self._record_operation(
+            "save_exists",
+            exists_start,
+            len(keys),
+            num_existing_keys=len(keys) - len(missing),
+        )
         if not missing:
             return True
         keys = [keys[i] for i in missing]
@@ -949,14 +956,15 @@ class KVCacheStoreSendingThread(KVTransferThread):
                     num_failed_keys=len(keys),
                 )
                 raise
+            missing_indices = [
+                i for i, exists in enumerate(exists_states) if exists != 1
+            ]
             self._record_operation(
                 "save_exists",
                 save_exists_start,
                 len(keys),
+                num_existing_keys=len(keys) - len(missing_indices),
             )
-            missing_indices = [
-                i for i, exists in enumerate(exists_states) if exists != 1
-            ]
 
             if not missing_indices:
                 save_completed = not missing_source_blocks
@@ -2335,6 +2343,7 @@ class MooncakeStoreWorker:
         num_bytes: int = 0,
         status: str = "ok",
         num_failed_keys: int = 0,
+        num_existing_keys: int = 0,
     ) -> None:
         with self._kv_connector_stats_lock:
             self.kv_connector_stats.record_operation(
@@ -2344,6 +2353,7 @@ class MooncakeStoreWorker:
                 num_bytes=num_bytes,
                 status=status,
                 num_failed_keys=num_failed_keys,
+                num_existing_keys=num_existing_keys,
             )
 
     def get_kv_connector_stats(self) -> MooncakeStoreConnectorStats | None:
