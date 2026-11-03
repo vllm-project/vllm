@@ -82,7 +82,7 @@ SPEC_DECODE_IMPLS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] =
     "nvidia": fused_recurrent_kda_nvidia,
     "amd": fused_recurrent_kda_amd,
 }
-SPEC_DECODE_FWD_IMPLS = {
+SPEC_DECODE_FWD_IMPLS: dict[str, Callable[..., tuple[torch.Tensor, torch.Tensor]]] = {
     "nvidia": fused_recurrent_kda_fwd,
     "amd": fused_recurrent_kda_fwd_amd,
 }
