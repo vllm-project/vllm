@@ -157,8 +157,6 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     def __init__(
         self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
     ) -> None:
-        # The config retains the unpadded [N, K] shape even when weights are
-        # mapped from a daemon and post-load padding is skipped.
         self.logical_output_size = c.weight_shape[0]
         super().__init__(c, layer_param_names)
 

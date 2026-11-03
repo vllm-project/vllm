@@ -213,8 +213,6 @@ class Fp8PerTensorOnlineLinearMethod(OnlineLinearBase):
 
     @property
     def supports_pre_processed_weights(self) -> bool:  # type: ignore[override]
-        # Other backends and serialized-source requantization have their own
-        # runtime state and must opt in after their restore paths are verified.
         return self.requantization_source is None and isinstance(
             getattr(self, "fp8_linear", None), CutlassFP8ScaledMMLinearKernel
         )

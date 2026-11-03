@@ -313,6 +313,10 @@ def test_ipc_cache_cold_start_and_warm_restart(
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="Online FP8 CUTLASS weight cache requires SM89+",
+)
 @pytest.mark.parametrize("quantization", ["fp8_per_tensor", "fp8_per_channel"])
 def test_ipc_cache_online_fp8(vllm_runner, quantization, tmp_path, monkeypatch):
     """Online FP8 weights are shared without requantizing on warm restarts."""
@@ -321,6 +325,10 @@ def test_ipc_cache_online_fp8(vllm_runner, quantization, tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Block FP8/MXFP8 online weight cache requires SM100+",
+)
 @pytest.mark.parametrize(
     "quantization,linear_backend",
     [("fp8_per_block", "cutlass"), ("mxfp8", "flashinfer_cutlass")],
@@ -377,6 +385,10 @@ NVFP4_CASE = ModelCase(
 )
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="NVFP4 CUTLASS MoE requires SM100+",
+)
 def test_ipc_cache_nvfp4_cutlass(vllm_runner, tmp_path, monkeypatch):
     """Repeated IPC attachment must not fuse the shared MoE scales again."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
