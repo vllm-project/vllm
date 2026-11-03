@@ -339,7 +339,7 @@ def test_hadamard_size_must_be_power_of_two(size):
     "linear,moe",
     [
         ({"weight": "fp8_per_block_static", "hadamard_size": 32}, None),
-        (None, {"weight": kMxfp4Static, "hadamard_size": 32}),
+        (None, {"weight": "fp8_per_block_static", "hadamard_size": 32}),
     ],
 )
 def test_hadamard_size_not_implemented_for_unvalidated_methods(linear, moe):
@@ -376,3 +376,49 @@ def test_hadamard_size_composes_with_quantization_config(
     )
     assert resolved is not None
     assert resolved[3].hadamard_size == expected_hadamard
+
+
+def test_mxfp4_hadamard32_moe_routes_experts_and_leaves_linear_unquantized():
+    """`mxfp4_hadamard32_moe` rotates the experts only; dense layers stay bf16."""
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4HadamardOnlineMoEMethod,
+    )
+
+    args = resolve_quantization_config("mxfp4_hadamard32_moe", None)
+    assert args is not None
+    assert args.linear is None
+    config = OnlineQuantizationConfig(args)
+    resolved = config.resolve_quant_method_cls(
+        RoutedExperts, "model.layers.0.mlp.experts"
+    )
+    assert resolved is not None
+    assert resolved[-1] is Mxfp4HadamardOnlineMoEMethod
+    assert config.resolve_quant_method_cls(LinearBase, "model.layers.0.o_proj") is None
+
+
+def test_mxfp4_hadamard32_rotates_linear_and_moe():
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4HadamardOnlineMoEMethod,
+    )
+
+    args = resolve_quantization_config("mxfp4_hadamard32", None)
+    assert args is not None
+    assert args.linear == QuantSpec(weight=kMxfp4Static, hadamard_size=32)
+    assert args.moe == QuantSpec(weight=kMxfp4Static, hadamard_size=32)
+    resolved = OnlineQuantizationConfig(args).resolve_quant_method_cls(
+        RoutedExperts, "model.layers.0.mlp.experts"
+    )
+    assert resolved is not None
+    assert resolved[-1] is Mxfp4HadamardOnlineMoEMethod
+
+
+def test_null_weight_disables_one_side_of_a_rotated_shorthand():
+    """Without Humming, `mxfp4_hadamard32` can still run linear-only."""
+    args = resolve_quantization_config("mxfp4_hadamard32", {"moe": {"weight": None}})
+    assert args is not None
+    assert args.linear == QuantSpec(weight=kMxfp4Static, hadamard_size=32)
+    config = OnlineQuantizationConfig(args)
+    assert (
+        config.resolve_quant_method_cls(RoutedExperts, "model.layers.0.mlp.experts")
+        is None
+    )

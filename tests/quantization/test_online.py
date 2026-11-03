@@ -156,6 +156,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_trtllm_fused_moe,
 )
+from vllm.utils.import_utils import has_humming
 from vllm.utils.torch_utils import set_default_torch_dtype
 
 if current_platform.is_rocm():
@@ -2672,6 +2673,51 @@ def test_online_lut_b_moe(vllm_runner, monkeypatch) -> None:
         llm.apply_model(check_model)
         outputs = llm.generate_greedy(["Hello my name is"], max_tokens=4)
         print(outputs[0][1])
+
+
+@pytest.mark.skipif(
+    not (
+        current_platform.is_cuda()
+        and current_platform.has_device_capability(100)
+        and has_humming()
+    ),
+    reason="MXFP4 activations on Humming need SM100+ and humming-kernels.",
+)
+def test_online_mxfp4_hadamard32_moe(vllm_runner, monkeypatch) -> None:
+    """Experts run W4A4 MXFP4 with the rotation on Humming; dense layers stay bf16."""
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import Mxfp4MoeBackend
+    from vllm.model_executor.layers.quantization.online.mxfp4 import (
+        Mxfp4HadamardOnlineMoEMethod,
+    )
+    from vllm.model_executor.layers.quantization.utils.humming.moe import (
+        HummingMoEQuantConfig,
+    )
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+    with vllm_runner(
+        "ibm-granite/granite-3.0-1b-a400m-base",
+        quantization="mxfp4_hadamard32_moe",
+        enforce_eager=True,
+    ) as llm:
+
+        def check_model(model):
+            layer = model.model.layers[0]
+            method = layer.block_sparse_moe.experts._quant_method
+            assert isinstance(method, Mxfp4HadamardOnlineMoEMethod)
+            assert method.mxfp4_backend == Mxfp4MoeBackend.HUMMING
+            quant_config = method.moe_quant_config
+            assert isinstance(quant_config, HummingMoEQuantConfig)
+            assert quant_config.w1_hadamard_block_size == 32
+            assert quant_config.w2_hadamard_block_size == 32
+            assert quant_config.w1_humming_config.input_quant_mode.should_quantize
+            assert isinstance(
+                layer.self_attn.o_proj.quant_method, UnquantizedLinearMethod
+            )
+
+        llm.apply_model(check_model)
+        output = llm.generate_greedy(["The capital of France is"], max_tokens=4)
+        assert "Paris" in output[0][1]
 
 
 def _patch_max_reduce(monkeypatch, full_amax) -> None:

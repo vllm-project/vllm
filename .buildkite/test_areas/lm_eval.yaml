@@ -1013,6 +1013,7 @@ steps:
   num_devices: 1
   source_file_dependencies:
   - vllm/model_executor/layers/quantization/humming.py
+  - vllm/model_executor/layers/quantization/online/mxfp4.py
   - vllm/model_executor/layers/quantization/utils/humming/
   - vllm/model_executor/layers/fused_moe/experts/fused_humming_moe.py
   - vllm/model_executor/layers/fused_moe/oracle/
