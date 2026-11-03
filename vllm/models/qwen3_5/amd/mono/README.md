@@ -21,8 +21,13 @@ The flag applies only to `qwen3_5_text`. Other model types that share the
 environment variable stay on their own path. A set flag on a deployment
 these kernels cannot run raises and lists the reason: TP other than 1 or 2,
 a GPU other than gfx950, pipeline parallel, LoRA, a KV connector, sequence
-parallel, speculative tokens, or a shape or quant method other than this
-Quark MXFP4 27B dense MLP.
+parallel, speculative tokens at TP2, or a shape or quant method other than
+this Quark MXFP4 27B dense MLP.
+
+With speculative decoding (MTP) at TP1, K1 is off: a verify step runs a
+request's draft tokens through the GDN recurrence in order, which K1 does
+not. The compiled stock GDN layer runs up to out_proj's input, and K2 takes
+the step's rows (draft tokens included) from there, out_proj folded.
 
 ## Grid width
 

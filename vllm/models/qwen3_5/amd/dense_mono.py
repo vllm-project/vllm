@@ -28,6 +28,8 @@ opaque call. A ``@torch.compiler.disable`` wrapper is skipped during that
 trace, which is why mode 3 used to fail closed.
 """
 
+import contextlib
+import copy
 import os
 
 import torch
@@ -148,9 +150,14 @@ def _unsupported(model, vllm_config) -> str | None:
         return "layer scale"
     if any(layer.use_attn_reduce_scatter_for_moe for layer in model.layers):
         return "sequence parallel"
-    if any(_is_gdn(layer) and layer.linear_attn.num_spec for layer in model.layers):
-        return "speculative tokens widen the GDN conv state"
+    if _spec_tokens(model) and get_tp_group().world_size != 1:
+        return "speculative tokens at TP2 (the TP2 graph runs K1 on every GDN layer)"
     return None
+
+
+def _spec_tokens(model) -> bool:
+    """Speculative decoding is on: GDN layers keep draft tokens' conv state."""
+    return any(_is_gdn(layer) and layer.linear_attn.num_spec for layer in model.layers)
 
 
 def _mxfp4_unsupported(proj, n: int, k: int) -> str | None:
@@ -563,7 +570,7 @@ class DenseMonoGraph(nn.Module):
         )
         residual = hidden
         for index, layer in enumerate(model.layers):
-            if _is_gdn(layer):
+            if _is_gdn(layer) and (mono.k1 or not mono.gdn_core):
                 hidden, residual = torch.ops.vllm.qwen38_dense_mono_layer(
                     hidden, residual, positions, index, index == 0
                 )
@@ -573,6 +580,13 @@ class DenseMonoGraph(nn.Module):
                 x = layer.input_layernorm(hidden)
             else:
                 x, residual = layer.input_layernorm(hidden, residual)
+            if _is_gdn(layer):
+                # K1 off (speculative decoding): the stock GDN layer up to
+                # out_proj's input, which K2 folds.
+                hidden, residual = torch.ops.vllm.qwen38_dense_mono_tail(
+                    mono.gdn_core[index](x), residual, index
+                )
+                continue
             attn = layer.self_attn
             qkv, _ = attn.qkv_proj(x)
             q, k, v, gate = attn._project_qkv_gate(qkv, positions)
@@ -615,10 +629,39 @@ class DenseMonoGraph(nn.Module):
         return hidden
 
 
-def _oproj_forward(mono, stock, x, *args, **kwargs):
-    if mono._skip_o:
+class _Passthrough(nn.Module):
+    """A linear's place when K2 folds it: returns its input."""
+
+    def forward(self, x, *args, **kwargs):
         return x, None
-    return stock(x, *args, **kwargs)
+
+
+def _gdn_core(attn):
+    """A view of GDN layer ``attn`` whose forward stops at out_proj's input.
+
+    It shares the layer's parameters and submodules except out_proj; the core
+    op still finds the layer (and its state) by name.
+    """
+    core = copy.copy(attn)
+    core._modules = dict(attn._modules)
+    core._modules["out_proj"] = _Passthrough()
+    core._forward_method = getattr(type(attn), attn._forward_method.__name__).__get__(
+        core
+    )
+    return core
+
+
+@contextlib.contextmanager
+def _skip_proj(proj, skip: bool):
+    """``proj`` returns its input while K2, which folds it, takes the layer."""
+    if not skip:
+        yield
+        return
+    proj.forward = lambda x, *args, **kwargs: (x, None)
+    try:
+        yield
+    finally:
+        del proj.forward
 
 
 class DenseMono:
@@ -634,7 +677,14 @@ class DenseMono:
             "VLLM_ROCM_QWEN38_DENSE_MONO_OPROJ", True
         )
         k1_flag = _flag("VLLM_ROCM_QWEN38_DENSE_MONO_K1", True)
-        self.k1 = k1_flag and (self.oproj or not self.whole_step)
+        # Speculative decoding (TP1): verify steps run a request's draft tokens
+        # through the GDN recurrence in order and widen the conv state; K1 takes
+        # one token a request. The stock GDN layer runs instead, and K2 takes the
+        # rows, which are independent in the FFN.
+        self.spec = _spec_tokens(model)
+        self.k1 = k1_flag and (self.oproj or not self.whole_step) and not self.spec
+        # GDN layers up to out_proj's input, for the TP1 graph with K1 off
+        self.gdn_core: dict[int, nn.Module] = {}
         self.k1_oproj = (
             self.k1
             and not self.whole_step
@@ -647,7 +697,6 @@ class DenseMono:
             from vllm.models.qwen3_5.amd.mono.tiling import device_grid
 
             self.grid = device_grid()
-        self._skip_o = False
         self._gdn_step = False
         self._ffn_step = False
         self._prepared = False
@@ -663,11 +712,12 @@ class DenseMono:
                 "VLLM_ROCM_MONO_DECODE cannot run Qwen3.8-27B dense mono decode: " + why
             )
         logger.info(
-            "Qwen3.8 dense mono row caps at TP%d: K1 %d, K2 %d; %d CTAs",
+            "Qwen3.8 dense mono row caps at TP%d: K1 %d, K2 %d; %d CTAs%s",
             self.tp,
-            self.k1_rows,
+            self.k1_rows if self.k1 else 0,
             self.k2_rows,
             self.grid,
+            "; speculative decoding: K1 off, K2 on verify steps" if self.spec else "",
         )
         self.scratch = None
         self.k1_scratch = None
@@ -812,6 +862,12 @@ class DenseMono:
                     D.stock_split_fields(s, self.tp, self.oproj)
             except ValueError as exc:
                 return f"K2: {exc}"
+        if self.whole_step and self.oproj and not self.k1:
+            self.gdn_core = {
+                i: _gdn_core(layer.linear_attn)
+                for i, layer in enumerate(self.model.layers)
+                if _is_gdn(layer)
+            }
         self._allocate()
         self._shuffle_weights()
         return self._self_check()
@@ -868,14 +924,6 @@ class DenseMono:
                 )
                 ws["qkvz"] = attn.in_proj_qkvz.weight_scale.data.clone()
                 ws["ba"] = attn.in_proj_ba.weight_scale.data.clone()
-
-    def _wrap_o(self, proj) -> None:
-        stock = proj.forward
-
-        def forward(x, *args, **kwargs):
-            return _oproj_forward(self, stock, x, *args, **kwargs)
-
-        proj.forward = forward
 
     def _wrap_linear_attn(self, index, layer) -> None:
         stock = layer.linear_attn.forward
@@ -1143,14 +1191,11 @@ class DenseMono:
         meta = self._metadata(attn)
         if meta is None:
             return False
-        if (
-            meta.num_prefills != 0
-            or meta.num_decodes <= 0
-            or meta.spec_sequence_masks is not None
-        ):
+        if meta.num_prefills != 0 or meta.num_decodes + meta.num_spec_decodes <= 0:
             return False
-        if meta.num_spec_decodes:
-            return self._skip("spec decode")
+        if meta.num_spec_decodes or meta.spec_sequence_masks is not None:
+            # K2 only: the stock GDN layer runs the verify step's recurrence.
+            return not self.k1 or self._skip("spec decode")
         return True
 
     def _skip(self, why: str) -> bool:
@@ -1233,15 +1278,12 @@ class DenseMono:
             x = layer.input_layernorm(hidden)
         else:
             x, res = layer.input_layernorm(hidden, residual)
-        self._skip_o = self.oproj and k2
-        try:
+        with _skip_proj(_o_proj(layer), self.oproj and k2):
             mixed = (
                 layer.linear_attn(x)
                 if _is_gdn(layer)
                 else layer.self_attn(positions=positions, hidden_states=x)
             )
-        finally:
-            self._skip_o = False
         return self._tail(index, layer, mixed, res, k2)
 
     def _layers(self, hidden, positions, k2):
