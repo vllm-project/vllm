@@ -3369,6 +3369,16 @@ class Scheduler(SchedulerInterface):
             )
         )
 
+    def drop_retained_exports(self) -> int:
+        """Stop holding finished requests' blocks for remote readers: free them
+        now. Used by abort-mode pauses. A completion the connector reports
+        later for one of them is ignored (no entry). Returns the count."""
+        entries = self.ledger.drop_exports()
+        for entry in entries:
+            if entry.request.request_id in self.requests:
+                self._free_if_unreferenced(entry.request)
+        return len(entries)
+
     def quiesced(self, mode: str, clear_cache: bool) -> bool:
         """Whether a pause of this mode may complete, as far as the scheduler
         is concerned (the engine core adds the device-side conditions).
