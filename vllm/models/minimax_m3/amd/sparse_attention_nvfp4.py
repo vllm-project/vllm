@@ -168,3 +168,43 @@ class MiniMaxM3SparseRocmNvfp4Impl(MiniMaxM3SparseImpl):
                 v_scale=v_scale,
             )
         return output
+
+    def forward_decode_mxfp8(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        out_q: torch.Tensor,
+        out_scale: torch.Tensor,
+    ) -> None:
+        """``forward`` of a decode-only batch with the output emitted as MXFP8
+        (E4M3 values ``out_q`` [tokens, H * D], row-major E8M0 scales
+        ``out_scale`` [tokens, H * D / 32]) for the o_proj that follows, instead
+        of bf16. Equal to ``mxfp8_e4m3_quantize`` of the bf16 output."""
+        from vllm.models.minimax_m3.amd.ops.nvfp4_sparse_decode.host import (
+            minimax_m3_nvfp4_sparse_decode_fly,
+        )
+
+        md = get_forward_context().attn_metadata[layer.layer_name]  # type: ignore[attr-defined,index]
+        assert isinstance(md, MiniMaxM3SparseMetadata)
+        assert md.num_prefills == 0 and md.num_decodes > 0
+        d = md.decode
+        assert d is not None
+        nd = md.num_decode_tokens
+        topk = layer.topk_indices_buffer  # type: ignore[attr-defined]
+        assert topk is not None
+        q = query[:nd].view(-1, self.num_heads, self.head_size)
+        minimax_m3_nvfp4_sparse_decode_fly(
+            q.contiguous(),
+            kv_cache,
+            topk[:, :nd, :],
+            d.block_table,
+            d.seq_lens,
+            self.scale,
+            None,
+            k_scale=layer._k_scale,  # type: ignore[attr-defined]
+            v_scale=layer._v_scale,  # type: ignore[attr-defined]
+            decode_query_len=d.decode_query_len,
+            out_q=out_q[:nd],
+            out_scale=out_scale[:nd],
+        )
