@@ -41,7 +41,8 @@ The complete single-host P TP2 + D TP2 NIXL example, including owner,
 consumer launch commands and a routed request, is in
 `examples/disaggregated/shared_engram/`. SGLang consumers can use the same
 provider with their own launch recipe in
-[SGLang #47478](https://github.com/sgl-project/sglang/pull/47478). The two
+[SGLang's VMM port](https://github.com/foraxe/sglang/tree/nyx/engram-vmm-port-99fd0104)
+(intended for [SGLang #47478](https://github.com/sgl-project/sglang/pull/47478)). The two
 engines use separate KV-transfer paths; the shared contract is the Engram
 owner generation and FABRIC handles.
 
@@ -53,7 +54,7 @@ their SHA256 digests are complete.
 ```bash
 umask 077
 openssl rand -hex 32 > /shared/private/engram.token
-python -m vllm.models.deepseek_v41.nvidia.ops.shared_engram_owner \
+python -m vllm.distributed.engram_share.vmm.owner \
   --model-dir /models/DeepSeek-V4.1-Flash \
   --listen-host OWNER_ADDRESS --listen-port 56000 \
   --token-file /shared/private/engram.token --device 0
@@ -91,15 +92,14 @@ uncertain lease is not cleared automatically by a lost TCP connection.
 
 ## Validation status
 
-On one four-GPU GB200 host, vLLM source rebased on `a9b727a6` with Torch 2.14
-and the published `40fe396b` native wheel
-passed separate-process CUDA import, direct Engram gather, CUDA Graph replay,
-and real checkpoint first/middle/last row checks. One owner published the
-188.833 GiB generation; consumer attachment showed no RSS increase for the
-table mapping. Two independent TP2 instances, then a real P TP2 to D TP2 NIXL
-handoff, completed against that generation. A matched ordinary host-table P/D
-control returned the same 32-token completion text. Single-request timing is
-diagnostic and does not establish a serving speedup or regression bound.
+The VMM-only port from pinned main `6b3488cc97ee` passed local four-GB200
+validation with Torch 2.14 and an older precompiled native wheel: a separate
+consumer matched seven real checkpoint boundary rows per layer and changed-ID
+CUDA Graph replay; the full TP2 model captured decode graphs at batches 1 and
+2 and generated two 32-token outputs; and P TP2 to D TP2 NIXL serving
+completed with one owner and eight normal detaches. The SGLang VMM port also
+completed its independent P/D route against this owner. These are same-host
+correctness gates, not a stable speedup or cross-host NVL72 claim.
 
 Cross-host import and serving on two NVL72 hosts have not been run because only
 one host is available. The local result establishes the mechanism and

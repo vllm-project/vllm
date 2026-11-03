@@ -1884,7 +1884,7 @@ class Worker(WorkerBase):
 
         engram_config = self.vllm_config.engram_config
         if engram_config is not None and engram_config.shared_host_endpoint:
-            from vllm.models.deepseek_v41.nvidia.ops.shared_engram_owner import (
+            from vllm.distributed.engram_share.vmm.owner import (
                 close_attached_tables,
             )
 

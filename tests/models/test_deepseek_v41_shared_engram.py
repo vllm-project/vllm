@@ -9,14 +9,14 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from vllm.models.deepseek_v41.common.engram import external_table_views
-from vllm.models.deepseek_v41.nvidia.ops import shared_engram_owner as owner
-from vllm.models.deepseek_v41.nvidia.ops import shared_engram_vmm as vmm
-from vllm.models.deepseek_v41.nvidia.ops.shared_engram_owner import (
+from vllm.distributed.engram_share.vmm import mapping as vmm
+from vllm.distributed.engram_share.vmm import owner
+from vllm.distributed.engram_share.vmm.mapping import TableHandles
+from vllm.distributed.engram_share.vmm.owner import (
     _OwnerServer,
     _OwnerState,
 )
-from vllm.models.deepseek_v41.nvidia.ops.shared_engram_vmm import TableHandles
+from vllm.models.deepseek_v41.common.engram import external_table_views
 
 
 def test_disconnected_consumer_prevents_owner_drain(caplog):

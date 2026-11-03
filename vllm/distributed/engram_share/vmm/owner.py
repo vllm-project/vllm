@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Publish immutable Engram tables to independent CUDA processes.
 
-Run with ``python -m vllm.models.deepseek_v41.nvidia.ops.shared_engram_owner``.
+Run with ``python -m vllm.distributed.engram_share.vmm.owner``.
 The control socket only exchanges metadata and leases; lookup rows never pass
 through it. Every participant needs access to the same NVIDIA IMEX channel.
 """
@@ -26,8 +26,7 @@ from types import SimpleNamespace
 import torch
 from safetensors import safe_open
 
-from vllm.models.deepseek_v41.common.engram import EngramLayout
-from vllm.models.deepseek_v41.nvidia.ops.shared_engram_vmm import (
+from vllm.distributed.engram_share.vmm.mapping import (
     IncompleteTableMapCleanup,
     TableHandles,
     TableMapping,
@@ -35,6 +34,7 @@ from vllm.models.deepseek_v41.nvidia.ops.shared_engram_vmm import (
     gpu_host_numa_nodes,
     import_table,
 )
+from vllm.models.deepseek_v41.common.engram import EngramLayout
 
 ROWS_PER_READ = 1 << 18
 MAX_CONTROL_LINE = 4096

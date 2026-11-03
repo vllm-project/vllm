@@ -1196,7 +1196,7 @@ class ParallelEngramEmbedding(nn.Module):
         scale_dim = self.dim // self.block_size
         if self.shared_host_endpoint:
             if torch.get_default_device().type != "meta":
-                from vllm.models.deepseek_v41.nvidia.ops.shared_engram_owner import (
+                from vllm.distributed.engram_share.vmm.owner import (
                     attach_table,
                     retain_attachment,
                 )
