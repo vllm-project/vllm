@@ -23,13 +23,13 @@ endpoints.
                         └─────────────── request + prompt_tokens ──┘
 ```
 
-The derender step needs more than the engine's `token_ids`. It also consumes the original `chat_request`/`completion_request` and `prompt_tokens` carried over from the render step (see [Request format](#request-format)) so the tool and reasoning parsers have the context they need. The chat streaming path additionally needs `prompt_token_ids` (see [Streaming cost](#streaming-cost)) when a parser is configured.
+The derender step needs more than the engine's `token_ids`. It also consumes the original `chat_request`/`completion_request` and `prompt_tokens` carried over from the render step (see [Request format](#request-format)) so the tool and reasoning parsers have the context they need. With a parser configured, chat derender also needs `prompt_token_ids`: streaming requires them (see [Streaming cost](#streaming-cost)), and non-streaming uses them unless the generate response has its own.
 
 All derender endpoints also accept an optional `prompt_token_ids` (the `token_ids` of the `GenerateRequest` returned by `/render`). It's used to seed detokenization from the end of the prompt, the same way the engine does. Without it, the first output token is decoded as if it started a new sequence. On SentencePiece tokenizers (Llama-2, Phi-3) that drops its leading space compared to `/v1/chat/completions` and `/v1/completions`. If it's omitted, derender falls back to the generate response's `prompt_token_ids` (set when the `GenerateRequest` has `return_token_ids`), then to decoding without prompt context.
 
 `/render` copies the request's `return_token_ids` onto the `GenerateRequest`. When it's set, derender returns `token_ids` and the generate response's `prompt_token_ids`, as `/v1/chat/completions` and `/v1/completions` do. The caller supplied `prompt_token_ids` is never echoed back since it may be only a suffix of the prompt.
 
-Seeding only reads the last few IDs (7 today), so a suffix of the prompt is enough and a long prompt doesn't need to travel back to derender. The exception is streaming chat with a tool or reasoning parser configured. There the parser also reads `prompt_token_ids` to decide whether the prompt left reasoning open and it can look back to any point in the prompt. In this case, send the full list (see [Streaming cost](#streaming-cost)).
+Seeding only reads the last few IDs (7 today), so a suffix of the prompt is enough and a long prompt doesn't need to travel back to derender. The exception is chat with a tool or reasoning parser configured. There the parser also reads `prompt_token_ids` to decide whether the prompt left reasoning open and it can look back to any point in the prompt. In this case, send the full list (see [Streaming cost](#streaming-cost)). Non-streaming chat derender gives the parser the generate response's `prompt_token_ids` instead when it's set, since the caller's may be a suffix. If a suffix starts after the last reasoning marker (e.g. `</think>`), the parser can't see it and may misclassify the output, the same as when no IDs are sent.
 
 ## API Reference
 
