@@ -44,6 +44,8 @@ HEALTH_POLL_INTERVAL = 64
 # Other builds and layer 1 run vLLM's attention op.
 FUSED_ATTENTION = {8: ("swa", "full"), 16: ("swa", "full"), 32: ("swa", "full")}
 SLIDING_WINDOW = (2047, 0)
+BF16_KV_DTYPES = ("auto", "bfloat16")
+FP8_KV_DTYPES = ("fp8", "fp8_e4m3")
 
 # The model shape the K3 build is specialized for.
 KERNEL_CONFIG: dict[str, float] = {
@@ -274,8 +276,8 @@ def deployment_refusals(
     cache = vllm_config.cache_config
     if getattr(cache, "kv_offloading_size", None):
         reasons.append("KV offloading on")
-    if cache.cache_dtype not in ("auto", "bfloat16"):
-        reasons.append(f"kv_cache_dtype={cache.cache_dtype} (kernel: bf16)")
+    if cache.cache_dtype not in BF16_KV_DTYPES + FP8_KV_DTYPES:
+        reasons.append(f"kv_cache_dtype={cache.cache_dtype} (kernel: bf16, fp8_e4m3)")
     if vllm_config.model_config.dtype != torch.bfloat16:
         reasons.append(f"model dtype {vllm_config.model_config.dtype}")
     return reasons
@@ -326,6 +328,10 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
             bad(f"layer {i}: RoPE cache {_shape(rope.cos_sin_cache)}")
         if not layer.self_attn.pre_qkv_proj_norm.has_weight:
             bad(f"layer {i}: weightless pre_qkv_proj_norm")
+        for name in ("_k_scale", "_v_scale"):
+            scale = getattr(attn.attn, name, None)
+            if scale is None or scale.dtype != torch.float32 or scale.numel() != 1:
+                bad(f"layer {i}: {name} {_shape(scale)}")
         if i > LAST_LAYER:
             continue
         check_bf16(i, "o_proj", attn.o_proj.weight, (h, dims.q_rows))
@@ -373,11 +379,13 @@ def layer_refusals(model: nn.Module, dims: MonoDims) -> list[str]:
     return reasons
 
 
-def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int) -> str | None:
-    """K3 writes bf16 LBHNC pages: ``[block][kv head][16 tokens][K | V]``."""
+def kv_cache_refusal(kv_cache: torch.Tensor, kv_heads: int, kv_fp8: bool) -> str | None:
+    """K3 writes LBHNC pages ``[block][kv head][16 tokens][K | V]``: bf16, or
+    e4m3 (uint8 storage) with ``kv_fp8``."""
     if kv_cache.numel() == 0:
         return "kv:unbound"
-    if kv_cache.dtype != torch.bfloat16:
+    dtypes = (torch.uint8, torch.float8_e4m3fn) if kv_fp8 else (torch.bfloat16,)
+    if kv_cache.dtype not in dtypes:
         return f"kv:{kv_cache.dtype}"
     want_shape = (kv_heads, KV_BLOCK_SIZE, 2 * 64)
     if tuple(kv_cache.shape[1:]) != want_shape:
@@ -508,7 +516,7 @@ class _FusedAttention:
         """The descriptor table of this step; ``q_of(i)`` = layer i's q."""
         rows = {}
         for i in self.layers:
-            md, _, kv_cache, _ = get_attention_context(
+            md, attn, kv_cache, _ = get_attention_context(
                 layers[i].self_attn.attn.layer_name
             )
             rows[i] = self.af.vllm_desc(
@@ -520,6 +528,8 @@ class _FusedAttention:
                 self.part,
                 num_reqs,
                 self.scales[i],
+                attn._k_scale,
+                attn._v_scale,
             )
         key = tuple((i, *w) for i, w in rows.items())
         table = self.tables.get(key)
@@ -599,7 +609,13 @@ class _Bucket:
             _, _, kv_cache, slots = get_attention_context(nxt.attn.layer_name)
             rope = nxt.rotary_emb
             cos_sin = rope.cos_sin_cache if rope is not None else self.no_rope
-            ptrs = (slots.data_ptr(), cos_sin.data_ptr(), positions.data_ptr())
+            ptrs = (
+                slots.data_ptr(),
+                cos_sin.data_ptr(),
+                positions.data_ptr(),
+                nxt.attn._k_scale.data_ptr(),
+                nxt.attn._v_scale.data_ptr(),
+            )
             # The kernels take the block stride (elements) in the V slot.
             kv = (kv_cache.data_ptr(), kv_cache.stride(0), *ptrs)
             stream, q, g = self.layer(mono, i, kind, attn_o, g, stream, kv, aux_layers)
@@ -624,19 +640,22 @@ class _K3Bucket(_Bucket):
         group: Any,
         fa: _FusedAttention | None = None,
         fused_kinds: Sequence[tuple[bool, str]] = (),
+        kv_fp8: bool = False,
     ) -> None:
         w = dims.world_size
         super().__init__(k3, k3.peer_layout(rows, w)[1], dims, device, group)
-        self.launchers = {
-            next_rope: k3.build(k3.build_vllm(S=rows, W=w, next_rope=next_rope))
-            for next_rope in (True, False)
-        }
+
+        def build(next_rope: bool, attn: str = ""):
+            return k3.build(
+                k3.build_vllm(
+                    S=rows, W=w, next_rope=next_rope, attn=attn, kv_fp8=kv_fp8
+                )
+            )
+
+        self.launchers = {next_rope: build(next_rope) for next_rope in (True, False)}
         self.fa = fa
         self.fused_launchers = {
-            (next_rope, kind): k3.build(
-                k3.build_vllm(S=rows, W=w, next_rope=next_rope, attn=kind)
-            )
-            for next_rope, kind in fused_kinds
+            (next_rope, kind): build(next_rope, kind) for next_rope, kind in fused_kinds
         }
         self.scratch = torch.zeros(
             k3.scratch_layout(rows, w)[1] // 4 + 64, dtype=torch.int32, device=device
@@ -703,9 +722,10 @@ class _K5Bucket(_Bucket):
         group: Any,
         fa: _FusedAttention | None = None,
         fused_kinds: Sequence[str] = (),
+        kv_fp8: bool = False,
     ) -> None:
         w = dims.world_size
-        key = k5.build_vllm(S=rows, W=w, next_rope=True)
+        key = k5.build_vllm(S=rows, W=w, next_rope=True, kv_fp8=kv_fp8)
         super().__init__(k5, k5.peer_layout(rows, w, key.bnd)[1], dims, device, group)
         self.bnd = key.bnd
         self.launch_a, launch_b = k5.build(key)
@@ -716,7 +736,7 @@ class _K5Bucket(_Bucket):
         self.launch_m = k5m.build(k5m.build_vllm(S=rows, W=w))
         self.fa = fa
         self.fused_launch_a = {
-            kind: k5.build(k5.build_vllm(S=rows, W=w, next_rope=True, attn=kind))[0]
+            kind: k5.build(dataclasses.replace(key, attn=kind))[0]
             for kind in fused_kinds
         }
         i32, f32, bf16 = torch.int32, torch.float32, torch.bfloat16
@@ -833,9 +853,11 @@ class MuseSparkMono:
         dims: MonoDims,
         buckets: Sequence[int],
         fused_attention: dict[int, str],
+        kv_fp8: bool = False,
     ) -> None:
         self.rank = rank
         self.dims = dims
+        self.kv_fp8 = kv_fp8
         self.refresh_weights(model)
         self.buckets: dict[int, _Bucket] = {}
         for b in buckets:
@@ -852,7 +874,7 @@ class MuseSparkMono:
                     {(self.weights[i].next_rope, t) for i, t in layers.items()}
                 )
                 self.buckets[b] = _K3Bucket(
-                    kernels.k3, b, dims, device, group, fa, k3_kinds
+                    kernels.k3, b, dims, device, group, fa, k3_kinds, kv_fp8
                 )
             else:
                 self.buckets[b] = _K5Bucket(
@@ -864,6 +886,7 @@ class MuseSparkMono:
                     group,
                     fa,
                     sorted(set(layers.values())),
+                    kv_fp8,
                 )
         self._validated: set[int] = set()
         self._fallbacks: set[str] = set()
@@ -901,7 +924,7 @@ class MuseSparkMono:
             return "positions"
         for name in names[1:]:
             _, _, kv_cache, slots = get_attention_context(name)
-            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads)
+            reason = kv_cache_refusal(kv_cache, self.dims.local_kv_heads, self.kv_fp8)
             if reason is not None:
                 return reason
             if (

@@ -29,7 +29,7 @@ and HA run it at their head (attn = "swa" / "full"), so the layer's attention an
 work are one launch.
 
 Shapes (a TP8 rank): 16 q heads, 2 kv heads (QPK = 8), head dim 64, 8 query tokens a request,
-NR requests (K3 S8: 1, S16: 2; HA S32: 4). K / V bf16 in the layer's vLLM LBHNC cache
+NR requests (K3 S8: 1, S16: 2; HA S32: 4). K / V bf16 (or e4m3, below) in the layer's vLLM LBHNC cache
 `[block][2][16][K 64 | V 64]` (block 16); the page table is the layer group's block_table
 (int32 `[NR][stride]`); seq_used = vLLM's seq_lens (int32 [NR], keys incl. the 8 new ones).
 q [8 NR, 16, 64] bf16 (row stride 1024, without the QK scale); out attn_o [8 NR, 1024] bf16.
@@ -55,7 +55,12 @@ Descriptor (int64 words, device memory; vllm_desc): 0 q, 1 the KV cache base, 2 
 in elements (a value), 3 block table, 4 seq_lens, 5 attn_o (out), 6 part (scratch of
 part_bytes()), 7 block-table row stride (elements), 8 real requests (requests >= it are graph
 padding: no split, zero output rows, their flags still set), 9 the softmax scale x log2(e) as
-fp32 bits. A fragment's descriptor is row `layer` of a table of TABLE_ROWS rows.
+fp32 bits, 10 / 11 the layer's K / V scale (fp32 [1]). A fragment's descriptor is row `layer` of a
+table of TABLE_ROWS rows.
+
+kv_fp8: the cache holds e4m3 (`[block][2][16][K 64 | V 64]` bytes). A lane loads its 16 K and 16 V
+channels as 2 dwordx4 and widens them to bf16 (exact) when it stores the step to LDS; the K scale
+multiplies the softmax scale and the V scale the merged output, so the MFMAs are the bf16 ones.
 """
 
 from types import SimpleNamespace
@@ -73,6 +78,7 @@ from .dev import (
     OOB_BOUND,
     THREADS,
     bf16_pair,
+    e4m3x4_bf16,
     hw_exp2,
     ld_i32,
     ld_i32_if,
@@ -99,7 +105,7 @@ PGMAX = 512  # page ids a CTA staged in one round (128 tiles)
 # keys a request the page staging covers (max_position_embeddings)
 VLLM_MAX_KEYS = 1 << 20
 REGION_IDS = {"aseg": 40}
-DESC_WORDS = 10
+DESC_WORDS = 12
 TABLE_ROWS = 64
 
 # parts of the scratch buffer (bytes); the segment count is always BLOCKS (G x CPG <= 256)
@@ -123,9 +129,9 @@ def default_cpg(NR, swa):
     return BLOCKS // g
 
 
-def make(NR, swa, maxk=VLLM_MAX_KEYS):
-    """The fragment for NR requests; swa = SWA (window 2048) or full attention. It stages enough
-    page ids a CTA for maxk keys a request (PGN)."""
+def make(NR, swa, maxk=VLLM_MAX_KEYS, kv_fp8=False):
+    """The fragment for NR requests; swa = SWA (window 2048) or full attention; kv_fp8 = an e4m3
+    cache. It stages enough page ids a CTA for maxk keys a request (PGN)."""
     # K / V load cache policy: cached for SWA, nontemporal for full
     KCM = 0 if swa else CM_NT
 
@@ -178,6 +184,11 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
         for i in range(DESC_WORDS // 2):
             v4 = ld_vec(dptr, 4 * i, 4)
             dv += [v4[e] for e in range(4)]
+        qks = uniform(dv[18]).bitcast(fx.Float32)
+        vs = None
+        if const_expr(kv_fp8):
+            qks = qks * uniform(ld_i32(p64(dv, 10), 0)).bitcast(fx.Float32)
+            vs = uniform(ld_i32(p64(dv, 11), 0)).bitcast(fx.Float32)
         return SimpleNamespace(
             q=p64(dv, 0),
             k=p64(dv, 1),
@@ -188,7 +199,8 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
             part=p64(dv, 6),
             pts=uniform(dv[14]),
             nreq=uniform(dv[16]),
-            qks=uniform(dv[18]).bitcast(fx.Float32),
+            qks=qks,
+            vs=vs,
         )
 
     def geom(d, req):
@@ -222,6 +234,14 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
         if const_expr(swa):
             # keys before the window: no access (vLLM frees their blocks)
             ok = ok & (kg >= wlo)
+        if const_expr(kv_fp8):
+            base = d.k + fx.Int64(uniform(pg)) * d.v + fx.Int64(kvh * (BS * 2 * HD))
+            # dwords: row (kg % 16) of 128 e4m3, channels [16 lch, 16 lch + 16)
+            off = (kg % BS) * (HD // 2) + 4 * lch
+            kv = [ld_vec_if(ok, base, off + o, 4, OOB_BOUND, KCM) for o in (0, HD // 4)]
+            return fx.Vector.from_elements(
+                [kv[j][i] for j in range(2) for i in range(4)], fx.Int32
+            )
         base = d.k + (
             fx.Int64(uniform(pg)) * d.v + fx.Int64(kvh * (BS * 2 * HD))
         ) * fx.Int64(2)
@@ -260,6 +280,8 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
         wlo=None,
     ):
         """One step (2 tiles): K / V of step s (kvc) -> LDS, the loads of step s + PD issued, then this wave's tile."""
+        if const_expr(kv_fp8):
+            kvc = [w for i in range(8) for w in e4m3x4_bf16(kvc[i])]
         gpu.barrier()
         for kind in range_constexpr(2):
             words = [kvc[8 * kind + i] for i in range(8)]
@@ -581,6 +603,8 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
                         [fx.ptr_load(g2 + b + 2 + i) for i in range(4)],
                     )
                 f = fx.Float32(1.0) / (Ls > fx.Float32(0.0)).select(Ls, fx.Float32(1.0))
+                if const_expr(kv_fp8):
+                    f = f * d.vs
                 tok = row // QPK
                 head = kvh * QPK + row % QPK
                 w2 = fx.Vector.from_elements(
@@ -614,7 +638,7 @@ def make(NR, swa, maxk=VLLM_MAX_KEYS):
     return SimpleNamespace(
         Lds=Lds,
         run=run,
-        key=f"attnfrag_nr{NR}_{'swa' if swa else 'full'}_c{CPG}_p{PD}_k{KCM}_{_SRC_HASH}",
+        key=f"attnfrag_nr{NR}_{'swa' if swa else 'full'}_c{CPG}_p{PD}_k{KCM}{'_kv8' if kv_fp8 else ''}_{_SRC_HASH}",
     )
 
 
@@ -631,11 +655,14 @@ def vllm_scale_word(scale):
     return struct.unpack("<i", struct.pack("<f", float(scale) * LOG2E))[0]
 
 
-def vllm_desc(q, kv_cache, block_table, seq_lens, out, part, nreq, scale):
-    """The 10 descriptor words of one layer: q [8 nreq.., 16 x 64] bf16 rows,
-    kv_cache the layer's `[block][2][16][128]` bf16 view (block stride = kv_cache.stride(0)), block_table int32
+def vllm_desc(
+    q, kv_cache, block_table, seq_lens, out, part, nreq, scale, k_scale, v_scale
+):
+    """The DESC_WORDS descriptor words of one layer: q [8 nreq.., 16 x 64] bf16 rows,
+    kv_cache the layer's `[block][2][16][128]` bf16 or e4m3 (uint8) view (block stride = kv_cache.stride(0)), block_table int32
     `[>= nreq][stride]` of the layer's group, seq_lens int32 [>= nreq], out attn_o [rows, 1024] bf16, part the scratch
-    (int32, part_bytes()), nreq the requests of the step (graph padding included: seq_len 0 = no keys, zero rows)."""
+    (int32, part_bytes()), nreq the requests of the step (graph padding included: seq_len 0 = no keys, zero rows),
+    k_scale / v_scale the layer's fp32 [1] scales (read by kv_fp8 builds)."""
     import torch
 
     assert (
@@ -643,7 +670,11 @@ def vllm_desc(q, kv_cache, block_table, seq_lens, out, part, nreq, scale):
         and q.stride(-1) == 1
         and q.shape[-1] * (q.shape[-2] if q.dim() == 3 else 1) % (NH * HD) == 0
     )
-    assert kv_cache.dtype == torch.bfloat16 and tuple(kv_cache.shape[1:]) == (
+    assert kv_cache.dtype in (
+        torch.bfloat16,
+        torch.uint8,
+        torch.float8_e4m3fn,
+    ) and tuple(kv_cache.shape[1:]) == (
         HKV,
         BS,
         2 * HD,
@@ -664,6 +695,8 @@ def vllm_desc(q, kv_cache, block_table, seq_lens, out, part, nreq, scale):
         and out.is_contiguous()
         and part.numel() * part.element_size() >= part_bytes()
     )
+    for s in (k_scale, v_scale):
+        assert s.dtype == torch.float32 and s.numel() == 1, (s.dtype, s.shape)
     return [
         q.data_ptr(),
         kv_cache.data_ptr(),
@@ -675,4 +708,6 @@ def vllm_desc(q, kv_cache, block_table, seq_lens, out, part, nreq, scale):
         block_table.stride(0),
         nreq,
         vllm_scale_word(scale),
+        k_scale.data_ptr(),
+        v_scale.data_ptr(),
     ]

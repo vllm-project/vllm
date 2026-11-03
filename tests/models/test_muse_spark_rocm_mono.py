@@ -272,16 +272,23 @@ def test_buckets_pad_rows_up_to_the_next_build() -> None:
     assert built_buckets(16) == built_buckets(128) == [8, 16, 32, 64, 96, 128]
 
 
-def test_kv_cache_guard_accepts_only_dense_bf16_lbhnc() -> None:
+def test_kv_cache_guard_accepts_only_dense_lbhnc_of_the_configured_dtype() -> None:
     lbhnc = torch.empty(10, 2, 16, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(lbhnc, 2) is None
+    assert kv_cache_refusal(lbhnc, 2, kv_fp8=False) is None
+    assert kv_cache_refusal(lbhnc, 2, kv_fp8=True) == "kv:torch.bfloat16"
     lhbnc = torch.empty(2, 10, 16, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(lhbnc.transpose(0, 1), 2).startswith("kv:stride")
-    fp8 = torch.empty(10, 2, 16, 128, dtype=torch.float8_e4m3fn, device="meta")
-    assert kv_cache_refusal(fp8, 2).startswith("kv:torch.float8")
+    assert kv_cache_refusal(lhbnc.transpose(0, 1), 2, False).startswith("kv:stride")
+    # vLLM allocates an fp8 cache as uint8; the backend views it as e4m3.
+    for dtype in (torch.uint8, torch.float8_e4m3fn):
+        fp8 = torch.empty(10, 2, 16, 128, dtype=dtype, device="meta")
+        assert kv_cache_refusal(fp8, 2, kv_fp8=True) is None
+        assert kv_cache_refusal(fp8, 2, kv_fp8=False) == f"kv:{dtype}"
+    e5m2 = torch.empty(10, 2, 16, 128, dtype=torch.float8_e5m2, device="meta")
+    assert kv_cache_refusal(e5m2, 2, kv_fp8=True) == "kv:torch.float8_e5m2"
     block32 = torch.empty(10, 2, 32, 128, dtype=torch.bfloat16, device="meta")
-    assert kv_cache_refusal(block32, 2).startswith("kv:shape")
-    assert kv_cache_refusal(torch.empty(0, dtype=torch.bfloat16), 2) == "kv:unbound"
+    assert kv_cache_refusal(block32, 2, False).startswith("kv:shape")
+    unbound = torch.empty(0, dtype=torch.bfloat16)
+    assert kv_cache_refusal(unbound, 2, False) == "kv:unbound"
 
 
 def test_config_guard_accepts_only_the_checkpoint_shape() -> None:
@@ -317,6 +324,9 @@ def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
     tiny, dspark = checkpoints / "tiny", checkpoints / "dspark"
     tep8 = _vllm_config(tiny, dspark, tp=8)
     assert deployment_refusals(tep8, 3, 8, _moe_parallel()) == []
+    for cache_dtype in ("fp8", "fp8_e4m3"):
+        fp8 = _vllm_config(tiny, dspark, tp=8, cache_dtype=cache_dtype)
+        assert deployment_refusals(fp8, 3, 8, _moe_parallel()) == []
 
     tp4 = _vllm_config(tiny, dspark, tp=4, expert_placement_strategy="round_robin")
     tp4.parallel_config.enable_expert_parallel = False
@@ -327,7 +337,7 @@ def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
         "MoE layers not expert parallel",
     ]
 
-    no_draft = _vllm_config(tiny, tp=8, cache_dtype="fp8")
+    no_draft = _vllm_config(tiny, tp=8, cache_dtype="fp8_e5m2")
     no_draft.lora_config = LoRAConfig()
     no_draft.model_config.enable_sleep_mode = True
     no_draft.weight_transfer_config = WeightTransferConfig()
@@ -336,7 +346,7 @@ def test_deployment_guard_accepts_only_tep8_with_dspark(checkpoints) -> None:
         "LoRA on",
         "sleep mode on",
         "weight transfer on",
-        "kv_cache_dtype=fp8 (kernel: bf16)",
+        "kv_cache_dtype=fp8_e5m2 (kernel: bf16, fp8_e4m3)",
     ]
 
 
@@ -507,7 +517,8 @@ def test_fused_attention_layers_follow_the_window(tiny_model) -> None:
 _K3_HEAD = (
     "attn_o attn_g stream_pre w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren "
     "w13 w13s w2 w2s w_post w_pp w_pff alpha beta w_in w_qkvg stream_out xn_out "
-    "part_out q_out g_out k_cache v_cache slots cos_sin pos scratch epoch health tl"
+    "part_out q_out g_out k_cache v_cache slots cos_sin pos k_scale v_scale scratch "
+    "epoch health tl"
 )
 _HA_HEAD = (
     "attn_o attn_g stream_in w_o alpha_a beta_a w_pffn w_r bias w_pre w_pren "
@@ -516,10 +527,10 @@ _HA_HEAD = (
 _HM_HEAD = "h ids sc w13 w13s w2 w2s w_post part_out scratch epoch health tl"
 _HB_HEAD = (
     "part w_pp w_pff alpha beta w_in w_qkvg stream_out sfull_out q_out g_out "
-    "k_cache v_cache slots cos_sin pos scratch epoch health tl"
+    "k_cache v_cache slots cos_sin pos k_scale v_scale scratch epoch health tl"
 )
 _REPLICAS = " w13r w13sr w2r w2sr eptab"
-_DESC_WORDS = 10
+_DESC_WORDS = 12
 
 
 def _params(head: str, world_size: int, tail: str) -> list[str]:
@@ -580,13 +591,14 @@ class StockLaunches:
         if not fused:
             return _device_view(attn_o, (rows, d.q_rows), torch.bfloat16)
         words = _device_view(attn_o, (_DESC_WORDS,), torch.int64).tolist()
-        md, _, kv_cache, _ = _attention_context(layer)
+        md, attn, kv_cache, _ = _attention_context(layer)
         assert words[1:5] == [
             kv_cache.data_ptr(),
             kv_cache.stride(0),
             md.block_table.data_ptr(),
             md.seq_lens.data_ptr(),
         ]
+        assert words[10:] == [attn._k_scale.data_ptr(), attn._v_scale.data_ptr()]
         assert words[8] == nreq
         q = _device_view(words[0], (rows, d.q_rows), torch.bfloat16)
         out = _device_view(words[5], (rows, d.q_rows), torch.bfloat16)
@@ -604,10 +616,12 @@ class StockLaunches:
         )
         stream = _device_view(a["stream"], (rows, d.hidden_size), torch.float32)
         positions = _device_view(b["pos"], (rows,), torch.int64)
-        _, _, kv_cache, slots = _attention_context(nxt)
+        _, attn, kv_cache, slots = _attention_context(nxt)
         assert b["k_cache"] == kv_cache.data_ptr()
         assert b["v_cache"] == kv_cache.stride(0)
         assert b["slots"] == slots.data_ptr()
+        assert b["k_scale"] == attn._k_scale.data_ptr()
+        assert b["v_scale"] == attn._v_scale.data_ptr()
         rope = nxt.self_attn.rotary_emb
         if rope is not None:
             assert b["cos_sin"] == rope.cos_sin_cache.data_ptr()
@@ -631,6 +645,7 @@ class _Key:
     next_rope: bool = True
     attn: str = ""
     bnd: int = 0
+    kv_fp8: bool = False
 
 
 class _Kernel:
@@ -649,8 +664,9 @@ class _Kernel:
     def scratch_layout(self, S, W=1, bnd=0):
         return {}, 4096
 
-    def build_vllm(self, S, W, next_rope=True, attn=""):
-        return _Key(S, W, next_rope, attn, self.owner.bnd if self.name == "k5" else 0)
+    def build_vllm(self, S, W, next_rope=True, attn="", kv_fp8=False):
+        bnd = self.owner.bnd if self.name == "k5" else 0
+        return _Key(S, W, next_rope, attn, bnd, kv_fp8)
 
     def build(self, key: _Key):
         o, w = self.owner, key.W
@@ -682,7 +698,9 @@ class _AttnFrag:
         return 4096
 
     @staticmethod
-    def vllm_desc(q, kv_cache, block_table, seq_lens, out, part, nreq, scale):
+    def vllm_desc(
+        q, kv_cache, block_table, seq_lens, out, part, nreq, scale, k_scale, v_scale
+    ):
         return [
             q.data_ptr(),
             kv_cache.data_ptr(),
@@ -694,6 +712,8 @@ class _AttnFrag:
             block_table.stride(0),
             nreq,
             0,
+            k_scale.data_ptr(),
+            v_scale.data_ptr(),
         ]
 
 
