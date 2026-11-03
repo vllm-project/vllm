@@ -63,6 +63,17 @@ async def init_app_state(
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
+    if vllm_config.kv_transfer_config and vllm_config.kv_transfer_config.pd_role:
+        from vllm.entrypoints.serve.pd_role.state import PDRoleState
+        from vllm.v1.engine.async_llm import AsyncLLM
+
+        if not isinstance(engine_client, AsyncLLM):
+            raise ValueError("Runtime P/D role switching requires AsyncLLM")
+        state.pd_role = PDRoleState(
+            vllm_config.kv_transfer_config.pd_role,
+            vllm_config.parallel_config.data_parallel_size,
+            engine_client.engine_core.call_utility_all_async,
+        )
     state.args = args
     resolved_chat_template = load_chat_template(args.chat_template)
     default_chat_template_kwargs = resolve_default_chat_template_kwargs(args)
