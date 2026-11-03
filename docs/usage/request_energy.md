@@ -38,7 +38,7 @@ marked unsupported. Dense text, chunked prefill, prefix reuse, cancellation,
 preemption, ordinary scheduling overlap and TP hooks require the native model
 and output-equivalence checks before this development patch is released.
 
-The branch's validation receipt records the executed native smoke cases and
-their limits. Full serving-profile coverage, physical accuracy and overhead
+The [validation receipt](request_energy_validation.md) records the executed native
+smoke cases and their limits. Full serving-profile coverage, physical accuracy and overhead
 remain separate acceptance gates; a successful replay is not a physical
 per-request energy reference.
