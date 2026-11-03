@@ -65,6 +65,7 @@
 --ramp-up-strategy
 --random-batch-size
 --random-input-len
+--random-mm-audio-sample-rate
 --random-mm-base-items-per-request
 --random-mm-bucket-config
 --random-mm-limit-mm-per-prompt

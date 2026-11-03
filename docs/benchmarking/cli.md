@@ -1325,16 +1325,16 @@ vllm bench serve \
   --endpoint /v1/chat/completions
 ```
 
-#### Synthetic Random Images (random-mm)
+#### Synthetic Random Multimodal: Images, Video, Audio (random-mm)
 
-Generate synthetic image inputs alongside random text prompts to stress-test vision models without external datasets.
+Generate synthetic image, video, and audio inputs alongside random text prompts to stress-test multimodal models without external datasets.
 
 Notes:
 
 - For online benchmarks, use `--backend openai-chat` with endpoint `/v1/chat/completions`.
 - For offline benchmarks, use `--backend vllm-chat` (see [Offline Throughput Benchmark](#-offline-throughput-benchmark) for an example).
 
-Start the server (example):
+Start the server (image/video example):
 
 ```bash
 vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
@@ -1377,12 +1377,35 @@ The number of items per request can be controlled by passing multiple image buck
   --random-mm-bucket-config '{(256, 256, 1): 0.7, (720, 1280, 1): 0.3}' \
 ```
 
+Ex.2: Audio buckets, against an audio-capable model:
+
+```bash
+vllm serve Qwen/Qwen2-Audio-7B-Instruct --dtype bfloat16
+```
+
+```bash
+vllm bench serve \
+  --backend openai-chat \
+  --model Qwen/Qwen2-Audio-7B-Instruct \
+  --endpoint /v1/chat/completions \
+  --dataset-name random-mm \
+  --num-prompts 100 \
+  --random-input-len 50 \
+  --random-output-len 40 \
+  --random-mm-base-items-per-request 1 \
+  --random-mm-limit-mm-per-prompt '{"image": 0, "video": 0, "audio": 1}' \
+  --random-mm-bucket-config '{(0, 5, 1): 1.0}' \
+  --ignore-eos \
+  --seed 42
+```
+
 Flags specific to `random-mm`:
 
 - `--random-mm-base-items-per-request`: base number of multimodal items per request.
 - `--random-mm-num-mm-items-range-ratio`: vary item count uniformly in the closed integer range [floor(n·(1−r)), ceil(n·(1+r))]. Set r=0 to keep it fixed; r=1 allows 0 items.
-- `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0}'.
-- `--random-mm-bucket-config`: dict mapping (H, W, T) → probability. Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1. Use T=1 for images. Set any T>1 for videos (video sampling not yet supported).
+- `--random-mm-limit-mm-per-prompt`: per-modality hard caps, e.g. '{"image": 3, "video": 0, "audio": 1}'.
+- `--random-mm-bucket-config`: dict mapping a 3-int tuple to a probability. For images/videos the tuple is (H, W, num_frames): num_frames=1 is an image, num_frames>1 is a video. For audio, a leading 0 marks the tuple as audio: (0, duration_seconds, num_channels). Entries with probability 0 are removed; remaining probabilities are renormalized to sum to 1.
+- `--random-mm-audio-sample-rate`: sample rate (Hz) for synthetic audio buckets. Servers resample input audio to the target model's own native rate before processing, so setting this to match that rate (e.g. 16000 for many ASR/audio-understanding models) avoids an extra resampling step being measured as part of every request's TTFT. Defaults to 48000.
 
 Behavioral notes:
 
@@ -1391,10 +1414,10 @@ Behavioral notes:
 How sampling works:
 
 - Determine per-request item count k by sampling uniformly from the integer range defined by `--random-mm-base-items-per-request` and `--random-mm-num-mm-items-range-ratio`, then clamp k to at most the sum of per-modality limits.
-- For each of the k items, sample a bucket (H, W, T) according to the normalized probabilities in `--random-mm-bucket-config`, while tracking how many items of each modality have been added.
+- For each of the k items, sample a bucket according to the normalized probabilities in `--random-mm-bucket-config`, while tracking how many items of each modality have been added.
 - If a modality (e.g., image) reaches its limit from `--random-mm-limit-mm-per-prompt`, all buckets of that modality are excluded and the remaining bucket probabilities are renormalized before continuing.
 This should be seen as an edge case, and if this behavior can be avoided by setting `--random-mm-limit-mm-per-prompt` to a large number. Note that this might result in errors due to engine config `--limit-mm-per-prompt`.
-- The resulting request contains synthetic image data in `multi_modal_data` (OpenAI Chat format). When `random-mm` is used with the OpenAI Chat backend, prompts remain text and MM content is attached via `multi_modal_data`.
+- The resulting request contains synthetic image, video, or audio data in `multi_modal_data` (OpenAI Chat format: `image_url`, `video_url`, or `input_audio` content items respectively). When `random-mm` is used with the OpenAI Chat backend, prompts remain text and MM content is attached via `multi_modal_data`.
 
 </details>
 

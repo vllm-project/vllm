@@ -325,6 +325,19 @@ pub fn generate_random_mm_dataset(
         }
     }
 
+    // Python's random-mm marks an audio bucket with a leading 0, i.e.
+    // (0, duration_seconds, num_channels) -- which would otherwise silently
+    // parse here as a zero-height image. Reject it explicitly instead.
+    for (key, prob) in buckets {
+        if key.height == 0 && *prob > 0.0 {
+            return Err(BenchError::Config(
+                "Audio generation (bucket key with a leading 0) is not yet \
+                 supported in Rust. Set audio bucket probabilities to 0.0."
+                    .into(),
+            ));
+        }
+    }
+
     // Compute item count bounds
     let n = base_items_per_request as f64;
     let r = num_mm_items_range_ratio;

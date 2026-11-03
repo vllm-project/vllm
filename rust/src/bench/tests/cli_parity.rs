@@ -36,6 +36,8 @@ const PYTHON_ONLY: &[&str] = &[
     // spec_bench dataset
     "--spec-bench-category",
     "--spec-bench-output-len",
+    // random-mm dataset: Rust's random-mm rejects audio buckets outright
+    "--random-mm-audio-sample-rate",
     // client-side chat templating / request shaping
     "--chat-template-kwargs",
     "--custom-ensure-client-side-data",
