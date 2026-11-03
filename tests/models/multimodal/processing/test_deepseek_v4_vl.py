@@ -3,6 +3,7 @@
 """DeepSeek-V4 VL processing helpers."""
 
 import json
+from typing import cast
 
 import pytest
 import torch
@@ -10,6 +11,7 @@ from PIL import Image
 from transformers import DeepseekV4Config
 
 from tests.models.utils import build_model_context
+from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.utils import (
     PlaceholderMetadataResolver,
     collect_ec_item_metadata,
@@ -19,9 +21,11 @@ from vllm.models.deepseek_v4.common.mm_preprocess import (
     DeepseekV4VLProcessor,
     build_image_block_pad_free,
 )
+from vllm.models.deepseek_v41.common.mm_preprocess import num_image_tokens
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.renderers.deepseek_v4 import DeepseekV41Renderer
+from vllm.renderers.inputs import DecoderOnlyDictPrompt
 from vllm.renderers.params import ChatParams
 from vllm.tokenizers.deepseek_v41 import get_deepseek_v41_tokenizer
 
@@ -133,8 +137,14 @@ def test_v41_image_metadata_only_roundtrip(sizes, monkeypatch):
         ],
         ChatParams(chat_template_kwargs={"thinking": False, "tokenize": False}),
     )
-    assert rendered["multi_modal_uuids"]["image"] == [str(i) for i in range(len(sizes))]
-    image_data = rendered["multi_modal_data"]["image"]
+    prompt_data = cast(DecoderOnlyDictPrompt, rendered)
+    assert prompt_data["multi_modal_uuids"]["image"] == [
+        str(i) for i in range(len(sizes))
+    ]
+    mm_data = prompt_data["multi_modal_data"]
+    assert mm_data is not None
+    image_data = mm_data["image"]
+    assert isinstance(image_data, dict)
 
     def unexpected_preprocessing(*args, **kwargs):
         pytest.fail("The EC consumer must not preprocess images")
@@ -170,7 +180,9 @@ def test_v41_image_metadata_only_roundtrip(sizes, monkeypatch):
         ),
         hf_processor_mm_kwargs={},
     )
-    model = DeepseekV41ForCausalLM.__new__(DeepseekV41ForCausalLM)
+    model = DeepseekV41ForCausalLM.__new__(
+        DeepseekV41ForCausalLM  # type: ignore[type-abstract]
+    )
     outputs = model.embed_multimodal(**supplied["mm_kwargs"].get_data())
     assert supplied["prompt_token_ids"] == raw["prompt_token_ids"]
     assert [len(output) for output in outputs] == lengths
@@ -182,8 +194,64 @@ def test_v41_renderer_keeps_metadata_when_image_order_is_unchanged():
     renderer = DeepseekV41Renderer.__new__(DeepseekV41Renderer)
     image_data = {"llm_grid": torch.tensor([[2, 3], [3, 2]])}
     image_uuids = ["first", "second"]
-    prompt = renderer._build_prompt(
-        ("prompt", [0, 1]), {"image": image_data}, {"image": image_uuids}
+    prompt = cast(
+        DecoderOnlyDictPrompt,
+        renderer._build_prompt(
+            ("prompt", [0, 1]), {"image": image_data}, {"image": image_uuids}
+        ),
     )
-    assert prompt["multi_modal_data"]["image"] is image_data
+    mm_data = prompt["multi_modal_data"]
+    assert mm_data is not None
+    assert mm_data["image"] is image_data
     assert prompt["multi_modal_uuids"]["image"] is image_uuids
+
+
+@pytest.mark.parametrize(
+    "image_order", [[2, 1, 0], [0, 2]], ids=["reversed", "dropped"]
+)
+@pytest.mark.parametrize(
+    "with_embeddings", [False, True], ids=["metadata", "embeddings"]
+)
+def test_v41_renderer_keeps_reordered_image_data_aligned(image_order, with_embeddings):
+    """Reordering images must keep their grids, UUIDs and embedding slices aligned."""
+    ctx = build_model_context(
+        "deepseek-ai/DeepSeek-V4.1-Flash", limit_mm_per_prompt={"image": 3}
+    )
+    config = VllmConfig(model_config=ctx.model_config)
+    mm_config = ctx.model_config.multimodal_config
+    assert mm_config is not None
+    mm_config.enable_mm_embeds = True
+    mm_config.allow_missing_mm_embeddings = not with_embeddings
+    renderer = DeepseekV41Renderer(
+        config, get_deepseek_v41_tokenizer(ctx.get_tokenizer())
+    )
+    try:
+        grids = torch.tensor([[2, 3], [3, 2], [1, 4]])
+        image_data = {"llm_grid": grids}
+        lengths = [num_image_tokens(h, w) for h, w in grids.tolist()]
+        embeddings = torch.arange(
+            sum(lengths) * ctx.model_config.hf_config.hidden_size, dtype=torch.float32
+        ).reshape(sum(lengths), -1)
+        if with_embeddings:
+            image_data["image_embeds"] = embeddings
+        uuids = ["first", "second", "third"]
+        prompt = cast(
+            DecoderOnlyDictPrompt,
+            renderer._build_prompt(
+                ("prompt", image_order), {"image": image_data}, {"image": uuids}
+            ),
+        )
+        mm_data = prompt["multi_modal_data"]
+        assert mm_data is not None
+        reordered = mm_data["image"]
+        assert isinstance(reordered, dict)
+        assert set(reordered) == set(image_data)
+        assert torch.equal(reordered["llm_grid"], grids[image_order])
+        assert prompt["multi_modal_uuids"]["image"] == [uuids[i] for i in image_order]
+        if with_embeddings:
+            slices = embeddings.split(lengths)
+            assert torch.equal(
+                reordered["image_embeds"], torch.cat([slices[i] for i in image_order])
+            )
+    finally:
+        renderer.shutdown()
