@@ -298,6 +298,28 @@ def test_shared_reset_preserves_peer_cache_and_events(shared_events_schedulers):
     assert list(peer.scheduler.take_events()) == []
 
 
+@pytest.mark.parametrize("num_lookahead", [1, 5])
+def test_shared_store_events_preserve_lookahead_tokens(tmp_path, num_lookahead):
+    """Replacing the private pool must retain the hash window in stored events."""
+    fixtures = _make_shared_schedulers(
+        tmp_path, enable_events=True, num_lookahead=num_lookahead
+    )
+    try:
+        writer, _ = fixtures
+        _, request = _do_eager_store(writer)
+        events = list(writer.scheduler.take_events())
+        assert len(events) == 2
+        for i, event in enumerate(events):
+            assert isinstance(event, BlockStored)
+            end = (i + 1) * BLOCK_SIZE
+            assert event.lookahead_token_ids == [
+                request.all_token_ids[end : end + num_lookahead]
+            ]
+    finally:
+        for fix in fixtures:
+            fix.scheduler.shutdown()
+
+
 def test_shared_reset_preserves_peer_copy_of_same_prefix(shared_events_schedulers):
     """A reset owner can still load another owner's independently stored copy."""
     writer, peer = shared_events_schedulers

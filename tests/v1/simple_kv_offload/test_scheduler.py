@@ -692,9 +692,15 @@ def _alloc_and_register(
     return kv_blocks
 
 
-def _make_shared_schedulers(tmp_path, count=2, enable_events=False):
+def _make_shared_schedulers(tmp_path, count=2, enable_events=False, num_lookahead=0):
     fixtures = [
-        make_scheduler(num_cpu_blocks=3, enable_events=enable_events)
+        make_scheduler(
+            num_cpu_blocks=3,
+            enable_events=enable_events,
+            vllm_config=_make_lookahead_config(num_lookahead)
+            if num_lookahead
+            else None,
+        )
         for _ in range(count)
     ]
     for rank, fix in enumerate(fixtures):

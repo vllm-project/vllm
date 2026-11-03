@@ -65,6 +65,7 @@ class SharedCPUBlockPool(BlockPool):
         enable_kv_cache_events: bool = False,
         max_hashes_per_slot: int = 2,
         medium: str = MEDIUM_CPU,
+        num_hash_lookahead_tokens: int = 0,
     ):
         if metadata.blocks_per_rank < 2:
             raise ValueError("Shared CPU offload needs at least two slots per DP rank.")
@@ -77,7 +78,12 @@ class SharedCPUBlockPool(BlockPool):
         self._peer_pinned: set[int] = set()
         count = metadata.blocks_per_rank * metadata.local_size
         super().__init__(
-            count, True, hash_block_size, enable_kv_cache_events, medium=medium
+            count,
+            True,
+            hash_block_size,
+            enable_kv_cache_events,
+            medium=medium,
+            num_hash_lookahead_tokens=num_hash_lookahead_tokens,
         )
         for block in self.blocks:
             block.prev_free_block = block.next_free_block = None
