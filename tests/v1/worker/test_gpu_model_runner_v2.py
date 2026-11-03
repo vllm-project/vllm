@@ -605,6 +605,7 @@ def test_emulated_pp_delayed_sample_is_rewound_before_recompute() -> None:
     runner.encoder_cache = None
     runner.aux_output_connector = None
     runner.draft_tokens_handler = DraftTokensHandler(device)
+    runner.speculator = None
 
     def get_prev_sampled_outputs():
         return {
