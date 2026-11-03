@@ -234,6 +234,8 @@ def _run_manual_ar_fusion_test(
         fallback_ar_calls = 0
 
         def spy_fused_op(*args, **kwargs):
+            # pattern_code is an argument to FlashInfer's fused kernel
+            # that selects which variant of the fused operation to run
             fused_op_patterns.append(kwargs.get("pattern_code"))
             return fused_op(*args, **kwargs)
 
@@ -261,7 +263,9 @@ def _run_manual_ar_fusion_test(
         # to an unfused all-reduce inside the manual path.
         expected_pattern = patterns.kARResidualRMSNorm
         assert fused_op_patterns == [expected_pattern, expected_pattern], (
-            fused_op_patterns
+            "expected the fused AR op to fire exactly twice on the no-quant "
+            "AR+RMSNorm pattern (post-attention norm + final norm); "
+            f"got {len(fused_op_patterns)} calls: {fused_op_patterns!r}"
         )
         assert fallback_ar_calls == 0, (
             "manual fusion fell back to an unfused all-reduce"
