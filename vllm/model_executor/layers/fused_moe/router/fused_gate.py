@@ -3,8 +3,42 @@
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import torch
+
+
+class FusedGateRoutingMetadata(NamedTuple):
+    """Token metadata that can be prepared once and reused across MoE layers."""
+
+    safe_hash_input_ids: torch.Tensor | None
+    image_token_mask: torch.Tensor | None
+    hash_token_mask: torch.Tensor | None
+
+
+def prepare_fused_gate_routing_metadata(
+    input_ids: torch.Tensor,
+    *,
+    has_hash_routing: bool,
+    image_sentinel_base_id: int | None,
+) -> FusedGateRoutingMetadata:
+    if image_sentinel_base_id is None:
+        return FusedGateRoutingMetadata(
+            input_ids if has_hash_routing else None,
+            None,
+            torch.ones_like(input_ids, dtype=torch.bool) if has_hash_routing else None,
+        )
+
+    image_token_mask = (input_ids >= image_sentinel_base_id) & (
+        input_ids < image_sentinel_base_id + 5
+    )
+    if not has_hash_routing:
+        return FusedGateRoutingMetadata(None, image_token_mask, None)
+    return FusedGateRoutingMetadata(
+        torch.where(image_token_mask, 0, input_ids),
+        image_token_mask,
+        ~image_token_mask,
+    )
 
 
 @dataclass(frozen=True)

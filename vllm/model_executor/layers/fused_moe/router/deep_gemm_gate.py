@@ -63,6 +63,10 @@ class DeepGemmGateBackend(FusedGateBackend):
             or not config.renormalize
         ):
             return False
+        # Preserve the native path's GateLinear crossover for small batches.
+        gate_threshold = 1 if weight.shape[0] == 128 else 16
+        if hidden_states.shape[0] <= gate_threshold:
+            return False
         for bias in (config.bias, config.image_bias):
             if bias is not None and (
                 bias.dtype != torch.float32

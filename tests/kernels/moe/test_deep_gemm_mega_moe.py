@@ -68,7 +68,10 @@ def _make_experts(**kwargs) -> DeepGemmMegaMoEExperts:
     return DeepGemmMegaMoEExperts(vllm_config, **kwargs)
 
 
-@pytest.mark.parametrize("num_tokens,num_experts,top_k", [(2, 128, 3), (17, 384, 6)])
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,top_k",
+    [(1, 128, 3), (2, 128, 3), (16, 384, 6), (17, 384, 6)],
+)
 @pytest.mark.parametrize("hash_and_vision", [False, True])
 @pytest.mark.parametrize("has_padding", [False, True])
 @torch.inference_mode()
@@ -92,7 +95,12 @@ def test_deep_gemm_gate_backend(
     backend = select_fused_gate_backend(
         default_fused_gate_backends(), x, weight, config, has_padding=has_padding
     )
-    if has_padding or not current_platform.is_device_capability_family(100):
+    gate_threshold = 1 if num_experts == 128 else 16
+    if (
+        has_padding
+        or num_tokens <= gate_threshold
+        or not current_platform.is_device_capability_family(100)
+    ):
         assert backend is None
         return
     assert backend is not None

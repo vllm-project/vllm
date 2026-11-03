@@ -44,6 +44,7 @@ from vllm.distributed.device_communicators.all_reduce_utils import (
     gpu_p2p_access_check,
 )
 from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
+from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.distributed.eplb.rebalance_execute import rearrange_expert_weights_inplace
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import (
@@ -53,11 +54,13 @@ from vllm.model_executor.layers.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.prepare_megamoe import prepare_megamoe_inputs
 from vllm.model_executor.layers.fused_moe.router.fused_gate import (
     FusedGateBackend,
     FusedGateConfig,
     FusedGateMetadata,
     FusedGatePlan,
+    prepare_fused_gate_routing_metadata,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_gate_router import (
     FusedGateRouter,
@@ -166,14 +169,16 @@ class TorchGatePlan(FusedGatePlan):
 
 
 class TorchGateBackend(FusedGateBackend):
-    def __init__(self, *, allow_routing_metadata=True):
+    def __init__(self, *, allow_routing_metadata=True, ep_rank=None):
         self.allow_routing_metadata = allow_routing_metadata
+        self.ep_rank = ep_rank
 
     def is_supported(self, hidden_states, weight, config, *, has_padding):
         return (
             hidden_states.is_cuda
             and hidden_states.dtype == weight.dtype == torch.bfloat16
             and config.scoring_func == "sqrtsoftplus"
+            and (self.ep_rank is None or config.ep_rank == self.ep_rank)
             and (
                 self.allow_routing_metadata
                 or not (
@@ -229,6 +234,141 @@ def test_fused_gate_router_preserves_shared_slots(
     assert ids.shape == weights.shape == (3, 5)
     torch.testing.assert_close(ids[:, 3:], ids.new_tensor([8, 9]).expand(3, 2))
     torch.testing.assert_close(weights[:, 3:], weights.new_full((3, 2), 0.5))
+    # Native consumers receive only routed slots and own shared-expert handling.
+    logical = router.forward(x, indices_type=torch.int64)
+    torch.testing.assert_close(logical, tuple(t[:, :3] for t in expected))
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="The reference gate requires CUDA"
+)
+@pytest.mark.parametrize("fuse_gate", [False, True])
+@pytest.mark.parametrize("hash_and_vision", [False, True])
+@torch.inference_mode()
+def test_fused_gate_router_native_staging(
+    fuse_gate, hash_and_vision, dist_init, default_vllm_config, monkeypatch
+):
+    """Native routing leaves EPLB and padding to staging, including graph replay."""
+    torch.manual_seed(42)
+    monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")
+    monkeypatch.setenv("VLLM_MOE_SKIP_PADDING", "1")
+    num_tokens, num_experts, top_k = 17, 8, 2
+    with torch.device("cuda"):
+        gate = GateLinear(
+            256, num_experts, params_dtype=torch.bfloat16, out_dtype=torch.float32
+        )
+        gate.weight.normal_(std=0.02)
+        x = torch.randn(num_tokens, 256, dtype=torch.bfloat16)
+        bias = torch.arange(num_experts, dtype=torch.float32)
+        table = (
+            (torch.arange(64)[:, None] + torch.arange(top_k)) % num_experts
+            if hash_and_vision
+            else None
+        )
+        input_ids = torch.arange(num_tokens)
+        if hash_and_vision:
+            input_ids[0] = 1000
+        padding = torch.arange(num_tokens) == num_tokens - 1
+        load = torch.zeros(num_experts, dtype=torch.int32)
+        eplb = EplbLayerState(
+            expert_load_view=load,
+            logical_to_physical_map=((torch.arange(num_experts) + 3) % num_experts)[
+                :, None
+            ],
+            logical_replica_count=torch.ones(num_experts, dtype=torch.int64),
+            should_record_tensor=torch.tensor(True),
+            num_unpadded_tokens_tensors=[
+                torch.tensor(num_tokens - 1, dtype=torch.int32)
+            ],
+        )
+    router_args = dict(
+        top_k=top_k,
+        global_num_experts=num_experts,
+        scoring_func="sqrtsoftplus",
+        routed_scaling_factor=1.5,
+        e_score_correction_bias=bias,
+        hash_indices_table=table,
+        bias_vl=-bias if hash_and_vision else None,
+        image_sentinel_lo=1000 if hash_and_vision else 0,
+    )
+    router = FusedGateRouter(
+        **router_args,
+        eplb_state=eplb,
+        defer_padding=True,
+        ep_rank=3,
+        fused_gate_backends=[TorchGateBackend(ep_rank=3)] if fuse_gate else [],
+    )
+    router.set_gate(gate)
+    captured_ids: list[torch.Tensor] = []
+    router.set_capture_fn(captured_ids.append)
+    reference = create_fused_moe_router(**router_args)
+    metadata = prepare_fused_gate_routing_metadata(
+        input_ids,
+        has_hash_routing=hash_and_vision,
+        image_sentinel_base_id=1000 if hash_and_vision else None,
+    )
+
+    def run(reference_path=False):
+        with set_forward_context(None, default_vllm_config, is_padding=padding):
+            if reference_path:
+                logits, _ = gate(x)
+                weights, ids = reference.select_experts(
+                    x, logits, torch.int64, input_ids=input_ids
+                )
+            else:
+                weights, ids = router.forward(
+                    x,
+                    indices_type=torch.int64,
+                    input_ids=input_ids,
+                    routing_metadata=metadata,
+                )
+            staged_weights, staged_ids = (
+                torch.empty_like(weights),
+                torch.empty_like(ids),
+            )
+            prepare_megamoe_inputs(
+                x,
+                weights,
+                ids,
+                torch.empty_like(x),
+                None,
+                staged_ids,
+                staged_weights,
+                is_padding=padding,
+                hidden_quant=None,
+                eplb_state=eplb,
+            )
+            return staged_weights, staged_ids
+
+    expected = run(reference_path=True)
+    expected_load = load.clone()
+    load.zero_()
+    with torch.profiler.profile(
+        activities=[torch.profiler.ProfilerActivity.CPU]
+    ) as prof:
+        actual = run()
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(load, expected_load, rtol=0, atol=0)
+    assert not captured_ids  # Capture belongs to the native experts.
+    assert torch.all(actual[1][-1] == -1)
+    assert (
+        any(event.key == "test_fused_gate_forward" for event in prof.key_averages())
+        == fuse_gate
+    )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        run()
+    stream.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = run()
+    x.normal_()
+    if table is not None:
+        table.copy_((table + 1) % num_experts)
+    graph.replay()
+    torch.testing.assert_close(captured, run(reference_path=True))
 
 
 @pytest.mark.skipif(
@@ -349,7 +489,20 @@ def test_fused_gate_backend_modular_moe(
     not current_platform.has_device_capability(90),
     reason="DeepSeek V4 requires SM90 or newer",
 )
-def test_fused_gate_backend_llm(tmp_path, vllm_runner, monkeypatch):
+@pytest.mark.parametrize(
+    "native_mega_moe",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                not current_platform.is_device_capability_family(100),
+                reason="Native MegaMoE experts require SM100",
+            ),
+        ),
+    ],
+)
+def test_fused_gate_backend_llm(tmp_path, vllm_runner, monkeypatch, native_mega_moe):
     """A registered gate's forward preserves LLM greedy tokens and logprobs."""
     from transformers import DeepseekV4Config
 
@@ -403,6 +556,10 @@ def test_fused_gate_backend_llm(tmp_path, vllm_runner, monkeypatch):
         gpu_memory_utilization=0.1,
         kv_cache_memory_bytes=16 * 1024 * 1024,
         distributed_executor_backend="uni",
+        kernel_config={
+            "moe_backend": "deep_gemm_mega_moe" if native_mega_moe else "auto"
+        },
+        enable_expert_parallel=native_mega_moe,
     ) as runner:
         prompts = [{"prompt_token_ids": [3, 4, 5, 6]}]
         params = SamplingParams(
@@ -417,10 +574,9 @@ def test_fused_gate_backend_llm(tmp_path, vllm_runner, monkeypatch):
         def start_profile(worker):
             num_routers = 0
             for layer in worker.model_runner.get_model().modules():
-                if isinstance(layer, MoERunner) and isinstance(
-                    layer.router, FusedGateRouter
-                ):
-                    layer.router.set_fused_gate_backends([TorchGateBackend()])
+                router = getattr(layer, "router", None)
+                if isinstance(router, FusedGateRouter):
+                    router.set_fused_gate_backends([TorchGateBackend()])
                     num_routers += 1
             worker.fused_gate_profiler = torch.profiler.profile(
                 activities=[torch.profiler.ProfilerActivity.CPU]

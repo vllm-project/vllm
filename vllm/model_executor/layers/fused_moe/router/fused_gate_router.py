@@ -13,6 +13,8 @@ from vllm.model_executor.layers.fused_moe.router.fused_gate import (
     FusedGateBackend,
     FusedGateConfig,
     FusedGateMetadata,
+    FusedGateRoutingMetadata,
+    prepare_fused_gate_routing_metadata,
     select_fused_gate_backend,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_bias_router import (
@@ -40,6 +42,8 @@ class FusedGateRouter(FusedTopKBiasRouter):
         bias_vl: torch.Tensor | None = None,
         image_sentinel_lo: int = 0,
         fused_gate_backends: Sequence[FusedGateBackend] = (),
+        ep_rank: int = 0,
+        defer_padding: bool = False,
     ):
         super().__init__(
             top_k=top_k,
@@ -57,6 +61,9 @@ class FusedGateRouter(FusedTopKBiasRouter):
         )
         self.gate: GateLinear | None = None
         self._fused_gate_backends = tuple(fused_gate_backends)
+        self.ep_rank = ep_rank
+        # Native MegaMoE invalidates padded routes during input staging.
+        self.defer_padding = defer_padding
 
     def set_gate(self, gate: torch.nn.Module | None) -> None:
         self.gate = gate if isinstance(gate, GateLinear) else None
@@ -74,6 +81,7 @@ class FusedGateRouter(FusedTopKBiasRouter):
             bias=self.e_score_correction_bias,
             image_bias=self.bias_vl if self.image_sentinel_lo > 0 else None,
             has_hash_routing=self._hash_indices_table is not None,
+            ep_rank=self.ep_rank,
         )
 
     def _select_fused_gate_backend(
@@ -89,7 +97,10 @@ class FusedGateRouter(FusedTopKBiasRouter):
             or gate.weight.shape[0] > self.global_num_experts
         ):
             return None
-        has_padding = get_moe_padding_mask(hidden_states.shape[0]) is not None
+        has_padding = (
+            not self.defer_padding
+            and get_moe_padding_mask(hidden_states.shape[0]) is not None
+        )
         return select_fused_gate_backend(
             self._fused_gate_backends,
             hidden_states,
@@ -107,32 +118,38 @@ class FusedGateRouter(FusedTopKBiasRouter):
         )
 
     def _fused_gate_metadata(
-        self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None
+        self,
+        hidden_states: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        routing_metadata: FusedGateRoutingMetadata | None,
     ) -> FusedGateMetadata:
-        image_mask = None
-        if self.bias_vl is not None:
-            assert input_ids is not None, "bias_vl routing requires input_ids"
-            if self.image_sentinel_lo > 0:
-                image_mask = (input_ids >= self.image_sentinel_lo) & (
-                    input_ids < self.image_sentinel_lo + 5
+        if routing_metadata is None:
+            if self._hash_indices_table is not None or self.bias_vl is not None:
+                assert input_ids is not None, "Hash/image routing requires input_ids"
+                routing_metadata = prepare_fused_gate_routing_metadata(
+                    input_ids,
+                    has_hash_routing=self._hash_indices_table is not None,
+                    image_sentinel_base_id=(
+                        self.image_sentinel_lo
+                        if self.bias_vl is not None and self.image_sentinel_lo > 0
+                        else None
+                    ),
                 )
+            else:
+                routing_metadata = FusedGateRoutingMetadata(None, None, None)
         fixed_ids = fixed_mask = None
         if self._hash_indices_table is not None:
-            assert input_ids is not None, "Hash routing requires input_ids"
-            safe_ids = (
-                torch.where(image_mask, 0, input_ids)
-                if image_mask is not None
-                else input_ids
+            safe_ids = routing_metadata.safe_hash_input_ids
+            fixed_mask = routing_metadata.hash_token_mask
+            assert safe_ids is not None and fixed_mask is not None, (
+                "Hash routing requires prepared input IDs and a routing mask"
             )
-            fixed_ids = self._hash_indices_table[safe_ids.long()].to(torch.int64)
-            fixed_mask = (
-                ~image_mask
-                if image_mask is not None
-                else torch.ones_like(input_ids, dtype=torch.bool)
-            )
-        padding = get_moe_padding_mask(hidden_states.shape[0])
+            fixed_ids = self._hash_indices_table[safe_ids].to(torch.int64)
+        padding = (
+            None if self.defer_padding else get_moe_padding_mask(hidden_states.shape[0])
+        )
         return FusedGateMetadata(
-            image_token_mask=image_mask,
+            image_token_mask=routing_metadata.image_token_mask,
             fixed_routing_mask=fixed_mask,
             fixed_expert_ids=fixed_ids,
             valid_token_mask=~padding if padding is not None else None,
@@ -146,15 +163,36 @@ class FusedGateRouter(FusedTopKBiasRouter):
         *,
         input_ids: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        return self.forward(
+            hidden_states, router_logits, indices_type, input_ids=input_ids
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor | None = None,
+        indices_type: torch.dtype | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+        routing_metadata: FusedGateRoutingMetadata | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return routed weights and logical IDs, computing gate logits if needed.
+
+        Native consumers handle shared experts, capture and EPLB themselves.
+        Modular consumers use select_experts(), which adds that post-processing.
+        """
         config = self._fused_gate_config()
         backend = self._select_fused_gate_backend(hidden_states, config)
         if backend is None:
+            if router_logits is None:
+                assert self.gate is not None, "Routing requires a gate or gate logits"
+                router_logits, _ = self.gate(hidden_states)
             return super()._compute_routed_topk(
                 hidden_states, router_logits, indices_type, input_ids=input_ids
             )
 
         assert self.gate is not None
-        metadata = self._fused_gate_metadata(hidden_states, input_ids)
+        metadata = self._fused_gate_metadata(hidden_states, input_ids, routing_metadata)
         plan = backend.prepare(hidden_states, self.gate.weight, config, metadata)
         topk_weights, topk_ids = plan.forward()
         return topk_weights, topk_ids.to(
