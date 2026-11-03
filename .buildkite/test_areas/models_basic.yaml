@@ -77,6 +77,7 @@ steps:
   - tests/models/test_deepseek_v41_replay_batch.py
   - tests/models/test_deepseek_v41_pcp.py
   - tests/models/test_deepseek_v41_pipeline.py
+  - tests/models/deepseek_v41/nvidia/test_fused_markov.py
   - tests/models/transformers/test_layer_registry_e2e.py
   - tests/models/test_deepseek_v41_replay_start.py
   - tests/models/test_muse_spark_rocm_loading.py
@@ -97,6 +98,7 @@ steps:
       models/test_deepseek_v41_replay_batch.py
       models/test_deepseek_v41_pcp.py
       models/test_deepseek_v41_pipeline.py
+      models/deepseek_v41/nvidia/test_fused_markov.py
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
