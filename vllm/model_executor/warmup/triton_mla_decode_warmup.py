@@ -6,7 +6,8 @@ Eager-only layers (e.g. an EAGLE drafter that is never graph-captured) first
 run decode attention on live traffic. Batch size only shapes the launch grid,
 so one call per layer config and ``seq_lens`` dtype covers every batch: the
 plain decode path passes int32 ``seq_lens`` while multi-token expansion in
-subclasses produces int64.
+subclasses produces int64. ``NUM_KV_SPLITS`` is a constexpr, so every split
+count the runtime can select must be warmed separately.
 """
 
 from typing import TYPE_CHECKING
@@ -21,12 +22,34 @@ from vllm.model_executor.warmup.runner_utils import (
     target_and_draft_models,
 )
 from vllm.platforms import current_platform
-from vllm.v1.attention.backends.mla.triton_mla import TritonMLAImpl
+from vllm.v1.attention.backends.mla.triton_mla import (
+    TritonMLAImpl,
+    _compute_num_kv_splits,
+)
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.v1.kv_cache_interface import is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
+
+
+def _num_kv_splits_values(max_model_len: int, sm_count: int) -> tuple[int, ...]:
+    """Every num_kv_splits value runtime can pick for this config.
+
+    ``TritonMLAImpl`` selects ``_compute_num_kv_splits(max_seq_len, sm_count)``
+    per batch: a power of two bounded by the SM-based maximum. The bound is
+    itself reachable for long sequences, so the set is every power of two up
+    to it plus the bound when it is not a power of two.
+    """
+    max_splits = _compute_num_kv_splits(max_model_len, sm_count)
+    values = []
+    splits = 1
+    while splits <= max_splits:
+        values.append(splits)
+        splits *= 2
+    if values[-1] != max_splits:
+        values.append(max_splits)
+    return tuple(values)
 
 
 @torch.inference_mode()
@@ -35,7 +58,14 @@ def triton_mla_decode_warmup(worker: "Worker") -> None:
     if runner.is_pooling_model:
         return
     layer_to_gid = kv_cache_group_ids(worker)
-    num_kv_splits = 1 if envs.VLLM_BATCH_INVARIANT else 4
+    num_kv_splits_values: tuple[int, ...]
+    if envs.VLLM_BATCH_INVARIANT:
+        num_kv_splits_values = (1,)
+    else:
+        num_kv_splits_values = _num_kv_splits_values(
+            worker.vllm_config.model_config.max_model_len,
+            current_platform.num_compute_units(),
+        )
     device = runner.device
     seen: set[tuple] = set()
     for model in target_and_draft_models(worker):
@@ -82,26 +112,27 @@ def triton_mla_decode_warmup(worker: "Worker") -> None:
                 (1, num_heads, impl.kv_lora_rank), dtype=dtype, device=device
             )
             lse = torch.empty((1, num_heads), dtype=dtype, device=device)
-            attn_logits = torch.empty(
-                (1, num_heads, num_kv_splits, impl.kv_lora_rank + 1),
-                dtype=torch.float32,
-                device=device,
-            )
-            for is_mla in is_mla_variants:
-                for seq_lens_dtype in (torch.int32, torch.int64):
-                    decode_attention_fwd(
-                        q,
-                        cache,
-                        kv_c_cache,
-                        o,
-                        lse,
-                        block_table_row,
-                        torch.zeros(1, dtype=seq_lens_dtype, device=device),
-                        attn_logits,
-                        num_kv_splits,
-                        impl.scale,
-                        cache.size(1),
-                        k_scale=layer._k_scale,
-                        v_scale=layer._k_scale,
-                        is_mla=is_mla,
-                    )
+            for num_kv_splits in num_kv_splits_values:
+                attn_logits = torch.empty(
+                    (1, num_heads, num_kv_splits, impl.kv_lora_rank + 1),
+                    dtype=torch.float32,
+                    device=device,
+                )
+                for is_mla in is_mla_variants:
+                    for seq_lens_dtype in (torch.int32, torch.int64):
+                        decode_attention_fwd(
+                            q,
+                            cache,
+                            kv_c_cache,
+                            o,
+                            lse,
+                            block_table_row,
+                            torch.zeros(1, dtype=seq_lens_dtype, device=device),
+                            attn_logits,
+                            num_kv_splits,
+                            impl.scale,
+                            cache.size(1),
+                            k_scale=layer._k_scale,
+                            v_scale=layer._k_scale,
+                            is_mla=is_mla,
+                        )
