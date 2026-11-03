@@ -737,7 +737,7 @@ def dispatch_cpu_unquantized_gemm(
         if (
             (is_arm_bf16 or torch.cpu._is_avx512_bf16_supported())
             and is_causal_conv1d_weight
-            and hasattr(ops, "causal_conv1d_weight_pack")
+            and hasattr(torch.ops._C, "causal_conv1d_weight_pack")
         ):
             # prepack conv weight
             unpacked = (

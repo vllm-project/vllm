@@ -132,6 +132,7 @@ def is_arm_bf16() -> bool:
     return (
         current_platform.get_cpu_architecture() == CpuArchEnum.ARM
         and torch.cpu.get_capabilities().get("bf16", False)
+        and hasattr(torch.ops._C, "causal_conv1d_weight_pack")
     )
 
 

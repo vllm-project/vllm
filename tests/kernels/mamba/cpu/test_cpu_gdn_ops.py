@@ -10,7 +10,7 @@ import torch.nn.functional as F
 
 import vllm._custom_ops as ops
 from vllm.model_executor.layers.mamba.ops.cpu import gdn_attention
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
@@ -498,6 +498,22 @@ def _maybe_pack_conv_weight(
     weight: torch.Tensor, is_weight_packed: bool
 ) -> torch.Tensor:
     return ops.causal_conv1d_weight_pack(weight) if is_weight_packed else weight
+
+
+def test_is_arm_bf16_requires_cpp_conv_kernels(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        current_platform, "get_cpu_architecture", lambda: CpuArchEnum.ARM
+    )
+    monkeypatch.setattr(torch.cpu, "get_capabilities", lambda: {"bf16": True})
+    monkeypatch.setattr(torch.ops, "_C", types.SimpleNamespace())
+    assert not gdn_attention.is_arm_bf16()
+
+    monkeypatch.setattr(
+        torch.ops._C, "causal_conv1d_weight_pack", lambda weight: weight, raising=False
+    )
+    assert gdn_attention.is_arm_bf16()
 
 
 @torch.inference_mode()
