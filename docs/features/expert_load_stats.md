@@ -75,12 +75,4 @@ Correctness tests:
 
 GPU tests exercise exact histograms, padding/invalid IDs, live valid-token counts across graph replay, export correctness, and EPLB mapping/sampling preservation. CPU tests exercise configuration, token ownership, summary resets, trace records, and buffer/writer lifecycle.
 
-Kernel-only instrumentation benchmark (CUDA required):
-
-```bash
-.venv/bin/python benchmarks/kernels/benchmark_expert_load_stats.py --tokens 1 8 64 512 4096
-```
-
-This measures standalone histogram cost and EPLB mapping with/without monitoring, with uniform and skewed routing. It does not measure JSON serialization, asynchronous export, or end-to-end serving overhead.
-
 Before production use, run a same-commit A/B benchmark with monitoring disabled, summaries enabled, and traces enabled. Compare output equivalence, throughput, TPOT, host overhead, and device memory. Profile small decode batches and skewed routing, and test both EPLB settings on the intended DP/TP/backend configuration. GPU tests and end-to-end M3 performance measurements require a CUDA environment; CPU test results do not establish their correctness or overhead.

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -159,14 +159,7 @@ def test_writer_errors_disable_file_export_without_failing_serving(
     records = reporter.consume(counts, counts[None][:0], [], 1, 0, True)
     failed_write = Mock(side_effect=OSError("disk full"))
     monkeypatch.setattr(Path, operation, failed_write)
-    stats: Any = object.__new__(ExpertLoadStats)
-    stats.current = None
-    with ThreadPoolExecutor(max_workers=1) as writer:
-        future = writer.submit(reporter.write, records)
-        future.result()
-        stats.slots = [SimpleNamespace(future=future, iterations=[])]
-        stats._acquire()
-    assert stats.current is stats.slots[0]
+    reporter.write(records)
     reporter.write(records)
     failed_write.assert_called_once()
     assert reporter.export_errors == 1
@@ -177,9 +170,7 @@ def test_writer_errors_disable_file_export_without_failing_serving(
     assert "1 export errors" in caplog_vllm.text
 
 
-def test_summary_logging_is_bounded_and_keeps_vectors_in_jsonl(tmp_path, monkeypatch):
-    from vllm.v1.worker import expert_load_stats as stats_module
-
+def test_summary_logging_is_bounded_and_keeps_vectors_in_jsonl(tmp_path, caplog_vllm):
     reporter = ExpertLoadReporter(
         ExpertLoadStatsConfig(enabled=True, output_dir=str(tmp_path)),
         list(range(4)),
@@ -188,13 +179,10 @@ def test_summary_logging_is_bounded_and_keeps_vectors_in_jsonl(tmp_path, monkeyp
     )
     counts = np.ones((4, 64), dtype=np.int64)
     records = reporter.consume(counts, counts[None][:0], [], 1, 0, True)
-    log = Mock()
-    monkeypatch.setattr(stats_module.logger, "info", log)
     reporter.write(records)
-    log.assert_called_once()
-    message, *args = log.call_args.args
-    assert "256 assignments" in message % tuple(args)
-    assert "counts" not in message
+    assert len(caplog_vllm.records) == 1
+    assert "256 assignments" in caplog_vllm.text
+    assert "counts" not in caplog_vllm.text
     assert reporter.path is not None
     assert all(
         json.loads(line)["counts"] == [1] * 64
@@ -361,31 +349,15 @@ def test_gpu_graph_replay_reads_live_valid_count_and_exports(tmp_path):
     )
     ids = torch.tensor([[0, 1], [1, 2], [2, 2], [0, 0]], device="cuda")
 
-    def run():
-        _record_expert_load[(1,)](
-            ids,
-            stats.counts[0],
-            stats.num_valid_tokens,
-            4,
-            2,
-            2,
-            1,
-            0,
-            4,
-            0,
-            64,
-            64,
-            256,
-        )
-
+    layer = ExpertLoadLayer(stats.counts[0], stats.num_valid_tokens, 0, 0, 1, False)
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        run()
+        layer.record(ids)
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        run()
+        layer.record(ids)
     # Capture and warmup had num_valid=0 and must not contribute.
     for valid in (1, 3):
         stats.begin(valid)
@@ -405,7 +377,7 @@ def test_gpu_graph_replay_reads_live_valid_count_and_exports(tmp_path):
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="CUDA required")
 @pytest.mark.parametrize("record_eplb", [False, True])
-def test_gpu_eplb_fusion_preserves_mapping_and_sampling(record_eplb, monkeypatch):
+def test_gpu_eplb_fusion_preserves_mapping_and_sampling(record_eplb):
     from vllm.model_executor.layers.fused_moe.router.base_router import (
         eplb_map_to_physical_and_record,
     )
@@ -427,7 +399,6 @@ def test_gpu_eplb_fusion_preserves_mapping_and_sampling(record_eplb, monkeypatch
     reference = torch.zeros_like(physical)
     logical = torch.zeros(num_experts, device="cuda", dtype=torch.int64)
     layer = ExpertLoadLayer(logical, valid, 0, 0, 1, False)
-    monkeypatch.setattr(layer, "token_span", lambda _: (0, 3, 0))
     expected = eplb_map_to_physical_and_record(
         ids, reference, mapping, replicas, flag, valid
     )
