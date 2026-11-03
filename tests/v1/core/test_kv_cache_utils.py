@@ -14,6 +14,7 @@ import torch
 import vllm.v1.core.kv_cache_planning as kv_cache_planning
 import vllm.v1.core.kv_cache_utils as kv_cache_utils
 from tests.v1.core.utils import (
+    get_kv_cache_configs,
     new_kv_cache_spec,
     new_mamba_spec,
     new_mla_spec,
@@ -1494,6 +1495,21 @@ def test_draft_layer_tag_is_not_part_of_the_cache_format(target):
 
 
 @pytest.mark.parametrize(
+    "spec",
+    [
+        new_kv_cache_spec(),
+        SinkFullAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=64, dtype=torch.float32, sink_len=4
+        ),
+    ],
+)
+def test_attention_merge_preserves_kv_head_major_slots(spec):
+    # NIXL re-shards NVFP4 pages by KV head only if the group spec keeps the flag.
+    spec = replace(spec, num_head_slots=2 * spec.num_kv_heads, kv_head_major_slots=True)
+    assert type(spec).merge([spec, spec]).kv_head_major_slots
+
+
+@pytest.mark.parametrize(
     "layer_type,dcp_size,expected_width",
     [
         ("mla", 1, 64),
@@ -1871,6 +1887,40 @@ def test_generate_scheduler_kv_cache_config():
     )
 
 
+@pytest.mark.parametrize(
+    "first_dtype,second_dtype,needs_zeroing",
+    [
+        (torch.float32, torch.float32, False),
+        (torch.float16, torch.float32, True),
+        (torch.float32, torch.float16, True),
+    ],
+)
+def test_generate_scheduler_kv_cache_config_keeps_zeroing(
+    first_dtype, second_dtype, needs_zeroing
+):
+    """Scheduler projection and PP workers must agree on the zeroing contract."""
+    config = VllmConfig(model_config=ModelConfig(max_model_len=128))
+    config.cache_config.kv_cache_layout = "LBNHC"
+    configs = get_kv_cache_configs(
+        config,
+        [
+            {
+                "layer_0": new_kv_cache_spec(),
+                "layer_1": new_kv_cache_spec(dtype=first_dtype),
+            },
+            {
+                "layer_2": new_kv_cache_spec(),
+                "layer_3": new_kv_cache_spec(dtype=second_dtype),
+            },
+        ],
+        [2**20, 2**20],
+    )
+    scheduler_config = generate_scheduler_kv_cache_config(configs)
+    assert configs[0].needs_kv_cache_zeroing is needs_zeroing
+    assert configs[1].needs_kv_cache_zeroing is needs_zeroing
+    assert scheduler_config.needs_kv_cache_zeroing is needs_zeroing
+
+
 def test_resolve_dcp_kv_block_size_unwraps_uniform_type_specs():
     attention = FullAttentionSpec(
         block_size=16,
@@ -2084,6 +2134,26 @@ def test_merge_mla_spec():
     ]
     with pytest.raises(AssertionError):
         kv_cache_specs[0].merge(kv_cache_specs)
+
+
+@pytest.mark.skip_global_cleanup
+def test_merge_sliding_window_mla_spec_preserves_quantization_mode():
+    specs = [
+        SlidingWindowMLASpec(
+            block_size=16,
+            num_kv_heads=1,
+            head_size=576,
+            dtype=torch.uint8,
+            cache_dtype_str="fp8_ds_mla",
+            kv_quant_mode=KVQuantMode.FP8_PER_TENSOR,
+            sliding_window=128,
+        )
+        for _ in range(2)
+    ]
+
+    merged = SlidingWindowMLASpec.merge(specs)
+
+    assert merged.kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
 
 
 @pytest.mark.parametrize("hash_fn", [sha256, sha256_cbor])

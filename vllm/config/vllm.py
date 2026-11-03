@@ -55,7 +55,7 @@ from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, get_field, replace
 from .watchdog_config import WatchdogConfig
-from .watermarking import WatermarkConfig
+from .watermarking import WatermarkConfig, warn_watermarking_override
 from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
@@ -1450,7 +1450,7 @@ class VllmConfig:
             )
         if config is None:
             return True
-        if config.watermarking is False:
+        if config.watermarking is False and not watermark_config.enforce:
             return False
 
         from vllm.sampling_params import BeamSearchParams, SamplingParams
@@ -1481,6 +1481,8 @@ class VllmConfig:
                 scope="global",
             )
             return False
+        if config.watermarking is False:
+            warn_watermarking_override()
         return True
 
     def _resolve_and_verify_engram_config(self) -> None:
@@ -2138,6 +2140,7 @@ class VllmConfig:
             self._validate_v2_model_runner()
         else:
             self._validate_v1_model_runner()
+        self._resolve_extensible_kv_cache()
 
         self._validate_profiler_config()
         self._validate_batch_sharded_sampling()
@@ -3172,9 +3175,76 @@ class VllmConfig:
 
         return unsupported
 
+    def _resolve_extensible_kv_cache(self) -> None:
+        """Settle `enable_extensible_kv_cache`: on where supported if unset, an
+        error if explicitly requested where unsupported.
+
+        Runs once per model: configs derived for sub-models (`with_hf_config`)
+        may pick a different runner, and must not revisit the decision.
+        """
+        from vllm.platforms import current_platform
+
+        cache_config = self.cache_config
+        if cache_config._extensible_kv_cache_resolved:
+            return
+        cache_config._extensible_kv_cache_resolved = True
+        requested = cache_config.enable_extensible_kv_cache
+        unsupported = None
+        if not current_platform.is_cuda_alike():
+            unsupported = "it is only supported on CUDA and ROCm"
+        elif cache_config.kv_cache_memory_bytes is not None:
+            unsupported = (
+                "it sizes the KV cache from measured memory, which "
+                "kv_cache_memory_bytes overrides"
+            )
+        elif cache_config.num_gpu_blocks_override is not None:
+            unsupported = (
+                "it sizes the KV cache from measured memory, which "
+                "num_gpu_blocks_override overrides"
+            )
+        elif not self.use_v2_model_runner:
+            unsupported = "it requires the V2 model runner"
+        elif self.attention_config.hisparse_config is not None:
+            unsupported = "HiSparse allocates its KV cache itself"
+        elif self.parallel_config.enable_elastic_ep:
+            unsupported = (
+                "elastic EP scale-up skips warmup and reuses the profiled KV "
+                "cache size, so no measurement would size the cache"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.has_connector("LMCacheMPConnector")
+        ):
+            unsupported = (
+                "LMCacheMPConnector shares the KV cache through legacy CUDA IPC, "
+                "which cannot export driver-mapped memory"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.uses_custom_mem_pool()
+        ):
+            unsupported = (
+                "custom_mem_pool allocates the KV cache from a connector's "
+                "memory pool, which a driver-mapped cache cannot use"
+            )
+        elif (
+            self.kv_transfer_config is not None
+            and current_platform.is_rocm()
+            and self.kv_transfer_config.registers_kv_cache_memory()
+        ):
+            # TODO: drop once UCX handles HSA_EXT_POINTER_TYPE_HSA_VMEM and
+            # hsa_amd_portable_export_dmabuf accepts VMM ranges.
+            unsupported = (
+                "on ROCm, UCX and RDMA cannot yet register driver-mapped memory, "
+                "which the NIXL, Mooncake, MoRIIO and UMBP connectors require"
+            )
+        if requested is None:
+            cache_config.enable_extensible_kv_cache = unsupported is None
+        elif requested and unsupported is not None:
+            raise ValueError(f"enable_extensible_kv_cache: {unsupported}.")
+
     def _get_v1_model_runner_unsupported_features(self) -> list[str]:
         unsupported: list[str] = []
-
         if self.attention_config.hisparse_config is not None:
             unsupported.append("HiSparse")
 

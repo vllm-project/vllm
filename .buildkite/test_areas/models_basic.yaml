@@ -4,6 +4,7 @@ depends_on:
 steps:
 - label: ":nvidia: (H200 MIG 18GB) Basic Models (Initialization)"
   key: basic-models-tests-initialization
+  automatic_shard: true
   timeout_in_minutes: 25
   device: h200_18gb
   source_file_dependencies:
@@ -19,6 +20,7 @@ steps:
     - pytest -v -s models/test_beam_construction.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Basic Models (Initialization)"
       dind: false
       device: mi355_dpx
@@ -80,6 +82,7 @@ steps:
   - tests/models/test_muse_spark_rocm_loading.py
   - tests/models/test_muse_spark_logits_local.py
   - tests/models/test_muse_spark_rocm_shared_rope.py
+  - tests/models/test_muse_spark_rocm_mono.py
   commands:
     - >-
       pytest -v -s
@@ -97,6 +100,7 @@ steps:
       models/test_muse_spark_rocm_loading.py
       models/test_muse_spark_logits_local.py
       models/test_muse_spark_rocm_shared_rope.py
+      models/test_muse_spark_rocm_mono.py
   mirror:
     amd:
       label: ":amd: (MI355) Basic Models (Other)"
@@ -127,6 +131,7 @@ steps:
       - vllm/models/muse_spark/
       - tests/models/test_muse_spark_logits_local.py
       - tests/models/test_muse_spark_rocm_shared_rope.py
+      - tests/models/test_muse_spark_rocm_mono.py
       commands:
       - >-
         pytest -v -s
@@ -147,12 +152,14 @@ steps:
         models/test_muse_spark_rocm_loading.py
         models/test_muse_spark_logits_local.py
         models/test_muse_spark_rocm_shared_rope.py
+        models/test_muse_spark_rocm_mono.py
       - VLLM_ROCM_USE_AITER=1 pytest -v -s models/test_hyv4_rocm.py -m 'not distributed'
       - pytest -v -s models/hy_v4/test_triton_ihc.py
       - pytest -v -s models/test_dsv4_mono_decode.py
 
 - label: ":amd: (MI355) MiniMax M3 MonoKernel"
   key: minimax-m3-monokernel-mi355
+  automatic_shard: true
   dind: false
   timeout_in_minutes: 45
   device: mi355_4
@@ -171,6 +178,7 @@ steps:
 
 - label: ":nvidia: (B200) Inkling"
   key: inkling-unit-tests-b200
+  automatic_shard: true
   timeout_in_minutes: 40
   device: b200-k8s
   source_file_dependencies:
@@ -183,6 +191,7 @@ steps:
     - pytest -v -s models/inkling
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Inkling"
       dind: false
       device: mi355_1
@@ -213,6 +222,7 @@ steps:
 
 - label: ":nvidia: (B200) Kimi K3"
   key: kimi-k3-unit-tests-b200
+  automatic_shard: true
   timeout_in_minutes: 40
   device: b200-k8s
   source_file_dependencies:
@@ -229,6 +239,7 @@ steps:
       kernels/attention/test_kimi_k3_mla_fused_epilogue.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355) Kimi K3"
       dind: false
       device: mi355_1
@@ -287,6 +298,7 @@ steps:
 
 - label: ":nvidia: (H200) Step5"
   key: step5-unit-tests
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_35gb
   source_file_dependencies:
@@ -297,6 +309,7 @@ steps:
     - pytest -v -s models/step5
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Step5"
       dind: false
       device: mi355_dpx
@@ -326,6 +339,7 @@ steps:
 
 - label: ":nvidia: (H200) GLM5Next"
   key: glm5next-unit-tests
+  automatic_shard: true
   timeout_in_minutes: 20
   device: h200_35gb
   source_file_dependencies:
@@ -336,6 +350,7 @@ steps:
     - pytest -v -s models/glm5next
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) GLM5Next"
       dind: false
       device: mi355_dpx
@@ -348,6 +363,7 @@ steps:
 
 - label: ":nvidia: (H200) Qwen4 Exp"
   key: qwen4-exp-unit-tests
+  automatic_shard: true
   timeout_in_minutes: 40
   device: h200_35gb
   source_file_dependencies:
@@ -365,6 +381,7 @@ steps:
     - pytest -v -s models/qwen4_exp/test_ple.py
   mirror:
     amd:
+      automatic_shard: true
       label: ":amd: (MI355 DPX) Qwen4 Exp"
       dind: false
       device: mi355_dpx
@@ -380,6 +397,7 @@ steps:
 
 - label: ":amd: (MI300) Qwen4 Exp"
   key: qwen4-exp-unit-tests-mi300
+  automatic_shard: true
   timeout_in_minutes: 40
   dind: false
   device: mi300_1
@@ -416,9 +434,13 @@ steps:
 
 - label: ":nvidia: (B200) Qwen3.5"
   key: qwen3-5-unit-tests-b200
+  automatic_shard: true
   timeout_in_minutes: 20
   device: b200-k8s
   source_file_dependencies:
+  - vllm/model_executor/layers/linear.py
+  - vllm/model_executor/layers/mamba/gdn
+  - vllm/model_executor/layers/utils.py
   - vllm/models/qwen3_5/
   - vllm/model_executor/models/qwen3_next.py
   - tests/models/qwen3_5/
@@ -448,6 +470,7 @@ steps:
   - tests/model_executor/layers/test_activation.py
   - tests/models/test_language_model_cache_is_weak.py
   - tests/models/deepseek_v32/test_sequence_parallel.py
+  - tests/models/deepseek_v32/test_pp_topk.py
   - tests/models/test_deepseek_v4_fi_moe_ep.py
   - tests/models/test_dspark_mla.py
   - tests/models/transformers/test_layer_registry.py
@@ -466,6 +489,7 @@ steps:
       model_executor/layers/test_activation.py
       models/test_language_model_cache_is_weak.py
       models/deepseek_v32/test_sequence_parallel.py
+      models/deepseek_v32/test_pp_topk.py
       models/test_deepseek_v4_fi_moe_ep.py
       models/test_dspark_mla.py
       models/transformers/test_layer_registry.py
@@ -478,6 +502,7 @@ steps:
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics'
   key: dsv41-mono-decode-numerics-amd
+  automatic_shard: true
   dind: false
   device: mi355_4
   num_devices: 4
@@ -497,6 +522,7 @@ steps:
 
 - label: ':amd: (MI355) DeepSeek-V4.1 Mono Decode Numerics TP8'
   key: dsv41-mono-decode-numerics-tp8-amd
+  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8
@@ -520,6 +546,7 @@ steps:
 
 - label: ':amd: (MI355) DeepSeek-V4-Pro Mono Decode Numerics'
   key: dsv4-mono-decode-numerics-amd
+  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8
@@ -538,6 +565,7 @@ steps:
 
 - label: ':amd: (MI300) DeepSeek-V4.1 gfx942 Mono Decode Layers'
   key: dsv41-mono-decode-layers-gfx942-amd
+  automatic_shard: true
   dind: false
   device: mi300_4
   num_devices: 4
@@ -582,6 +610,7 @@ steps:
 
 - label: ':amd: (MI355) Kimi-K3 Specialized Decode'
   key: kimi-k3-specialized-decode-amd
+  automatic_shard: true
   dind: false
   device: mi355_8
   num_devices: 8
