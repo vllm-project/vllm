@@ -77,7 +77,9 @@ class WorkerLoRAManager:
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self.vocab_size = vllm_config.model_config.get_vocab_size()
-        self.hf_config = vllm_config.model_config.hf_config
+        self._transformers_renames = get_transformers_renames(
+            vllm_config.model_config.hf_config
+        )
         lora_config = vllm_config.lora_config
         if lora_config is None:
             raise ValueError("LoRA config must be set for WorkerLoRAManager.")
