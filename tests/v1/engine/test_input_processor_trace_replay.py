@@ -81,6 +81,7 @@ def _validate(enable_trace_replay: bool) -> None:
             return_sampling_mask=False,
             enable_trace_replay=enable_trace_replay,
             is_diffusion=False,
+            hf_config=SimpleNamespace(),
         ),
         vllm_config=SimpleNamespace(
             reasoning_config=None,

@@ -196,7 +196,18 @@ class InputProcessor:
                         else None
                     ),
                     vocab_size=self.model_config.get_vocab_size(),
+                    per_request_temperature=getattr(
+                        self.model_config.hf_config,
+                        "diffusion_per_request_temperature",
+                        False,
+                    ),
                 )
+            else:
+                validate_request = getattr(
+                    self.model_config.hf_config, "validate_ar_request", None
+                )
+                if validate_request is not None:
+                    validate_request(params)
 
             if self.model_config.return_sampling_mask:
                 if params.temperature <= 0:

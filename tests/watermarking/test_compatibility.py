@@ -34,6 +34,7 @@ def _input_processor(
         supports_multimodal_inputs=False,
         runner_type="generate",
         is_diffusion=False,
+        hf_config=SimpleNamespace(),
     )
     config.watermark_config = (
         WatermarkConfig(key=42, enforce=enforce) if server_uses_watermarking else None
