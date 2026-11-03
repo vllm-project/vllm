@@ -23,6 +23,8 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from ..utils import RemoteOpenAIServer, multi_gpu_test
 
 if TYPE_CHECKING:
+    from tempfile import TemporaryDirectory
+
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
     from vllm.v1.worker.gpu_worker import Worker
 
@@ -218,6 +220,123 @@ def test_olmoe_lora_idle_peer(olmoe_lora_files, use_v2):
 
 
 class LoRASlotOrderWorkerExtension:
+    lora_namespace: "TemporaryDirectory[str]"
+
+    def lora_memory(self, reset: bool = False):
+        from vllm.distributed import get_dp_group
+        from vllm.utils.gpu_sync_debug import gpu_sync_allowed
+
+        with gpu_sync_allowed():
+            cast("Worker", self).synchronize_device()
+        if reset:
+            torch.accelerator.memory.reset_peak_memory_stats()
+        sample = {
+            "allocated": torch.accelerator.memory.max_memory_allocated(),
+            "reserved": torch.accelerator.memory.max_memory_reserved(),
+        }
+        group = get_dp_group()
+        samples = [None] * group.world_size
+        torch.distributed.all_gather_object(samples, sample, group=group.cpu_group)
+        return samples
+
+    def adapter_namespace(self, paths: list[str], mode: str):
+        import os
+        import tempfile
+
+        from vllm.distributed import get_dp_group, get_tp_group
+
+        dp, tp = get_dp_group(), get_tp_group()
+        last = (
+            dp.rank_in_group == dp.world_size - 1
+            and tp.rank_in_group == tp.world_size - 1
+        )
+        if hasattr(self, "lora_namespace"):
+            os.close(32000)
+            self.lora_namespace.cleanup()
+        else:
+            assert not Path("/proc/self/fd/32000").exists()
+        self.lora_namespace = tempfile.TemporaryDirectory(prefix="lora-admission-")
+        directory = Path(self.lora_namespace.name)
+        source = Path(paths[1 if last and mode == "mismatch" else 0])
+        shutil.copy2(source / "adapter_config.json", directory)
+        if not (last and mode == "missing"):
+            weights = source / (
+                "adapter_config.json"
+                if last and mode == "corrupt"
+                else "adapter_model.safetensors"
+            )
+            (directory / "adapter_model.safetensors").symlink_to(weights)
+        descriptor = os.open(directory, os.O_RDONLY)
+        os.dup2(descriptor, 32000)
+        os.close(descriptor)
+        return str(directory)
+
+    def hold_lora_worker(self, socket_path: str):
+        import socket
+
+        from vllm.distributed import get_dp_group, get_tp_group
+
+        dp, tp = get_dp_group(), get_tp_group()
+        if (
+            dp.rank_in_group == dp.world_size - 1
+            and tp.rank_in_group == tp.world_size - 1
+        ):
+            with socket.socket(socket.AF_INET) as gate:
+                gate.settimeout(30)
+                gate.bind(("127.0.0.1", 0))
+                gate.listen(1)
+                pending = Path(socket_path + ".pending")
+                pending.write_text(str(gate.getsockname()[1]))
+                pending.replace(socket_path)
+                connection, _ = gate.accept()
+                with connection:
+                    assert connection.recv(1) == b"1"
+        return True
+
+    def terminate_lora_worker(self, marker: str):
+        import os
+
+        from vllm.distributed import get_dp_group, get_tp_group
+
+        dp, tp = get_dp_group(), get_tp_group()
+        if (
+            dp.rank_in_group == dp.world_size - 1
+            and tp.rank_in_group == tp.world_size - 1
+        ):
+            Path(marker).write_text(str(os.getpid()))
+            os._exit(71)
+        return True
+
+    def lora_cache_state(self):
+        worker = cast("Worker", self)
+        manager = worker.model_runner.get_model().lora_manager
+        pointers: list[tuple[str, str, int]] = []
+        for name, module in manager.modules.items():
+            for attribute in ("lora_a_stacked", "lora_b_stacked"):
+                tensors = getattr(module, attribute, ())
+                if isinstance(tensors, torch.Tensor):
+                    tensors = [tensors]
+                pointers.extend(
+                    (name, attribute, value.data_ptr()) for value in tensors
+                )
+        assert pointers
+        state = {
+            "models": [
+                (key, value.source_fingerprint)
+                for key, value in manager.list_adapters().items()
+            ],
+            "active": list(manager._active_adapters.order),
+            "cpu_pinned": sorted(manager._registered_adapters.pinned_items),
+            "gpu_pinned": sorted(manager._active_adapters.pinned_items),
+            "buffers": pointers,
+        }
+        from vllm.distributed import get_dp_group
+
+        group = get_dp_group()
+        states = [None] * group.world_size
+        torch.distributed.all_gather_object(states, state, group=group.cpu_group)
+        return states
+
     def start_lora_trace(self):
         worker = cast("Worker", self)
         runner = cast("GPUModelRunner", worker.model_runner)
@@ -275,7 +394,12 @@ class LoRASlotOrderWorkerExtension:
 
 
 def run_group_admission_server(
-    model: str, paths: list[str], tp: int, graph: bool = False
+    model: str,
+    paths: list[str],
+    tp: int,
+    graph: bool = False,
+    failures: bool = True,
+    failstop: bool = False,
 ):
     """Compare repaired cold/divergent receivers and concurrent adapter cohorts."""
     args = [
@@ -323,6 +447,7 @@ def run_group_admission_server(
                 "VLLM_GPU_SYNC_CHECK": "error",
                 "OMP_NUM_THREADS": "1",
                 "MKL_NUM_THREADS": "1",
+                "VLLM_ALLOW_RUNTIME_LORA_UPDATING": "1",
             },
         ) as server,
         server.get_client(timeout=90) as client,
@@ -383,6 +508,8 @@ def run_group_admission_server(
                 adapter: future.result() for adapter, future in futures.items()
             } == reference
         replays = []
+        if failures:
+            check_group_lora_recovery(server, paths)
         if graph:
             requests.post(
                 server.url_for("pause"), params={"mode": "wait"}, timeout=60
@@ -418,6 +545,8 @@ def run_group_admission_server(
             assert len(replays) == 2 * tp and all(count > 0 for count in replays), (
                 replays
             )
+        if failstop:
+            check_group_lora_worker_death(server)
         return {
             "dp": 2,
             "tp": tp,
@@ -425,7 +554,186 @@ def run_group_admission_server(
             "completed_graph_replays_by_worker": replays,
             "reference": reference,
             "common_permuted_cold_divergent_and_concurrent": "passed_exact_scores",
+            "failed_and_delayed_updates": failures,
+            "worker_death_fail_closed": failstop,
         }
+
+
+def check_group_lora_recovery(server, paths):
+    import socket
+    import tempfile
+    import time
+    from concurrent.futures import TimeoutError
+
+    def rpc(method, args=()):
+        response = requests.post(
+            server.url_for("collective_rpc"),
+            json={
+                "method": method,
+                "args": list(args),
+                "timeout": 40,
+            },
+            timeout=50,
+        )
+        response.raise_for_status()
+        return response.json()["results"]
+
+    def load(name):
+        return requests.post(
+            server.url_for("v1/load_lora_adapter"),
+            json={
+                "lora_name": name,
+                "lora_path": "/proc/self/fd/32000",
+            },
+            timeout=60,
+        )
+
+    with server.get_client(timeout=60) as client:
+
+        def score(name):
+            result = client.completions.create(
+                model=name,
+                prompt=[[1, 42, 67, 105, 325, 556, 880, 1042]],
+                max_tokens=8,
+                temperature=0,
+                extra_body={"prompt_logprobs": 0, "ignore_eos": True},
+            ).choices[0]
+            return (
+                result.text,
+                result.finish_reason,
+                result.model_dump()["prompt_logprobs"],
+            )
+
+        reference = score("adapter-1")
+        for mode in ("missing", "corrupt", "mismatch"):
+            rpc("adapter_namespace", (paths, mode))
+            before = rpc("lora_cache_state")
+            response = load(f"rejected-{mode}")
+            assert requests.get(server.url_for("health"), timeout=15).status_code == 200
+            assert response.status_code == (404 if mode == "missing" else 500)
+            if mode != "missing":
+                assert "previous epoch restored" in response.text
+            assert rpc("lora_cache_state") == before
+            assert score("adapter-1") == reference
+
+        directories = rpc("adapter_namespace", (paths, "valid"))
+        socket_path = str(
+            Path(tempfile.gettempdir()) / (Path(directories[-1]).name + ".sock")
+        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            hold = pool.submit(rpc, "hold_lora_worker", (socket_path,))
+            deadline = time.monotonic() + 10
+            while not Path(socket_path).exists():
+                if time.monotonic() > deadline:
+                    raise TimeoutError("Worker did not reach the delay gate")
+                time.sleep(0.01)
+            delayed = pool.submit(load, "delayed-adapter")
+            with socket.socket(socket.AF_INET) as release:
+                release.connect(("127.0.0.1", int(Path(socket_path).read_text())))
+                try:
+                    with pytest.raises(TimeoutError):
+                        delayed.result(timeout=0.25)
+                finally:
+                    release.sendall(b"1")
+            hold.result(timeout=30)
+            delayed.result(timeout=30).raise_for_status()
+        Path(socket_path).unlink()
+        assert score("delayed-adapter") == reference
+        rpc("adapter_namespace", (paths, "missing"))
+        before = rpc("lora_cache_state")
+        assert load("failed-after-source-disappeared").status_code == 404
+        assert rpc("lora_cache_state") == before
+        assert score("delayed-adapter") == reference
+        assert score("adapter-1") == reference
+
+
+def check_group_lora_worker_death(server):
+    import tempfile
+    import time
+    from contextlib import suppress
+
+    with tempfile.TemporaryDirectory(prefix="lora-worker-death-") as directory:
+        marker = Path(directory) / "worker-exited"
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            termination = pool.submit(
+                requests.post,
+                server.url_for("collective_rpc"),
+                json={
+                    "method": "terminate_lora_worker",
+                    "args": [str(marker)],
+                    "timeout": 8,
+                },
+                timeout=10,
+            )
+            deadline = time.monotonic() + 20
+            while True:
+                try:
+                    response = requests.get(server.url_for("health"), timeout=2)
+                    healthy = response.status_code == 200
+                except requests.RequestException:
+                    healthy = False
+                if marker.exists() and not healthy:
+                    break
+                assert time.monotonic() < deadline, "Dead worker did not stop serving"
+                time.sleep(0.02)
+            with suppress(requests.RequestException):
+                assert termination.result(timeout=12).status_code >= 500
+
+
+async def check_group_lora_pins(model: str, paths: list[str], tp: int):
+    import asyncio
+
+    from vllm.engine.arg_utils import AsyncEngineArgs
+    from vllm.v1.engine.async_llm import AsyncLLM
+
+    engine = AsyncLLM.from_engine_args(
+        AsyncEngineArgs(
+            model=model,
+            enable_lora=True,
+            enable_group_lora_admission=True,
+            data_parallel_size=2,
+            tensor_parallel_size=tp,
+            all2all_backend="allgather_reducescatter",
+            max_loras=2,
+            max_cpu_loras=4,
+            max_lora_rank=8,
+            max_model_len=256,
+            max_num_batched_tokens=128,
+            max_num_seqs=8,
+            enable_prefix_caching=False,
+        )
+    )
+    try:
+        adapters = [
+            LoRARequest(f"pin-{i}", i, path) for i, path in enumerate(paths[:3], 1)
+        ]
+        for adapter in adapters[:2]:
+            assert await asyncio.wait_for(engine.add_lora(adapter), 30)
+            assert await asyncio.wait_for(engine.pin_lora(adapter.lora_int_id), 30)
+
+        async def score(request_id):
+            result = None
+            async for output in engine.generate(
+                {"prompt_token_ids": [1, 42, 67, 105, 325, 556, 880, 1042]},
+                vllm.SamplingParams(
+                    temperature=0, max_tokens=8, ignore_eos=True, prompt_logprobs=0
+                ),
+                request_id,
+                lora_request=adapters[0],
+            ):
+                result = output
+            assert result is not None
+            return result.outputs[0].token_ids, result.prompt_logprobs
+
+        reference = await score("before-pin-failure")
+        with pytest.raises(Exception, match="previous epoch restored"):
+            await asyncio.wait_for(engine.add_lora(adapters[2]), 30)
+        assert await score("after-pin-failure") == reference
+        with pytest.raises(Exception, match="already pinned"):
+            await asyncio.wait_for(engine.pin_lora(99999), 30)
+        assert await score("after-pin-budget-refusal") == reference
+    finally:
+        engine.shutdown()
 
 
 def _group_adapters(source: str, destination: Path) -> list[str]:

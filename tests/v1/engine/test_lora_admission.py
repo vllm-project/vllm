@@ -28,8 +28,10 @@ def request(adapter: int, arrival: float = 0, name: str | None = None) -> Reques
 def publish(admission, action, workers=4):
     assert action[0] == "prepare"
     fingerprints = {
-        msgspec.msgpack.decode(item, type=LoRARequest).lora_int_id: f"hash-{i}"
-        for i, item in enumerate(action[1])
+        (
+            adapter := msgspec.msgpack.decode(item, type=LoRARequest).lora_int_id
+        ): f"hash-{adapter}"
+        for item in action[1]
     }
     admission.publish(
         action,
@@ -213,3 +215,52 @@ def test_frontend_local_id_collisions_receive_group_wide_ids():
     assert _register(engines, "first", LoRARequest("one", 1, "/one")) == [1, 1]
     assert _register(engines, "second", LoRARequest("two", 1, "/two")) == [2, 2]
     assert _register(engines, "duplicate", LoRARequest("one", 99, "/one")) == [1, 1]
+
+
+def test_rejected_load_restores_admission_and_completes_every_call():
+    engines = [GroupLoRAAdmission(2) for _ in range(2)]
+    req = request(1)
+    for engine in engines:
+        engine.track(req)
+        publish(engine, engine.plan([engine.snapshot([])]))
+    futures = [
+        engine.enqueue("bad", "add_lora", request(2).lora_request) for engine in engines
+    ]
+    frames = [engine.snapshot([]) for engine in engines]
+    for engine in engines:
+        assert engine.plan(frames) is None
+    frames = [engine.snapshot([]) for engine in engines]
+    for engine in engines:
+        assert not engine.reject(engine.plan(frames), "checkpoint missing on rank 1")
+        assert engine.ready == engine.admitted == {1}
+        assert not engine.pending and engine.target is None
+    for future in futures:
+        with pytest.raises(ValueError, match="previous epoch restored"):
+            future.result()
+
+
+def test_failed_promotion_does_not_retry_or_block_other_adapters():
+    engine = GroupLoRAAdmission(2)
+    active, bad, other = [request(i, i) for i in range(1, 4)]
+    engine.track(active)
+    publish(engine, engine.plan([engine.snapshot([])]))
+    active.status = RequestStatus.RUNNING
+    engine.track(bad)
+    action = engine.plan([engine.snapshot([active])])
+    assert engine.reject(action, "bad weights") == {2}
+    assert engine.admitted == {1}
+    engine.track(other)
+    publish(engine, engine.plan([engine.snapshot([active])]))
+    assert engine.ready == {1, 3}
+
+
+def test_an_adapter_cannot_silently_change_weights_between_epochs():
+    engine = GroupLoRAAdmission(1)
+    first = request(1)
+    engine.track(first)
+    publish(engine, engine.plan([engine.snapshot([])]))
+    encoded = msgspec.msgpack.encode(first.lora_request)
+    with pytest.raises(RuntimeError, match="immutable weights"):
+        engine.validate(
+            ("prepare", [encoded]), [{"error": None, "fingerprints": {1: "changed"}}]
+        )

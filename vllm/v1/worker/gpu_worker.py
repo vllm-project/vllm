@@ -1624,6 +1624,8 @@ class Worker(WorkerBase):
         return self.model_runner.add_lora(lora_request)
 
     def update_lora_group(self, method: str, argument: Any) -> dict:
+        if method == "commit":
+            return self.model_runner.lora_manager.group_update(method, argument)
         # Completion of CPU scheduling does not retire asynchronous GPU readers.
         with gpu_sync_allowed():
             self.synchronize_device()

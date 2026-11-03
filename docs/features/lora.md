@@ -485,9 +485,16 @@ unregistered IDs and uncoordinated synchronous mutations are refused in this mod
 
 Loads, pins, and removals use the existing loaders after outstanding GPU work
 retires. Adapter buffer addresses are preserved. Workers must acknowledge the
-same checkpoint fingerprints before a new set is published. A partial load or
-identity mismatch stops the engines rather than serving partially updated
-weights; automatic rollback is not implemented. Keep checkpoint files immutable
+same checkpoint fingerprints before a new set is published. A failed load or
+identity mismatch triggers group-wide rollback from retained CPU adapter objects;
+the previous resident set, cache order and pins must be restored on every worker
+before admission resumes. The failed update returns an error without stopping
+healthy engines. Failed promotions reject the affected requests until the unchanged
+adapter files are restored and the adapter is reloaded. GPU buffer addresses stay
+stable; CPU memory can temporarily exceed the cache budget while the previous
+objects are retained. A lost worker, invalid CUDA context or failed restoration
+still stops the engines with admission blocked; rollback is not worker restart
+or fault tolerance. Keep checkpoint files immutable
 and use distinct IDs for distinct versions; in-place updates are refused.
 
 The initial implementation requires PP=1 and does not support external/hybrid
