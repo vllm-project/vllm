@@ -879,3 +879,110 @@ def test_parallel_config_manages_decode_sharding(
     )
 
     assert parallel_config.pcp_shard_decode_requests is expected
+
+
+@pytest.mark.parametrize(
+    "tp,pcp,dcp,head_factor",
+    [(1, 4, 4, 1), (2, 4, 4, 1), (2, 4, 8, 2), (8, 1, 8, 8), (1, 4, 1, 1)],
+)
+def test_replicated_attention_preserves_parallel_topology(tp, pcp, dcp, head_factor):
+    target = ParallelConfig(
+        tensor_parallel_size=tp,
+        prefill_context_parallel_size=pcp,
+        decode_context_parallel_size=dcp,
+        distributed_executor_backend="mp",
+    )
+    draft = replace(target, pcp_execution_mode="replicated")
+    assert draft.world_size == target.world_size == tp * pcp
+    assert draft.prefill_context_parallel_size == target.prefill_context_parallel_size
+    assert draft.decode_context_parallel_size == dcp
+    assert draft.dcp_query_head_multiplier == head_factor
+    assert draft.pcp_execution_size == 1
+    assert not draft.pcp_shard_decode_requests
+    assert target.pcp_execution_size == pcp
+    assert draft.compute_hash() != target.compute_hash()
+    # The execution policy cannot make an invalid process topology legal.
+    with pytest.raises(ValueError):
+        replace(
+            draft,
+            tensor_parallel_size=1,
+            prefill_context_parallel_size=1,
+            decode_context_parallel_size=4,
+        )
+
+
+def test_dspark_mla_constructor_keeps_pcp_topology(tmp_path):
+    from transformers import DeepseekV3Config
+
+    from vllm.config import ModelConfig, SchedulerConfig, SpeculativeConfig
+    from vllm.transformers_utils.configs.k3_dspark import K3DSparkConfig
+    from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
+
+    dims = dict(
+        hidden_size=256,
+        intermediate_size=512,
+        num_hidden_layers=2,
+        num_attention_heads=8,
+        num_key_value_heads=8,
+        vocab_size=128,
+        q_lora_rank=64,
+        kv_lora_rank=512,
+        qk_nope_head_dim=128,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        max_position_embeddings=128,
+        n_routed_experts=0,
+        n_shared_experts=0,
+        num_experts_per_tok=0,
+    )
+    target_path, draft_path = tmp_path / "target", tmp_path / "draft"
+    DeepseekV3Config(architectures=["DeepseekV3ForCausalLM"], **dims).save_pretrained(
+        target_path
+    )
+    K3DSparkConfig(
+        architectures=["K3DSparkModel"],
+        target_layer_ids=[0],
+        num_target_layers=1,
+        block_size=2,
+        mask_token_id=127,
+        **dims,
+    ).save_pretrained(draft_path)
+    model = ModelConfig(
+        model=str(target_path),
+        skip_tokenizer_init=True,
+        dtype="bfloat16",
+        max_model_len=128,
+        enforce_eager=True,
+    )
+    parallel = ParallelConfig(
+        prefill_context_parallel_size=4,
+        decode_context_parallel_size=4,
+        distributed_executor_backend="mp",
+    )
+    spec = SpeculativeConfig(
+        model=str(draft_path),
+        method="dspark",
+        num_speculative_tokens=2,
+        target_model_config=model,
+        target_parallel_config=parallel,
+    )
+    config = VllmConfig(
+        model_config=model,
+        parallel_config=parallel,
+        speculative_config=spec,
+        scheduler_config=SchedulerConfig(
+            is_encoder_decoder=False,
+            max_model_len=128,
+            max_num_batched_tokens=128,
+            max_num_seqs=2,
+        ),
+    )
+    drafter = DSparkSpeculator(config, torch.device("cuda"))
+    draft_parallel = drafter.vllm_config.parallel_config
+    assert draft_parallel.world_size == parallel.world_size == 4
+    assert draft_parallel.prefill_context_parallel_size == 4
+    assert draft_parallel.decode_context_parallel_size == 4
+    assert draft_parallel.pcp_execution_size == 1
+    assert parallel.pcp_execution_size == 4
+    assert drafter.hidden_states.shape == (128, 256)
+    assert drafter.num_query_per_req == 2

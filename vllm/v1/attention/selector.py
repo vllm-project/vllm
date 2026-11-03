@@ -170,7 +170,7 @@ def get_attn_backend(
         use_non_causal=vllm_config.attention_config.use_non_causal,
         use_batch_invariant=envs.VLLM_BATCH_INVARIANT,
         use_kv_connector=use_kv_connector,
-        use_pcp=vllm_config.parallel_config.prefill_context_parallel_size > 1,
+        use_pcp=vllm_config.parallel_config.uses_pcp_partitioning,
         use_adaptive_verification=use_adaptive_verification,
         use_dcp=vllm_config.parallel_config.decode_context_parallel_size > 1,
         use_rswa=(

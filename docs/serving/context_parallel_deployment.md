@@ -16,6 +16,35 @@ Depending on the use case, there are two possible strategies:
 
 Both approaches are under active development.
 
+### Topology and attention execution layout
+
+`ParallelConfig.prefill_context_parallel_size` describes the physical PCP group.
+It participates in world-size and DCP topology validation even when a draft
+model repeats its queries on every PCP rank. DFlash and DSpark use
+`pcp_execution_mode="replicated"` in their model-local configuration; the target
+retains the default `"partitioned"` policy. The derived `pcp_execution_size` is
+one for replicated execution. It is a model capability/layout view, not a
+process-group size or a replacement for the global PCP setting.
+
+Each partitioned forward carries `CommonAttentionMetadata.pcp_context`, including
+capture and profiling forwards. Builders propagate this into backend metadata,
+and cache writers use it to decide whether to gather partitioned KV rows.
+A missing context means rank-local input, including a replicated draft forward.
+Tensor lengths validate a declared layout; they do not choose the layout.
+
+DCP KV ownership and query-head communication remain tied to physical topology.
+For PCP greater than one, DCP equal to PCP repeats the same TP heads; DCP equal
+to TP times PCP combines distinct TP head shards. Backend schedules and workspace
+sizes count distinct heads, not duplicated PCP copies. Replicated attention does
+not imply replicated KV when DCP is enabled.
+
+For example, a target with TP=1, PCP=4 and DCP=4 retains that topology in its MLA
+draft configuration while the draft executes locally on each rank. This removes
+the invalid intermediate TP=1, PCP=1, DCP=4 configuration. Model and backend
+capability restrictions still apply: the K3 target does not support partitioned
+PCP, and non-causal multi-token MLA with DCP requires a backend explicitly
+supporting that combination. This separation alone does not enable new kernels.
+
 ## Decode Context Parallel
 
 Due to the auto-regressive nature of decoding, every decoding step needs to compute a small amount of query tokens w.r.t. a large number of key/value tokens stored in the paged KV cache. The core of decode context parallel is how to shard the KV cache across GPUs.

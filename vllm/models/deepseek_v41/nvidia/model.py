@@ -209,7 +209,7 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     FlashMLA path.
     """
     backend = vllm_config.attention_config.backend
-    if vllm_config.parallel_config.prefill_context_parallel_size > 1:
+    if vllm_config.parallel_config.pcp_execution_size > 1:
         if backend not in (
             None,
             AttentionBackendEnum.FLASHMLA_SPARSE,
@@ -706,7 +706,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         self.config = config
         self.quant_config = quant_config
         self.parallel_config = vllm_config.parallel_config
-        if self.parallel_config.prefill_context_parallel_size > 1 and (
+        if self.parallel_config.pcp_execution_size > 1 and (
             self.parallel_config.decode_context_parallel_size != 1
             or self.parallel_config.use_ubatching
             or (
@@ -1075,7 +1075,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         local_input_ids = input_ids
         if (
             input_ids is not None
-            and self.parallel_config.prefill_context_parallel_size > 1
+            and self.parallel_config.pcp_execution_size > 1
             and not self.parallel_config.enable_expert_parallel
         ):
             input_ids = get_pcp_group().all_gather(input_ids, dim=0)
@@ -1262,7 +1262,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         assert self.decoder_replay_layers is not None
         if (
             input_ids is not None
-            and self.parallel_config.prefill_context_parallel_size > 1
+            and self.parallel_config.pcp_execution_size > 1
             and not self.parallel_config.enable_expert_parallel
             and self.decoder_replay_layers.replay_batch is not None
         ):

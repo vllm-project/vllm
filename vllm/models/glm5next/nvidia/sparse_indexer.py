@@ -791,7 +791,7 @@ class SparseAttnIndexerKpool(CustomOp):
         self.dcp_world_size = 1
         self.dcp_rank = 0
         if _parallel is not None and _parallel.decode_context_parallel_size > 1:
-            if _parallel.prefill_context_parallel_size > 1:
+            if _parallel.pcp_execution_size > 1:
                 raise NotImplementedError(
                     "SparseAttnIndexerKpool does not support PCP+DCP."
                 )

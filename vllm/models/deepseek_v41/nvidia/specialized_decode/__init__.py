@@ -91,7 +91,7 @@ def unsupported(vllm_config: VllmConfig) -> list[str]:
             and parallel.data_parallel_size == 1
             and not parallel.enable_expert_parallel
             and parallel.decode_context_parallel_size == 1
-            and parallel.prefill_context_parallel_size == 1
+            and parallel.pcp_execution_size == 1
             and not parallel.use_ubatching
         ),
         "DSpark speculative decoding without adaptive verification": (

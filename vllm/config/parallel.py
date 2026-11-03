@@ -152,6 +152,11 @@ class ParallelConfig:
     prefill_context_parallel_size: int = Field(default=1, ge=1)
     """Number of ranks that split prefill sequence computation. PCP expands
     the process world size but does not increase the KV-cache shard count."""
+    pcp_execution_mode: Literal["partitioned", "replicated"] = "partitioned"
+    """Per-model execution policy within the physical PCP group. Replicated
+    drafts keep the process topology and DCP KV ownership but do not partition
+    queries across PCP ranks. Per-forward layout is carried by attention metadata.
+    """
     data_parallel_size: int = Field(default=1, ge=1)
     """Number of data parallel groups. MoE layers will be sharded according to
     the product of the tensor, prefill-context, and data parallel sizes."""
@@ -703,6 +708,28 @@ class ParallelConfig:
         return self.world_size * self.data_parallel_size
 
     @property
+    def uses_pcp_partitioning(self) -> bool:
+        return (
+            self.prefill_context_parallel_size > 1
+            and self.pcp_execution_mode == "partitioned"
+        )
+
+    @property
+    def pcp_execution_size(self) -> int:
+        """PCP width required by this model's partitioned attention path."""
+        return self.prefill_context_parallel_size if self.uses_pcp_partitioning else 1
+
+    @property
+    def dcp_query_head_multiplier(self) -> int:
+        """Distinct TP head shards in one DCP group (PCP replicates heads)."""
+        if self.prefill_context_parallel_size == 1:
+            return self.decode_context_parallel_size
+        return max(
+            1,
+            self.decode_context_parallel_size // self.prefill_context_parallel_size,
+        )
+
+    @property
     def pcp_shard_decode_requests(self) -> bool:
         """Whether PCP can shard decode requests across its ranks.
 
@@ -710,10 +737,7 @@ class ParallelConfig:
         have a single PCP owner. DCP shards the KV cache and therefore requires
         every decode request to run on every participating DCP rank.
         """
-        return (
-            self.prefill_context_parallel_size > 1
-            and self.decode_context_parallel_size == 1
-        )
+        return self.uses_pcp_partitioning and self.decode_context_parallel_size == 1
 
     @property
     def use_ubatching(self) -> bool:

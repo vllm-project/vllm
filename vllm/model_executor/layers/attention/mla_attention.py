@@ -687,7 +687,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
                     _COMPUTE_PREFILL_METADATA_KERNEL.register_warmup()
 
-        if self.use_pcp and self.impl.dcp_world_size > 1 and not self.supports_pcp_dcp:
+        if (
+            parallel_config.uses_pcp_partitioning
+            and self.impl.dcp_world_size > 1
+            and not self.supports_pcp_dcp
+        ):
             raise NotImplementedError(
                 f"{type(self).__name__} does not support PCP+DCP."
             )
@@ -2419,6 +2423,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         self.vllm_config = vllm_config
         self.device = device
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
+        self.dcp_query_head_multiplier = parallel_config.dcp_query_head_multiplier
         # merge() unions this flag across the KV group, so a shared target/draft
         # group would mark the target builder as non-causal.
         ctx = self.compilation_config.static_forward_context
@@ -3397,6 +3402,8 @@ class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
         parallel_config = get_current_vllm_config().parallel_config
         # Avoid requiring an initialized DCP group in tests.
         self.dcp_world_size: int = parallel_config.decode_context_parallel_size
+        self.pcp_world_size = parallel_config.prefill_context_parallel_size
+        self.dcp_query_head_multiplier = parallel_config.dcp_query_head_multiplier
 
     @abstractmethod
     def forward_mqa(

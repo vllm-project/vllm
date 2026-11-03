@@ -63,7 +63,7 @@ class DeepseekV41SparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuilder):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_size = self.vllm_config.parallel_config.pcp_execution_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         if self.pcp_size > 1:
             self.no_replay_start = self.no_replay_start.new_zeros(
@@ -182,7 +182,7 @@ class DeepseekV4SparseMLAMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_size = vllm_config.parallel_config.pcp_execution_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         # Classify single-token queries (plus num_speculative_tokens via
         # supports_spec_as_decode=True) as decodes; longer queries go to prefill.

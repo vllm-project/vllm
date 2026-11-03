@@ -192,7 +192,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
                 batch_size=num_reqs,
                 max_seqlen_q=max_query_len,
                 max_seqlen_k=max_seq_len,
-                num_heads_q=self.num_heads * self.dcp_world_size,
+                num_heads_q=self.num_heads * self.dcp_query_head_multiplier,
                 num_heads_kv=1,
                 headdim=self.mla_dims.qk_rope_head_dim,
                 cache_seqlens=seqlens,

@@ -238,7 +238,7 @@ def _heterogeneous_shared_expert_enabled(vllm_config: VllmConfig) -> bool:
         reasons.append("tensor parallelism is not 8")
     if parallel_config.data_parallel_size != 1:
         reasons.append("data parallelism is enabled")
-    if parallel_config.prefill_context_parallel_size != 1:
+    if parallel_config.pcp_execution_size != 1:
         reasons.append("prefill context parallelism is enabled")
     if vllm_config.kernel_config.moe_backend != "aiter":
         reasons.append("the MoE backend is not AITER")

@@ -297,7 +297,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         self.layer_id = layer_id
 
         self.prefix = prefix  # Alias for compatibility with compressor
-        self.use_pcp = vllm_config.parallel_config.prefill_context_parallel_size > 1
+        self.use_pcp = vllm_config.parallel_config.pcp_execution_size > 1
         self.hidden_size = config.hidden_size
         self.n_heads = config.num_attention_heads
         assert self.n_heads % tp_size == 0
@@ -545,7 +545,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             swa_bounded_replay = False
         if (
             swa_bounded_replay
-            and vllm_config.parallel_config.prefill_context_parallel_size > 1
+            and vllm_config.parallel_config.pcp_execution_size > 1
             and not cache_config.enable_prefix_caching
         ):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")

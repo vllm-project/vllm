@@ -45,7 +45,7 @@ from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
 )
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.attention import (
@@ -100,6 +100,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
 from vllm.v1.attention.ops.dcp import MLADCPManager
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
+from vllm.v1.attention.ops.pcp import finalize_mla_pcp_decode
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
@@ -367,10 +368,11 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
 
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
-        assert parallel_config.prefill_context_parallel_size == 1, (
+        assert not parallel_config.uses_pcp_partitioning, (
             "Kimi-K3 MultiHeadLatentAttention does not support prefill context "
             "parallelism."
         )
+        self.pcp_world_size = parallel_config.prefill_context_parallel_size
         self.dcp_world_size = parallel_config.decode_context_parallel_size
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
@@ -390,7 +392,7 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                 output_dtype=dtype,
                 padded_num_heads=self.q_pad_num_heads,
                 is_lse_base_on_e=self.impl.lse_base_on_e,
-                use_pcp=False,
+                use_pcp=self.pcp_world_size > 1,
             )
         self.prefill_backend = get_mla_prefill_backend(vllm_config)(
             num_heads=self.num_local_heads,
@@ -714,8 +716,12 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
             )
             if self.dcp_world_size > 1:
                 assert self.dcp_manager is not None
-                assert self.dcp_manager.query_gather is not None
-                mqa_q = self.dcp_manager.query_gather(mqa_q)
+                if self.pcp_world_size > 1:
+                    if self.dcp_world_size > self.pcp_world_size:
+                        mqa_q = get_tp_group().all_gather(mqa_q, dim=1)
+                else:
+                    assert self.dcp_manager.query_gather is not None
+                    mqa_q = self.dcp_manager.query_gather(mqa_q)
             latent_out, lse = self.impl.forward_mqa(  # type: ignore[attr-defined]
                 mqa_q, self._attn_read_kv_cache(), attn_metadata, self
             )
@@ -731,6 +737,10 @@ class MultiHeadLatentAttention(nn.Module, AttentionLayerBase):
                         : attn_metadata.num_decodes + 1
                     ],
                 )
+                if self.pcp_world_size > 1:
+                    latent_out = finalize_mla_pcp_decode(
+                        latent_out, self.num_local_heads
+                    )
             self._v_up_proj(latent_out, out=attn_out[:num_mqa_tokens])
 
     def _decode_concat_cache(

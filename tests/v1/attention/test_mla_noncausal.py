@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm.config import ParallelConfig
 from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
@@ -102,7 +103,9 @@ def _dspark_dcp_vllm_config(
         speculative_config=SimpleNamespace(
             method="dspark", num_speculative_tokens=None
         ),
-        parallel_config=SimpleNamespace(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=2,
+            distributed_executor_backend="mp",
             decode_context_parallel_size=2,
             prefill_context_parallel_size=1,
             cp_kv_cache_interleave_size=1,

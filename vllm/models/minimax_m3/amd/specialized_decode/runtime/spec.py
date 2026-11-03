@@ -32,7 +32,7 @@ class DecodeConfig:
             reasons.append("does not support data parallelism")
         if pc.decode_context_parallel_size != 1:
             reasons.append("does not support decode context parallelism")
-        if pc.prefill_context_parallel_size != 1:
+        if pc.pcp_execution_size != 1:
             reasons.append("does not support prefill context parallelism")
         if pc.use_ubatching:
             reasons.append("does not support DBO or ubatching")

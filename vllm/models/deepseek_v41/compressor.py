@@ -114,7 +114,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         super().__init__(*args, **kwargs)
         assert isinstance(self.kv_cache_spec, CircularBufferSpec)
         self.capacity = self.kv_cache_spec.block_size
-        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_size = self.vllm_config.parallel_config.pcp_execution_size
         max_num_batched_tokens = (
             self.vllm_config.scheduler_config.max_num_batched_tokens
         )
@@ -304,7 +304,7 @@ class DeepseekCompressor(nn.Module):
         self.rotate = rotate
         self.prefix = prefix
         self.k_cache_prefix = k_cache_prefix
-        self.pcp_size = vllm_config.parallel_config.prefill_context_parallel_size
+        self.pcp_size = vllm_config.parallel_config.pcp_execution_size
         self.pcp_rank = get_pcp_group().rank_in_group if self.pcp_size > 1 else 0
         # Ratio 1 pools single tokens, so the checkpoint carries no gate.
         self.has_gate = compress_ratio > 1

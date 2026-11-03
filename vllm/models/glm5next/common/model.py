@@ -1326,10 +1326,9 @@ def _fused_shared_experts_tuned(parallel_config: ParallelConfig) -> bool:
         )
     if parallel_config.data_parallel_size != 1:
         reasons.append(f"data_parallel_size is {parallel_config.data_parallel_size}")
-    if parallel_config.prefill_context_parallel_size != 1:
+    if parallel_config.pcp_execution_size != 1:
         reasons.append(
-            "prefill_context_parallel_size is "
-            f"{parallel_config.prefill_context_parallel_size}"
+            f"prefill_context_parallel_size is {parallel_config.pcp_execution_size}"
         )
     if parallel_config.enable_expert_parallel:
         reasons.append("expert parallelism is enabled")
