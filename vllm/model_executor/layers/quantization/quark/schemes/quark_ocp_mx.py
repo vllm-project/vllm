@@ -247,7 +247,8 @@ class QuarkOCP_MX(QuarkScheme):
             )
         elif self.weight_quant_key == kMxfp8Static:
             self.ocp_mx_linear = init_mxfp8_linear_kernel(
-                weight_shape=layer.weight.shape
+                weight_shape=layer.weight.shape,
+                activation_quant_key=self.activation_quant_key,
             )
             if current_platform.is_rocm():
                 expose_input_quant_key(layer, self.ocp_mx_linear)

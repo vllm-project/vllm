@@ -8,6 +8,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_SCALE_DTYPE,
     dequant_mxfp8_to_bf16,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+)
 from vllm.model_executor.utils import replace_parameter
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
@@ -17,6 +22,13 @@ class EmulationMxfp8LinearKernel(Mxfp8LinearKernel):
     """Software emulation fallback for MXFP8 (dequant to BF16)."""
 
     supports_pre_processed_weights = True
+
+    @classmethod
+    def _supports_quant_scheme(
+        cls, weight_key: QuantKey | None, activation_key: QuantKey | None
+    ) -> bool:
+        # Retain the existing A16 fallback for W8A8 checkpoints.
+        return weight_key == kMxfp8Static and activation_key in (None, kMxfp8Dynamic)
 
     @classmethod
     def is_supported(

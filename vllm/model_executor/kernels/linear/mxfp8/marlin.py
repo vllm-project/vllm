@@ -6,12 +6,24 @@ import torch
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp8Dynamic,
+    kMxfp8Static,
+)
 
 from .Mxfp8LinearKernel import Mxfp8LinearKernel, Mxfp8LinearLayerConfig
 
 
 class MarlinMxfp8LinearKernel(Mxfp8LinearKernel):
     """MXFP8 W8A16 GEMM via Marlin (SM80+)."""
+
+    @classmethod
+    def _supports_quant_scheme(
+        cls, weight_key: QuantKey | None, activation_key: QuantKey | None
+    ) -> bool:
+        # Retain the existing A16 fallback for W8A8 checkpoints.
+        return weight_key == kMxfp8Static and activation_key in (None, kMxfp8Dynamic)
 
     @classmethod
     def is_supported(
