@@ -3419,7 +3419,6 @@ async fn non_stream_chat_returns_json_response() {
         (choice, "routed_experts"),
         (choice, "weight_versions"),
         (message, "refusal"),
-        (message, "annotations"),
         (message, "audio"),
         (message, "function_call"),
         (message, "reasoning"),
@@ -3433,7 +3432,11 @@ async fn non_stream_chat_returns_json_response() {
     }
     // ...except `tool_calls`, which Python pops from the payload when empty,
     // and the fields the OpenAI spec types as non-nullable.
-    for (object, key) in [(message, "tool_calls"), (usage, "prompt_tokens_details")] {
+    for (object, key) in [
+        (message, "tool_calls"),
+        (message, "annotations"),
+        (usage, "prompt_tokens_details"),
+    ] {
         assert!(!object.contains_key(key), "expected no `{key}`: {json}");
     }
 }
