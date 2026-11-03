@@ -18,6 +18,9 @@ from vllm.model_executor.kernels.linear import (
     Mxfp8LinearLayerConfig,
     init_mxfp8_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8Dynamic,
+)
 from vllm.platforms import PlatformEnum
 
 pytestmark = pytest.mark.cpu_test
@@ -227,3 +230,35 @@ def test_rocm_mxfp8_aiter_flydsl_tuned_lookup_failure_is_untuned():
     ):
         platform.is_rocm.return_value = True
         assert lookup(*_AITER_FLYDSL_TUNED_SHAPE) is False
+
+
+@pytest.mark.parametrize("capability", [100, 103])
+def test_weight_only_mxfp8_skips_w8a8_kernel(capability):
+    """A weight-only (activation=None) MXFP8 request must not select a kernel
+    that quantizes activations to FP8 (the FlashInfer W8A8 kernels); it must
+    fall through to the W8A16 Marlin kernel. Regression test for #65193."""
+    with _patch_cuda_platform(capability):
+        kernel = init_mxfp8_linear_kernel(
+            weight_shape=_SUPPORTED_SHAPE, activation_quant_key=None
+        )
+    assert isinstance(kernel, MarlinMxfp8LinearKernel)
+
+
+@pytest.mark.parametrize("capability", [100, 103])
+def test_w8a8_mxfp8_still_selects_flashinfer(capability):
+    """An explicit W8A8 (kMxfp8Dynamic) request keeps selecting the FlashInfer
+    kernel that self-quantizes activations."""
+    with _patch_cuda_platform(capability):
+        kernel = init_mxfp8_linear_kernel(
+            weight_shape=_SUPPORTED_SHAPE, activation_quant_key=kMxfp8Dynamic
+        )
+    assert isinstance(kernel, FlashInferCutedslMxfp8LinearKernel)
+
+
+@pytest.mark.parametrize("capability", [100, 103])
+def test_unspecified_activation_keeps_historical_selection(capability):
+    """Callers that do not declare an activation scheme keep the pre-#65193
+    selection (no gating): the FlashInfer kernel, not Marlin."""
+    with _patch_cuda_platform(capability):
+        kernel = init_mxfp8_linear_kernel(weight_shape=_SUPPORTED_SHAPE)
+    assert isinstance(kernel, FlashInferCutedslMxfp8LinearKernel)
