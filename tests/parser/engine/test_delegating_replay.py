@@ -13,6 +13,7 @@ that has both tool and reasoning adapters and a builder in
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import NamedTuple
 
 import pytest
@@ -40,6 +41,7 @@ from vllm.parser.engine.adapters import (
     ParserEngineReasoningAdapter,
     ParserEngineToolAdapter,
 )
+from vllm.parser.engine.parser_engine_config import ParserState
 from vllm.parser.mistral import MistralParser
 
 _TOOLS_VALIDATOR = TypeAdapter(list[ChatCompletionToolsParam])
@@ -51,6 +53,11 @@ class _PairingInfo(NamedTuple):
     parser_cls: type[Parser]
     name: str
     samples: tuple
+    tool_marker: str
+    # Whether the tool marker is matched by token ID. Only then can a marker
+    # written as plain text be told apart from the real special token.
+    tool_marker_by_token_id: bool
+    terminals: tuple[str, ...]
 
 
 def _discover_pairings() -> list[_PairingInfo]:
@@ -116,11 +123,30 @@ def _discover_pairings() -> list[_PairingInfo]:
                 "tool_parser_cls": adapters["tool"],
             },
         )
+        # The terminal that opens a tool section from plain content, e.g.
+        # TOOL_START, TOOL_SECTION_START or TOOL_REQUESTS_START.
+        marker_name = next(
+            name
+            for state, name in cfg.transitions
+            if state == ParserState.CONTENT
+            and name.startswith("TOOL_")
+            and name.endswith("_START")
+        )
         found.append(
             _PairingInfo(
                 parser_cls=parser_cls,
                 name=cfg.name,
                 samples=build_samples(cfg.name),
+                tool_marker=cfg.terminal_literal(marker_name),
+                tool_marker_by_token_id=marker_name in cfg.token_id_terminals,
+                terminals=tuple(
+                    sorted(
+                        terminal
+                        for terminal in cfg.terminal_literals
+                        | set(cfg.token_id_terminals.values())
+                        if len(terminal) > 1
+                    )
+                ),
             )
         )
     if missing_builders:
@@ -167,8 +193,84 @@ def test_delegating_replay(parser_cls, sample, chunk_size):
     assert_parse_output(output, sample)
 
 
+@pytest.mark.parametrize(
+    "parser_cls,sample",
+    _ALL_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else "",
+)
+def test_delegating_parse(parser_cls, sample):
+    tokenizer = make_mock_tokenizer(sample)
+    validated_tools = (
+        _TOOLS_VALIDATOR.validate_python(sample.tools) if sample.tools else None
+    )
+    parser = parser_cls(
+        tokenizer,
+        validated_tools,
+        chat_template_kwargs=sample.chat_template_kwargs,
+    )
+
+    output = parse_non_streaming(
+        parser,
+        sample,
+        _test_request(tools=sample.tools),
+    )
+
+    assert_parse_output(output, sample)
+
+
+_LITERAL_MARKER_SAMPLES = [
+    (
+        pairing.parser_cls,
+        pairing.tool_marker,
+        next(s for s in pairing.samples if "whitespace-before-tool" in s.id),
+    )
+    for pairing in _PAIRINGS
+    if pairing.tool_marker_by_token_id
+]
+
+
+@pytest.mark.parametrize(
+    "parser_cls,marker,sample",
+    _LITERAL_MARKER_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else "",
+)
+def test_delegating_parse_preserves_literal_tool_marker(
+    parser_cls,
+    marker,
+    sample,
+):
+    validated_tools = (
+        _TOOLS_VALIDATOR.validate_python(sample.tools) if sample.tools else None
+    )
+    kwargs = {"chat_template_kwargs": sample.chat_template_kwargs}
+    marker_id = sample.vocab[marker]
+    marker_index = next(
+        i for i, (token_id, _) in enumerate(sample.tokens) if token_id == marker_id
+    )
+    literal_id = max(token_id for token_id, _ in sample.tokens) + 1
+    tokens = list(sample.tokens)
+    tokens.insert(marker_index, (literal_id, marker))
+    literal_sample = replace(
+        sample,
+        tokens=tokens,
+        expected_content=None,
+    )
+
+    tokenizer = MockTokenizer(vocab=dict(sample.vocab), tokens=tokens)
+    parser = parser_cls(tokenizer, validated_tools, **kwargs)
+    output = parse_non_streaming(
+        parser,
+        literal_sample,
+        _test_request(tools=sample.tools),
+    )
+
+    assert_parse_output(output, literal_sample)
+    assert output.content.endswith(marker)
+    assert not output.content.removesuffix(marker).strip()
+
+
 _TOOL_CALL_SAMPLES = [
-    (p.parser_cls, p.name, s)
+    (p.parser_cls, p.name, p.terminals, s)
     for p in _PAIRINGS
     for s in p.samples
     if s.expected_tool_calls
@@ -176,11 +278,16 @@ _TOOL_CALL_SAMPLES = [
 
 
 @pytest.mark.parametrize(
-    "parser_cls,parser_name,sample",
+    "parser_cls,parser_name,terminals,sample",
     _TOOL_CALL_SAMPLES,
     ids=lambda v: v.id if hasattr(v, "id") else "",
 )
-def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
+def test_delegating_parse_tool_choice_none(
+    parser_cls,
+    parser_name,
+    terminals,
+    sample,
+):
     """Non-streaming parse() with tool_choice='none' via DelegatingParser
     must not leak special tokens into content."""
     tokenizer = make_mock_tokenizer(sample)
@@ -202,14 +309,8 @@ def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
         f"Expected no tool calls but got {output.tool_calls}"
     )
 
-    cfg = parser._tool_parser._parser_engine.parser_engine_config
-    terminals = sorted(
-        v
-        for v in cfg.terminal_literals | set(cfg.token_id_terminals.values())
-        if len(v) > 1
-    )
     assert_no_terminal_leakage(
         output,
-        terminals,
+        list(terminals),
         context=f"parser={parser_name}",
     )
