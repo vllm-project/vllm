@@ -109,7 +109,7 @@ class DeepEPV2PrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def __init__(
         self,
-        buffer: deep_ep.ElasticBuffer,
+        buffer: "deep_ep.ElasticBuffer",
         num_dispatchers: int,
         dp_size: int,
         rank_expert_offset: int,

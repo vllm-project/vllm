@@ -76,10 +76,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.triton_utils import tl
+from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
 DEVICE_TYPE = current_platform.device_type
+requires_deep_ep_v2 = pytest.mark.skipif(
+    not has_deep_ep_v2(), reason="Requires DeepEP v2 (ElasticBuffer)"
+)
 
 
 def test_triton_moe_launcher_passes_scalar_scale_as_pointer(monkeypatch) -> None:
@@ -2120,7 +2124,7 @@ def _run_triton_experts(
 def test_triton_moe_padded_standard_ignores_padding(block_shape, per_act_token_quant):
     """Inactive rows of a PaddedStandard buffer must not affect valid outputs."""
     m, n, k, e, topk, pad = 32, 256, 512, 8, 2, 16
-    dtype, quant_dtype = torch.bfloat16, torch.float8_e4m3fn
+    dtype, quant_dtype = torch.bfloat16, current_platform.fp8_dtype()
 
     w1, w2, quant_config = make_test_quant_config(
         e,
@@ -2208,6 +2212,7 @@ def test_triton_moe_padded_standard_ignores_padding(block_shape, per_act_token_q
     torch.testing.assert_close(out_clean[:m], out_unpadded, atol=2e-2, rtol=2e-1)
 
 
+@requires_deep_ep_v2
 @torch.inference_mode()
 def test_deepep_v2_padded_scale_ignores_padding_tail():
     """The prepare stage must keep decode padding out of a per-tensor scale."""
@@ -2222,7 +2227,7 @@ def test_deepep_v2_padded_scale_ignores_padding_tail():
     expert_x[m_valid:] = float("nan")
 
     _, _, quant_config = make_test_quant_config(
-        8, k, k, in_dtype=torch.bfloat16, quant_dtype=torch.float8_e4m3fn
+        8, k, k, in_dtype=torch.bfloat16, quant_dtype=current_platform.fp8_dtype()
     )
 
     prepare_finalize = object.__new__(DeepEPV2PrepareAndFinalize)
