@@ -424,6 +424,7 @@ def test_extensible_kv_cache_off_with_elastic_ep(monkeypatch, requested):
         ("MooncakeConnector", "cuda", True),
         ("MooncakeStoreConnector", "cuda", True),
         ("MoRIIOConnector", "cuda", True),
+        ("UMBPStoreConnector", "cuda", True),
         ("OffloadingConnector", "cuda", False),
         ("LMCacheConnectorV1", "cuda", False),
     ],

@@ -655,7 +655,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_cache_config = kv_cache_config
         self.extensible_kv_cache: ExtensibleKVCache | None = None
         if extensible:
-            self.extensible_kv_cache = ExtensibleKVCache(kv_cache_config, self.device)
+            self.extensible_kv_cache = ExtensibleKVCache(
+                kv_cache_config,
+                self.device,
+                self.cache_config.get_resolved_kv_cache_layout(),
+            )
 
         block_table_max_model_len = self.max_model_len
         if self.is_encoder_decoder:

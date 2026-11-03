@@ -8,6 +8,7 @@ from bisect import bisect_right
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import replace
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 import torch
@@ -21,11 +22,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.reload.layerwise import max_layer_reload_bytes
 from vllm.multimodal.gpu_ipc_memory import reserve_mm_ipc_gpu_memory
 from vllm.platforms import current_platform
-from vllm.utils.extensible_tensor import (
-    ExtensibleTensor,
-    granule_aligned_blocks,
-    granule_block_alignment,
-)
+from vllm.utils.extensible_tensor import ExtensibleTensor
+from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.v1.kv_cache_interface import (
     KVCacheConfig,
@@ -76,24 +74,27 @@ class ExtensibleKVCache:
     prefix of blocks on demand. Blocks keep fixed offsets, so views over the
     reservation and captured CUDA graphs stay valid as more are committed. The
     allocation splits into segments holding num_blocks blocks each: one per
-    layer for layer-outermost layouts (sized by that layer's block stride), one
+    layer for block-compact layer-outermost layouts (sized by that layer's
+    block stride, possibly padded apart by `pad_kv_cache_segments`), one
     overall for block-outermost.
     """
 
-    def __init__(self, kv_cache_config: KVCacheConfig, device: torch.device):
+    def __init__(
+        self,
+        kv_cache_config: KVCacheConfig,
+        device: torch.device,
+        layout: KVCacheLayout,
+    ):
         tensors = kv_cache_config.kv_cache_tensors
         assert tensors, "Extensible KV cache requires at least one KV cache tensor."
         sizes = {tensor.size for tensor in tensors}
         assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
         self.size = sizes.pop()
         self.capacity_blocks = kv_cache_config.num_blocks
-        if self.capacity_blocks <= 0 or self.size % self.capacity_blocks != 0:
-            raise ValueError(
-                f"KV cache allocation of {self.size} bytes is not a whole number "
-                f"of {self.capacity_blocks} blocks."
-            )
-        self.bytes_per_block = self.size // self.capacity_blocks
-        self.segment_offsets, self.segment_strides = self._segments(tensors)
+        if self.capacity_blocks <= 0:
+            raise ValueError(f"Invalid KV cache capacity {self.capacity_blocks}.")
+        self.segment_offsets, self.segment_strides = self._segments(tensors, layout)
+        self.bytes_per_block = sum(self.segment_strides)
         self.num_committed_blocks = 0
         # Memory to keep free while committing before the final sizing, e.g.
         # the profiled activation peak the warmup steps are about to hit.
@@ -108,31 +109,41 @@ class ExtensibleKVCache:
             self.size,
             device=device,
             segment_capacities=[
-                self.capacity_blocks * stride for stride in self.segment_strides
+                end - start
+                for start, end in pairwise([*self.segment_offsets, self.size])
             ],
         )
 
-    def _segments(self, tensors: list[KVCacheTensor]) -> tuple[list[int], list[int]]:
-        """Segment offsets and block strides tiling the allocation.
+    def _segments(
+        self, tensors: list[KVCacheTensor], layout: KVCacheLayout
+    ) -> tuple[list[int], list[int]]:
+        """Segment offsets and block strides covering the allocation.
 
-        With one block stride the segments are implied by it; with several, each
-        tensor must give its layers contiguous num_blocks-block regions.
+        Block-compact layer-outermost layouts give each layer a num_blocks-block
+        region, which may be padded apart. Otherwise the segments are implied by
+        the one block stride.
         """
-        block_strides = {tensor.block_stride for tensor in tensors}
-        if len(block_strides) == 1:
+        if not layout.is_block_compact or layout.is_block_outermost:
+            block_strides = {tensor.block_stride for tensor in tensors}
+            if len(block_strides) != 1:
+                raise ValueError(
+                    "KV cache tensors with different block strides need a "
+                    "block-compact layer-outermost layout for the extensible KV "
+                    "cache."
+                )
             stride = block_strides.pop()
             segment_bytes = self.capacity_blocks * stride
+            if self.size % segment_bytes != 0:
+                raise ValueError(
+                    f"KV cache allocation of {self.size} bytes is not a whole "
+                    f"number of {self.capacity_blocks}-block segments."
+                )
             num_segments = self.size // segment_bytes
             return [i * segment_bytes for i in range(num_segments)], [
                 stride
             ] * num_segments
         segments: dict[int, int] = {}
         for tensor in tensors:
-            if tensor.layer_stride != self.capacity_blocks * tensor.block_stride:
-                raise ValueError(
-                    "KV cache tensors with different block strides need a "
-                    "layer-outermost layout for the extensible KV cache."
-                )
             for layer_idx in range(len(tensor.layers)):
                 offset = tensor.offset + layer_idx * tensor.layer_stride
                 stride = segments.setdefault(offset, tensor.block_stride)
@@ -143,12 +154,12 @@ class ExtensibleKVCache:
                     )
         offsets = sorted(segments)
         strides = [segments[offset] for offset in offsets]
-        end = 0
+        end = offsets[0]
         for offset, stride in zip(offsets, strides):
-            if offset != end:
-                raise ValueError("KV cache tensors do not tile the allocation.")
-            end += self.capacity_blocks * stride
-        if end != self.size:
+            if offset < end:
+                raise ValueError("KV cache tensors overlap.")
+            end = offset + self.capacity_blocks * stride
+        if offsets[0] != 0 or end > self.size:
             raise ValueError("KV cache tensors do not tile the allocation.")
         return offsets, strides
 
@@ -260,22 +271,9 @@ class ExtensibleKVCache:
             for stride in self.segment_strides
         )
 
-    @property
-    def block_alignment(self) -> int:
-        """Block count multiple at which every segment ends on a granule."""
-        return granule_block_alignment(self.segment_strides, self.buffer.granularity)
-
-    def blocks_within(self, num_bytes: int, aligned: bool = False) -> int:
-        """Most blocks whose physical footprint fits in num_bytes.
-
-        aligned restricts the count to multiples of block_alignment, so
-        that a defragmenting commit backs each segment with one chunk exactly.
-        """
+    def blocks_within(self, num_bytes: int) -> int:
+        """Most blocks whose physical footprint fits in num_bytes."""
         num_blocks = min(num_bytes // self.bytes_per_block, self.capacity_blocks)
-        if aligned:
-            return granule_aligned_blocks(
-                num_blocks, self.segment_strides, self.buffer.granularity
-            )
         while num_blocks > 0 and self.physical_bytes_for(num_blocks) > num_bytes:
             num_blocks -= 1
         return num_blocks
@@ -350,6 +348,58 @@ class ExtensibleKVCache:
         self.num_committed_blocks = 0
 
 
+def registers_kv_cache_memory(vllm_config: "VllmConfig") -> bool:
+    """Whether a KV connector registers the committed KV cache for RDMA, which
+    needs each segment backed by one physical chunk."""
+    kv_transfer_config = vllm_config.kv_transfer_config
+    return (
+        kv_transfer_config is not None
+        and kv_transfer_config.registers_kv_cache_memory()
+    )
+
+
+def pad_kv_cache_segments(
+    kv_cache_config: KVCacheConfig, layout: KVCacheLayout, granule: int
+) -> KVCacheConfig:
+    """Start every layer's region on a granule, so that a defragmenting commit
+    of any block count can back each segment with one physical chunk.
+
+    Only address space grows: commits already map whole granules per segment.
+    Block-outermost layouts have a single segment at offset 0 and are returned
+    as is.
+    """
+    if layout.is_block_outermost:
+        return kv_cache_config
+    assert layout.is_block_compact, f"{layout.name} has no per-layer segments."
+    num_blocks = kv_cache_config.num_blocks
+    tensors = kv_cache_config.kv_cache_tensors
+    assert all(t.layer_stride == num_blocks * t.block_stride for t in tensors)
+    # Cache groups alias each other's layer regions.
+    regions = {
+        tensor.offset + layer_idx * tensor.layer_stride: tensor.layer_stride
+        for tensor in tensors
+        for layer_idx in range(len(tensor.layers))
+    }
+    padded_offsets: dict[int, int] = {}
+    end = padded_end = 0
+    for offset in sorted(regions):
+        assert offset == end, "KV cache tensors do not tile the allocation."
+        padded_offsets[offset] = padded_end
+        end += regions[offset]
+        padded_end += round_up(regions[offset], granule)
+    padded = copy.copy(kv_cache_config)
+    padded.kv_cache_tensors = [
+        replace(
+            tensor,
+            size=padded_end,
+            offset=padded_offsets[tensor.offset],
+            layer_stride=round_up(tensor.layer_stride, granule),
+        )
+        for tensor in tensors
+    ]
+    return padded
+
+
 def num_committable_kv_blocks(runner: "GPUModelRunner") -> int:
     """Blocks warmup may address: all of them, or, for an extensible cache,
     the count agreed across ranks so that every rank warms up the same shapes."""
@@ -409,7 +459,7 @@ def extend_kv_cache(
         )
     kv_cache.commit(
         num_blocks,
-        defragment=runner.vllm_config.kv_transfer_config is not None,
+        defragment=registers_kv_cache_memory(runner.vllm_config),
         shrink=True,
     )
     runner.kv_cache_config.num_blocks = kv_cache.num_committed_blocks
@@ -512,9 +562,7 @@ def measure_kv_cache_blocks(
         vllm_config.model_config.multimodal_config,
         getattr(vllm_config.parallel_config, "_api_process_count", 1),
     )
-    num_blocks = kv_cache.blocks_within(
-        kv_cache_bytes, aligned=vllm_config.kv_transfer_config is not None
-    )
+    num_blocks = kv_cache.blocks_within(kv_cache_bytes)
     # Torch may grow into what stays free once the cache is extended, less the
     # memory kept for multimodal IPC and for allocations outside torch.
     left_free = (
