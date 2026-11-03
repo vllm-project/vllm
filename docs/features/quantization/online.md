@@ -52,6 +52,7 @@ vllm serve Qwen/Qwen3.5-35B-A3B --quantization mxfp4 \
 | `fp8_per_block` | fp8_e4m3 data, fp32 per-128x128-block scale | fp8_e4m3 data, fp32 per-1x128-block scale | |
 | `mxfp8` | fp8_e4m3 data, e8m0 per-1x32-block scale | fp8_e4m3 data, e8m0 per-1x32-block scale | Requires SM 100+ (Blackwell or newer) for w8a8, other GPUs use a w8a16 fallback |
 | `mxfp4` | fp4_e2m1 data, e8m0 per-1x32-block scale ([OCP MX specs](https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf)) | - linear: fp4_e2m1 data, e8m0 per-1x32-block scale in some backends, or BF16. <br> - MOE: fp4_e2m1 data, e8m0 per-1x32-block scale. | Linear MXFP4 backend is auto-selected per platform, not enforcing activation dtype. Some use BF16 activation. Use `--linear-backend` to pin one (e.g. `--linear-backend flashinfer`). |
+| `int8_per_channel_weight_only` | int8 data, fp32 per-output-channel scale | int8 data, fp32 dynamic per-token scale | Linear and MoE. The `_weight_only` suffix is historical: the scheme was MoE-only W8A16 when it was introduced with `experts_int8`, and activations are INT8 today. Requires an int8 scaled-mm kernel (SM 75+ on CUDA) |
 
 ## Advanced Configuration
 

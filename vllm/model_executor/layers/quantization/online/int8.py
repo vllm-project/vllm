@@ -11,6 +11,7 @@ if TYPE_CHECKING:
         FusedMoEQuantConfig,
     )
 
+from vllm.model_executor.kernels.linear import init_int8_linear_kernel
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.int8 import (
@@ -19,11 +20,16 @@ from vllm.model_executor.layers.fused_moe.oracle.int8 import (
     make_int8_moe_quant_config,
     select_int8_moe_backend,
 )
+from vllm.model_executor.layers.quantization.online.linear_base import (
+    OnlineLinearBase,
+    _is_tp_sharded,
+)
 from vllm.model_executor.layers.quantization.online.moe_base import (
     OnlineMoEMethodBase,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_weight_quant,
+    amax_for_tp_weight_quant,
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
     weight_amax,
@@ -141,3 +147,119 @@ class Int8OnlineMoEMethod(OnlineMoEMethodBase):
             w2_bias=getattr(layer, "w2_bias", None),
             layer=layer,
         )
+
+
+# ---------------------------------------------------------------------------
+# Online INT8 Linear
+# ---------------------------------------------------------------------------
+
+INT8_MAX = torch.iinfo(torch.int8).max
+INT8_MIN = torch.iinfo(torch.int8).min
+
+# Chunk so the fp32 intermediate of the multiply stays under ~64 MB.
+_INT8_QUANT_CHUNK_ELEMS = 16 * 1024 * 1024
+
+
+def _int8_channel_scale(amax: torch.Tensor) -> torch.Tensor:
+    """Per-output-channel INT8 scale, ``amax / 127``.
+
+    An all-zero row gets a neutral 1.0 so the quantization below never divides
+    by zero; every code of that row is zero, so it still reconstructs exactly.
+    """
+    amax = amax.to(torch.float32)
+    return torch.where(amax > 0, amax / INT8_MAX, torch.ones_like(amax))
+
+
+def _int8_quant_per_channel(weight: torch.Tensor, amax: torch.Tensor) -> torch.Tensor:
+    """Quantize ``weight`` per output channel, mirroring the W8A8 kernel.
+
+    ``scaled_int8_quant`` multiplies by ``127 / absmax`` rather than dividing
+    by ``absmax / 127``, rounds to nearest-even and saturates to the int8 range,
+    so the same formula is used here.
+    """
+    amax = amax.to(torch.float32)
+    inv_scale = torch.where(amax > 0, INT8_MAX / amax, torch.zeros_like(amax))
+    out = torch.empty_like(weight, dtype=torch.int8)
+    chunk_rows = max(1, _INT8_QUANT_CHUNK_ELEMS // weight.shape[-1])
+    for start in range(0, weight.shape[0], chunk_rows):
+        rows = slice(start, start + chunk_rows)
+        scaled = weight[rows].to(torch.float32) * inv_scale[rows]
+        out[rows] = scaled.round_().clamp_(INT8_MIN, INT8_MAX).to(torch.int8)
+    return out
+
+
+class Int8OnlineLinearMethod(OnlineLinearBase):
+    """Online per-output-channel INT8 (W8A8) linear quantization.
+
+    Loads fp16/bf16 weights and quantizes them per output channel during
+    loading; activations are quantized to int8 per token inside the scaled-mm
+    kernel. The resulting layout matches a compressed-tensors W8A8 INT8
+    checkpoint.
+    """
+
+    weight_quant_key = kInt8StaticChannelSym
+    activation_quant_key = kInt8DynamicTokenSym
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+        # A requantization source may not have set it, and the kernel reads it
+        # to decide whether scales need expanding to per-channel.
+        layer.logical_widths = output_partition_sizes
+
+        self.int8_linear = init_int8_linear_kernel(
+            is_channelwise=True,
+            is_static_input_scheme=False,
+            input_symmetric=True,
+            module_name=self.__class__.__name__,
+            is_fused_module=len(output_partition_sizes) > 1,
+        )
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        weight = self.get_weight_for_quantization(layer)
+        amax = weight_amax(weight, dim=-1, keepdim=True)
+        # A per-output-channel scale only reduces the input dim: a
+        # column-parallel shard already matches the unsharded scale, while a
+        # row-parallel one needs the global amax.
+        amax = amax_for_tp_weight_quant(
+            amax, _is_tp_sharded(layer, reduces_output_dim=False)
+        )
+        qweight = _int8_quant_per_channel(weight, amax)
+
+        replace_parameter(layer, "weight", qweight)
+        # Registered lazily: `create_weights` must not register tensors the
+        # checkpoint does not have, or layerwise online processing never fires.
+        replace_parameter(layer, "weight_scale", _int8_channel_scale(amax))
+
+        self.int8_linear.process_weights_after_loading(layer)
+        self.release_requantization_source_weights(layer)
+
+        layer._already_called_process_weights_after_loading = True
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        # The int8 scaled-mm kernel quantizes activations per token internally.
+        return self.int8_linear.apply_weights(layer, x, bias)

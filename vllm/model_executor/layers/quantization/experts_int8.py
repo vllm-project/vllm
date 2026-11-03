@@ -24,7 +24,8 @@ class ExpertsInt8Config(QuantizationConfig):
     Linear layers are left unquantized.
 
     Backward-compatible config for ``--quantization experts_int8``.
-    Prefer ``--quantization int8_per_channel``
+    Prefer ``--quantization int8_per_channel_weight_only``, which also
+    quantizes linear layers.
     """
 
     def __init__(self) -> None:

@@ -215,8 +215,12 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
         linear=QuantSpec(weight=kMxfp4Static),
         moe=QuantSpec(weight=kMxfp4Static),
     ),
-    # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
+    # INT8 per-channel weights + dynamic per-token INT8 activations, on both
+    # linear and MoE layers. The `_weight_only` suffix is historical: the
+    # scheme was MoE-only W8A16 when it was introduced with `experts_int8`
+    # (#38463); its activations have been quantized to INT8 since #39187.
     "int8_per_channel_weight_only": QuantizationConfigArgs(
+        linear=QuantSpec(weight=kInt8StaticChannelSym),
         moe=QuantSpec(weight=kInt8StaticChannelSym),
     ),
     # Online NVFP4 on MoE with per-token dynamic activation scales (Blackwell +
