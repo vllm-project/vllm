@@ -20,6 +20,7 @@ from tests.v1.core.utils import full_layer, new_kv_cache_group, sliding_window_l
 from vllm.config import CacheConfig
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.utils.torch_utils import get_dtype_size
+from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheManager
 from vllm.v1.core.kv_cache_planning import (
     _get_kv_cache_bytes_per_block,
@@ -550,6 +551,7 @@ class TestCSALinearGrouping:
             )
 
         groups = _get_packed_kv_cache_groups(config, specs)
+        assert groups is not None
         gdn = [g for g in groups if g.layer_names[0].startswith("gdn.")]
 
         assert _get_kv_cache_bytes_per_block(groups, KVCacheLayout.BLHNC) == sum(
@@ -898,7 +900,9 @@ class TestSWABoundedReplayGrouping:
             hash_block_size=128,
             scheduler_block_size=128,
         )
-        (group,) = manager.coordinator.attention_groups
+        coordinator = manager.coordinator
+        assert isinstance(coordinator, HybridKVCacheCoordinator)
+        (group,) = coordinator.attention_groups
         assert group.manager_cls is FullAttentionManager
 
         # Allocating and caching a request goes through every group's manager;
