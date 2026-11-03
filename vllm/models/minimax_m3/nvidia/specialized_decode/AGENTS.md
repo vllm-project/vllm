@@ -38,12 +38,14 @@ raises.
 | `moe/__init__.py` | `build_low_batch_ffn`, `LowBatchFfn` (`accepts`, `run`) |
 | `moe/front_cute.py` | Routing + per-token NVFP4 input + routing record in one launch; FC2's input quantization |
 | `moe/gemm_cute.py` | Routed FC1 (SwiGLU-OAI epilogue) and FC2 on persistent `tcgen05` NVFP4 GEMMs |
+| `moe/shared_cute.py` | The MXFP8 shared expert: input quantization, split-K FC1, SwiGLU-OAI + MXFP8, FC2 on the same GEMM |
 
 The routing record and the persistent GEMM skeleton are imported from the
 DeepSeek-V4.1 low-batch MoE (`deepseek_v41/nvidia/specialized_decode/moe/`).
 `MiniMaxM3MoE.process_weights_after_loading` builds one `LowBatchFfn` per MoE
 layer once the weights are processed; it compiles the kernels then, outside any
-CUDA graph capture, and binds the expert weights in place (no copies).
+CUDA graph capture, and binds the routed and shared expert weights in place (no
+copies).
 
 ## Paths
 
@@ -52,7 +54,7 @@ CUDA graph capture, and binds the expert weights in place (no copies).
 | Gate: stock `GateLinear` (FP32 logits) | all |
 | Front: top-4 of `sigmoid(logit) + bias`, BF16 weights from the recovered scores, per-token NVFP4 of the input, routing record | 1-8 |
 | Routed FC1 and FC2 on the record's work items, FC2's input quantized per token from FC1's BF16 output | 1-8 |
-| Shared expert: stock MXFP8 MLP on the aux stream, joined before `run` returns | 1-8 |
+| Shared expert on the aux stream, joined before `run` returns: MXFP8 input, FC1 split over K into 12 slices (144 work items), BF16 gate_up and SwiGLU-OAI to MXFP8 `h`, FC2 | 1-8 |
 | Top-k finalize, all-reduce, next input norm: the fused boundary kernel | up to 32 |
 
 ## Dispatch

@@ -8,19 +8,21 @@ takes, the stock chain runs about eleven small kernels. Here::
 
     x ─► gate (stock) ─► front ─► FC1 ─► FC2 input ─► FC2 ─► gemm2_permuted
     │                    (top-4, NVFP4 x, record)
-    └─(aux stream)─► shared expert (stock) ─────────────────► shared_output
+    └─(aux stream)─► MXFP8 x ─► FC1 (split K) ─► SwiGLU, MXFP8 h ─► FC2
+                                                         └─► shared_output
 
 * ``front_cute.py``: the routing (top-4 of ``sigmoid(logit) + bias``, the
   weights from the recovered scores), the routed input's per-token NVFP4 and
   the routing record of ``routed_expert_route_cute.py`` in one launch, and the
   per-token NVFP4 of FC1's BF16 output;
 * ``gemm_cute.py``: FC1 (with SwiGLU-OAI) and FC2, persistent ``tcgen05``
-  NVFP4 GEMMs over the record's (weight tile, token tile) items.
+  NVFP4 GEMMs over the record's (weight tile, token tile) items;
+* ``shared_cute.py``: the MXFP8 shared expert on the same GEMM.
 
-The kernels read the expert weights vLLM prepares for the TRT-LLM-gen NVFP4
-experts in place, are compiled once per device when a layer is bound, and
-launch on the current stream with programmatic dependent launch, so CUDA
-graphs capture them like any other kernel. The routing weights are BF16, as
+The kernels read the weights vLLM prepares for the TRT-LLM-gen NVFP4 experts
+and the FlashInfer MXFP8 linears in place, are compiled once per device when a
+layer is bound, and launch with programmatic dependent launch, so CUDA graphs
+capture them like any other kernel. The routing weights are BF16, as
 the monolithic TRT-LLM-gen experts return them and the fused finalize reads
 them.
 """
@@ -59,6 +61,15 @@ from .front_cute import (
     LowBatchFront,
 )
 from .gemm_cute import RoutedFc1, RoutedFc2
+from .shared_cute import (
+    SPLIT_K,
+    SPLITS,
+    SharedAct,
+    SharedFc1,
+    SharedFc2,
+    SharedInputQuant,
+)
+from .shared_cute import tile_scale_bytes as shared_tile_scale_bytes
 
 logger = init_logger(__name__)
 
@@ -66,6 +77,11 @@ logger = init_logger(__name__)
 SWIGLU_LIMIT = 7.0
 SWIGLU_ALPHA = 1.702
 SWIGLU_BETA = 1.0
+# Persistent CTAs of the shared expert's GEMMs (144 and 48 work items), which
+# leave SMs to the routed GEMMs beside them (the critical path). On B300 at
+# 1, 4 and 8 rows, within 3% of the best of 144/48, 72/48, 48/24 and 24/16.
+SHARED_FC1_CTAS = 36
+SHARED_FC2_CTAS = 24
 
 
 class LowBatchFfn:
@@ -75,19 +91,36 @@ class LowBatchFfn:
         routed = moe.experts.routed_experts
         quant = routed.quant_method.moe_kernel.fused_experts.quant_config
         self.gate = moe.gate
-        self.shared_experts = moe.shared_experts
         self.bias = moe.e_score_correction_bias
         self.scale = float(moe.routed_scaling_factor)
         self.routed = routed
         self.w13, self.w13_scale = routed.w13_weight, quant.w1_scale
         self.w2, self.w2_scale = routed.w2_weight, quant.w2_scale
         self.alpha1, self.alpha2 = quant.g1_alphas, quant.g2_alphas
+        gate_up, down = moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj
+        self.gate_up, self.gate_up_scale = gate_up.weight, gate_up.weight_scale
+        self.down, self.down_scale = down.weight, down.weight_scale
         index = self.w13.device.index
         self.device_index = (
             torch.accelerator.current_device_index() if index is None else index
         )
+        device = self.w13.device
+        # The shared expert's routing records: FC1's tile s is K split s; FC2
+        # has one tile, of 1-8 rows.
+        self.shared_fc1_record = torch.tensor(
+            [TILE * SPLITS, SPLITS, 0, 0]
+            + list(range(SPLITS))
+            + [TILE * (s + 1) for s in range(SPLITS)],
+            dtype=torch.int32,
+            device=device,
+        )
+        self.shared_fc2_records = torch.tensor(
+            [[TILE, 1, 0, 0, 0, 0, 0, 0, rows, 0, 0, 0] for rows in range(1, 9)],
+            dtype=torch.int32,
+            device=device,
+        )
         # Compile the kernels now, not inside a CUDA graph capture.
-        for compile_kernel in (_front, _fc2_input, _fc1, _fc2):
+        for compile_kernel in _KERNELS:
             compile_kernel(self.device_index)
         self.aux = aux_stream()
         self.input_ready = torch.cuda.Event()
@@ -117,7 +150,7 @@ class LowBatchFfn:
         self.input_ready.record(main)
         with torch.cuda.stream(self.aux):
             self.input_ready.wait(self.aux)
-            shared_output = self.shared_experts(x)
+            shared_output = self.shared(x)
             self.shared_ready.record(self.aux)
 
         logits, _ = self.gate(x)
@@ -205,6 +238,65 @@ class LowBatchFfn:
             ),
             shared_output=shared_output,
         )
+
+    def shared(self, x: torch.Tensor) -> torch.Tensor:
+        """The shared expert's BF16 output (``shared_cute.py``), on the current
+        stream."""
+        rows = x.size(0)
+        device = x.device
+        x8 = torch.empty(TILE * HIDDEN, dtype=torch.uint8, device=device)
+        x8_scale = torch.empty(
+            SPLITS * shared_tile_scale_bytes(SPLIT_K), dtype=torch.uint8, device=device
+        )
+        partial = torch.empty(
+            SPLITS * TILE * 2 * INTERMEDIATE, dtype=torch.float32, device=device
+        )
+        h8 = torch.empty(TILE * INTERMEDIATE, dtype=torch.uint8, device=device)
+        h8_scale = torch.empty(
+            shared_tile_scale_bytes(INTERMEDIATE), dtype=torch.uint8, device=device
+        )
+        output = torch.empty((rows, HIDDEN), dtype=torch.bfloat16, device=device)
+        stream = current_cu_stream()
+        index = self.device_index
+        sms = _sm_count(index)
+        _shared_input(index)(
+            _ptr(cutlass.Uint32, x),
+            _ptr(cutlass.Uint32, x8),
+            _ptr(cutlass.Uint8, x8_scale),
+            Int32(rows),
+            stream,
+        )
+        _shared_fc1(index)(
+            _ptr(cutlass.Float8E4M3FN, self.gate_up),
+            _ptr(cutlass.Float8E8M0FNU, self.gate_up_scale),
+            _ptr(cutlass.Float8E4M3FN, x8),
+            _ptr(cutlass.Float8E8M0FNU, x8_scale),
+            _ptr(cutlass.Float32, partial),
+            _ptr(cutlass.Int32, self.shared_fc1_record),
+            Int32(SPLITS),
+            Int32(min(sms, SHARED_FC1_CTAS)),
+            stream,
+        )
+        _shared_act(index)(
+            _ptr(cutlass.Float32, partial),
+            _ptr(cutlass.Uint32, h8),
+            _ptr(cutlass.Uint8, h8_scale),
+            Int32(rows),
+            stream,
+        )
+        _shared_fc2(index)(
+            _ptr(cutlass.Float8E4M3FN, self.down),
+            _ptr(cutlass.Float8E8M0FNU, self.down_scale),
+            _ptr(cutlass.Float8E4M3FN, h8),
+            _ptr(cutlass.Float8E8M0FNU, h8_scale),
+            _ptr(cutlass.BFloat16, output),
+            _ptr(cutlass.Int32, self.shared_fc2_records[rows - 1]),
+            Int32(rows),
+            Int32(4),
+            Int32(min(sms, SHARED_FC2_CTAS)),
+            stream,
+        )
+        return output
 
 
 def _ptr(dtype: type[cutlass.Numeric], tensor: torch.Tensor, align: int = 16):
@@ -299,6 +391,79 @@ def _fc2(device_index: int):
 
 
 @cache
+def _shared_input(device_index: int):
+    with torch.accelerator.device_index(device_index):
+        return cute.compile(
+            SharedInputQuant(),
+            _fake(cutlass.Uint32),
+            _fake(cutlass.Uint32),
+            _fake(cutlass.Uint8),
+            Int32(1),
+            make_fake_stream(),
+        )
+
+
+@cache
+def _shared_fc1(device_index: int):
+    with torch.accelerator.device_index(device_index):
+        return cute.compile(
+            SharedFc1(),
+            _fake(cutlass.Float8E4M3FN),
+            _fake(cutlass.Float8E8M0FNU),
+            _fake(cutlass.Float8E4M3FN),
+            _fake(cutlass.Float8E8M0FNU),
+            _fake(cutlass.Float32),
+            _fake(cutlass.Int32),
+            Int32(SPLITS),
+            Int32(1),
+            make_fake_stream(),
+        )
+
+
+@cache
+def _shared_act(device_index: int):
+    with torch.accelerator.device_index(device_index):
+        return cute.compile(
+            SharedAct(),
+            _fake(cutlass.Float32),
+            _fake(cutlass.Uint32),
+            _fake(cutlass.Uint8),
+            Int32(1),
+            make_fake_stream(),
+        )
+
+
+@cache
+def _shared_fc2(device_index: int):
+    with torch.accelerator.device_index(device_index):
+        return cute.compile(
+            SharedFc2(),
+            _fake(cutlass.Float8E4M3FN),
+            _fake(cutlass.Float8E8M0FNU),
+            _fake(cutlass.Float8E4M3FN),
+            _fake(cutlass.Float8E8M0FNU),
+            _fake(cutlass.BFloat16),
+            _fake(cutlass.Int32),
+            Int32(1),
+            Int32(4),
+            Int32(1),
+            make_fake_stream(),
+        )
+
+
+_KERNELS = (
+    _front,
+    _fc1,
+    _fc2_input,
+    _fc2,
+    _shared_input,
+    _shared_fc1,
+    _shared_act,
+    _shared_fc2,
+)
+
+
+@cache
 def _sm_count(device_index: int) -> int:
     """Streaming multiprocessors of a device: the persistent GEMMs' CTAs."""
     return torch.cuda.get_device_properties(device_index).multi_processor_count
@@ -363,6 +528,32 @@ def _unsupported_reason(moe: torch.nn.Module) -> str | None:
     bias = moe.e_score_correction_bias
     if bias.dtype != torch.float32 or tuple(bias.shape) != (EXPERTS,):
         return "bias is not FP32 [128]"
+    shared = moe.shared_experts
+    act = shared.act_fn
+    if (act.swiglu_limit, act.alpha, act.beta) != (
+        SWIGLU_LIMIT,
+        SWIGLU_ALPHA,
+        SWIGLU_BETA,
+    ):
+        return "shared expert SwiGLU-OAI constants"
+    for linear, n, k in (
+        (shared.gate_up_proj, 2 * INTERMEDIATE, HIDDEN),
+        (shared.down_proj, HIDDEN, INTERMEDIATE),
+    ):
+        # FlashInfer's MXFP8 linears keep K-major E4M3 weights and E8M0
+        # scales in the 128x4 layout.
+        kernel = type(getattr(linear.quant_method, "kernel", None)).__name__
+        weight, scale = linear.weight, getattr(linear, "weight_scale", None)
+        if (
+            not (kernel.startswith("FlashInfer") and "Mxfp8" in kernel)
+            or weight.dtype != torch.float8_e4m3fn
+            or tuple(weight.t().shape) != (n, k)
+            or not weight.t().is_contiguous()
+            or scale is None
+            or scale.dtype != torch.uint8
+            or scale.numel() != n * k // 32
+        ):
+            return f"shared expert {kernel}"
     return None
 
 
