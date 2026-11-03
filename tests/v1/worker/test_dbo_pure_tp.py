@@ -44,12 +44,14 @@ def test_merge_keeps_none_and_intermediate_tensors():
     assert merged["hidden_states"].shape == (4, 4)
 
 
-def _parallel_config(tp=4, dp=1, ep=False):
+def _parallel_config(tp=4, dp=1, ep=False, dbo=True):
+    # An explicit backend skips the GPU count check: CI may run this on one GPU.
     return ParallelConfig(
         tensor_parallel_size=tp,
         data_parallel_size=dp,
         enable_expert_parallel=ep,
-        enable_dbo=True,
+        enable_dbo=dbo,
+        distributed_executor_backend="mp",
     )
 
 
@@ -64,7 +66,7 @@ def _parallel_config(tp=4, dp=1, ep=False):
 )
 def test_dbo_tp_only(tp, dp, ep, tp_only):
     assert _parallel_config(tp, dp, ep).dbo_tp_only is tp_only
-    assert not ParallelConfig(tensor_parallel_size=tp).dbo_tp_only  # DBO off
+    assert not _parallel_config(tp, dbo=False).dbo_tp_only
 
 
 def _config(tp=4, dp=1, ep=False, spec=False, mm=False, enc_dec=False):
@@ -161,9 +163,7 @@ def test_workspace_id_shared_across_microbatches(monkeypatch, num_ubatches, expe
 def test_no_ubatch_comms_outside_pure_tp_dbo(monkeypatch, kwargs):
     tp = SimpleNamespace(ubatch_comms=None)
     monkeypatch.setattr(parallel_state, "_TP", tp)
-    dbo = kwargs.pop("dbo", True)
-    pc = _parallel_config(**kwargs) if dbo else ParallelConfig(tensor_parallel_size=4)
-    ubatching.init_dbo_tp_comms(pc)
+    ubatching.init_dbo_tp_comms(_parallel_config(**kwargs))
     assert tp.ubatch_comms is None
 
 

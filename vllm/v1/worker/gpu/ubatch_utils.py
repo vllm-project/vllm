@@ -361,32 +361,11 @@ class UBatchRunner:
         init_dbo_tp_comms(self.parallel_config)
         self._pending_finish: Callable[[], Any] | None = None
         self.sm_control = create_sm_control_context(self.parallel_config)
-        # TODO: remove once hipblasLtCreate no longer issues a null-stream memset.
-        if current_platform.is_rocm():
-            self._warm_blas_lt_handles()
-
-    def _warm_blas_lt_handles(self) -> None:
-        """Fill torch's hipBLASLt handle pool for the microbatch threads.
-
-        hipblasLtCreate clears a new handle's Stream-K flags with a null-stream
-        hipMemset that can land after a GEMM on the comm stream has started, and
-        the GEMM then never finishes. Microbatch threads are new every step and
-        take their per-stream handles from the pool."""
-        a = torch.zeros((64, 64), dtype=torch.bfloat16, device=self.device)
-        streams = (current_stream(), self.capture_stream, self.comm_stream)
-
-        def touch() -> None:
-            torch.accelerator.set_device_index(self.device.index)
-            for stream in streams:
-                with torch.cuda.stream(stream):
-                    torch.mm(a, a, out_dtype=torch.float32)
-
-        threads = [threading.Thread(target=touch) for _ in range(self.num_ubatches)]
-        for t in threads:
-            t.start()
-        for t in threads:
-            t.join()
-        torch.accelerator.synchronize(self.device)
+        current_platform.prepare_ubatch_streams(
+            self.device,
+            (current_stream(), self.capture_stream, self.comm_stream),
+            self.num_ubatches,
+        )
 
     def prepare(
         self,
