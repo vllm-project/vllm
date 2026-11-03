@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import struct
 from typing import Any
 
 import torch
@@ -151,6 +152,36 @@ def _is_16_bit_png(image: Image.Image, data: bytes) -> bool:
     return image.format == "PNG" and data[24] == 16
 
 
+def _orientation_visible_to_torchcodec(image: Image.Image, data: bytes) -> bool:
+    # torchcodec only reads the EXIF orientation from the first APP1 segment of
+    # JPEGs and from eXIf chunks before the pixel data of PNGs. Pillow also
+    # finds it in a later APP1 segment (e.g. after XMP), in XMP
+    # tiff:Orientation, in "Raw profile type exif" PNG text chunks and in
+    # chunks after the pixel data.
+    if image.format == "JPEG":
+        app1 = next((s for m, s in image.applist if m == "APP1"), None)
+        if app1 is not None and not app1.startswith(b"Exif\0\0"):
+            return False
+    if b"tiff:Orientation" in image.info.get("xmp", b""):
+        return False
+    if image.format == "PNG":
+        if "tiff:Orientation" in image.info.get("XML:com.adobe.xmp", ""):
+            return False
+        if "Raw profile type exif" in image.info:
+            return False
+        # Pillow only parses the chunks after IDAT when loading the image, so
+        # they are not in `image.info` yet. Text chunks may hold XMP or EXIF.
+        pos, seen_idat = 8, False
+        while pos + 8 <= len(data):
+            length, kind = struct.unpack_from(">I4s", data, pos)
+            if kind == b"IDAT":
+                seen_idat = True
+            elif seen_idat and kind in (b"eXIf", b"tEXt", b"zTXt", b"iTXt"):
+                return False
+            pos += length + 12
+    return True
+
+
 def can_decode_with_torchcodec(image: Image.Image, data: bytes) -> bool:
     """Whether torchcodec decodes `data`, opened by Pillow as `image`, to the
     same pixels as `convert_image_mode(normalize_image(image), "RGB")`."""
@@ -160,6 +191,7 @@ def can_decode_with_torchcodec(image: Image.Image, data: bytes) -> bool:
         and not _has_transparency(image)
         and not getattr(image, "is_animated", False)
         and not _is_16_bit_png(image, data)
+        and _orientation_visible_to_torchcodec(image, data)
     )
 
 
