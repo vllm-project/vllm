@@ -221,6 +221,14 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return tokenizer
 
+    def finalize_message(self, parser: Any, message: Any) -> Any:
+        """Enrich a parsed assistant message after derender parsing.
+
+        Default is a no-op. Renderers that surface parser-side extras
+        (e.g. Cohere grounding citations) override this.
+        """
+        return message
+
     def render_completion_suffix(self, prompt: str, suffix: str) -> str | None:
         """Render OpenAI completion suffix input when the renderer supports FIM."""
         return None

@@ -38,6 +38,7 @@ from vllm.entrypoints.cohere.serving import (
 )
 from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     GenerateRequest,
+    ParseContext,
     ReasoningParserKwargs,
 )
 from vllm.entrypoints.serve.engine.protocol import ErrorInfo, ErrorResponse
@@ -138,6 +139,7 @@ def _generate_request() -> GenerateRequest:
         token_ids=[5, 6, 7],
         sampling_params=SamplingParams(temperature=0.25),
         model="m",
+        parse_context=ParseContext(),
     )
 
 
@@ -506,11 +508,42 @@ class TestRenderEndpoint:
         with TestClient(app) as client:
             r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
         assert r.status_code == HTTPStatus.OK
-        assert r.json()["reasoning_parser_kwargs"] == {
+        body = r.json()
+        assert body["reasoning_parser_kwargs"] == {
             "chat_template_kwargs": {"safety_mode": "strict"}
         }
+        assert "citation_sources" not in body["parse_context"]
         assert render_handler.seen_kwargs_filter is not None
         assert render_handler.seen_kwargs_filter(kwargs) == {"safety_mode": "strict"}
+
+    def test_grounded_render_fills_citation_sources(self):
+        """Grounded Cohere render sends a JSON-safe citation_sources list."""
+        render_handler = _RenderHandler(_generate_request())
+        app = _build_render_app(_RenderChatHandler(), render_handler)
+        body = {
+            **_minimal_request_body(),
+            "documents": [{"id": "doc-1", "data": {"text": "Paris is in France."}}],
+        }
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat/render", json=body)
+        assert r.status_code == HTTPStatus.OK
+        parse_context = r.json()["parse_context"]
+        assert parse_context["citation_sources"] == [
+            {
+                "bucket": 0,
+                "idx": 0,
+                "source": {
+                    "type": "document",
+                    "id": "doc-1",
+                    "document": {"text": "Paris is in France.", "id": "doc-1"},
+                },
+            }
+        ]
+        # The tuple-keyed map must stay out of the JSON kwargs.
+        assert "_position_to_source" not in parse_context.get(
+            "chat_template_kwargs", {}
+        )
+        assert GenerateRequest.model_validate(r.json()).parse_context is not None
 
     def test_501_when_chat_handler_missing(self):
         app = _build_render_app(None, _RenderHandler(_generate_request()))

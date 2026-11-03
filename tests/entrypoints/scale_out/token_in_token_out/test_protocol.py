@@ -213,6 +213,40 @@ def test_parse_context_rejects_non_json_template_kwargs():
         ParseContext(chat_template_kwargs={"_position_to_source": {(0, 0): "x"}})
 
 
+def test_parse_context_omits_unset_citation_sources():
+    """Older generate nodes must not see citation_sources: null on every request."""
+    dumped = ParseContext().model_dump()
+    assert "citation_sources" not in dumped
+    assert "citation_sources" not in json.loads(ParseContext().model_dump_json())
+
+
+def test_parse_context_citation_sources_round_trip():
+    parse_context = ParseContext.model_validate(
+        {
+            "citation_sources": [
+                {
+                    "bucket": 0,
+                    "idx": 1,
+                    "source": {"type": "document", "id": "doc-1"},
+                }
+            ]
+        }
+    )
+    assert parse_context.citation_sources is not None
+    assert parse_context.citation_sources[0].bucket == 0
+    assert parse_context.citation_sources[0].source["id"] == "doc-1"
+    request = GenerateRequest.model_validate(
+        {
+            **_base_payload(),
+            "output_mode": "derender",
+            "parse_context": parse_context.model_dump(),
+        }
+    )
+    assert request.parse_context is not None
+    assert request.parse_context.citation_sources is not None
+    assert request.parse_context.citation_sources[0].idx == 1
+
+
 @pytest.mark.parametrize("tools", [None, []])
 def test_parse_context_to_chat_request_accepts_converter_tool_fields(tools):
     """The Anthropic converter emits these and coupled /v1/messages serves them."""
@@ -329,6 +363,34 @@ def test_derender_response_dispatches_on_output_mode():
     )
     assert isinstance(parsed, GenerateDerenderResponse)
     assert parsed.choices[0].message.content == "hi"
+
+
+def test_derender_choice_keeps_cohere_citations():
+    from vllm.entrypoints.cohere.cohere_chat_message import (
+        Citation,
+        CitationSource,
+        CohereChatMessage,
+    )
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        GenerateDerenderChoice,
+    )
+
+    message = CohereChatMessage(
+        role="assistant",
+        content="The capital is Paris.",
+        citations=[
+            Citation(
+                start=15,
+                end=20,
+                text="Paris",
+                sources=[CitationSource(type="document", id="doc-paris")],
+            )
+        ],
+    )
+    choice = GenerateDerenderChoice(index=0, token_ids=[1], message=message)
+    dumped = json.loads(choice.model_dump_json())
+    assert dumped["message"]["citations"][0]["text"] == "Paris"
+    assert dumped["message"]["citations"][0]["sources"][0]["id"] == "doc-paris"
 
 
 @pytest.mark.parametrize("output_mode", [None, 5])

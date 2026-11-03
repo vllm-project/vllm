@@ -409,6 +409,8 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest | None,
         history_tool_call_cnt: int,
         prompt_token_ids: list[int] | None,
+        *,
+        citation_sources: Sequence[Any] | None = None,
     ) -> list[tuple[ChatMessage, str]]:
         """Parse the engine's decoded output text into assistant messages.
 
@@ -418,13 +420,19 @@ class OnlineDerenderer:
                 or no parser on this server, the message content is the text.
             history_tool_call_cnt: Tool calls already in the conversation.
             prompt_token_ids: Prompt token IDs, if known.
+            citation_sources: JSON-safe citation source map from
+                `parse_context`, installed on the parser before parse.
 
         Returns:
             One message and chat `finish_reason` per output in order.
 
         """
         return await self._derender_text_choices_async(
-            outputs, chat_request, history_tool_call_cnt, prompt_token_ids
+            outputs,
+            chat_request,
+            history_tool_call_cnt,
+            prompt_token_ids,
+            citation_sources=citation_sources,
         )
 
     def _derender_text_choices(
@@ -433,6 +441,8 @@ class OnlineDerenderer:
         chat_request: ChatCompletionRequest | None,
         history_tool_call_cnt: int,
         prompt_token_ids: list[int] | None,
+        *,
+        citation_sources: Sequence[Any] | None = None,
     ) -> list[tuple[ChatMessage, str]]:
         tokenizer = self.renderer.get_tokenizer()
         results: list[tuple[ChatMessage, str]] = []
@@ -448,6 +458,7 @@ class OnlineDerenderer:
                     chat_request.chat_template_kwargs or {},
                     prompt_token_ids,
                     history_tool_call_count=history_tool_call_cnt,
+                    citation_sources=citation_sources,
                 )
             finish_reason = resolve_finish_reason(
                 output.finish_reason, chat_request, bool(message.tool_calls)
@@ -521,6 +532,8 @@ class OnlineDerenderer:
         chat_template_kwargs: dict[str, Any],
         prompt_token_ids: list[int] | None,
         history_tool_call_count: int | None = None,
+        *,
+        citation_sources: Sequence[Any] | None = None,
     ) -> tuple[ChatMessage, int]:
         """Parse decoded output text into an assistant `ChatMessage`.
 
@@ -535,6 +548,8 @@ class OnlineDerenderer:
             history_tool_call_count: Tool calls in the conversation, for
                 requests that carry no messages. None derives it from
                 `chat_request`.
+            citation_sources: JSON-safe citation source map installed on
+                the parser before `parse`.
 
         Returns:
             The assembled assistant message and the number of reasoning
@@ -553,6 +568,8 @@ class OnlineDerenderer:
             parser.set_prompt_token_ids(prompt_token_ids)
         if history_tool_call_count is not None:
             parser.set_history_tool_call_count(history_tool_call_count)
+        if citation_sources is not None:
+            parser.set_citation_sources(citation_sources)
         reasoning, content, tool_calls = parser.parse(
             text,
             chat_request,
@@ -574,6 +591,7 @@ class OnlineDerenderer:
             content=fields.content,
             tool_calls=fields.tool_calls,
         )
+        message = self.renderer.finalize_message(parser, message)
         reasoning_tokens = (
             parser.count_reasoning_tokens(token_ids)
             if self._include_reasoning_tokens_details
