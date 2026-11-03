@@ -504,6 +504,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         dtype = torch.get_default_dtype()
+        self.act_dtype = dtype
         if attn_backend is not None:
             assert attn_backend.is_mla(), (
                 f"MLAAttention: attn_backend must be an MLA backend, "
@@ -1239,7 +1240,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self._vllm_config.attention_config.sparse_mla_force_mqa
         )
 
-    def process_weights_after_loading(self, act_dtype: torch.dtype):
+    def process_weights_after_loading(self) -> None:
+        act_dtype = self.act_dtype
         # Let per-backend impls do their own weight packing first (no-op
         # unless overridden), mirroring Attention.process_weights_after_loading.
         self.impl.process_weights_after_loading(act_dtype)

@@ -107,17 +107,11 @@ def init(device: torch.device, max_width: int) -> None:
     global _CP
     if _CP is not None:
         return
-    from vllm.config import get_current_vllm_config
     from vllm.distributed import get_tp_group
     from vllm.platforms.rocm import on_gfx950
 
     tp = get_tp_group()
-    # One set of buffers and flags: microbatches would share them.
-    if (
-        tp.world_size != WORLD
-        or not on_gfx950()
-        or get_current_vllm_config().parallel_config.use_ubatching
-    ):
+    if tp.world_size != WORLD or not on_gfx950():
         return
     _CP = IndexCP(tp.rank_in_group, tp.cpu_group, device, _kernel.MAX_ROWS, max_width)
 

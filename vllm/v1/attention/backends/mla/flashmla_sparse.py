@@ -445,12 +445,14 @@ class FlashMLASparseMetadataBuilder(
             and not self.pcp_dcp_kv_gather
         )
 
-        if parallel_config.decode_context_parallel_size > 1:
-            if self.pcp_dcp_kv_gather and cache_config.cache_dtype != "fp8_ds_mla":
-                raise NotImplementedError(
-                    "PCP+DCP sparse prefill gathers the KV through the fp8_ds_mla "
-                    f"upconvert; got a {cache_config.cache_dtype} cache"
-                )
+        if self.pcp_dcp_kv_gather and cache_config.cache_dtype != "fp8_ds_mla":
+            raise NotImplementedError(
+                "PCP+DCP sparse prefill gathers the KV through the fp8_ds_mla "
+                f"upconvert; got a {cache_config.cache_dtype} cache"
+            )
+        # The bf16 kernel returns the LSE for every token and pads the
+        # DCP-gathered heads itself, so only fp8 caches are restricted.
+        if parallel_config.decode_context_parallel_size > 1 and self.use_fp8_kv_cache:
             if not self.fp8_use_mixed_batch and not self.pcp_dcp_kv_gather:
                 raise NotImplementedError(
                     "DCP for FlashMLA sparse is only supported on the "
@@ -781,14 +783,6 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
                 f"dtypes, got {kv_cache_dtype}"
             )
 
-        if self.need_to_return_lse_for_decode and not is_quantized_kv_cache(
-            kv_cache_dtype
-        ):
-            raise NotImplementedError(
-                "DCP for FlashMLA sparse requires an fp8_ds_mla kv-cache; "
-                "the bf16 sparse path is not supported under DCP."
-            )
-
         self.pcp_dcp_kv_gather = False
         self.workspace_specs: list[tuple[tuple[int, ...], torch.dtype]] = [
             (q_concat_shape, torch.bfloat16)
@@ -903,7 +897,22 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             == topk_indices.shape[0]
         )
         uses_host_cache = isinstance(index_group, HiSparseMLAIndexGroup)
-        if not uses_host_cache and decode_only:
+        if self.dcp_world_size > 1:
+            # The indexer emits global token ids; keep this rank's shard and
+            # pack its local slots to the front of each row for topk_length.
+            topk_indices, topk_length = triton_filter_and_convert_dcp_index(
+                req_id_per_token,
+                block_table,
+                topk_indices,
+                dcp_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=attn_metadata.cp_kv_cache_interleave_size,
+                BLOCK_SIZE=attn_metadata.block_size,
+                BLOCK_STRIDE_ROWS=block_stride_rows,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
+        elif not uses_host_cache and decode_only:
             topk_indices, topk_length = self._convert_logical_to_physical_topk(
                 topk_indices,
                 attn_metadata,
@@ -928,6 +937,14 @@ class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
             topk_length,
             actual_num_heads,
         )
+        if self.need_to_return_lse_for_decode:
+            # The kernel returns (0, +inf) for rows where this rank owns none
+            # of the selected tokens; (0, -inf) is the identity element of the
+            # cross-rank LSE merge, so it drops this rank from those rows.
+            lse.masked_fill_((topk_length == 0).view(-1, 1), float("-inf"))
+            # The head-padding slice leaves `attn_out` non-contiguous, and the
+            # DCP combines (reduce_scatter, direct A2A) need packed heads.
+            return attn_out.contiguous(), lse
         if decode_out is None:
             return attn_out, lse
         return torch.cat([decode_out, attn_out], dim=0), None

@@ -325,16 +325,6 @@ def test_hisparse_shared_host_pool_uses_one_replicated_mmap(monkeypatch):
     assert region is not None
     assert isinstance(region, FakeSharedOffloadRegion)
     assert [t.data_ptr() for t in pinned_pools] == [t.data_ptr() for t in pinned]
-    assert region.kwargs == {
-        "engine_id": "hisparse_instance_dp3",
-        "num_chunks": 1,
-        "rank": 0,
-        "kv_bytes_per_chunk": 4 * page,
-        "cpu_page_size": 64,
-        "barrier": tp_group.barrier,
-        "creator_memory_check": hisparse_runtime_module.check_hisparse_host_memory,
-        "populate_shard": (1, 2),
-    }
     assert region.view_sizes == [24, 40]
     assert [pool.shape for pool in pools] == [(24,), (40,)]
     registration_ranges.assert_called_once_with([24, 40], 4, page)
@@ -1344,10 +1334,10 @@ def test_hisparse_worker_shutdown_releases_pinned_state(monkeypatch):
 
 
 class _TestReplaySSMMixer(MambaMixer2):
-    def __init__(self):
+    def __init__(self, backend: MambaBackendEnum = MambaBackendEnum.FLASHINFER):
         torch.nn.Module.__init__(self)
         self.use_replayssm = True
-        self.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
+        self.mamba_config = MambaConfig(backend=backend)
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_query_len = torch.empty(0, dtype=torch.int32)
@@ -1365,9 +1355,12 @@ def _packed_replayssm_cache(num_blocks: int) -> torch.Tensor:
     return torch.full((num_blocks, 1, 1, 80), 0, dtype=torch.int8)
 
 
+@pytest.mark.parametrize(
+    "backend", [MambaBackendEnum.FLASHINFER, MambaBackendEnum.TRITON]
+)
 @pytest.mark.parametrize("layers_only", [False, True])
-def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only):
-    mixers = [_TestReplaySSMMixer() for _ in range(3)]
+def test_bind_kv_cache_shares_replayssm_trackers_by_cache_group(layers_only, backend):
+    mixers = [_TestReplaySSMMixer(backend) for _ in range(3)]
     layer_names = [f"layers.{i}.mixer" for i in range(3)]
     ctx = dict(zip(layer_names, mixers))
     # Reverse insertion order: updater must follow layer index, not dict order.

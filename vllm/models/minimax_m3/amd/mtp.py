@@ -219,14 +219,17 @@ class MiniMaxM3MultiTokenPredictor(nn.Module):
                 "bf16"
             )
             if indexer_kv_dtype != "bf16":
-                raise NotImplementedError(
-                    f"MiniMax M3 MTP could not select the MSA indexer, leaving "
-                    f"its draft layers on the bf16 indexer, so "
-                    f"indexer_kv_dtype={indexer_kv_dtype!r} has nowhere to go. "
-                    f"See the preceding 'MSA unavailable' log line for why. Drop "
-                    f"indexer_kv_dtype from --attention-config, or speculate "
-                    f"with an EAGLE3 drafter instead."
-                )
+                from vllm.platforms.rocm import on_gfx942
+
+                if not on_gfx942():
+                    raise NotImplementedError(
+                        f"MiniMax M3 MTP could not select the MSA indexer, leaving "
+                        f"its draft layers on the bf16 indexer, so "
+                        f"indexer_kv_dtype={indexer_kv_dtype!r} has nowhere to go. "
+                        f"See the preceding 'MSA unavailable' log line for why. Drop "
+                        f"indexer_kv_dtype from --attention-config, or speculate "
+                        f"with an EAGLE3 drafter instead."
+                    )
         self.layers = torch.nn.ModuleDict(
             {
                 str(idx): MiniMaxM3MultiTokenPredictorLayer(
