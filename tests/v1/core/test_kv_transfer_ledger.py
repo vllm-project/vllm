@@ -110,3 +110,18 @@ def test_drop_exports_keeps_imports():
     assert sorted(e.request_id for e in dropped) == ["g", "h"]
     assert not ledger.has_exports() and ledger.needs_driving()
     assert ledger.is_referenced("i") and not ledger.is_referenced("g")
+
+
+def test_pins_blocks_only_for_open_imports_and_exports():
+    ledger = KVTransferLedger()
+    r = _req("j")
+    ledger.open_import(r)
+    assert not ledger.pins_blocks() and ledger.needs_driving()   # pending
+    ledger.import_started(r)
+    assert ledger.pins_blocks()                                  # open
+    ledger.complete("j", IMPORT)
+    assert not ledger.pins_blocks()                              # received
+    ledger.open_export(_req("k"))
+    assert ledger.pins_blocks()
+    ledger.drop_exports()
+    assert not ledger.pins_blocks()
