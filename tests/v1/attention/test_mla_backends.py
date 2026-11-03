@@ -443,8 +443,9 @@ def test_mla_v_up_proj_follows_tuned_aiter_triton_bf16_bmm(
     layer = _bare_mla_layer(
         monkeypatch, kv_b_weight, num_heads, qk_nope_head_dim, v_head_dim
     )
+    layer.act_dtype = torch.bfloat16
     with torch.no_grad():
-        layer.process_weights_after_loading(torch.bfloat16)
+        layer.process_weights_after_loading()
     x = torch.randn(
         num_tokens, num_heads * kv_lora_rank, dtype=torch.bfloat16, device="cuda"
     )
