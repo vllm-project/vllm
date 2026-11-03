@@ -384,6 +384,8 @@ def rocm_aiter_fused_experts(
         # DeepSeek V4.1 a4w4 uses SEPARATED (see below).
         from aiter.ops.flydsl.moe_common import GateMode
 
+        from vllm.platforms.rocm import on_gfx1250
+
         gate_mode = ""
         q_dtype_a = None
         if activation == MoEActivation.SITU:
@@ -402,6 +404,8 @@ def rocm_aiter_fused_experts(
                 q_dtype_a = dtypes.fp4x2
             else:
                 gate_mode = GateMode.INTERLEAVE.value
+        elif quant_config.use_mxfp4_w4a4 and on_gfx1250():
+            gate_mode = GateMode.INTERLEAVE.value
         elif activation_interleave is not None:
             gate_mode = (
                 GateMode.INTERLEAVE.value
@@ -641,7 +645,7 @@ class AiterFp8ChannelExperts(AiterExperts):
 
 class AiterMxfp4Experts(AiterExperts):
     """MXFP4-quantized weights, with either unquantized (bf16/fp16) or
-    MXFP4-quantized dynamic activations. gfx950-only (not gfx1250)."""
+    MXFP4-quantized dynamic activations. gfx950 and gfx1250."""
 
     @staticmethod
     def _supports_quant_scheme(
@@ -656,4 +660,4 @@ class AiterMxfp4Experts(AiterExperts):
             return False
         from vllm.platforms.rocm import on_gfx950, on_gfx1250
 
-        return on_gfx950() and not on_gfx1250()
+        return on_gfx950() or (on_gfx1250() and activation_key == kMxfp4Dynamic)
