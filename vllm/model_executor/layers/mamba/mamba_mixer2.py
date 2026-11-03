@@ -32,7 +32,7 @@ from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
-    is_conv_state_dim_first,
+    get_conv_state_view,
 )
 from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
     causal_conv1d_fn,
@@ -546,6 +546,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # ReplaySSM appends x/dt/B rings to (conv_state, ssm_state).
         _n_state = 5 if self.use_replayssm else 2
         self.kv_cache = tuple(torch.tensor([]) for _ in range(_n_state))
+        self._conv_state_view_cache: tuple[torch.Tensor, torch.Tensor] | None = None
         self._replayssm_ring_start = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_num_accepted = torch.empty(0, dtype=torch.int32)
         self._replayssm_prev_query_len = torch.empty(0, dtype=torch.int32)
@@ -750,13 +751,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
             attn_metadata = attn_metadata_raw.get(self.prefix)
         if attn_metadata is not None:
             assert isinstance(attn_metadata, Mamba2AttentionMetadata)
-            # conv_state must be (..., dim, width-1) for the conv kernels.
-            # DS layout stores it that way directly; SD layout needs a
-            # transpose (which keeps dim contiguous via stride tricks).
-            conv_state = (
-                self.kv_cache[0]
-                if is_conv_state_dim_first()
-                else self.kv_cache[0].transpose(-1, -2)
+            # conv_state must be (..., dim, width-1) for the conv kernels; the
+            # SD-layout transpose is cached per state-cache tensor identity.
+            self._conv_state_view_cache, conv_state = get_conv_state_view(
+                self._conv_state_view_cache, self.kv_cache[0]
             )
             ssm_state = self.kv_cache[1]
             if self.use_replayssm:

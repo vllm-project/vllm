@@ -931,6 +931,10 @@ def clear_layer_kv_caches(layers: Iterable[Any]) -> None:
             continue
         kv_cache = layer.kv_cache
         layer.kv_cache = torch.tensor([]) if isinstance(kv_cache, torch.Tensor) else []
+        # Mamba/SSM mixers cache the conv-state layout view directly on the
+        # layer; drop it so the detached state cache tensor is not pinned.
+        if hasattr(layer, "_conv_state_view_cache"):
+            layer._conv_state_view_cache = None
         # Clean up quantized KV cache scale views
         # (int8_per_token_head, fp8_per_token_head)
         if hasattr(layer, "impl"):

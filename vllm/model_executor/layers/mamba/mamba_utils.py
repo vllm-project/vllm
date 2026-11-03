@@ -50,6 +50,33 @@ def is_conv_state_dim_first() -> bool:
     return get_conv_state_layout() == "DS"
 
 
+def get_conv_state_view(
+    cache: tuple[torch.Tensor, torch.Tensor] | None,
+    conv_state_base: torch.Tensor,
+) -> tuple[tuple[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """Return ``(new_cache, conv_state)`` for a mixer's conv-state cache tensor.
+
+    The conv kernels want ``(..., dim, state_len)``. DS layout stores it that
+    way; SD layout needs a ``transpose(-1, -2)``. That transpose depends only on
+    the cache tensor's storage/strides, which are fixed once the cache is
+    allocated, so re-deriving it on every forward is pure host overhead that
+    multiplies by num_mamba_layers x tokens on the eager (custom-op) path.
+
+    Cache the view per cache-tensor identity. The identity check rebuilds the
+    view when profiling's minimal state cache is replaced by the real one, so
+    the cache never points at freed memory. Mirrors the FlashAttention fix
+    #64571; part of the #59534 / #64572 per-call view-derivation class.
+    """
+    if cache is None or cache[0] is not conv_state_base:
+        view = (
+            conv_state_base
+            if is_conv_state_dim_first()
+            else conv_state_base.transpose(-1, -2)
+        )
+        cache = (conv_state_base, view)
+    return cache, cache[1]
+
+
 class MambaStateDtypeCalculator:
     @classmethod
     def linear_attention_state_dtype(
