@@ -21,14 +21,13 @@ from vllm.v1.kv_offload.config import OffloadingConfig
 from vllm.v1.kv_offload.cpu.common import CPUOffloadingInfo, CPUOffloadingMetrics
 from vllm.v1.kv_offload.cpu.gpu_worker import CPUOffloadingWorker
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
-from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
+from vllm.v1.kv_offload.cpu.shared_offload_region import (
+    REGION_SEGMENTS,
+    SharedOffloadRegion,
+)
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
-
-# Split the shared region into this many shm files so workers pre-fault them
-# in parallel (page-cache inserts are serialized per file).
-_REGION_SEGMENTS = 32
 
 T = TypeVar("T")
 
@@ -213,7 +212,7 @@ class CPUOffloadingSpec(OffloadingSpec):
                 kv_bytes_per_chunk=self.kv_bytes_per_chunk,
                 cpu_page_size=self.cpu_page_size_per_worker,
                 barrier=_all_workers_barrier,
-                num_segments=_REGION_SEGMENTS,
+                num_segments=REGION_SEGMENTS,
                 populate_shard=(
                     (worker_index, world_size) if self.replicated_layout else None
                 ),

@@ -26,6 +26,22 @@ from vllm.models.kimi_k3.amd.specialized_decode.mono.common.plan import THREADS,
 ROWS = 16
 KCH = 128
 LDS_PAD = 8  # bf16 a padded token row
+TILE = 16  # token rows an MFMA's B operand holds
+XTILE_BYTES = 116 * 1024  # a tile of x rows in LDS at most
+
+
+def tile_rows(k):
+    """Token rows an LDS tile of K = ``k`` (padded) bf16 rows holds: 16, or 8
+    for the 7168-wide rows (16 of them are 229 KB)."""
+    n = TILE
+    while n > 1 and n * (k + LDS_PAD) * 2 > XTILE_BYTES:
+        n //= 2
+    return n
+
+
+def token_tiles(s, n=TILE):
+    """(first token, rows) of each tile of ``n`` rows over S = ``s``."""
+    return [(t0, min(n, s - t0)) for t0 in range(0, s, n)]
 
 
 def chunks(k):
@@ -98,9 +114,9 @@ def const_live(per, n):
 
 
 @traced
-def rows_to_lds(tid, src, k, s, xl, xrow, cm=0, ldk=None, k0=0):
-    """Columns k0 .. k0 + k of token rows 0 .. s - 1 of the bf16 [s, ldk] at
-    ``src`` -> LDS (``xrow`` a row), 16 B a lane."""
+def rows_to_lds(tid, src, k, s, xl, xrow, cm=0, ldk=None, k0=0, t0=0):
+    """Columns k0 .. k0 + k of token rows t0 .. t0 + s - 1 of the bf16 [S, ldk]
+    at ``src`` -> LDS rows 0 .. s - 1 (``xrow`` a row), 16 B a lane."""
     ldk = k if ldk is None else ldk
     words = s * k // 8
     for i in range_constexpr((words + THREADS - 1) // THREADS):
@@ -110,7 +126,7 @@ def rows_to_lds(tid, src, k, s, xl, xrow, cm=0, ldk=None, k0=0):
         v = fx.Vector(
             bo.buffer_load(
                 rsrc(src),
-                (t * ldk + k0 + kk) // 2,
+                ((t0 + t) * ldk + k0 + kk) // 2,
                 vec_width=4,
                 dtype=T.i32,
                 cache_modifier=cm,
@@ -121,6 +137,6 @@ def rows_to_lds(tid, src, k, s, xl, xrow, cm=0, ldk=None, k0=0):
     gpu.barrier()
 
 
-def dev_rows_to_lds(tid, src, k, s, xl, xrow):
+def dev_rows_to_lds(tid, src, k, s, xl, xrow, t0=0):
     """``rows_to_lds`` at device scope: rows another CTA of this launch wrote."""
-    rows_to_lds(tid, src, k, s, xl, xrow, CM_DEV)
+    rows_to_lds(tid, src, k, s, xl, xrow, CM_DEV, t0=t0)
