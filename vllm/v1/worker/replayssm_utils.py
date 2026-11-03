@@ -400,6 +400,21 @@ class ReplaySSMModelContext:
             and mixer.replayssm_buffer_len == first.replayssm_buffer_len
             for mixer in mixers
         ), "FlashInfer ReplaySSM requires equal materialization geometry"
+        # FlashInfer reads the SSM state and the x and B rings with 16-byte
+        # copies. The page layout makes them aligned for supported models;
+        # fail clearly instead of faulting inside the kernel otherwise.
+        for mixer in mixers:
+            for name, state in zip(
+                ("ssm state", "x ring", "B ring"), mixer.kv_cache[1:4]
+            ):
+                slot_stride = state.stride(0) * state.element_size()
+                if state.data_ptr() % 16 or slot_stride % 16:
+                    raise ValueError(
+                        f"FlashInfer ReplaySSM needs a 16-byte-aligned {name}, "
+                        f"but layer {mixer.prefix} has base address "
+                        f"{state.data_ptr():#x} and slot stride {slot_stride} "
+                        "bytes: this model's Mamba page layout is not aligned."
+                    )
 
         device = first.kv_cache[1].device
         block_tables = [table for _, _, table in grouped]
@@ -447,13 +462,13 @@ class ReplaySSMModelContext:
                 x_cache_slot_strides=_cuda_i64_slot_strides(
                     [m.kv_cache[2] for m in mixers]
                 ),
-                B_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[4] for m in mixers]),
+                B_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[3] for m in mixers]),
                 B_cache_slot_strides=_cuda_i64_slot_strides(
-                    [m.kv_cache[4] for m in mixers]
-                ),
-                dt_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[3] for m in mixers]),
-                dt_cache_slot_strides=_cuda_i64_slot_strides(
                     [m.kv_cache[3] for m in mixers]
+                ),
+                dt_cache_ptrs=_cuda_i64_ptrs([m.kv_cache[4] for m in mixers]),
+                dt_cache_slot_strides=_cuda_i64_slot_strides(
+                    [m.kv_cache[4] for m in mixers]
                 ),
                 A_ptrs=_cuda_i64_ptrs([m.A for m in mixers]),
                 state_scale_ptrs=zero_table,
@@ -499,7 +514,7 @@ class ReplaySSMModelContext:
             dim=first.kv_cache[1].size(2),
             dstate=first.kv_cache[1].size(3),
             num_heads=first.kv_cache[1].size(1),
-            heads_per_group=(first.kv_cache[1].size(1) // first.kv_cache[4].size(1)),
+            heads_per_group=(first.kv_cache[1].size(1) // first.kv_cache[3].size(1)),
             max_window=self.logical_window,
             ring_buffer_len=self.ring_buffer_len,
             pad_slot_id=NULL_BLOCK_ID,

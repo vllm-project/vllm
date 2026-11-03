@@ -122,18 +122,17 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             (heads, dim),
             (heads, dim, dstate),
             (heads, ring_len, dim),
-            (heads, ring_len),
             (1, ring_len, dstate),
+            (heads, ring_len),
         ),
         dtypes=(
             torch.bfloat16,
             ssm_dtype,
             torch.bfloat16,
-            torch.float32,
             torch.bfloat16,
+            torch.float32,
         ),
         mamba_cache_mode="align",
-        state_alignment=16,
         block_stride_alignment=16,
     )
     spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
@@ -158,14 +157,13 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
         layer = SimpleNamespace(
             get_state_shape=lambda: spec.shapes,
             get_state_dtype=lambda: spec.dtypes,
-            state_alignment=16,
         )
         MambaBase.bind_kv_cache(layer, page)
         caches[name] = layer.kv_cache
     rings = {name: states[2:] for name, states in caches.items()}
     for name, states in caches.items():
         states[1].normal_(std=0.1)
-        x, dt, B = rings[name]
+        x, B, dt = rings[name]
         x.normal_()
         dt.fill_(0.01)
         B.normal_()
@@ -276,7 +274,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
                 continue
             for name in names:
                 destinations.setdefault(caches[name][1].data_ptr(), set()).add(dst)
-                x, dt, B = rings[name]
+                x, B, dt = rings[name]
                 expected = original[name][src].float().clone()
                 for offset in range(flush):
                     pos = (start + offset) % ring_len
@@ -556,8 +554,8 @@ def test_replayssm_physical_ring_shape(
     assert shapes == (
         *base_shapes,
         (8, expected_ring_len, 4),
-        (8, expected_ring_len),
         (2, expected_ring_len, 16),
+        (8, expected_ring_len),
     )
 
 
@@ -754,4 +752,4 @@ def test_replayssm_ring_shape_extends_groups_for_head_shards():
         backend=MambaBackendEnum.TRITON,
     )
 
-    assert shapes == (*base_shapes, (2, 16, 64), (2, 16), (1, 16, 128))
+    assert shapes == (*base_shapes, (2, 16, 64), (1, 16, 128), (2, 16))

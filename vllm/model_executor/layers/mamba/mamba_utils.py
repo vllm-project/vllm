@@ -21,16 +21,11 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    pass
 
 logger = init_logger(__name__)
 
 ConvStateLayoutType = Literal["SD", "DS"]
-
-
-def mamba_state_alignment(vllm_config: "VllmConfig") -> int:
-    # FlashInfer loads state and ring caches with 16-byte cp.async instructions.
-    return 16 if vllm_config.use_flashinfer_replayssm else 1
 
 
 @functools.lru_cache
@@ -97,10 +92,10 @@ class MambaStateDtypeCalculator:
         model_dtype: ModelDType | torch.dtype,
     ) -> tuple[torch.dtype, ...]:
         """Append the ReplaySSM ring dtypes to a base ``(conv, ssm)`` tuple:
-        ``(x_cache, dt_cache, B_cache)`` = ``(activation, fp32, activation)``.
+        ``(x_cache, B_cache, dt_cache)`` = ``(activation, activation, fp32)``.
         """
         activation_dtype = get_kv_cache_torch_dtype("auto", model_dtype)
-        return (*base_dtypes, activation_dtype, torch.float32, activation_dtype)
+        return (*base_dtypes, activation_dtype, activation_dtype, torch.float32)
 
     @classmethod
     def _mamba_state_dtype(
@@ -231,10 +226,15 @@ class MambaStateShapeCalculator:
         tuple[int, int],
         tuple[int, int, int],
         tuple[int, int, int],
-        tuple[int, int],
         tuple[int, int, int],
+        tuple[int, int],
     ]:
-        """Append the physical ReplaySSM ring shapes.
+        """Append the physical ReplaySSM ring shapes ``(x, B, dt)``.
+
+        The fp32 dt ring goes last: FlashInfer reads the state and the x and B
+        rings with 16-byte copies, while dt needs only 4-byte alignment. With dt
+        last, every 16-byte-sensitive state starts at a multiple of 16 bytes for
+        the supported head_dim / d_state values, without padding.
 
         ``base_shapes[1]`` is ``(nheads // tp, head_dim, state_size)``;
         B_cache extends ``n_groups`` for head shards as in ``mamba2_state_shape``.
@@ -249,8 +249,8 @@ class MambaStateShapeCalculator:
         return (
             *base_shapes,
             (local_nheads, ring_buffer_len, head_dim),
-            (local_nheads, ring_buffer_len),
             (local_ngroups, ring_buffer_len, state_size),
+            (local_nheads, ring_buffer_len),
         )
 
     @classmethod

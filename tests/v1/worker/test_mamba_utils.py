@@ -542,7 +542,6 @@ def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
             block_size=16,
             shapes=mixer.get_state_shape(),
             dtypes=mixer.get_state_dtype(),
-            state_alignment=16,
             page_size_padded=128,
         )
         for mixer in mixers
@@ -596,16 +595,15 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
     conv_shape = (8, 6) if is_conv_state_dim_first() else (6, 8)
     spec = MambaSpec(
         block_size=16,
-        shapes=(conv_shape, (1, 4, 4), (1, 20, 4), (1, 20), (1, 20, 4)),
+        shapes=(conv_shape, (1, 4, 4), (1, 20, 4), (1, 20, 4), (1, 20)),
         dtypes=(
             torch.bfloat16,
             torch.float32,
             torch.bfloat16,
-            torch.float32,
             torch.bfloat16,
+            torch.float32,
         ),
         mamba_cache_mode="align",
-        state_alignment=16,
         block_stride_alignment=16,
     )
     spec = replace(spec, page_size_padded=spec.page_size_bytes + 128)
