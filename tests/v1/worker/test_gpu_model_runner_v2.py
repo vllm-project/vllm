@@ -15,6 +15,7 @@ import vllm.distributed.aux_output_connector.worker as aux_output_worker
 import vllm.v1.worker.gpu.model_runner as model_runner_module
 from vllm.config import (
     AttentionConfig,
+    AuxOutputConfig,
     CacheConfig,
     KernelConfig,
     LoadConfig,
@@ -124,7 +125,7 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     capturer = object()
     model = torch.nn.Module()
     vllm_config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(enabled=enabled),
+        aux_output_config=AuxOutputConfig(enable_return_routed_experts=enabled),
         max_concurrent_batches=1,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=8),
     )
@@ -161,7 +162,7 @@ def test_profile_run_creates_aux_output_connector_before_forward(
     assert events == expected_events
     connector = runner.aux_output_connector
     if enabled:
-        assert connector is not None and connector._capturer is capturer
+        assert connector is not None and connector._routed_experts_capturer is capturer
     else:
         assert connector is None
 

@@ -135,6 +135,7 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         routed_experts_prompt_start,
+        indexer_topk_prompt_start,
         vllm_xargs,
         stream_interval,
     } = sampling_params;
@@ -154,6 +155,14 @@ pub fn lower_sampling_params(
     if routed_experts_prompt_start > prompt_len {
         return Err(SamplingParamsError::RoutedExpertsPromptStartOutOfRange {
             value: routed_experts_prompt_start,
+            prompt_len,
+        }
+        .into());
+    }
+    let indexer_topk_prompt_start = indexer_topk_prompt_start.unwrap_or(0);
+    if indexer_topk_prompt_start > prompt_len {
+        return Err(SamplingParamsError::IndexerTopkPromptStartOutOfRange {
+            value: indexer_topk_prompt_start,
             prompt_len,
         }
         .into());
@@ -250,6 +259,7 @@ pub fn lower_sampling_params(
         skip_reading_prefix_cache,
         extra_args: vllm_xargs,
         routed_experts_prompt_start,
+        indexer_topk_prompt_start,
         stream_interval,
     };
     validate_resolved_sampling_params(&params)?;
@@ -501,6 +511,27 @@ mod tests {
         let error = lower(Some(4)).unwrap_err();
         assert!(error.is_request_validation_error());
         assert!(error.to_string().contains("routed_experts_prompt_start"));
+    }
+
+    #[test]
+    fn lower_sampling_params_validates_independent_indexer_prompt_start() {
+        let lower = |start| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    routed_experts_prompt_start: Some(1),
+                    indexer_topk_prompt_start: start,
+                    ..Default::default()
+                },
+                sample_sampling_limits(),
+            )
+        };
+        assert_eq!(lower(None).unwrap().indexer_topk_prompt_start, 0);
+        let params = lower(Some(3)).unwrap();
+        assert_eq!(params.indexer_topk_prompt_start, 3);
+        assert_eq!(params.routed_experts_prompt_start, 1);
+        let error = lower(Some(4)).unwrap_err();
+        assert!(error.is_request_validation_error());
+        assert!(error.to_string().contains("indexer_topk_prompt_start"));
     }
 
     #[test]
@@ -832,6 +863,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                indexer_topk_prompt_start: 0,
                 stream_interval: None,
             }
         "#]]
@@ -887,6 +919,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                indexer_topk_prompt_start: 0,
                 stream_interval: None,
             }
         "#]]
@@ -1070,6 +1103,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                indexer_topk_prompt_start: 0,
                 stream_interval: None,
             }
         "#]]
@@ -1145,6 +1179,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                indexer_topk_prompt_start: 0,
                 stream_interval: None,
             }
         "#]]
@@ -1215,6 +1250,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                indexer_topk_prompt_start: 0,
                 stream_interval: None,
             }
         "#]]
@@ -1681,6 +1717,7 @@ mod tests {
                 skip_reading_prefix_cache: None,
                 extra_args: None,
                 routed_experts_prompt_start: 0,
+                indexer_topk_prompt_start: 0,
                 stream_interval: None,
             }
         "#]]

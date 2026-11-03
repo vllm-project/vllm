@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from functools import partial
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 import torch
 
@@ -26,6 +27,31 @@ logger = logging.getLogger(__name__)
 class RoutedExpertsCaptureSource(Protocol):
     layer_id: int
     capture_fn: Callable[[torch.Tensor], None] | None
+
+
+@dataclass
+class _CaptureBinding:
+    """One capture callback this capturer installed on a model module."""
+
+    target: Any
+    attribute: str
+    installed: Any
+    setter: Callable[[Any], None] | None = None
+
+    def install(self) -> None:
+        self._set(self.installed)
+
+    def _set(self, value: Any) -> None:
+        if self.setter is None:
+            setattr(self.target, self.attribute, value)
+        else:
+            self.setter(value)
+
+    def release(self) -> None:
+        """Remove the callback only if this binding still owns the slot."""
+        if getattr(self.target, self.attribute, None) is not self.installed:
+            return
+        self._set(None)
 
 
 def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
@@ -84,6 +110,24 @@ class RoutedExpertsCapturer:
         )
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
+        self._bindings: list[_CaptureBinding] = []
+        self._closed = False
+
+    def bind(self, bindings: list[_CaptureBinding]) -> None:
+        """Record the callbacks installed by :func:`bind_routed_experts_capturer`."""
+        if self._closed:
+            raise ValueError("Cannot bind a closed routed-experts capturer")
+        self._bindings = bindings
+
+    def close(self) -> None:
+        """Unbind this capturer's callbacks and release its device buffer."""
+        if self._closed:
+            return
+        for binding in reversed(self._bindings):
+            binding.release()
+        self._bindings.clear()
+        del self.device_buffer
+        self._closed = True
 
     def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
         if not 0 <= layer_id < self.device_buffer.shape[1]:
@@ -180,29 +224,33 @@ class RoutedExpertsSink:
         self.capture_fn = capture_fn
 
 
-def bind_routed_experts_capturer(
-    model: torch.nn.Module,
-    capturer: RoutedExpertsCapturer,
-) -> None:
-    """Attach capture callbacks to the target model's MoE routers."""
+def _get_routed_experts_bindings(
+    model: torch.nn.Module, capturer: RoutedExpertsCapturer
+) -> list[_CaptureBinding]:
+    """Validate every capture target before installing any callback."""
     from vllm.model_executor.layers.fused_moe.layer import MoERunner
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
         FusedMoEExpertsMonolithic,
     )
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
-    num_bound = 0
+    bindings: list[_CaptureBinding] = []
     for module in model.modules():
         if isinstance(module, RoutedExpertsCaptureSource):
-            module.capture_fn = partial(capturer.capture, module.layer_id)
-            num_bound += 1
+            if module.capture_fn is not None:
+                raise ValueError(
+                    f"Routed-experts source layer {module.layer_id} is already bound"
+                )
+            bindings.append(
+                _CaptureBinding(
+                    module, "capture_fn", partial(capturer.capture, module.layer_id)
+                )
+            )
             continue
         if not isinstance(module, MoERunner):
             continue
-        capture_fn = partial(capturer.capture, module.layer_id)
-        quant_method = module._quant_method
-        if quant_method.is_monolithic:
-            moe_kernel = getattr(quant_method, "moe_kernel", None)
+        if module._quant_method.is_monolithic:
+            moe_kernel = getattr(module._quant_method, "moe_kernel", None)
             impl = getattr(moe_kernel, "impl", None)
             fused_experts = getattr(impl, "fused_experts", None)
             if not (
@@ -213,18 +261,66 @@ def bind_routed_experts_capturer(
                     "Routed-experts capture is not supported with monolithic "
                     f"MoE kernel {type(fused_experts).__name__}."
                 )
-            module.routed_experts.routing_sink = RoutedExpertsSink(
-                fused_experts.moe_config, capture_fn
+            if module.routed_experts.routing_sink is not None:
+                raise ValueError(
+                    "Routed-experts monolithic layer "
+                    f"{module.layer_id} is already bound"
+                )
+            bindings.append(
+                _CaptureBinding(
+                    module.routed_experts,
+                    "routing_sink",
+                    RoutedExpertsSink(
+                        fused_experts.moe_config,
+                        partial(capturer.capture, module.layer_id),
+                    ),
+                )
             )
-            num_bound += 1
         elif isinstance(module.router, BaseRouter):
-            module.router.set_capture_fn(capture_fn)
-            num_bound += 1
+            if module.router.capture_fn is not None:
+                raise ValueError(
+                    f"Routed-experts router layer {module.layer_id} is already bound"
+                )
+            bindings.append(
+                _CaptureBinding(
+                    module.router,
+                    "capture_fn",
+                    partial(capturer.capture, module.layer_id),
+                    module.router.set_capture_fn,
+                )
+            )
         else:
             raise ValueError(
                 "Routed-experts capture is not supported with router "
                 f"{type(module.router).__name__}."
             )
 
-    if num_bound == 0:
+    if not bindings:
         raise ValueError("No supported MoE router found for routed-experts capture.")
+    return bindings
+
+
+def bind_routed_experts_capturer(
+    model: torch.nn.Module,
+    capturer: RoutedExpertsCapturer,
+) -> None:
+    """Attach capture callbacks to the target model's MoE routers.
+
+    All targets are validated before any callback is installed. A failure while
+    installing rolls back the callbacks already installed by this call, so a
+    retry starts from an unbound model.
+    """
+    if capturer._closed:
+        raise ValueError("Cannot bind a closed routed-experts capturer")
+    if capturer._bindings:
+        raise ValueError("Routed-experts capturer is already bound")
+
+    bindings = _get_routed_experts_bindings(model, capturer)
+    try:
+        for binding in bindings:
+            binding.install()
+    except BaseException:
+        for binding in reversed(bindings):
+            binding.release()
+        raise
+    capturer.bind(bindings)

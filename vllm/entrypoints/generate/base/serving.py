@@ -5,7 +5,7 @@ import time
 from collections.abc import Awaitable
 from dataclasses import dataclass, field
 from http import HTTPStatus
-from typing import ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 
 from fastapi import Request
 from pydantic import ConfigDict
@@ -30,8 +30,10 @@ from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
+from vllm.outputs import CompletionOutput
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
+from vllm.utils.serial_utils import numpy2base64
 from vllm.v1.metrics.stats import RequestStateStats
 
 logger = init_logger(__name__)
@@ -40,6 +42,12 @@ RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
 SESSION_ID_HEADER = "X-Session-ID"
 PRIORITY_HEADER = "X-Vllm-Priority"
+
+
+def indexer_response_fields(output: CompletionOutput) -> dict[str, Any]:
+    if output.indexer_topk is None:
+        return {}
+    return {"indexer_topk": numpy2base64(output.indexer_topk)}
 
 
 def build_per_request_timing_metrics(

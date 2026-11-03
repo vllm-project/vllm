@@ -1210,6 +1210,9 @@ class DeepseekV2MLAAttention(nn.Module):
             is_sparse=self.is_v32,
             topk_indices_buffer=topk_indices_buffer,
             index_group_builder=index_group_builder,
+            enable_indexer_capture=(
+                self.is_v32 and vllm_config.aux_output_config.enable_return_indexer_topk
+            ),
         )
 
         self.mla_attn = MultiHeadLatentAttentionWrapper(

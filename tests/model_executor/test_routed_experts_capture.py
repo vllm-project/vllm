@@ -73,6 +73,23 @@ def _capturer_with_buffer(
     return c
 
 
+class _BindableCapturer(RoutedExpertsCapturer):
+    """A capturer that carries the lifecycle state the binder expects."""
+
+    def __init__(self, capture):
+        self._bindings = []
+        self._closed = False
+        self.device_buffer = torch.empty(0, dtype=torch.int32)
+        self._capture = capture
+
+    def capture(self, layer_id: int, topk_ids: torch.Tensor) -> None:
+        self._capture(layer_id, topk_ids)
+
+
+def _bindable_capturer(capture):
+    return _BindableCapturer(capture)
+
+
 class DummyRouter(BaseRouter):
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -164,7 +181,7 @@ def test_public_binding_binds_target_model_router(monkeypatch):
 
     monkeypatch.setattr(fused_moe_layer, "MoERunner", DummyFusedMoE)
     calls = []
-    capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
+    capturer = _bindable_capturer(lambda layer_id, ids: calls.append((layer_id, ids)))
 
     bind_routed_experts_capturer(
         types.SimpleNamespace(modules=lambda: [target_module]), capturer
@@ -185,7 +202,7 @@ def test_public_binding_supports_direct_capture_source():
 
     source = DirectCaptureSource()
     calls = []
-    capturer = types.SimpleNamespace(capture=lambda *args: calls.append(args))
+    capturer = _bindable_capturer(lambda layer_id, ids: calls.append((layer_id, ids)))
 
     bind_routed_experts_capturer(source, capturer)
 
@@ -252,7 +269,7 @@ def _bind_monolithic(
     monkeypatch.setattr(fused_moe_layer, "MoERunner", _MonolithicMoE)
     layer = _MonolithicMoE(experts)
     bind_routed_experts_capturer(
-        SimpleNamespace(modules=lambda: [layer]), SimpleNamespace(capture=capture)
+        SimpleNamespace(modules=lambda: [layer]), _bindable_capturer(capture)
     )
     return layer
 
@@ -670,7 +687,7 @@ def test_get_aux_output_connector_passes_config(monkeypatch):
 def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatch):
     import vllm.distributed.aux_output_connector.worker as aux_output_worker
 
-    capturer = Mock()
+    capturer = Mock(_closed=False, _bindings=[])
     constructor = Mock(return_value=capturer)
     bind = Mock()
     monkeypatch.setattr(aux_output_worker, "RoutedExpertsCapturer", constructor)
@@ -682,7 +699,9 @@ def test_aux_output_worker_connector_binds_capture_on_non_output_rank(monkeypatc
     )
 
     config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(enable_return_routed_experts=True),
+        aux_output_config=SimpleNamespace(
+            enable_return_routed_experts=True, enable_return_indexer_topk=False
+        ),
         kv_transfer_config=None,
         max_concurrent_batches=2,
         scheduler_config=SimpleNamespace(max_num_batched_tokens=32),
@@ -728,10 +747,14 @@ def test_aux_output_worker_connector_default_capacity(monkeypatch):
         aux_output_worker, "BackgroundBlockObjectStore", background_store_constructor
     )
     buffer_constructor = Mock()
-    monkeypatch.setattr(aux_output_worker, "RoutedExpertsBuffer", buffer_constructor)
+    monkeypatch.setattr(aux_output_worker, "AuxOutputBuffer", buffer_constructor)
 
     config = SimpleNamespace(
-        aux_output_config=SimpleNamespace(max_bytes=None),
+        aux_output_config=SimpleNamespace(
+            max_bytes=None,
+            enable_return_routed_experts=True,
+            enable_return_indexer_topk=False,
+        ),
         kv_transfer_config=None,
         cache_config=SimpleNamespace(enable_prefix_caching=True),
         scheduler_config=SimpleNamespace(max_num_seqs=8, max_num_batched_tokens=32),
@@ -784,3 +807,65 @@ def test_v2_model_runner_accepts_routed_experts(monkeypatch):
     unsupported = VllmConfig._get_v2_model_runner_unsupported_features(config)
 
     assert "routed experts capture" not in unsupported
+
+
+class _RejectingRouter(DummyRouter):
+    reject = False
+
+    def set_capture_fn(self, capture_fn):
+        if capture_fn is not None and self.reject:
+            raise RuntimeError("router rejected the capture callback")
+        super().set_capture_fn(capture_fn)
+
+
+class _RouterMoE:
+    def __init__(self, layer_id: int, *, reject: bool = False):
+        self.layer_id = layer_id
+        self.router = _RejectingRouter(top_k=2, global_num_experts=16)
+        self.router.reject = reject
+        self._quant_method = _make_modular_routed_experts().quant_method
+
+
+def _bind_routers(monkeypatch, layers):
+    import vllm.model_executor.layers.fused_moe.layer as fused_moe_layer
+
+    monkeypatch.setattr(fused_moe_layer, "MoERunner", _RouterMoE)
+    model = types.SimpleNamespace(modules=lambda: layers)
+    capturer = _bindable_capturer(Mock())
+    bind_routed_experts_capturer(model, capturer)
+    return capturer
+
+
+def test_capturer_close_unbinds_callbacks_and_releases_the_buffer(monkeypatch):
+    layers = [_RouterMoE(1), _RouterMoE(2)]
+    capturer = _bind_routers(monkeypatch, layers)
+    assert all(layer.router.capture_fn is not None for layer in layers)
+
+    capturer.close()
+
+    assert all(layer.router.capture_fn is None for layer in layers)
+    assert not hasattr(capturer, "device_buffer")
+    capturer.close()
+
+
+def test_bind_rolls_back_callbacks_installed_before_a_failure(monkeypatch):
+    first, second = _RouterMoE(1), _RouterMoE(2, reject=True)
+
+    with pytest.raises(RuntimeError, match="router rejected"):
+        _bind_routers(monkeypatch, [first, second])
+
+    assert first.router.capture_fn is None
+    assert second.router.capture_fn is None
+
+
+def test_bind_rejects_a_closed_or_already_bound_capturer(monkeypatch):
+    layers = [_RouterMoE(1)]
+    capturer = _bind_routers(monkeypatch, layers)
+
+    with pytest.raises(ValueError, match="already bound"):
+        _bind_routers(monkeypatch, layers)
+
+    capturer.close()
+    model = types.SimpleNamespace(modules=lambda: layers)
+    with pytest.raises(ValueError, match="closed"):
+        bind_routed_experts_capturer(model, capturer)
