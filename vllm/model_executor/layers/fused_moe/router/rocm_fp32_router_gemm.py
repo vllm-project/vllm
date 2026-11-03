@@ -9,6 +9,13 @@ from vllm.platforms.rocm import on_gfx950
 from vllm.triton_utils import tl, triton
 
 _MAX_TOKENS = 32
+# Routers with at most this many weight elements (e.g. 6144 x 128, 3072 x 256,
+# 4096 x 192) stay ahead of cast + hipBLASLt F.linear on MI355 up to 128 tokens,
+# which covers decode steps of 5-16 speculative-decoding requests (8 query tokens
+# each). Wider routers (2560 x 512, 7168 x 384, 8192 x 256, ...) fall behind
+# F.linear before then and keep the 32-token limit.
+_SMALL_ROUTER_MAX_ELEMENTS = 6144 * 128
+_SMALL_ROUTER_MAX_TOKENS = 128
 # From this many multiply-adds on, F.linear wins on MI355.
 _MAX_MACS = 1 << 27
 # Above this num_tokens * num_experts, hipBLASLt wins for BF16 weights.
@@ -90,7 +97,23 @@ def _launch_config(
         return (8, 512, 2) if wide else (4, 1024, 4)
     if num_experts >= 768:
         return 16, 256, 2
+    if not wide and num_tokens > _MAX_TOKENS:
+        # swept on MI355X for 128 experts x K=6144 over 33..128 tokens
+        if num_tokens <= 48:
+            return 4, 512, 2
+        if num_tokens <= 64:
+            return 8, 512, 4
+        if num_tokens <= 96:
+            return 16, 512, 4
+        return 8, 512, 2
     return (8, 256, 2) if wide else (4, 512, 2)
+
+
+def max_tokens(num_experts: int, hidden_size: int) -> int:
+    """Largest batch the Triton kernel serves for a [experts, hidden] router."""
+    if num_experts * hidden_size <= _SMALL_ROUTER_MAX_ELEMENTS:
+        return _SMALL_ROUTER_MAX_TOKENS
+    return _MAX_TOKENS
 
 
 def can_use_rocm_fp32_router_gemm(
@@ -125,8 +148,9 @@ def _validate_inputs(
         raise ValueError("hidden_states and router_weight must be contiguous")
     if router_weight.shape[1] != hidden_states.shape[1]:
         raise ValueError("router_weight and hidden_states hidden sizes differ")
-    if not 0 <= hidden_states.shape[0] <= _MAX_TOKENS:
-        raise ValueError(f"num_tokens must be in [0, {_MAX_TOKENS}]")
+    limit = max_tokens(*router_weight.shape)
+    if not 0 <= hidden_states.shape[0] <= limit:
+        raise ValueError(f"num_tokens must be in [0, {limit}]")
     if hidden_states.shape[0] * router_weight.numel() >= _MAX_MACS:
         raise ValueError(
             f"num_tokens * num_experts * hidden_size must be < {_MAX_MACS}"

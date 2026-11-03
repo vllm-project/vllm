@@ -30,6 +30,7 @@ SHAPES = [
     (1000, 100),
 ]
 MAX_TOKENS = 32
+SMALL_ROUTER_MAX_TOKENS = 128
 ATOL = 5e-4
 RTOL = 0.0
 
@@ -104,6 +105,45 @@ def test_rocm_fp32_router_gemm_preserves_topk(
             assert gap < 1e-3
 
 
+SMALL_ROUTER_SHAPES = [(6144, 128), (3072, 256), (4096, 192), (2880, 128), (5120, 16)]
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(("hidden_size", "num_experts"), SMALL_ROUTER_SHAPES)
+@pytest.mark.parametrize("num_tokens", [33, 40, 48, 49, 64, 65, 96, 97, 127, 128])
+@torch.inference_mode()
+def test_rocm_fp32_router_gemm_small_router_above_32_tokens(
+    num_tokens: int, hidden_size: int, num_experts: int, dtype: torch.dtype
+) -> None:
+    """Small routers (<= 6144 x 128 weights) use the Triton kernel up to 128 tokens."""
+    assert rocm_router.max_tokens(num_experts, hidden_size) == SMALL_ROUTER_MAX_TOKENS
+    torch.manual_seed(77 + num_tokens + hidden_size + num_experts)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
+    weight = torch.randn(num_experts, hidden_size, dtype=torch.float32, device="cuda")
+
+    output = rocm_fp32_router_gemm(x, weight)
+
+    assert output.shape == (num_tokens, num_experts)
+    torch.testing.assert_close(output, _reference(x, weight), atol=ATOL, rtol=RTOL)
+
+
+@torch.inference_mode()
+def test_rocm_fp32_router_gemm_token_limit_depends_on_router_size() -> None:
+    small = (6144, 128)
+    wide = [(2560, 512), (7168, 384), (8192, 256), (4096, 352)]
+    assert rocm_router.max_tokens(*reversed(small)) == SMALL_ROUTER_MAX_TOKENS
+    for hidden_size, num_experts in wide:
+        assert rocm_router.max_tokens(num_experts, hidden_size) == MAX_TOKENS
+    x = torch.randn(
+        SMALL_ROUTER_MAX_TOKENS + 1, 6144, dtype=torch.bfloat16, device="cuda"
+    )
+    weight = torch.randn(128, 6144, dtype=torch.float32, device="cuda")
+    assert not rocm_router.can_use_rocm_fp32_router_gemm(x, weight)
+    x = torch.randn(MAX_TOKENS + 1, 2560, dtype=torch.bfloat16, device="cuda")
+    weight = torch.randn(512, 2560, dtype=torch.float32, device="cuda")
+    assert not rocm_router.can_use_rocm_fp32_router_gemm(x, weight)
+
+
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_rejects_invalid_inputs() -> None:
     device = torch.device("cuda")
@@ -114,7 +154,7 @@ def test_rocm_fp32_router_gemm_rejects_invalid_inputs() -> None:
     with pytest.raises(ValueError, match="num_tokens"):
         rocm_fp32_router_gemm(
             torch.randn(
-                MAX_TOKENS + 1,
+                SMALL_ROUTER_MAX_TOKENS + 1,
                 hidden_size,
                 dtype=torch.bfloat16,
                 device=device,
@@ -180,7 +220,7 @@ def test_rocm_fp32_router_gemm_cuda_graph_observes_input_mutation() -> None:
     assert not torch.equal(first_output, second_output)
 
 
-@pytest.mark.parametrize("num_tokens", [4, 32, 33])
+@pytest.mark.parametrize("num_tokens", [4, 32, 33, 40, 128, 129])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @torch.inference_mode()
 def test_rocm_fp32_router_gemm_custom_op_dispatch(
@@ -362,6 +402,30 @@ def test_gate_linear_uses_rocm_fp32_router_gemm(
 
     assert bias is None
     assert calls == ([num_tokens] if num_tokens <= MAX_TOKENS else [])
+    torch.testing.assert_close(output, _reference(x, gate.weight), atol=ATOL, rtol=RTOL)
+
+
+@pytest.mark.parametrize("num_tokens", [32, 33, 40, 128, 129])
+@torch.inference_mode()
+def test_gate_linear_small_router_uses_rocm_fp32_router_gemm_up_to_128_tokens(
+    monkeypatch: pytest.MonkeyPatch, num_tokens: int
+) -> None:
+    """A 6144 x 128 fp32 router (MiniMax-M3) takes the kernel for decode batches of
+    up to 128 tokens instead of cast + hipBLASLt."""
+    gate = _make_gate_linear(monkeypatch, 6144, 128)
+    calls = []
+    kernel = rocm_router.rocm_fp32_router_gemm
+
+    def spy(hidden_states, router_weight):
+        calls.append(hidden_states.shape[0])
+        return kernel(hidden_states, router_weight)
+
+    monkeypatch.setattr(rocm_router, "rocm_fp32_router_gemm", spy)
+    x = torch.randn(num_tokens, 6144, dtype=torch.bfloat16, device="cuda")
+    output, bias = gate(x)
+
+    assert bias is None
+    assert calls == ([num_tokens] if num_tokens <= SMALL_ROUTER_MAX_TOKENS else [])
     torch.testing.assert_close(output, _reference(x, gate.weight), atol=ATOL, rtol=RTOL)
 
 
