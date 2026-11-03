@@ -24,6 +24,10 @@ from vllm.platforms import current_platform
 from vllm.transformers_utils.chat_templates import get_chat_template_fallback_path
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
+NO_REPEAT_NGRAM_PROCESSOR = (
+    "vllm.v1.worker.gpu.sample.no_repeat_ngram:NoRepeatNGramState"
+)
+
 
 class ModelRequestData(NamedTuple):
     engine_args: EngineArgs
@@ -188,8 +192,6 @@ def run_deepseek_vl2(questions: list[str], modality: str) -> ModelRequestData:
 
 
 def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
-    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
-
     assert modality == "image"
 
     model_name = "deepseek-ai/DeepSeek-OCR"
@@ -197,7 +199,7 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         limit_mm_per_prompt={modality: 1},
-        logits_processors=[NGramPerReqLogitsProcessor],
+        logits_processors=[NO_REPEAT_NGRAM_PROCESSOR],
     )
 
     # deepseek-ocr use plain prompt template
@@ -205,15 +207,15 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
 
     # The following sampling params config is taken from
     # the official Deepseek-OCR inference example.
-    # (IMPORTANT) Use the custom logits processor and avoid skipping
-    # special tokens for this model for the optimal OCR performance.
+    # (IMPORTANT) Use the GPU no-repeat n-gram processor and avoid
+    # skipping special tokens for this model for the optimal OCR performance.
     sampling_params = [
         SamplingParams(
             temperature=0.0,
             max_tokens=8192,
             # ngram logit processor args
             extra_args=dict(
-                ngram_size=30,
+                no_repeat_ngram_size=30,
                 window_size=90,
                 # whitelist: <td>, </td>
                 whitelist_token_ids={128821, 128822},
@@ -231,8 +233,6 @@ def run_deepseek_ocr(questions: list[str], modality: str) -> ModelRequestData:
 
 
 def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
-    from vllm.model_executor.models.deepseek_ocr import NGramPerReqLogitsProcessor
-
     assert modality == "image"
 
     model_name = "deepseek-ai/DeepSeek-OCR-2"
@@ -240,7 +240,7 @@ def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
     engine_args = EngineArgs(
         model=model_name,
         limit_mm_per_prompt={modality: 1},
-        logits_processors=[NGramPerReqLogitsProcessor],
+        logits_processors=[NO_REPEAT_NGRAM_PROCESSOR],
     )
 
     # deepseek-ocr use plain prompt template
@@ -248,15 +248,15 @@ def run_deepseek_ocr2(questions: list[str], modality: str) -> ModelRequestData:
 
     # The following sampling params config is taken from
     # the official Deepseek-OCR inference example.
-    # (IMPORTANT) Use the custom logits processor and avoid skipping
-    # special tokens for this model for the optimal OCR performance.
+    # (IMPORTANT) Use the GPU no-repeat n-gram processor and avoid
+    # skipping special tokens for this model for the optimal OCR performance.
     sampling_params = [
         SamplingParams(
             temperature=0.0,
             max_tokens=8192,
             # ngram logit processor args
             extra_args=dict(
-                ngram_size=30,
+                no_repeat_ngram_size=30,
                 window_size=90,
                 # whitelist: <td>, </td>
                 whitelist_token_ids={128821, 128822},
