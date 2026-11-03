@@ -881,6 +881,46 @@ def test_cached_request_data_resumed_all_token_ids_mrv1_only():
     assert cached.all_token_ids == {}
 
 
+@pytest.mark.parametrize("long_prefill_token_threshold", [0, 128])
+def test_encoder_cache_pressure_respects_disabled_chunked_prefill(
+    long_prefill_token_threshold,
+):
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+        enable_chunked_prefill=False,
+        async_scheduling=True,
+        long_prefill_token_threshold=long_prefill_token_threshold,
+    )
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=800,
+        max_tokens=1,
+        mm_positions=[[PlaceholderRange(offset=100, length=600)] for _ in range(2)],
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    first, second = requests
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens == {first.request_id: 800}
+
+    # The first image is still in flight and occupies the encoder cache.
+    assert scheduler.schedule().num_scheduled_tokens == {}
+    assert second.status == RequestStatus.WAITING
+    assert second.num_computed_tokens == 0
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[first.request_id],
+            req_id_to_index={first.request_id: 0},
+            sampled_token_ids=[[EOS_TOKEN_ID]],
+        ),
+    )
+    assert scheduler.schedule().num_scheduled_tokens == {second.request_id: 800}
+
+
 def test_schedule_partial_requests():
     """Test scheduling behavior with partial requests.
 
