@@ -131,6 +131,58 @@ A data parallel deployment with 8 GPUs (`vllm serve -tp=2 -dp=4`) has:
 For CPU resource sizing recommendations, see
 [CPU Resources for GPU Deployments](../configuration/optimization.md#cpu-resources-for-gpu-deployments).
 
+## Scheduler
+
+The scheduler runs inside the **Engine Core Process** and decides which
+requests execute each step. The code can be found in
+[vllm/v1/core/sched/scheduler.py](../../vllm/v1/core/sched/scheduler.py).
+
+The scheduler is **token-budget-based**: each step, it fills a budget of
+`max_num_batched_tokens` across both running and waiting requests. There are no
+separate prefill and decode phases. Each request tracks how many of its tokens
+have been computed, and the scheduler assigns it tokens to close the gap. This
+single loop handles chunked prefill, prefix caching and speculative decoding.
+
+### Scheduling Policies
+
+Two policies are supported via `--scheduling-policy`:
+
+- **FCFS** (default): requests are scheduled first-come, first-served. When
+    the KV cache is exhausted, the last-admitted running request is preempted.
+- **Priority**: requests carry an integer `priority` field. When the KV cache
+    is exhausted, the running request with the lowest priority (highest
+    `priority` value, then latest arrival time) is preempted.
+
+### Preemption
+
+When a request cannot be allocated new KV cache blocks, the scheduler
+**preempts** running requests, chosen by the scheduling policy, until enough
+blocks are free:
+
+1. The preempted request's KV cache blocks are freed.
+2. Its progress is reset and it returns to the waiting queue. Under FCFS it
+    goes to the front of the queue; under Priority it is reinserted by
+    `(priority, arrival_time)`.
+3. When re-admitted, it is recomputed rather than swapped back from CPU
+    memory. Prefix caching or a KV connector can restore part of its progress
+    immediately.
+
+For how to reduce preemption, see
+[Preemption](../configuration/optimization.md#preemption).
+
+### Async Scheduling
+
+With async scheduling,
+[vllm/v1/core/sched/async_scheduler.py](../../vllm/v1/core/sched/async_scheduler.py)
+overlaps CPU scheduling with GPU execution: while the GPU executes step *N*,
+the CPU schedules step *N+1*, using placeholders for the tokens that step *N*
+will produce.
+
+If a request is preempted while it still has output in flight, that output is
+normally still delivered when it arrives. It is dropped instead when delivering
+it would be invalid, for example when `reset_prefix_cache` preempts and resumes
+requests within the same step.
+
 ## LLM Engine
 
 The `LLMEngine` and `AsyncLLMEngine` classes are central to the functioning of

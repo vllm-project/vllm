@@ -149,6 +149,7 @@ fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaContentPar
                 url,
                 detail: None,
                 uuid,
+                max_long_side_pixel: None,
             },
             (pb::Modality::Image, pb::media_item::Source::RawBytes(data)) => {
                 MediaContentPart::ImageData {
@@ -161,7 +162,12 @@ fn raw_parts_from_proto(media: Vec<pb::MediaItem>) -> Result<Vec<MediaContentPar
             (
                 pb::Modality::Video,
                 pb::media_item::Source::Url(url) | pb::media_item::Source::DataUri(url),
-            ) => MediaContentPart::VideoUrl { url, uuid },
+            ) => MediaContentPart::VideoUrl {
+                url,
+                uuid,
+                fps: None,
+                max_long_side_pixel: None,
+            },
             (pb::Modality::Video, pb::media_item::Source::RawBytes(data)) => {
                 MediaContentPart::VideoData {
                     data,

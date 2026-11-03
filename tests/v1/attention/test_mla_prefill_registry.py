@@ -2,13 +2,25 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for MLA prefill backend registry."""
 
+import gc
+from unittest.mock import MagicMock
+
 import pytest
 import torch
 
 from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
+from vllm.v1.attention.backends.mla.prefill.flashinfer import FlashInferPrefillBackend
 from vllm.v1.attention.backends.mla.prefill.registry import (
     MLAPrefillBackendEnum,
     register_mla_prefill_backend,
+)
+from vllm.v1.attention.backends.mla.prefill.trtllm_ragged import (
+    TrtllmRaggedPrefillBackend,
+)
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    init_workspace_manager,
+    reset_workspace_manager,
 )
 
 
@@ -21,7 +33,9 @@ class CustomMLAPrefillBackend(MLAPrefillBackend):
     def get_name() -> str:
         return "CUSTOM"
 
-    def run_prefill_new_tokens(self, q, k, v, return_softmax_lse):
+    def run_prefill_new_tokens(
+        self, q, k, v, return_softmax_lse, out=None, output_scale=None
+    ):
         raise NotImplementedError
 
     def run_prefill_context_chunk(self, chunk, q, k, v, out=None):
@@ -48,6 +62,38 @@ def test_prefill_backend_clone_has_isolated_metadata():
     backend._prefill_metadata = object()
     clone._prefill_metadata = object()
     assert clone._prefill_metadata is not backend._prefill_metadata
+
+
+@pytest.mark.parametrize(
+    "backend_cls", [TrtllmRaggedPrefillBackend, FlashInferPrefillBackend]
+)
+def test_prefill_backend_does_not_pin_grown_workspace(monkeypatch, backend_cls):
+    """Reserving workspace at init must not keep a view of it: when another user
+    grows the shared workspace, the old buffer must be freed."""
+    monkeypatch.setenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", "4096")
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        manager = current_workspace_manager()
+        backend = backend_cls(
+            num_heads=4,
+            scale=0.5,
+            kv_lora_rank=8,
+            qk_nope_head_dim=16,
+            qk_rope_head_dim=8,
+            v_head_dim=32,
+            vllm_config=MagicMock(),
+        )
+        (view,) = manager.get_simultaneous(((1,), torch.uint8))
+        old_storage = view.untyped_storage()._weak_ref()
+        del view
+
+        manager.get_simultaneous(((1 << 20,), torch.uint8))
+        gc.collect()
+
+        assert torch.UntypedStorage._expired(old_storage)
+        del backend
+    finally:
+        reset_workspace_manager()
 
 
 @pytest.fixture(autouse=True)
@@ -109,7 +155,9 @@ def test_register_custom_backend_as_decorator():
         def get_name() -> str:
             return "DECORATED"
 
-        def run_prefill_new_tokens(self, q, k, v, return_softmax_lse):
+        def run_prefill_new_tokens(
+            self, q, k, v, return_softmax_lse, out=None, output_scale=None
+        ):
             raise NotImplementedError
 
         def run_prefill_context_chunk(self, chunk, q, k, v, out=None):
@@ -175,7 +223,8 @@ def test_register_dynamic_member_duplicate_raises():
     MLAPrefillBackendEnum.register("DUP_TEST", path)
     with pytest.raises(ValueError, match="already exists"):
         MLAPrefillBackendEnum.register("DUP_TEST", "other.module.OtherClass")
-    _remove_dynamic_member(MLAPrefillBackendEnum, MLAPrefillBackendEnum.DUP_TEST)
+    # member added at runtime by register()
+    _remove_dynamic_member(MLAPrefillBackendEnum, MLAPrefillBackendEnum.DUP_TEST)  # type: ignore[attr-defined]
 
 
 class StringDecoratorMLAPrefillBackend(MLAPrefillBackend):
@@ -189,10 +238,12 @@ class StringDecoratorMLAPrefillBackend(MLAPrefillBackend):
     def get_name() -> str:
         return "DECORATED"
 
-    def run_prefill_new_tokens(self, q, k, v, return_softmax_lse):
+    def run_prefill_new_tokens(
+        self, q, k, v, return_softmax_lse, out=None, output_scale=None
+    ):
         raise NotImplementedError
 
-    def run_prefill_context_chunk(self, chunk_idx, q, k, v):
+    def run_prefill_context_chunk(self, chunk, q, k, v, out=None):
         raise NotImplementedError
 
 
@@ -201,7 +252,8 @@ def test_register_mla_prefill_backend_with_string_name_direct():
         "STRING_DIRECT",
         "tests.v1.attention.test_mla_prefill_registry.CustomMLAPrefillBackend",
     )
-    member = MLAPrefillBackendEnum.STRING_DIRECT
+    # member added at runtime by register()
+    member = MLAPrefillBackendEnum.STRING_DIRECT  # type: ignore[attr-defined]
     assert member.is_overridden()
     assert member.get_class().get_name() == "CUSTOM"
 
@@ -218,7 +270,8 @@ def test_register_mla_prefill_backend_with_string_name_decorator():
     result = register_mla_prefill_backend("STRING_DECORATOR")(decorated_cls)
     assert result is decorated_cls
 
-    member = MLAPrefillBackendEnum.STRING_DECORATOR
+    # member added at runtime by register()
+    member = MLAPrefillBackendEnum.STRING_DECORATOR  # type: ignore[attr-defined]
     assert member.is_overridden()
     assert member.get_path() == (
         f"{decorated_cls.__module__}.{decorated_cls.__qualname__}"
