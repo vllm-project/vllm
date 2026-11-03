@@ -44,7 +44,7 @@ _ANTHROPIC_ERROR_TYPE_BY_STATUS: dict[int, str] = {
 
 
 def translate_error_type(status_code: int) -> str:
-    """Translate an HTTP status code to Anthropic's ``error.type`` vocabulary."""
+    """Translate an HTTP status code to Anthropic's `error.type` vocabulary."""
     error_type = _ANTHROPIC_ERROR_TYPE_BY_STATUS.get(status_code)
     if error_type is not None:
         return error_type
@@ -224,7 +224,7 @@ class AnthropicOutputConfig(BaseModel):
 class AnthropicThinkingConfigEnabled(BaseModel):
     """Extended thinking with a fixed token budget.
 
-    ``display`` is accepted but ignored: reasoning is always returned.
+    `display` is accepted but ignored: reasoning is always returned.
     """
 
     type: Literal["enabled"]
@@ -239,7 +239,7 @@ class AnthropicThinkingConfigDisabled(BaseModel):
 class AnthropicThinkingConfigAdaptive(BaseModel):
     """Extended thinking whose depth the model chooses.
 
-    ``display`` is accepted but ignored: reasoning is always returned.
+    `display` is accepted but ignored: reasoning is always returned.
     """
 
     type: Literal["adaptive"]

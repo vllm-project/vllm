@@ -578,7 +578,7 @@ class SpeculativeConfig:
     num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
     """Batch-size schedule used to dynamically choose speculative-token count.
 
-    Each entry is ``(range_start, range_end, num_speculative_tokens)`` with an
+    Each entry is `(range_start, range_end, num_speculative_tokens)` with an
     inclusive batch-size range.
     """
 
@@ -706,7 +706,7 @@ class SpeculativeConfig:
     xpress_topc: int | None = Field(default=None, ge=0)
     """For XPress drafting, score each Jacobi pass only on the drafter's top-C
     base-logit candidates. 0 disables the narrowing and scores the full
-    vocabulary. Takes precedence over ``xpress_topc`` in the draft
+    vocabulary. Takes precedence over `xpress_topc` in the draft
     checkpoint's config, which is used when this is unset."""
 
     speculator_options: dict[str, Any] | None = None
@@ -715,7 +715,7 @@ class SpeculativeConfig:
 
     fly_window_size: int | None = Field(default=None, ge=1)
     """Number of subsequent native acceptance decisions checked by FLy.
-    If unset, defaults to ``min(6, num_speculative_tokens - 1)``."""
+    If unset, defaults to `min(6, num_speculative_tokens - 1)`."""
 
     fly_entropy_threshold: float = Field(default=0.3, ge=0)
     """Target top-k entropy lower bound for FLy loose acceptance."""
@@ -1290,20 +1290,18 @@ class SpeculativeConfig:
         target_hf_overrides: HfOverrides | None,
         transformers_mtp_overrides: dict[str, Any] | None = None,
     ) -> Callable[[PreTrainedConfig], PreTrainedConfig]:
-        """Build the ``hf_overrides`` for the draft ``ModelConfig``.
+        """Build the `hf_overrides` for the draft `ModelConfig`.
 
-        Callable overrides on the target are config-to-config transforms
-        (e.g. test harnesses shrinking ``num_hidden_layers``) and must also
-        reach the draft config — otherwise a draft belonging to a large
-        target is instantiated at full size even when the target is shrunk.
-        Dict overrides are target-specific key patches and are not applied
-        to the draft.
+        Callable overrides on the target are config-to-config transforms (e.g. test
+        harnesses shrinking `num_hidden_layers`) and must also reach the draft config —
+        otherwise a draft belonging to a large target is instantiated at full size even
+        when the target is shrunk. Dict overrides are target-specific key patches and
+        are not applied to the draft.
 
-        The composed override must stay picklable: the draft ``ModelConfig``
-        is sent to spawned engine-core processes, so a local closure would
-        fail with ``Can't get local object`` during pickling. Bind the
-        target via ``functools.partial`` over a module-referenceable static
-        method instead.
+        The composed override must stay picklable: the draft `ModelConfig` is sent to
+        spawned engine-core processes, so a local closure would fail with
+        `Can't get local object` during pickling. Bind the target via
+        `functools.partial` over a module-referenceable static method instead.
         """
         if not callable(target_hf_overrides):
             return functools.partial(
@@ -1319,7 +1317,7 @@ class SpeculativeConfig:
 
     @staticmethod
     def _is_custom_proposer_path(model: str | None) -> bool:
-        """True if ``model`` is a dotted import path (e.g. ``pkg.MyProposer``)."""
+        """True if `model` is a dotted import path (e.g. `pkg.MyProposer`)."""
         if model is None:
             return False
         if model.startswith(("http://", "https://", "file://")):
@@ -1727,7 +1725,7 @@ class SpeculativeConfig:
         """Return the maximum additional drafting slots per request.
 
         The scheduler budget already includes one query slot per decoding request.
-        Let K be ``num_speculative_tokens``. Standard configurations require:
+        Let K be `num_speculative_tokens`. Standard configurations require:
 
         ==================== ============= ======== ================
         Algorithm            Method        Parallel Additional slots

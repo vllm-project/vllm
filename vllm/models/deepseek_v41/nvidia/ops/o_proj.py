@@ -53,7 +53,7 @@ def _can_fuse_wo_a(layer: nn.Module) -> bool:
 
 
 def register_dsv41_o_proj_warmup(layer: nn.Module) -> None:
-    """Warm the fused WO-A token counts ``dsv41_o_proj`` can dispatch."""
+    """Warm the fused WO-A token counts `dsv41_o_proj` can dispatch."""
     # Draft models load outside the warmup registry; their layers share the
     # target's attention shapes, so the target's registration covers them too.
     if _can_fuse_wo_a(layer):
@@ -73,8 +73,8 @@ def dsv41_o_proj(
     positions: torch.Tensor,
     wo_b_proj: Callable[..., torch.Tensor] | None = None,
 ) -> torch.Tensor:
-    """``deep_gemm_fp8_o_proj`` with WO-A fused for small SM100/SM103 batches;
-    ``wo_b_proj`` replaces ``layer._wo_b_proj``."""
+    """`deep_gemm_fp8_o_proj` with WO-A fused for small SM100/SM103 batches;
+    `wo_b_proj` replaces `layer._wo_b_proj`."""
     wo_b_proj = wo_b_proj or layer._wo_b_proj
     o = attn_out[:, : layer.n_local_heads, :]
     cos_sin_cache = layer.rotary_emb.cos_sin_cache

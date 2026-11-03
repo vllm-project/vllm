@@ -214,8 +214,8 @@ class SpecializedDecode:
         """This step's decode plan, or None to run the stock forward instead.
 
         Steps that run the stock forward:
-        - pipeline-parallel stage inputs (``intermediate_tensors``);
-        - token counts without prepared providers (above 64 or not in ``batches``);
+        - pipeline-parallel stage inputs (`intermediate_tensors`);
+        - token counts without prepared providers (above 64 or not in `batches`);
         - steps outside a CUDA graph capture (profiling, warmup and the warmup run
           before each capture), so every stock kernel runs before its capture;
         - PIECEWISE steps, keyed by token count alone and so captured as stock;
@@ -287,7 +287,7 @@ class SpecializedDecode:
 
         Runs in chunks of at most 255 rows: the stock RMSNorm kernel reduces with
         1024-thread blocks below 256 rows and 256-thread blocks above, so chunking keeps
-        the reduction order ``compute_logits`` uses for the few sampled rows, and
+        the reduction order `compute_logits` uses for the few sampled rows, and
         prefill logits match stock.
         """
         hidden, aux = output if isinstance(output, tuple) else (output, None)

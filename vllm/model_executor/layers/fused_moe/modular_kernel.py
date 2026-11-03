@@ -269,11 +269,10 @@ class FusedMoEPrepareAndFinalize(ABC):
         return self.supports_async()
 
     def supports_deferred_moe_finalize(self) -> bool:
-        """Whether ``finalize`` can be skipped for a deferring consumer.
+        """Whether `finalize` can be skipped for a deferring consumer.
 
-        An implementation opts in only if everything it does in ``finalize``
-        -- the top-k reduction, and any combine or reduce-scatter -- is work
-        the consumer takes over.
+        An implementation opts in only if everything it does in `finalize` -- the top-k
+        reduction, and any combine or reduce-scatter -- is work the consumer takes over.
         """
         return False
 
@@ -536,8 +535,8 @@ class FusedMoEExperts(ABC):
     kept_constants: tuple[str, ...] = ()
 
     def keep_constants(self, layer: torch.nn.Module, prefix: str = "_experts_") -> None:
-        """Point ``kept_constants`` at tensors kept on ``layer`` (as ``prefix +
-        name.lstrip("_")``), refilled in place: every post-load rerun builds a
+        """Point `kept_constants` at tensors kept on `layer` (as `prefix +
+        name.lstrip("_")`), refilled in place: every post-load rerun builds a
         new experts object, and captured CUDA graphs read the first one's."""
         for name in self.kept_constants:
             value = getattr(self, name, None)
@@ -1069,7 +1068,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         """Whether this expert supports routing replay capture.
 
         Subclasses backed by a kernel that exposes routed expert IDs
-        (e.g. FlashInfer's ``routing_replay_out``) should override.
+        (e.g. FlashInfer's `routing_replay_out`) should override.
         """
         return False
 
@@ -1091,12 +1090,12 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         topk_group: int | None = None,
         routing_replay_out: torch.Tensor | None = None,
     ) -> torch.Tensor | UnfinalizedMoEOutput:
-        """Same as ``FusedMoEExperts.apply``, except uses router_logits as opposed
+        """Same as `FusedMoEExperts.apply`, except uses router_logits as opposed
         to the topk_ids and topk_weights. This is useful for kernels
         with fused router and fused_experts (e.g. FLASHINFER_TRTLLM).
 
-        Kernels that ``supports_routing_replay_capture`` write each token's
-        routed expert ids into the leading rows of ``routing_replay_out``.
+        Kernels that `supports_routing_replay_capture` write each token's
+        routed expert ids into the leading rows of `routing_replay_out`.
         """
         raise NotImplementedError
 

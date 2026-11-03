@@ -264,7 +264,7 @@ def select_wna16_moe_backend(
     """Select the WNA16 MoE backend.
 
     Args:
-        config: the shared ``FusedMoEConfig`` for this layer.
+        config: the shared `FusedMoEConfig` for this layer.
         weight_key: The QuantKey describing the weight quantization.
                     Must have int4 or int8 type.
         quant_config: Quantization structure and checkpoint format description.
@@ -274,7 +274,7 @@ def select_wna16_moe_backend(
             up to a tile boundary may be selected.
 
     Returns:
-        A tuple of (``WNA16MoEBackend``, experts class or ``None``).
+        A tuple of (`WNA16MoEBackend`, experts class or `None`).
 
     """
     activation_format = (
@@ -518,7 +518,7 @@ def _process_weights_flashinfer(
 
     Steps
     -----
-    1. Transform weights/scales via ``prepare_static_weights_for_trtllm_mxint4_moe``.
+    1. Transform weights/scales via `prepare_static_weights_for_trtllm_mxint4_moe`.
     2. Return transformed tensors and biases.
     """
     from vllm.model_executor.layers.quantization.utils.flashinfer_mxint4_moe import (
@@ -547,8 +547,8 @@ def _process_weights_flashinfer(
 
 
 def _pad_w13_shard_cols(x: torch.Tensor, unit: int, padded_unit: int) -> torch.Tensor:
-    """Zero-pad each of the two gate/up shards of a ``(E, rows, 2 * unit)``
-    tensor along its last dim, from ``unit`` to ``padded_unit`` columns."""
+    """Zero-pad each of the two gate/up shards of a `(E, rows, 2 * unit)`
+    tensor along its last dim, from `unit` to `padded_unit` columns."""
     if padded_unit == unit:
         return x
     e, rows, _ = x.shape
@@ -558,14 +558,14 @@ def _pad_w13_shard_cols(x: torch.Tensor, unit: int, padded_unit: int) -> torch.T
 
 
 def _pad_rows(x: torch.Tensor, padded_rows: int) -> torch.Tensor:
-    """Zero-pad a ``(E, rows, cols)`` tensor to ``padded_rows`` rows."""
+    """Zero-pad a `(E, rows, cols)` tensor to `padded_rows` rows."""
     if padded_rows == x.size(1):
         return x
     return torch.nn.functional.pad(x, (0, 0, 0, padded_rows - x.size(1)))
 
 
 def _pad_w13_bias(bias: torch.Tensor, n: int, padded_n: int) -> torch.Tensor:
-    """Zero-pad each gate/up shard of a ``(E, 2 * n)`` bias to ``padded_n``."""
+    """Zero-pad each gate/up shard of a `(E, 2 * n)` bias to `padded_n`."""
     if padded_n == n:
         return bias
     e = bias.size(0)
@@ -603,13 +603,13 @@ def _process_weights_marlin(
     """Standard Marlin weight post-processing shared by MARLIN and
     BATCHED_MARLIN backends.
 
-    Inputs arrive in canonical N-first layout ``[E, N, K_packed]``.
+    Inputs arrive in canonical N-first layout `[E, N, K_packed]`.
 
     Steps
     -----
     1. Transpose canonical N-first to K-first for Marlin.
     2. Optional FP8 preprocessing of packed weights / scales.
-    3. Repack weights via ``gptq_marlin_moe_repack``.
+    3. Repack weights via `gptq_marlin_moe_repack`.
     4. Permute scales (and optionally extract INT8 global scales).
     5. Permute bias tensors.
     """
@@ -927,8 +927,8 @@ def _process_weights_rdna3(
     """RDNA3 (gfx1100) W4A16 weight post-processing.
 
     Transposes the canonical N-first inputs to the K-first layout of
-    ``moe_gptq_gemm_rdna3`` (weights ``[E, K // 8, N]``, scales
-    ``[E, groups, N]``), interleaves the packed nibbles per expert (the exllama
+    `moe_gptq_gemm_rdna3` (weights `[E, K // 8, N]`, scales
+    `[E, groups, N]`), interleaves the packed nibbles per expert (the exllama
     shuffle the dense RDNA3 kernel also uses) and synthesizes the symmetric
     zero points the kernel dequantizes with.
     """
@@ -1074,7 +1074,7 @@ def _process_weights_cpu(
 
 
 def _zen_repack_s4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
-    """Repack CT int4 ``[E, N, K//8]`` into zentorch s4 ``[E, N, K//8]``."""
+    """Repack CT int4 `[E, N, K//8]` into zentorch s4 `[E, N, K//8]`."""
     from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
         _import_unpack_from_int32,
     )
@@ -1151,7 +1151,7 @@ def _process_weights_xpu(
     """Repack INT4 MoE weights into the layout
     `vllm_xpu_kernels.fused_moe_interface.xpu_fused_moe(is_int4=True)` expects.
 
-    Inputs arrive in canonical N-first layout ``[E, N, K_packed]`` int32.
+    Inputs arrive in canonical N-first layout `[E, N, K_packed]` int32.
     The int32 → uint8 view recovers sequential int4-packed bytes along
     the input dim.  Each packed int32 holds 8 nibbles in ascending K order;
     on a little-endian host the view exposes them as two nibbles per byte
@@ -1548,26 +1548,26 @@ def convert_to_wna16_moe_kernel_format(
     """Dispatch weight post-processing to the appropriate per-backend handler.
 
     All non-AWQ frontends must supply weights and scales in N-first
-    canonical layout ``[E, N_out, K_packed]``.  AWQ uses a different
+    canonical layout `[E, N_out, K_packed]`.  AWQ uses a different
     packing axis and is handled by dedicated per-backend helpers.
 
-    To add a new backend, implement a ``_process_weights_<name>`` helper and
+    To add a new backend, implement a `_process_weights_<name>` helper and
     add a branch here. Backends that rewrite the layer's parameters in place
-    (e.g. Humming) return ``None``; the caller then skips the param scatter.
+    (e.g. Humming) return `None`; the caller then skips the param scatter.
 
     Args:
-        backend: the selected ``WNA16MoEBackend``.
-        layer: the ``MoERunner`` layer whose parameters are being prepared.
-        quant_config: the ``QuantizationConfig`` for this layer.
+        backend: the selected `WNA16MoEBackend`.
+        layer: the `MoERunner` layer whose parameters are being prepared.
+        quant_config: the `QuantizationConfig` for this layer.
         input_dtype: optional activation dtype, usually should be 16 bit.
         w13: fused gate/up expert weights.
         w2: down-projection expert weights.
-        w13_scale: quantization scales for ``w13``.
-        w2_scale: quantization scales for ``w2``.
-        w13_qzeros: optional zero points for ``w13``.
-        w2_qzeros: optional zero points for ``w2``.
-        w13_bias: optional bias for ``w13``.
-        w2_bias: optional bias for ``w2``.
+        w13_scale: quantization scales for `w13`.
+        w2_scale: quantization scales for `w2`.
+        w13_qzeros: optional zero points for `w13`.
+        w2_qzeros: optional zero points for `w2`.
+        w13_bias: optional bias for `w13`.
+        w2_bias: optional bias for `w2`.
 
     """
     if backend == WNA16MoEBackend.HUMMING:

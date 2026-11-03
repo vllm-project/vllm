@@ -525,19 +525,18 @@ async def async_request_openai_chat_completions(
 
 
 def _extract_sse_data(message: str) -> str | None:
-    """Extract the ``data`` payload of a single SSE message.
+    """Extract the `data` payload of a single SSE message.
 
-    The Responses API stream labels every message with an ``event:`` line
-    before its ``data:`` line, so the payload cannot be recovered by
-    stripping a leading ``data: `` the way the Completions and Chat
-    Completions streams allow.
+    The Responses API stream labels every message with an `event:` line before its
+    `data:` line, so the payload cannot be recovered by stripping a leading `data: ` the
+    way the Completions and Chat Completions streams allow.
 
     Args:
         message: One complete SSE message, without its trailing blank line.
 
     Returns:
         The payload, with multi-line payloads joined by newlines as required
-        by the SSE spec, or None if the message carries no ``data:`` line.
+        by the SSE spec, or None if the message carries no `data:` line.
 
     """
     # NOTE: split on "\n" rather than using splitlines(), which also breaks on

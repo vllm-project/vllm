@@ -21,15 +21,14 @@ class HcDownSiluFma:
     """BF16 GEMM kernel based on CTA-local FMA dot products, with the mHC SiLU
     epilogue fused into the final store.
 
-    Computes C[M, N] = A[M, K] @ B[N, K]^T for bf16 inputs, rounds the fp32
-    accumulator to bf16 (production rounding boundary), then applies
-    SiLU(x/HC) to columns < ``rank`` and passes columns >= ``rank`` through.
-    Output is bf16 [M, N].
+    Computes C[M, N] = A[M, K] @ B[N, K]^T for bf16 inputs, rounds the fp32 accumulator
+    to bf16 (production rounding boundary), then applies SiLU(x/HC) to columns < `rank`
+    and passes columns >= `rank` through. Output is bf16 [M, N].
 
     See the base class docstring in
     vllm/model_executor/kernels/linear/cute_dsl/_ll_bf16_dotprod.py for the
     GEMM structure; only the epilogue differs. The compile key is
-    ``(M, K, threadblock_size, rank, hc)``.
+    `(M, K, threadblock_size, rank, hc)`.
     """
 
     def __init__(

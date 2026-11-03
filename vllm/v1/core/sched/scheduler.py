@@ -3440,7 +3440,7 @@ class Scheduler(SchedulerInterface):
         )
 
     def _load_restores_replay_window(self, request: Request) -> bool:
-        """Whether the KV connector's load for ``request`` restores every DSV41
+        """Whether the KV connector's load for `request` restores every DSV41
         SWA bounded-replay group, as a P/D transfer of the request's own blocks
         does; a prefix-cache store holds no window."""
         assert self.connector is not None
@@ -3454,10 +3454,9 @@ class Scheduler(SchedulerInterface):
         """Record where a prefix hit's replay starts and return the number of
         hit tokens to recompute; the caller rewinds the computed count by it.
 
-        The replayed tokens are the hit's last window (see
-        ``Request.replay_start``): the worker rebuilds their sliding-window KV
-        and leaves their cached KV alone. A hit whose KV load carries the
-        window replays nothing.
+        The replayed tokens are the hit's last window (see `Request.replay_start`): the
+        worker rebuilds their sliding-window KV and leaves their cached KV alone. A hit
+        whose KV load carries the window replays nothing.
         """
         if not self.prefix_replay_tokens:
             return 0

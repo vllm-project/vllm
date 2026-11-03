@@ -297,7 +297,7 @@ def wvsplitkrc_dispatch(n: int, k: int, m: int, cu_count: int) -> tuple[int, boo
 # loads of a GEMM collide on the L2/MALL channel hash. Offsetting the stride by one
 # 128 B cache line dodges the collision and keeps each row cache-line aligned.
 def cache_aliasing_pad_elems(k: int, element_size: int) -> int:
-    """Row-stride pad, in elements, that stops an ``[n, k]`` weight aliasing on gfx11,
+    """Row-stride pad, in elements, that stops an `[n, k]` weight aliasing on gfx11,
     or 0 when the stride does not alias.
 
     Args:
@@ -317,7 +317,7 @@ def maybe_pad_weight_avoid_cache_aliasing(weight: torch.Tensor) -> torch.Tensor:
     """Offset a dense weight's row stride so it stops aliasing.
 
     Returns a view with the original shape whose row stride is one cache line
-    wider, or ``weight`` unchanged when the pad does not apply.
+    wider, or `weight` unchanged when the pad does not apply.
     """
     from vllm.platforms.rocm import on_gfx11
 
@@ -600,7 +600,7 @@ direct_register_custom_op(
 
 
 def maybe_use_skinny_gemm(layer: torch.nn.Module) -> None:
-    """Mark ``layer`` for the skinny GEMM if its weight shape has a plan."""
+    """Mark `layer` for the skinny GEMM if its weight shape has a plan."""
     from vllm.model_executor.kernels.linear.cute_dsl.skinny_gemm_plans import (
         get_skinny_gemm_plan,
     )
@@ -640,7 +640,7 @@ def cuda_unquantized_gemm(
 def warmup_rocm_skinny_gemm_workspaces(device: torch.device) -> None:
     """Eagerly allocate wvSplitKrc's per-device split-K workspace pool.
 
-    wvSplitKrc partitions one per-device allocation into ``kWvSlots`` slots
+    wvSplitKrc partitions one per-device allocation into `kWvSlots` slots
     (csrc/rocm/skinny_gemms.cu) and hands each stream one on first use, so that
     two streams never share the split-K partials and counters.
 

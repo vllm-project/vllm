@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""DeepSeek-V4.1 specialized decode on NVIDIA GPUs: a decode executor over the
-stock backbone, enabled by
-``additional_config={"decode_backend": "latency_specialized"}``.
+"""DeepSeek-V4.1 specialized decode on NVIDIA GPUs: a decode executor over the stock
+backbone, enabled by `additional_config={"decode_backend": "latency_specialized"}`.
 
 The executor runs FULL-graph decode steps; every other step runs the stock
 forward. It issues cross-rank collectives, so the deployment check below is
@@ -57,7 +56,7 @@ class DecodeConfig:
 @cache
 def uses_checked_flashinfer(feature: str) -> bool:
     """Whether the installed FlashInfer is at least the version whose internals
-    ``feature`` was checked against; logs once per feature when it is not."""
+    `feature` was checked against; logs once per feature when it is not."""
     try:
         version = importlib.metadata.version("flashinfer-python")
     except importlib.metadata.PackageNotFoundError:

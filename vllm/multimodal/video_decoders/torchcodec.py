@@ -65,7 +65,7 @@ class TorchCodecVideoBackendMixin:
 
     Builds a :class:`~torchcodec.decoders.VideoDecoder` over the in-memory
     bytes and extracts the sampled indices with a single batched
-    ``get_frames_at`` call, while releasing the GIL during decode.
+    `get_frames_at` call, while releasing the GIL during decode.
     """
 
     @staticmethod

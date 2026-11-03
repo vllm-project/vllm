@@ -3,16 +3,16 @@
 """DeepSeek V4.1 attention on FlashMLA's mega-attention kernel (SM100).
 
 One kernel does Q RoPE, sparse attention, the inverse RoPE of the output and
-its FP8 cast, and writes straight into the buffer ``wo_a`` consumes. So the
-layer declares ``accepts_unnormed_unroped_query`` -- the kernel RoPEs Q itself,
+its FP8 cast, and writes straight into the buffer `wo_a` consumes. So the
+layer declares `accepts_unnormed_unroped_query` -- the kernel RoPEs Q itself,
 leaving Q only the zero-pad to the kernel's head count -- and
-its ``_alloc_attn_out`` / ``_o_proj`` pair speaks QuantizedActivation instead
+its `_alloc_attn_out` / `_o_proj` pair speaks QuantizedActivation instead
 of bf16, since the output needs no rotation or quantization here.
 
-``wq_b`` rows and ``wo_a`` columns are permuted once at load so the surrounding
+`wq_b` rows and `wo_a` columns are permuted once at load so the surrounding
 GEMMs speak the kernel's chunk-interleaved layouts directly. A step's prefill
 and decode segments write disjoint token ranges of one output buffer pair, so
-a single ``wo_a`` einsum covers the whole step.
+a single `wo_a` einsum covers the whole step.
 """
 
 from dataclasses import replace
@@ -112,11 +112,11 @@ def alloc_mega_attn_output(
     """Allocate the output buffer pair the mega-attention kernels write into.
 
     One pair per forward step: the prefill and decode segments fill disjoint
-    token ranges, so a single ``fp8_einsum`` over all ``num_tokens`` can
+    token ranges, so a single `fp8_einsum` over all `num_tokens` can
     consume the result instead of one call per segment.
 
     The scale buffer is MN-major -- stride 1 along tokens, head-dim stride
-    ``ceil4(num_tokens)`` -- which is both what the kernel requires of a
+    `ceil4(num_tokens)` -- which is both what the kernel requires of a
     caller-provided buffer and what DeepGEMM expects for this N.
     """
     d = WV_GROUP_SIZE * _HEAD_DIM_V
@@ -139,7 +139,7 @@ def alloc_mega_attn_output(
 
 
 def _token_slice(out: QuantizedActivation, start: int, end: int) -> QuantizedActivation:
-    """The ``[start, end)`` token slice of a mega-attention output buffer."""
+    """The `[start, end)` token slice of a mega-attention output buffer."""
     data = out.data[start:end]
     return replace(out, data=data, scale=out.scale[start:end], orig_shape=data.shape)
 
@@ -153,11 +153,10 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def is_available_for(cls, vllm_config: VllmConfig) -> bool:
         """Whether this layer can serve the configured model on this device.
 
-        The kernel is SM100-only and wants ``WV_GROUP_SIZE`` heads per ``wo_a``
-        group, which stops holding once TP divides the head count far enough
-        (TP16 on a 64-head model leaves 4). ``__init__`` raises on both, so the
-        default-backend selector asks here first rather than turning an
-        unsupported topology into a startup crash.
+        The kernel is SM100-only and wants `WV_GROUP_SIZE` heads per `wo_a` group, which
+        stops holding once TP divides the head count far enough (TP16 on a 64-head model
+        leaves 4). `__init__` raises on both, so the default-backend selector asks here
+        first rather than turning an unsupported topology into a startup crash.
         """
         if not is_flashmla_mega_attn_supported()[0]:
             return False
@@ -214,11 +213,11 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
     def _o_proj(
         self, attn_out: QuantizedActivation, positions: torch.Tensor
     ) -> torch.Tensor:
-        """Grouped ``wo_a`` then ``wo_b`` over the kernel's quantized output.
+        """Grouped `wo_a` then `wo_b` over the kernel's quantized output.
 
         The inverse RoPE and the FP8 cast happened inside the attention
-        kernel, and ``wo_a`` is permuted for its output layout, so there is
-        nothing to rotate or quantize here and ``positions`` is unused. The
+        kernel, and `wo_a` is permuted for its output layout, so there is
+        nothing to rotate or quantize here and `positions` is unused. The
         scale already is DeepGEMM's packed-ue8m0 MN-major layout, so the
         einsum consumes the kernel's output with no repacking.
         """
@@ -343,7 +342,7 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         flashmla_metadata: DeepseekV4FlashMLAMetadata | None,
         swa_metadata: "DeepseekSparseSWAMetadata",
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
-        """The compressed cache and its ``[n, topk]`` slot indices / lengths."""
+        """The compressed cache and its `[n, topk]` slot indices / lengths."""
         if self.compress_ratio == 0:
             return None, None, None
         assert flashmla_metadata is not None
@@ -367,12 +366,12 @@ class DeepseekV4MegaAttnAttention(DeepseekV4FlashMLAAttention):
         swa_metadata: "DeepseekSparseSWAMetadata",
         out: QuantizedActivation,
     ) -> None:
-        """Mega attention over the paged quantized caches, in place into ``out``.
+        """Mega attention over the paged quantized caches, in place into `out`.
 
-        The caches are ``[num_blocks, page, 1, bytes]``, the record taken from
-        ``bytes`` (528 V4.1 fp8, 288 V4.1 NVFP4; NVFP4 only as the compressed
-        cache beside an fp8 SWA one), and the indices ``[s_q, topk]`` int32
-        slot ids (``block * page + offset``, ``-1`` invalid).
+        The caches are `[num_blocks, page, 1, bytes]`, the record taken from
+        `bytes` (528 V4.1 fp8, 288 V4.1 NVFP4; NVFP4 only as the compressed
+        cache beside an fp8 SWA one), and the indices `[s_q, topk]` int32
+        slot ids (`block * page + offset`, `-1` invalid).
         """
         extra_cache, extra_idx, extra_len = self._decode_compressed_kv_and_topk(
             flashmla_metadata, swa_metadata

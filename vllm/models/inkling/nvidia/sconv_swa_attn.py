@@ -2,16 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inkling short-conv state managed as a sliding-window KV cache.
 
-Each decoder layer owns one ``InklingConvState`` (an ``AttentionLayerBase``) that
-emits a single ``SlidingWindowSpec`` for the layer's 4 sconv streams (K, V,
+Each decoder layer owns one `InklingConvState` (an `AttentionLayerBase`) that
+emits a single `SlidingWindowSpec` for the layer's 4 sconv streams (K, V,
 attn-output, mlp-output), packed head-major into one block:
 
     H = num_kv_heads (per-rank), N = block_size = sconv_kernel_size,
     D = head_dim(K) + head_dim(V) + hidden/H(attn) + hidden/H(mlp)
 
-``D`` is TP-invariant; per rank we store ``H/TP`` heads of width ``D``. The conv
+`D` is TP-invariant; per rank we store `H/TP` heads of width `D`. The conv
 reads/writes this cache out-of-band via a custom backend; the (smaller) conv page
-is padded up to the uniform attention page by ``unify_kv_cache_spec_page_size``.
+is padded up to the uniform attention page by `unify_kv_cache_spec_page_size`.
 """
 
 from __future__ import annotations

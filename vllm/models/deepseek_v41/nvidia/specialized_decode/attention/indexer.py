@@ -2,20 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The sparse-attention indexers in a specialized decode step.
 
-``decode_rows`` runs a dense indexer (``SparseAttnIndexer``) on a copy of the
-varlen decode branch of ``sparse_attn_indexer``, with two additions:
+`decode_rows` runs a dense indexer (`SparseAttnIndexer`) on a copy of the
+varlen decode branch of `sparse_attn_indexer`, with two additions:
 
 - Row sharding. The indexer is replicated across the TP ranks. In a step of at
-  least ``ROW_SHARD_MIN_REQUESTS`` requests whose count the ranks divide, each
+  least `ROW_SHARD_MIN_REQUESTS` requests whose count the ranks divide, each
   rank scores, selects candidates for and top-k's only its contiguous slice of
-  the rows; TP all-gathers of the int32 rows rebuild ``topk_indices_buffer``
+  the rows; TP all-gathers of the int32 rows rebuild `topk_indices_buffer`
   and, in the candidate source, the candidate blocks.
-- The candidate source selects its candidate blocks with ``cooperative_topk``
-  for up to 64 rows per rank (see ``candidate_topk``).
+- The candidate source selects its candidate blocks with `cooperative_topk`
+  for up to 64 rows per rank (see `candidate_topk`).
 
 Steps it does not take run the stock indexer.
 
-``CandidateOverlap`` moves the candidate consumers' candidate expansion and
+`CandidateOverlap` moves the candidate consumers' candidate expansion and
 sparse MQA-logits schedule onto a side stream.
 
 The row-sharded path issues TP collectives, so its gates read only host state
@@ -74,12 +74,12 @@ OVERLAP_MAX_ROWS = 16
 def row_shard_bounds(
     num_rows: int, num_requests: int, world_size: int, rank: int
 ) -> tuple[int, int] | None:
-    """Rows ``[start, end)`` that ``rank`` scores in a pure-decode step, or
+    """Rows `[start, end)` that `rank` scores in a pure-decode step, or
     None when the step stays replicated.
 
     Each slice holds whole requests of a uniform step; varlen rows are
     independent, so the split is exact either way. Slices start on an even
-    row: DeepGEMM's paged MQA logits needs its int32 ``indices`` 8-byte
+    row: DeepGEMM's paged MQA logits needs its int32 `indices` 8-byte
     aligned. DSpark decode steps always split so; capture and profiling runs
     of one row a request may not, and stay replicated.
     """
@@ -102,8 +102,8 @@ def rope_quant_q(
     positions: torch.Tensor,
     rotary_emb: nn.Module,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
-    """The second half of ``indexer.forward_q``: RoPE and quantize the
-    projected queries ``q`` and scale the per-head ``indexer_weights``."""
+    """The second half of `indexer.forward_q`: RoPE and quantize the
+    projected queries `q` and scale the per-head `indexer_weights`."""
     q_quant, weights = fused_indexer_q_rope_quant(
         positions,
         q.view(-1, indexer.n_head, indexer.head_dim),
@@ -131,7 +131,7 @@ def decode_rows(
     q_quant: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     weights: torch.Tensor,
 ) -> torch.Tensor:
-    """``op(hidden_states, q_quant, None, weights)`` for a pure-decode step,
+    """`op(hidden_states, q_quant, None, weights)` for a pure-decode step,
     row-sharded and with cooperative candidates where they apply."""
     attn_metadata = get_forward_context().attn_metadata
     metadata = (
@@ -206,7 +206,7 @@ def _decode_rows(
     fast_candidates: bool,
 ) -> None:
     """The varlen decode branch of `sparse_attn_indexer` on rows
-    ``[start, end)``: paged MQA logits, candidate selection or mask, and
+    `[start, end)`: paged MQA logits, candidate selection or mask, and
     top-k into the same rows of the shared buffers."""
     assert decode.indices is not None
     kv_cache = kv_cache_as_quant_view(
@@ -275,10 +275,10 @@ def decode_schedule(
     sparse_block_kv: int,
     scratch: bool = False,
 ) -> torch.Tensor:
-    """Expand the decode rows' candidates into ``rows.sparse_indices`` /
-    ``rows.end`` and return their DeepGEMM schedule; the same kernels and
+    """Expand the decode rows' candidates into `rows.sparse_indices` /
+    `rows.end` and return their DeepGEMM schedule; the same kernels and
     inputs as the inline step of `sparse_mqa_logits_paged_decode`. With
-    ``scratch``, expand zero candidates into private outputs instead."""
+    `scratch`, expand zero candidates into private outputs instead."""
     assert rows.block_table is not None and rows.row_indices is not None
     candidates = op.candidate_blocks[: rows.row_ke.shape[0]]
     sparse_indices, end = rows.sparse_indices, rows.end
@@ -307,22 +307,21 @@ def decode_schedule(
 class CandidateOverlap:
     """The candidate consumers' expansion and schedule on a side stream.
 
-    The first candidate consumer of a decode step expands the candidate blocks
-    into DeepGEMM sparse block ids and builds the paged sparse MQA-logits
-    schedule, which later consumers reuse. Neither reads Q, the KV cache or the
-    hidden states, so the candidate source forks them onto ``stream`` once it
-    has written the candidates (``fork``) and every consumer waits for them
-    (``join``) before scoring. The kernels and inputs are those of the inline
-    path, so the outputs match.
+    The first candidate consumer of a decode step expands the candidate blocks into
+    DeepGEMM sparse block ids and builds the paged sparse MQA-logits schedule, which
+    later consumers reuse. Neither reads Q, the KV cache or the hidden states, so the
+    candidate source forks them onto `stream` once it has written the candidates
+    (`fork`) and every consumer waits for them (`join`) before scoring. The kernels and
+    inputs are those of the inline path, so the outputs match.
 
     The side stream issues no collectives. The fork waits on the main stream,
-    so a step's writes to the builder's ``sparse_indices`` / ``end`` cannot
+    so a step's writes to the builder's `sparse_indices` / `end` cannot
     overtake the previous step's reads, and the schedule allocated on
-    ``stream`` is recorded as used by the main stream.
+    `stream` is recorded as used by the main stream.
 
     DeepGEMM's schedule kernel keeps a per-stream workspace that it creates on
-    first use and refuses to create during a capture, so ``warm`` runs the
-    schedule on ``stream`` once from an eager decode step, on zero candidates
+    first use and refuses to create during a capture, so `warm` runs the
+    schedule on `stream` once from an eager decode step, on zero candidates
     and private outputs; the executor forks only after that.
     """
 

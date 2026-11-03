@@ -206,7 +206,7 @@ def commit_replayssm_ring_trackers(
     accepted from that query is available only on the next forward pass. This
     function then advances the per-request ring by the accepted prefix and
     records the current query length for the following pass. A zero
-    ``prev_query_len`` means that reset/prefill left no prior MTP query to
+    `prev_query_len` means that reset/prefill left no prior MTP query to
     commit; slot validity is handled independently by the kernel mask.
 
     Standard single-token decode needs no delayed commit: its ReplaySSM kernel
@@ -294,15 +294,14 @@ def plan_replayssm_decode(
 ) -> None:
     """Plan one Triton ReplaySSM standard-decode step on the GPU.
 
-    ``ring_pos[slot]`` counts the tokens buffered since the slot's last
-    full-state write. For each decode row this writes the step's
-    ``write_pos``/``is_flush`` (read by every layer of the cache group) and
-    advances the slot's counter, so the runner supplies no ring metadata.
-    Prefill resets the counters via ``reset_replayssm_ring_trackers``.
+    `ring_pos[slot]` counts the tokens buffered since the slot's last full-state write.
+    For each decode row this writes the step's `write_pos`/`is_flush` (read by every
+    layer of the cache group) and advances the slot's counter, so the runner supplies no
+    ring metadata. Prefill resets the counters via `reset_replayssm_ring_trackers`.
 
-    With ``align_block_size`` > 0 (mamba ``align`` prefix caching), the ring
+    With `align_block_size` > 0 (mamba `align` prefix caching), the ring
     restarts at each block's first step and flushes on the step completing a
-    block; ``seq_lens`` must then hold each row's sequence length.
+    block; `seq_lens` must then hold each row's sequence length.
     """
     if state_batch_indices.dim() > 1:
         state_batch_indices = state_batch_indices[:, 0]
@@ -499,7 +498,7 @@ class CPUSSUBackend(MambaSSUBackend):
     """CPU SSU backend using the compiled C++ VSX/scalar kernel.
 
     On CPU-only platforms (PowerPC, x86 without CUDA) this dispatches to
-    the vectorized C++ kernel registered as ``torch.ops._C.selective_state_update_cpu``.
+    the vectorized C++ kernel registered as `torch.ops._C.selective_state_update_cpu`.
     That kernel uses vec_op SIMD intrinsics (VSX on ppc64le, AVX2 on x86,
     scalar fallback elsewhere) and is parallelised with OpenMP across heads.
 

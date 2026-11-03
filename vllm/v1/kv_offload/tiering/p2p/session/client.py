@@ -3,9 +3,9 @@
 """Client-role state machine for a single peer session.
 
 Handles outgoing fetch requests, abort-on-timeout, abort-ack timeout,
-and produces ``LoadResult`` for completed loads. The session coordinator
+and produces `LoadResult` for completed loads. The session coordinator
 parses wire messages and dispatches typed arguments here; this module
-never touches ``ControlConnection`` directly — it emits via the ``send``
+never touches `ControlConnection` directly — it emits via the `send`
 callback injected by the coordinator (which gates on ConnectAck).
 """
 
@@ -46,7 +46,7 @@ _LOOKUP_TIMEOUT_S = 8.0
 class _InboundLoadState:
     """Client-role state for a single in-flight load request.
 
-    Lives in ``_ClientRequestState.loads`` keyed by round_seq for the
+    Lives in `_ClientRequestState.loads` keyed by round_seq for the
     duration of a fetch; the owning kv_request_id is the outer dict key.
     """
 
@@ -69,9 +69,9 @@ class _ClientRequestState:
     """Per-kv_request_id client-side state.
 
     One entry per kv_request_id we're driving. Lookup-phase fields are
-    used only by symmetric P2P (``do_p2p_fetch``); PD-only loads leave
-    ``probes``/``unsent`` empty and drive just ``phase`` and ``loads``. An
-    entry is dropped once every field is idle — see ``ClientRole._maybe_prune``.
+    used only by symmetric P2P (`do_p2p_fetch`); PD-only loads leave
+    `probes`/`unsent` empty and drive just `phase` and `loads`. An
+    entry is dropped once every field is idle — see `ClientRole._maybe_prune`.
     """
 
     # -- Lookup phase (symmetric P2P only; untouched for PD) --
@@ -116,13 +116,11 @@ class LoadResult(NamedTuple):
 class ClientCloseResult(NamedTuple):
     """What the manager must fail when a peer session is torn down.
 
-    ``failed_jobs`` is the ``job_id`` of every load still in flight and not
-    yet reported; each becomes a ``JobResult(success=False)``.
-    ``failed_req_ids`` is every kv_request_id whose lookup() would otherwise
-    defer forever on the dead
-    peer — the in-flight loads plus any request holding an unresolved
-    symmetric-P2P probe. ``failed_jobs`` is the subset of ``failed_req_ids``
-    that had a load job.
+    `failed_jobs` is the `job_id` of every load still in flight and not yet reported;
+    each becomes a `JobResult(success=False)`. `failed_req_ids` is every kv_request_id
+    whose lookup() would otherwise defer forever on the dead peer — the in-flight loads
+    plus any request holding an unresolved symmetric-P2P probe. `failed_jobs` is the
+    subset of `failed_req_ids` that had a load job.
     """
 
     failed_jobs: list[int]
@@ -132,9 +130,8 @@ class ClientCloseResult(NamedTuple):
 class ClientRole:
     """Client-side load state machine for one peer session.
 
-    The coordinator owns the connection and the send-gating; this role
-    is given a ``send`` callback and a ``peer_id`` for log messages and
-    is otherwise self-contained.
+    The coordinator owns the connection and the send-gating; this role is given a `send`
+    callback and a `peer_id` for log messages and is otherwise self-contained.
     """
 
     def __init__(self, peer_id: str, send: Callable[[dict], None]) -> None:
@@ -178,7 +175,7 @@ class ClientRole:
     def _maybe_prune(self, kv_request_id: str) -> None:
         """Drop the entry once it holds no live load or lookup state.
 
-        ``peer_lookup_open`` is only read by ``finish``, and every path
+        `peer_lookup_open` is only read by `finish`, and every path
         that clears the last probe (fetch / finish / close) also settles
         it, so dropping on emptiness never loses a flag still in use.
         """
@@ -232,7 +229,7 @@ class ClientRole:
 
     @property
     def expired_abort_ack(self) -> tuple[str, int] | None:
-        """The first ``(kv_request_id, round_seq)`` whose AbortAck timed out."""
+        """The first `(kv_request_id, round_seq)` whose AbortAck timed out."""
         return self._expired_abort_ack
 
     # ------------------------------------------------------------------
@@ -297,14 +294,12 @@ class ClientRole:
     def finish(self, kv_request_id: str) -> None:
         """Finish a request: abort in-flight loads and release lookup state.
 
-        Called from the session's ``finish_request``. Sends an
-        AbortFetchMsg per load not already aborting, and — independently —
-        the terminal empty FetchMsg when the peer still holds lookup
-        state no fetch has closed (its "request finished" signal: it
-        releases lookup state, drains parked supply, and fires
-        ``cb.finish_request``). A later round's supply can be parked
-        while an earlier round's load is still in flight, so both can be
-        owed at once.
+        Called from the session's `finish_request`. Sends an AbortFetchMsg per load not
+        already aborting, and — independently — the terminal empty FetchMsg when the
+        peer still holds lookup state no fetch has closed (its "request finished"
+        signal: it releases lookup state, drains parked supply, and fires
+        `cb.finish_request`). A later round's supply can be parked while an earlier
+        round's load is still in flight, so both can be owed at once.
 
         Then drop all probe/lookup state. Aborted loads are reported failed
         at once and kept until their AbortAck (or the session's close)
@@ -410,15 +405,13 @@ class ClientRole:
         - Once a LookupRespMsg has resolved the entry: returns the cached
           bool result on every call without popping it.
 
-        A resolved entry is retained until a fetch closes the round
-        (``request_blocks`` clears all probes) or the request finishes
-        (``finish`` clears all entries for the id). A request's
-        block set can be re-probed across steps, so popping on read would
-        make a repeat probe of an already-resolved key look brand-new and
-        re-queue it, emitting a redundant LookupMsg for an answer we
-        already hold. Keeping the entry until fetch makes repeat probes
-        free; clearing at fetch forces a fresh probe under the next
-        round, since the block is unpinned once served.
+        A resolved entry is retained until a fetch closes the round (`request_blocks`
+        clears all probes) or the request finishes (`finish` clears all entries for the
+        id). A request's block set can be re-probed across steps, so popping on read
+        would make a repeat probe of an already-resolved key look brand-new and re-queue
+        it, emitting a redundant LookupMsg for an answer we already hold. Keeping the
+        entry until fetch makes repeat probes free; clearing at fetch forces a fresh
+        probe under the next round, since the block is unpinned once served.
         """
         st = self._get_or_create_request(kv_request_id)
         st.probed = True
@@ -440,17 +433,16 @@ class ClientRole:
     def flush_pending_lookups(self, send_ready: bool) -> None:
         """Send a LookupMsg for each kv_request_id with unsent entries.
 
-        Called once per scheduler step from the manager's
-        ``on_schedule_end()``. A request's block set may be discovered
-        across several scheduler steps, so more than one LookupMsg can
-        go out per kv_request_id — one per step that registered new
-        keys, all tagged with the current round. register_lookup()
-        de-dups in-flight and already-resolved (req_id, key) pairs, so
-        each LookupMsg carries only the keys first probed in that step.
-        Wait for ConnectAckMsg before sending or starting the response deadline.
+        Called once per scheduler step from the manager's `on_schedule_end()`. A
+        request's block set may be discovered across several scheduler steps, so more
+        than one LookupMsg can go out per kv_request_id — one per step that registered
+        new keys, all tagged with the current round. register_lookup() de-dups in-flight
+        and already-resolved (req_id, key) pairs, so each LookupMsg carries only the
+        keys first probed in that step. Wait for ConnectAckMsg before sending or
+        starting the response deadline.
 
         Only requests that registered new keys since the last flush are
-        visited — the ``_flush_pending`` work-list avoids scanning every
+        visited — the `_flush_pending` work-list avoids scanning every
         live request each scheduler step.
         """
         if not send_ready:
@@ -521,11 +513,10 @@ class ClientRole:
     def collect_results(self) -> list[LoadResult]:
         """Walk load timeouts and drain completed loads.
 
-        A load past its load timeout (``_P2P_LOAD_TIMEOUT_S`` or
-        ``_PD_LOAD_TIMEOUT_S``) gets an AbortFetchMsg and is reported failed
-        at once, with its blocks' release deferred. One whose AbortAck then
-        misses ``_ABORT_ACK_TIMEOUT_S`` is recorded in ``expired_abort_ack``,
-        so the session disconnects and close() releases it.
+        A load past its load timeout (`_P2P_LOAD_TIMEOUT_S` or `_PD_LOAD_TIMEOUT_S`)
+        gets an AbortFetchMsg and is reported failed at once, with its blocks' release
+        deferred. One whose AbortAck then misses `_ABORT_ACK_TIMEOUT_S` is recorded in
+        `expired_abort_ack`, so the session disconnects and close() releases it.
         """
         now = time.monotonic()
         for req_id in self._active_loads:
@@ -565,7 +556,7 @@ class ClientRole:
 
         A request is failed if it has a load in flight (its job fails) or
         holds an unresolved symmetric-P2P probe (its lookup() would defer
-        forever on an answer that can never arrive). See ``ClientCloseResult``.
+        forever on an answer that can never arrive). See `ClientCloseResult`.
         The end of the session is the release point for every load already
         reported failed: their deferred releases are set here.
         """

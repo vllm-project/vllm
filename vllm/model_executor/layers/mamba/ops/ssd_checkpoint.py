@@ -78,14 +78,14 @@ def store_prefill_checkpoint(
 
     Args:
         checkpoint: Per-row offsets and destination blocks.
-        chunk_idx: Per-row index into ``chunk_states`` of the checkpoint.
-        x: Pre-conv activations, ``(dim, num_prefill_tokens)``.
-        conv_state: Paged conv state, ``(num_blocks, dim, state_len + num_spec)``.
+        chunk_idx: Per-row index into `chunk_states` of the checkpoint.
+        x: Pre-conv activations, `(dim, num_prefill_tokens)`.
+        conv_state: Paged conv state, `(num_blocks, dim, state_len + num_spec)`.
         chunk_states: SSD states at every chunk end.
         ssm_state: Paged SSM state.
         query_start_loc: Prefill query start locations.
-        state_len: ``conv_kernel_size - 1``, not the spec-widened conv width.
-            Readers take the first ``state_len`` slots as the newest inputs.
+        state_len: `conv_kernel_size - 1`, not the spec-widened conv width.
+            Readers take the first `state_len` slots as the newest inputs.
 
     """
     dim = x.size(0)

@@ -116,10 +116,10 @@ class QuantizationConfigArgs:
     """
 
     linear: QuantSpec | None = None
-    """Spec applied to ``LinearBase`` layers."""
+    """Spec applied to `LinearBase` layers."""
 
     moe: QuantSpec | None = None
-    """Spec applied to ``FusedMoEFactory`` layers."""
+    """Spec applied to `FusedMoEFactory` layers."""
 
     ignore: list[str] = Field(default_factory=list)
     """Layers to skip quantization for. Online quantization also supports

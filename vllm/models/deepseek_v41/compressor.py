@@ -272,7 +272,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
 
 
 class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
-    """Fused ``wkv``/``wgate`` projection with the FP32 output the compressor
+    """Fused `wkv`/`wgate` projection with the FP32 output the compressor
     state accumulates in."""
 
     def forward(self, input_: torch.Tensor) -> torch.Tensor:
@@ -282,7 +282,7 @@ class DeepseekV4CompressorKVScoreLinear(MergedColumnParallelLinear):
 class DeepseekCompressor(nn.Module):
     """DeepSeek V4.1 KV/score compressor.
 
-    Pools ``compress_ratio`` consecutive tokens into one KV latent with a
+    Pools `compress_ratio` consecutive tokens into one KV latent with a
     learned softmax gate (ratio 1 has no gate and no pooling). Owns the
     linear, norm and state cache. State saving, compression and RMSNorm share
     one Triton kernel. The emitted latent feeds independent main-cache and

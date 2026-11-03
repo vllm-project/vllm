@@ -121,13 +121,11 @@ class _StoreAdmission(Enum):
 class BoundaryStoreStats:
     """Cumulative counters for boundary hand-off stores.
 
-    Every branch that declines a hand-off is silent by design: the boundary is
-    simply not offloaded and a later request misses. Without counters the only
-    symptom is a lower cache hit rate with nothing in the logs, so each decline
-    reason is counted and exposed through
-    ``SimpleCPUOffloadConnector.get_boundary_store_stats()``. Reset by
-    ``reset()``, which carries any not-yet-drained deltas; not otherwise
-    cleared.
+    Every branch that declines a hand-off is silent by design: the boundary is simply
+    not offloaded and a later request misses. Without counters the only symptom is a
+    lower cache hit rate with nothing in the logs, so each decline reason is counted and
+    exposed through `SimpleCPUOffloadConnector.get_boundary_store_stats()`. Reset by
+    `reset()`, which carries any not-yet-drained deltas; not otherwise cleared.
     """
 
     published: int = 0
@@ -297,8 +295,8 @@ class SimpleCPUOffloadScheduler:
         """Derive a CPU KVCacheConfig from the GPU config.
         Same kv_cache_groups, num_blocks scaled by CPU/GPU memory ratio.
 
-        An explicit ``num_cpu_blocks`` is checked against local capacity.
-        ``aligned_num_cpu_blocks`` comes from the live worker allocations and
+        An explicit `num_cpu_blocks` is checked against local capacity.
+        `aligned_num_cpu_blocks` comes from the live worker allocations and
         is used as-is when no explicit count is configured."""
         # Import here to avoid potential circular imports
         from vllm.v1.kv_cache_interface import KVCacheTensor
@@ -715,7 +713,7 @@ class SimpleCPUOffloadScheduler:
 
         Returns:
             (gpu_block_ids, cpu_block_ids, req_ids, block_meta) for the store
-            event. ``block_meta`` is None when kv cache events are disabled.
+            event. `block_meta` is None when kv cache events are disabled.
 
         """
         merged_gpu_block_ids: list[int] = []
@@ -1348,7 +1346,7 @@ class SimpleCPUOffloadScheduler:
     ) -> int | None:
         """Locate the full-attention prompt-tail block for a fine-grained hit.
 
-        Mirrors ``FullAttentionManager._cache_partial_tail_block``: only the
+        Mirrors `FullAttentionManager._cache_partial_tail_block`: only the
         final prompt hash boundary is eligible, and boundaries that land on a
         physical block edge are already covered by the positional scan.
 

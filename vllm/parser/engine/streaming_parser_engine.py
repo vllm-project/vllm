@@ -88,7 +88,7 @@ def _build_drop_info(
 
 
 class StreamingParserEngine:
-    """Consumes ``(delta_text, delta_token_ids)`` pairs and produces a
+    """Consumes `(delta_text, delta_token_ids)` pairs and produces a
     stream of :class:`SemanticEvent` instances.
 
     This is the main entry point for streaming parsing.
@@ -384,14 +384,13 @@ class StreamingParserEngine:
     _REASONING_EVENTS = frozenset({EventType.REASONING_START, EventType.REASONING_END})
 
     def _compute_reasoning_markup_terminals(self) -> frozenset[str]:
-        """Terminals the ``skip_reasoning_parsing`` bypass may neutralize.
+        """Terminals the `skip_reasoning_parsing` bypass may neutralize.
 
-        Only reasoning-exclusive markers qualify: every transition they
-        participate in stays within CONTENT/REASONING and emits nothing
-        but reasoning events. Inkling's ``<|end_message|>`` is labelled
-        THINK_END yet also closes text, header, and tool blocks;
-        bypassing a shared marker would eat that structure, so one impure
-        marker disables the bypass for the whole config.
+        Only reasoning-exclusive markers qualify: every transition they participate in
+        stays within CONTENT/REASONING and emits nothing but reasoning events. Inkling's
+        `<|end_message|>` is labelled THINK_END yet also closes text, header, and tool
+        blocks; bypassing a shared marker would eat that structure, so one impure marker
+        disables the bypass for the whole config.
         """
         markers = frozenset(
             terminal

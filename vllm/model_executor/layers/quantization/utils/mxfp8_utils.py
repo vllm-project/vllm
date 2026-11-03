@@ -90,8 +90,8 @@ def _mxfp8_e4m3_quantize_torch(
 def _mxfp8_quant_triton_kernel():
     """Lazily-built Triton kernel: per-32-block E8M0 scale + FP8-E4M3 quant.
 
-    Fuses what ``_mxfp8_e4m3_quantize_torch`` does in several elementwise passes
-    into one launch. Each program handles ``[BLOCK_M, 32]`` (one MX block).
+    Fuses what `_mxfp8_e4m3_quantize_torch` does in several elementwise passes
+    into one launch. Each program handles `[BLOCK_M, 32]` (one MX block).
     """
     from vllm.triton_utils import tl, triton
 

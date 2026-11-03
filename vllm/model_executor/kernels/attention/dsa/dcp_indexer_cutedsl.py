@@ -29,7 +29,7 @@ def _dcp_merge_topk_and_interleave(vllm_config: Any) -> tuple[int, int]:
     """(topk, cp_interleave) the DCP merge runs with.
 
     Kpool indexers (GLM-5.x) merge pool ids: topk and the interleave are both
-    in units of ``index_kpool`` tokens.
+    in units of `index_kpool` tokens.
     """
     hf_text_config = vllm_config.model_config.hf_text_config
     topk = hf_text_config.index_topk
@@ -46,12 +46,11 @@ def stable_topk_from_gathered_candidates_cutedsl(
     topk: int,
     out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Select each row's global top-``topk`` from all ranks' candidates.
+    """Select each row's global top-`topk` from all ranks' candidates.
 
-    ``gathered`` is rank-major ``[world_size, rows, topk, 2]``, as produced by a
-    dim-0 all-gather of each rank's ``[rows, topk, 2]`` candidates, and is read
-    in place: a dim-1 gather into ``[rows, world_size * topk, 2]`` would cost a
-    full reorder copy.
+    `gathered` is rank-major `[world_size, rows, topk, 2]`, as produced by a dim-0
+    all-gather of each rank's `[rows, topk, 2]` candidates, and is read in place: a
+    dim-1 gather into `[rows, world_size * topk, 2]` would cost a full reorder copy.
     """
     assert gathered.dim() == 4 and gathered.shape[2:] == (topk, 2), (
         f"Expected [world_size, rows, {topk}, 2] candidates, "

@@ -154,7 +154,7 @@ def start_watch_dog(
     watchdog_config: WatchdogConfig,
     logger: Logger,
 ) -> WatchDog:
-    """Start the process-wide watchdog if ``watchdog_config.dump_dir`` is set.
+    """Start the process-wide watchdog if `watchdog_config.dump_dir` is set.
 
     Returns the WatchDog singleton either way.
     """

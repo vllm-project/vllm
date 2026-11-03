@@ -104,14 +104,13 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     """
 
     def get_finished_count(self) -> int:
-        """Number of ``finished_sending`` notifications expected per request.
+        """Number of `finished_sending` notifications expected per request.
 
-        Only TP rank 0 writes hidden states to disk, so each request yields a
-        single notification. The default (``None``) makes ``KVOutputAggregator``
-        wait for every worker in the world size; since ranks 1..N-1 never submit
-        a copy, the request would never be reported as finished and its blocks
-        would be leaked forever (the scheduler then spins on
-        ``has_finished_requests()``).
+        Only TP rank 0 writes hidden states to disk, so each request yields a single
+        notification. The default (`None`) makes `KVOutputAggregator` wait for every
+        worker in the world size; since ranks 1..N-1 never submit a copy, the request
+        would never be reported as finished and its blocks would be leaked forever (the
+        scheduler then spins on `has_finished_requests()`).
         """
         return 1
 
@@ -334,9 +333,9 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1, SupportsHMA):
     ) -> None:
         """Thread worker: wait for async DtoH copy, write to disk, release lock.
 
-        ``lock_fd`` is an open file descriptor on the companion ``.lock``
-        file with ``LOCK_EX`` already held.  Closing it releases the lock,
-        which unblocks any client sleeping on ``LOCK_SH``.
+        `lock_fd` is an open file descriptor on the companion `.lock`
+        file with `LOCK_EX` already held.  Closing it releases the lock,
+        which unblocks any client sleeping on `LOCK_SH`.
         """
         try:
             event.synchronize()

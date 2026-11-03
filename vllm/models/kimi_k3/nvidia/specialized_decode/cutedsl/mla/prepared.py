@@ -3,9 +3,9 @@
 """Prepared MLA core: the packed input projection feeds the query kernel, then either
 tokenspeed_mla_decode (core "tokenspeed") or FlashInfer's trtllm-gen MLA decode (core
 "trtllm"; FP8 Q and KV as tokenspeed, FP32 softmax and accumulation) into the BF16
-latent, and MlaValue (W_UV / gate). Under DCP (``dcp``: a DcpBox) the tokenspeed core
+latent, and MlaValue (W_UV / gate). Under DCP (`dcp`: a DcpBox) the tokenspeed core
 runs over the local KV shard for every DCP rank's heads between the query's q
-publication and ``DcpValue``'s merge (see mla.dcp). Spec verify: ``q`` query tokens
+publication and `DcpValue`'s merge (see mla.dcp). Spec verify: `q` query tokens
 per request (rows grouped by request, causal among them)."""
 
 from functools import cache
@@ -32,8 +32,8 @@ _FLASHINFER: dict[tuple[torch.device, int], tuple[torch.Tensor, torch.Tensor]] =
 
 @cache
 def compile_core(batch, heads, pitch, specs, device, dcp=0, sms=148, q=1):
-    """CuTe kernels (query, value) of one batch of rows (``q`` per request); under DCP
-    (``dcp``: its size) the query publishes and the value is DcpValue."""
+    """CuTe kernels (query, value) of one batch of rows (`q` per request); under DCP
+    (`dcp`: its size) the query publishes and the value is DcpValue."""
     qnorm, kvnorm, qb, uk, uv, qinv, kinv, kv = (
         fake(shape, stride, dtype, 4 if dtype == torch.float32 else 16)
         for shape, stride, dtype in specs
@@ -70,7 +70,7 @@ def compile_core(batch, heads, pitch, specs, device, dcp=0, sms=148, q=1):
 
 
 def core_for(batch, core="auto", q=1):
-    """``core`` unless "auto": trtllm-gen from B16, else tokenspeed (spec verify,
+    """`core` unless "auto": trtllm-gen from B16, else tokenspeed (spec verify,
     q > 1: tokenspeed, whose SM-filling splits stream long contexts far faster)."""
     if core == "auto":
         core = "trtllm" if batch >= TRTLLM_CORE_BATCH and q == 1 else "tokenspeed"
@@ -82,7 +82,7 @@ def core_for(batch, core="auto", q=1):
 
 
 def pad_requests(batch, block_table, lengths, totals=None):
-    """Request metadata for ``batch`` rows: PIECEWISE graphs pad the tokens but not
+    """Request metadata for `batch` rows: PIECEWISE graphs pad the tokens but not
     the requests, so missing rows become empty requests (length 0 on page 0)."""
     rows = min(lengths.shape[0], block_table.shape[0])
     if rows >= batch:
@@ -95,8 +95,8 @@ def pad_requests(batch, block_table, lengths, totals=None):
 
 
 def trtllm_decode(query, cache, block_table, lengths, max_seq, scales, out):
-    """FlashInfer trtllm-gen MLA decode of FP8 ``query`` [B, q, H, 576] (causal among
-    the q rows) over the FP8 paged cache into BF16 ``out`` [B, q, H, 512], PDL chained;
+    """FlashInfer trtllm-gen MLA decode of FP8 `query` [B, q, H, 576] (causal among
+    the q rows) over the FP8 paged cache into BF16 `out` [B, q, H, 512], PDL chained;
     zeroed workspace and multi-CTA counter (self-resetting) owned here, one per (device,
     heads)."""
     from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
@@ -131,9 +131,9 @@ def trtllm_decode(query, cache, block_table, lengths, max_seq, scales, out):
 
 
 class PreparedMla:
-    """``max_context`` (the deployment's longest sequence) bounds the split count;
-    ``core`` forces "tokenspeed" or "trtllm". ``dcp``: the model's DcpBox, with this
-    layer's mailbox ``parity``. ``queries``: the query lengths q (spec verify: 1 + the
+    """`max_context` (the deployment's longest sequence) bounds the split count;
+    `core` forces "tokenspeed" or "trtllm". `dcp`: the model's DcpBox, with this
+    layer's mailbox `parity`. `queries`: the query lengths q (spec verify: 1 + the
     draft length) prepared for every batch of rows divisible by q."""
 
     def __init__(
@@ -208,7 +208,7 @@ class PreparedMla:
     def stock_core(self, cache, block_table, lengths, batch, q=1, totals=None):
         """tokenspeed_mla_decode or trtllm-gen into the BF16 latent (DCP: tokenspeed
         for every rank's heads over the local shard into the DcpBox rows + LSE; q > 1
-        masks causally in global positions, ``totals``). tokenspeed: a fixed split
+        masks causally in global positions, `totals`). tokenspeed: a fixed split
         count per batch (one CTA pair per split filling the SMs); both PDL chained
         between our kernels."""
         box, reqs = self.dcp, batch // q
@@ -231,9 +231,9 @@ class PreparedMla:
     def run(
         self, projected, out, *, cache, slots, block_table, lengths, totals=None, q=1
     ):
-        """``lengths``/``block_table``: this rank's KV (the local shard under DCP);
-        ``totals``: under DCP, the requests' full lengths. ``q`` rows per request (spec
-        verify; ``slots`` per row). Rows of ``projected`` beyond the requests run as
+        """`lengths`/`block_table`: this rank's KV (the local shard under DCP);
+        `totals`: under DCP, the requests' full lengths. `q` rows per request (spec
+        verify; `slots` per row). Rows of `projected` beyond the requests run as
         empty requests (zero output)."""
         batch, s = projected.shape[0], stream(self.device)
         reqs = batch // q

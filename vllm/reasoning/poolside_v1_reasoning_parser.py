@@ -2,22 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Laguna reasoning parser.
 
-``DeepSeekV3ReasoningParser.is_reasoning_end`` walks the entire
-token sequence backwards and returns ``True`` on the first ``</think>`` it
-sees. When called on ``prompt_token_ids`` that mistakes any stray
-``</think>`` in conversation history, few-shot examples or tool descriptions
-for a template-injected "thinking already ended" marker. In the streaming
-path (see ``vllm/entrypoints/openai/chat_completion/serving.py``,
-``prompt_is_reasoning_end_arr``) that false positive short-circuits the
-reasoning parser for the whole response, so any ``<think>...</think>`` the
-model emits itself ends up in the content field instead of the reasoning
-field.
+`DeepSeekV3ReasoningParser.is_reasoning_end` walks the entire token sequence backwards
+and returns `True` on the first `</think>` it sees. When called on `prompt_token_ids`
+that mistakes any stray `</think>` in conversation history, few-shot examples or tool
+descriptions for a template-injected "thinking already ended" marker. In the streaming
+path (see `vllm/entrypoints/openai/chat_completion/serving.py`,
+`prompt_is_reasoning_end_arr`) that false positive short-circuits the reasoning parser
+for the whole response, so any `<think>...</think>` the model emits itself ends up in
+the content field instead of the reasoning field.
 
-As we have more flexible templates, we instead scope
-the backward search to the current assistant turn: the
-walk terminates as soon as we hit the ``<assistant>`` start-of-message
-token. A ``</think>`` in a prior user turn or few-shot example is no longer
-visible.
+As we have more flexible templates, we instead scope the backward search to the current
+assistant turn: the walk terminates as soon as we hit the `<assistant>` start-of-message
+token. A `</think>` in a prior user turn or few-shot example is no longer visible.
 """
 
 from collections.abc import Sequence
@@ -30,7 +26,7 @@ from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
 
 class PoolsideV1ReasoningParser(DeepSeekV3ReasoningParser):
-    """Drop-in replacement for ``deepseek_v3`` that tolerates ``</think>``
+    """Drop-in replacement for `deepseek_v3` that tolerates `</think>`
     tokens appearing anywhere in the prompt other than the generation prefix.
     """
 

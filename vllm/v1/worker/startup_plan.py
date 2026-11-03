@@ -3,18 +3,17 @@
 """Persist and reuse the memory-profiling result across engine boots.
 
 On startup, vLLM measures how much GPU memory the KV cache can use and
-computes the ``--kv-cache-memory`` value that reproduces that allocation.
+computes the `--kv-cache-memory` value that reproduces that allocation.
 For a fixed (model, config, hardware, library) combination the result is
 deterministic, yet it is re-measured on every boot.
 
-When ``VLLM_ENABLE_STARTUP_PLAN=1``, each worker persists that value under
-``{VLLM_CACHE_ROOT}/startup_plan/`` (regenerable derived state, alongside
-the torch.compile cache), keyed by a fingerprint of everything the value
-depends on, and later boots apply it automatically -- skipping the
-memory-profiling measurement and the CUDA-graph memory estimation pass --
-if and only if the fingerprint matches and the device has at least as much
-free memory as when the plan was recorded. On any mismatch the worker
-falls back to full profiling, so a stale plan costs nothing and is never
+When `VLLM_ENABLE_STARTUP_PLAN=1`, each worker persists that value under
+`{VLLM_CACHE_ROOT}/startup_plan/` (regenerable derived state, alongside the
+torch.compile cache), keyed by a fingerprint of everything the value depends on, and
+later boots apply it automatically -- skipping the memory-profiling measurement and the
+CUDA-graph memory estimation pass -- if and only if the fingerprint matches and the
+device has at least as much free memory as when the plan was recorded. On any mismatch
+the worker falls back to full profiling, so a stale plan costs nothing and is never
 trusted.
 """
 
@@ -43,15 +42,14 @@ def compute_plan_fingerprint(
 ) -> str:
     """Hash everything the profiled KV-cache memory value depends on.
 
-    ``VllmConfig.compute_hash()`` covers the vLLM version and the model,
-    cache, parallel, and compilation configs, but deliberately contains no
-    device identity (``DeviceConfig.compute_hash`` is empty), so device
-    name, total memory, compute capability, and the torch/CUDA build are
-    added here. The vLLM version is also pinned as an explicit factor so
-    version invalidation holds no matter how ``compute_hash`` evolves.
-    Rank is included because per-rank memory use differs under TP/PP.
-    Driver-only changes are not part of the key; the free-memory gate at
-    apply time bounds the residual risk.
+    `VllmConfig.compute_hash()` covers the vLLM version and the model, cache, parallel,
+    and compilation configs, but deliberately contains no device identity
+    (`DeviceConfig.compute_hash` is empty), so device name, total memory, compute
+    capability, and the torch/CUDA build are added here. The vLLM version is also pinned
+    as an explicit factor so version invalidation holds no matter how `compute_hash`
+    evolves. Rank is included because per-rank memory use differs under TP/PP.
+    Driver-only changes are not part of the key; the free-memory gate at apply time
+    bounds the residual risk.
     """
     # Imported here (as VllmConfig.compute_hash does) to avoid a cycle with
     # the top-level vllm package.
@@ -77,7 +75,7 @@ def compute_plan_fingerprint(
 def _plan_path(fingerprint: str) -> str:
     """Plans are regenerable derived state, so they live under the standard
     vLLM cache root (like the torch.compile cache) and relocate with
-    ``VLLM_CACHE_ROOT`` instead of needing a location knob of their own."""
+    `VLLM_CACHE_ROOT` instead of needing a location knob of their own."""
     # VLLM_CACHE_ROOT is already user-expanded by envs.py.
     return os.path.join(
         envs.VLLM_CACHE_ROOT, "startup_plan", f"startup_plan_{fingerprint}.json"
@@ -132,9 +130,9 @@ def _applicable_kv_cache_memory_bytes(
 
 
 def maybe_apply_startup_plan(worker: "Worker") -> None:
-    """If enabled and ``--kv-cache-memory`` was not set explicitly, apply a
-    persisted plan by setting ``worker.cache_config.kv_cache_memory_bytes``.
-    No-op unless ``VLLM_ENABLE_STARTUP_PLAN=1``."""
+    """If enabled and `--kv-cache-memory` was not set explicitly, apply a
+    persisted plan by setting `worker.cache_config.kv_cache_memory_bytes`.
+    No-op unless `VLLM_ENABLE_STARTUP_PLAN=1`."""
     if (
         not envs.VLLM_ENABLE_STARTUP_PLAN
         or worker.cache_config.kv_cache_memory_bytes is not None
@@ -166,8 +164,7 @@ def maybe_apply_startup_plan(worker: "Worker") -> None:
 
 def maybe_save_startup_plan(worker: "Worker", kv_cache_memory_bytes: int) -> None:
     """Atomically persist this boot's profiling result for future boots.
-    No-op unless ``VLLM_ENABLE_STARTUP_PLAN=1``; failures are logged,
-    never raised."""
+    No-op unless `VLLM_ENABLE_STARTUP_PLAN=1`; failures are logged, never raised."""
     if not envs.VLLM_ENABLE_STARTUP_PLAN:
         return
     fingerprint = compute_plan_fingerprint(

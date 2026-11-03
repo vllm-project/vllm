@@ -51,7 +51,7 @@ def _spec_fingerprint(spec: KVCacheSpec) -> dict[str, str]:
 def _model_fingerprint(model_config: Any) -> dict[str, Any]:
     """Effective model settings that change the KV a checkpoint produces.
 
-    ``hf_config`` already has ``hf_overrides`` applied, so overridden RoPE or
+    `hf_config` already has `hf_overrides` applied, so overridden RoPE or
     attention settings separate engines that share the same model path.
     """
     hf_config = getattr(model_config, "hf_config", None)
@@ -153,7 +153,7 @@ class UMBPNamespace:
 
     @classmethod
     def configured(cls, vllm_config: Any) -> UMBPNamespace | None:
-        """Return the explicit ``key_namespace``, or None when it is derived."""
+        """Return the explicit `key_namespace`, or None when it is derived."""
         extra = vllm_config.kv_transfer_config.kv_connector_extra_config
         configured = extra.get("key_namespace", "auto")
         if configured == "auto":

@@ -2,13 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """NVFP4 prefill index scorer for small work (FlyDSL, gfx950).
 
-The scores of ``kernel.py`` with one dequantized block per workgroup: a
-workgroup is 4 waves x 32 MQ query rows x a segment of the causal window. Per
-block, wave w dequantizes token tile w into e4m3 A fragments in LDS (double
-buffered, one barrier per block) while the MFMAs of the previous block run;
-every wave multiplies all four token tiles against its query rows with
-v_mfma_f32_32x32x64_f8f6f4. Blocks before the wave's first query position skip
-the causal mask in a loop of their own.
+The scores of `kernel.py` with one dequantized block per workgroup: a workgroup is 4
+waves x 32 MQ query rows x a segment of the causal window. Per block, wave w dequantizes
+token tile w into e4m3 A fragments in LDS (double buffered, one barrier per block) while
+the MFMAs of the previous block run; every wave multiplies all four token tiles against
+its query rows with v_mfma_f32_32x32x64_f8f6f4. Blocks before the wave's first query
+position skip the causal mask in a loop of their own.
 """
 
 import flydsl.compiler as flyc
@@ -99,7 +98,7 @@ def tile_q(mq: int) -> int:
 
 
 def compile_score_prefill_shared(heads: int = 1, mq: int = 2):
-    """Build the scorer for 1, 2 or 4 index heads and ``mq`` 32-row query tiles
+    """Build the scorer for 1, 2 or 4 index heads and `mq` 32-row query tiles
     per wave."""
     assert heads in (1, 2, 4) and mq in MQ_CHOICES, (heads, mq)
     H, MQ = heads, mq
