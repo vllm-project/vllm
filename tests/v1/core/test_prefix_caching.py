@@ -662,7 +662,7 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
     transfers = coordinator.build_offload_command().page_transfers
     assert len(transfers) == 1
     restore = transfers[0]
-    assert restore.restore and not restore.after_forward
+    assert restore.restore
     assert restore.host_block_id == source[-1].block_id
     assert restore.resident_block_ids == (resident[-1].block_id,)
     request.num_computed_tokens = count
@@ -791,7 +791,7 @@ def test_hisparse_materializes_prefix_without_allocating_hot_blocks(
 
     spills = get_hisparse_coordinator(manager).build_offload_command().page_transfers
     assert len(spills) == 2
-    assert all(spill.after_forward for spill in spills)
+    assert not any(spill.restore for spill in spills)
     resident_blocks = manager.get_blocks(request.request_id).blocks[2]
     assert [block.ref_cnt for block in resident_blocks] == [2, 2]
     spill_counts = {spill.transfer_id: 1 for spill in spills}

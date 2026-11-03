@@ -370,8 +370,6 @@ class FlashMLASparseMetadataBuilder(
         else:
             threshold = {16: 128, 32: 128, 64: 256, 128: 256}.get(num_q_heads, 256)
         self.use_hisparse = vllm_config.attention_config.hisparse_config is not None
-        if self.use_hisparse:
-            threshold = 1
         # Varlen decodes are safe under DCP: causality comes from the
         # indexer's top-k indices, not from the kernel metadata.
         self._init_reorder_batch_threshold(

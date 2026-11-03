@@ -734,7 +734,7 @@ void concat_and_cache_mla_grouped(
     const std::string& kv_cache_dtype);
 
 #ifndef USE_ROCM
-// HiSparse kernels use raw PTX in the row copy; CUDA-only.
+// HiSparse kernels use raw PTX in zero_row_warp; CUDA-only.
 void hisparse_resolve_residency(
     torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
     torch::stable::Tensor const& hot_block_table,
@@ -744,20 +744,18 @@ void hisparse_resolve_residency(
     torch::stable::Tensor& lru_slots,
     std::optional<torch::stable::Tensor> const& request_state_indices,
     int64_t region_stride, int64_t max_union_rows,
-    std::optional<torch::stable::Tensor> const& miss_mask,
     std::optional<torch::stable::Tensor> const& stats,
     std::optional<torch::stable::Tensor> const& attention_indices,
     int64_t attention_block_stride,
     std::optional<torch::stable::Tensor> const& request_ids,
     std::optional<torch::stable::Tensor> const& source_block_table,
     int64_t source_block_size,
-    std::optional<torch::stable::Tensor> const& resolved_global_indices,
     std::optional<torch::stable::Tensor> const& valid_counts,
     std::optional<torch::stable::Tensor> const& swap_host_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_device_physical_rows,
     std::optional<torch::stable::Tensor> const& swap_counts,
     std::optional<torch::stable::Tensor> const& resident_block_table,
-    int64_t resident_block_size, int64_t resident_null_block,
+    int64_t resident_block_size,
     std::optional<torch::stable::Tensor> const& num_valid_rows);
 
 void hisparse_invalidate_written_slots(
@@ -767,14 +765,11 @@ void hisparse_invalidate_written_slots(
     torch::stable::Tensor const& written_slots, int64_t num_state_rows,
     int64_t region_stride);
 
-void hisparse_gather_plan(
-    torch::stable::Tensor const& host_cache, torch::stable::Tensor& hot_cache,
-    torch::stable::Tensor const& global_indices,
-    torch::stable::Tensor const& hot_indices,
-    torch::stable::Tensor const& miss_mask,
-    std::optional<torch::stable::Tensor> const& request_state_indices,
-    std::optional<torch::stable::Tensor> const& attention_indices,
-    int64_t attention_block_stride);
+void hisparse_gather_plan(torch::stable::Tensor const& host_cache,
+                          torch::stable::Tensor& hot_cache,
+                          torch::stable::Tensor const& global_indices,
+                          torch::stable::Tensor const& hot_indices,
+                          torch::stable::Tensor const& miss_mask);
 
 void hisparse_gather_compact(torch::stable::Tensor const& host_cache,
                              torch::stable::Tensor& hot_cache,
