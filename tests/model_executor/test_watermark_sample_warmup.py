@@ -23,6 +23,7 @@ from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gpu_sampler import GPUWatermarkSampler
 from vllm.v1.watermarking.spec_decode import create_speculative_target_watermarker
 from vllm.v1.watermarking.synthid import _STREAM_DOMAIN as SYNTHID_STREAM
+from vllm.v1.watermarking.synthid import SynthIDWatermarker
 from vllm.v1.watermarking.watermarker import WatermarkSample
 
 MASTER_KEY = 20250910
@@ -135,7 +136,7 @@ def _capture_synthid_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
         )
         return torch.zeros(logits.shape[0], dtype=torch.int64, device=logits.device)
 
-    monkeypatch.setattr("vllm.v1.watermarking.synthid.is_supported", lambda: True)
+    monkeypatch.setattr(SynthIDWatermarker, "_use_fused", lambda self, logits: True)
     monkeypatch.setattr(
         "vllm.v1.watermarking.synthid.synthid_sample", fake_synthid_sample
     )

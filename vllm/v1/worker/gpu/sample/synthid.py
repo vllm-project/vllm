@@ -13,6 +13,7 @@ samples with Gumbel-max.
 import functools
 
 import torch
+from packaging import version
 
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, gl, gluon, tl, triton
@@ -38,15 +39,18 @@ _HIST_TILE = 4 * _HIST_GROUPS
 # Each histogram word adds at most 2**16 per token; this many tokens per
 # program cannot overflow its uint32 bins.
 _HIST_MAX_TOKENS = (1 << 16) - 1
+# Triton 3.6 and 3.7 import Gluon but lack gl.barrier or
+# shared_memory_descriptor.atomic_scatter_add.
+HAS_GLUON = HAS_TRITON and version.parse(triton.__version__).release >= (3, 8)
 
 
 def is_supported() -> bool:
     """Validated on H100 (sm90); expected to work on sm80 and newer.
 
-    The layouts assume 32-thread warps, so ROCm takes the torch path.
+    The layouts assume 32-thread warps, so ROCm cannot run the kernels.
     """
     return (
-        HAS_TRITON
+        HAS_GLUON
         and current_platform.is_cuda()
         and current_platform.has_device_capability(80)
     )

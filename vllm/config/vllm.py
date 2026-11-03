@@ -1584,6 +1584,13 @@ class VllmConfig:
         self._resolve_and_verify_engram_config()
 
         self._check_supports_watermarking()
+        if (
+            self.watermark_config is not None
+            and self.watermark_config.algorithm == "synthid_text"
+        ):
+            from vllm.v1.watermarking.synthid import check_synthid_text_platform
+
+            check_synthid_text_platform()
         # Models may have supplied their own DCP defaults above; anything still
         # unset falls back to the stock ones.
         self.parallel_config.set_dcp_defaults()

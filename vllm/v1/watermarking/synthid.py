@@ -9,6 +9,8 @@ import torch
 
 from vllm.config.watermarking import WatermarkPRFName
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.triton_utils import HAS_TRITON, triton
 from vllm.v1.watermarking.detector import WatermarkDetector
 from vllm.v1.watermarking.prfs import PhiloxPRF, create_prf
 from vllm.v1.watermarking.watermarker import (
@@ -23,6 +25,33 @@ logger = init_logger(__name__)
 
 # High stream word ("SYNT") keeps SynthID-Text off Gumbel-max's Philox streams.
 _STREAM_DOMAIN = 0x53594E54 << 32
+
+
+def _fused_kernels_error() -> str:
+    triton_version = triton.__version__ if HAS_TRITON else "not installed"
+    return (
+        "SynthID-Text watermarking on GPUs runs only through its fused Gluon "
+        "kernels, which need an NVIDIA CUDA GPU with compute capability 8.0 or "
+        "newer and Triton 3.8 or newer with Gluon (found platform "
+        f"{current_platform.device_name!r}, Triton {triton_version}). Install "
+        "Triton 3.8 or newer (the version torch 2.14 requires), or run without "
+        "SynthID-Text watermarking."
+    )
+
+
+def check_synthid_text_platform() -> None:
+    """Raise if this platform's GPUs cannot run the fused SynthID-Text kernels.
+
+    The torch tournament serves only CPUs and CUDA GPUs below sm80. It is
+    several times slower than the kernels, so it is not a fallback for GPUs
+    that should run them.
+    """
+    if not current_platform.is_cuda_alike():
+        return
+    if current_platform.is_cuda() and not current_platform.has_device_capability(80):
+        return
+    if not is_supported():
+        raise ValueError(_fused_kernels_error())
 
 
 def _validate_depth(depth: int) -> None:
@@ -49,10 +78,9 @@ class SynthIDWatermarker(Watermarker):
         self._context_width = context_width
         self.depth = depth
         # The first fused call runs in the engine's profile run, before CUDA
-        # graph capture. A kernel that cannot compile on this GPU fails there
-        # and the tournament falls back to torch for the rest of the run.
+        # graph capture. A kernel that cannot compile on this GPU fails there,
+        # and startup stops with a clear error.
         self._fused_verified = False
-        self._fused_failed = False
 
     @property
     def context_width(self) -> int:
@@ -114,21 +142,18 @@ class SynthIDWatermarker(Watermarker):
         if random_sampler is None:
             raise ValueError("SynthID-Text requires a random sampler")
 
-        if not self._fused_failed and is_supported():
+        if self._use_fused(logits):
             if self._fused_verified:
                 return self._sample_fused(logits, contexts, random_sampler, skip_mask)
             try:
                 sample = self._sample_fused(logits, contexts, random_sampler, skip_mask)
-            except Exception:
-                logger.warning(
-                    "The fused SynthID-Text kernels failed on this GPU; "
-                    "sampling with the torch implementation instead.",
-                    exc_info=True,
-                )
-                self._fused_failed = True
-            else:
-                self._fused_verified = True
-                return sample
+            except Exception as e:
+                raise RuntimeError(
+                    "The fused SynthID-Text kernels failed to compile or launch. "
+                    + _fused_kernels_error()
+                ) from e
+            self._fused_verified = True
+            return sample
 
         watermarked_logits = self.watermark_logits(logits, contexts)
         if skip_mask is not None:
@@ -139,6 +164,10 @@ class SynthIDWatermarker(Watermarker):
             token_ids=random_sampler(watermarked_logits),
             logits=logits,
         )
+
+    def _use_fused(self, logits: torch.Tensor) -> bool:
+        # Tensors on the CPU, as in tests, keep the torch tournament.
+        return logits.is_cuda and is_supported()
 
     def _sample_fused(
         self,

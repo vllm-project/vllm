@@ -8,6 +8,7 @@ import pytest
 import torch
 from pydantic import ValidationError
 
+from vllm.config import VllmConfig
 from vllm.config.watermarking import WatermarkConfig
 from vllm.v1.watermarking.factory import create_watermarker
 from vllm.v1.watermarking.gumbel import GumbelWatermarker
@@ -473,7 +474,7 @@ def test_synthid_detector_recognizes_fused_samples():
 
 
 def _fake_fused_sampler(monkeypatch, sample_fn):
-    monkeypatch.setattr("vllm.v1.watermarking.synthid.is_supported", lambda: True)
+    monkeypatch.setattr(SynthIDWatermarker, "_use_fused", lambda self, logits: True)
     monkeypatch.setattr("vllm.v1.watermarking.synthid.synthid_sample", sample_fn)
 
 
@@ -489,14 +490,27 @@ def _cpu_sampler_inputs():
     return logits, contexts, random_sampler
 
 
-def test_failed_first_fused_call_falls_back_to_torch(monkeypatch):
-    calls = []
-
+def test_failed_first_fused_call_is_a_clear_error(monkeypatch):
     def failing_synthid_sample(*args, **kwargs):
-        calls.append(1)
         raise RuntimeError("compilation failed")
 
     _fake_fused_sampler(monkeypatch, failing_synthid_sample)
+    logits, contexts, random_sampler = _cpu_sampler_inputs()
+    watermarker = SynthIDWatermarker(42, context_width=3, depth=5)
+
+    with pytest.raises(RuntimeError, match="Triton 3.8 or newer") as error:
+        watermarker.sample(logits, contexts, random_sampler)
+    assert str(error.value.__cause__) == "compilation failed"
+
+
+def test_cpu_tensors_use_the_torch_tournament(monkeypatch):
+    def failing_synthid_sample(*args, **kwargs):
+        raise AssertionError("the fused kernels need CUDA tensors")
+
+    monkeypatch.setattr("vllm.v1.watermarking.synthid.is_supported", lambda: True)
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.synthid.synthid_sample", failing_synthid_sample
+    )
     monkeypatch.setattr(
         RandomSampler, "__call__", lambda self, scores: scores.argmax(dim=-1)
     )
@@ -504,12 +518,9 @@ def test_failed_first_fused_call_falls_back_to_torch(monkeypatch):
     watermarker = SynthIDWatermarker(42, context_width=3, depth=5)
     expected = watermarker.watermark_logits(logits, contexts).argmax(dim=-1)
 
-    first = watermarker.sample(logits, contexts, random_sampler)
-    second = watermarker.sample(logits, contexts, random_sampler)
+    sample = watermarker.sample(logits, contexts, random_sampler)
 
-    assert calls == [1]
-    assert torch.equal(first.token_ids, expected)
-    assert torch.equal(second.token_ids, expected)
+    assert torch.equal(sample.token_ids, expected)
 
 
 def test_fused_failure_after_the_first_call_is_not_swallowed(monkeypatch):
@@ -532,17 +543,94 @@ def test_fused_failure_after_the_first_call_is_not_swallowed(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("is_cuda", "has_capability", "expected"),
-    [(True, True, True), (True, False, False), (False, True, False)],
+    ("has_gluon", "is_cuda", "has_capability", "expected"),
+    [
+        (True, True, True, True),
+        (False, True, True, False),  # Triton < 3.8
+        (True, True, False, False),
+        (True, False, True, False),
+    ],
 )
 def test_fused_kernels_require_nvidia_sm80(
-    monkeypatch, is_cuda, has_capability, expected
+    monkeypatch, has_gluon, is_cuda, has_capability, expected
 ):
     platform = SimpleNamespace(
         is_cuda=lambda: is_cuda,
         has_device_capability=lambda capability: has_capability and capability == 80,
     )
     monkeypatch.setattr(fused_synthid, "current_platform", platform)
-    monkeypatch.setattr(fused_synthid, "HAS_TRITON", True)
+    monkeypatch.setattr(fused_synthid, "HAS_GLUON", has_gluon)
 
     assert fused_synthid.is_supported() is expected
+
+
+def _platform(name, capability=(9, 0)):
+    return SimpleNamespace(
+        device_name=name,
+        is_cuda=lambda: name == "cuda",
+        is_cuda_alike=lambda: name in ("cuda", "rocm"),
+        has_device_capability=lambda minimum: capability >= divmod(minimum, 10),
+    )
+
+
+@pytest.mark.parametrize(
+    ("platform", "has_gluon", "fails"),
+    [
+        (_platform("cuda"), True, False),
+        (_platform("cuda"), False, True),  # Triton < 3.8
+        (_platform("cuda", capability=(7, 5)), False, False),  # torch tournament
+        (_platform("rocm"), True, True),
+        (_platform("cpu"), False, False),  # torch tournament
+    ],
+    ids=["cuda", "cuda-old-triton", "cuda-sm75", "rocm", "cpu"],
+)
+def test_synthid_fails_at_startup_without_fused_kernels(
+    monkeypatch, platform, has_gluon, fails
+):
+    monkeypatch.setattr("vllm.v1.watermarking.synthid.current_platform", platform)
+    monkeypatch.setattr(fused_synthid, "current_platform", platform)
+    monkeypatch.setattr(fused_synthid, "HAS_GLUON", has_gluon)
+    watermark_config = WatermarkConfig(key=42, algorithm="synthid_text")
+    if fails:
+        with pytest.raises(ValueError, match="Triton 3.8 or newer"):
+            VllmConfig(watermark_config=watermark_config)
+    else:
+        VllmConfig(watermark_config=watermark_config)
+
+
+@requires_fused
+@pytest.mark.parametrize("enforce_eager", [True, False])
+def test_engine_fails_at_startup_when_fused_kernels_fail(
+    vllm_runner, monkeypatch, enforce_eager
+):
+    """The profiling run's dummy sampler pass is the first fused call.
+
+    It comes before the kernel warmup, which does not run at all with
+    ``enforce_eager``.
+    """
+    fused_calls = []
+
+    def failing_synthid_sample(*args, **kwargs):
+        fused_calls.append(kwargs)
+        raise RuntimeError("kernel failed to compile")
+
+    # The patch reaches the worker only when the engine runs in-process.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setattr(
+        "vllm.v1.watermarking.synthid.synthid_sample", failing_synthid_sample
+    )
+    with (
+        pytest.raises(RuntimeError, match="Triton 3.8 or newer") as error,
+        vllm_runner(
+            "hmellor/tiny-random-LlamaForCausalLM",
+            dtype="half",
+            enforce_eager=enforce_eager,
+            max_model_len=128,
+            max_num_seqs=4,
+            watermark_config={"algorithm": "synthid_text", "key": 42},
+        ),
+    ):
+        pass
+
+    assert len(fused_calls) == 1
+    assert str(error.value.__cause__) == "kernel failed to compile"
