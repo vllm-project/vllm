@@ -1293,9 +1293,12 @@ def _default_rocm_aiter_fa_gluon(vllm_config: "VllmConfig") -> None:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     attention_config = vllm_config.attention_config
+    parallel_config = vllm_config.parallel_config
     if (
         attention_config.backend is not None
         or attention_config.backend_per_kind
+        or parallel_config.world_size != 1
+        or parallel_config.enable_expert_parallel
         or not rocm_aiter_ops.is_mha_enabled()
         or not on_gfx950()
     ):
@@ -1304,7 +1307,6 @@ def _default_rocm_aiter_fa_gluon(vllm_config: "VllmConfig") -> None:
     from vllm.v1.attention.backends.rocm_aiter_fa_gluon import pa_gluon_supports
 
     model_config = vllm_config.model_config
-    parallel_config = vllm_config.parallel_config
     if pa_gluon_supports(
         model_config.get_num_attention_heads(parallel_config),
         model_config.get_num_kv_heads(parallel_config),

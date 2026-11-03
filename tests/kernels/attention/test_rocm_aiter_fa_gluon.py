@@ -62,18 +62,20 @@ def test_pa_gluon_supports(
 
 
 @pytest.mark.parametrize(
-    ("backend", "heads", "kv_cache_dtype", "shuffle", "expected"),
+    ("backend", "heads", "kv_cache_dtype", "shuffle", "parallel", "expected"),
     [
-        (None, (24, 4), "auto", True, "ROCM_AITER_FA_GLUON"),
-        (None, (24, 4), "auto", False, None),
-        ("ROCM_ATTN", (24, 4), "auto", True, "ROCM_ATTN"),
-        (None, (16, 2), "auto", True, None),
-        (None, (24, 4), "fp8", True, None),
+        (None, (24, 4), "auto", True, (1, False), "ROCM_AITER_FA_GLUON"),
+        (None, (24, 4), "auto", False, (1, False), None),
+        ("ROCM_ATTN", (24, 4), "auto", True, (1, False), "ROCM_ATTN"),
+        (None, (16, 2), "auto", True, (1, False), None),
+        (None, (24, 4), "fp8", True, (1, False), None),
+        (None, (24, 4), "auto", True, (2, False), None),
+        (None, (24, 4), "auto", True, (1, True), None),
     ],
-    ids=["qwen38", "plain-kv", "user-backend", "gqa-8", "fp8-kv"],
+    ids=["qwen38", "plain-kv", "user-backend", "gqa-8", "fp8-kv", "tp2", "ep"],
 )
 def test_qwen3_5_config_selects_gluon_backend(
-    backend, heads, kv_cache_dtype, shuffle, expected, aiter_env
+    backend, heads, kv_cache_dtype, shuffle, parallel, expected, aiter_env
 ):
     from vllm.config import AttentionConfig
     from vllm.model_executor.models.config import _default_rocm_aiter_fa_gluon
@@ -92,7 +94,9 @@ def test_qwen3_5_config_selects_gluon_backend(
             get_num_kv_heads=lambda _: heads[1],
             get_head_size=lambda: 256,
         ),
-        parallel_config=None,
+        parallel_config=SimpleNamespace(
+            world_size=parallel[0], enable_expert_parallel=parallel[1]
+        ),
         cache_config=SimpleNamespace(cache_dtype=kv_cache_dtype),
     )
     _default_rocm_aiter_fa_gluon(config)
