@@ -50,7 +50,7 @@ from vllm.entrypoints.serve.exception_handling.handlers.validation import (
 from vllm.entrypoints.serve.exception_handling.handlers.vllm_error import (
     vllm_error_handler,
 )
-from vllm.exceptions import VLLMError
+from vllm.exceptions import VLLMError, VLLMValidationError
 from vllm.sampling_params import SamplingParams
 
 
@@ -78,7 +78,7 @@ class _Handler:
     * a :class:`CohereChatV2Response` (non-streaming JSON path);
     * an async generator yielding SSE frames (streaming path);
     * an :class:`ErrorResponse` (error envelope path); or
-    * an exception (router-level 500 path).
+    * an exception (router-level error path).
     """
 
     def __init__(self, result):
@@ -122,9 +122,11 @@ class _RenderHandler:
     def __init__(self, result):
         self.result = result
         self.seen_request = None
+        self.seen_kwargs_filter = None
 
-    async def render_chat_request(self, request):
+    async def render_chat_request(self, request, engine_chat_template_kwargs=None):
         self.seen_request = request
+        self.seen_kwargs_filter = engine_chat_template_kwargs
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -371,6 +373,22 @@ class TestEndpoint:
         body = r.json()
         assert body == {"message": "kaboom"}
 
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            VLLMValidationError("bad temperature", parameter="temperature"),
+            ValueError("bad temperature"),
+        ],
+        ids=["vllm_validation_error", "value_error"],
+    )
+    def test_handler_client_error_returns_400_envelope(self, exc):
+        """Client-caused handler errors are 4xx, matching the OpenAI routes."""
+        app = _build_app(handler=_Handler(exc))
+        with TestClient(app) as client:
+            r = client.post("/cohere/v2/chat", json=_minimal_request_body())
+        assert r.status_code == HTTPStatus.BAD_REQUEST
+        assert "bad temperature" in r.json()["message"]
+
     def test_non_json_content_type_rejected(self):
         """The ``validate_json_request`` dependency raises
         ``RequestValidationError`` (HTTP 422) for non-JSON content
@@ -472,22 +490,27 @@ class TestRenderEndpoint:
         assert kwargs["safety_mode"] == "strict"
 
     def test_api_server_only_kwargs_not_forwarded(self):
-        """As on ``/cohere/v2/chat``, the engine's reasoning parser must not
-        receive the template kwargs that only the API server reads."""
+        """As on ``/cohere/v2/chat``, the engine's reasoning parser and the
+        derender ``parse_context`` must not receive the template kwargs that
+        only the API server reads. Their tuple keys can't be JSON encoded."""
+        kwargs = {
+            "safety_mode": "strict",
+            **dict.fromkeys(_API_SERVER_ONLY_TEMPLATE_KWARGS, {(0, 0): "x"}),
+        }
         result = _generate_request()
         result.reasoning_parser_kwargs = ReasoningParserKwargs(
-            chat_template_kwargs={
-                "safety_mode": "strict",
-                **dict.fromkeys(_API_SERVER_ONLY_TEMPLATE_KWARGS, "x"),
-            }
+            chat_template_kwargs=kwargs
         )
-        app = _build_render_app(_RenderChatHandler(), _RenderHandler(result))
+        render_handler = _RenderHandler(result)
+        app = _build_render_app(_RenderChatHandler(), render_handler)
         with TestClient(app) as client:
             r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
         assert r.status_code == HTTPStatus.OK
         assert r.json()["reasoning_parser_kwargs"] == {
             "chat_template_kwargs": {"safety_mode": "strict"}
         }
+        assert render_handler.seen_kwargs_filter is not None
+        assert render_handler.seen_kwargs_filter(kwargs) == {"safety_mode": "strict"}
 
     def test_501_when_chat_handler_missing(self):
         app = _build_render_app(None, _RenderHandler(_generate_request()))
@@ -525,10 +548,10 @@ class TestRenderEndpoint:
         assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
         assert r.json() == {"message": "tokenizer exploded"}
 
-    def test_conversion_exception_returns_500_envelope(self):
+    def test_conversion_client_error_returns_400_envelope(self):
         """Conversion runs inside the same ``try`` as the render call, so
-        a bad v2 body that slips past Pydantic still yields the Cohere
-        error envelope rather than an unhandled 500 with vLLM's shape.
+        a bad v2 body that slips past Pydantic still yields a 4xx in the
+        Cohere error envelope rather than an unhandled 500 with vLLM's shape.
         """
 
         class _Boom:
@@ -538,7 +561,7 @@ class TestRenderEndpoint:
         app = _build_render_app(_Boom(), _RenderHandler(_generate_request()))
         with TestClient(app) as client:
             r = client.post("/cohere/v2/chat/render", json=_minimal_request_body())
-        assert r.status_code == HTTPStatus.INTERNAL_SERVER_ERROR
+        assert r.status_code == HTTPStatus.BAD_REQUEST
         assert r.json() == {"message": "unconvertible message"}
 
     def test_invalid_body_returns_422(self):
@@ -581,6 +604,21 @@ class TestCohereErrorEnvelope:
         assert "error" not in body
         assert "message" in body
         assert isinstance(body["message"], str) and body["message"]
+
+    @pytest.mark.parametrize("path", ["/cohere/v2/chat", "/cohere/v2/chat/render"])
+    def test_required_tool_choice_without_tools_returns_400(self, path):
+        """Reject an impossible tool choice before reaching either handler."""
+        app = _build_app_with_vllm_handlers(handler=None)
+        with TestClient(app) as client:
+            response = client.post(
+                path,
+                json={**_minimal_request_body(), "tool_choice": "REQUIRED"},
+            )
+        assert response.status_code == HTTPStatus.BAD_REQUEST
+        body = response.json()
+        assert "error" not in body
+        assert "REQUIRED" in body["message"]
+        assert "tools" in body["message"]
 
     def test_http_error_body_is_cohere_shaped(self):
         # A raised ``HTTPException`` from anywhere in the request cycle
