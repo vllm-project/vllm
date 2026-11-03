@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for translating vLLM cache metadata to native offloading config."""
 
+import json
+from pathlib import Path
 from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
@@ -9,7 +11,14 @@ import pytest
 import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import MockOffloadingSpec
-from vllm.config import KVTransferConfig, ParallelConfig, VllmConfig
+from vllm.config import (
+    CacheConfig,
+    DeviceConfig,
+    KVTransferConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.config import (
     build_offloading_config,
 )
@@ -1394,3 +1403,119 @@ def test_blocks_per_chunk_must_be_positive():
 
     with pytest.raises(ValueError, match="greater than 0"):
         build_offloading_config(config, _make_kv_cache_config())
+
+
+def _real_mla_offloading_config(
+    tmp_path: Path, extra_config: dict[str, Any] | None = None
+) -> VllmConfig:
+    model_path = tmp_path / "mla-model"
+    model_path.mkdir(exist_ok=True)
+    (model_path / "config.json").write_text(
+        json.dumps(
+            {
+                "architectures": ["DeepseekV2ForCausalLM"],
+                "model_type": "deepseek_v2",
+                "hidden_size": 128,
+                "intermediate_size": 256,
+                "num_hidden_layers": 2,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 4,
+                "kv_lora_rank": 64,
+                "qk_nope_head_dim": 32,
+                "qk_rope_head_dim": 32,
+                "v_head_dim": 32,
+                "max_position_embeddings": 128,
+                "vocab_size": 256,
+            }
+        )
+    )
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=str(model_path),
+            dtype="float32",
+            max_model_len=128,
+            skip_tokenizer_init=True,
+        ),
+        cache_config=CacheConfig(block_size=16, enable_prefix_caching=True),
+        device_config=DeviceConfig(device="cpu"),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=4, distributed_executor_backend="mp"
+        ),
+        kv_transfer_config=KVTransferConfig(
+            kv_connector="OffloadingConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config=extra_config or {},
+        ),
+    )
+
+
+@pytest.mark.parametrize("hisparse", [False, True])
+def test_heterogeneous_pages_keep_scheduler_worker_offload_sizes(tmp_path, hisparse):
+    """Flattening must not replace a sum of unequal pages by N equal pages."""
+    config = _real_mla_offloading_config(tmp_path)
+    spec = (
+        UniformTypeKVCacheSpecs(
+            block_size=16,
+            kv_cache_specs={
+                "indexer.0": _mla_spec(head_size=128, dtype=torch.float16),
+                "indexer.1": _mla_spec(head_size=128, dtype=torch.uint8),
+            },
+        )
+        if hisparse
+        else _uniform_spec("attention")
+    )
+    group = KVCacheGroupSpec(
+        list(spec.kv_cache_specs),
+        spec,
+        role=(
+            KVCacheGroupRole.HISPARSE_INDEXER if hisparse else KVCacheGroupRole.DEFAULT
+        ),
+    )
+    groups = [group]
+    if hisparse:
+        groups.insert(
+            0,
+            KVCacheGroupSpec(
+                ["source"],
+                _mla_spec(),
+                host_resident=True,
+                role=KVCacheGroupRole.HISPARSE_SOURCE,
+            ),
+        )
+    worker_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=groups,
+        hisparse_host_num_blocks=4 if hisparse else None,
+        kv_tp_replicas=4,
+    )
+    scheduler_config = generate_scheduler_kv_cache_config([worker_config])
+
+    worker = build_offloading_config(config, worker_config)
+    scheduler = build_offloading_config(config, scheduler_config)
+
+    assert worker.worker_kv_bytes_per_block == spec.page_size_bytes
+    assert scheduler.worker_kv_bytes_per_block == worker.worker_kv_bytes_per_block
+    assert scheduler.replicated_layout == worker.replicated_layout
+
+
+def test_canonical_certification_keeps_all_layer_specs(tmp_path):
+    """A representative MLA page cannot certify a non-portable sibling."""
+    config = _real_mla_offloading_config(tmp_path, {"canonical_layout": True})
+    spec = UniformTypeKVCacheSpecs(
+        block_size=16,
+        kv_cache_specs={"mla": _mla_spec(), "sharded": _full_attention_spec()},
+    )
+    worker_config = KVCacheConfig(
+        num_blocks=4,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(list(spec.kv_cache_specs), spec)],
+    )
+
+    for cache_config in (
+        worker_config,
+        generate_scheduler_kv_cache_config([worker_config]),
+    ):
+        offloading = build_offloading_config(config, cache_config)
+        assert not offloading.parallel.is_parallelism_agnostic
+        assert not offloading.replicated_layout
