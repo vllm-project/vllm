@@ -182,10 +182,10 @@ mod tests {
         full_format_from_builder_for_test,
     };
     use crate::reasoning::{
-        DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser, Glm45ReasoningParser,
-        Glm47ReasoningParser, KimiK2ReasoningParser, MiniMaxM2ReasoningParser,
-        NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningParser,
-        Step3ReasoningParser,
+        DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser, DeepSeekV4ReasoningParser,
+        Glm45ReasoningParser, Glm47ReasoningParser, KimiK2ReasoningParser,
+        MiniMaxM2ReasoningParser, NemotronV3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
+        ReasoningParser, Step3ReasoningParser,
     };
     use crate::tool::{
         DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
@@ -199,6 +199,7 @@ mod tests {
             .with_regular_token("<think>", 256)
             .with_regular_token("</think>", 257)
             .with_regular_token("｜DSML｜", 258)
+            .with_regular_token("<tool_call>", 259)
     }
 
     fn test_tools() -> Vec<Tool> {
@@ -504,6 +505,42 @@ mod tests {
     }
 
     #[test]
+    fn combined_parser_emits_tool_calls_opened_inside_reasoning() {
+        let tools = test_tools();
+        let reasoning = Glm47ReasoningParser::create(Arc::new(tokenizer())).unwrap();
+        let tool = Glm47MoeToolParser::create(&tools, Arc::new(tokenizer())).unwrap();
+        let mut parser = CombinedParser::new(Some(reasoning), Some(tool));
+        // The prompt opens reasoning; the model starts a call without `</think>`.
+        parser.initialize(&[256]).unwrap();
+
+        let output = collect(
+            &mut parser,
+            &[
+                "reason",
+                "<tool_call>get_weather<arg_key>location</arg_key>",
+                "<arg_value>Paris</arg_value></tool_call>",
+            ],
+        );
+
+        let mut reasoning = String::new();
+        let mut name = None;
+        let mut arguments = String::new();
+        for event in output.events {
+            match event {
+                UnifiedParserEvent::Reasoning(piece) => reasoning.push_str(&piece.text),
+                UnifiedParserEvent::ToolCall(call) => {
+                    name = name.or(call.name);
+                    arguments.push_str(&call.arguments);
+                }
+                UnifiedParserEvent::Text(text) => panic!("unexpected text {text:?}"),
+            }
+        }
+        assert_eq!(reasoning, "reason");
+        assert_eq!(name.as_deref(), Some("get_weather"));
+        assert_eq!(arguments, r#"{"location":"Paris"}"#);
+    }
+
+    #[test]
     fn combined_parser_preserves_tool_output_on_parse_error() {
         let mut parser = CombinedParser::new(None, Some(Box::new(PartialThenErrorToolParser)));
         let mut output = UnifiedParserOutput::default();
@@ -533,7 +570,7 @@ mod tests {
         assert_builder_parity::<DeepSeekR1ReasoningParser, DeepSeekV3ToolParser>("deepseek-r1");
         assert_builder_parity::<DeepSeekV3ReasoningParser, DeepSeekV31ToolParser>("deepseek-v3.1");
         assert_builder_parity::<DeepSeekV3ReasoningParser, DeepSeekV32ToolParser>("deepseek-v3.2");
-        assert_builder_parity::<DeepSeekV3ReasoningParser, DeepSeekV4ToolParser>("deepseek-v4");
+        assert_builder_parity::<DeepSeekV4ReasoningParser, DeepSeekV4ToolParser>("deepseek-v4");
         assert_builder_parity::<Glm47ReasoningParser, Glm47MoeToolParser>("glm-4.7");
         assert_builder_parity::<KimiK2ReasoningParser, KimiK2ToolParser>("kimi-k2");
         assert_builder_parity::<MiniMaxM2ReasoningParser, MinimaxM2ToolParser>("minimax-m2");

@@ -8,9 +8,10 @@ use vllm_tokenizer::{DecodedText, DynTokenizer, TokenAnchor, TokenAttribution, T
 
 use super::{
     CohereCmdReasoningParser, DeepSeekR1ReasoningParser, DeepSeekV3ReasoningParser,
-    DelimitedReasoningParser, DelimitedReasoningParserBuilder, Glm45ReasoningParser,
-    KimiReasoningParser, MiniMaxM3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta,
-    ReasoningParser, Result, SeedOssReasoningParser, Step3p5ReasoningParser,
+    DeepSeekV4ReasoningParser, DelimitedReasoningParser, DelimitedReasoningParserBuilder,
+    Glm45ReasoningParser, Glm47ReasoningParser, KimiReasoningParser, MiniMaxM2ReasoningParser,
+    MiniMaxM3ReasoningParser, Qwen3ReasoningParser, ReasoningDelta, ReasoningParser, Result,
+    SeedOssReasoningParser, Step3p5ReasoningParser,
 };
 
 pub(crate) const THINK_START_ID: u32 = 256;
@@ -24,6 +25,9 @@ pub(crate) const MM_THINK_START_ID: u32 = 263;
 pub(crate) const MM_THINK_END_ID: u32 = 264;
 pub(crate) const SEED_THINK_START_ID: u32 = 265;
 pub(crate) const SEED_THINK_END_ID: u32 = 266;
+pub(crate) const TOOL_CALL_ID: u32 = 267;
+pub(crate) const MINIMAX_TOOL_CALL_ID: u32 = 268;
+pub(crate) const DSML_ID: u32 = 269;
 
 pub(crate) fn fake_tokenizer() -> TestTokenizer {
     TestTokenizer::new()
@@ -38,6 +42,9 @@ pub(crate) fn fake_tokenizer() -> TestTokenizer {
         .with_regular_token("</mm:think>", MM_THINK_END_ID)
         .with_regular_token("<seed:think>", SEED_THINK_START_ID)
         .with_regular_token("</seed:think>", SEED_THINK_END_ID)
+        .with_regular_token("<tool_call>", TOOL_CALL_ID)
+        .with_regular_token("<minimax:tool_call>", MINIMAX_TOOL_CALL_ID)
+        .with_regular_token("｜DSML｜", DSML_ID)
 }
 
 /// Decode `chunks` with [`fake_tokenizer`] as the frontend streams them:
@@ -186,8 +193,8 @@ type FamilyCase = (
     &'static str,
 );
 
-/// The reasoning families built on [`DelimitedReasoningParser`]. DeepSeek V4,
-/// GLM-4.7, Kimi K2, and MiMo alias the DeepSeek V3 parser.
+/// The reasoning families built on [`DelimitedReasoningParser`]. Kimi K2 and
+/// MiMo alias the DeepSeek V3 parser.
 fn delimited_families() -> Vec<FamilyCase> {
     vec![
         (
@@ -211,6 +218,24 @@ fn delimited_families() -> Vec<FamilyCase> {
         (
             "glm45",
             Glm45ReasoningParser::create,
+            THINK_START_ID,
+            "</think>",
+        ),
+        (
+            "glm47",
+            Glm47ReasoningParser::create,
+            THINK_START_ID,
+            "</think>",
+        ),
+        (
+            "deepseek_v4",
+            DeepSeekV4ReasoningParser::create,
+            THINK_START_ID,
+            "</think>",
+        ),
+        (
+            "minimax_m2",
+            MiniMaxM2ReasoningParser::create,
             THINK_START_ID,
             "</think>",
         ),
@@ -295,6 +320,83 @@ fn delimited_families_end_reasoning_only_at_the_dedicated_end_token() {
             "{name}"
         );
         assert_eq!(collected.content_text, "answer", "{name}");
+    }
+}
+
+/// One family whose tool-call opener ends reasoning without `</think>`: name,
+/// constructor, and the opener in [`fake_tokenizer`].
+type ImplicitEndCase = (
+    &'static str,
+    fn(DynTokenizer) -> Result<Box<dyn ReasoningParser>>,
+    &'static str,
+);
+
+fn implicit_end_families() -> Vec<ImplicitEndCase> {
+    vec![
+        ("qwen3", Qwen3ReasoningParser::create, "<tool_call>"),
+        ("glm45", Glm45ReasoningParser::create, "<tool_call>"),
+        ("glm47", Glm47ReasoningParser::create, "<tool_call>"),
+        (
+            "minimax_m2",
+            MiniMaxM2ReasoningParser::create,
+            "<minimax:tool_call>",
+        ),
+        (
+            "deepseek_v4",
+            DeepSeekV4ReasoningParser::create,
+            "<｜DSML｜tool_calls>",
+        ),
+    ]
+}
+
+#[test]
+fn tool_call_opener_ends_reasoning_and_stays_content() {
+    for (name, create, opener) in implicit_end_families() {
+        let wire = format!("reason{opener}call");
+        // Every split, including inside the opener, as the frontend streams it.
+        for split in 0..=wire.len() {
+            let Some((head, tail)) = wire.split_at_checked(split) else {
+                continue;
+            };
+            let mut parser = create(Arc::new(fake_tokenizer())).unwrap();
+            parser.initialize(&[THINK_START_ID]).unwrap();
+
+            let collected = collect_attributed(parser.as_mut(), decode([head, tail]).to_vec());
+
+            assert_eq!(
+                collected.reasoning_text, "reason",
+                "{name} split at {split}"
+            );
+            assert_eq!(
+                collected.content_text,
+                format!("{opener}call"),
+                "{name} split at {split}"
+            );
+        }
+    }
+}
+
+#[test]
+fn ordinary_tool_call_opener_stays_reasoning() {
+    let tokenizer = fake_tokenizer();
+    for (name, create, opener) in implicit_end_families() {
+        let mut parser = create(Arc::new(fake_tokenizer())).unwrap();
+        parser.initialize(&[THINK_START_ID]).unwrap();
+
+        // The model quotes the opener with ordinary tokens inside reasoning.
+        let ids = [
+            tokenizer.encode("quote ", false).unwrap(),
+            tokenizer.encode_ordinary(opener).unwrap(),
+        ]
+        .concat();
+        let collected = collect_attributed(parser.as_mut(), vec![decode_ids(&tokenizer, &ids)]);
+
+        assert_eq!(
+            collected.reasoning_text,
+            format!("quote {opener}"),
+            "{name}"
+        );
+        assert_eq!(collected.content_text, "", "{name}");
     }
 }
 

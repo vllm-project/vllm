@@ -5,6 +5,7 @@ use vllm_tokenizer::{DecodedText, DynTokenizer};
 use xgrammar_structural_tag::format::Format;
 
 use crate::output_grammar::{self, OutputGrammarContext};
+use crate::utils::Marker;
 
 use super::{
     DelimitedReasoningParser, DelimitedReasoningParserBuilder, ReasoningDelta, ReasoningParser,
@@ -13,6 +14,9 @@ use super::{
 
 /// Reasoning parser for GLM-4.5/4.6 models using `<think>`/`</think>`
 /// delimiters.
+///
+/// A `<tool_call>` emitted before `</think>` ends reasoning and starts the
+/// tool call.
 pub struct Glm45ReasoningParser {
     inner: DelimitedReasoningParser,
 }
@@ -20,10 +24,12 @@ pub struct Glm45ReasoningParser {
 impl Glm45ReasoningParser {
     /// Create a GLM-4.5/4.6 parser backed by the shared delimited state machine.
     pub fn new(tokenizer: DynTokenizer) -> Result<Self> {
+        let tool_call_start = Marker::special_in(tokenizer.as_ref(), "<tool_call>");
         Ok(Self {
             inner: DelimitedReasoningParserBuilder::new(tokenizer, "<think>", "</think>")
                 .with_before_start("\n")
                 .with_after_end("\n")
+                .with_implicit_ends(tool_call_start)
                 .build()?,
         })
     }
