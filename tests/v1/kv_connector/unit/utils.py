@@ -295,6 +295,7 @@ def create_model_runner_output(
     token_id: int = 0,
     kv_connector_worker_meta: KVConnectorWorkerMetadata | None = None,
     failed_recving: set[str] | None = None,
+    failed_sync_recving: set[str] | None = None,
 ) -> ModelRunnerOutput:
     """Make dummy model runner output for testing."""
     # Make request data.
@@ -313,6 +314,7 @@ def create_model_runner_output(
             and invalid_block_ids is None
             and kv_connector_worker_meta is None
             and failed_recving is None
+            and failed_sync_recving is None
         )
         else KVConnectorOutput(
             finished_sending=finished_sending,
@@ -320,6 +322,7 @@ def create_model_runner_output(
             invalid_block_ids=invalid_block_ids or set(),
             kv_connector_worker_meta=kv_connector_worker_meta,
             failed_recving=failed_recving or set(),
+            failed_sync_recving=failed_sync_recving or set(),
         )
     )
 

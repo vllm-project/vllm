@@ -107,6 +107,7 @@ class KVOutputAggregator:
         aggregated_kv_connector_worker_meta = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
+        failed_sync_recving = set[str]()
 
         salvaged, self._salvaged_outputs = self._salvaged_outputs, []
 
@@ -177,6 +178,7 @@ class KVOutputAggregator:
                 combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
+            failed_sync_recving |= kv_output.failed_sync_recving
             self._failed_recving_pending |= kv_output.failed_recving
 
         failed_recving = self._failed_recving_pending & finished_recving
@@ -194,6 +196,7 @@ class KVOutputAggregator:
             kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
             failed_recving=failed_recving,
+            failed_sync_recving=failed_sync_recving,
             expected_finished_count=self._expected_finished_count,
         )
 

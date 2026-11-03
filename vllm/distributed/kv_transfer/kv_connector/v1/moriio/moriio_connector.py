@@ -2007,6 +2007,9 @@ class MoRIIOConnectorWorker:
         self._recving_local_blocks: dict[ReqId, list[int]] = {}
         # Drained by get_block_ids_with_load_errors.
         self._invalid_block_ids: set[int] = set()
+        # Failed reads the scheduler recovers per request; drained by
+        # get_transfer_results.
+        self._failed_sync_recving: set[ReqId] = set()
         # This step's posted reads, awaited in start_load_kv before the forward.
         self._reads_issued_this_step: list = []
 
@@ -2985,10 +2988,15 @@ class MoRIIOConnectorWorker:
                 pending.popitem(last=False)
             done_recving |= failed_recving
 
+        failed_sync_recving, self._failed_sync_recving = (
+            self._failed_sync_recving,
+            set(),
+        )
         return KVConnectorTransferResults(
             finished_sending=done_sending,
             finished_recving=done_recving,
             failed_recving=failed_recving,
+            failed_sync_recving=failed_sync_recving,
         )
 
     def _pop_done_transfers(self) -> set[str]:
@@ -3069,18 +3077,15 @@ class MoRIIOConnectorWorker:
 
         A READ still in flight when the wait gives up fails the step in both
         modes: RDMA may still write into its blocks, so the forward must not
-        consume them. If every READ is terminal, failures are reported via
-        get_block_ids_with_load_errors when block-level recovery is supported,
-        and re-raised otherwise.
+        consume them. If every READ is terminal, the failed requests are
+        reported to the scheduler once _pop_done_transfers sees them.
         """
         statuses = self._reads_issued_this_step
         self._reads_issued_this_step = []
         if not statuses:
             return
         try:
-            self.moriio_wrapper.waiting_for_transfer_complete(
-                statuses, fail_fast=not self._block_load_errors_supported
-            )
+            self.moriio_wrapper.waiting_for_transfer_complete(statuses, fail_fast=False)
         except TransferError:
             in_flight = sum(not (s.Succeeded() or s.Failed()) for s in statuses)
             if in_flight:
@@ -3089,12 +3094,6 @@ class MoRIIOConnectorWorker:
                     "flight; failing the step.",
                     in_flight,
                     len(statuses),
-                )
-                raise
-            if not self._block_load_errors_supported:
-                logger.exception(
-                    "MoRIIO READ failed before the forward; aborting because "
-                    "this KV cache layout cannot report load errors per block."
                 )
                 raise
             logger.exception(
@@ -3114,12 +3113,13 @@ class MoRIIOConnectorWorker:
     def _record_failed_recv(self, req_id: ReqId) -> None:
         """Hand a failed read to scheduler recovery.
 
-        Without block-level recovery the failure is raised before the
-        forward instead, in _await_reads_issued_this_step.
+        Block-level recovery needs one KV cache group and no recurrent state;
+        otherwise the scheduler recovers the whole request.
         """
-        if not self._block_load_errors_supported:
-            return
-        self._invalid_block_ids.update(self._recving_local_blocks.get(req_id, ()))
+        if self._block_load_errors_supported:
+            self._invalid_block_ids.update(self._recving_local_blocks.get(req_id, ()))
+        else:
+            self._failed_sync_recving.add(req_id)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Drain the blocks whose read failed, for the scheduler to recompute."""
@@ -3243,8 +3243,7 @@ class MoRIIOConnectorWorker:
         the collective (raising early would hang the peers still waiting for it).
         Every worker reaches the all-reduce(MIN) vote, so every worker agrees on
         which engines failed. A failed engine is returned rather than raised so
-        only its requests fail; the next step retries the missing ranks. It
-        still raises when block-level recovery is unsupported.
+        only its requests fail; the next step retries the missing ranks.
 
         Returns:
             Remote engines whose handshake failed on at least one TP worker.
@@ -3352,12 +3351,6 @@ class MoRIIOConnectorWorker:
             vote = torch.tensor([1 if all_ok else 0], device="cpu", dtype=torch.int32)
             dist.all_reduce(vote, group=self.tp_group.cpu_group, op=dist.ReduceOp.MIN)
             if int(vote.item()) == 0:
-                if not self._block_load_errors_supported:
-                    raise HandshakeError(
-                        f"Eager MoRIIO handshake failed for {remote_engine_id} "
-                        "on at least one TP rank; this KV cache layout cannot "
-                        "report load errors per block"
-                    )
                 failed.add(remote_engine_id)
                 continue
 
@@ -4231,9 +4224,12 @@ class MoRIIOConnectorWorker:
             meta.remote_engine_id,
             req_id,
         )
-        self._invalid_block_ids.update(
-            block_id for group in meta.local_block_ids for block_id in group
-        )
+        if self._block_load_errors_supported:
+            self._invalid_block_ids.update(
+                block_id for group in meta.local_block_ids for block_id in group
+            )
+        else:
+            self._failed_sync_recving.add(req_id)
         remote_tp_size = int(meta.tp_size) or self.world_size
         ports = self._read_notify_ports(
             meta.remote_notify_port,

@@ -96,6 +96,9 @@ class KVConnectorTransferResults:
     finished_sending: set[str] = field(default_factory=set)
     finished_recving: set[str] = field(default_factory=set)
     failed_recving: set[str] = field(default_factory=set)
+    # Requests whose synchronous load (load_kv_async=False) failed this step:
+    # the forward pass ran on incomplete KV.
+    failed_sync_recving: set[str] = field(default_factory=set)
 
 
 class SupportsHMA(ABC):

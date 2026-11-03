@@ -181,6 +181,7 @@ def _make_reader(
     worker._reads_issued_this_step = []
     worker._mamba_reads_this_step = []
     worker._invalid_block_ids = set()
+    worker._failed_sync_recving = set()
     consumer.sent = read_from
     return released
 
@@ -526,22 +527,26 @@ def test_tp_vote_fails_an_engine_another_rank_could_not_reach(monkeypatch):
 
 
 @pytest.mark.parametrize("model", ["mla_hybrid", "sliding"])
-def test_failed_handshake_still_fails_the_step_without_block_recovery(
-    model, monkeypatch
-):
-    """With several KV cache groups or recurrent state the scheduler cannot
-    recover a load error, so a failed handshake still fails the step."""
+def test_failed_handshake_without_block_recovery_fails_the_request(model, monkeypatch):
+    """With several KV cache groups or recurrent state, a failed handshake is
+    reported per request for the scheduler to recover, not raised."""
     heads, layers = MODELS[model]
     state = _global_state(layers, heads)
-    _, (consumer,) = _ranks(model, 1, 1, True, LAYOUTS[0], state)
+    producers, (consumer,) = _ranks(model, 1, 1, True, LAYOUTS[0], state)
     worker = consumer.worker
-    worker.moriio_config = SimpleNamespace(backend="xgmi")
+    _make_reader(consumer, producers, "xgmi")
     _fail_handshakes_to(worker, "prefill", monkeypatch)
     metadata = MoRIIOConnectorMetadata()
-    metadata.reqs_to_recv["req"] = _meta(["full"], 1)
-    with pytest.raises(HandshakeError, match="per block"):
-        worker._eager_handshake_all_dp_ranks(metadata)
+    meta = _meta(["full"], 1)
+    metadata.reqs_to_recv["req"] = meta
+
+    assert worker._eager_handshake_all_dp_ranks(metadata) == {"prefill:0"}
     worker._handshake_initiation_executor.shutdown()
+    meta.remote_engine_id = "prefill:0"
+    worker._fail_recv_without_read("req", meta)
+
+    assert worker._failed_sync_recving == {"req"}
+    assert worker._invalid_block_ids == set()
 
 
 def _mixed_layout_pair():
