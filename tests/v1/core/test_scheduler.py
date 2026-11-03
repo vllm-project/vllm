@@ -21,6 +21,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.watermarking import WatermarkConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
@@ -313,6 +314,43 @@ def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
 
     assert list(metadata.retained_block_hashes) == second.block_hashes
     assert list(metadata.released_block_hashes) == first.block_hashes[:3]
+
+
+@pytest.mark.parametrize(
+    "with_config,params,expected",
+    [
+        (True, {"watermarking": True}, True),
+        (True, {"watermarking": False}, False),
+        (True, {"watermarking": True, "temperature": 0.0}, False),
+        (True, {"watermarking": True, "trace_decode_token_ids": [0]}, False),
+        (False, {"watermarking": True}, None),
+    ],
+)
+def test_first_output_reports_watermarking(with_config, params, expected):
+    """EngineCore sends the flag it applied on the first output only."""
+    scheduler = create_scheduler()
+    if with_config:
+        scheduler.vllm_config.watermark_config = WatermarkConfig(key=42)
+    (request,) = create_requests(num_requests=1, max_tokens=2, ignore_eos=True)
+    for name, value in params.items():
+        setattr(request.sampling_params, name, value)
+    scheduler.add_request(request)
+
+    reported = []
+    for _ in range(2):
+        scheduler_output = scheduler.schedule()
+        model_output = ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        outputs = scheduler.update_from_output(scheduler_output, model_output)
+        reported.append(outputs[0].outputs[0].watermarking)
+
+    assert reported == [expected, None]
 
 
 def test_finish_request():
@@ -2530,6 +2568,41 @@ def test_kv_cache_release_after_keep_pause_preserves_requests():
     assert core.wake_up(tags=["kv_cache"])
     resumed = scheduler.schedule()
     assert resumed.num_scheduled_tokens == {running.request_id: running.num_tokens}
+
+
+@pytest.mark.parametrize("extensible", [True, False])
+def test_pause_that_clears_the_kv_cache_lets_weight_updates_borrow_it(extensible):
+    """Workers learn that their extensible KV cache holds nothing to keep from
+    a pause that cleared it until the resume, and only then."""
+    from types import SimpleNamespace
+
+    core = object.__new__(EngineCore)
+    core.scheduler = create_scheduler()
+    core.mm_receiver_cache = None
+    core.batch_queue = None
+    core.model_executor = Mock(
+        is_sleeping=False,
+        vllm_config=SimpleNamespace(
+            cache_config=SimpleNamespace(enable_extensible_kv_cache=extensible)
+        ),
+    )
+    rpc = core.model_executor.collective_rpc
+
+    def reclaimable_calls() -> list[bool]:
+        return [
+            call.kwargs["args"][0]
+            for call in rpc.call_args_list
+            if call.args == ("set_kv_cache_reclaimable",)
+        ]
+
+    core.pause_scheduler(mode="keep", clear_cache=False)
+    core.resume_scheduler()
+    assert reclaimable_calls() == []
+
+    core.pause_scheduler(mode="abort", clear_cache=True)
+    core.pause_scheduler(mode="abort", clear_cache=True)
+    core.resume_scheduler()
+    assert reclaimable_calls() == ([True, False] if extensible else [])
 
 
 @pytest.mark.parametrize(
