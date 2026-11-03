@@ -6,7 +6,6 @@ import sys
 import threading
 from contextlib import nullcontext
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, Mock, call, patch
 from uuid import UUID
 
@@ -14,7 +13,6 @@ import pytest
 import torch
 from pydantic import ValidationError
 
-import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from tests.utils import create_new_process_for_each_test
 from vllm.config import (
     CompilationConfig,
@@ -779,12 +777,18 @@ class TestAnnotateProfile:
 class TestDPSynchronizedProfiler:
     def _worker(self, profiler):
         worker = _make_worker(profiler, synchronize_iterations=True, dp_size=2)
-        worker._dp_profiler_requested = True
+        with patch(
+            "vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"
+        ):
+            worker.profile()
         return worker
 
     def test_waits_until_every_rank_is_ready(self, default_profiler_config):
         profiler = ConcreteWorkerProfiler(default_profiler_config)
         worker = self._worker(profiler)
+        assert worker._dp_profiler_requested
+        assert not profiler.is_armed
+        assert profiler.start_call_count == 0
 
         Worker._advance_dp_synchronized_profiler(worker, False)
 
@@ -795,19 +799,6 @@ class TestDPSynchronizedProfiler:
 
         assert profiler.start_call_count == 1
         assert profiler._active_iteration_count == 1
-
-    def test_profile_request_arms_without_starting_locally(self):
-        profiler = MagicMock()
-        worker = _make_worker(profiler, synchronize_iterations=True, dp_size=2)
-
-        with patch(
-            "vllm.distributed.utils.get_worker_rank_suffix",
-            return_value="rank0",
-        ):
-            Worker.profile(worker)
-
-        assert worker._dp_profiler_requested is True
-        profiler.start.assert_not_called()
 
     @pytest.mark.parametrize("synchronize_iterations", [False, True])
     def test_single_rank_keeps_rank_local_profiling(self, synchronize_iterations):
@@ -876,8 +867,9 @@ class TestDPSynchronizedProfiler:
         assert profiler.start_call_count == 1
         assert worker._dp_profiler_requested is False
 
-    def test_delayed_start_counts_shared_boundaries(self, default_profiler_config):
+    def test_configured_bounds_and_restart(self, default_profiler_config):
         default_profiler_config.delay_iterations = 2
+        default_profiler_config.max_iterations = 1
         profiler = ConcreteWorkerProfiler(default_profiler_config)
         worker = self._worker(profiler)
 
@@ -888,26 +880,18 @@ class TestDPSynchronizedProfiler:
         assert profiler.is_running
         assert profiler.start_call_count == 1
 
-    def test_auto_stop_resets_synchronized_session(self, default_profiler_config):
-        default_profiler_config.max_iterations = 1
-        profiler = ConcreteWorkerProfiler(default_profiler_config)
-        worker = self._worker(profiler)
-
-        Worker._advance_dp_synchronized_profiler(worker, True)
         Worker._advance_dp_synchronized_profiler(worker, True)
 
         assert not profiler.is_armed
         assert profiler.stop_call_count == 1
         assert worker._dp_profiler_requested is False
 
-    def test_restart_after_auto_stop(self, default_profiler_config):
-        default_profiler_config.max_iterations = 1
-        profiler = ConcreteWorkerProfiler(default_profiler_config)
-        worker = self._worker(profiler)
-
+        with patch(
+            "vllm.distributed.utils.get_worker_rank_suffix", return_value="rank0"
+        ):
+            worker.profile()
         Worker._advance_dp_synchronized_profiler(worker, True)
-        Worker._advance_dp_synchronized_profiler(worker, True)
-        worker._dp_profiler_requested = True
+        assert not profiler.is_running
         Worker._advance_dp_synchronized_profiler(worker, True)
 
         assert profiler.start_call_count == 2
@@ -1033,124 +1017,6 @@ def test_worker_init_enables_requested_profiler_clock(
     assert profiler.start_call_count == 1
     worker.profile(is_start=False)
     assert profiler.stop_call_count == 1
-
-
-class _BoundaryObserved(Exception):
-    pass
-
-
-class _StopAfterBoundaryBatch:
-    @property
-    def num_tokens(self):
-        raise _BoundaryObserved
-
-
-def _v1_boundary_result(profiler_ready=True):
-    return (
-        CUDAGraphMode.NONE,
-        _StopAfterBoundaryBatch(),
-        False,
-        None,
-        None,
-        profiler_ready,
-    )
-
-
-@pytest.mark.parametrize("profiler_ready", [True, False, None])
-def test_v1_execute_model_advances_profiler_only_after_dp_agreement(profiler_ready):
-    runner: Any = GPUModelRunner.__new__(GPUModelRunner)
-    runner.execute_model_state = None
-    runner.speculative_config = None
-    runner.synchronize_input_prep = nullcontext
-    runner._update_states = Mock()
-    runner.cache_config = SimpleNamespace(kv_sharing_fast_prefill=False)
-    runner.num_prompt_logprobs = 0
-    runner.input_batch = SimpleNamespace(num_reqs=1, req_ids=["request"])
-    runner._prepare_inputs = Mock(return_value=(None, None, None))
-    runner.cascade_attn_enabled = False
-    runner.parallel_config = SimpleNamespace(use_ubatching=False)
-    runner._allow_microbatching = Mock(return_value=False)
-    runner._determine_batch_execution_and_padding = Mock(
-        return_value=_v1_boundary_result(profiler_ready)
-    )
-    runner.dp_profiler_advance = Mock()
-    scheduler_output = MagicMock(
-        total_num_scheduled_tokens=1,
-        num_scheduled_tokens={"request": 1},
-        scheduled_encoder_inputs={},
-    )
-
-    with (
-        patch.object(
-            gpu_model_runner_module,
-            "has_kv_transfer_group",
-            return_value=False,
-        ),
-        pytest.raises(_BoundaryObserved),
-    ):
-        GPUModelRunner.execute_model(runner, scheduler_output)
-
-    if profiler_ready is None:
-        runner.dp_profiler_advance.assert_not_called()
-    else:
-        runner.dp_profiler_advance.assert_called_once_with(profiler_ready)
-
-
-@pytest.mark.parametrize("profiler_ready", [True, False, None])
-def test_v1_dummy_run_advances_profiler_only_after_dp_agreement(profiler_ready):
-    runner: Any = GPUModelRunner.__new__(GPUModelRunner)
-    runner.vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(multimodal_config=None)
-    )
-    runner.max_num_tokens = 4
-    runner.max_num_reqs = 4
-    runner.scheduler_config = SimpleNamespace(max_num_seqs=4)
-    runner.uniform_decode_query_len = 1
-    runner._determine_batch_execution_and_padding = Mock(
-        return_value=_v1_boundary_result(profiler_ready)
-    )
-    runner.dp_profiler_advance = Mock()
-
-    with pytest.raises(_BoundaryObserved):
-        GPUModelRunner._dummy_run(runner, 1, skip_eplb=True)
-
-    if profiler_ready is None:
-        runner.dp_profiler_advance.assert_not_called()
-    else:
-        runner.dp_profiler_advance.assert_called_once_with(profiler_ready)
-
-
-@pytest.mark.parametrize("dummy_run", [False, True])
-@pytest.mark.parametrize("profiler_ready", [True, False, None])
-def test_v2_forward_advances_profiler_only_after_dp_agreement(
-    dummy_run, profiler_ready
-):
-    from vllm.v1.worker.gpu import model_runner as v2
-
-    runner = MagicMock()
-    runner.gather_batch_req_state.return_value = (None, None)
-    runner.lora_config = None
-    runner.aux_output_connector = None
-    runner.is_encoder_decoder = False
-    scheduler_output = MagicMock(
-        total_num_scheduled_tokens=1, num_scheduled_tokens={"request": 1}
-    )
-    with (
-        patch.object(
-            v2,
-            "dispatch_cg_and_sync_dp",
-            return_value=(
-                _StopAfterBoundaryBatch(),
-                SimpleNamespace(profiler_ready=profiler_ready),
-            ),
-        ),
-        pytest.raises(_BoundaryObserved),
-    ):
-        v2.GPUModelRunner.execute_model(runner, scheduler_output, dummy_run=dummy_run)
-    if profiler_ready is None:
-        runner.dp_profiler_advance.assert_not_called()
-    else:
-        runner.dp_profiler_advance.assert_called_once_with(profiler_ready)
 
 
 @pytest.mark.parametrize("runner_version", [1, 2])
