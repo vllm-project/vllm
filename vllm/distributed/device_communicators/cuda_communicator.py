@@ -85,7 +85,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             if use_aiter_allreduce:
                 from vllm.platforms.rocm import get_cdna_version
 
-                use_aiter_tp_all_gather = get_cdna_version() == 4
+                use_aiter_tp_all_gather = get_cdna_version() in (3, 4)
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem

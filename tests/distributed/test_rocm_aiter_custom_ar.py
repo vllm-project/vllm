@@ -192,7 +192,7 @@ def tp_all_gather(
             assert torch.equal(out, expected(inp, dim))
         from vllm.platforms.rocm import get_cdna_version
 
-        expected_dims = [0, 0, -1, -1, -1, -1] if get_cdna_version() == 4 else []
+        expected_dims = [0, 0, -1, -1, -1, -1] if get_cdna_version() in (3, 4) else []
         assert aiter_dims == expected_dims
 
 
