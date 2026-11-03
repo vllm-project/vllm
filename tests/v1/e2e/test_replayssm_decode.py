@@ -411,6 +411,8 @@ def test_flashinfer_replayssm_prefix_cache_tp1(
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("model_name", FLASHINFER_MODELS)
 def test_flashinfer_replayssm_prefix_cache_tp2(vllm_runner, model_name, monkeypatch):
+    # The test fork can inherit CUDA state initialized during collection.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
     _check_replayssm_prefix_caching(
         vllm_runner,
         model_name,

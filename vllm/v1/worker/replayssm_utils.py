@@ -31,8 +31,22 @@ def initialize_replayssm_ring_trackers(
             continue
         state = layers[0].kv_cache[0]
         num_blocks, device = state.shape[0], state.device
-        ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
-        num_committed = torch.zeros_like(ring_start)
+        trackers = (
+            layers[0]._replayssm_ring_start,
+            layers[0]._replayssm_prev_num_accepted,
+        )
+        # Extensible caches rebind after capture. Keep the captured addresses.
+        if all(
+            t.numel() >= num_blocks and t.device == device for t in trackers
+        ) and all(
+            layer._replayssm_ring_start is trackers[0]
+            and layer._replayssm_prev_num_accepted is trackers[1]
+            for layer in layers
+        ):
+            ring_start, num_committed = (t[:num_blocks] for t in trackers)
+        else:
+            ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
+            num_committed = torch.zeros_like(ring_start)
         for layer in layers:
             layer._replayssm_ring_start = ring_start
             layer._replayssm_prev_num_accepted = num_committed
