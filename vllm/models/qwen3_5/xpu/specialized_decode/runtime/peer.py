@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The P2P mailboxes of the in-kernel TP all-reduces: one device region per
 rank, exported with Level Zero IPC and imported by the peer, holding one mailbox
-per mono kernel; and
+per mono layer / MTP prologue and the vocabulary-shard candidate exchange; and
 the TP agreements that must precede anything collective."""
 
 import os
@@ -54,8 +54,8 @@ def _exchange_fd(fd: int, rank: int, group) -> int:
 
 
 class PeerRegion:
-    """This rank's region and the peer's, mapped: one mailbox per name. The
-    constructor is collective over the TP CPU group (the
+    """This rank's region and the peer's, mapped: one mailbox per name, then the
+    candidate exchange. The constructor is collective over the TP CPU group (the
     handle and fd exchange): every rank reaches it after the TP agreements."""
 
     def __init__(self, names: list[str], rank: int, group):
@@ -63,7 +63,10 @@ class PeerRegion:
         self.rank = rank
         self.mbox_bytes = int(ops.mono_mbox_bytes())
         self.slots = {name: i for i, name in enumerate(names)}
-        self.handle = ops.mono_ipc_create(len(names) * self.mbox_bytes)
+        self.lm_off = len(names) * self.mbox_bytes
+        self.handle = ops.mono_ipc_create(
+            self.lm_off + int(ops.mono_lmhead_mbox_bytes())
+        )
         info = ops.mono_ipc_export(self.handle)
         infos: list = [None] * dist.get_world_size(group)
         dist.all_gather_object(infos, info, group=group)
@@ -82,3 +85,7 @@ class PeerRegion:
         """(own, peer) addresses of the mailbox of ``name``."""
         off = self.slots[name] * self.mbox_bytes
         return self.own + off, self.peer + off
+
+    def candidates(self) -> tuple[int, int]:
+        """(own, peer) addresses of the candidate exchange."""
+        return self.own + self.lm_off, self.peer + self.lm_off

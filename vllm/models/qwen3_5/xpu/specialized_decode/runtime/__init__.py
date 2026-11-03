@@ -215,6 +215,9 @@ OPS = (
     "mono_decode_layer_spec",
     "mono_register_mtp",
     "mono_mtp_prologue",
+    "mono_lmhead_mbox_bytes",
+    "mono_shard_topk_max_k",
+    "mono_shard_topk",
 )
 
 
