@@ -151,6 +151,10 @@ class SpecializedDecode:
         if m1:
             why = mla_weight_reasons(backbone)
             m1 = tp_agree(not why, tp.cpu_group)
+            if not m1 and dcp.world_size == 1:
+                # DCP1 runs M1c only (``runtime.step_reasons``)
+                agree(why or ["another TP rank's MLA layers"], tp.cpu_group,
+                      "DCP1 without M1")  # fmt: skip
             if not m1:
                 logger.info(
                     "Kimi-K3 specialized decode: the MLA layers run vLLM's "
@@ -232,7 +236,7 @@ class SpecializedDecode:
         - pipeline-parallel stage inputs, and steps before a KV cache is bound
           (profiling, dummy runs);
         - PIECEWISE steps (captured without attention metadata);
-        - widths without kernels (more than MAX_ROWS rows);
+        - widths without kernels (more than max_num_seqs requests);
         - steps that are not pure, uniform regular-decode or spec-verify steps
           (``step_reason``).
 
