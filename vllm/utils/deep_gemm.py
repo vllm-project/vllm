@@ -214,38 +214,56 @@ _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl: (
 ) = None
 
 
-@functools.cache
+def _configure_deep_gemm(module, batch_invariant: bool):
+    if batch_invariant:
+        configure = getattr(module, "use_deterministic_algorithms", None)
+        if configure is None:
+            raise RuntimeError(
+                "Batch-invariant execution requires the pinned DeepGEMM "
+                "use_deterministic_algorithms API"
+            )
+        configure(True)
+    return module
+
+
 def _import_deep_gemm():
     """Import the deep_gemm module.
 
     Prefers an externally installed ``deep_gemm`` package (so users can
     pin a specific version), then falls back to the vendored copy bundled
-    in the vLLM wheel.
+    in the vLLM wheel. Under batch invariance its deterministic mode is on.
 
     Returns ``None`` when neither source is usable.
     """
+    return _load_deep_gemm(envs.VLLM_BATCH_INVARIANT)
+
+
+@functools.cache
+def _load_deep_gemm(batch_invariant: bool):
     # 1. Try the external (pip-installed) package first.
     try:
         module = importlib.import_module("deep_gemm")
-        logger.debug_once("Imported deep_gemm module from site-packages")
-        return module
     except ImportError:
         logger.info_once(
             "deep_gemm not found in site-packages, "
             "trying vendored vllm.third_party.deep_gemm"
         )
+    else:
+        logger.debug_once("Imported deep_gemm module from site-packages")
+        return _configure_deep_gemm(module, batch_invariant)
 
     # 2. Fall back to the vendored copy bundled in the vLLM wheel.
     try:
         module = importlib.import_module("vllm.third_party.deep_gemm")
-        logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
-        return module
     except ImportError:
         logger.info_once("Vendored deep_gemm not found either")
     except Exception as e:
         # The vendored module may raise RuntimeError during _C.init()
         # if JIT include files are missing (e.g. incomplete wheel).
         logger.warning_once("Failed to import vendored deep_gemm: %s", e)
+    else:
+        logger.debug_once("Imported deep_gemm module from vllm.third_party.deep_gemm")
+        return _configure_deep_gemm(module, batch_invariant)
 
     return None
 
@@ -426,7 +444,9 @@ def get_theoretical_mk_alignment_for_contiguous_layout(
         return _get_theoretical_mk_alignment_for_contiguous_layout_impl(
             expected_m, num_groups
         )
-    except TypeError:
+    except (TypeError, RuntimeError):
+        # Older DeepGEMM builds take per-group expected_m only (the torch op
+        # binding raises RuntimeError rather than TypeError on extra args).
         per_group_m = None if expected_m is None else cdiv(expected_m, num_groups)
         return _get_theoretical_mk_alignment_for_contiguous_layout_impl(per_group_m)
 
