@@ -10,8 +10,9 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheTensor,
 )
-from vllm.v1.worker.utils import AttentionGroup
+from vllm.v1.worker.utils import AttentionGroup, prepare_kernel_block_sizes
 
 
 def _backend(name: str, sizes: list[int]):
@@ -70,26 +71,36 @@ def init(monkeypatch):
         ),
     )
 
-    def run(**kwargs):
+    def run(packed=False, **kwargs):
+        spec = FullAttentionSpec(
+            block_size=512, num_kv_heads=1, head_size=128, dtype=torch.bfloat16
+        )
+        page = spec.page_size_bytes
+        # Block-outermost packing places both layers' pages inside each block.
+        tensors = (
+            [
+                KVCacheTensor(
+                    size=2 * page,
+                    layers=["target", "draft"],
+                    layer_stride=page,
+                    block_stride=2 * page,
+                )
+            ]
+            if packed
+            else []
+        )
         kv_cache_config = KVCacheConfig(
             num_blocks=1,
-            kv_cache_tensors=[],
+            kv_cache_tensors=tensors,
             kv_cache_groups=[
-                KVCacheGroupSpec(
-                    layer_names=["target", "draft"],
-                    kv_cache_spec=FullAttentionSpec(
-                        block_size=512,
-                        num_kv_heads=1,
-                        head_size=128,
-                        dtype=torch.bfloat16,
-                    ),
-                )
+                KVCacheGroupSpec(layer_names=["target", "draft"], kv_cache_spec=spec)
             ],
         )
         vllm_config = SimpleNamespace(parallel_config=None)
-        return attn_utils.init_attn_backend(
+        groups, cg, sizes = attn_utils.init_attn_backend(
             kv_cache_config, vllm_config, torch.device("cpu"), **kwargs
         )
+        return groups, sizes, kv_cache_config
 
     return run
 
@@ -97,23 +108,37 @@ def init(monkeypatch):
 def test_draft_reuses_target_kernel_block_size(init):
     # The target runner sees every layer of the group, so the cache is laid
     # out in 128-token kernel blocks.
-    groups, _, target_sizes = init(draft_layer_names={"draft"})
+    groups, target_sizes, kv_cache_config = init(draft_layer_names={"draft"})
     assert target_sizes == [128]
     assert {g.kernel_block_size for g in groups[0]} == {128}
 
     # Seen alone, the draft's backend would pick 512 and read that cache with
     # the wrong page size.
-    _, _, draft_only = init(active_layer_names={"draft"})
+    _, draft_only, _ = init(active_layer_names={"draft"})
     assert draft_only == [512]
 
-    # Given the target's sizes, the draft keeps the cache's 128-token pages.
-    draft_groups, _, draft_sizes = init(
-        active_layer_names={"draft"}, kernel_block_sizes=target_sizes
+    # Selected from the target's groups, the draft keeps 128-token pages.
+    from_target = prepare_kernel_block_sizes(kv_cache_config, groups)
+    assert from_target == [128]
+    draft_groups, draft_sizes, _ = init(
+        active_layer_names={"draft"}, kernel_block_sizes=from_target
     )
     assert draft_sizes == [128]
     assert [g.kernel_block_size for g in draft_groups[0]] == [128]
 
 
-def test_unset_kernel_block_size_falls_back_to_selection(init):
-    _, _, sizes = init(active_layer_names={"draft"}, kernel_block_sizes=[None])
-    assert sizes == [512]
+def test_packed_cache_keeps_allocation_block_size(init):
+    # Block-outermost packing is never split group-wide: the allocation keeps
+    # 512-token blocks and each backend subdivides its own layers' pages.
+    groups, target_sizes, kv_cache_config = init(
+        packed=True, draft_layer_names={"draft"}
+    )
+    assert target_sizes == [512]
+
+    # The draft gets the allocation size, not the target backend's 128.
+    from_target = prepare_kernel_block_sizes(kv_cache_config, groups)
+    assert from_target == [512]
+    _, draft_sizes, _ = init(
+        packed=True, active_layer_names={"draft"}, kernel_block_sizes=from_target
+    )
+    assert draft_sizes == [512]

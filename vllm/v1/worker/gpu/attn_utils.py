@@ -200,7 +200,7 @@ def init_attn_backend(
     device: torch.device,
     active_layer_names: set[str] | None = None,
     draft_layer_names: set[str] | None = None,
-    kernel_block_sizes: Sequence[int | None] | None = None,
+    kernel_block_sizes: list[int] | None = None,
 ) -> tuple[list[list[AttentionGroup]], AttentionCGSupportInfo, list[int]]:
     # Phase 1: discover attention groups for each kv cache group.
     attn_groups: list[list[AttentionGroup]] = []
@@ -267,15 +267,10 @@ def init_attn_backend(
 
     # Phase 2: pick a kernel block size per kv cache group that is supported
     # by all backends within that group. A caller that sees only some of a
-    # group's layers (the drafter) passes the sizes the KV cache was laid out
+    # group's layers (the drafter) passes the sizes the KV cache was allocated
     # with, since its backends alone may pick a different, incompatible size.
-    selected = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
-    if kernel_block_sizes is not None:
-        selected = [
-            given if given is not None else size
-            for given, size in zip(kernel_block_sizes, selected, strict=False)
-        ] + selected[len(kernel_block_sizes) :]
-    kernel_block_sizes = selected
+    if kernel_block_sizes is None:
+        kernel_block_sizes = prepare_kernel_block_sizes(kv_cache_config, attn_groups)
 
     if current_platform.is_xpu():
         for kv_cache_group_id, selected_kernel_block_size in enumerate(
