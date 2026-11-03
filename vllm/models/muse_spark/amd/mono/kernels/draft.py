@@ -598,9 +598,9 @@ def build(key: Build):
         g = lane // 16
         k8 = bid % 8
         gq = bid // 8
-        if tid < 32:
+        if tid < 32:  # the boundary into the layer: phase layer - 1 (tag - 1)
             mb_poll(
-                tag,
+                tag - 1,
                 health,
                 [(reg(scratch, "xnf"), k8 * 32 + tid, 1)],
                 REGION_IDS["xnf"],
