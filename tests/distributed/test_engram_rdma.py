@@ -1,18 +1,113 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import json
+import socket
 import struct
 import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 from vllm.distributed.engram_rdma.owner import (
     MAX_COPY_CHUNK,
-    _copy_and_sample,
     _copy_and_sample_row264,
     build_owner_metadata,
     inspect_checkpoint,
 )
+from vllm.distributed.engram_rdma.provider import ReaderRuntime
+from vllm.distributed.engram_rdma.runtime import ControlError, OwnerClient, OwnerServer
+
+
+class OwnerControlTests(unittest.TestCase):
+    def setUp(self):
+        self.owner = OwnerServer(
+            {"checkpoint_id": "ckpt-sha256:abc", "table": {"rows": 7}}
+        ).start()
+        host, port = self.owner.address
+        self.client = OwnerClient(host, port, "ckpt-sha256:abc", self.owner.generation)
+        self.leases = []
+
+    def attach(self, client=None):
+        lease = (client or self.client).attach()
+        self.leases.append(lease)
+        return lease
+
+    def tearDown(self):
+        for lease in self.leases:
+            if not lease._released:
+                lease.release()
+        self.owner.close()
+
+    def test_independent_clients_and_reconnect_keep_generation(self):
+        host, port = self.owner.address
+        other = OwnerClient(host, port, "ckpt-sha256:abc", self.owner.generation)
+        first, second = self.attach(), self.attach(other)
+        self.assertNotEqual(first.token, second.token)
+        self.assertEqual(first.metadata["table"]["rows"], 7)
+        generation = self.owner.generation
+        first.release()
+        reconnected = self.attach(
+            OwnerClient(host, port, "ckpt-sha256:abc", generation)
+        )
+        self.assertEqual(reconnected.client.generation, generation)
+        second.release()
+        reconnected.release()
+
+    def test_close_enters_drain_and_refuses_live_lease(self):
+        lease = self.attach()
+        with self.assertRaisesRegex(ControlError, r"lease\(s\) remain"):
+            self.owner.close()
+        self.assertTrue(self.owner.draining)
+        with self.assertRaisesRegex(ControlError, "draining"):
+            self.client.attach()
+        lease.release()
+        self.owner.close()
+
+    def test_explicit_drain_rejects_new_attach(self):
+        lease = self.attach()
+        result = self.client.begin_drain()
+        self.assertEqual(result["leases"], 1)
+        with self.assertRaisesRegex(ControlError, "draining"):
+            self.client.attach()
+        lease.release()
+
+    def test_status_reports_live_leases_and_drain_without_attaching(self):
+        self.assertEqual(self.client.status()["leases"], 0)
+        lease = self.attach()
+        self.assertEqual(self.client.status()["leases"], 1)
+        self.client.begin_drain()
+        self.assertTrue(self.client.status()["draining"])
+        lease.release()
+        self.assertEqual(self.client.status()["leases"], 0)
+
+    def test_stale_generation_and_lease_rejected(self):
+        host, port = self.owner.address
+        stale = OwnerClient(host, port, "ckpt-sha256:abc", "old-generation")
+        with self.assertRaisesRegex(ControlError, "generation"):
+            stale.attach()
+        lease = self.attach()
+        lease.release()
+        with self.assertRaisesRegex(ControlError, "unknown or already"):
+            self.client._request("release", lease=lease.token)
+
+    def test_checkpoint_mismatch_and_metadata_is_immutable(self):
+        host, port = self.owner.address
+        wrong = OwnerClient(host, port, "other-checkpoint", self.owner.generation)
+        with self.assertRaisesRegex(ControlError, "checkpoint"):
+            wrong.attach()
+        with self.assertRaises(TypeError):
+            self.owner.metadata["checkpoint_id"] = "changed"
+
+    def test_malformed_and_oversize_frames_rejected(self):
+        for payload in (b"{bad json}\n", b"{}" + b" " * (64 * 1024) + b"\n"):
+            with socket.create_connection(self.owner.address, timeout=2) as sock:
+                sock.settimeout(2)
+                sock.sendall(payload)
+                response = json.loads(sock.makefile("rb").readline())
+            self.assertFalse(response["ok"])
+            self.assertIn("invalid request", response["error"])
 
 
 def write_safetensors(path, tensors, payload):
@@ -64,30 +159,22 @@ class Row264OwnerCpuTests(unittest.TestCase):
             )
         return payloads
 
-    def test_split_and_row264_have_same_bytes_and_checkpoint_identity(self):
+    def test_row264_matches_checkpoint_and_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             payloads = self.make_checkpoint(root)
             manifest = inspect_checkpoint(root)
             total = sum(spec["nbytes"] for spec in manifest["specs"])
-            split_buffer = bytearray(total)
-            split_tables, split_samples = _copy_and_sample(
-                manifest, memoryview(split_buffer), chunk_bytes=64
-            )
             packed_buffer = bytearray(total)
             packed_tables, packed_samples = _copy_and_sample_row264(
                 manifest, memoryview(packed_buffer), chunk_bytes=2 * 264
             )
 
-            self.assertEqual(len(split_buffer), len(packed_buffer))
-            self.assertEqual(len(split_tables), 4)
             self.assertEqual(
                 [(x["layer"], x["kind"]) for x in packed_tables],
                 [(1, "row264"), (14, "row264")],
             )
-            self.assertTrue(
-                all(x["exact_match"] for x in split_samples + packed_samples)
-            )
+            self.assertTrue(all(x["exact_match"] for x in packed_samples))
             self.assertEqual(
                 manifest["identity_material"],
                 inspect_checkpoint(root)["identity_material"],
@@ -112,15 +199,6 @@ class Row264OwnerCpuTests(unittest.TestCase):
                     )
                 offset += rows * 264
 
-            split_md = build_owner_metadata(
-                manifest,
-                split_tables,
-                [11, 12, 13, 14],
-                [x["nbytes"] for x in split_tables],
-                0,
-                55000,
-                b"native-md",
-            )
             row_md = build_owner_metadata(
                 manifest,
                 packed_tables,
@@ -131,10 +209,8 @@ class Row264OwnerCpuTests(unittest.TestCase):
                 b"native-md",
                 storage_layout="row264",
             )
-            self.assertEqual(split_md["storage_layout"], "split")
             self.assertEqual(row_md["storage_layout"], "row264")
-            self.assertEqual(split_md["checkpoint_id"], row_md["checkpoint_id"])
-            self.assertEqual(len(split_md["addresses"]), 4)
+            self.assertEqual(manifest["checkpoint_identity"], row_md["checkpoint_id"])
             self.assertEqual(len(row_md["addresses"]), 2)
             self.assertEqual(
                 [
@@ -205,5 +281,24 @@ class Row264OwnerCpuTests(unittest.TestCase):
                 )
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_reader_setup_failure_releases_owner_lease(tmp_path, monkeypatch):
+    """A failed checkpoint check must not block an otherwise safe owner drain."""
+    metadata = {"checkpoint_id": "fixture", "storage_layout": "row264"}
+    with OwnerServer(metadata).start() as owner:
+        host, port = owner.address
+        ready = tmp_path / "ready.json"
+        ready.write_text(
+            json.dumps(
+                {
+                    "host": host,
+                    "port": port,
+                    "checkpoint_id": "fixture",
+                    "generation": owner.generation,
+                }
+            )
+        )
+        monkeypatch.setenv("ENGRAM_SHARED_READY", str(ready))
+        monkeypatch.setenv("ENGRAM_SHARED_MODEL", str(tmp_path / "missing"))
+        with pytest.raises(FileNotFoundError):
+            ReaderRuntime()
+        assert owner.lease_count == 0

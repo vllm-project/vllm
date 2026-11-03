@@ -3,7 +3,7 @@
 """Single pinned-Host owner for the real DSV4.1 Engram layers 1 and 14.
 
 Startup is intentionally explicit: this program allocates ~188.83 GiB pinned
-Host memory and registers four split or two row264 native MRs. It is not run by
+Host memory and registers two row264 native MRs. It is not run by
 syntax/mock tests.
 """
 
@@ -22,7 +22,7 @@ import time
 from contextlib import ExitStack
 from pathlib import Path
 
-from vllm.distributed.engram_rdma.control import ControlError, OwnerServer
+from vllm.distributed.engram_rdma.runtime import ControlError, OwnerServer
 
 LAYERS = (1, 14)
 WEIGHT_DTYPE = "F8_E4M3"
@@ -155,83 +155,6 @@ def inspect_checkpoint(root):
         "identity_material": identity_material,
         "checkpoint_identity": "sha256:" + identity,
     }
-
-
-def _copy_region(
-    source, source_offset, destination, destination_offset, nbytes, chunk_bytes
-):
-    """Copy bytes with at most `chunk_bytes` temporary source storage."""
-    if not 0 < chunk_bytes <= MAX_COPY_CHUNK:
-        raise ValueError(f"copy chunk must be in (0, {MAX_COPY_CHUNK}]")
-    copied = 0
-    while copied < nbytes:
-        size = min(chunk_bytes, nbytes - copied)
-        destination[
-            destination_offset + copied : destination_offset + copied + size
-        ] = source[source_offset + copied : source_offset + copied + size]
-        copied += size
-
-
-def _copy_and_sample(manifest, destination, chunk_bytes):
-    """Fill one contiguous destination from mmap slices and compare sample rows."""
-    offset = 0
-    tables, samples = [], []
-    for spec in manifest["specs"]:
-        shard = manifest["shards"][spec["shard"]]
-        with open(shard["path"], "rb") as stream:
-            mapping = mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ)
-            try:
-                start = shard["data_start"] + spec["data_offsets"][0]
-                _copy_region(
-                    mapping, start, destination, offset, spec["nbytes"], chunk_bytes
-                )
-                row_bytes = spec["columns"]
-                row_ids = sorted({0, 1, spec["rows"] // 2, spec["rows"] - 1})
-                sample_digest = hashlib.sha256()
-                for row in row_ids:
-                    lo, hi = row * row_bytes, (row + 1) * row_bytes
-                    source_bytes = mapping[start + lo : start + hi]
-                    copied_bytes = bytes(destination[offset + lo : offset + hi])
-                    if source_bytes != copied_bytes:
-                        raise RuntimeError(
-                            f"sample byte mismatch for {spec['name']} row {row}"
-                        )
-                    sample_digest.update(row.to_bytes(8, "little"))
-                    sample_digest.update(source_bytes)
-                samples.append(
-                    {
-                        "tensor": spec["name"],
-                        "rows": row_ids,
-                        "sample_bytes_sha256": sample_digest.hexdigest(),
-                        "exact_match": True,
-                    }
-                )
-            finally:
-                mapping.close()
-        tables.append(
-            {
-                **{
-                    k: spec[k]
-                    for k in (
-                        "name",
-                        "layer",
-                        "kind",
-                        "dtype",
-                        "shape",
-                        "rows",
-                        "columns",
-                        "nbytes",
-                    )
-                },
-                "offset": offset,
-            }
-        )
-        offset += spec["nbytes"]
-    if offset != len(destination):
-        raise RuntimeError(
-            f"backing size mismatch: copied={offset} allocated={len(destination)}"
-        )
-    return tables, samples
 
 
 def _copy_and_sample_row264(manifest, destination, chunk_bytes):
@@ -384,15 +307,12 @@ def build_owner_metadata(
     owner_gpu,
     rdma_port,
     native_md,
-    storage_layout="split",
+    storage_layout="row264",
 ):
     """Build the lease payload consumed by ReaderRuntime, in MR order."""
-    if storage_layout == "split":
-        expected_order = [(1, "weight"), (1, "scale"), (14, "weight"), (14, "scale")]
-    elif storage_layout == "row264":
-        expected_order = [(1, "row264"), (14, "row264")]
-    else:
+    if storage_layout != "row264":
         raise ValueError(f"unsupported storage layout: {storage_layout}")
+    expected_order = [(1, "row264"), (14, "row264")]
     if (
         len(tables) != len(expected_order)
         or len(addresses) != len(expected_order)
@@ -408,7 +328,7 @@ def build_owner_metadata(
         int(table["nbytes"]) != int(length) for table, length in zip(tables, lengths)
     ):
         raise ValueError("table specs do not match registered MR lengths")
-    if storage_layout == "row264" and any(
+    if any(
         table.get("columns") != 264 or table.get("shape") != [table.get("rows"), 264]
         for table in tables
     ):
@@ -461,7 +381,7 @@ class CountingOwnerServer(OwnerServer):
 
 
 class RealCheckpointOwner:
-    """Own pinned checkpoint bytes, four registrations and the lease server."""
+    """Own pinned checkpoint bytes, registered tables and the lease server."""
 
     def __init__(self, args):
         self.args = args
@@ -477,11 +397,11 @@ class RealCheckpointOwner:
     def start(self):
         import torch
 
-        from vllm.distributed.engram_rdma.transport import Context
+        from vllm.distributed.engram_rdma.runtime import Context
 
         self.manifest = inspect_checkpoint(self.args.checkpoint)
-        storage_layout = getattr(self.args, "storage_layout", "split")
-        if storage_layout not in ("split", "row264"):
+        storage_layout = getattr(self.args, "storage_layout", "row264")
+        if storage_layout != "row264":
             raise ValueError(f"unsupported storage layout: {storage_layout}")
         pinned_bytes = sum(spec["nbytes"] for spec in self.manifest["specs"])
         # The configured GiB value is displayed to two decimals. Permit at most
@@ -544,10 +464,7 @@ class RealCheckpointOwner:
             )
         LOG.info("actual pinned allocation: %s", actual_mapping)
         self.numpy_view = memoryview(self.backing.numpy())
-        copy_fn = (
-            _copy_and_sample if storage_layout == "split" else _copy_and_sample_row264
-        )
-        tables, samples = copy_fn(
+        tables, samples = _copy_and_sample_row264(
             self.manifest, self.numpy_view, self.args.copy_chunk_mib * 1024 * 1024
         )
         self.numpy_view.release()
@@ -730,9 +647,7 @@ def main(argv=None):
         help="pinned byte budget; permits <=0.005 GiB display-rounding tolerance",
     )
     parser.add_argument("--copy-chunk-mib", type=int, default=8)
-    parser.add_argument(
-        "--storage-layout", choices=("split", "row264"), default="row264"
-    )
+    parser.add_argument("--storage-layout", choices=("row264",), default="row264")
     args = parser.parse_args(argv)
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"

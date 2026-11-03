@@ -10,9 +10,9 @@ from types import SimpleNamespace
 
 import torch
 
-from vllm.distributed.engram_rdma.control import OwnerClient
 from vllm.distributed.engram_rdma.owner import inspect_checkpoint
 from vllm.distributed.engram_rdma.provider import VllmRemoteReader
+from vllm.distributed.engram_rdma.runtime import OwnerClient
 
 
 def checkpoint_row(manifest, layer, row):

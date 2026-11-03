@@ -3,8 +3,7 @@
 """Small GPU test of the vLLM adapter's row layout and scratch ordering."""
 
 import os
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 
 import torch
 
@@ -33,12 +32,9 @@ class FakeRuntime:
         pass
 
 
-mock = ModuleType("vllm.distributed.engram_rdma.reader")
-mock.ReaderRuntime = FakeRuntime
-sys.modules[mock.__name__] = mock
-
 from vllm.distributed.engram_rdma import provider as vllm_rdma_provider  # noqa: E402
 
+vllm_rdma_provider.ReaderRuntime = FakeRuntime
 vllm_rdma_provider.verify_checkpoint_samples = lambda: None
 VllmRemoteReader = vllm_rdma_provider.VllmRemoteReader
 
