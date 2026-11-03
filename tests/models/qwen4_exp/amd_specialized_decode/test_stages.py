@@ -737,24 +737,28 @@ def _moe_kernel(rows, codec="bf16"):
         prologue,
     )
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import ld_i32x4
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.plan import (
+        source_digest,
+    )
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import BLOCKS, THREADS
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange as ex
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import moe, tiled
 
+    digest = source_digest()  # FlyDSL does not hash the stages' sources
     shape = moe.Shape(rows, RIP)
-    words = moe.lds_words(shape)
+    MoeLds = moe.lds_struct(shape)
+
+    @fx.struct
+    class GemmLds:
+        stage: fx.Array[fx.Int32, tiled.stage_words(rows), 16]
+
+    @fx.union
+    class PhaseLds:
+        gemm: GemmLds
+        moe: MoeLds
 
     @fx.struct
     class Smem:
-        stage: fx.Array[fx.Int32, tiled.stage_words(rows), 16]
-        index: fx.Array[fx.Int32, words.index, 16]
-        units: fx.Array[fx.Int32, words.units, 16]
-        scan: fx.Array[fx.Int32, words.scan, 16]
-        x: fx.Array[fx.Int32, words.x, 16]
-        xs: fx.Array[fx.Int32, words.xs, 16]
-        act: fx.Array[fx.Int32, words.act, 16]
-        acts: fx.Array[fx.Int32, words.acts, 16]
-        mstage: fx.Array[fx.Int32, words.stage, 16]
         word: fx.Array[fx.Int32, 4, 16]
 
     @flyc.kernel(name=f"t_moe_{rows}_{codec}", known_block_size=[THREADS, 1, 1])
@@ -779,38 +783,24 @@ def _moe_kernel(rows, codec="bf16"):
         folds: Int64,
         health: Int64,
     ):
+        _ = digest
         tid, bid = fx.thread_idx.x, fx.block_idx.x
-        sm = fx.SharedAllocator().allocate(Smem).peek()
+        alloc = fx.SharedAllocator()
+        sm = alloc.allocate(Smem).peek()
+        ph = alloc.allocate(PhaseLds)
         g = Grid(tid, bid, s0, s1, folds, health, fx.Int64(0), sm.word.ptr)
         prologue(g)
-        moe.router(g, tiled.Gemm(sm.stage.ptr, rows, tid), w_gate, x, part)
-        grid_sync(g)
-        moe.quantize_rows(g, x, x4, x4s, rows)
-        moe.route(g, part, route, rows)
-        grid_sync(g)
-        lds = moe.Lds(
-            index=sm.index.ptr,
-            units=sm.units.ptr,
-            scan=sm.scan.ptr,
-            x=sm.x.ptr,
-            xs=sm.xs.ptr,
-            act=sm.act.ptr,
-            acts=sm.acts.ptr,
-            stage=sm.mstage.ptr,
-        )
         tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 9
-        moe.experts(
-            g, shape, lds, route, x4, x4s, w13, w13s, w2, w2s, mpart, mpart2, flags, tag
-        )
-        grid_sync(g)
-        moe.combine(
+        moe.mlp(
             g,
+            shape,
+            tiled.Gemm(ph.gemm.peek().stage.ptr, rows, tid),
+            ph.moe.peek(),
+            x,
+            moe.Weights(w_gate, w13, w13s, w2, w2s),
+            moe.Bufs(part, route, x4, x4s, mpart, mpart2, flags),
             ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 2, tag, rows, codec),
-            route,
-            mpart,
-            mpart2,
-            flags,
-            rows,
+            lambda name: grid_sync(g),
         )
 
     @flyc.jit
@@ -836,6 +826,7 @@ def _moe_kernel(rows, codec="bf16"):
         health: Int64,
         stream: fx.Stream = default_stream,
     ):
+        _ = digest
         kern(
             x,
             w_gate,
@@ -1017,6 +1008,178 @@ def test_moe(harness, rows, routing, codec):
         assert marked > 0
     if routing == "hot":
         assert marked == rows * SLOTS
+
+
+class _LazyDequant:
+    """``w[e]``: expert ``e`` of e2m1 ``codes`` / E8M0 ``scales`` dequantized to
+    f32 on first use (a test routes to few of the 513 experts)."""
+
+    def __init__(self, codes, scales, k):
+        self.codes, self.scales, self.k, self.cache = codes, scales, k, {}
+
+    def __getitem__(self, e):
+        if e not in self.cache:
+            sc = self.scales[e][:, : self.k // 32].float()
+            self.cache[e] = ref.E2M1[self.codes[e].long()] * torch.pow(
+                2.0, sc - 127
+            ).repeat_interleave(32, -1)
+        return self.cache[e]
+
+
+def _lazy_expert_weights(gen, experts, rows, k, rows_real, k_real):
+    """``_expert_weights`` with the dequantized copy made per expert on use."""
+    codes = torch.randint(0, 16, (experts, rows, k), generator=gen, dtype=torch.uint8)
+    codes[:, :, k_real:] = 0
+    cols = (k // 32 + 7) // 8 * 8
+    sc = torch.full((experts, rows, cols), 127, dtype=torch.uint8)
+    sc[:, :, : k // 32] = torch.randint(
+        118, 124, (experts, rows, k // 32), generator=gen, dtype=torch.uint8
+    )
+    half = rows // 2 if rows_real < rows else rows
+    for h in range(rows // half):
+        codes[:, h * half + rows_real : (h + 1) * half] = 0
+    packed = codes[..., 0::2] | (codes[..., 1::2] << 4)
+    return (
+        shuffle_data(packed),
+        shuffle_scale(sc.view(experts * rows, cols)).view(experts, rows, cols),
+        _LazyDequant(codes, sc, k),
+    )
+
+
+@pytest.fixture(scope="module")
+def small_moe_weights():
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
+        E_ALL,
+        HIDDEN,
+        RI,
+    )
+
+    gen = torch.Generator().manual_seed(5)
+    w13, w13s, w13d = _lazy_expert_weights(gen, E_ALL, 2 * RIP, HIDDEN, RI, HIDDEN)
+    w2, w2s, w2d = _lazy_expert_weights(gen, E_ALL, HIDDEN, RIP, HIDDEN, RI)
+    dev = {n: v.cuda() for n, v in dict(w13=w13, w13s=w13s, w2=w2, w2s=w2s).items()}
+    return dev, w13d, w2d
+
+
+@pytest.mark.parametrize(
+    "rows, routing, codec",
+    [
+        (1, "picked", "bf16"),
+        (2, "picked", "bf16"),
+        (3, "picked", "bf16"),
+        (4, "picked", "bf16"),
+        (5, "picked", "bf16"),
+        (7, "shared", "bf16"),
+        (8, "picked", "bf16"),
+        (8, "random", "bf16"),
+        (8, "hot", "bf16"),
+        (8, "shared", "bf16"),
+        (8, "inactive", "bf16"),
+        (8, "picked", "int4"),
+        (12, "picked", "bf16"),
+        (12, "inactive", "bf16"),
+    ],
+)
+def test_moe_small(harness, small_moe_weights, rows, routing, codec):
+    """The small-batch MoE path (rows <= ``moe.SMALL_MAX``: GEMV router, local
+    routing, gate/up pieces, down by output owners into the exchange) against
+    the reference, as ``test_moe``. ``picked``: every row its own 10 experts
+    with clear logit margins; ``hot``: every row the same 10; ``shared``: rows
+    drawing 10 of 16 experts; ``inactive``: the last three rows zero (padding),
+    which route to experts 0..9 (ties go to the lower expert) with equal
+    weights and give exactly zero. ``int4``: the exchange's INT4 lines."""
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
+        E_ALL,
+        EXPERTS,
+        HIDDEN,
+        RI,
+        SLOTS,
+        TOPK,
+    )
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import moe
+
+    assert moe.small(rows)
+    dev, w13d, w2d = small_moe_weights
+    gen = torch.Generator().manual_seed(rows)
+    idle = 3 if routing == "inactive" else 0
+    if routing == "random":
+        x = torch.randn(rows, HIDDEN, generator=gen).to(torch.bfloat16)
+        w_gate = (torch.randn(E_ALL, HIDDEN, generator=gen) * 0.05).to(torch.bfloat16)
+    else:
+        pool = torch.randperm(EXPERTS, generator=gen)
+        if routing == "hot":
+            picks = [pool[:TOPK].tolist()] * rows
+        elif routing == "shared":
+            picks = [
+                pool[:16][torch.randperm(16, generator=gen)[:TOPK]].tolist()
+                for _ in range(rows)
+            ]
+        else:
+            picks = [
+                torch.randperm(EXPERTS, generator=gen)[:TOPK].tolist()
+                for _ in range(rows)
+            ]
+        x, w_gate = _routed_inputs(gen, rows, picks)
+        if idle:
+            x[rows - idle :] = 0
+    y_r, ids_r, ws_r = ref.moe(x, w_gate, w13d, w2d, EXPERTS, TOPK, RI, RIP)
+
+    part = torch.zeros(moe.router_plan().partial_words(rows), device="cuda")
+    route = torch.zeros(2 * rows * SLOTS, dtype=torch.int32, device="cuda")
+    x4 = torch.zeros(rows, HIDDEN // 8, dtype=torch.int32, device="cuda")
+    x4s = torch.zeros(rows, HIDDEN // 32, dtype=torch.int32, device="cuda")
+    mpart = torch.zeros(rows * SLOTS, HIDDEN, device="cuda")
+    mpart2 = torch.zeros(rows * SLOTS, HIDDEN, device="cuda")
+    flags = torch.zeros(rows * SLOTS, dtype=torch.int32, device="cuda")
+    harness.mbox_t.zero_()
+    _moe_kernel(rows, codec)(
+        x.cuda().data_ptr(),
+        w_gate.cuda().data_ptr(),
+        *[dev[n].data_ptr() for n in ("w13", "w13s", "w2", "w2s")],
+        part.data_ptr(),
+        route.data_ptr(),
+        x4.data_ptr(),
+        x4s.data_ptr(),
+        mpart.data_ptr(),
+        mpart2.data_ptr(),
+        flags.data_ptr(),
+        harness.mbox,
+        harness.epoch.data_ptr(),
+        *harness.sync_args(),
+        torch.cuda.current_stream(),
+    )
+    torch.accelerator.synchronize()
+    assert harness.health[0].item() == 0
+    ids = route[: rows * SLOTS].view(rows, SLOTS).cpu()
+    ws = route[rows * SLOTS :].view(torch.float32).view(rows, SLOTS).cpu()
+    y = harness.exchange_y(rows, 2, codec).double().cpu()
+    live = rows - idle
+    if idle:
+        expect = list(range(TOPK)) + [EXPERTS]
+        assert (ids[live:] == torch.tensor(expect, dtype=torch.int32)).all()
+        assert (ws[live:, :TOPK] == ws[live:, :1]).all()
+        assert (ws[live:, :TOPK].sum(1) - 1).abs().max().item() < 1e-6
+        assert (ws[live:, TOPK] == 0.5).all()
+        assert (y[live:] == 0).all()
+    ids, ws, y, ids_r, ws_r, y_r = (t[:live] for t in (ids, ws, y, ids_r, ws_r, y_r))
+    agree = (torch.sort(ids, 1).values == torch.sort(ids_r.int(), 1).values).all(1)
+    if routing == "random":
+        assert agree.float().mean().item() >= 0.85
+    else:
+        assert agree.all()
+    ws_err = (torch.sort(ws, 1).values - torch.sort(ws_r.float(), 1).values).abs()[
+        agree
+    ]
+    assert ws_err.max().item() < 1e-5
+    err = ((y - y_r).norm(dim=1) / y_r.norm(dim=1))[agree]
+    if codec == "int4":
+        # the codec's own error, as test_moe
+        q_err = (ref.int4_roundtrip(y_r) - y_r).norm(dim=1) / y_r.norm(dim=1)
+        assert err.median().item() < 1.5 * q_err.median().item() + 5e-3
+    else:
+        assert err.median().item() < 5e-3
+        assert err.max().item() < 5e-2
+    assert (flags != 0).sum().item() == 0  # no split marks on this path
 
 
 @pytest.mark.parametrize(

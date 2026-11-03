@@ -136,12 +136,7 @@ def phase_names(key) -> list[str]:
     """The stamps of a traced build (``LayerBuild.trace``), in order: each
     marks the end of the named phase ("start": the kernel's start)."""
     mix = lambda t: [f"{t}.mix_down", f"{t}.mix_reduce", f"{t}.mix_up"]  # noqa: E731
-    mlp = mix("mlp") + [
-        "router",
-        "route+quant",
-        "experts",
-        "moe_combine+allreduce+combine",
-    ]
+    mlp = mix("mlp") + moe.phase_names(key.tokens)
     out = ["start"] + (["stats"] if key.stats else [])
     if key.kind != "qsa_back":
         out += mix("attn")
@@ -238,24 +233,13 @@ def build(key: LayerBuild):
         return _BUILDS[key]
     S, tp = key.tokens, key.tp
     shape = moe.Shape(S, key.rip)
-    mw = moe.lds_words(shape)
+    MoeLds = moe.lds_struct(shape)
     aux_words = max(hc.up_lds_words(S), ex_.GroupTile.words(S), gdn.recur_lds_words())
 
     @fx.struct
     class GemmLds:
         stage: fx.Array[fx.Int32, tiled.stage_words(S), 16]
         aux: fx.Array[fx.Int32, aux_words, 16]
-
-    @fx.struct
-    class MoeLds:
-        index: fx.Array[fx.Int32, mw.index, 16]
-        units: fx.Array[fx.Int32, mw.units, 16]
-        scan: fx.Array[fx.Int32, mw.scan, 16]
-        x: fx.Array[fx.Int32, mw.x, 16]
-        xs: fx.Array[fx.Int32, mw.xs, 16]
-        act: fx.Array[fx.Int32, mw.act, 16]
-        acts: fx.Array[fx.Int32, mw.acts, 16]
-        stage: fx.Array[fx.Int32, mw.stage, 16]
 
     @fx.union
     class PhaseLds:
@@ -367,44 +351,33 @@ def build(key: LayerBuild):
             end_phase("out+allreduce+combine")
 
         def mlp_half():
+            mw = moe.Weights(w_gate, w13, w13s, w2, w2s)
+            pre = moe.prefetch(g, shape, mw)  # in flight through the mix
             mix("mlp", m_norm, m_di, m_up, scr.inj_m)
-            moe.router(g, gemm, w_gate, x, scr.part)
-            end_phase("router")
-            moe.quantize_rows(g, x, scr.x4, scr.x4s, S)
-            moe.route(g, scr.part, scr.route, S)
-            end_phase("route+quant")
-            lds = moe.Lds(
-                index=ml.index.ptr,
-                units=ml.units.ptr,
-                scan=ml.scan.ptr,
-                x=ml.x.ptr,
-                xs=ml.xs.ptr,
-                act=ml.act.ptr,
-                acts=ml.acts.ptr,
-                stage=ml.stage.ptr,
-            )
             xch = exchange(MLP)
-            moe.experts(
+            moe.mlp(
                 g,
                 shape,
-                lds,
-                scr.route,
-                scr.x4,
-                scr.x4s,
-                w13,
-                w13s,
-                w2,
-                w2s,
-                scr.mpart,
-                scr.mpart2,
-                scr.split,
-                xch.tag,
+                gemm,
+                ml,
+                x,
+                mw,
+                moe.Bufs(
+                    scr.part,
+                    scr.route,
+                    scr.x4,
+                    scr.x4s,
+                    scr.mpart,
+                    scr.mpart2,
+                    scr.split,
+                ),
+                xch,
+                end_phase,
+                pre,
             )
-            end_phase("experts")
-            moe.combine(g, xch, scr.route, scr.mpart, scr.mpart2, scr.split, S)
             hc.combine(g, xch, state, scr.inj_m, scr.rrms, S, key.hc_eps)
             if const_expr(key.trace):
-                end_phase("moe_combine+allreduce+combine")
+                end_phase(moe.phase_names(S)[-1])
 
         if const_expr(key.stats):
             hc.stats(g, state, scr.rrms, S, key.hc_eps)

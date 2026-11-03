@@ -68,27 +68,30 @@ def quant_bf16_group(pairs, code):
     return words
 
 
+def quant_f32_word(values, scale):
+    """8 f32 values as one Int32 word of e2m1 codes over ``scale``
+    (``scale_value`` of the group's code)."""
+    lo = _pack_f32(
+        _pack_f32(i32(0), values[0], values[1], scale, 0),
+        values[2],
+        values[3],
+        scale,
+        1,
+    )
+    hi = _pack_f32(
+        _pack_f32(i32(0), values[4], values[5], scale, 0),
+        values[6],
+        values[7],
+        scale,
+        1,
+    )
+    return lo | (hi << i32(16))
+
+
 def quant_f32_group(values, code):
     """32 f32 values as four Int32 words of e2m1 codes."""
     scale = scale_value(code)
-    words = []
-    for w in range(4):
-        lo = _pack_f32(
-            _pack_f32(i32(0), values[8 * w], values[8 * w + 1], scale, 0),
-            values[8 * w + 2],
-            values[8 * w + 3],
-            scale,
-            1,
-        )
-        hi = _pack_f32(
-            _pack_f32(i32(0), values[8 * w + 4], values[8 * w + 5], scale, 0),
-            values[8 * w + 6],
-            values[8 * w + 7],
-            scale,
-            1,
-        )
-        words.append(lo | (hi << i32(16)))
-    return words
+    return [quant_f32_word(values[8 * w : 8 * w + 8], scale) for w in range(4)]
 
 
 def amax(values):
