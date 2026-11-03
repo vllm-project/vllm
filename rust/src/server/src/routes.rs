@@ -102,45 +102,35 @@ fn runtime_lora_updating_enabled() -> bool {
         .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
+/// Optional route families, each enabled by a CLI flag or an environment
+/// variable as in the Python frontend.
+#[derive(Debug, Clone, Copy, Default)]
+struct RouteGates {
+    /// `VLLM_SERVER_DEV_MODE`: development-only routes.
+    dev_mode: bool,
+    /// `VLLM_ALLOW_RUNTIME_LORA_UPDATING`: LoRA load and unload routes.
+    runtime_lora_updating: bool,
+    /// `--enable-scale-out`: scale-out routes, which answer 403 when disabled.
+    scale_out: bool,
+}
+
+impl RouteGates {
+    fn resolve(state: &AppState) -> Self {
+        Self {
+            dev_mode: server_dev_mode_enabled(),
+            runtime_lora_updating: runtime_lora_updating_enabled(),
+            scale_out: state.api_server_options.enable_scale_out,
+        }
+    }
+}
+
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let scale_out_endpoints_enabled = state.api_server_options.enable_scale_out;
-    build_router_with_options(
-        state,
-        server_dev_mode_enabled(),
-        runtime_lora_updating_enabled(),
-        scale_out_endpoints_enabled,
-    )
+    let gates = RouteGates::resolve(&state);
+    build_router_with_gates(state, gates)
 }
 
-#[cfg(test)]
-fn build_router_with_dev_mode(state: Arc<AppState>, dev_mode_enabled: bool) -> Router {
-    build_router_with_dev_mode_and_lora(state, dev_mode_enabled, false)
-}
-
-#[cfg(test)]
-fn build_router_with_dev_mode_and_lora(
-    state: Arc<AppState>,
-    dev_mode_enabled: bool,
-    runtime_lora_updating_enabled: bool,
-) -> Router {
-    build_router_with_options(state, dev_mode_enabled, runtime_lora_updating_enabled, true)
-}
-
-#[cfg(test)]
-fn build_router_with_scale_out_endpoints(
-    state: Arc<AppState>,
-    scale_out_endpoints_enabled: bool,
-) -> Router {
-    build_router_with_options(state, false, false, scale_out_endpoints_enabled)
-}
-
-fn build_router_with_options(
-    state: Arc<AppState>,
-    dev_mode_enabled: bool,
-    runtime_lora_updating_enabled: bool,
-    scale_out_endpoints_enabled: bool,
-) -> Router {
+fn build_router_with_gates(state: Arc<AppState>, gates: RouteGates) -> Router {
     let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))
@@ -178,7 +168,7 @@ fn build_router_with_options(
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
 
-    if scale_out_endpoints_enabled {
+    if gates.scale_out {
         router = router.route("/inference/v1/generate", post(inference::generate));
         // TODO: implement the remaining scale-out routes.
         for path in UNIMPLEMENTED_SCALE_OUT_ROUTES {
@@ -210,13 +200,13 @@ fn build_router_with_options(
             .route("/checkpoint/status", get(checkpoint::status));
     }
 
-    if runtime_lora_updating_enabled {
+    if gates.runtime_lora_updating {
         router = router
             .route("/v1/load_lora_adapter", post(lora::load_lora_adapter))
             .route("/v1/unload_lora_adapter", post(lora::unload_lora_adapter));
     }
 
-    if dev_mode_enabled {
+    if gates.dev_mode {
         // Development-only
         router = router
             .route("/reset_prefix_cache", post(cache::reset_prefix_cache))
