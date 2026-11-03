@@ -15,12 +15,13 @@ import numpy as np
 from vllm.distributed.aux_output_connector.hidden_states import (
     HiddenStateCaptureChunk,
     HiddenStateCapturePlan,
-    HiddenStateCaptureResult,
     HiddenStateScheduler,
 )
+from vllm.distributed.aux_output_connector.outputs import AuxOutputs
 from vllm.v1.core.kv_cache_utils import maybe_convert_block_hash
 
 if TYPE_CHECKING:
+    from vllm.config import AuxOutputConfig
     from vllm.distributed.kv_events import ExternalBlockHash
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1
     from vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -51,7 +52,7 @@ class AuxOutputConnectorMetadata:
     released_block_hashes: PackedBlockHashes | None = None
     hidden_plans: dict[str, HiddenStateCapturePlan] = field(default_factory=dict)
     finished_hidden_requests: tuple[str, ...] = ()
-    hidden_accepted_ends: dict[str, int] = field(default_factory=dict)
+    hidden_settled_ends: dict[str, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -69,8 +70,7 @@ class AuxOutputSchedulerConnector:
         self,
         kv_cache_manager: KVCacheManager,
         kv_connector: KVConnectorBase_V1 | None = None,
-        *,
-        aux_config=None,
+        aux_config: AuxOutputConfig | None = None,
     ) -> None:
         self._routing = aux_config is None or aux_config.enable_return_routed_experts
         self._hidden = (
@@ -105,17 +105,13 @@ class AuxOutputSchedulerConnector:
         requests: dict[str, Request],
     ) -> AuxOutputConnectorMetadata:
         """Build one step's incremental worker metadata."""
-        hidden_plans, hidden_finished = (
-            ({}, ())
+        hidden_plans, hidden_settled_ends, hidden_finished = (
+            ({}, {}, ())
             if self._hidden is None
             else self._hidden.build_metadata(
                 scheduler_output.num_scheduled_tokens, requests
             )
         )
-        hidden_accepted_ends = {
-            rid: requests[rid].num_prompt_tokens - 1 + requests[rid].num_output_tokens
-            for rid in hidden_plans
-        }
         if not self._routing:
             return AuxOutputConnectorMetadata(
                 self._generation,
@@ -123,7 +119,7 @@ class AuxOutputSchedulerConnector:
                 {},
                 tuple(scheduler_output.finished_req_ids),
                 hidden_plans=hidden_plans,
-                hidden_accepted_ends=hidden_accepted_ends,
+                hidden_settled_ends=hidden_settled_ends,
                 finished_hidden_requests=hidden_finished,
             )
         scheduled_requests: dict[str, int] = {}
@@ -173,7 +169,7 @@ class AuxOutputSchedulerConnector:
             self._pack_hashes(self._released_hashes),
         )
         metadata.hidden_plans = hidden_plans
-        metadata.hidden_accepted_ends = hidden_accepted_ends
+        metadata.hidden_settled_ends = hidden_settled_ends
         metadata.finished_hidden_requests = hidden_finished
         self._retained_hashes, self._released_hashes = [], []
         return metadata
@@ -267,18 +263,21 @@ class AuxOutputSchedulerConnector:
         )
         return request_output.rows[:local_end]
 
-    def take_hidden_output(
+    def take_outputs(
         self,
         request: Request,
         output: dict[str, AuxRequestOutput] | None,
-        num_new_tokens: int,
         stopped: bool,
-    ) -> tuple[HiddenStateCaptureResult | None, str | None]:
-        if self._hidden is None:
-            return None, None
-        return self._hidden.take_output(
-            request, (output or {}).get(request.request_id), num_new_tokens, stopped
-        )
+    ) -> tuple[np.ndarray | None, AuxOutputs | None]:
+        """Settle all auxiliary outputs on a step that emits request output."""
+        aux_outputs = None
+        if self._hidden is not None:
+            result, reason = self._hidden.take_output(
+                request, (output or {}).get(request.request_id), stopped
+            )
+            if result is not None or reason is not None:
+                aux_outputs = AuxOutputs(result, reason)
+        return self.take_output(request, output), aux_outputs
 
     def request_finished(self, request: Request) -> None:
         """Queue a request's terminal event and final block hashes."""

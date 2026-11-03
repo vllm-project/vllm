@@ -50,6 +50,11 @@ class HiddenStateCaptureRequest(OpenAIBaseModel):
     start: int = Field(ge=0, strict=True)
     end: int = Field(gt=0, strict=True)
     collection_id: str
+    coordinate: Literal["response", "absolute"] = Field(
+        default="response",
+        description="'response' counts rows from the first generated token; "
+        "'absolute' counts prompt rows too, so prompt rows can be captured.",
+    )
     min_rows: int = Field(default=1, ge=1, strict=True)
     aux_layer_ids: list[int] = Field(default_factory=list)
     hidden_layout: Literal["final", "aux_final", "dflash_aux"] | None = None
@@ -68,8 +73,17 @@ class CaptureTensor(OpenAIBaseModel):
     shape: list[int]
 
 
+class CaptureSegmentResponse(OpenAIBaseModel):
+    kind: Literal["prompt", "output"]
+    start: int
+    end: int
+
+
 class HiddenStateCaptureResponse(OpenAIBaseModel):
-    hidden_states: CaptureTensor
+    tensors: dict[str, CaptureTensor] = Field(
+        description="'hidden_states', plus 'logprobs' and 'logprob_token_ids' "
+        "when logprob_topk is set."
+    )
     hidden_positions: list[int]
     hidden_position_start: int
     hidden_position_end: int
@@ -86,8 +100,11 @@ class HiddenStateCaptureResponse(OpenAIBaseModel):
         "in milliseconds; "
         "not completed GPU-to-CPU transfer time."
     )
-    logprobs: CaptureTensor | None = None
-    logprob_token_ids: CaptureTensor | None = None
+    segments: list[CaptureSegmentResponse]
+    logits_contract: dict[str, Any] | None = Field(
+        default=None,
+        description="Parameters for rebuilding logits from the final layer.",
+    )
 
 
 class CompletionRequest(OpenAIBaseModel):

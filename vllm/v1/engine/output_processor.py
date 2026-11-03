@@ -4,13 +4,13 @@
 import asyncio
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import torch
 
-from vllm.distributed.aux_output_connector.hidden_states import HiddenStateCaptureResult
+from vllm.distributed.aux_output_connector.outputs import AuxOutputs
 from vllm.lora.request import LoRARequest
 from vllm.outputs import (
     STREAM_FINISHED,
@@ -233,8 +233,7 @@ class RequestState:
         # Per-sequence spec-decode accumulator; arrives once (on finish) via
         # EngineCoreOutput, then attached to this sequence's CompletionOutput.
         self.spec_decode_metrics: RequestSpecDecodeMetrics | None = None
-        self.hidden_state_capture: HiddenStateCaptureResult | None = None
-        self.hidden_capture_skip_reason: str | None = None
+        self.aux_outputs: AuxOutputs | None = None
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -473,17 +472,14 @@ class RequestState:
             num_cached_tokens=self.num_cached_tokens,
             num_cache_creation_tokens=self.num_cache_creation_tokens,
             metrics=self.stats,
-            hidden_state_capture=(
-                self.hidden_state_capture
-                if finished or self.output_kind == RequestOutputKind.DELTA
-                else None
-            ),
-            hidden_capture_skip_reason=(
-                self.hidden_capture_skip_reason
-                if finished or self.output_kind == RequestOutputKind.DELTA
-                else None
-            ),
+            aux_outputs=self._take_aux_outputs(finished),
         )
+
+    def _take_aux_outputs(self, finished: bool) -> AuxOutputs | None:
+        if not finished and self.output_kind != RequestOutputKind.DELTA:
+            return None
+        aux_outputs, self.aux_outputs = self.aux_outputs, None
+        return aux_outputs
 
     def _new_completion_output(
         self,
@@ -814,14 +810,9 @@ class OutputProcessor:
 
             if engine_core_output.spec_decode_metrics is not None:
                 req_state.spec_decode_metrics = engine_core_output.spec_decode_metrics
-            if engine_core_output.hidden_state_capture is not None:
-                req_state.hidden_state_capture = replace(
-                    engine_core_output.hidden_state_capture,
-                    request_id=req_state.external_req_id,
-                )
-            if engine_core_output.hidden_capture_skip_reason is not None:
-                req_state.hidden_capture_skip_reason = (
-                    engine_core_output.hidden_capture_skip_reason
+            if engine_core_output.aux_outputs is not None:
+                req_state.aux_outputs = engine_core_output.aux_outputs.combine(
+                    req_state.aux_outputs
                 )
 
             request_error = None
@@ -877,12 +868,6 @@ class OutputProcessor:
                 ec_transfer_params,
                 error=request_error,
             ):
-                if isinstance(request_output, RequestOutput) and (
-                    request_output.finished
-                    or req_state.output_kind == RequestOutputKind.DELTA
-                ):
-                    req_state.hidden_state_capture = None
-                    req_state.hidden_capture_skip_reason = None
                 if streaming_chunk_boundary:
                     request_output.finished = False
 
