@@ -686,11 +686,7 @@ class Granite4VisionForConditionalGeneration(
             for imsize in image_sizes
         ]
 
-        # Strip per-image padding tiles in both layouts. The HF processor pads every
-        # image in one call to that call's largest tile count, so a multi-image prompt
-        # whose images tile differently arrives with trailing zero tiles -- also when
-        # pixel_values is a list of per-image tensors (embed_multimodal), not only as a
-        # 5-D batch. Concatenating the list unsliced makes the per-image split fail.
+        # Strip per-image padding tiles for both batched and list layouts.
         if isinstance(pixel_values, list) or pixel_values.dim() == 5:
             pixel_values = torch.cat(
                 [pv[:np_] for pv, np_ in zip(pixel_values, image_num_patches)],
