@@ -5,7 +5,7 @@ import torch
 from torch import Generator
 
 from tests.utils import large_gpu_mark
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.triton_utils import HAS_TRITON
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.sample.ops.topk_topp_sampler import (
@@ -1228,8 +1228,9 @@ class TestFlashInferDistributionMatch:
 
 
 @pytest.mark.skipif(
-    not current_platform.is_cpu(),
-    reason="CPU top-k/top-p kernels require a CPU build",
+    not current_platform.is_cpu()
+    or current_platform.get_cpu_architecture() == CpuArchEnum.X86,
+    reason="CPU top-k/top-p C++ kernels require a non-x86 CPU build",
 )
 class TestCpuTopkTopp:
     """Tests for the CPU top-k/top-p kernel.

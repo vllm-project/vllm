@@ -426,10 +426,12 @@ void apply_logit_bias_cpu(
 
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
+#if !defined(__x86_64__) && !defined(_M_X64)
 void cpu_topp_sampling(torch::Tensor& logits, const torch::Tensor& p);
 void cpu_topk_sampling(torch::Tensor& logits, const torch::Tensor& k);
 void cpu_topk_topp_sampling(torch::Tensor& logits, const torch::Tensor& k,
                             const torch::Tensor& p);
+#endif
 
 namespace cpu_utils {
 // Kernels used only by standalone CPU MRV2.
@@ -1151,6 +1153,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor restore_when_all_masked, Tensor stop_token_ids, "
       "bool check_all_masked_rows) -> ()",
       &apply_logit_bias_cpu);
+// x86 uses the Triton or PyTorch sampling path.
+#if !defined(__x86_64__) && !defined(_M_X64)
   ops.def("cpu_topp_sampling(Tensor! logits, Tensor p) -> ()");
   ops.impl("cpu_topp_sampling", torch::kCPU, &cpu_topp_sampling);
 
@@ -1159,6 +1163,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 
   ops.def("cpu_topk_topp_sampling(Tensor! logits, Tensor k, Tensor p) -> ()");
   ops.impl("cpu_topk_topp_sampling", torch::kCPU, &cpu_topk_topp_sampling);
+#endif
 
   // Speculative decoding kernels
   ops.def(

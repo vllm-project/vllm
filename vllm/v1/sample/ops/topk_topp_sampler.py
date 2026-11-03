@@ -604,7 +604,7 @@ def apply_top_k_only(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
 
 def _apply_top_k_only_cpu(logits: torch.Tensor, k: torch.Tensor) -> torch.Tensor:
     logits = logits.contiguous()
-    _cpu_topk_sampling_op(logits, k.to(torch.int32))
+    _cpu_topk_sampling_op(logits, k)
     return logits
 
 
@@ -622,18 +622,22 @@ def apply_top_k_top_p_cpu(
         assert (k > 0).all(), (
             "k values must be > 0; use k=vocab_size to disable top-k filtering"
         )
+        k = k.to(torch.int32).contiguous()
+
+    if p is not None:
+        p = p.float().contiguous()
 
     if p is None:
         return _apply_top_k_only_cpu(logits, k)
 
     if k is None:
         logits = logits.contiguous()
-        _cpu_topp_sampling_op(logits, p.float())
+        _cpu_topp_sampling_op(logits, p)
         return logits
 
     # Joint k+p path.
     logits = logits.contiguous()
-    _cpu_topk_topp_sampling_op(logits, k.to(torch.int32), p.float())
+    _cpu_topk_topp_sampling_op(logits, k, p)
     return logits
 
 
