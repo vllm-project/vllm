@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for EmbedIOProcessor."""
 
+from typing import get_args
+
 import pytest
 import torch
 from pydantic import TypeAdapter, ValidationError
@@ -21,7 +23,9 @@ from vllm.entrypoints.pooling.typing import (
     PoolingEngineInput,
     PoolingServeContext,
 )
-from vllm.inputs import tokens_input
+from vllm.exceptions import VLLMValidationError
+from vllm.inputs import mm_input, tokens_input
+from vllm.multimodal.inputs import MultiModalKwargsItems, PlaceholderRange
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 
 
@@ -107,6 +111,65 @@ class TestEmbeddingRequestParsing:
             [{"role": "user", "content": "goodbye"}],
         ]
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"input": "hello"},
+            {"input": [[1, 2], [3]]},
+            {"input": []},
+            {"input": [{"role": "user", "content": "hi"}]},
+            {"input": [[{"role": "user", "content": "hi"}]]},
+            {"messages": [{"role": "user", "content": "hi"}]},
+            {"messages": [[{"role": "user", "content": "hi"}]]},
+            {"messages": []},
+            {"messages": [{"author": {"role": "user"}, "content": []}]},
+            {"input": "hello", "messages": [{"role": "user", "content": "hi"}]},
+            {
+                "input": [{"role": "user", "content": "hi"}],
+                "messages": [{"role": "user", "content": "hi"}],
+            },
+        ],
+    )
+    def test_parses_like_plain_union(self, body):
+        """The completion fast path must parse like the plain union."""
+        plain_union = TypeAdapter(get_args(EmbeddingRequest)[0])
+        expected = plain_union.validate_python(body)
+        request: EmbeddingRequest = TypeAdapter(EmbeddingRequest).validate_python(body)
+
+        assert type(request) is type(expected)
+        assert request.model_dump(exclude={"request_id"}) == expected.model_dump(
+            exclude={"request_id"}
+        )
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {"input": [1, "a"]},
+            {"input": [[1], "x"]},
+            {"input": "x", "dimensions": "abc"},
+            {
+                "input": "x",
+                "continue_final_message": True,
+                "add_generation_prompt": True,
+            },
+        ],
+    )
+    def test_rejects_like_plain_union(self, body):
+        """Invalid bodies must fail exactly as the plain union fails them."""
+        plain_union = TypeAdapter(get_args(EmbeddingRequest)[0])
+        with pytest.raises(Exception) as expected:
+            plain_union.validate_python(body)
+        with pytest.raises(Exception) as actual:
+            TypeAdapter(EmbeddingRequest).validate_python(body)
+
+        assert type(actual.value) is type(expected.value)
+        if isinstance(expected.value, ValidationError):
+            assert actual.value.errors(include_url=False) == expected.value.errors(
+                include_url=False
+            )
+        else:
+            assert str(actual.value) == str(expected.value)
 
 
 class TestCohereEmbedRequestParsing:
@@ -462,6 +525,33 @@ class TestChunkedEmbeddingProcessing:
             num_cached_tokens=0,
             finished=True,
         )
+
+    @pytest.mark.parametrize(
+        ("chunking_enabled", "num_tokens"), [(True, 2), (True, 5), (False, 2)]
+    )
+    def test_multimodal_input_requires_chunking_disabled(
+        self, chunking_enabled, num_tokens
+    ):
+        """Reject images before changing a mixed batch, including short inputs."""
+        handler = self._make_handler()
+        handler.enable_chunked_processing = chunking_enabled
+        ctx = self._make_context()
+        assert ctx.engine_inputs is not None
+        image_prompt = mm_input(
+            prompt_token_ids=list(range(num_tokens)),
+            mm_kwargs=MultiModalKwargsItems({"image": [None]}),
+            mm_hashes={"image": ["cached-image"]},
+            mm_placeholders={"image": [PlaceholderRange(offset=0, length=1)]},
+        )
+        ctx.engine_inputs[1]["prompts"] = image_prompt
+
+        if chunking_enabled:
+            with pytest.raises(VLLMValidationError, match="multimodal inputs"):
+                handler.maybe_pre_process_chunked(ctx)
+        else:
+            handler.maybe_pre_process_chunked(ctx)
+        assert ctx.engine_inputs[1]["prompts"] is image_prompt
+        assert ctx.original_engine_inputs is None
 
     def test_aggregation_uses_metadata_not_request_id_parsing(self):
         handler = self._make_handler()

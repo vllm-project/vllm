@@ -42,6 +42,7 @@ class MockModelConfig:
     task = "generate"
     runner_type = "generate"
     model = MODEL_NAME
+    served_model_name = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -114,6 +115,37 @@ async def test_tokenize_chat_skips_mm_cache_for_renderer_only_path():
     assert (
         serving.online_renderer.preprocess_chat.call_args.kwargs["skip_mm_cache"]
         is True
+    )
+
+
+@pytest.mark.skip_global_cleanup
+def test_tokenize_chat_forwards_response_format_to_renderer():
+    """Structured formats must affect Mistral tokenization, not just generation."""
+    response_format = {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "answer",
+            "schema": {"type": "object", "properties": {"value": {"type": "string"}}},
+            "strict": True,
+        },
+    }
+    request = TokenizeChatRequest.model_validate(
+        {
+            "model": MODEL_NAME,
+            "messages": [{"role": "user", "content": "Return JSON"}],
+            "response_format": response_format,
+        }
+    )
+
+    params = request.build_chat_params(
+        default_template=None,
+        default_template_content_format="auto",
+    )
+
+    assert params.response_format is not None
+    assert (
+        params.response_format.model_dump(mode="json", by_alias=True, exclude_none=True)
+        == response_format
     )
 
 

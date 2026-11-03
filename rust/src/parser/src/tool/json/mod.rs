@@ -19,6 +19,7 @@ mod mistral;
 mod phi4mini;
 mod qwen;
 
+use vllm_tokenizer::DecodedText;
 use winnow::ascii::multispace0 as ws0;
 use winnow::combinator::{alt, seq};
 use winnow::error::{AddContext, ModalResult, StrContext, StrContextValue};
@@ -98,8 +99,8 @@ impl JsonToolCallParser {
         }
     }
 
-    fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
-        self.buffer.push_str(chunk);
+    fn parse_into(&mut self, chunk: DecodedText, output: &mut ToolParserOutput) -> Result<()> {
+        self.buffer.push_str(&chunk.text);
         let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
@@ -395,6 +396,7 @@ fn safe_text_event(
 #[cfg(test)]
 mod tests {
     use expect_test::expect;
+    use vllm_tokenizer::DecodedText;
 
     use super::{JsonToolCallConfig, JsonToolCallParser, JsonToolCallWhitespace};
     use crate::tool::ToolParserOutput;
@@ -421,7 +423,7 @@ mod tests {
     fn collect_chunks(parser: &mut JsonToolCallParser, chunks: &[&str]) -> ToolParserOutput {
         let mut output = ToolParserOutput::default();
         for chunk in chunks {
-            parser.parse_into(chunk, &mut output).unwrap();
+            parser.parse_into(DecodedText::unattributed(*chunk), &mut output).unwrap();
         }
         output.append(parser.finish().unwrap());
         output.coalesce()

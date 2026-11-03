@@ -103,19 +103,6 @@ def gload(addr, words=4, nt=False):
     return fx.Int32(v) if words == 1 else fx.Vector(v)
 
 
-def atomic_add_dev(addr, value):
-    """Device-scope atomic add on the global i32 at ``addr``; the old value.
-    Relaxed: an acquire / release here would write back and invalidate L2."""
-    return fx.Int32(
-        fx.atomic_add(
-            _gptr(addr),
-            fx.Int32(value),
-            syncscope="agent",
-            ordering=fx.AtomicOrdering.Monotonic,
-        )
-    )
-
-
 def gstore(addr, value, words=4):
     """Store ``words`` i32 (an Int32 or a Vector) at a 64-bit global address."""
     v = as_ir_value(fx.Int32(value) if words == 1 else value)
@@ -349,7 +336,10 @@ def mx_code(amax):
     + 127, 0, 254), amax floored at FLT_MIN."""
     a = fx.max(amax, fx.Float32(FLT_MIN))
     q = div_rn(a, fx.Float32(FP8_MAX), fx.Float32(1.0 / FP8_MAX))
-    return fx.min(fx.max(ceil_exp(q), fx.Int32(0)), fx.Int32(254))
+    bits = q.bitcast(fx.Int32)
+    sub = (bits > 0x400000).select(fx.Int32(1), fx.Int32(0))
+    e = (bits < 0x800000).select(sub, ceil_exp(q))
+    return fx.min(fx.max(e, fx.Int32(0)), fx.Int32(254))
 
 
 def mx_mul(code):
