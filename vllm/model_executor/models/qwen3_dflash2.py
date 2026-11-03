@@ -13,6 +13,7 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.worker.gpu.spec_decode.dflash2.config import DFlash2SpeculatorConfig
 
 from .qwen3_dflash import (
     DFlashQwen3DecoderLayer,
@@ -296,6 +297,10 @@ def _score_edges(
     anchor_token_ids: torch.Tensor,
     top_k: int,
 ) -> torch.Tensor:
+    # A request still in chunked prefill anchors on its next prompt token, which
+    # can lie past the draft vocabulary (an audio placeholder, say). Its draft is
+    # discarded, so only keep the codebook lookup in range.
+    anchor_token_ids = anchor_token_ids.clamp(0, predecessor_table.shape[0] - 1)
     successors = successor_table[candidate_ids]
     predecessor_ids = torch.cat(
         (
@@ -393,14 +398,19 @@ class DFlash2Qwen3Model(DFlashQwen3Model):
 
 
 class DFlash2Qwen3ForCausalLM(DFlashQwen3ForCausalLM):
+    # The speculator this is a draft model of (see SpeculativeDraftModel).
+    speculator_config_class = DFlash2SpeculatorConfig
+
     model_cls = DFlash2Qwen3Model
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         draft_config = self.config.dflash_config
         softcap = float(draft_config.get("final_logit_softcapping") or 0.0)
+        # Candidates index the selector codebooks, which have the draft's
+        # vocabulary; the target's vocabulary can be larger.
         self.candidate_logits_processor = LogitsProcessor(
-            vllm_config.model_config.get_vocab_size(),
+            min(vllm_config.model_config.get_vocab_size(), self.config.vocab_size),
             scale=float(draft_config.get("output_multiplier", 1.0)),
             soft_cap=softcap if softcap > 0 else None,
         )
