@@ -92,10 +92,13 @@ def test_sm90_prefers_flashinfer(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _resolve_gdn_prefill_backend(_config("auto"))[1] == "flashinfer"
 
 
-def test_sm100_offers_cutedsl(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(gdn_module, "current_platform", _platform(10, 0))
+@pytest.mark.parametrize(("major", "auto"), [(10, "flashinfer"), (11, "triton")])
+def test_blackwell_offers_cutedsl(
+    monkeypatch: pytest.MonkeyPatch, major: int, auto: str
+) -> None:
+    monkeypatch.setattr(gdn_module, "current_platform", _platform(major, 0))
     assert _resolve_gdn_prefill_backend(_config("cutedsl"))[1] == "cutedsl"
-    assert _resolve_gdn_prefill_backend(_config("auto"))[1] == "flashinfer"
+    assert _resolve_gdn_prefill_backend(_config("auto"))[1] == auto
 
 
 def test_a_non_cuda_platform_resolves_to_triton(
