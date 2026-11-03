@@ -14,9 +14,9 @@ from tests.v1.attention.utils import (
     MockMambaBuilder,
     create_common_attn_metadata,
 )
+from tests.v1.worker.test_utils import _TestReplaySSMMixer
 from vllm.config import CacheConfig
-from vllm.config.mamba import MambaBackendEnum, MambaConfig
-from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.config.mamba import MambaConfig
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncsByType,
@@ -47,7 +47,10 @@ from vllm.v1.worker.mamba_utils import (
     preprocess_mamba,
     stage_postprocess_inputs_to_gpu,
 )
-from vllm.v1.worker.replayssm_utils import initialize_replayssm_ring_trackers
+from vllm.v1.worker.replayssm_utils import (
+    ReplaySSMModelContext,
+    initialize_replayssm_ring_trackers,
+)
 from vllm.v1.worker.utils import (
     allocate_kv_cache,
     bind_kv_cache_to_layers,
@@ -270,7 +273,6 @@ def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
     cfg = _TestConfig(num_layers=1)
     device = torch.device("cpu")
     kv_cache_config = _make_kv_cache_config(cfg, ["layer_0"])
-    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
     conv_ptr = 1 << 63
     temporal_ptr = (1 << 64) - 8
     block_table_ptr = (1 << 63) + 42
@@ -293,6 +295,7 @@ def test_gpu_context_reinterprets_high_data_ptrs_for_int64_metadata():
         block_table_ptr,
     )
     forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
+    gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context)
 
     gpu_ctx.initialize_from_forward_context(
         kv_cache_config, forward_context, _COPY_FUNCS, [block_table]
@@ -486,6 +489,7 @@ def _make_gpu_ctx(
     cfg: _TestConfig,
     kv_cache_config: KVCacheConfig,
     device: torch.device,
+    forward_context: dict[str, Any],
     copy_funcs: MambaStateCopyFuncsByType = _COPY_FUNCS,
 ) -> MambaSpecDecodeGPUContext:
     """Create MambaSpecDecodeGPUContext for the GPU path."""
@@ -497,9 +501,63 @@ def _make_gpu_ctx(
         max_num_reqs=cfg.max_num_reqs,
         kv_cache_config=kv_cache_config,
         copy_funcs=copy_funcs,
+        forward_context=forward_context,
         device=device,
         make_buffer=make_buffer,
     )
+
+
+def test_replayssm_gpu_copy_layout_preserves_canonical_cpu_copies():
+    mixer = _TestReplaySSMMixer()
+    spec = MambaSpec(
+        block_size=16,
+        shapes=mixer.get_state_shape(),
+        dtypes=mixer.get_state_dtype(),
+    )
+    kv_config = KVCacheConfig(
+        num_blocks=3,
+        kv_cache_tensors=[],
+        kv_cache_groups=[KVCacheGroupSpec(["mixer"], spec)],
+    )
+    cfg = _TestConfig(num_layers=1, max_num_reqs=2)
+    device = torch.device("cpu")
+    canonical = _make_copy_bufs(cfg, kv_config, device)
+    replay = _make_gpu_ctx(cfg, kv_config, device, {"mixer": mixer})
+
+    assert canonical.src_ptrs.cpu.numel() == cfg.max_num_reqs * 2
+    assert replay.num_states == 5
+    assert replay.state_base_addrs.numel() == 5
+    assert _COPY_FUNCS[MambaAttentionBackendEnum.MAMBA2] == _DEFAULT_COPY_FUNCS
+
+
+def test_replayssm_rejects_incompatible_ring_geometry_before_materialization():
+    class DifferentRingMixer(_TestReplaySSMMixer):
+        def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+            shapes = super().get_state_shape()
+            return (*shapes[:2], (1, 4), *shapes[3:])
+
+    mixers = [_TestReplaySSMMixer(), DifferentRingMixer()]
+    specs = [
+        MambaSpec(
+            block_size=16,
+            shapes=mixer.get_state_shape(),
+            dtypes=mixer.get_state_dtype(),
+            state_alignment=16,
+            page_size_padded=128,
+        )
+        for mixer in mixers
+    ]
+    assert specs[0].is_uniform_with_collection({"first": specs[0], "second": specs[1]})
+    for mixer in mixers:
+        mixer.bind_kv_cache(torch.zeros((3, 1, 1, 128), dtype=torch.int8))
+        mixer.A = -torch.ones(1)
+        mixer.replayssm_buffer_len = 16
+
+    with pytest.raises(AssertionError, match="equal materialization geometry"):
+        ReplaySSMModelContext.create(
+            [(mixers, specs[0], torch.zeros((1, 1), dtype=torch.int32))],
+            max_num_reqs=1,
+        )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
@@ -547,7 +605,6 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
             torch.bfloat16,
         ),
         mamba_cache_mode="align",
-        num_extra_temporal_states=3,
         state_alignment=16,
         block_stride_alignment=16,
     )
@@ -564,16 +621,18 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
         5 * (2 * spec.page_size_bytes + 8),
     )
     pages = allocate_kv_cache(kv_config, device, layout)
+
+    class PackedReplaySSMMixer(_TestReplaySSMMixer):
+        def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+            return spec.shapes
+
+        def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+            return spec.dtypes
+
     forward_context = {}
     for name in layer_names:
-        mixer = MambaMixer2.__new__(MambaMixer2)
-        torch.nn.Module.__init__(mixer)
-        mixer.use_replayssm = mixer.use_flashinfer_replayssm = True
-        mixer.state_alignment = 16
+        mixer = PackedReplaySSMMixer()
         mixer.replayssm_buffer_len = 16
-        mixer.mamba_config = MambaConfig(backend=MambaBackendEnum.FLASHINFER)
-        mixer.get_state_shape = lambda: spec.shapes
-        mixer.get_state_dtype = lambda: spec.dtypes
         mixer.A = -torch.ones(1, device=device)
         forward_context[name] = mixer
     bind_kv_cache_to_layers(pages, forward_context)
@@ -594,7 +653,7 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
         mixer._replayssm_ring_start[source_slot] = 7
         mixer._replayssm_prev_num_accepted[source_slot] = 9
     cfg = _TestConfig(num_layers=2, max_num_reqs=2)
-    ctx = _make_gpu_ctx(cfg, kv_config, device)
+    ctx = _make_gpu_ctx(cfg, kv_config, device, forward_context)
     batch_table = torch.tensor([[1, 2]], dtype=torch.int32, device=device)
     persistent_table = torch.tensor([[0, 0], [1, 2]], dtype=torch.int32, device=device)
     ctx.initialize_from_forward_context(
@@ -736,9 +795,6 @@ def test_mamba_groups_support_different_state_specs():
     assert copy_bufs.dst_ptrs.cpu.numel() == cfg.max_num_reqs * 5
     assert copy_bufs.sizes.cpu.numel() == cfg.max_num_reqs * 5
 
-    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"))
-    assert ctx.num_states == 5
-
     forward_context = {}
     gdn_spec_layer_names = ["gdn.0", "gdn.1"]
     for layer_name in gdn_spec_layer_names:
@@ -757,6 +813,8 @@ def test_mamba_groups_support_different_state_specs():
         torch.zeros(4, 8, dtype=torch.int32),
         torch.zeros(4, 8, dtype=torch.int32),
     ]
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"), forward_context)
+    assert ctx.num_states == 5
     ctx.initialize_from_forward_context(
         kv_cache_config,
         forward_context,
@@ -823,10 +881,6 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
     assert copy_bufs.mamba_group_ids == [0]
     assert copy_bufs.src_ptrs.cpu.numel() == cfg.max_num_reqs * 5
 
-    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"))
-    assert ctx.mamba_group_ids == [0]
-    assert ctx.num_states == 5
-
     forward_context = {
         "gdn.0": MagicMock(
             use_flashinfer_replayssm=False,
@@ -847,6 +901,9 @@ def test_mamba_groups_support_mixed_specs_in_uniform_group():
             kv_cache=(torch.empty(8, 12, 8, dtype=torch.float16),),
         ),
     }
+    ctx = _make_gpu_ctx(cfg, kv_cache_config, torch.device("cpu"), forward_context)
+    assert ctx.mamba_group_ids == [0]
+    assert ctx.num_states == 5
     ctx.initialize_from_forward_context(
         kv_cache_config,
         forward_context,
@@ -1061,7 +1118,6 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         shapes=tuple(tensor.shape[1:] for tensor in mixer.kv_cache),
         dtypes=tuple(tensor.dtype for tensor in mixer.kv_cache),
         mamba_cache_mode=cache_mode,
-        num_extra_temporal_states=3,
     )
     replay = ReplaySSMModelContext.create(
         [([mixer], spec, torch.tensor([[1]], dtype=torch.int32, device=device))],
@@ -1134,7 +1190,7 @@ def test_gpu_context_ignores_auxiliary_cache_tensors() -> None:
         temporal_state,
         *(torch.empty(config.num_blocks, 1) for _ in range(4)),
     ]
-    context = _make_gpu_ctx(config, kv_cache_config, device)
+    context = _make_gpu_ctx(config, kv_cache_config, device, {"layer_0": attention})
 
     context.initialize_from_forward_context(
         kv_cache_config,
@@ -1301,7 +1357,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         max_blocks = max(len(b) for b in block_ids_per_req)
@@ -1389,7 +1445,7 @@ class TestPostprocessMambaFusedKernel:
 
         forward_context = {"layer_0": _make_mock_attention(conv_state, temporal_state)}
 
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
@@ -1470,7 +1526,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # Run GPU path
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         max_blocks_per_req = 8
         block_table_gpu = torch.zeros(
@@ -1575,7 +1631,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # Run GPU path with REALISTIC block table stride
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         # KEY DIFFERENCE: Create a large block table like real code does
         # Real system has max_num_blocks_per_req >> blocks actually used
@@ -1712,7 +1768,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
@@ -1852,7 +1908,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
@@ -2010,7 +2066,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
 
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
@@ -2142,7 +2198,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
@@ -2295,7 +2351,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         max_blocks = max(len(b) for b in block_ids_per_req)
         block_table_gpu = torch.zeros(
@@ -2448,7 +2504,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(local_cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         max_blocks = max(len(b) for b in block_ids_per_req)
         block_table_gpu = torch.zeros(
@@ -2601,7 +2657,7 @@ class TestPostprocessMambaFusedKernel:
         )
 
         # --- Run GPU path ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_gpu)
         num_reqs = len(req_ids)
         block_table_gpu = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table_gpu[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
@@ -2758,7 +2814,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- GPU fused kernel ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, fwd_gpu)
         num_reqs = 1
         block_table = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
@@ -2883,7 +2939,7 @@ class TestPostprocessMambaFusedKernel:
         torch.accelerator.synchronize()
 
         # --- GPU fused kernel ---
-        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx = _make_gpu_ctx(cfg, kv_cache_config, device, fwd_gpu)
         num_reqs = 1
         block_table = torch.zeros(num_reqs, 8, dtype=torch.int32, device=device)
         block_table[0, :8] = torch.tensor(block_ids_per_req[0], dtype=torch.int32)
@@ -3020,7 +3076,7 @@ class TestPostprocessMambaFusedKernel:
         forward_context_sd = {
             "layer_0": _make_mock_attention(sd_conv, sd_temporal),
         }
-        gpu_ctx_sd = _make_gpu_ctx(cfg, kv_cache_config, device)
+        gpu_ctx_sd = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_sd)
         accepted_gpu_sd = _run_gpu_postprocess(
             gpu_ctx_sd,
             kv_cache_config=kv_cache_config,
@@ -3074,7 +3130,7 @@ class TestPostprocessMambaFusedKernel:
             forward_context_ds = {
                 "layer_0": _make_mock_attention(ds_conv, ds_temporal),
             }
-            gpu_ctx_ds = _make_gpu_ctx(cfg, kv_cache_config, device)
+            gpu_ctx_ds = _make_gpu_ctx(cfg, kv_cache_config, device, forward_context_ds)
             accepted_gpu_ds = _run_gpu_postprocess(
                 gpu_ctx_ds,
                 kv_cache_config=kv_cache_config,

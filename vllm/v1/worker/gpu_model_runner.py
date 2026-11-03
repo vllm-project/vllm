@@ -1045,6 +1045,7 @@ class GPUModelRunner(
                 max_num_reqs=self.max_num_reqs,
                 kv_cache_config=self.kv_cache_config,
                 copy_funcs=self._get_mamba_state_copy_funcs(),
+                forward_context=self.compilation_config.static_forward_context,
                 make_buffer=self._make_buffer,
                 device=self.device,
                 with_postprocess_align=(

@@ -178,6 +178,7 @@ class MambaHybridModelState(DefaultModelState):
             max_num_reqs=self.max_num_reqs,
             kv_cache_config=kv_cache_config,
             copy_funcs=self._mamba_state_copy_funcs,
+            forward_context=self.vllm_config.compilation_config.static_forward_context,
             device=self.device,
             make_buffer=lambda n, dtype: CpuGpuBuffer(
                 n, dtype=dtype, device=self.device

@@ -11,6 +11,7 @@ from vllm.config import CacheConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFuncs,
     MambaStateCopyFuncsByType,
     get_conv_copy_spec,
     get_temporal_copy_spec,
@@ -789,6 +790,27 @@ class MambaCopyBuffers:
         )
 
 
+def _get_mamba_gpu_state_copy_funcs(
+    spec: MambaSpec,
+    layer: Any,
+    copy_funcs: MambaStateCopyFuncsByType,
+) -> MambaStateCopyFuncs:
+    state_copy_funcs = copy_funcs[spec.mamba_type]
+    if isinstance(layer, MambaBase) and layer.use_flashinfer_replayssm:
+        if (
+            spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
+            or len(spec.shapes) != 5
+            or len(spec.dtypes) != 5
+            or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
+        ):
+            raise ValueError(
+                "FlashInfer ReplaySSM requires two canonical Mamba2 "
+                "states and three ring states"
+            )
+        state_copy_funcs += (get_temporal_copy_spec,) * 3
+    return state_copy_funcs
+
+
 @dataclasses.dataclass
 class MambaSpecDecodeGPUContext:
     """Context for GPU-side Mamba state copy operations during the
@@ -863,6 +885,7 @@ class MambaSpecDecodeGPUContext:
         max_num_reqs: int,
         kv_cache_config: KVCacheConfig,
         copy_funcs: MambaStateCopyFuncsByType,
+        forward_context: dict[str, Any],
         device: torch.device,
         make_buffer: Callable[..., CpuGpuBuffer],
     ) -> "MambaSpecDecodeGPUContext":
@@ -876,36 +899,17 @@ class MambaSpecDecodeGPUContext:
             and spec.mamba_cache_mode == mamba_spec.mamba_cache_mode
             for spec in mamba_groups
         ), "all mamba groups must share cache scheduling parameters"
-        copy_funcs_by_spec = {
-            spec: copy_funcs[spec.mamba_type] for spec in mamba_groups
-        }
-        for spec in mamba_groups:
-            if spec.num_extra_temporal_states:
-                if (
-                    spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
-                    or spec.num_extra_temporal_states != 3
-                    or len(spec.shapes) != 5
-                    or len(spec.dtypes) != 5
-                    or copy_funcs_by_spec[spec]
-                    != (get_conv_copy_spec, get_temporal_copy_spec)
-                ):
-                    raise ValueError(
-                        "FlashInfer ReplaySSM requires two canonical Mamba2 "
-                        "states and three ring states"
-                    )
-                copy_funcs_by_spec[spec] += (
-                    get_temporal_copy_spec,
-                ) * spec.num_extra_temporal_states
-
         # Count physical state tensors across all Mamba groups. Different
         # groups may expose different state specs.
         total_states = sum(
             len(
-                copy_funcs_by_spec[
+                _get_mamba_gpu_state_copy_funcs(
                     _get_mamba_spec_for_layer(
                         kv_cache_config.kv_cache_groups[gid], layer_name
-                    )
-                ]
+                    ),
+                    forward_context[layer_name],
+                    copy_funcs,
+                )
             )
             for gid in mamba_group_ids
             for layer_name in kv_cache_config.kv_cache_groups[gid].layer_names
@@ -1047,8 +1051,10 @@ class MambaSpecDecodeGPUContext:
             layer_names = kv_cache_group.layer_names
             for layer_name in layer_names:
                 mamba_spec = _get_mamba_spec_for_layer(kv_cache_group, layer_name)
-                state_copy_funcs = mamba_state_copy_funcs[mamba_spec.mamba_type]
                 attention = forward_context[layer_name]
+                state_copy_funcs = _get_mamba_gpu_state_copy_funcs(
+                    mamba_spec, attention, mamba_state_copy_funcs
+                )
                 kv_caches: list[torch.Tensor] = attention.kv_cache
                 is_flashinfer_replayssm = (
                     isinstance(attention, MambaBase)
@@ -1056,14 +1062,11 @@ class MambaSpecDecodeGPUContext:
                 )
                 has_baseline_layer |= not is_flashinfer_replayssm
                 if is_flashinfer_replayssm:
-                    if mamba_spec.num_extra_temporal_states != 3 or len(kv_caches) != 5:
+                    if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
                             "FlashInfer ReplaySSM requires five bound Mamba2 states"
                         )
                     mixers.append(attention)
-                    state_copy_funcs += (
-                        get_temporal_copy_spec,
-                    ) * mamba_spec.num_extra_temporal_states
                 if len(kv_caches) < len(state_copy_funcs):
                     raise ValueError(
                         f"Expected at least {len(state_copy_funcs)} Mamba state "
@@ -1410,6 +1413,7 @@ class MambaBuffers:
         max_num_reqs: int,
         kv_cache_config: KVCacheConfig,
         copy_funcs: MambaStateCopyFuncsByType,
+        forward_context: dict[str, Any],
         make_buffer: Callable[..., CpuGpuBuffer],
         device: torch.device,
         with_postprocess_align: bool,
@@ -1423,6 +1427,7 @@ class MambaBuffers:
                     max_num_reqs=max_num_reqs,
                     kv_cache_config=kv_cache_config,
                     copy_funcs=copy_funcs,
+                    forward_context=forward_context,
                     device=device,
                     make_buffer=make_buffer,
                 )

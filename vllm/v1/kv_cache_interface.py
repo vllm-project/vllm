@@ -1094,10 +1094,6 @@ class MambaSpec(KVCacheSpec):
     dtypes: tuple[torch.dtype, ...]
     state_alignment: int = 1
     """Byte alignment of each state within a page."""
-    num_extra_temporal_states: int = 0
-    """Trailing states beyond the layer's canonical states that use temporal
-    copies. Their shapes and dtypes must match within a cache group.
-    """
     page_size_padded: int | None = None
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
@@ -1170,16 +1166,6 @@ class MambaSpec(KVCacheSpec):
             and spec.prefill_checkpoint_alignment == self.prefill_checkpoint_alignment
             and spec.page_size_bytes == self.page_size_bytes
             and spec.state_alignment == self.state_alignment
-            and spec.num_extra_temporal_states == self.num_extra_temporal_states
-            and (
-                not self.num_extra_temporal_states
-                or (
-                    spec.shapes[-self.num_extra_temporal_states :]
-                    == self.shapes[-self.num_extra_temporal_states :]
-                    and spec.dtypes[-self.num_extra_temporal_states :]
-                    == self.dtypes[-self.num_extra_temporal_states :]
-                )
-            )
             and spec.tp_replicated == self.tp_replicated
             for spec in kv_cache_specs.values()
         )

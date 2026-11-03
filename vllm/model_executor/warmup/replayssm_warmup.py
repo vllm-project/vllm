@@ -140,6 +140,7 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     if num_slots <= 0:
         return
 
+    from vllm.model_executor.layers.mamba.abstract import MambaBase
     from vllm.v1.kv_cache_interface import MambaSpec
     from vllm.v1.worker.replayssm_utils import ReplaySSMModelContext
 
@@ -147,11 +148,16 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     grouped = []
     for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
         spec = group.kv_cache_spec
-        if not isinstance(spec, MambaSpec) or not spec.num_extra_temporal_states:
+        if not isinstance(spec, MambaSpec):
             continue
         mixers = [
-            config.compilation_config.static_forward_context[name]
+            layer
             for name in group.layer_names
+            if isinstance(
+                layer := config.compilation_config.static_forward_context[name],
+                MambaBase,
+            )
+            and layer.use_flashinfer_replayssm
         ]
         if not mixers:
             continue
