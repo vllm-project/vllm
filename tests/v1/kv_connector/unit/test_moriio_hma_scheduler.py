@@ -19,8 +19,11 @@ from unittest.mock import Mock
 import pytest
 import torch
 
+from vllm import SamplingParams
+from vllm.utils.hashing import sha256
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_planning import get_kv_cache_groups
+from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import KVConnectorBlockState, SchedulerOutput
 from vllm.v1.core.single_type_kv_cache_manager import FullAttentionManager
 from vllm.v1.kv_cache_interface import (
@@ -32,7 +35,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_cache_layout import KVCacheLayout
-from vllm.v1.request import RequestStatus
+from vllm.v1.request import Request, RequestStatus
 
 moriio_connector = importlib.import_module(
     "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector"
@@ -74,7 +77,9 @@ class _FakeScheduler(moriio_connector.MoRIIOConnectorScheduler):  # type: ignore
         self.kv_cache_config = SimpleNamespace(
             kv_cache_groups=[None, None],
             select_transfer_block_ids=lambda block_ids: tuple(block_ids),
+            hash_block_size=16,
         )
+        self.vllm_config = SimpleNamespace(num_hash_lookahead_tokens=0)
         for k, v in attrs.items():
             setattr(self, k, v)
 
@@ -1354,14 +1359,41 @@ def test_register_kv_caches_allows_hma_divergent_block_size():
 # _truncate_mamba_request_for_prefill
 # --------------------------------------------------------------------------
 def _mk_request(prompt, max_tokens=64, params=None):
-    return SimpleNamespace(
-        kv_transfer_params={} if params is None else params,
-        num_prompt_tokens=len(prompt),
-        prompt_token_ids=list(prompt),
-        prompt_embeds=None,
-        _all_token_ids=list(prompt),
-        max_tokens=max_tokens,
+    return Request(
+        "req",
+        list(prompt),
+        SamplingParams(
+            max_tokens=max_tokens,
+            extra_args={
+                "kv_transfer_params": {} if params is None else params,
+            },
+        ),
+        None,
     )
+
+
+@pytest.mark.parametrize("lookahead", [0, 1])
+def test_truncate_mamba_request_drops_hashes_of_the_last_token(lookahead):
+    """Hashes that cover the dropped prompt token are dropped with it."""
+    sched = _FakeScheduler(
+        vllm_config=SimpleNamespace(num_hash_lookahead_tokens=lookahead)
+    )
+    init_none_hash(sha256)
+    hasher = get_request_block_hasher(16, sha256, lookahead)
+
+    def request(num_tokens: int) -> Request:
+        return Request(
+            "r",
+            list(range(num_tokens)),
+            SamplingParams(max_tokens=1, extra_args={"kv_transfer_params": {}}),
+            None,
+            block_hasher=hasher,
+        )
+
+    req = request(32 + lookahead)
+    assert len(req.block_hashes) == 2
+    sched._truncate_mamba_request_for_prefill(req)
+    assert req.block_hashes == request(31 + lookahead).block_hashes
 
 
 def test_truncate_mamba_request_pops_last_token_and_caps_tokens():
