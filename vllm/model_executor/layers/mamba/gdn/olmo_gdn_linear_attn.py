@@ -4,6 +4,7 @@ import torch
 from einops import rearrange
 from torch import nn
 
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import (
     VllmConfig,
     get_current_vllm_config,
@@ -20,6 +21,10 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.mamba.gdn.base import GatedDeltaNetAttention
+from vllm.model_executor.layers.mamba.gdn.qwen_gdn_linear_attn import (
+    _log_gdn_backend_decision,
+    _resolve_gdn_prefill_backend,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
     is_conv_state_dim_first,
@@ -45,8 +50,7 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadata
 
 @PluggableLayer.register("olmo_hybrid_gated_delta_net_attention")
 class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
-    """
-    Gated DeltaNet linear attention layer for OLMo Hybrid.
+    """Gated DeltaNet linear attention layer for OLMo Hybrid.
 
     This implements the linear attention mechanism that replaces sliding window
     attention in the hybrid architecture.
@@ -84,6 +88,14 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         self.key_dim = self.head_k_dim * self.num_k_heads
         self.value_dim = self.head_v_dim * self.num_v_heads
         self.allow_neg_eigval = getattr(config, "linear_allow_neg_eigval", False)
+
+        # OLMo always runs FLA; the resolver may still pick FlashInfer on CUDA.
+        requested_backend, _ = _resolve_gdn_prefill_backend(vllm_config)
+        if requested_backend == "sycl":
+            raise ValueError(
+                "GDN prefill backend 'sycl' is not supported for OLMo Hybrid."
+            )
+        _log_gdn_backend_decision(vllm_config, requested_backend, "triton")
 
         # Fused QKVG projection: 1 matmul instead of 4
         self.in_proj_qkvg = MergedColumnParallelLinear(
@@ -294,9 +306,7 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
         a: torch.Tensor,
         core_attn_out: torch.Tensor,
     ):
-        """
-        Core attention computation (called by custom op).
-        """
+        """Core attention computation (called by custom op)."""
         forward_context = get_forward_context()
         attn_metadata = forward_context.attn_metadata
 
@@ -305,7 +315,10 @@ class OlmoHybridGatedDeltaNetAttention(GatedDeltaNetAttention):
             return
 
         assert isinstance(attn_metadata, dict)
-        attn_metadata = attn_metadata[self.prefix]  # type: ignore[assignment]
+        attn_metadata = attn_metadata.get(self.prefix)  # type: ignore[assignment]
+        if attn_metadata is None:
+            # Profile/warmup dummy runs skip mamba-family metadata.
+            return
         assert isinstance(attn_metadata, GDNAttentionMetadata)
         has_initial_state = attn_metadata.has_initial_state
         spec_query_start_loc = attn_metadata.spec_query_start_loc
@@ -524,6 +537,7 @@ def _make_fused_conv1d_weight_loader(dims, tp_size, tp_rank):
     return weight_loader
 
 
+@eager_break_during_capture
 def olmo_hybrid_gdn_full_forward(
     hidden_states: torch.Tensor,
     output: torch.Tensor,
@@ -543,20 +557,10 @@ def olmo_hybrid_gdn_full_forward(
     )
 
 
-def olmo_hybrid_gdn_full_forward_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    layer_name: str,
-) -> None:
-    """Fake implementation for torch.compile."""
-    return
-
-
 direct_register_custom_op(
     op_name="olmo_hybrid_gdn_full_forward",
     op_func=olmo_hybrid_gdn_full_forward,
     mutates_args=["output"],
-    fake_impl=olmo_hybrid_gdn_full_forward_fake,
 )
 
 

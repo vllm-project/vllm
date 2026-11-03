@@ -4,13 +4,14 @@
 from typing import TYPE_CHECKING, Any
 
 import torch
-from torch.nn.parameter import Parameter
 
 from vllm.model_executor.kernels.linear import init_mxfp4_linear_kernel
+from vllm.model_executor.layers.quantization.utils.quant_utils import kMxfp4Dynamic
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
 )
+from vllm.model_executor.utils import move_parameter
 
 from .inc_scheme import INCLinearScheme
 
@@ -28,8 +29,13 @@ class INCMxfp4LinearMethod(INCLinearScheme):
     """
 
     def __init__(self, layer_config: "INCLayerConfig") -> None:
+        if not isinstance(layer_config.group_size, int):
+            raise ValueError(
+                "INC MXFP4 requires scalar group_size, "
+                f"but found group_size={layer_config.group_size!r}."
+            )
         self.group_size = layer_config.group_size or 32
-        self.kernel = init_mxfp4_linear_kernel()
+        self.kernel = init_mxfp4_linear_kernel(activation_quant_key=kMxfp4Dynamic)
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -78,8 +84,7 @@ class INCMxfp4LinearMethod(INCLinearScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
-        del layer.weight_packed
+        move_parameter(layer, "weight_packed", "weight")
         self.kernel.process_weights_after_loading(layer)
 
     def apply_weights(

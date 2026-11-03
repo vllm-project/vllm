@@ -12,9 +12,7 @@ from vllm.model_executor.models.bert import (
     BertMLMHead,
     SPLADESparsePooler,
 )
-from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.pool.late_interaction_runner import LateInteractionRunner
 from vllm.v1.pool.metadata import PoolingMetadata, PoolingStates
 from vllm.v1.worker.gpu.input_batch import InputBatch
@@ -119,18 +117,17 @@ def test_pooling_runner_gathers_required_token_ids() -> None:
     req_states = MagicMock(spec=RequestState)
     req_states.prompt_len = MagicMock(np=np.array([0, 2, 0, 3], dtype=np.int32))
     metadata = runner._get_pooling_metadata(
-        input_batch, req_states, torch.device(current_platform.device_type)
+        input_batch, req_states, torch.device("cpu")
     )
 
     expected = torch.tensor([[101, 11, 102], [101, 102, 0]])
     assert metadata.prompt_token_ids_cpu is not None
-    assert metadata.prompt_token_ids is not None
-    assert metadata.prompt_token_ids_cpu.is_pinned() == PIN_MEMORY
+    assert metadata.prompt_token_ids is None
+    assert metadata.prompt_token_ids_cpu.is_pinned() is False
     torch.testing.assert_close(
         metadata.prompt_lens, torch.tensor([3, 2], dtype=torch.int32)
     )
     torch.testing.assert_close(metadata.prompt_token_ids_cpu, expected)
-    torch.testing.assert_close(metadata.prompt_token_ids.cpu(), expected)
 
 
 def test_pooling_runner_stores_only_required_token_ids() -> None:
@@ -231,7 +228,7 @@ def test_pooling_runner_supports_encoder_token_embedding() -> None:
     assert runner.supported_tasks == {"token_embed"}
 
 
-def test_pooling_runner_rejects_decoder_token_classification() -> None:
+def test_pooling_runner_supports_decoder_token_classification() -> None:
     model = MagicMock()
     model.pooler.get_supported_tasks.return_value = {"token_classify"}
     vllm_config = MagicMock()
@@ -239,13 +236,12 @@ def test_pooling_runner_rejects_decoder_token_classification() -> None:
     vllm_config.model_config.attn_type = "decoder"
     vllm_config.model_config.get_pooling_task.return_value = "token_classify"
 
-    with pytest.raises(ValueError, match="selects 'token_classify'") as exc_info:
-        PoolingRunner(model, vllm_config)
+    runner = PoolingRunner(model, vllm_config)
 
-    assert "Set an explicitly supported task" not in str(exc_info.value)
+    assert runner.supported_tasks == {"token_classify"}
 
 
-def test_pooling_runner_filters_decoder_token_classification() -> None:
+def test_pooling_runner_keeps_decoder_token_classification() -> None:
     model = MagicMock()
     model.pooler.get_supported_tasks.return_value = {"embed", "token_classify"}
     vllm_config = MagicMock()
@@ -255,10 +251,10 @@ def test_pooling_runner_filters_decoder_token_classification() -> None:
 
     runner = PoolingRunner(model, vllm_config)
 
-    assert runner.supported_tasks == {"embed"}
+    assert runner.supported_tasks == {"embed", "token_classify"}
 
 
-def test_pooling_runner_filters_decoder_token_embedding() -> None:
+def test_pooling_runner_keeps_decoder_token_embedding() -> None:
     model = MagicMock()
     model.pooler.get_supported_tasks.return_value = {"embed", "token_embed"}
     vllm_config = MagicMock()
@@ -268,12 +264,10 @@ def test_pooling_runner_filters_decoder_token_embedding() -> None:
 
     runner = PoolingRunner(model, vllm_config)
 
-    assert runner.supported_tasks == {"embed"}
+    assert runner.supported_tasks == {"embed", "token_embed"}
 
 
-def test_pooling_runner_gates_embed_token_classification_to_encoder() -> None:
-    # BGE-M3's combined task emits per-token weights alongside the embedding,
-    # so it is enabled only where prefill is unchunked.
+def test_pooling_runner_supports_embed_token_classification() -> None:
     model = MagicMock()
     model.pooler.get_supported_tasks.return_value = {"embed", "embed&token_classify"}
     vllm_config = MagicMock()
@@ -285,7 +279,3 @@ def test_pooling_runner_gates_embed_token_classification_to_encoder() -> None:
         "embed",
         "embed&token_classify",
     }
-
-    vllm_config.model_config.attn_type = "decoder"
-    vllm_config.model_config.get_pooling_task.return_value = "embed"
-    assert PoolingRunner(model, vllm_config).supported_tasks == {"embed"}

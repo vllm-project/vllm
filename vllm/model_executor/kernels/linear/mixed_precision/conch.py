@@ -43,12 +43,6 @@ class ConchLinearKernel(MPLinearKernel):
             )
             return False, error_msg
 
-        if c.has_g_idx:
-            return (
-                False,
-                "Activation reordering (g_idx) is not supported by ConchLinearKernel",
-            )
-
         if find_spec("conch") is None:
             error_msg = (
                 "conch-triton-kernels is not installed, please "
@@ -119,8 +113,8 @@ class ConchLinearKernel(MPLinearKernel):
         self._transform_param(layer, self.w_s_name, transform_w_s)
         if self.config.zero_points:
             self._transform_param(layer, self.w_zp_name, transform_w_zp)
-        elif self.w_zp_name is not None:
-            layer.register_parameter(self.w_zp_name, None)
+        else:
+            self._retire_unused_zp(layer)
 
     def apply_weights(
         self,
@@ -130,7 +124,7 @@ class ConchLinearKernel(MPLinearKernel):
     ) -> torch.Tensor:
         from conch.ops.quantization.gemm import mixed_precision_gemm
 
-        w_q, w_s, w_zp, _ = self._get_weight_params(layer)
+        w_q, w_s, w_zp = self._get_weight_params(layer)
 
         # Map channelwise group_size=-1 to the actual input dimension K.
         # The conch kernel computes stride_mul = block_k / group_size;

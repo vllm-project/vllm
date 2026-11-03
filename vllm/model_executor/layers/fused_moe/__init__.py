@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from vllm.model_executor.layers.fused_moe.activation import (
+    ApplyMoEActivationConfig,
     MoEActivation,
     activation_without_mul,
     apply_moe_activation,
@@ -63,6 +64,7 @@ def get_config() -> dict[str, Any] | None:
 
 
 __all__ = [
+    "ApplyMoEActivationConfig",
     "FusedMoEFactory",
     "FusedMoERouter",
     "FusedMoEConfig",
@@ -104,7 +106,11 @@ if HAS_TRITON:
         BatchedTritonExperts,
     )
     from vllm.model_executor.layers.fused_moe.experts.rocm_aiter_moe import (
-        AiterExperts,
+        AiterFp8BlockExperts,
+        AiterFp8ChannelExperts,
+        AiterFp8TensorExperts,
+        AiterMxfp4Experts,
+        AiterUnquantizedExperts,
     )
     from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
@@ -130,7 +136,11 @@ if HAS_TRITON:
     )
 
     __all__ += [
-        "AiterExperts",
+        "AiterUnquantizedExperts",
+        "AiterFp8BlockExperts",
+        "AiterFp8TensorExperts",
+        "AiterFp8ChannelExperts",
+        "AiterMxfp4Experts",
         "fused_topk",
         "fused_experts",
         "get_config_file_name",

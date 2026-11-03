@@ -1,0 +1,32 @@
+{
+  "messages": [
+    {
+      "role": "user",
+      "content": "question"
+    },
+    {
+      "role": "developer",
+      "content": "policy",
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "lookup",
+            "parameters": {
+              "type": "object"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "thought",
+      "content": "answer"
+    }
+  ],
+  "add_generation_prompt": false,
+  "template_kwargs": {
+    "thinking": true
+  }
+}
