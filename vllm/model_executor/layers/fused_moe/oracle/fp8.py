@@ -622,11 +622,9 @@ def convert_to_fp8_moe_kernel_format(
         w13.is_shuffled = True
         w2.is_shuffled = True
     elif fp8_backend == Fp8MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.oracle.humming import (
-            stage_moe_weights_for_humming,
-        )
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
+            stage_moe_weights_for_humming,
         )
 
         scale_name = stage_moe_weights_for_humming(

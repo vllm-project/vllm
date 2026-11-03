@@ -1644,11 +1644,9 @@ def convert_weight_to_mxfp4_moe_kernel_format(
         )
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
-        from vllm.model_executor.layers.fused_moe.oracle.humming import (
-            stage_moe_weights_for_humming,
-        )
         from vllm.model_executor.layers.quantization.utils.humming import (
             convert_to_humming_moe_kernel_format,
+            stage_moe_weights_for_humming,
         )
 
         stage_moe_weights_for_humming(
