@@ -409,6 +409,7 @@ def test_qsa_selection_uses_portable_topk_on_rocm(
         pytest.param(257, 6, 1, 1024, id="tp4_split4"),
         pytest.param(513, 6, 1, 1024, id="tp4_split1"),
         pytest.param(513, 12, 1, 1792, id="tp2_split1_prefill"),
+        pytest.param(257, 24, 2, 1792, id="tp1_split1_prefill"),
     ],
 )
 def test_qsa_sparse_paged_attention_matches_reference(

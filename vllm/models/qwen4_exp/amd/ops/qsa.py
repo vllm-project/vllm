@@ -894,10 +894,10 @@ def qsa_sparse_paged_attention(
         if current_platform.is_rocm():
             from vllm.platforms.rocm import on_gfx950
 
-            # One wave per program was measured on MI355X at the TP2 prefill
-            # shape (BLOCK_M=16); other shapes and architectures keep the
-            # GB300 profile.
-            if on_gfx950() and block_m == 16:
+            # One wave per program was faster than two on MI355X at every
+            # group size measured (3 to 24 query heads per KV head); other
+            # architectures keep the GB300 profile.
+            if on_gfx950():
                 partial_warps = 1
     # gfx942 and gfx950 have a 64 KiB LDS limit. One software-pipelining
     # stage keeps the wide TP4 tile within that shared-memory budget.
