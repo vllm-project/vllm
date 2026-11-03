@@ -7,10 +7,12 @@ warm restarts (weights mapped from the daemon via CUDA IPC) must both serve
 identical outputs.
 """
 
+import json
 import multiprocessing
 import os
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -19,6 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 import psutil
@@ -28,7 +31,15 @@ import regex as re
 from tests.utils import create_new_process_for_each_test
 from vllm import SamplingParams
 from vllm.assets.image import ImageAsset
+from vllm.model_executor.model_loader.weight_cache.artifact_store import (
+    MooncakeArtifactStore,
+    artifact_key,
+)
+from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
+    FlashInferWarmupCache,
+)
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.network_utils import get_open_port
 
 
@@ -430,8 +441,6 @@ def test_mooncake_warmup_cache_store_e2e(vllm_runner, case, tmp_path, monkeypatc
     generation skip tuning with no source daemon online."""
     if not current_platform.is_cuda_alike():
         pytest.skip("Weight cache IPC sharing requires CUDA or ROCm")
-    from vllm.utils.flashinfer import has_flashinfer
-
     if not (has_flashinfer() and current_platform.has_device_capability(90)):
         pytest.skip("FlashInfer autotune requires FlashInfer and SM90+")
     if case is K3_CASE and not current_platform.is_device_capability_family(100):
@@ -1420,8 +1429,6 @@ class MooncakeCluster:
         self._log_chunks: list[str] = []
 
     def _binary(self, name: str) -> str:
-        from pathlib import Path
-
         path = shutil.which(name)
         if path is not None:
             return path
@@ -1435,9 +1442,6 @@ class MooncakeCluster:
         return str(candidate)
 
     def __enter__(self) -> "MooncakeCluster":
-        import json
-        import socket
-
         self.master_port = get_open_port()
         self.master_addr = f"127.0.0.1:{self.master_port}"
         self._start(
@@ -1487,10 +1491,6 @@ class MooncakeCluster:
                 "-global_segment_size",
                 "256MB",
             ]
-        )
-
-        from vllm.model_executor.model_loader.weight_cache.artifact_store import (
-            MooncakeArtifactStore,
         )
 
         # The store round-trips only after the client has mounted its segment.
@@ -1544,15 +1544,6 @@ class MooncakeCluster:
 
 def test_mooncake_store_cross_process_e2e(tmp_path, monkeypatch):
     """A real Mooncake cluster shares autotune tables across processes."""
-    import json
-
-    from vllm.model_executor.model_loader.weight_cache.artifact_store import (
-        artifact_key,
-    )
-    from vllm.model_executor.model_loader.weight_cache.warmup_cache import (
-        FlashInferWarmupCache,
-    )
-
     with MooncakeCluster(tmp_path, monkeypatch) as cluster:
         kind = FlashInferWarmupCache(store_names=["mooncake"])
         filename = "autotune_configs_dp0_rank0.json"
