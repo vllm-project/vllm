@@ -26,9 +26,9 @@ every TP rank with the missing requirements:
 - The fused MoE finalize + all-reduce + norm (`ops/finalize_allreduce_norm.py`),
   which needs NVLink multicast on every rank.
 
-The multicast check is per rank, so the ranks' results are combined with a MIN
-all-reduce over the TP group: if any rank misses a requirement, every rank
-raises.
+Every rank gives the same answer: the other checks read only the configuration,
+and `supports_fused_moe_finalize` decides the multicast probe over the TP group
+(an all-ranks reduction), so either every rank raises or none does.
 
 Two more checks follow, and they also raise on every rank, because the
 configuration decides both:

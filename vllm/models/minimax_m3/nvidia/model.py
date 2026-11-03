@@ -706,7 +706,7 @@ class MiniMaxM3MoE(nn.Module):
     def process_weights_after_loading(self) -> None:
         if self.use_low_batch_ffn:
             from vllm.models.minimax_m3.nvidia.specialized_decode.moe import (
-                build_low_batch_ffn,
+                LowBatchFfn,
                 unsupported_reason,
             )
 
@@ -715,7 +715,7 @@ class MiniMaxM3MoE(nn.Module):
                     "decode_backend=latency_specialized: the low-batch FFN cannot "
                     f"take this MoE layer ({reason})."
                 )
-            self.low_batch_ffn = build_low_batch_ffn(self)
+            self.low_batch_ffn = LowBatchFfn(self)
 
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
         """``forward`` with the routed top-k reduction and all-reduce left open."""

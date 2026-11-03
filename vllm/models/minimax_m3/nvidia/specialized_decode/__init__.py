@@ -9,11 +9,10 @@ every other forward runs the stock layers.
 """
 
 import torch
-import torch.distributed as dist
 
 import vllm.envs as envs
 from vllm.config import CompilationMode, CUDAGraphMode, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size, get_tp_group
+from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -29,8 +28,8 @@ INTERMEDIATE_PER_RANK = 768
 
 
 def unsupported(vllm_config: VllmConfig) -> list[str]:
-    """Every requirement of the specialized decode this deployment misses
-    (the fused MoE finalize is probed separately, per rank)."""
+    """Every requirement of the specialized decode the configuration misses
+    (the fused MoE finalize is checked separately)."""
     from vllm.models.minimax_m3.nvidia.model import _use_mega_moe
 
     parallel = vllm_config.parallel_config
@@ -94,9 +93,10 @@ def captures_pure_decode() -> bool:
 def specialized_decode_config(vllm_config: VllmConfig) -> bool:
     """Whether the specialized decode is on (``decode_backend``).
 
-    Collective over the TP group when requested: every rank raises if any rank
-    cannot run it. The fused MoE finalize the low-batch FFN feeds needs NVLink
-    multicast, which each rank probes for itself.
+    Raises with every missing requirement when requested. The configuration
+    checks give the same answer on every TP rank, and the fused MoE finalize the
+    low-batch FFN feeds (NVLink multicast) is decided over the TP group inside
+    ``supports_fused_moe_finalize``, so every rank raises alike.
     """
     extra = vllm_config.additional_config
     backend = extra.get("decode_backend", "auto") if isinstance(extra, dict) else "auto"
@@ -116,13 +116,10 @@ def specialized_decode_config(vllm_config: VllmConfig) -> bool:
             "tensor parallelism with the fused MoE finalize + all-reduce + norm "
             "(NVLink multicast on every rank)"
         )
-    supported = torch.tensor([0 if missing else 1], dtype=torch.int32)
-    # The multicast probe is rank-local, and ranks that disagree would run
-    # different kernels.
-    dist.all_reduce(supported, op=dist.ReduceOp.MIN, group=get_tp_group().cpu_group)
-    if not supported.item():
-        reason = "; ".join(missing) or "another tensor parallel rank to support it"
-        raise ValueError(f"decode_backend=latency_specialized needs {reason}.")
+    if missing:
+        raise ValueError(
+            f"decode_backend=latency_specialized needs {'; '.join(missing)}."
+        )
     logger.info_once(
         "MiniMax-M3 specialized decode on: MoE layers that leave their finalize "
         "to the next layer run the low-batch FFN in FULL-graph decode steps of "

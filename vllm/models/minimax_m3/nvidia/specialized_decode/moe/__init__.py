@@ -579,7 +579,8 @@ def unsupported_reason(moe: torch.nn.Module) -> str | None:
 def build_low_batch_ffn(moe: torch.nn.Module) -> LowBatchFfn | None:
     """The low-batch FFN of a ``MiniMaxM3MoE`` with processed weights, or None
     when the layer cannot take it. Compiles the kernels (outside any CUDA
-    graph capture)."""
+    graph capture). For callers that can run without it, like a benchmark; the
+    model raises with ``unsupported_reason`` instead."""
     reason = unsupported_reason(moe)
     if reason is not None:
         logger.warning_once("MiniMax-M3 low-batch FFN not used: %s.", reason)
