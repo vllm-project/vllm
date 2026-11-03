@@ -16,6 +16,7 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.filesystem import (
 from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
     build_ec_cache_key,
 )
+from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import ECTieringStats
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
@@ -86,13 +87,73 @@ class ECTieringManager:
         primary: _PrimaryTier,
         secondary: _SecondaryTier,
         namespace_digest: str,
+        stats: ECTieringStats | None = None,
     ) -> None:
         self._primary = primary
         self._secondary = secondary
         self._namespace_digest = namespace_digest
+        self._stats = stats
         self._descriptors: dict[str, _StoreDescriptor] = {}
         self._pending_writes: dict[str, str] = {}
         self._pending_reads: dict[str, str] = {}
+        self._pending_read_identifiers: set[str] = set()
+        self._prefetch_requests: dict[str, set[str]] = {}
+        self._prefetch_waiters: dict[str, set[str]] = {}
+        self._prefetch_holds: set[str] = set()
+
+    def prefetch_entry(
+        self,
+        request_id: str,
+        identifier: str,
+        modality: str,
+        num_tokens: int,
+        shape: tuple[int, int],
+        element_size: int,
+    ) -> None:
+        """Try one early read without waiting or reclaiming other prefetch holds."""
+        self.poll()
+        if (
+            identifier not in self._pending_read_identifiers
+            and identifier not in self._prefetch_holds
+        ):
+            self._ensure_primary_entry(
+                identifier,
+                modality,
+                num_tokens,
+                shape,
+                element_size,
+                reclaim_prefetch=False,
+            )
+        if (
+            identifier in self._pending_read_identifiers
+            or identifier in self._prefetch_holds
+        ):
+            self._prefetch_requests.setdefault(request_id, set()).add(identifier)
+            self._prefetch_waiters.setdefault(identifier, set()).add(request_id)
+
+    def release_prefetch(self, request_id: str, identifier: str | None = None) -> None:
+        """Release a request's interest after consumption or cancellation."""
+        identifiers = self._prefetch_requests.get(request_id)
+        if identifiers is None:
+            return
+        released = tuple(identifiers) if identifier is None else (identifier,)
+        for key in released:
+            if key not in identifiers:
+                continue
+            identifiers.remove(key)
+            waiters = self._prefetch_waiters[key]
+            waiters.remove(request_id)
+            if not waiters:
+                del self._prefetch_waiters[key]
+                if key in self._prefetch_holds:
+                    self._prefetch_holds.remove(key)
+                    self._primary.unpin(key)
+        if not identifiers:
+            del self._prefetch_requests[request_id]
+
+    def _forget_prefetch(self, identifier: str) -> None:
+        for request_id in tuple(self._prefetch_waiters.get(identifier, ())):
+            self.release_prefetch(request_id, identifier)
 
     def register_cpu_save(
         self,
@@ -149,6 +210,8 @@ class ECTieringManager:
         if not accepted:
             self._primary.unpin(identifier)
             return
+        if self._stats is not None:
+            self._stats.increment("fs_writes")
         self._pending_writes[descriptor.cache_key] = identifier
 
     def ensure_primary_entry(
@@ -160,12 +223,34 @@ class ECTieringManager:
         element_size: int,
     ) -> bool:
         """Ensure an SSD hit is promoted, returning false while it is pending."""
+        entry = self._primary.get(identifier)
+        if entry is not None and entry.ready:
+            return True
         self.poll()
+        return self._ensure_primary_entry(
+            identifier,
+            modality,
+            num_tokens,
+            shape,
+            element_size,
+            reclaim_prefetch=True,
+        )
+
+    def _ensure_primary_entry(
+        self,
+        identifier: str,
+        modality: str,
+        num_tokens: int,
+        shape: tuple[int, int],
+        element_size: int,
+        *,
+        reclaim_prefetch: bool,
+    ) -> bool:
         entry = self._primary.get(identifier)
         if entry is not None:
             if entry.ready:
                 return True
-            return identifier not in self._pending_reads.values()
+            return identifier not in self._pending_read_identifiers
 
         logical_size_bytes = shape[0] * shape[1] * element_size
         block_size_bytes = self._primary.block_size_bytes
@@ -182,10 +267,16 @@ class ECTieringManager:
             return True
 
         entry = self._primary.alloc(identifier, num_blocks, shape)
+        if entry is None and reclaim_prefetch and self._prefetch_holds:
+            # Speculative ready entries must not prevent demand admission.
+            for key in tuple(self._prefetch_holds):
+                self._primary.unpin(key)
+            self._prefetch_holds.clear()
+            entry = self._primary.alloc(identifier, num_blocks, shape)
         if entry is None:
             return False
-        destinations = self._primary.block_views(entry.block_ids)
         try:
+            destinations = self._primary.block_views(entry.block_ids)
             accepted = self._secondary.submit_read(cache_key, destinations)
         except Exception:
             self._primary.discard(identifier)
@@ -198,18 +289,36 @@ class ECTieringManager:
         if not accepted:
             self._primary.discard(identifier)
             return True
+        if self._stats is not None:
+            self._stats.increment("fs_reads")
         self._pending_reads[cache_key] = identifier
+        self._pending_read_identifiers.add(identifier)
         return False
 
     def poll(self) -> tuple[list[ECReadResult], list[ECWriteResult]]:
         """Publish completed loads and release pins for completed stores."""
         read_completions = self._secondary.poll_completed_reads()
         for completion in read_completions:
+            if self._stats is not None:
+                self._stats.increment("fs_read_completions")
+                self._stats.observe("fs_read_queue_seconds", completion.queue_time)
+                self._stats.observe(
+                    "fs_read_transfer_seconds", completion.transfer_time
+                )
+                if completion.success:
+                    self._stats.increment("fs_read_bytes", completion.file_size_bytes)
+                else:
+                    self._stats.increment("fs_read_failures")
             identifier = self._pending_reads.pop(completion.cache_key)
+            self._pending_read_identifiers.remove(identifier)
             if completion.success:
                 self._primary.mark_ready(identifier)
+                if self._prefetch_waiters.get(identifier):
+                    self._primary.pin(identifier)
+                    self._prefetch_holds.add(identifier)
             else:
                 self._primary.discard(identifier)
+                self._forget_prefetch(identifier)
                 logger.warning(
                     "Encoder-cache filesystem load failed for %s: %s",
                     identifier,
@@ -218,6 +327,16 @@ class ECTieringManager:
 
         write_completions = self._secondary.poll_completed_writes()
         for completion in write_completions:
+            if self._stats is not None:
+                self._stats.increment("fs_write_completions")
+                self._stats.observe("fs_write_queue_seconds", completion.queue_time)
+                self._stats.observe(
+                    "fs_write_transfer_seconds", completion.transfer_time
+                )
+                if completion.success:
+                    self._stats.increment("fs_write_bytes", completion.file_size_bytes)
+                else:
+                    self._stats.increment("fs_write_failures")
             identifier = self._pending_writes.pop(completion.cache_key)
             self._primary.unpin(identifier)
             if not completion.success:
@@ -237,5 +356,7 @@ class ECTieringManager:
         """Drain transfers, finalize their state, and verify quiescence."""
         self._secondary.shutdown()
         self.poll()
+        for request_id in tuple(self._prefetch_requests):
+            self.release_prefetch(request_id)
         if self._pending_reads or self._pending_writes:
             raise RuntimeError("filesystem shutdown left encoder-cache jobs pending")

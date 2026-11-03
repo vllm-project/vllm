@@ -419,7 +419,8 @@ class ECCPUWorker:
                 encoder_cache[mm_hash] = flat[: shape[0] * shape[1]].view(shape)
                 offset += n
 
-        current_platform.current_stream().wait_stream(stream)
+        # Depend on this batch's completion marker, already retained in-flight.
+        compute_stream.wait_event(end_event)
 
     def build_connector_worker_meta(self) -> ECCPUWorkerMetadata | None:
         """Report the GPU copies that completed on this rank this step: saved

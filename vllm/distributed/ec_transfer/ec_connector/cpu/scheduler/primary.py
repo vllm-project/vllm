@@ -13,10 +13,11 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.embedding_cache imp
     EmbeddingCache,
 )
 
+
 class _BlockStorage(Protocol):
     def data_ptr(self) -> int: ...
 
-    def __getitem__(self, index: int) -> Any: ...
+    def numpy(self) -> Any: ...
 
 
 class _ECPrimaryRegion(Protocol):
@@ -85,11 +86,21 @@ class ECPrimaryTierManager:
         return self._cache.has_held_entries()
 
     def block_views(self, block_ids: Sequence[int]) -> tuple[memoryview, ...]:
-        """Return zero-copy byte views for complete allocated blocks."""
-        return tuple(
-            memoryview(self._region.blocks[block_id].numpy()).cast("B")
-            for block_id in block_ids
-        )
+        """Return zero-copy views of consecutive runs, preserving block order."""
+        if not block_ids:
+            return ()
+
+        storage = memoryview(self._region.blocks.numpy()).cast("B")
+        block_size = self.block_size_bytes
+        views: list[memoryview] = []
+        first = previous = block_ids[0]
+        for block_id in block_ids[1:]:
+            if block_id != previous + 1:
+                views.append(storage[first * block_size : (previous + 1) * block_size])
+                first = block_id
+            previous = block_id
+        views.append(storage[first * block_size : (previous + 1) * block_size])
+        return tuple(views)
 
     def shutdown(self) -> None:
         self._region.cleanup()

@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from stat import S_ISREG
+from time import monotonic
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from uuid import uuid4
 
@@ -31,6 +32,10 @@ from vllm.v1.kv_offload.tiering.backpressure import (
 if TYPE_CHECKING:
     from vllm.distributed.ec_transfer.ec_connector.tiering.executor import (
         ECFileIOCompletion,
+        ECFileIOStats,
+    )
+    from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import (
+        ECTieringStats,
     )
 
 logger = init_logger(__name__)
@@ -52,6 +57,8 @@ class ECReadResult:
     cache_key: str
     success: bool
     file_size_bytes: int = 0
+    queue_time: float = 0.0
+    transfer_time: float = 0.0
     error: str | None = None
 
 
@@ -62,6 +69,8 @@ class ECWriteResult:
     cache_key: str
     success: bool
     file_size_bytes: int = 0
+    queue_time: float = 0.0
+    transfer_time: float = 0.0
     error: str | None = None
 
 
@@ -94,6 +103,8 @@ class _ECFileIOExecutor(Protocol):
 
     def poll_completed(self) -> list[ECFileIOCompletion]: ...
 
+    def stats(self) -> ECFileIOStats: ...
+
     def drain(self) -> None: ...
 
     def shutdown(self) -> None: ...
@@ -119,6 +130,7 @@ class ECFileSystemTierManager:
         fsync: bool = False,
         backpressure: ECFileSystemBackpressureConfig | None = None,
         executor: _ECFileIOExecutor | None = None,
+        stats: ECTieringStats | None = None,
     ) -> None:
         if capacity_bytes <= 0:
             raise ValueError("filesystem capacity_bytes must be positive")
@@ -135,6 +147,7 @@ class ECFileSystemTierManager:
         self._used_bytes = 0
         self._fsync = fsync
         self._executor = executor
+        self._stats = stats
         self._backpressure_detector: BackpressureDetector | None = None
         if backpressure is not None and backpressure.enabled:
             self._backpressure_detector = EMABackpressureDetector(
@@ -153,13 +166,40 @@ class ECFileSystemTierManager:
         self._read_pins: Counter[str] = Counter()
         self._completed_reads: deque[ECReadResult] = deque()
         self._completed_writes: deque[ECWriteResult] = deque()
+        recovery_started = monotonic()
         self._recover_index()
+        self._recovery_seconds = monotonic() - recovery_started
+        self._recovered_entries = len(self._entries)
+        self._recovered_bytes = self._used_bytes
+        if self._stats is not None:
+            self._stats.increment("fs_recoveries")
+            self._stats.set_gauge("fs_recovery_seconds", self._recovery_seconds)
+            self._stats.set_gauge("fs_recovered_entries", self._recovered_entries)
+            self._stats.set_gauge("fs_recovered_bytes", self._recovered_bytes)
         self._evict_to_capacity()
 
     @property
     def used_bytes(self) -> int:
         """Return bytes owned by entries in the in-memory index."""
         return self._used_bytes
+
+    @property
+    def capacity_bytes(self) -> int:
+        """Return the configured filesystem capacity."""
+        return self._capacity_bytes
+
+    def io_stats(self) -> ECFileIOStats:
+        """Return the executor's current non-blocking pressure snapshot."""
+        return self._executor.stats()
+
+    @property
+    def recovery_stats(self) -> tuple[float, int, int]:
+        """Return startup index recovery time, entries, and bytes."""
+        return (
+            self._recovery_seconds,
+            self._recovered_entries,
+            self._recovered_bytes,
+        )
 
     def contains(self, cache_key: str) -> bool:
         """Return an in-memory membership decision without filesystem I/O."""
@@ -208,14 +248,12 @@ class ECFileSystemTierManager:
             raise ValueError("file_size_bytes must be positive")
         if file_size_bytes > self._capacity_bytes:
             return False
-        if (
-            cache_key in self._pending_write_keys
-            or cache_key in self._deleting_keys
+        if cache_key in self._pending_write_keys or cache_key in self._deleting_keys:
+            return False
+        if self._backpressure_detector is not None and not (
+            self._backpressure_detector.should_store(len(sources))
         ):
             return False
-        if self._backpressure_detector is not None:
-            if not self._backpressure_detector.should_store(len(sources)):
-                return False
 
         entry_path = get_ec_entry_path(
             self._root_dir,
@@ -298,6 +336,8 @@ class ECFileSystemTierManager:
                 cache_key=completion.cache_key,
                 success=completion.success,
                 file_size_bytes=completion.file_size_bytes,
+                queue_time=completion.queue_time,
+                transfer_time=completion.transfer_time,
                 error=completion.error,
             )
         )
@@ -326,6 +366,8 @@ class ECFileSystemTierManager:
                 cache_key=completion.cache_key,
                 success=completion.success,
                 file_size_bytes=completion.file_size_bytes,
+                queue_time=completion.queue_time,
+                transfer_time=completion.transfer_time,
                 error=completion.error,
             )
         )
@@ -408,6 +450,8 @@ class ECFileSystemTierManager:
                 return
             self._pending_deletes[job_id] = indexed_entry
             self._deleting_keys.add(cache_key)
+            if self._stats is not None:
+                self._stats.increment("fs_evictions")
 
 
 @runtime_checkable

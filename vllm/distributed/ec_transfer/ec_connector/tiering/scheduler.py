@@ -30,6 +30,7 @@ from vllm.distributed.ec_transfer.ec_connector.tiering.layout import (
 from vllm.distributed.ec_transfer.ec_connector.tiering.manager import (
     ECTieringManager,
 )
+from vllm.distributed.ec_transfer.ec_connector.tiering.metrics import ECTieringStats
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -42,7 +43,9 @@ class ECTieringScheduler(ECCPUScheduler):
     """Extend the CPU scheduler with asynchronous secondary-tier transfers."""
 
     def __init__(self, vllm_config: VllmConfig) -> None:
+        self._stats = ECTieringStats()
         self._tiering_manager: ECTieringManager | None = None
+        self._filesystem: ECFileSystemTierManager | None = None
         super().__init__(vllm_config)
         tiering_config = ECTieringConfig.from_vllm_config(vllm_config)
         fs_config = tiering_config.filesystem_tier
@@ -61,17 +64,82 @@ class ECTieringScheduler(ECCPUScheduler):
                 n_write_threads=fs_config.n_write_threads,
                 fsync=fs_config.fsync,
                 backpressure=fs_config.backpressure,
+                stats=self._stats,
             )
             self._tiering_manager = ECTieringManager(
                 self._primary,
                 filesystem,
                 namespace_digest,
+                self._stats,
             )
+            self._filesystem = filesystem
         except Exception:
             if filesystem is not None:
                 filesystem.shutdown()
             super().shutdown()
             raise
+
+    def has_cache_item(self, identifier: str) -> bool:
+        hit = super().has_cache_item(identifier)
+        self._stats.increment("cpu_hits" if hit else "recomputes")
+        return hit
+
+    def on_new_request(self, request: Request) -> None:
+        if self._tiering_manager is None or not self._is_consumer:
+            return
+        for feature in request.mm_features:
+            num_tokens = feature.mm_position.get_num_embeds()
+            shape = (
+                num_tokens,
+                get_encoder_output_width(self._vllm_config, feature.modality),
+            )
+            self._tiering_manager.prefetch_entry(
+                request.request_id,
+                feature.identifier,
+                feature.modality,
+                num_tokens,
+                shape,
+                self._dtype.itemsize,
+            )
+
+    def on_schedule_begin(self) -> None:
+        if self._tiering_manager is not None:
+            self._tiering_manager.poll()
+
+    def request_finished(self, request: Request):
+        try:
+            return super().request_finished(request)
+        finally:
+            if self._tiering_manager is not None:
+                self._tiering_manager.release_prefetch(request.request_id)
+
+    def get_stats(self) -> ECTieringStats | None:
+        if self._filesystem is not None:
+            io_stats = self._filesystem.io_stats()
+            self._stats.set_gauge("fs_used_bytes", self._filesystem.used_bytes)
+            self._stats.set_gauge("fs_capacity_bytes", self._filesystem.capacity_bytes)
+            recovery_seconds, recovered_entries, recovered_bytes = (
+                self._filesystem.recovery_stats
+            )
+            self._stats.set_gauge("fs_recovery_seconds", recovery_seconds)
+            self._stats.set_gauge("fs_recovered_entries", recovered_entries)
+            self._stats.set_gauge("fs_recovered_bytes", recovered_bytes)
+            for key in (
+                "pending_read_jobs",
+                "pending_read_bytes",
+                "pending_write_jobs",
+                "pending_write_bytes",
+            ):
+                self._stats.set_gauge(key, getattr(io_stats, key))
+            self._stats.set_gauge(
+                "oldest_read_queue_seconds", io_stats.oldest_read_queue_age
+            )
+            self._stats.set_gauge(
+                "oldest_write_queue_seconds", io_stats.oldest_write_queue_age
+            )
+        if self._stats.is_empty():
+            return None
+        return self._stats.clone_and_reset()
 
     @staticmethod
     def _build_namespace(vllm_config: VllmConfig) -> ECCacheNamespace:
@@ -95,6 +163,11 @@ class ECTieringScheduler(ECCPUScheduler):
 
     def update_state_after_alloc(self, request: Request, index: int) -> None:
         super().update_state_after_alloc(request, index)
+        if self._tiering_manager is not None:
+            # The CPU scheduler has acquired the H2D pin before we release ours.
+            self._tiering_manager.release_prefetch(
+                request.request_id, request.mm_features[index].identifier
+            )
         if self._tiering_manager is None or not self._is_producer:
             return
         feature = request.mm_features[index]
@@ -163,8 +236,7 @@ class ECTieringScheduler(ECCPUScheduler):
 
     def has_pending_push_work(self) -> bool:
         secondary_pending = (
-            self._tiering_manager is not None
-            and self._tiering_manager.has_pending()
+            self._tiering_manager is not None and self._tiering_manager.has_pending()
         )
         return secondary_pending or super().has_pending_push_work()
 
@@ -173,5 +245,6 @@ class ECTieringScheduler(ECCPUScheduler):
             if self._tiering_manager is not None:
                 self._tiering_manager.shutdown()
                 self._tiering_manager = None
+                self._filesystem = None
         finally:
             super().shutdown()

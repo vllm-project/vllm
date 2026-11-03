@@ -117,6 +117,19 @@ class _FakeExecutor:
     def shutdown(self) -> None:
         self.shutdown_called = True
 
+    def stats(self):
+        return SimpleNamespace(
+            pending_read_jobs=0,
+            pending_read_bytes=0,
+            pending_write_jobs=0,
+            pending_write_bytes=0,
+            pending_delete_jobs=0,
+            pending_delete_bytes=0,
+            oldest_read_queue_age=0.0,
+            oldest_write_queue_age=0.0,
+            oldest_delete_queue_age=0.0,
+        )
+
 
 class _FakeFileSystemTier:
     def contains(self, cache_key: str) -> bool:
@@ -152,9 +165,7 @@ def test_filesystem_tier_protocol_is_structural() -> None:
 
 
 def test_io_results_represent_success_and_failure() -> None:
-    read_result = ECReadResult(
-        cache_key="read", success=True, file_size_bytes=16
-    )
+    read_result = ECReadResult(cache_key="read", success=True, file_size_bytes=16)
     write_result = ECWriteResult(
         cache_key="write",
         success=False,
