@@ -8,13 +8,15 @@ SwiGLU-OAI, quantization, down GEMM) runs five kernels; its gate_up GEMM puts
 
 1. :class:`SharedInputQuant`: the input rows to MXFP8 (per 32 values a
    UE8M0 scale rounded up from amax / 448, E4M3 values; FlashInfer's
-   ``mxfp8_quantize``), one CTA per row, into an 8-row operand with its scales
-   in the per-tile 128x4 atom layout;
+   ``mxfp8_quantize``), one CTA per row, into :data:`SPLITS` 8-row tiles of
+   512 columns (tile ``s``: the rows' columns ``512 s ..``, [96, 512]) with
+   their scales in the per-tile 128x4 atom layout;
 2. :class:`SharedFc1`: ``gate_up = x @ w_gate_up^T`` split over K into
    :data:`SPLITS` slices of 512 columns, so the 1536 weight rows give 144
-   work items: the persistent ``tcgen05`` GEMM of ``gemm_cute.py`` with the
-   split as the A operand's batch mode and the B operand's token tile; each
-   item stores its FP32 partial sums;
+   work items: the persistent ``tcgen05`` GEMM the routed FC1 and FC2 build
+   on (DeepSeek-V4.1's ``RoutedExpertGemm``), with the split as the A
+   operand's batch mode and the B operand's token tile; each item stores its
+   FP32 partial sums;
 3. :class:`SharedAct`: the partial sums added in split order, rounded to
    BF16 as the stock GEMM stores ``gate_up``, SwiGLU-OAI to BF16 ``h`` and
    ``h`` to MXFP8;
@@ -46,11 +48,9 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm_c
     RoutedExpertGemm,
 )
 
-from .front_cute import local_amax
+from .front_cute import HIDDEN, INTERMEDIATE, local_amax
 from .gemm_cute import swiglu_oai_bf16x2
 
-HIDDEN = 6144
-INTERMEDIATE = 768
 SPLITS = 12
 SPLIT_K = HIDDEN // SPLITS
 SF_VEC = 32
@@ -120,8 +120,8 @@ class SharedInputQuant:
         rows: Int32,
         stream: cuda.CUstream,
     ):
-        """``x``: BF16 [rows, 6144] as words; ``quant``: E4M3 [8, 6144] as
-        words; ``scale``: :data:`SPLITS` tiles of atoms."""
+        """``x``: BF16 [rows, 6144] as words; ``quant``: E4M3 [96, 512] as
+        words (module docstring); ``scale``: :data:`SPLITS` tiles of atoms."""
         self.kernel(
             cute.make_tensor(x_ptr, cute.make_layout(rows * HIDDEN // 2)),
             cute.make_tensor(quant_ptr, cute.make_layout(TILE * HIDDEN // 4)),
@@ -167,7 +167,8 @@ class SharedFc1(RoutedExpertGemm):
         stream: cuda.CUstream,
     ):
         """A: w_gate_up (1536, 6144) E4M3, K-major, E8M0 scales in the 128x4
-        layout; B: the quantized input (8, 6144); out FP32."""
+        layout; B: the quantized input (96, 512), tile ``s`` K split ``s``;
+        out FP32."""
         self.a_dtype = a_ptr.value_type
         self.b_dtype = b_ptr.value_type
         self.sf_dtype = sfa_ptr.value_type

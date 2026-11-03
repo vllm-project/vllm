@@ -52,6 +52,7 @@ from vllm.utils.torch_utils import aux_stream
 
 from .front_cute import (
     EXPERTS,
+    H_TILE_BYTES,
     HIDDEN,
     INTERMEDIATE,
     MAX_ROWS,
@@ -82,6 +83,8 @@ SWIGLU_BETA = 1.0
 # 1, 4 and 8 rows, within 3% of the best of 144/48, 72/48, 48/24 and 24/16.
 SHARED_FC1_CTAS = 36
 SHARED_FC2_CTAS = 24
+# Table width of the shared FC2's one-tile routing record.
+SHARED_FC2_WORDS = 4
 
 
 class LowBatchFfn:
@@ -98,13 +101,11 @@ class LowBatchFfn:
         self.w2, self.w2_scale = routed.w2_weight, quant.w2_scale
         self.alpha1, self.alpha2 = quant.g1_alphas, quant.g2_alphas
         gate_up, down = moe.shared_experts.gate_up_proj, moe.shared_experts.down_proj
+        self.shared_linears = (gate_up, down)
         self.gate_up, self.gate_up_scale = gate_up.weight, gate_up.weight_scale
         self.down, self.down_scale = down.weight, down.weight_scale
-        index = self.w13.device.index
-        self.device_index = (
-            torch.accelerator.current_device_index() if index is None else index
-        )
         device = self.w13.device
+        self.device_index = device.index
         # The shared expert's routing records: FC1's tile s is K split s; FC2
         # has one tile, of 1-8 rows.
         self.shared_fc1_record = torch.tensor(
@@ -115,7 +116,13 @@ class LowBatchFfn:
             device=device,
         )
         self.shared_fc2_records = torch.tensor(
-            [[TILE, 1, 0, 0, 0, 0, 0, 0, rows, 0, 0, 0] for rows in range(1, 9)],
+            [
+                [TILE, 1, 0, 0]
+                + [0] * SHARED_FC2_WORDS
+                + [rows]
+                + [0] * (SHARED_FC2_WORDS - 1)
+                for rows in range(1, MAX_ROWS + 1)
+            ],
             dtype=torch.int32,
             device=device,
         )
@@ -127,8 +134,9 @@ class LowBatchFfn:
         self.shared_ready = torch.cuda.Event()
 
     def accepts(self, x: torch.Tensor) -> bool:
-        """1-8 contiguous BF16 rows of the hidden size, and the expert weights
-        still the tensors bound here (a weight reload replaces them)."""
+        """1-8 contiguous BF16 rows of the hidden size, and the routed and
+        shared expert weights still the tensors bound here (a weight reload
+        replaces them)."""
         return (
             x.dim() == 2
             and 1 <= x.size(0) <= MAX_ROWS
@@ -138,6 +146,8 @@ class LowBatchFfn:
             and x.data_ptr() % 16 == 0
             and self.routed.w13_weight.data_ptr() == self.w13.data_ptr()
             and self.routed.w2_weight.data_ptr() == self.w2.data_ptr()
+            and self.shared_linears[0].weight.data_ptr() == self.gate_up.data_ptr()
+            and self.shared_linears[1].weight.data_ptr() == self.down.data_ptr()
         )
 
     def run(self, x: torch.Tensor) -> MoEOutput:
@@ -167,9 +177,7 @@ class LowBatchFfn:
         h_quant = torch.empty(
             (h_rows, INTERMEDIATE // 2), dtype=torch.uint8, device=device
         )
-        h_scale = torch.empty(
-            tiles * 128 * INTERMEDIATE // 16, dtype=torch.uint8, device=device
-        )
+        h_scale = torch.empty(tiles * H_TILE_BYTES, dtype=torch.uint8, device=device)
         h_pt = torch.empty(h_rows, dtype=torch.float32, device=device)
         output = torch.empty((h_rows, HIDDEN), dtype=torch.bfloat16, device=device)
         stream = current_cu_stream()
@@ -292,7 +300,7 @@ class LowBatchFfn:
             _ptr(cutlass.BFloat16, output),
             _ptr(cutlass.Int32, self.shared_fc2_records[rows - 1]),
             Int32(rows),
-            Int32(4),
+            Int32(SHARED_FC2_WORDS),
             Int32(min(sms, SHARED_FC2_CTAS)),
             stream,
         )
@@ -516,7 +524,7 @@ def _unsupported_reason(moe: torch.nn.Module) -> str | None:
             or not tensor.is_contiguous()
             or tensor.data_ptr() % 32
         ):
-            return f"{name} {tuple(tensor.shape)} {tensor.dtype}"
+            return f"{name} layout"
     for alphas in (quant.g1_alphas, quant.g2_alphas):
         if (
             alphas is None

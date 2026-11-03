@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The MiniMax-M3 low-batch FFN (``specialized_decode/moe``) against the stock
-MoE layer on random weights in the checkpoint's formats: NVFP4 routed experts
-(compressed-tensors), MXFP8 shared expert, FP32 router."""
+code it replaces, on random weights in the checkpoint's formats (NVFP4 routed
+experts, compressed-tensors; MXFP8 shared expert; FP32 router): the stock
+TRT-LLM-gen experts' call stopped after GEMM2 and the stock shared MLP."""
 
 import os
 import tempfile
-from types import SimpleNamespace
+from contextlib import suppress
 
 import pytest
 import torch
+from transformers import PretrainedConfig
 
 from vllm.platforms import current_platform
 
@@ -60,7 +62,7 @@ def layer():
             "ignored_layers": [],
         }
     )
-    hf = SimpleNamespace(
+    hf = PretrainedConfig(
         hidden_size=HIDDEN,
         num_local_experts=EXPERTS,
         num_experts_per_tok=TOP_K,
@@ -79,30 +81,35 @@ def layer():
     fd, path = tempfile.mkstemp()
     os.close(fd)
     default_dtype = torch.get_default_dtype()
-    torch.set_default_dtype(torch.bfloat16)
-    with set_current_vllm_config(config):
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            distributed_init_method=f"file://{path}",
-            local_rank=0,
-            backend="nccl",
-        )
-        initialize_model_parallel(1, 1)
-        init_workspace_manager(torch.device(DEVICE))
-        moe = MiniMaxM3MoE(
-            hf, 3, quant_config=quant, reduce_results=False, prefix="layers.3.moe"
-        ).to(DEVICE)
+    try:
+        with set_current_vllm_config(config):
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{path}",
+                local_rank=0,
+                backend="nccl",
+            )
+            initialize_model_parallel(1, 1)
+            init_workspace_manager(torch.device(DEVICE))
+            torch.set_default_dtype(torch.bfloat16)
+            moe = MiniMaxM3MoE(
+                hf, 3, quant_config=quant, reduce_results=False, prefix="layers.3.moe"
+            ).to(DEVICE)
+            torch.set_default_dtype(default_dtype)
+            _fill(moe, torch.Generator(device=DEVICE).manual_seed(0))
+            for module in moe.modules():
+                method = getattr(module, "quant_method", None)
+                if isinstance(method, QuantizeMethodBase):
+                    method.process_weights_after_loading(module)
+            ffn = build_low_batch_ffn(moe)
+            assert ffn is not None
+            yield moe, config, ffn
+    finally:
         torch.set_default_dtype(default_dtype)
-        _fill(moe, torch.Generator(device=DEVICE).manual_seed(0))
-        for module in moe.modules():
-            method = getattr(module, "quant_method", None)
-            if isinstance(method, QuantizeMethodBase):
-                method.process_weights_after_loading(module)
-        ffn = build_low_batch_ffn(moe)
-        assert ffn is not None
-        yield moe, config, ffn
-    cleanup_dist_env_and_memory()
+        cleanup_dist_env_and_memory()
+        with suppress(FileNotFoundError):
+            os.remove(path)
 
 
 def _fill(moe, generator):
@@ -131,9 +138,10 @@ def _fill(moe, generator):
 
 
 def _inputs(kind, rows, generator, moe):
-    """BF16 rows routed in one of three ways (the bias is restored after)."""
+    """BF16 rows routed in one of three ways; returns the router's bias and
+    gate weight to restore afterwards."""
     x = torch.randn(rows, HIDDEN, generator=generator, device=DEVICE) * 2
-    bias = moe.e_score_correction_bias.data.clone()
+    saved = (moe.e_score_correction_bias.data.clone(), moe.gate.weight.data.clone())
     if kind == "one_expert_set":
         # Every row on the same four experts: full 8-row tiles at 8 rows.
         moe.e_score_correction_bias.data[5:9] += 20
@@ -144,44 +152,105 @@ def _inputs(kind, rows, generator, moe):
         x[:, :rows] = 0
         x[torch.arange(rows), torch.arange(rows)] = 1
         gate = moe.gate.weight.data
-        saved = gate.clone()
         gate.zero_()
         gate[torch.arange(EXPERTS), torch.arange(EXPERTS) // 4] = 8
-        return x.to(torch.bfloat16), (bias, saved)
-    if rows > 1:
+    elif rows > 1:
         x[1] = 0  # a zero row
-    return x.to(torch.bfloat16), (bias, None)
+    return x.to(torch.bfloat16), saved
 
 
-def _restore(moe, saved):
-    bias, gate = saved
-    moe.e_score_correction_bias.data.copy_(bias)
-    if gate is not None:
-        moe.gate.weight.data.copy_(gate)
+def _stock_routed(moe, x):
+    """``TrtLlmNvFp4ExpertsMonolithic.apply``'s FlashInfer call on ``x``,
+    stopped after GEMM2 (the deferred finalize the low-batch FFN replaces)."""
+    from flashinfer.fused_moe import trtllm_fp4_block_scale_moe
+
+    from vllm.model_executor.layers.fused_moe.moe_output import (
+        convert_flashinfer_moe_output,
+    )
+    from vllm.model_executor.layers.fused_moe.utils import fi_moe_largest_bucket
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        activation_to_flashinfer_int,
+        quantize_nvfp4_per_token_input,
+    )
+
+    routed = moe.experts.routed_experts
+    impl = routed.quant_method.moe_kernel.fused_experts
+    quant = impl.quant_config
+    logits, _ = moe.gate(x)
+    values, scales, per_token = quantize_nvfp4_per_token_input(x)
+    result = trtllm_fp4_block_scale_moe(
+        routing_logits=logits,
+        routing_bias=moe.e_score_correction_bias,
+        hidden_states=values,
+        hidden_states_scale=scales.view(torch.float8_e4m3fn).reshape(x.shape[0], -1),
+        gemm1_weights=routed.w13_weight,
+        gemm1_weights_scale=quant.w1_scale.view(torch.float8_e4m3fn),
+        gemm1_bias=None,
+        gemm1_alpha=impl.gemm1_alpha,
+        gemm1_beta=impl.gemm1_beta,
+        gemm1_clamp_limit=impl.gemm1_clamp_limit,
+        gemm2_weights=routed.w2_weight,
+        gemm2_weights_scale=quant.w2_scale.view(torch.float8_e4m3fn),
+        gemm2_bias=None,
+        output1_scale_scalar=impl.g1_scale_c,
+        output1_scale_gate_scalar=quant.g1_alphas,
+        output2_scale_scalar=quant.g2_alphas,
+        num_experts=EXPERTS,
+        top_k=TOP_K,
+        n_group=0,
+        topk_group=0,
+        intermediate_size=INTERMEDIATE,
+        local_expert_offset=0,
+        local_num_experts=EXPERTS,
+        routed_scaling_factor=moe.routed_scaling_factor,
+        routing_method_type=impl.routing_method_type,
+        do_finalize=False,
+        activation_type=activation_to_flashinfer_int(impl.moe_config.activation),
+        per_token_scale=per_token,
+        tune_max_num_tokens=fi_moe_largest_bucket(impl.moe_config),
+    )
+    return convert_flashinfer_moe_output(
+        result, do_finalize=False, num_tokens=x.shape[0], top_k=TOP_K
+    )
 
 
-def _final(out):
-    """FP32 rows of a MoEOutput: weighted routed rows plus the shared expert."""
-    routed = out.routed
+def _final(routed, shared):
+    """FP32 rows: the weighted routed rows plus the shared output."""
     rows = routed.expanded_idx_to_permuted_idx.long()
     picked = routed.gemm2_permuted[rows.view(-1)].float().view(*rows.shape, HIDDEN)
     weights = routed.expert_weights.float().unsqueeze(-1)
-    return (picked * weights).sum(dim=1) + out.shared_output.float()
+    return (picked * weights).sum(dim=1) + shared.float()
 
 
-def _check(out, stock, x):
-    """Within the NVFP4 rounding of the stock path."""
-    assert out.routed.expert_weights.dtype == torch.bfloat16
-    assert out.shared_output.dtype == torch.bfloat16
-    assert bool((out.routed.expanded_idx_to_permuted_idx >= 0).all())
-    final = _final(out)
-    stock = stock.float()
+def _check(out, moe, x):
+    """The same routing weights (to one BF16 ulp) and outputs within the
+    rounding of two NVFP4 / MXFP8 chains. They are mostly bitwise equal, but
+    the GEMMs accumulate in different orders, so a BF16 or E2M1 rounding can
+    flip, which moves a row by about a percent; a wrong expert, scale,
+    clamp or row moves it by far more."""
+    stock = _stock_routed(moe, x)
+    stock_shared = moe.shared_experts(x)
+    mine = out.routed
+    assert mine.expert_weights.dtype == torch.bfloat16
+    assert not mine.route_major
+    torch.testing.assert_close(
+        mine.expert_weights.float().sort(dim=-1).values,
+        stock.expert_weights.float().sort(dim=-1).values,
+        rtol=0,
+        atol=2**-7,
+    )
+    final = _final(mine, out.shared_output)
+    expected = _final(stock, stock_shared)
     for row in range(x.shape[0]):
         if not bool(x[row].any()):
-            assert torch.equal(final[row], stock[row]), "a zero row"
+            assert not bool(final[row].any()), "a zero row"
             continue
-        error = (final[row] - stock[row]).norm() / stock[row].norm()
-        assert error < 0.03, f"row {row}: relative error {error:.4f}"
+        for name, got, want in (
+            ("shared", out.shared_output[row].float(), stock_shared[row].float()),
+            ("final", final[row], expected[row]),
+        ):
+            error = float((got - want).norm() / want.norm())
+            assert error < 0.02, f"row {row} {name}: relative error {error:.4f}"
 
 
 @pytest.mark.parametrize("graph", [False, True], ids=["eager", "graph"])
@@ -189,13 +258,13 @@ def _check(out, stock, x):
 @pytest.mark.parametrize("rows", [1, 3, 8])
 def test_low_batch_ffn_matches_stock(layer, rows, kind, graph):
     """Eager calls and CUDA graph replays with new values in the captured
-    input, against the stock layer's finalized output."""
+    input."""
     from vllm.config import set_current_vllm_config
     from vllm.forward_context import set_forward_context
 
     moe, config, ffn = layer
     generator = torch.Generator(device=DEVICE).manual_seed(rows)
-    x, saved = _inputs(kind, rows, generator, moe)
+    x, (bias, gate) = _inputs(kind, rows, generator, moe)
     try:
         with (
             set_current_vllm_config(config),
@@ -214,8 +283,8 @@ def test_low_batch_ffn_matches_stock(layer, rows, kind, graph):
                     out = ffn.run(static)
                 static.copy_(x)
                 cuda_graph.replay()
-            stock = moe(x)
             torch.cuda.synchronize()
-            _check(out, stock, x)
+            _check(out, moe, x)
     finally:
-        _restore(moe, saved)
+        moe.e_score_correction_bias.data.copy_(bias)
+        moe.gate.weight.data.copy_(gate)
