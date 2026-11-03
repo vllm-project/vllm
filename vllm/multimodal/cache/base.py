@@ -474,11 +474,17 @@ class BaseMultiModalReceiverCache(
         identifier for backward compatibility).
         """
         for feature in mm_features:
+            if feature.requires_kv:
+                # data=None is a deliberate absence (decoder KV supplies the
+                # media), not a cache reference; a lookup would report a miss.
+                continue
             cache_key = feature.mm_hash or feature.identifier
             self.touch_receiver_cache_item(cache_key, feature.data)
 
         missing_mm_hashes: list[str] = []
         for feature in mm_features:
+            if feature.requires_kv:
+                continue
             cache_key = feature.mm_hash or feature.identifier
             try:
                 feature.data = self.get_and_update_item(feature.data, cache_key)

@@ -11,6 +11,7 @@ from vllm.config import VllmConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import (
     EngineInput,
+    MultiModalInput,
     PromptType,
     SingletonInput,
     split_enc_dec_input,
@@ -439,7 +440,7 @@ class InputProcessor:
         current_platform.validate_request(engine_input, params)
 
         encoder_input, decoder_input = split_enc_dec_input(engine_input)
-        self._validate_model_inputs(encoder_input, decoder_input)
+        self._validate_model_inputs(encoder_input, decoder_input, params)
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_input["type"] == "embeds":
@@ -517,6 +518,7 @@ class InputProcessor:
         mm_features: list[MultiModalFeatureSpec] | None = None
 
         if decoder_input["type"] == "multimodal":
+            requires_kv = decoder_input.get("mm_requires_kv", False)
             decoder_mm_inputs = decoder_input["mm_kwargs"]
             decoder_mm_positions = decoder_input["mm_placeholders"]
             decoder_mm_hashes = decoder_input["mm_hashes"]
@@ -548,6 +550,7 @@ class InputProcessor:
                         ),
                         mm_position=decoder_mm_positions[modality][idx],
                         mm_hash=base_mm_hash,
+                        requires_kv=requires_kv,
                     )
                 )
 
@@ -621,6 +624,7 @@ class InputProcessor:
         self,
         prompt_input: SingletonInput,
         prompt_type: Literal["encoder", "decoder"],
+        params: SamplingParams | PoolingParams,
     ) -> None:
         prompt_ids = (
             None
@@ -644,19 +648,25 @@ class InputProcessor:
                 )
 
         if prompt_input["type"] == "multimodal":
-            decoder_mm_positions = prompt_input["mm_placeholders"]
-            for modality, mm_positions in decoder_mm_positions.items():
-                for mm_position in mm_positions:
-                    num_embeds = mm_position.get_num_embeds()
-                    if num_embeds > self.mm_encoder_cache_size:
-                        raise VLLMValidationError(
-                            f"The {prompt_type} prompt contains a(n) {modality} item "
-                            f"with {num_embeds} embedding tokens, which exceeds the "
-                            f"pre-allocated encoder cache size "
-                            f"{self.mm_encoder_cache_size}. Please reduce the input "
-                            f"size or increase the encoder cache size "
-                            f"by setting --limit-mm-per-prompt at startup."
-                        )
+            if prompt_input.get("mm_requires_kv", False):
+                # KV-only inputs carry no media, so encoder capacity does not
+                # apply; the scheduler enforces the actual KV coverage.
+                self._validate_kv_only_input(prompt_input, params)
+            else:
+                decoder_mm_positions = prompt_input["mm_placeholders"]
+                for modality, mm_positions in decoder_mm_positions.items():
+                    for mm_position in mm_positions:
+                        num_embeds = mm_position.get_num_embeds()
+                        if num_embeds > self.mm_encoder_cache_size:
+                            raise VLLMValidationError(
+                                f"The {prompt_type} prompt contains a(n) "
+                                f"{modality} item with {num_embeds} embedding "
+                                "tokens, which exceeds the pre-allocated encoder "
+                                f"cache size {self.mm_encoder_cache_size}. Please "
+                                "reduce the input size or increase the encoder "
+                                "cache size by setting --limit-mm-per-prompt at "
+                                "startup."
+                            )
 
         # Shared by generate, embedding and pooling requests.
         if prompt_ids:
@@ -666,8 +676,72 @@ class InputProcessor:
         self,
         encoder_input: SingletonInput | None,
         decoder_input: SingletonInput,
+        params: SamplingParams | PoolingParams,
     ):
         if encoder_input is not None:
-            self._validate_model_input(encoder_input, prompt_type="encoder")
+            self._validate_model_input(
+                encoder_input, prompt_type="encoder", params=params
+            )
 
-        self._validate_model_input(decoder_input, prompt_type="decoder")
+        self._validate_model_input(decoder_input, prompt_type="decoder", params=params)
+
+    def _validate_kv_only_input(
+        self,
+        decoder_input: MultiModalInput,
+        params: SamplingParams | PoolingParams,
+    ) -> None:
+        """Validate a media-free input whose features require decoder KV.
+
+        The input carries hashes and placeholder positions but no media, so
+        nothing about the items can be derived here. Reject up front what the
+        scheduler could otherwise only fail after the KV has been transferred.
+        """
+        if self.model_config.uses_mrope or self.model_config.is_encoder_decoder:
+            # M-RoPE positions and encoder-decoder cross-attention are derived
+            # from the media itself, which a KV-only input does not carry.
+            raise VLLMValidationError(
+                "mm_requires_kv is not supported for M-RoPE or encoder-decoder models."
+            )
+        if (
+            not isinstance(params, SamplingParams)
+            or params.prompt_logprobs is not None
+            or params.prompt_logprob_token_ids is not None
+        ):
+            raise VLLMValidationError(
+                "mm_requires_kv inputs cannot be rescored without media; pooling, "
+                "prompt_logprobs and prompt_logprob_token_ids are unsupported."
+            )
+        num_prompt_tokens = len(decoder_input["prompt_token_ids"])
+        mm_kwargs = decoder_input["mm_kwargs"]
+        last_span_end = 0
+        for modality, hashes in decoder_input["mm_hashes"].items():
+            positions = decoder_input["mm_placeholders"].get(modality, [])
+            items = mm_kwargs.get(modality)
+            if items is None:
+                items = [None] * len(hashes)
+            if not hashes or not (len(hashes) == len(positions) == len(items)):
+                raise VLLMValidationError(
+                    "mm_requires_kv inputs need one hash and one placeholder per "
+                    f"{modality} item."
+                )
+            for mm_hash, position, item in zip(hashes, positions, items):
+                if not mm_hash or item is not None:
+                    raise VLLMValidationError(
+                        "mm_requires_kv inputs must carry a nonempty hash and no "
+                        f"media payload per item; got {modality} hash={mm_hash!r} "
+                        f"with payload={'present' if item is not None else 'absent'}."
+                    )
+                span_end = position.offset + position.length
+                if span_end > num_prompt_tokens:
+                    raise VLLMValidationError(
+                        f"{modality} placeholder [{position.offset}, {span_end}) "
+                        f"exceeds the prompt length {num_prompt_tokens}."
+                    )
+                last_span_end = max(last_span_end, span_end)
+        if last_span_end >= num_prompt_tokens:
+            # The final prompt token is always recomputed to produce logits, so
+            # a span that reaches it could never be covered by KV alone.
+            raise VLLMValidationError(
+                "mm_requires_kv inputs need at least one prompt token after the "
+                "last multimodal span."
+            )

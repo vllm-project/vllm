@@ -13,6 +13,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionReque
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.scale_out.token_in_token_out.mm_features import (
+    engine_input_from_features,
     extract_mm_features,
     merge_mm_kwargs_items,
     mm_kwargs_from_features,
@@ -26,7 +27,7 @@ from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
-from vllm.inputs import mm_input
+from vllm.inputs import MultiModalInput, mm_input
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFieldElem,
@@ -131,7 +132,7 @@ def _image_engine_input(
     *,
     pixel_keep_on_cpu: bool = False,
     grid_keep_on_cpu: bool = True,
-) -> tuple[object, MultiModalFieldElem, MultiModalFieldElem]:
+) -> tuple[MultiModalInput, MultiModalFieldElem, MultiModalFieldElem]:
     pixel_values = MultiModalFieldElem(
         data=torch.randn(5, 3, dtype=torch.float32),
         field=MultiModalBatchedField(keep_on_cpu=pixel_keep_on_cpu),
@@ -422,3 +423,74 @@ def test_metadata_can_replace_or_extend_full_mm_data():
     merged = merge_mm_kwargs_items(full_item, metadata_item)
     assert merged is not None
     assert set(merged) == {"pixel_values", "image_grid_thw"}
+
+
+def test_requires_kv_is_omitted_from_wire_format_when_false():
+    engine_input, _, _ = _image_engine_input()
+    features = extract_mm_features(engine_input)
+    assert features is not None
+    assert features.requires_kv is False
+    assert "requires_kv" not in features.model_dump()
+    assert "requires_kv" not in features.model_dump_json()
+    restored = MultiModalFeatures.model_validate_json(features.model_dump_json())
+    assert restored.requires_kv is False
+
+
+@pytest.mark.parametrize("has_transfer", [False, True])
+def test_requires_kv_restores_media_free_engine_input(has_transfer):
+    engine_input, _, _ = _image_engine_input()
+    features = extract_mm_features(engine_input).model_dump()
+    features["kwargs_data"] = None
+    features["mm_metadata"] = None
+    features["requires_kv"] = True
+    request = GenerateRequest.model_validate(
+        {
+            "token_ids": engine_input["prompt_token_ids"],
+            "features": features,
+            "sampling_params": {},
+            "cache_salt": "tenant-a",
+            "kv_transfer_params": {"remote": True} if has_transfer else None,
+        }
+    )
+    assert request.features is not None
+    assert request.features.requires_kv is True
+    restored = engine_input_from_features(
+        request.token_ids, request.features, cache_salt=request.cache_salt
+    )
+    assert restored["mm_requires_kv"] is True
+    assert restored["cache_salt"] == "tenant-a"
+    assert restored["mm_hashes"] == engine_input["mm_hashes"]
+    assert restored["mm_kwargs"]["image"][0] is None
+    assert [(p.offset, p.length) for p in restored["mm_placeholders"]["image"]] == [
+        (p.offset, p.length) for p in engine_input["mm_placeholders"]["image"]
+    ]
+
+
+def test_features_without_kv_requirement_restore_their_payloads():
+    engine_input, _, _ = _image_engine_input()
+    features = extract_mm_features(engine_input)
+    restored = engine_input_from_features(engine_input["prompt_token_ids"], features)
+    assert restored.get("mm_requires_kv", False) is False
+    assert "pixel_values" in restored["mm_kwargs"]["image"][0]
+
+
+@pytest.mark.parametrize(
+    ("change", "error"),
+    [
+        ("payload", "serialized media payloads"),
+        ("metadata", "serialized media payloads"),
+        ("hash", "nonempty hash"),
+    ],
+)
+def test_requires_kv_rejects_media_payloads_and_empty_hashes(change, error):
+    engine_input, _, _ = _image_engine_input()
+    features = extract_mm_features(engine_input).model_dump()
+    if change == "metadata":
+        features["mm_metadata"] = features["kwargs_data"]
+    if change != "payload":
+        features["kwargs_data"] = None
+    if change == "hash":
+        features["mm_hashes"]["image"][0] = ""
+    features["requires_kv"] = True
+    with pytest.raises(ValidationError, match=error):
+        MultiModalFeatures.model_validate(features)

@@ -1878,3 +1878,50 @@ async def test_stream_derender_chunk_has_no_null_delta_keys():
         .delta.content
         == "a"
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("remote_kv", [False, True])
+async def test_serve_tokens_requires_kv_features_skip_rendering_and_media(remote_kv):
+    engine = _mock_engine()
+    payload: dict[str, Any] = {
+        "token_ids": [1, 2, 2, 2, 3],
+        "features": {
+            "mm_hashes": {"image": ["image-a"]},
+            "mm_placeholders": {"image": [{"offset": 1, "length": 3}]},
+            "requires_kv": True,
+        },
+        "cache_salt": "tenant-a",
+        "sampling_params": {"max_tokens": 1},
+        "return_token_ids": True,
+    }
+    if remote_kv:
+        payload["kv_transfer_params"] = {"do_remote_prefill": True}
+    request = GenerateRequest.model_validate_json(json.dumps(payload))
+
+    async def mock_generate(prompt, sampling_params, *args, **kwargs):
+        assert prompt["prompt_token_ids"] == payload["token_ids"]
+        assert prompt["mm_hashes"] == {"image": ["image-a"]}
+        assert prompt["mm_kwargs"] == {"image": [None]}
+        assert prompt["mm_requires_kv"] is True
+        assert prompt["cache_salt"] == "tenant-a"
+        (placeholder,) = prompt["mm_placeholders"]["image"]
+        assert (placeholder.offset, placeholder.length) == (1, 3)
+        if remote_kv:
+            assert sampling_params.extra_args["kv_transfer_params"] == {
+                "do_remote_prefill": True
+            }
+        yield _make_request_output(
+            "req-1", token_ids=[10], finish_reason="stop", finished=True
+        )
+
+    engine.generate = MagicMock(side_effect=mock_generate)
+    serving = _build_serving_tokens(engine)
+    engine.renderer.render_cmpl_async = AsyncMock(
+        side_effect=AssertionError("processed features must not be rendered again")
+    )
+    response = await serving.serve_tokens(request)
+    assert isinstance(response, GenerateTokensResponse)
+    engine.generate.assert_called_once()
+    serving.online_renderer.preprocess_completion.assert_not_awaited()
+    engine.renderer.render_cmpl_async.assert_not_awaited()

@@ -160,6 +160,32 @@ class MultiModalFeatures(BaseModel):
     `pixel_values`.
     """
 
+    requires_kv: bool = Field(default=False, exclude_if=lambda value: not value)
+    """All items must already be covered by decoder KV; none is computed here.
+
+    This is a requirement, not proof that the KV exists: the engine checks the
+    actual coverage when scheduling, including after preemption and failed KV
+    loads, and fails the request rather than recompute the media. It holds for
+    local prefix KV as much as for KV loaded through a connector, so it does
+    not need `kv_transfer_params`. Items carry hashes and placeholder positions
+    only: `kwargs_data` and `mm_metadata` must not carry payloads.
+    """
+
+    @model_validator(mode="after")
+    def _validate_kv_requirement(self) -> "MultiModalFeatures":
+        if not self.requires_kv:
+            return self
+        if not self.mm_hashes or any(
+            not hashes or any(not h for h in hashes)
+            for hashes in self.mm_hashes.values()
+        ):
+            raise ValueError("requires_kv requires a nonempty hash per item")
+        if _has_serialized_mm_items(self.kwargs_data) or _has_serialized_mm_items(
+            self.mm_metadata
+        ):
+            raise ValueError("requires_kv does not accept serialized media payloads")
+        return self
+
     @model_validator(mode="after")
     def _validate_parallel_fields(self) -> "MultiModalFeatures":
         modalities = set(self.mm_hashes)

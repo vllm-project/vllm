@@ -79,6 +79,14 @@ decode = client.chat.completions.create(
 
 If `messages` has non-text content or `echo` is set, the ids are ignored and `messages` is rendered instead, so it must match the prefill request. Otherwise `kv_transfer_params["prompt_token_ids"]` must be a non-empty list of non-negative integers, or the request fails with HTTP 400, as it always does on `/v1/chat/completions/batch`.
 
+## Continuing a multimodal request from existing KV
+
+A decode instance can continue a multimodal request without the media and without encoder capacity when the prompt's KV already exists, locally or through a KV connector. The [Generate API](../serving/online_serving/token_in_token_out.md) input carries the prefill-side `token_ids` and a `features` object with the item hashes and placeholder ranges, and `features.requires_kv: true` states that every item must be covered by decoder KV. The same hashes and positions make the decode instance compute the same block hashes as prefill, so prefix caching and hash-keyed KV stores see the same blocks on both sides. `--limit-mm-per-prompt` may be 0 on the decode instance: such inputs are exempt from the encoder-cache capacity check.
+
+The flag is a requirement, not proof that the KV exists. Before scheduling any computation, the engine checks that the computed tokens cover every required span, including after a preemption or a failed KV load, and fails the request (`finish_reason="error"`) rather than recompute an image from placeholder token ids. Items must carry a nonempty hash and no media payload; the prompt must end with at least one token after the last multimodal span, because the final prompt token is always recomputed; prompt logprobs, pooling, M-RoPE models and encoder-decoder models are not supported. Local prefix-cache hits are whole blocks and never include the block holding the final prompt token, so without a connector the spans must end within the first `floor((N - 1) / block_size) * block_size` tokens of an `N`-token prompt.
+
+Python callers submit the same input directly to `AsyncLLM.generate()` or `LLMEngine.add_request()` as a `MultiModalInput` with `mm_kwargs` set to `None` per item and `mm_requires_kv=True`. `LLM.generate()` and the renderers reject such inputs, because rendering them again would drop the requirement and the media identities.
+
 ## Generate API output modes
 
 When the prefill and decode stages use the [Generate API](../serving/online_serving/token_in_token_out.md) (`/inference/v1/generate`), only the decode response reaches the client, so set `output_mode` on the decode request only. A proxy that reuses the client's request body for the prefill request must reset `output_mode` to `tokens` there. A prefill instance started with `--tokens-only` has no tokenizer and rejects `output_mode: "text"` with a 400.
