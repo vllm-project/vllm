@@ -16,6 +16,10 @@ import torch
 from torch import nn
 from transformers.models.gemma4 import Gemma4VisionConfig
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.model_executor.layers.activation import GELUTanh, get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -197,8 +201,8 @@ class Gemma4VisionMLP(nn.Module):
         self.down_proj = linear(
             intermediate_size, hidden_size, prefix=maybe_prefix(prefix, "down_proj")
         )
-        # get_act_fn swaps gelu_pytorch_tanh for the exact GELU on ROCm, for
-        # torch.compile; this tower is not compiled, so keep the model's tanh.
+        # get_act_fn swaps gelu_pytorch_tanh for the exact GELU on ROCm; keep
+        # the model's tanh approximation.
         self.act_fn = (
             GELUTanh()
             if config.hidden_activation == "gelu_pytorch_tanh"
@@ -209,6 +213,17 @@ class Gemma4VisionMLP(nn.Module):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "hidden_states": 0,
+        "cos": 1,
+        "sin": 1,
+        "cu_seqlens": 0,
+        "sequence_lengths": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class Gemma4VisionEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -229,8 +244,23 @@ class Gemma4VisionEncoderLayer(nn.Module):
         self.pre_feedforward_layernorm = RMSNorm(hidden_size, eps=eps)
         self.post_feedforward_layernorm = RMSNorm(hidden_size, eps=eps)
 
-    def forward(self, hidden_states: torch.Tensor, **attn_kwargs) -> torch.Tensor:
-        x = self.self_attn(self.input_layernorm(hidden_states), **attn_kwargs)
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: torch.Tensor,
+        sequence_lengths: torch.Tensor | None,
+    ) -> torch.Tensor:
+        x = self.self_attn(
+            self.input_layernorm(hidden_states),
+            cos,
+            sin,
+            cu_seqlens,
+            max_seqlen,
+            sequence_lengths,
+        )
         hidden_states = hidden_states + self.post_attention_layernorm(x)
         x = self.mlp(self.pre_feedforward_layernorm(hidden_states))
         return hidden_states + self.post_feedforward_layernorm(x)
