@@ -224,8 +224,7 @@ def _submittable_handler(monkeypatch: pytest.MonkeyPatch, gpu_to_cpu: bool = Tru
     """Bare handler wired up far enough to run transfer_async off-device."""
     handler = _bare_handler(gpu_to_cpu)
     handler.layer_refs_per_group = [MagicMock()]
-    handler.src_blocks_per_chunk = 1
-    handler.dst_blocks_per_chunk = 1
+    handler.blocks_per_chunk = 1
     handler._estimate_max_copy_ops = lambda group_sizes: 4
     handler._fill_group_ops = lambda g_idx, **kwargs: (1, 128)
     handler._swap_blocks_batch = MagicMock()
