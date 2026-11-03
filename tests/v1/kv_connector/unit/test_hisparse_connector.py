@@ -26,6 +26,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.hisparse.worker import (
 from vllm.distributed.kv_transfer.kv_connector.v1.multi_connector import MultiConnector
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.hisparse import runtime as runtime_module
+from vllm.v1.hisparse.backend import CUDAHiSparseBackend, HiSparseBackend
 from vllm.v1.hisparse.coordinator import get_hisparse_coordinator
 from vllm.v1.hisparse.runtime import (
     HiSparseCacheHandle,
@@ -39,6 +40,54 @@ from vllm.v1.hisparse.types import (
 )
 from vllm.v1.metrics.stats import KVCacheEvictionEvent
 from vllm.v1.worker.gpu.kv_connector import ActiveKVConnector
+
+
+@pytest.mark.parametrize("use_cuda", [False, True])
+@pytest.mark.parametrize("size,alignment", [(1, 4096), (4097, 4096), (4097, 65536)])
+def test_private_host_backing_preserves_storage_and_registration(
+    monkeypatch, use_cuda, size, alignment
+):
+    class Backend(HiSparseBackend):
+        host_pool_alignment = alignment
+
+        def allocate_host_backing(self, nbytes):
+            self.owner = super().allocate_host_backing(nbytes)
+            return self.owner
+
+        def pin_tensor(self, tensor):
+            self.registrations.append(tensor)
+
+    class CUDABackend(Backend, CUDAHiSparseBackend):
+        pass
+
+    backend = CUDABackend() if use_cuda else Backend()
+    backend.registrations = []
+    monkeypatch.setattr(runtime_module, "get_hisparse_backend", lambda: backend)
+    payload, registered = runtime_module.allocate_pinned_host_pool(size)
+    assert payload.numel() == size
+    assert registered.numel() == (size + alignment - 1) // alignment * alignment
+    assert registered.data_ptr() % alignment == 0
+    assert payload.data_ptr() == registered.data_ptr()
+    assert payload.untyped_storage().data_ptr() == backend.owner.data_ptr()
+    assert len(backend.registrations) == 1
+    assert backend.registrations[0] is registered
+    del backend.owner
+    payload.fill_(7)
+    assert torch.all(registered[:size] == 7)
+
+
+def test_private_host_backing_rejects_invalid_storage_before_registration(monkeypatch):
+    class Backend(HiSparseBackend):
+        def allocate_host_backing(self, size):
+            return torch.empty(size, dtype=torch.float32)
+
+        def pin_tensor(self, tensor):
+            raise AssertionError("Invalid backing must not be registered")
+
+    backend = Backend()
+    monkeypatch.setattr(runtime_module, "get_hisparse_backend", lambda: backend)
+    with pytest.raises(ValueError, match="contiguous int8 CPU backing"):
+        runtime_module.allocate_pinned_host_pool(128)
 
 
 @pytest.mark.parametrize("nested", [False, True])
