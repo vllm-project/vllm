@@ -28,7 +28,6 @@ We currently support the following OpenAI APIs:
 ## Anthropic APIs
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
-    - In addition to the Anthropic fields, `/v1/messages` accepts the vLLM extra parameter `min_tokens` (default `0`): the minimum number of tokens to generate before EOS or a stop sequence can end the response.
 
 ## Cohere APIs
 
