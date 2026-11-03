@@ -122,6 +122,7 @@ def test_dspark_sharded_sampling_equivalence(monkeypatch: pytest.MonkeyPatch):
         m.setenv("VLLM_USE_V2_MODEL_RUNNER", "1")
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
         m.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+        m.setenv("VLLM_USE_BREAKABLE_CUDAGRAPH", "1")
 
         def run(disable_sharding: bool):
             llm = LLM(
