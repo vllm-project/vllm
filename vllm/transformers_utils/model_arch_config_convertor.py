@@ -314,6 +314,7 @@ class ModelArchConfigConvertorBase:
             "longcat_flash",
             "pangu_ultra_moe",
             "pangu_ultra_moe_mtp",
+            "raon1_mini",
             "bailing_hybrid",
             "bailing_hybrid_mtp",
             "bailing_hybrid_v3_mtp",

@@ -537,6 +537,11 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "Qwen/Qwen3-Next-80B-A3B-Instruct",
         extras={"tiny-random": "tiny-random/qwen3-next-moe"},
     ),
+    "Raon1MiniForCausalLM": _HfExamplesInfo(
+        "KRAFTON/Raon-1-mini-preview",
+        trust_remote_code=True,
+        max_model_len=4096,
+    ),
     "Rnj1ForCausalLM": _HfExamplesInfo(
         "EssentialAI/rnj-1-instruct",
         is_available_online=False,
