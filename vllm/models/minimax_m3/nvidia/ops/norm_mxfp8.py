@@ -20,6 +20,50 @@ MXFP8_BLOCK = 32
 SF_ROW_TILE = 128
 
 
+@triton.jit
+def _swizzled_scale_offsets(row, g, PADDED_COLS: tl.constexpr):
+    """Offsets of row ``row``'s UE8M0 scales (blocks ``g``) in the 128x4
+    swizzled layout [m_tile, k_tile, 32, 4, 4]."""
+    SF_ROW_TILE: tl.constexpr = 128
+    return (
+        (g % 4)
+        + (g // 4) * 512
+        + (row % 32) * 16
+        + ((row % SF_ROW_TILE) // 32) * 4
+        + (row // SF_ROW_TILE) * (SF_ROW_TILE * PADDED_COLS)
+    )
+
+
+@triton.jit
+def _store_mxfp8_row(y, out_ptr, sf_ptr, sf_off, row, cols, mask, g, G: tl.constexpr):
+    """Quantize a [blocks, 32] BF16 row to E4M3 + UE8M0 and store both; the
+    scale rounds the block amax / 448 up to a power of two (FlashInfer's
+    ``mxfp8_quantize`` arithmetic)."""
+    H: tl.constexpr = G * 32
+    amax = tl.max(tl.abs(y.to(tl.float32)), axis=1)
+    scale = amax * (1.0 / 448.0)
+    # UE8M0 scale: ceil to a power of two (exponent bump when the
+    # mantissa is nonzero, except tiny subnormals), clamped to [0, 254].
+    bits = scale.to(tl.uint32, bitcast=True)
+    exp = (bits >> 23) & 255
+    mant = bits & 0x7FFFFF
+    bump = (mant != 0) & ~((exp == 0) & (mant <= 0x400000))
+    e = tl.minimum(exp + bump.to(tl.uint32), 254)
+    e = tl.where(scale <= 0.0, 0, e)
+    # Inverse scale 2^(127 - e) (0 for e == 0), always a power of two.
+    inv_bits = tl.where(e == 0, 0, (254 - e) << 23)
+    inv = inv_bits.to(tl.float32, bitcast=True)
+    # Bitwise the reference conversion (saturating; NaN -> +448);
+    # checked exhaustively over all BF16 values and power-of-two scales.
+    q = tl.clamp(y.to(tl.float32) * inv[:, None], -448.0, 448.0)
+    tl.store(
+        out_ptr + row * H + cols,
+        q.to(tl.float8e4nv).to(tl.uint8, bitcast=True),
+        mask=mask,
+    )
+    tl.store(sf_ptr + sf_off, e.to(tl.uint8), mask=g < G)
+
+
 @triton.jit(do_not_specialize=["M"])
 def _gemma_rmsnorm_mxfp8_kernel(
     x_ptr,
@@ -34,7 +78,6 @@ def _gemma_rmsnorm_mxfp8_kernel(
     H: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
-    SF_ROW_TILE: tl.constexpr = 128
     G: tl.constexpr = H // 32
     GP: tl.constexpr = triton.next_power_of_2(H) // 32
     PADDED_COLS: tl.constexpr = (G + 3) // 4 * 4
@@ -47,14 +90,7 @@ def _gemma_rmsnorm_mxfp8_kernel(
         tl.extra.cuda.gdc_wait()
         tl.extra.cuda.gdc_launch_dependents()
     if sf_ptr is not None:
-        # Swizzled 128x4 scale layout [m_tile, k_tile, 32, 4, 4].
-        sf_off = (
-            (g % 4)
-            + (g // 4) * 512
-            + (row % 32) * 16
-            + ((row % SF_ROW_TILE) // 32) * 4
-            + (row // SF_ROW_TILE) * (SF_ROW_TILE * PADDED_COLS)
-        )
+        sf_off = _swizzled_scale_offsets(row, g, PADDED_COLS)
         if row >= M:
             # Zero the padding rows of the swizzled scale tensor.
             tl.store(sf_ptr + sf_off, tl.zeros((GP,), tl.uint8), mask=g < G)
@@ -75,28 +111,7 @@ def _gemma_rmsnorm_mxfp8_kernel(
     y = (h * rstd * (1.0 + w.to(tl.float32))).to(tl.bfloat16)
 
     if sf_ptr is not None:
-        amax = tl.max(tl.abs(y.to(tl.float32)), axis=1)
-        scale = amax * (1.0 / 448.0)
-        # UE8M0 scale: ceil to a power of two (exponent bump when the
-        # mantissa is nonzero, except tiny subnormals), clamped to [0, 254].
-        bits = scale.to(tl.uint32, bitcast=True)
-        exp = (bits >> 23) & 255
-        mant = bits & 0x7FFFFF
-        bump = (mant != 0) & ~((exp == 0) & (mant <= 0x400000))
-        e = tl.minimum(exp + bump.to(tl.uint32), 254)
-        e = tl.where(scale <= 0.0, 0, e)
-        # Inverse scale 2^(127 - e) (0 for e == 0), always a power of two.
-        inv_bits = tl.where(e == 0, 0, (254 - e) << 23)
-        inv = inv_bits.to(tl.float32, bitcast=True)
-        # Bitwise the reference conversion (saturating; NaN -> +448);
-        # checked exhaustively over all BF16 values and power-of-two scales.
-        q = tl.clamp(y.to(tl.float32) * inv[:, None], -448.0, 448.0)
-        tl.store(
-            out_ptr + row * H + cols,
-            q.to(tl.float8e4nv).to(tl.uint8, bitcast=True),
-            mask=mask,
-        )
-        tl.store(sf_ptr + sf_off, e.to(tl.uint8), mask=g < G)
+        _store_mxfp8_row(y, out_ptr, sf_ptr, sf_off, row, cols, mask, g, G)
     else:
         tl.store(out_ptr + row * H + cols, y, mask=mask)
 
