@@ -62,7 +62,7 @@ from vllm.v1.hisparse.runtime import (
     build_hisparse_prefill_staging_plan,
     hisparse_staging_block_capacity,
 )
-from vllm.v1.kv_cache_interface import is_quantized_kv_cache
+from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -195,6 +195,19 @@ _MASKED_MHA_THRESHOLDS: dict[
 }
 
 
+def _masked_mha_thresholds(
+    backend_name: str, tensor_parallel_size: int, qk_head_dim: int, v_head_dim: int
+) -> tuple[_MaskedMHARanges, _MaskedMHARanges | None] | None:
+    if backend_name == "FLASH_ATTN_MLA_SPARSE_FA4":
+        # Its prefill batches run on FlashInfer's kernel, so it shares those rows.
+        backend_name = "FLASHINFER_MLA_SPARSE"
+    return (
+        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
+        .get(backend_name, {})
+        .get(tensor_parallel_size)
+    )
+
+
 def _use_masked_mha(
     *,
     backend_name: str,
@@ -204,14 +217,14 @@ def _use_masked_mha(
     query_len: int,
     seq_len: int,
     has_context: bool,
+    kv_cache_quantized: bool = False,
 ) -> bool:
-    if backend_name == "FLASH_ATTN_MLA_SPARSE_FA4":
-        # Its prefill batches run on FlashInfer's kernel, so it shares those rows.
-        backend_name = "FLASHINFER_MLA_SPARSE"
-    thresholds = (
-        _MASKED_MHA_THRESHOLDS.get((qk_head_dim, v_head_dim), {})
-        .get(backend_name, {})
-        .get(tensor_parallel_size)
+    # The context gather cannot decode the packed ds_mla layouts and is
+    # unvalidated on plain fp8, so quantized caches qualify only without context.
+    if has_context and kv_cache_quantized:
+        return False
+    thresholds = _masked_mha_thresholds(
+        backend_name, tensor_parallel_size, qk_head_dim, v_head_dim
     )
     if thresholds is None:
         return False
@@ -232,8 +245,13 @@ def _is_masked_mha_available(
     qk_rope_head_dim: int,
     v_head_dim: int,
     kv_cache_dtype: str,
+    allow_quantized_kv: bool = False,
 ) -> bool:
-    """Check if masked MHA can ever fire for this model configuration."""
+    """Check if masked MHA can ever fire for this model configuration.
+
+    A quantized KV cache qualifies only when `allow_quantized_kv` is set; the
+    caller then keeps masked MHA to batches without cached context.
+    """
     if not current_platform.is_device_capability_family(100):
         return False
     model_dims = (
@@ -253,7 +271,9 @@ def _is_masked_mha_available(
     fa_version = get_flash_attn_version(
         head_size=qk_nope_head_dim + qk_rope_head_dim, head_size_v=v_head_dim
     )
-    return fa_version == 4 and not is_quantized_kv_cache(kv_cache_dtype)
+    return fa_version == 4 and (
+        allow_quantized_kv or not is_quantized_kv_cache(kv_cache_dtype)
+    )
 
 
 @dataclass
@@ -370,6 +390,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=self.model_config.dtype,
             device=device,
         )
+        attention_layer = vllm_config.compilation_config.static_forward_context[
+            layer_names[0]
+        ]
+        cache_dtype = vllm_config.cache_config.cache_dtype
         self.topk_mask_workspace: torch.Tensor | None = None
         if _is_masked_mha_available(
             self.model_config.model_arch_config.total_num_attention_heads,
@@ -377,16 +401,24 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             self.mla_dims.qk_nope_head_dim,
             self.mla_dims.qk_rope_head_dim,
             self.mla_dims.v_head_dim,
-            vllm_config.cache_config.cache_dtype,
+            cache_dtype,
+            vllm_config.attention_config.sparse_mla_masked_mha_quantized_kv,
+        ) and (
+            # The quantized-KV opt-in reserves the mask only where it can route.
+            not is_quantized_kv_cache(cache_dtype)
+            or _masked_mha_thresholds(
+                attention_layer.get_attn_backend().get_name(),
+                parallel_config.tensor_parallel_size,
+                self.mla_dims.qk_nope_head_dim + self.mla_dims.qk_rope_head_dim,
+                self.mla_dims.v_head_dim,
+            )
+            is not None
         ):
             self.topk_mask_workspace = torch.zeros(
                 GLOBAL_TOPK_MASK_MAX_BYTES // torch.int32.itemsize,
                 dtype=torch.int32,
                 device=device,
             )
-        attention_layer = vllm_config.compilation_config.static_forward_context[
-            layer_names[0]
-        ]
         layer_prefill_backend = attention_layer.prefill_backend
         self._backend_name = attention_layer.get_attn_backend().get_name()
         # The workspace follows the global KV dtype; a layer group can differ
@@ -394,6 +426,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         self._masked_mha_available = (
             self.topk_mask_workspace is not None
             and attention_layer.impl.masked_mha_available
+        )
+        self._kv_cache_quantized = (
+            self._masked_mha_available
+            and kv_cache_spec.kv_quant_mode != KVQuantMode.NONE
         )
         self.dcp_manager: MLADCPManager | None = None
         if self.dcp_world_size > 1:
@@ -635,6 +671,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 query_len=prefill_max_query_len,
                 seq_len=prefill_max_seq_len,
                 has_context=chunked_context is not None,
+                kv_cache_quantized=self._kv_cache_quantized,
             )
             and self._topk_masks_fit(
                 len(prefill_query_lens_cpu), prefill_max_query_len, chunked_context
@@ -875,6 +912,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
     group_conversion_decode_only: ClassVar[bool] = False
     # Whether forward_mqa runs ShardQ metadata and is validated.
     supports_shardq: ClassVar[bool] = False
+    # Backends whose forward_mqa converts top-k indices itself opt out of the
+    # index-group workspace; under HiSparse every layer still joins a group.
+    uses_index_group: ClassVar[bool] = True
 
     def __init__(
         self,
@@ -917,22 +957,28 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
         self.init_topk_indices_buffer(indexer, topk_indices_buffer)
         self.index_group: SparseMLAIndexGroup | None = None
         self.index_group_index = 0
+        vllm_config = get_current_vllm_config()
         if index_group_builder is None and self.topk_indices_buffer is not None:
             index_group_builder = SparseMLAIndexGroupBuilder(self.topk_indices_buffer)
         if index_group_builder is not None:
-            vllm_config = get_current_vllm_config()
-            self.index_group, self.index_group_index = (
-                index_group_builder.register_layer(
-                    indexer is not None,
-                    vllm_config if sliding_window is None else None,
-                    row_width=(
-                        self.get_fp8_ds_mla_row_bytes()
-                        if kv_cache_dtype == "fp8_ds_mla"
-                        else head_size
-                    ),
-                    kv_cache_dtype=kv_cache_dtype,
+            if (
+                self.uses_index_group
+                or vllm_config.attention_config.hisparse_config is not None
+            ):
+                self.index_group, self.index_group_index = (
+                    index_group_builder.register_layer(
+                        indexer is not None,
+                        vllm_config if sliding_window is None else None,
+                        row_width=(
+                            self.get_fp8_ds_mla_row_bytes()
+                            if kv_cache_dtype == "fp8_ds_mla"
+                            else head_size
+                        ),
+                        kv_cache_dtype=kv_cache_dtype,
+                    )
                 )
-            )
+            elif indexer is not None:
+                index_group_builder.skip_index_producing_layer()
 
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()
@@ -948,8 +994,10 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
             qk_rope_head_dim=qk_rope_head_dim,
             v_head_dim=v_head_dim,
             kv_cache_dtype=kv_cache_dtype,
+            allow_quantized_kv=(
+                vllm_config.attention_config.sparse_mla_masked_mha_quantized_kv
+            ),
         )
-        vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         cudagraph_mode = (
             vllm_config.compilation_config.cudagraph_mode or CUDAGraphMode.NONE
@@ -1306,6 +1354,9 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], SharedTopkIndicesBuffer, Generic
                 "Masked MHA with context does not yet support decode context "
                 "parallelism"
             )
+        assert self.kv_cache_dtype not in ("fp8_ds_mla", "nvfp4_ds_mla"), (
+            f"gather_and_maybe_dequant_cache cannot decode {self.kv_cache_dtype}"
+        )
 
         chunked_context = prefill_metadata.chunked_context
         assert chunked_context is not None
