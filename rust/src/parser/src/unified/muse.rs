@@ -43,6 +43,7 @@ use winnow::stream::Partial;
 use winnow::token::{literal, rest, take_till, take_until, take_while};
 
 use super::{Result, UnifiedParser, UnifiedParserOutput, token_id};
+use crate::schema::{JsonType, OptionSource, SchemaRoot};
 use crate::tool::{Tool, ToolCallDelta};
 use crate::unified::parsing_failed;
 use crate::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
@@ -136,6 +137,15 @@ pub struct MuseUnifiedParser {
     emitted_call_count: usize,
 }
 
+/// Whether a parameter schema declares a string, including the nullable forms
+/// `Optional[str]` takes (`["string", "null"]`, `anyOf`, `oneOf`). A schema that
+/// does not constrain the type is not a string one, so its values still decode.
+fn accepts_string(root: &SchemaRoot<'_>, schema: &Value) -> bool {
+    root.options(schema)
+        .iter()
+        .any(|option| option.ty == JsonType::String && !matches!(option.source, OptionSource::Any))
+}
+
 impl MuseUnifiedParser {
     /// Create a Muse parser.
     pub fn new(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
@@ -151,15 +161,14 @@ impl MuseUnifiedParser {
             string_parameters: tools
                 .iter()
                 .map(|tool| {
+                    let root = SchemaRoot::new(&tool.parameters);
                     let strings = tool
                         .parameters
                         .get("properties")
                         .and_then(Value::as_object)
                         .into_iter()
                         .flatten()
-                        .filter(|(_, schema)| {
-                            schema.get("type").and_then(Value::as_str) == Some("string")
-                        })
+                        .filter(|(_, schema)| accepts_string(&root, schema))
                         .map(|(name, _)| name.clone())
                         .collect();
                     (tool.name.clone(), strings)
@@ -784,6 +793,53 @@ mod tests {
                 assert_eq!(collect_stream(&mut parser, &chunks), batch);
             }
         }
+    }
+
+    #[test]
+    fn muse_preserves_nullable_string_parameters() {
+        let tools = [Tool {
+            name: "lookup".to_string(),
+            description: None,
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "zip": {"type": "string"},
+                    "zip_list": {"type": ["string", "null"]},
+                    "zip_any_of": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+                    "zip_one_of": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+                    "count": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
+                    "untyped": {}
+                }
+            }),
+            strict: None,
+            defer_loading: None,
+        }];
+        let params = [
+            "zip",
+            "zip_list",
+            "zip_any_of",
+            "zip_one_of",
+            "count",
+            "untyped",
+        ]
+        .map(|name| (name, "10001"));
+        let text = format!(
+            " to=lookup{MESSAGE}{}{EOT}",
+            atem(&[("lookup", &params[..])])
+        );
+        let mut parser = MuseUnifiedParser::new(&tools, Arc::new(tokenizer())).unwrap();
+        let calls = parser.parse_complete(&text).unwrap().calls();
+        assert_eq!(
+            serde_json::from_str::<Value>(&calls[0].arguments).unwrap(),
+            json!({
+                "zip": "10001",
+                "zip_list": "10001",
+                "zip_any_of": "10001",
+                "zip_one_of": "10001",
+                "count": 10001,
+                "untyped": 10001
+            })
+        );
     }
 
     #[test]
