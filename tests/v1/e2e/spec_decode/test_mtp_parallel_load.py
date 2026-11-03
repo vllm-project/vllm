@@ -44,6 +44,7 @@ class InlineConfig:
     pp_size: int = 1
     enable_expert_parallel: bool = False
     enable_eplb: bool = False
+    load_format: str = "auto"
     skip_reason: str | None = None
 
 
@@ -57,6 +58,16 @@ INLINE_CONFIGS = [
         enable_eplb=True,
     ),
     InlineConfig(id="pp2", pp_size=2),
+    # The draft lives on the last PP stage only, so loading it must not join
+    # InstantTensor's world-group collectives.
+    InlineConfig(
+        id="pp2_instanttensor",
+        pp_size=2,
+        load_format="instanttensor",
+        skip_reason=None
+        if current_platform.is_cuda()
+        else "InstantTensor requires NVIDIA GPUs",
+    ),
 ]
 
 
@@ -66,6 +77,7 @@ def _inline_kwargs(config: InlineConfig, *, with_spec: bool) -> dict[str, Any]:
         "tensor_parallel_size": config.tp_size,
         "pipeline_parallel_size": config.pp_size,
         "enable_expert_parallel": config.enable_expert_parallel,
+        "load_format": config.load_format,
         "max_model_len": MAX_MODEL_LEN,
         "gpu_memory_utilization": GPU_MEM_UTIL,
         "enforce_eager": True,
