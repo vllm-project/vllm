@@ -5,8 +5,8 @@ step, then a mono kernel per decoder layer inside the stock layer loop.
 
 Built by the model state once the weights are loaded
 (``model_state.Qwen3_5XpuModelState``): checks the loaded weights, maps the
-peer mailboxes and builds the layer kernels, before memory profiling and graph
-capture. ``bind_caches`` binds them
+peer mailboxes and builds the layer kernels of the target model and of the MTP
+drafter, before memory profiling and graph capture. ``bind_caches`` binds them
 to every KV cache vLLM allocates. Each step ``plan`` returns a ``Step`` or None;
 ``Step.layer(i)`` is the kernel replacing decoder layer i. Weight reloads are not
 supported."""
@@ -23,9 +23,9 @@ from vllm.distributed import get_tp_group
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 
-from . import DECODE_ROWS, DecodeConfig
+from . import DECODE_ROWS, MTP_LAYER_ID, MTP_PROLOGUE_ID, MTP_ROWS, DecodeConfig
 from .guards import FailStop, bind_reasons, weight_reasons
-from .layers import MonoLayer
+from .layers import MonoLayer, MtpPrologue
 from .peer import PeerRegion, tp_agree
 
 logger = init_logger(__name__)
@@ -86,11 +86,35 @@ def step_kind(md, gdn_prefix: str, attn_prefix: str, rows: int, q: int) -> int |
     return 1 if a.max_query_len == 1 else None
 
 
+def draft_kind(md, attn_prefix: str, rows: int, q: int) -> int | None:
+    """The MTP drafter's pass: q for its first pass of a verify step (the
+    target's shape, q tokens a request), 1 for the later one-token passes.
+    Only the drafter's attention metadata is seen here: a batch of short prompts
+    of at most q tokens can look like a verify step. Its drafts may then be
+    wrong, which costs acceptance, never correctness (the target verifies them),
+    and the kernels stay within the step's rows."""
+    if not isinstance(md, dict):
+        return None
+    a: Any = md.get(attn_prefix)
+    if a is None or a.num_prefill_tokens:
+        return None
+    if a.max_query_len == 1 and a.num_decode_tokens <= rows:
+        return 1
+    if q > 1 and a.max_query_len == q and rows % q == 0:
+        return q
+    return None
+
+
 class SpecializedDecode:
     """The executor: builds the layer kernels, binds them to each KV cache and
-    plans every step."""
+    plans every step of the target model and of the MTP drafter."""
 
-    def __init__(self, backbone: nn.Module, config: DecodeConfig):
+    def __init__(
+        self,
+        backbone: nn.Module,
+        config: DecodeConfig,
+        drafters: list[nn.Module] | None = None,
+    ):
         tp = get_tp_group()
         self.config = config
         self.rank, self.group = tp.rank_in_group, tp.cpu_group
@@ -104,7 +128,20 @@ class SpecializedDecode:
                 f"{type(backbone).__name__}"
             )
         self.kernels = layers
-        agree(weight_reasons(list(layers.values())), "the loaded weights")
+        # the MTP drafter: its decoder layer and its prologue
+        self.draft: dict[int, MonoLayer] = {}
+        self.prologue: MtpPrologue | None = None
+        for predictor in drafters or ():
+            if len(predictor.layers) != 1 or self.prologue is not None:
+                raise RuntimeError(
+                    "Qwen3.5 XPU mono decode: one MTP drafter of one layer only"
+                )
+            self.draft[0] = MonoLayer(predictor.layers[0], MTP_LAYER_ID, "mtp.layer")
+            self.prologue = MtpPrologue(predictor, MTP_PROLOGUE_ID, "mtp.prologue")
+        agree(
+            weight_reasons([*layers.values(), *self.draft.values()]),
+            "the loaded weights",
+        )
         kinds = {k.attn for k in layers.values()}
         if kinds != {True, False}:
             raise RuntimeError(
@@ -113,7 +150,11 @@ class SpecializedDecode:
             )
         self.gdn_prefix = next(k.prefix for k in layers.values() if not k.attn)
         self.attn_prefix = next(k.prefix for k in layers.values() if k.attn)
-        names = [k.name for k in layers.values()]
+        names = [k.name for k in layers.values()] + [
+            k.name for k in self.draft.values()
+        ]
+        if self.prologue is not None:
+            names.append(self.prologue.name)
         self.region = PeerRegion(names, self.rank, self.group)
         ops = torch.ops._xpu_C
         self.failstop = FailStop(
@@ -123,14 +164,15 @@ class SpecializedDecode:
         self._bound: tuple | None = None
         self.binds = 0
         logger.info(
-            "Qwen3.5 XPU mono decode: %d decoder layers, %s; other steps run "
+            "Qwen3.5 XPU mono decode: %d decoder layers%s, %s; other steps run "
             "vLLM's layers",
             len(layers),
+            " + MTP drafter" if self.draft else "",
             f"verify of {config.q} tokens a request" if config.q > 1 else "decode",
         )
 
     def _all(self) -> list[MonoLayer]:
-        return list(self.kernels.values())
+        return [*self.kernels.values(), *self.draft.values()]
 
     def _key(self) -> tuple | None:
         caches = [c for k in self._all() for c in k.caches()]
@@ -153,6 +195,8 @@ class SpecializedDecode:
         def bind():
             for k in self._all():
                 k.bind(self.region.mailbox(k.name))
+            if self.prologue is not None:
+                self.prologue.bind(self.region.mailbox(self.prologue.name), self.rank)
 
         agree(bind_reasons(bind), "the KV caches")
         self._bound = key
@@ -202,6 +246,25 @@ class SpecializedDecode:
         if kind is None:
             return None
         return Step(rows, kind, md, self.kernels)
+
+    def plan_draft(self, positions: torch.Tensor) -> Step | None:
+        """The MTP drafter's plan: its first pass of a verify step (the
+        target's rows, q tokens a request) or a later one-token pass of
+        1 / 2 / 4 / 8 rows."""
+        if not self.draft:
+            return None
+        context = self._context()
+        if context is None:
+            return None
+        rows, q = positions.size(-1), self.config.q
+        kind = draft_kind(context.attn_metadata, self.draft[0].prefix, rows, q)
+        if kind is None or rows not in MTP_ROWS:
+            return None
+        if kind == 1 and rows not in DECODE_ROWS:
+            return None
+        if kind > 1 and (rows, kind) not in self.config.verify:
+            return None
+        return Step(rows, kind, context.attn_metadata, self.draft)
 
     def after_step(self) -> None:
         """Once per executed step on every TP rank: raises on every rank once a

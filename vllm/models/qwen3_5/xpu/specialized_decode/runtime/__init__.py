@@ -42,8 +42,12 @@ ARCHITECTURES = ("Qwen3_5MoeForConditionalGeneration", "Qwen3_5MoeForCausalLM")
 DECODE_ROWS = (1, 2, 4, 8)
 # (rows, tokens a request) of the verify kernels: rows = requests x tokens
 VERIFY = frozenset({(2, 2), (3, 3), (4, 2), (4, 4), (6, 3), (8, 2), (8, 4), (8, 8)})
+# rows of the MTP prologue kernel
+MTP_ROWS = (1, 2, 3, 4, 6, 8)
 # speculative tokens the verify kernels serve: 1 .. 7 (8 tokens a request)
 MAX_SPEC_TOKENS = 7
+# kernel-side ids of the MTP drafter's layer and prologue
+MTP_LAYER_ID, MTP_PROLOGUE_ID = 1000, 2000
 
 
 @dataclass(frozen=True)
@@ -209,6 +213,8 @@ OPS = (
     "mono_register_layer",
     "mono_decode_layer",
     "mono_decode_layer_spec",
+    "mono_register_mtp",
+    "mono_mtp_prologue",
 )
 
 

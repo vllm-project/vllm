@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""The mono kernels of the decoder layers: vLLM tensors -> launches. A
-``MonoLayer`` runs one whole decoder layer (GatedDeltaNet or full attention,
-then the MoE with the shared expert, both TP all-reduces in the kernel) on a
-planned step. The kernels read vLLM's loaded weights and caches in place;
+"""The mono kernels of the decoder layers and of the MTP prologue: vLLM tensors
+-> launches. A ``MonoLayer`` runs one whole decoder layer (GatedDeltaNet or full
+attention, then the MoE with the shared expert, both TP all-reduces in the
+kernel) on a planned step; ``MtpPrologue`` runs the MTP drafter's two pre-fc
+norms and fc. The kernels read vLLM's loaded weights and caches in place;
 ``bind`` registers them with the kernels (again whenever the caches move)."""
 
 import torch
@@ -120,3 +121,33 @@ class MonoLayer:
                 self.kid, hidden_states, residual, out, res, positions, m0, m1, m2
             )
         return out, res
+
+
+class MtpPrologue:
+    """fc([norm_e(e); norm_h(h)]) of the MTP predictor on [e; h], one kernel
+    for 1, 2, 3, 4, 6 or 8 rows."""
+
+    def __init__(self, predictor: nn.Module, kid: int, name: str):
+        self.kid, self.name = kid, name
+        self.norm_e = predictor.pre_fc_norm_embedding
+        self.norm_h = predictor.pre_fc_norm_hidden
+        self.fc = predictor.fc
+
+    def weights(self) -> list[torch.Tensor]:
+        return [
+            self.norm_e.weight,
+            self.norm_h.weight,
+            self.fc.weight,
+            self.fc.weight_scale,
+        ]
+
+    def bind(self, mailbox: tuple[int, int], rank: int) -> None:
+        own, peer = mailbox
+        torch.ops._xpu_C.mono_register_mtp(self.kid, own, peer, self.weights(), rank)
+
+    def launch(self, embeds: torch.Tensor, hidden: torch.Tensor) -> torch.Tensor:
+        x = torch.cat([embeds, hidden], dim=-1)
+        out = x.new_empty(x.shape[0], hidden.shape[-1])
+        served = torch.ops._xpu_C.mono_mtp_prologue(self.kid, x, out)
+        assert served, f"no MTP prologue kernel for {x.shape[0]} rows"
+        return out

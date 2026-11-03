@@ -9,7 +9,8 @@ them:
   ``init_specialized_decode`` in the causal LM's ``__init__`` (the config check,
   before any module allocates weights) and ``get_model_state_cls``; the model
   state builds the executor after load (``model_state.Qwen3_5XpuModelState``).
-  The backbone's ``forward`` plans each step (``specialized_decode.plan``)."""
+  The backbone's ``forward`` plans each step (``specialized_decode.plan``).
+- ``register_drafter``: the MTP predictor, built with the target's executor."""
 
 from typing import TYPE_CHECKING
 
@@ -33,6 +34,19 @@ def initialize_specialized_decode(model: torch.nn.Module) -> None:
             module._decode = MoEStep(module)
 
 
+# MTP predictors of this process (loaded before the target's model state builds
+# the executor), run on the mono kernels with the target's
+_drafters: list[nn.Module] = []
+
+
+def register_drafter(predictor: nn.Module, vllm_config) -> None:
+    """Called by the MTP predictor's ``__init__``. The target's config check
+    already refused unsupported speculative settings."""
+    predictor.specialized_decode = None
+    if vllm_config.kernel_config.monokernel:
+        _drafters.append(predictor)
+
+
 class SpecializedDecodeMixin:
     """On the Qwen3.5 causal LM. ``self.model`` is the ``Qwen3_5Model`` the
     executor runs over."""
@@ -49,8 +63,11 @@ class SpecializedDecodeMixin:
         from .runtime.decode import SpecializedDecode
 
         assert self.specialized_decode_config is not None
-        decode = SpecializedDecode(self.model, self.specialized_decode_config)
+        drafters = list(_drafters)
+        decode = SpecializedDecode(self.model, self.specialized_decode_config, drafters)
         self.model.specialized_decode = decode
+        for predictor in drafters:
+            predictor.specialized_decode = decode
         return decode
 
 

@@ -37,7 +37,7 @@ from vllm.model_executor.models.utils import (
 from vllm.sequence import IntermediateTensors
 
 from .model import Qwen3_5DecoderLayer, Qwen3_5Model, Qwen3_5RMSNorm
-from .specialized_decode.hooks import initialize_specialized_decode
+from .specialized_decode.hooks import initialize_specialized_decode, register_drafter
 
 logger = init_logger(__name__)
 
@@ -113,6 +113,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         self.pre_fc_norm_embedding = Qwen3_5RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
         )
+        # the mono decode runs this predictor with the target (``--monokernel``)
+        register_drafter(self, vllm_config)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -128,18 +130,25 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
     ) -> torch.Tensor:
         # Branch on the inputs, not the rank: the drafter is built entirely on
         # the last PP stage, where `is_first_rank` is False.
+        decode = self.specialized_decode
+        step = None
+        if decode is not None and intermediate_tensors is None:
+            step = decode.plan_draft(positions)
         if intermediate_tensors is None:
             if inputs_embeds is None:
                 inputs_embeds = self.embed_input_ids(input_ids)
             assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
-            hidden_states = torch.cat(
-                [
-                    self.pre_fc_norm_embedding(inputs_embeds),
-                    self.pre_fc_norm_hidden(hidden_states),
-                ],
-                dim=-1,
-            )
-            hidden_states = self.fc(hidden_states)
+            if step is not None:
+                hidden_states = decode.prologue.launch(inputs_embeds, hidden_states)
+            else:
+                hidden_states = torch.cat(
+                    [
+                        self.pre_fc_norm_embedding(inputs_embeds),
+                        self.pre_fc_norm_hidden(hidden_states),
+                    ],
+                    dim=-1,
+                )
+                hidden_states = self.fc(hidden_states)
             residual = None
         else:
             hidden_states = intermediate_tensors["hidden_states"]
@@ -151,7 +160,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             assert hidden_states.shape[0] == positions.shape[-1]
             hidden_states = sequence_parallel_chunk(hidden_states)
             assert residual is None
-        hidden_states, residual = mtp_layer(
+        kernel = None if step is None else step.layer(current_step_idx)
+        hidden_states, residual = (kernel or mtp_layer)(
             positions=positions,
             hidden_states=hidden_states,
             residual=residual,
