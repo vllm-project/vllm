@@ -201,9 +201,11 @@ _DLManagedTensor._fields_ = [
     ("deleter", _DLDeleter),
 ]
 
-_PyCapsule_New = ctypes.pythonapi.PyCapsule_New
-_PyCapsule_New.restype = ctypes.py_object
-_PyCapsule_New.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+# A private prototype: ctypes.pythonapi.PyCapsule_New is shared, and other
+# libraries (e.g. FlashInfer's MNNVL buffers) reset its restype.
+_PyCapsule_New = ctypes.PYFUNCTYPE(
+    ctypes.py_object, ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p
+)(("PyCapsule_New", ctypes.pythonapi))
 _malloc = ctypes.CDLL(None).malloc
 _malloc.restype = ctypes.c_void_p
 _malloc.argtypes = [ctypes.c_size_t]
