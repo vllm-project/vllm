@@ -45,6 +45,10 @@ from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.sched.kv_transfer_ledger import (
+    KVTransferLedger,
+    TransferDirection,
+)
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -270,6 +274,9 @@ class Scheduler(SchedulerInterface):
         # KV Connector: requests in process of async KV loading or recving
         self.finished_recving_kv_req_ids: set[str] = set()
         self.failed_recving_kv_req_ids: set[str] = set()
+        # Every transfer that pins this engine's blocks or needs it to keep
+        # stepping, as explicit entries instead of queue-length arithmetic.
+        self.ledger = KVTransferLedger()
 
         # Grammar compilation failures to finish as per-request errors in
         # update_from_output.
@@ -1580,6 +1587,7 @@ class Scheduler(SchedulerInterface):
                     # into the WAITING_FOR_REMOTE_KV state.
                     request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
                     num_async_kv_loads += 1
+                    self.ledger.import_started(request)
                     # Set num_computed_tokens even though KVs are not yet loaded.
                     # request.num_computed_tokens will not be used anywhere until
                     # the request finished the KV transfer.
@@ -3110,6 +3118,8 @@ class Scheduler(SchedulerInterface):
                     # Count P/D requests on arrival: connector matching is
                     # skipped while all run slots are taken.
                     self._set_kv_fetch_stage(request, KV_FETCH_WAITING_TO_START)
+                    # A remote engine holds KV for this request from now on.
+                    self.ledger.open_import(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -3214,6 +3224,15 @@ class Scheduler(SchedulerInterface):
         if self.finished_req_ids_dict is not None:
             self.finished_req_ids_dict[request.client_index].add(request_id)
 
+        if connector_delay_free_blocks:
+            # A remote reader (or an async save) still needs the blocks.
+            self.ledger.open_export(request)
+        if delay_free_blocks:
+            # An import is in flight; its completion frees the blocks.
+            self.ledger.mark_finished(request)
+        else:
+            # A pending or already-consumed import pins nothing any more.
+            self.ledger.close(request_id, TransferDirection.IMPORT)
         delay_free_blocks |= connector_delay_free_blocks
         if not delay_free_blocks:
             self._free_blocks(request)
@@ -3222,8 +3241,18 @@ class Scheduler(SchedulerInterface):
 
     def _free_blocks(self, request: Request):
         assert request.is_finished()
+        self.ledger.drop_request(request.request_id)
         self._free_request_blocks(request)
-        del self.requests[request.request_id]
+        self.requests.pop(request.request_id, None)
+
+    def _free_if_unreferenced(self, request: Request) -> bool:
+        """Free a finished request's blocks unless another transfer still
+        pins them (e.g. a save still in flight after its load completed)."""
+        assert request.is_finished()
+        if self.ledger.is_referenced(request.request_id):
+            return False
+        self._free_blocks(request)
+        return True
 
     @property
     def pause_state(self) -> PauseState:
@@ -3316,12 +3345,9 @@ class Scheduler(SchedulerInterface):
     def has_finished_requests(self) -> bool:
         if self.finished_req_ids:
             return True
-        if self.connector is None:
-            return False
-        # Finished requests waiting on delayed connector cleanup remain in
-        # self.requests after they have been removed from scheduling queues.
-        num_running, num_waiting = self.get_request_counts()
-        return len(self.requests) > (num_running + num_waiting)
+        # Finished requests whose blocks a transfer still pins (a retained
+        # export, or an import that was in flight when they finished).
+        return self.ledger.has_retained()
 
     def has_requests(self) -> bool:
         # Override the interface default to also keep the engine alive while a
@@ -3692,6 +3718,7 @@ class Scheduler(SchedulerInterface):
         elif request.num_computed_tokens == request.num_tokens:
             request.num_computed_tokens = request.num_tokens - 1
         self.finished_recving_kv_req_ids.remove(request.request_id)
+        self.ledger.close(request.request_id, TransferDirection.IMPORT)
 
     def _handle_blocked_waiting_request(self, request: Request) -> bool:
         """Returns True if scheduling of this request should proceed, False if
@@ -3746,19 +3773,36 @@ class Scheduler(SchedulerInterface):
         # KV Connector:: update recv and send status from last step.
         for req_id in kv_connector_output.finished_recving or ():
             logger.debug("Finished recving KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            req = self.requests[req_id]
+            entry = self.ledger.complete(req_id, TransferDirection.IMPORT)
+            req = entry.request if entry is not None else self.requests.get(req_id)
+            if req is None:
+                logger.warning(
+                    "Ignoring finished_recving for unknown request %s", req_id
+                )
+                continue
             if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                 self.finished_recving_kv_req_ids.add(req_id)
                 self._set_kv_fetch_stage(req, KV_FETCH_COMPLETED_WAITING)
             else:
                 assert RequestStatus.is_finished(req.status)
                 self._aborted_kv_loads.discard(req_id)
-                self._free_blocks(self.requests[req_id])
+                # The request finished while loading; the load no longer pins
+                # its blocks, but a save (export) still might.
+                self.ledger.close(req_id, TransferDirection.IMPORT)
+                self._free_if_unreferenced(req)
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
-            self._free_blocks(self.requests[req_id])
+            entry = self.ledger.close(req_id, TransferDirection.EXPORT)
+            if entry is None:
+                # Already released (expired, aborted) or never ours: nothing pins
+                # blocks for it, so there is nothing to free.
+                logger.warning(
+                    "Ignoring finished_sending for request %s without a retained "
+                    "export",
+                    req_id,
+                )
+                continue
+            self._free_if_unreferenced(entry.request)
 
     def _update_requests_with_invalid_blocks(
         self,

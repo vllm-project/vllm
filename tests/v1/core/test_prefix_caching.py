@@ -59,6 +59,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
     make_block_hash_with_group_id,
 )
+from vllm.v1.core.sched.kv_transfer_ledger import KVTransferLedger
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.core.single_type_kv_cache_manager import (
@@ -745,7 +746,11 @@ def test_nixl_hisparse_full_block_import_keeps_a_writable_tail(num_tokens):
         finished_recving_kv_req_ids={request.request_id},
         prefix_replay_tokens=0,
         prefix_replay_group_ids=(),
+        ledger=KVTransferLedger(),
     )
+    # The load of this import has started and is now finished.
+    scheduler.ledger.open_import(request)
+    scheduler.ledger.import_started(request)
     scheduler._mark_prefix_replay = MethodType(Scheduler._mark_prefix_replay, scheduler)
     scheduler._load_restores_replay_window = MethodType(
         Scheduler._load_restores_replay_window, scheduler

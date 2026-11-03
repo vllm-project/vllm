@@ -6743,6 +6743,9 @@ def test_delayed_kv_connector_free_keeps_scheduler_active():
     request.status = RequestStatus.FINISHED_STOPPED
     scheduler.requests[request.request_id] = request
     scheduler.finished_req_ids = set()
+    # The connector asked to delay the free: the export is recorded in the
+    # transfer ledger (what request_finished() -> _free_request() does).
+    scheduler.ledger.open_export(request)
 
     assert scheduler.has_finished_requests()
     assert scheduler.has_requests()
