@@ -459,7 +459,7 @@ _LOG_CONFIG_FILE_DEPRECATION_MESSAGE = (
 
 
 _MAMBA_CACHE_MODE_DEPRECATION_MESSAGE = (
-    "--mamba-cache-mode is deprecated and will be removed in v0.33.0. "
+    "--mamba-cache-mode is deprecated and will be removed in v0.34.0. "
     "It has no effect: Mamba prefix caching follows --enable-prefix-caching."
 )
 
@@ -871,7 +871,7 @@ class EngineArgs:
 
     fail_on_environ_validation: bool = False
     gdn_prefill_backend: (
-        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"] | None
+        Literal["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl", "hip"] | None
     ) = None
     kda_prefill_backend: (
         Literal["auto", "triton", "flashkda", "flashinfer", "fused"] | None
@@ -1956,7 +1956,7 @@ class EngineArgs:
         parser.add_argument(
             "--gdn-prefill-backend",
             dest="gdn_prefill_backend",
-            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl"],
+            choices=["flashinfer", "triton", "cutedsl", "aiter_flydsl", "sycl", "hip"],
             default=None,
             help="Select GDN prefill backend.",
         )
