@@ -38,9 +38,6 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
     slots) via a Triton kernel; steps 1..k-1 are single-token decode steps.
     """
 
-    # Standalone AR drafting needs one extra slot per request for correction.
-    num_extra_query_per_req = 1
-
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
@@ -61,6 +58,17 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         )
         self.expanded_slot_mappings: torch.Tensor
         self.supports_mm_inputs = False
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        # The expanded prefill adds a correction token to each request.
+        self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            self.num_speculative_steps + 2,
+            varlen_decode=self.enable_adaptive_verification,
+        )
+        super().init_cudagraph_manager(cudagraph_mode)
 
     @property
     def attn_vllm_config(self) -> VllmConfig:
@@ -317,6 +325,10 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
         num_tokens_across_dp = (
             dp_sync_state.num_tokens_across_dp if dp_sync_state is not None else None
         )
+        # The expanded prefill adds a correction token to each request.
+        draft_seq_lens_cpu_upper_bound = (
+            input_batch.seq_lens_cpu_upper_bound[:num_reqs] + 1
+        )
         # Copy per-request temperature/seeds/idx_mapping into pre-allocated
         # buffers so sample_draft can read them without extra slicing.
         self._copy_request_inputs(
@@ -357,7 +369,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             uniform_token_count = get_uniform_decode_token_count(
                 num_reqs,
                 total_expanded,
-                max_query_len + self.num_extra_query_per_req,
+                max_query_len + 1,
                 input_batch.decode_graph_eligible,
             )
             # Standalone AR prefill adds a correction-token slot per request,
@@ -397,10 +409,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
                 num_reqs=num_reqs,
                 batch_desc=prefill_batch_desc,
                 query_start_loc_np=query_start_loc_cpu,
-                seq_lens_cpu_upper_bound=(
-                    input_batch.seq_lens_cpu_upper_bound[:num_reqs]
-                    + self.num_extra_query_per_req
-                ),
+                seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
                 step=0,
                 slot_mappings=slot_mappings,
             )
@@ -433,7 +442,7 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             num_reqs,
             skip_attn,
             dp_sync_state,
-            input_batch.seq_lens_cpu_upper_bound,
+            draft_seq_lens_cpu_upper_bound,
             is_profile,
             num_speculative_tokens,
         )

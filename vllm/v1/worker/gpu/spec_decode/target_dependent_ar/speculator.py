@@ -11,6 +11,9 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.dp_utils import DPSyncState, dispatch_cg_and_sync_dp
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+from vllm.v1.worker.gpu.spec_decode.autoregressive.cudagraph_utils import (
+    SpeculatorCudaGraphManager,
+)
 from vllm.v1.worker.gpu.spec_decode.autoregressive.speculator import (
     AutoRegressiveSpeculator,
 )
@@ -35,6 +38,17 @@ class TargetDependentARSpeculator(AutoRegressiveSpeculator):
         )
 
         self.inputs_embeds: torch.Tensor | None = None
+
+    def init_cudagraph_manager(self, cudagraph_mode: CUDAGraphMode) -> None:
+        self.prefill_cudagraph_manager = SpeculatorCudaGraphManager(
+            self.vllm_config,
+            self.device,
+            cudagraph_mode,
+            self.num_speculative_steps + 1,
+            # Draft prefill shares the target's padded attention metadata.
+            varlen_decode=self.enable_adaptive_verification,
+        )
+        super().init_cudagraph_manager(cudagraph_mode)
 
     def load_model(self, target_model: nn.Module) -> None:
         super().load_model(target_model)
