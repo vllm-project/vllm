@@ -160,7 +160,8 @@ def init_hisparse_kv_cache(
         )
         return kv_caches
     except Exception:
-        release_pinned_state([], host_pool.pinned, host_pool.shared_region)
+        release_pinned_state(host_pool.pinned, host_pool.shared_region)
+        unbind_hisparse_caches(forward_context)
         drop_hisparse_host_pool(vllm_config)
         raise
 
@@ -174,15 +175,11 @@ def _get_hisparse_cache(
     return hisparse_cache
 
 
-def release_hisparse_profiling_cache(forward_context: dict[str, Any]) -> None:
-    """Detach the profiling caches but keep the host pool for the real KV cache."""
-    runtimes = {
-        id(cache.runtime): cache.runtime
-        for layer in forward_context.values()
-        if (cache := getattr(layer, "hisparse_cache", None)) is not None
-        and hasattr(cache.runtime, "_host_cache")
-    }
-    release_pinned_state(list(runtimes.values()), [])
+def unbind_hisparse_caches(forward_context: dict[str, Any]) -> None:
+    """Detach HiSparse cache bindings without unregistering the host pool."""
+    for layer in forward_context.values():
+        if (cache := getattr(layer, "hisparse_cache", None)) is not None:
+            cache.unbind_cache()
 
 
 def _tensor_placements(
