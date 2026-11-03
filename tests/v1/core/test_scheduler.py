@@ -21,6 +21,7 @@ from vllm.config import (
     SpeculativeConfig,
     VllmConfig,
 )
+from vllm.config.watermarking import WatermarkConfig
 from vllm.distributed.aux_output_connector.connector import (
     AuxOutputSchedulerConnector,
     AuxRequestOutput,
@@ -313,6 +314,43 @@ def test_evicted_blocks_release_their_auxiliary_outputs_past_capacity():
 
     assert list(metadata.retained_block_hashes) == second.block_hashes
     assert list(metadata.released_block_hashes) == first.block_hashes[:3]
+
+
+@pytest.mark.parametrize(
+    "with_config,params,expected",
+    [
+        (True, {"watermarking": True}, True),
+        (True, {"watermarking": False}, False),
+        (True, {"watermarking": True, "temperature": 0.0}, False),
+        (True, {"watermarking": True, "trace_decode_token_ids": [0]}, False),
+        (False, {"watermarking": True}, None),
+    ],
+)
+def test_first_output_reports_watermarking(with_config, params, expected):
+    """EngineCore sends the flag it applied on the first output only."""
+    scheduler = create_scheduler()
+    if with_config:
+        scheduler.vllm_config.watermark_config = WatermarkConfig(key=42)
+    (request,) = create_requests(num_requests=1, max_tokens=2, ignore_eos=True)
+    for name, value in params.items():
+        setattr(request.sampling_params, name, value)
+    scheduler.add_request(request)
+
+    reported = []
+    for _ in range(2):
+        scheduler_output = scheduler.schedule()
+        model_output = ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[0]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        outputs = scheduler.update_from_output(scheduler_output, model_output)
+        reported.append(outputs[0].outputs[0].watermarking)
+
+    assert reported == [expected, None]
 
 
 def test_finish_request():
@@ -1547,6 +1585,57 @@ def test_no_mm_input_chunking_at_item_boundary():
     assert ask(400, 500) == 0
     # Starts exactly at the item and covers it: schedule it.
     assert ask(400, 800) == 800
+    # Starts inside the item (a prefix cache hit ended there) and cannot finish
+    # it: schedule nothing, never a negative count.
+    assert ask(600, 500) == 0
+    # Starts inside the item and finishes it: schedule the rest.
+    assert ask(600, 600) == 600
+
+
+def test_no_mm_input_chunking_after_prefix_cache_hit_inside_item():
+    """A prefix cache hit can end inside a multimodal item (hits are block
+    aligned). The rest of the item must then be scheduled in one step too."""
+    block_size = 256
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=600,
+        disable_chunked_mm_input=True,
+        enable_prefix_caching=True,
+        block_size=block_size,
+        max_model_len=2048,
+    )
+
+    def image_request(req_id: str) -> Request:
+        return create_requests(
+            num_requests=1,
+            num_tokens=590,
+            mm_hashes_list=[["image"]],
+            mm_positions=[[PlaceholderRange(offset=0, length=576)]],
+            block_size=block_size,
+            req_ids=[req_id],
+        )[0]
+
+    def step() -> dict[str, int]:
+        output = scheduler.schedule()
+        scheduler.update_from_output(output, make_output(scheduler))
+        return output.num_scheduled_tokens
+
+    # Caches the first two blocks, 512 of the 576 image tokens.
+    scheduler.add_request(image_request("primer"))
+    assert step() == {"primer": 590}
+
+    # The text prefill leaves 600 - 560 - 1 = 39 tokens of budget, less than the
+    # 64 image tokens left after the hit.
+    scheduler.add_request(
+        create_requests(
+            num_requests=1, num_tokens=560, block_size=block_size, req_ids=["text"]
+        )[0]
+    )
+    scheduler.add_request(image_request("hit"))
+    assert step() == {"primer": 1, "text": 560}
+
+    # The 64 image tokens and the 14 text tokens after them, in one chunk.
+    assert step() == {"primer": 1, "text": 1, "hit": 78}
 
 
 @pytest.mark.parametrize("enable_prefix_caching", [True, False])
