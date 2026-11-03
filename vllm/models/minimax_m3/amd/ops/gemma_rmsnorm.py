@@ -26,6 +26,8 @@ per-head q_norm/k_norm (N == head_dim). Inputs may be non-contiguous views
 contiguous.
 """
 
+from typing import Literal, overload
+
 import torch
 
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
@@ -235,6 +237,28 @@ def gemma_fused_add_rmsnorm_mxfp8_and_bf16(
     return x_q, x_scale, normed.reshape(x.shape), res_out
 
 
+@overload
+def _gemma_fused_add_rmsnorm(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    quant_mxfp8: bool,
+    also_bf16: Literal[False] = False,
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]: ...
+
+
+@overload
+def _gemma_fused_add_rmsnorm(
+    x: torch.Tensor,
+    residual: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    quant_mxfp8: bool,
+    also_bf16: Literal[True],
+) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor | None]: ...
+
+
 def _gemma_fused_add_rmsnorm(
     x: torch.Tensor,
     residual: torch.Tensor,
@@ -242,6 +266,9 @@ def _gemma_fused_add_rmsnorm(
     eps: float,
     quant_mxfp8: bool,
     also_bf16: bool = False,
+) -> (
+    tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]
+    | tuple[torch.Tensor, torch.Tensor | None, torch.Tensor, torch.Tensor | None]
 ):
     orig_shape = x.shape
     n = orig_shape[-1]

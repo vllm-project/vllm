@@ -299,7 +299,7 @@ class MiniMAXGemmaRMSNorm(nn.Module):
 
 
 # Rows per program of the fused swiglu + MXFP8 quant: at decode-sized M (8-192)
-# 16 is ~0.1 us faster than the MoE path's 64 on MI355X.
+# 16 is ~0.1 us faster than the MoE path's 64. Tuned on gfx950 (MI355X) only.
 _SWIGLU_QUANT_BLOCK_M = 16
 
 
@@ -381,6 +381,11 @@ class MiniMaxM3MLP(nn.Module):
         if self.fuse_act_quant_mxfp8 and not self._down_proj_quantizes_in_gemm(
             gate_up.shape[0]
         ):
+            # Not bit-identical to the unfused chain, by design: this quantizes
+            # the fp32 swiglu result directly and skips the bf16 rounding the
+            # unfused path applies before the quant (about 2% of the E4M3
+            # bytes differ; the result is at least as close to the fp32
+            # activation).
             act_q, act_scale = swiglu_oai_quantize_mxfp8(
                 gate_up,
                 alpha=self.swiglu_alpha,
