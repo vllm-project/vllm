@@ -104,13 +104,16 @@ class IndexerCapturer:
         *,
         output_rank: bool = True,
     ) -> None:
-        self._num_layers = config.model_config.get_total_num_hidden_layers()
-        sources = _get_indexer_capture_sources(model, self._num_layers)
+        sources = _get_indexer_capture_sources(
+            model, config.model_config.get_total_num_hidden_layers()
+        )
+        for layer_id, _, source in sources:
+            if source.indexer_capture is not None:
+                raise ValueError(
+                    f"Indexer capture source layer {layer_id} is already bound"
+                )
         layer_ids = tuple(layer_id for layer_id, _, _ in sources)
         topk = sources[0][1]
-        self.source_columns = {
-            layer_id: column for column, layer_id in enumerate(layer_ids)
-        }
         self.shape_per_token = (len(layer_ids), topk)
         self.fixed_bytes_per_token = len(layer_ids) * topk * 4
         self._bindings: list[tuple[IndexerCaptureSource, IndexerCaptureSink]] = []
@@ -143,6 +146,15 @@ class IndexerCapturer:
             device=config.device_config.device,
         )
 
+        try:
+            for column, (_, _, source) in enumerate(sources):
+                sink = IndexerCaptureSink(self.device_buffer[:, column])
+                self._bindings.append((source, sink))
+                source.set_indexer_capture_sink(sink)
+        except BaseException:
+            self.close()
+            raise
+
     def snapshot(self, num_rows: int) -> torch.Tensor:
         """Copy the forwarded rows into a snapshot owned by the caller."""
         assert self._output_rank, "Indexer snapshots require the output rank"
@@ -159,32 +171,3 @@ class IndexerCapturer:
         self._bindings.clear()
         del self.device_buffer
         self._closed = True
-
-
-def bind_indexer_capturer(
-    model: torch.nn.Module,
-    capturer: IndexerCapturer,
-) -> None:
-    """Attach sinks to the model's logical TopK producers."""
-    if capturer._closed:
-        raise ValueError("Cannot bind a closed Indexer capturer")
-    sources = _get_indexer_capture_sources(model, capturer._num_layers)
-    expected = [
-        (layer_id, capturer.shape_per_token[1]) for layer_id in capturer.source_columns
-    ]
-    if [(layer_id, topk) for layer_id, topk, _ in sources] != expected:
-        raise ValueError("Indexer capture source layout changed after allocation")
-    for layer_id, _, source in sources:
-        if source.indexer_capture is not None:
-            raise ValueError(
-                f"Indexer capture source layer {layer_id} is already bound"
-            )
-    try:
-        for layer_id, _, source in sources:
-            column = capturer.source_columns[layer_id]
-            sink = IndexerCaptureSink(capturer.device_buffer[:, column])
-            capturer._bindings.append((source, sink))
-            source.set_indexer_capture_sink(sink)
-    except Exception:
-        capturer.close()
-        raise

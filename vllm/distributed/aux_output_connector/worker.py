@@ -33,10 +33,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsCapturer,
     bind_routed_experts_capturer,
 )
-from vllm.model_executor.layers.indexer_capture import (
-    IndexerCapturer,
-    bind_indexer_capturer,
-)
+from vllm.model_executor.layers.indexer_capture import IndexerCapturer
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
 
 if TYPE_CHECKING:
@@ -120,12 +117,11 @@ class AuxOutputWorkerConnector:
                 self._indexer = IndexerCapturer(
                     model, vllm_config, output_rank=get_tp_group().is_first_rank
                 )
-                bind_indexer_capturer(model, self._indexer)
         except BaseException:
             self._close_capture()
             raise
         self._r3_shape: tuple[int, ...] = ()
-        self._r3_dtype = np.dtype("uint8")
+        self._r3_dtype: np.dtype[Any] = np.dtype("uint8")
         self._r3_nbytes = 0
         self._store: BackgroundBlockObjectStore | None = None
         self._buffer: AuxOutputBuffer | None = None
@@ -141,11 +137,12 @@ class AuxOutputWorkerConnector:
 
     def _close_capture(self) -> None:
         """Release both capturers; safe to call on a partially built connector."""
-        for name in ("_routed_experts_capturer", "_indexer"):
-            capturer = getattr(self, name, None)
+        capturers = self._routed_experts_capturer, self._indexer
+        self._routed_experts_capturer = None
+        self._indexer = None
+        for capturer in capturers:
             if capturer is None:
                 continue
-            setattr(self, name, None)
             try:
                 capturer.close()
             except Exception:
@@ -580,8 +577,6 @@ class AuxOutputWorkerConnector:
                 self._buffer = None
                 self._requests.clear()
                 self._step_metadata = None
-                self._r3_shape = ()
-                self._r3_nbytes = 0
                 self._close_capture()
 
 

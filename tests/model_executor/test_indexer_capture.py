@@ -12,7 +12,6 @@ from vllm.model_executor.layers.indexer_capture import (
     IndexerCapturer,
     IndexerCaptureSink,
     IndexerCaptureSource,
-    bind_indexer_capturer,
     capture_indexer_topk,
 )
 
@@ -78,9 +77,6 @@ def test_binding_maps_sparse_layer_ids_before_shared_topk_is_overwritten(
     consumer, mtp = CaptureSource(4, producer=False), CaptureSource(8, topk=7)
     model = torch.nn.ModuleList([second, mtp, consumer, first])
     capture = IndexerCapturer(model, capture_config)
-    assert first.indexer_capture is None and second.indexer_capture is None
-    bind_indexer_capturer(model, capture)
-    assert capture.source_columns == {2: 0, 5: 1}
     assert consumer.indexer_capture is None and mtp.indexer_capture is None
     shared = torch.tensor([[3, -1], [4, 2]], dtype=torch.int32)
     first(shared)
@@ -92,69 +88,30 @@ def test_binding_maps_sparse_layer_ids_before_shared_topk_is_overwritten(
     capture.close()
 
 
-def test_capture_snapshots_survive_shared_buffer_reuse(capture_config):
-    first, second = CaptureSource(2), CaptureSource(5)
-    model = torch.nn.ModuleList([first, second])
-    capture = IndexerCapturer(model, capture_config)
-    bind_indexer_capturer(model, capture)
-    shared = torch.tensor([[3, 1], [4, 2]], dtype=torch.int32)
-    first(shared)
-    shared.add_(10)
-    second(shared)
-    snapshots = [capture.snapshot(2) for _ in range(3)]
-    shared.zero_()
-    first(shared)
-    shared.add_(20)
-    second(shared)
-    assert torch.equal(
-        snapshots[0], torch.tensor([[[3, 1], [13, 11]], [[4, 2], [14, 12]]])
-    )
-    assert capture.snapshot(2).tolist() == [
-        [[0, 0], [20, 20]],
-        [[0, 0], [20, 20]],
-    ]
-    capture.close()
-
-
-def test_snapshot_is_independent_of_the_capture_buffer(capture_config):
+@pytest.mark.parametrize("num_rows", [0, 1, 2])
+def test_snapshots_survive_capture_buffer_reuse(capture_config, num_rows):
     source = CaptureSource(2)
     capture = IndexerCapturer(source, capture_config)
-    capture.device_buffer.fill_(7)
-    snapshot = capture.snapshot(len(capture.device_buffer))
+    rows = torch.tensor([[3, 1], [4, 2]], dtype=torch.int32)
+    source(rows)
+    snapshot = capture.snapshot(num_rows)
+    source(rows + 10)
+    next_snapshot = capture.snapshot(2)
 
-    capture.device_buffer.fill_(123)
-
-    assert snapshot.tolist() == [[[7, 7]], [[7, 7]]]
-    assert snapshot.data_ptr() != capture.device_buffer.data_ptr()
-    capture.close()
-
-
-def test_snapshots_of_different_sizes_stay_independent(capture_config):
-    capture = IndexerCapturer(CaptureSource(2), capture_config)
-    capture.device_buffer[:2] = torch.arange(2, dtype=torch.int32)[:, None, None]
-    small = capture.snapshot(1)
-    large = capture.snapshot(2)
-
-    capture.device_buffer.zero_()
-
-    assert small.shape == (1, 1, 2)
-    assert large.shape == (2, 1, 2)
-    assert small.tolist() == [[[0, 0]]]
-    assert large[:, 0, 0].tolist() == [0, 1]
-    assert small.data_ptr() != large.data_ptr()
+    assert snapshot.shape == (num_rows, 1, 2)
+    torch.testing.assert_close(snapshot[:, 0], rows[:num_rows])
+    torch.testing.assert_close(next_snapshot[:, 0], rows + 10)
     capture.close()
 
 
 def test_close_unbinds_sources_and_preserves_later_binding(capture_config):
     source = CaptureSource(2)
     capture = IndexerCapturer(source, capture_config)
-    bind_indexer_capturer(source, capture)
     with pytest.raises(ValueError, match="already bound"):
-        bind_indexer_capturer(source, capture)
+        IndexerCapturer(source, capture_config)
     capture.close()
     assert source.indexer_capture is None
     rebound = IndexerCapturer(source, capture_config)
-    bind_indexer_capturer(source, rebound)
     assert rebound.namespace == capture.namespace
     capture.close()
     source(torch.tensor([[7, 1]], dtype=torch.int32))
@@ -251,10 +208,8 @@ def test_bind_rolls_back_sinks_installed_before_a_failure(capture_config):
     first = CaptureSource(2)
     rejecting = _RejectingSource(5)
     model = torch.nn.ModuleList([first, rejecting])
-    capture = IndexerCapturer(model, capture_config)
-
     with pytest.raises(RuntimeError, match="sink rejected"):
-        bind_indexer_capturer(model, capture)
+        IndexerCapturer(model, capture_config)
 
     assert first.indexer_capture is None
     assert rejecting.indexer_capture is None

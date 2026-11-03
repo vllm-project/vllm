@@ -38,14 +38,20 @@ class _CaptureBinding:
     installed: Any
     setter: Callable[[Any], None] | None = None
 
+    def install(self) -> None:
+        self._set(self.installed)
+
+    def _set(self, value: Any) -> None:
+        if self.setter is None:
+            setattr(self.target, self.attribute, value)
+        else:
+            self.setter(value)
+
     def release(self) -> None:
         """Remove the callback only if this binding still owns the slot."""
         if getattr(self.target, self.attribute, None) is not self.installed:
             return
-        if self.setter is None:
-            setattr(self.target, self.attribute, None)
-        else:
-            self.setter(None)
+        self._set(None)
 
 
 def _get_routed_experts_shape(vllm_config: VllmConfig) -> tuple[int, int, int]:
@@ -218,9 +224,9 @@ class RoutedExpertsSink:
         self.capture_fn = capture_fn
 
 
-def _get_routed_experts_targets(
-    model: torch.nn.Module,
-) -> list[tuple[int, str, Any]]:
+def _get_routed_experts_bindings(
+    model: torch.nn.Module, capturer: RoutedExpertsCapturer
+) -> list[_CaptureBinding]:
     """Validate every capture target before installing any callback."""
     from vllm.model_executor.layers.fused_moe.layer import MoERunner
     from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -228,14 +234,18 @@ def _get_routed_experts_targets(
     )
     from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
-    targets: list[tuple[int, str, Any]] = []
+    bindings: list[_CaptureBinding] = []
     for module in model.modules():
         if isinstance(module, RoutedExpertsCaptureSource):
             if module.capture_fn is not None:
                 raise ValueError(
                     f"Routed-experts source layer {module.layer_id} is already bound"
                 )
-            targets.append((module.layer_id, "source", module))
+            bindings.append(
+                _CaptureBinding(
+                    module, "capture_fn", partial(capturer.capture, module.layer_id)
+                )
+            )
             continue
         if not isinstance(module, MoERunner):
             continue
@@ -256,22 +266,38 @@ def _get_routed_experts_targets(
                     "Routed-experts monolithic layer "
                     f"{module.layer_id} is already bound"
                 )
-            targets.append((module.layer_id, "monolithic", module))
+            bindings.append(
+                _CaptureBinding(
+                    module.routed_experts,
+                    "routing_sink",
+                    RoutedExpertsSink(
+                        fused_experts.moe_config,
+                        partial(capturer.capture, module.layer_id),
+                    ),
+                )
+            )
         elif isinstance(module.router, BaseRouter):
             if module.router.capture_fn is not None:
                 raise ValueError(
                     f"Routed-experts router layer {module.layer_id} is already bound"
                 )
-            targets.append((module.layer_id, "router", module))
+            bindings.append(
+                _CaptureBinding(
+                    module.router,
+                    "capture_fn",
+                    partial(capturer.capture, module.layer_id),
+                    module.router.set_capture_fn,
+                )
+            )
         else:
             raise ValueError(
                 "Routed-experts capture is not supported with router "
                 f"{type(module.router).__name__}."
             )
 
-    if not targets:
+    if not bindings:
         raise ValueError("No supported MoE router found for routed-experts capture.")
-    return targets
+    return bindings
 
 
 def bind_routed_experts_capturer(
@@ -289,33 +315,10 @@ def bind_routed_experts_capturer(
     if capturer._bindings:
         raise ValueError("Routed-experts capturer is already bound")
 
-    targets = _get_routed_experts_targets(model)
-    bindings: list[_CaptureBinding] = []
+    bindings = _get_routed_experts_bindings(model, capturer)
     try:
-        for layer_id, kind, module in targets:
-            capture_fn = partial(capturer.capture, layer_id)
-            if kind == "source":
-                module.capture_fn = capture_fn
-                bindings.append(_CaptureBinding(module, "capture_fn", capture_fn))
-            elif kind == "monolithic":
-                moe_config = (
-                    module._quant_method.moe_kernel.impl.fused_experts.moe_config
-                )
-                sink = RoutedExpertsSink(moe_config, capture_fn)
-                module.routed_experts.routing_sink = sink
-                bindings.append(
-                    _CaptureBinding(module.routed_experts, "routing_sink", sink)
-                )
-            else:
-                module.router.set_capture_fn(capture_fn)
-                bindings.append(
-                    _CaptureBinding(
-                        module.router,
-                        "capture_fn",
-                        capture_fn,
-                        module.router.set_capture_fn,
-                    )
-                )
+        for binding in bindings:
+            binding.install()
     except BaseException:
         for binding in reversed(bindings):
             binding.release()
