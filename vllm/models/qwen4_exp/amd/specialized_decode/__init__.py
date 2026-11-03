@@ -4,5 +4,5 @@
 
 ``hooks`` holds the model's entry points, ``runtime`` the refusals, the plan of
 each step and the executor, ``wide`` the persistent kernels for decode steps
-of 32 to 128 rows (one launch per GDN layer, two around vLLM's attention on a
+of 1 to 128 rows (one launch per GDN layer, two around the QSA attention on a
 QSA layer). See ``README.md``."""

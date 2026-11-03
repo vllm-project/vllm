@@ -1094,7 +1094,7 @@ def _moe_kernel(rows, codec="bf16"):
     @fx.union
     class PhaseLds:
         gemm: GemmLds
-        moe: MoeLds
+        moe: MoeLds  # type: ignore[valid-type]
 
     @fx.struct
     class Smem:

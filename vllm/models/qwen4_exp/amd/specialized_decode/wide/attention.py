@@ -193,7 +193,7 @@ def build(key: AttnBuild):
             if const_expr(key.dense):
                 # a short row's list is its blocks in order: no load (masked)
                 v = ld(sel, row * sel_stride + bi, Int32, nbytes=sel_bytes, mask=listed)
-                selected.append(listed.select(v, bi))
+                selected.append(listed.select(v, bi))  # type: ignore[union-attr]
             else:
                 selected.append(ld(sel, row * sel_stride + bi, Int32))
         pos = []

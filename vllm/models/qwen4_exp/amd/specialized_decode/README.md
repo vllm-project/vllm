@@ -8,7 +8,7 @@ persistent FlyDSL launch per decoder layer (`runtime/decode.py`,
 | layer | launches | phases |
 | --- | --- | --- |
 | GDN (36) | `gdn` | [stats] attn mix, GDN projection + conv, gated delta rule + gated norm, out_proj + all-reduce + combine, MLP mix, router, routing + MXFP4 quantization, experts, MoE combine + all-reduce + combine |
-| QSA (12) | `qsa_front`, vLLM's QSA, `qsa_back` | attn mix → x; vLLM's qkv_proj and QSA attention (indexer, paged KV); gated o_proj + all-reduce + combine and the MLP half |
+| QSA (12) | `qsa_front`, indexer, attention, `qsa_back` | attn mix → x, qkv_proj + index_qk_proj; vLLM's fused prepare, the indexer scores and the top-k select (`wide/indexer.py`, `wide/select.py`); sparse attention on the paged KV (`wide/attention.py`); gated o_proj + all-reduce + combine and the MLP half |
 
 The embedding, the PLE layer, the final mixer, the head and sampling stay
 vLLM's. Steps of a width without a build, prefill and mixed steps run vLLM's
@@ -24,7 +24,11 @@ per layer on vLLM's buffers, weights and caches in place, no multi-step
 device loop. Up to 16 rows (`tiled.RESIDENT_MAX`) a GEMM unit stages its whole
 K slice once, and a mix, and the GDN projection through the attention combine,
 each run as one phase whose CTAs hand data over as tagged pairs
-(`wide/stages/tagged.py`) rather than through grid barriers.
+(`wide/stages/tagged.py`) rather than through grid barriers. Up to 12 rows
+(`moe.SMALL_MAX`) the MoE takes a small-batch path: every CTA computes whole
+router logits for its gate rows, each routed or shared expert's gate/up runs
+as pieces of 32 intermediate rows spread over the grid, and 160 CTAs own the
+down projection's output rows and push the exchange lines.
 
 ## MoE schedule
 

@@ -286,7 +286,7 @@ def build(key: LayerBuild):
     @fx.union
     class PhaseLds:
         gemm: GemmLds
-        moe: MoeLds
+        moe: MoeLds  # type: ignore[valid-type]
 
     @fx.struct
     class Smem:
@@ -511,7 +511,7 @@ def build(key: LayerBuild):
                 end_phase("gdn_proj+conv")
                 gdn.recur(g, w, b, aux_f32, S, key.gdn_eps)
                 pending = end_phase("gdn_recur")
-                source = tiled.Source(scr.core, VALUE_DIM)
+                source = tiled.Source(scr.core, VALUE_DIM)  # type: ignore[assignment]
                 name = "out+allreduce+combine"
             mlp_half(back(out_w, source, VALUE_DIM, pending, name))
         if const_expr(key.kind == "qsa_back"):

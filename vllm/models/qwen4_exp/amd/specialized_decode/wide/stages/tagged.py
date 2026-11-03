@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """(value, tag) hand-offs between the CTAs of one launch, without a grid
-barrier (the narrow decode's tagged mailbox pairs).
+barrier.
 
 A producer stores each 32-bit value next to a tag, a pair a 64-bit half of
 one store (``put``); a consumer re-loads its pairs until every tag is the
