@@ -342,3 +342,21 @@ q_fp8, q_scale, kv_normed = fused_mla_dual_rms_norm_per_token_quant(
   works.
 - [Attention Backends](attention_backends.md) — attention-specific kernel
   selection.
+
+## SM90 SiLU and block-FP8 producer (experimental)
+
+The internal `vllm._custom_ops.silu_mul_fp8_sm90` helper combines BF16
+SiLU/multiply with FlashInfer SM90's 1x128 activation quantization. It returns
+packed E4M3 values and FP32 scales with logical shape `(M, K / 128)` and
+physical strides `(1, round_up(M, 4))`. All-zero groups use scale 1. These
+are not the UE8M0 scales used by the DeepGEMM branch.
+
+The default retains the final BF16 rounding of the tested compiled activation.
+`round_silu=True` additionally retains the intermediate SiLU BF16 rounding of
+the explicit CUDA activation. Callers must select the matching activation
+semantics. Automatic model/compiler integration is not enabled by this draft.
+
+Reproduce the boundary benchmark with
+`python benchmarks/kernels/benchmark_silu_mul_fp8_sm90.py` after rebuilding.
+It measures activation, quantization and GEMM together with CUDA graphs;
+it does not measure whole-model serving latency.
