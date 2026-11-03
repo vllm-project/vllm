@@ -8,6 +8,7 @@ import vllm.envs as envs
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
     TritonWarmupTensor,
 )
+from vllm.models.qwen4_exp.nvidia.ops.qsa import _is_sm120
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import round_up
@@ -106,6 +107,25 @@ def _qsa_mqa_paged_uniform_kernel(
             & (columns[:, None] < NUM_COLUMNS)
             & (columns[:, None] < visible[None, :]),
         )
+
+
+# Launch kwargs of _qsa_mqa_paged_prefill_kernel per index cache dtype; the
+# default table is tuned on GB300.
+_PREFILL_CONFIG = {
+    torch.bfloat16: dict(TILE_R=64, BLOCK_N=64, K_TILES=16, STAGES=2, num_warps=4),
+    torch.float8_e4m3fn: dict(TILE_R=32, BLOCK_N=64, K_TILES=16, STAGES=2, num_warps=8),
+}
+_SM120_PREFILL_CONFIG = {
+    torch.bfloat16: dict(TILE_R=16, BLOCK_N=64, K_TILES=4, STAGES=1, num_warps=4),
+    torch.float8_e4m3fn: dict(TILE_R=32, BLOCK_N=64, K_TILES=4, STAGES=2, num_warps=4),
+}
+
+
+def _prefill_launch_config(cache_dtype: torch.dtype) -> dict[str, int]:
+    configs = _SM120_PREFILL_CONFIG if _is_sm120() else _PREFILL_CONFIG
+    if cache_dtype == torch.float8_e4m3fn:
+        return configs[torch.float8_e4m3fn]
+    return configs[torch.bfloat16]
 
 
 @triton.jit
@@ -451,13 +471,8 @@ def _prefill_logits(
         num_queries, logits_width
     )
 
-    # tuned on GB300
-    if k_cache.dtype == torch.float8_e4m3fn:
-        TILE_R, STAGES, num_warps = 32, 2, 8
-    else:
-        TILE_R, STAGES, num_warps = 64, 2, 4
-    BLOCK_N = 64
-    K_TILES = 16
+    launch_config = _prefill_launch_config(k_cache.dtype)
+    TILE_R = launch_config["TILE_R"]
     num_requests = page_table.shape[0]
     stock_row_tiles = num_requests * triton.cdiv(
         min(num_queries, max_query_len), TILE_R
@@ -469,7 +484,7 @@ def _prefill_logits(
     grid = (
         compact_row_tiles if compact else num_requests,
         1 if compact else triton.cdiv(min(num_queries, max_query_len), TILE_R),
-        triton.cdiv(logits_width, BLOCK_N * K_TILES),
+        triton.cdiv(logits_width, launch_config["BLOCK_N"] * launch_config["K_TILES"]),
     )
     _qsa_mqa_paged_prefill_kernel[grid](
         q,
@@ -489,12 +504,8 @@ def _prefill_logits(
         PAGE_SIZE=k_cache.shape[1],
         NUM_HEADS=q.shape[1],
         HEAD_DIM=q.shape[2],
-        TILE_R=TILE_R,
-        BLOCK_N=BLOCK_N,
-        K_TILES=K_TILES,
-        STAGES=STAGES,
         COMPACT=compact,
-        num_warps=num_warps,
+        **launch_config,
     )
     return logits
 
