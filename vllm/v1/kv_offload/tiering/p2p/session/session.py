@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import contextlib
 import time
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -45,6 +45,7 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
 )
 from vllm.v1.kv_offload.tiering.p2p.session.server import (
     ServerRole,
+    StoreDrainResult,
     StoreResult,
 )
 
@@ -149,6 +150,7 @@ class P2PSession:
         self._death_reason: str | None = None
         self._peer_fault_at: float | None = None
         self._abort_ack_fault: str | None = None
+        self._registration_fault: str | None = None
 
         now = time.monotonic()
         self._connected_at: float | None = None
@@ -218,13 +220,13 @@ class P2PSession:
     def data_plane_fault(self) -> str | None:
         """The data-plane fault that ended this session, if any.
 
-        Either the transport's peer fault (see server role) or an AbortAck
-        that never arrived, which leaves this side unable to tell whether
-        the peer's WRITE stopped.
+        The transport's peer fault (see server role), an AbortAck that never
+        arrived, which leaves this side unable to tell whether the peer's
+        WRITE stopped, or a failed registration of the peer's NIXL agent.
         """
         if self._server.peer_fault is not None:
             return self._server.peer_fault
-        return self._abort_ack_fault
+        return self._abort_ack_fault or self._registration_fault
 
     @property
     def last_activity_at(self) -> float:
@@ -274,6 +276,12 @@ class P2PSession:
     ) -> None:
         """New blocks stored locally — match against pending fetch demand."""
         self._server.add_stored_blocks(kv_request_id, keys, block_ids, job_id)
+
+    def drain_stores(
+        self, kv_request_ids: Iterable[str] | None = None
+    ) -> StoreDrainResult:
+        """Withdraw queued stores, optionally for fetches arriving during drain."""
+        return self._server.drain_stores(kv_request_ids)
 
     def finish_request(self, kv_request_id: str) -> None:
         """Called when the request is finishing locally.
@@ -493,8 +501,11 @@ class P2PSession:
                 self.peer_id,
                 fault,
             )
+        # A stalled transfer would never drain, and teardown retains
+        # whatever is still running, so waiting buys nothing.
         if (
             self._server.has_inflight_transfers
+            and not self._server.transfer_stalled
             and now - self._peer_fault_at < _PEER_FAULT_DRAIN_S
         ):
             return
@@ -668,7 +679,8 @@ class P2PSession:
         Called from poll() after message dispatch. A successful
         registration releases ConnectAckMsg — the peer treats that as
         permission to send, so it must not go out earlier. A failed one
-        marks the connection dead so the manager reaps the session.
+        sends a best-effort disconnect and marks the local connection dead
+        for the manager to reap.
         """
         registration = self._pending_registration
         if registration is None or not registration.done():
@@ -682,7 +694,11 @@ class P2PSession:
                 self.peer_id,
                 exc,
             )
-            self._mark_dead(f"peer registration failed: {exc}")
+            # The peer may have registered us and be waiting for our ack. A
+            # session it keeps would ack our next ConnectMsg without sending
+            # its own, so we would look it up without ever registering it.
+            self._registration_fault = f"peer registration failed: {exc}"
+            self._disconnect(self._registration_fault)
             return
         if self._conn is not None and self._conn.alive:
             self._do_send(
