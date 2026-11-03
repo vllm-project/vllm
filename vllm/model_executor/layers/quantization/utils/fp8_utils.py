@@ -13,6 +13,9 @@ import torch
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.batch_invariant import (
+    fused_silu_mul_per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     amax_for_moe_activation_quant,
     get_fp8_min_max,
@@ -276,6 +279,22 @@ def silu_mul_quant_fp8_packed_triton(
     Without ``expert_ends``, the original dense launch configuration is used
     and the metadata loads are compiled out.
     """
+    if envs.VLLM_BATCH_INVARIANT:
+        if expert_ends is not None:
+            raise NotImplementedError(
+                "BI packed quantization does not support expert padding metadata"
+            )
+        if alpha != 1.0 or beta != 0.0:
+            raise ValueError("The BI quantization kernel requires plain SwiGLU")
+        return fused_silu_mul_per_token_group_quant_fp8(
+            input,
+            output_q=output_q,
+            group_size=group_size,
+            use_ue8m0=True,
+            clamp_limit=clamp_limit,
+            masked_m=None,
+        )
+
     assert input.dim() == 2
     assert input.is_contiguous()
 
