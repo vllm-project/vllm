@@ -52,7 +52,11 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import (
     traced,
     zeros,
 )
-from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import THREADS, WAVES
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
+    BLOCKS,
+    THREADS,
+    WAVES,
+)
 
 LANES = 64
 TILE = 16
@@ -63,6 +67,11 @@ XSTRIDE = CHUNK // 2 + 4  # LDS row stride in i32 words: 16 pad bytes stagger th
 DEPTH = 2  # chunks of loads in flight (2 beat 1 and 3 at 128 rows)
 UNROLL = 4  # K chunks up to which the chunk loop is unrolled
 RESIDENT_MAX = 16  # widths whose GEMM units stage their whole K slice once
+# widths past RESIDENT_MAX up to which a phase's weights are loaded in an
+# earlier phase (``Gemm.preload``): wider, the held registers and the drain of
+# the loads at that phase's barrier cost more than the preload hides (measured
+# at 128 rows)
+PRELOAD_ROWS = 96
 
 
 def token_tiles(rows: int) -> int:
@@ -179,12 +188,19 @@ class Fp4Weights(TraceInvariant):
             ) * i32(2) + a
         return kb * i32(self.rows) + row
 
-    def issue(self, row, chunk, g):
+    def issue(self, row, chunk, g, mask=None):
+        """The lane's 16-byte data load and its scale byte of chunk ``chunk``;
+        with ``mask`` false, no request (zeros)."""
         row = (row < i32(self.rows)).select(row, i32(self.rows - 1))
-        data = ld_i32x4(self.addr, self._data_word(row, chunk, g), self.cm)
-        code = ld(
-            self.scale, self._scale_byte(row, chunk * i32(4) + g), fx.Uint8, cm=self.cm
-        )
+        at = self._data_word(row, chunk, g)
+        if mask is None:
+            data, nbytes = ld_i32x4(self.addr, at, self.cm), None
+        else:
+            dbytes = self.rows * self.cols // 2
+            data = ld(self.addr, at, fx.Int32, 4, cm=self.cm, nbytes=dbytes, mask=mask)
+            nbytes = self.rows * (self.scale_cols if self.shuffled else self.cols // 32)
+        kb = self._scale_byte(row, chunk * i32(4) + g)
+        code = ld(self.scale, kb, fx.Uint8, cm=self.cm, nbytes=nbytes, mask=mask)
         return [data, code]
 
     @staticmethod
@@ -366,12 +382,14 @@ class Gemm(TraceInvariant):
         return self.fill(source, chunk), pre
 
     def preload(self, weights, rows, first, count: int, mask=None):
-        """The weight loads of ``run``'s first ``min(depth, count)`` chunks, to
-        issue before the phase (weights do not depend on the phase before) and
-        pass to ``run`` as ``pending``."""
+        """The weight loads ``run`` stages outside its loop (every chunk when
+        ``count`` <= UNROLL, else the first ``depth``), to issue before the
+        phase (weights do not depend on the phase before) and pass to ``run``
+        as ``pending``."""
+        n = count if count <= UNROLL else min(self.depth, count)
         return [
             [weights.issue(r, first + i32(i), self.group, mask) for r in rows]
-            for i in range(min(self.depth, count))
+            for i in range(n)
         ]
 
     def run(self, source, weights, rows, first, count: int, pending=None):
@@ -382,7 +400,8 @@ class Gemm(TraceInvariant):
         else ``preload``'s of the first chunks."""
         if self.resident:
             return self._resident(source, weights, rows, first, count, pending)
-        pre = pending or [None] * min(self.depth, count)
+        pre = list(pending or ())
+        pre += [None] * (count - len(pre))
         if count <= UNROLL:
             return self._unrolled(source, weights, rows, first, count, pre)
         return _gemm_loop(self, source, weights, rows, first, count, pre)
@@ -493,8 +512,9 @@ class Gemm(TraceInvariant):
         fx.barrier()
         for c in range(count):
             if c + depth < count:
+                nxt = c + depth
                 staged.append(
-                    self.stage(source, weights, rows, first, count, i32(c + depth))
+                    self.stage(source, weights, rows, first, count, i32(nxt), pre[nxt])
                 )
             a = [weights.operands(w) for w in staged[c][1]]
             acc = self.multiply(i32(c % 2), a, acc, weights)
@@ -603,6 +623,18 @@ def issue_unit(bid, tid, weights, plan):
     return issue_chunks(weights, rows, first, plan.per, group)
 
 
+def unit_preload(gemm, weights, plan, bid):
+    """Past ``RESIDENT_MAX``, the weight loads of ``run``'s first chunks
+    (``Gemm.preload``) of CTA ``bid``'s unit of ``plan``, for
+    ``gemm_units(pending=...)``: issued in an earlier phase (weights do not
+    depend on it), so they land while the grid waits. ``plan`` has at most one
+    unit a CTA; a CTA without one issues no request."""
+    assert plan.units <= BLOCKS, (plan.units, BLOCKS)
+    live = bid < i32(plan.units)
+    _, split, _, rows = unit_rows(plan, live.select(bid, i32(0)), gemm.tid)
+    return gemm.preload(weights, rows, split * i32(plan.per), plan.per, live)
+
+
 @traced
 def _gemm_unit(gemm, source, weights, plan, epilogue, after, unit, pending):
     group, split, firsts, rows = unit_rows(plan, unit, gemm.tid)
@@ -621,7 +653,8 @@ def gemm_units(
     ``bid, bid + workers, ...``. ``epilogue(unit, split, first_row, lane, acc)``
     finishes a weight tile's accumulators; ``after(group, split)``, when given,
     runs once a unit behind all waves' epilogues (CTA-uniform). ``pending``:
-    the first unit's weights (``issue_unit``; resident widths)."""
+    the first unit's weights, ``issue_unit``'s at the resident widths,
+    ``unit_preload``'s at the others."""
     start = bid
     if const_expr(pending is not None):
         if bid < i32(plan.units):

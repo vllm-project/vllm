@@ -354,6 +354,13 @@ def _hc_kernel(rows, codec="bf16", combine=True, cold=False):
         sm = fx.SharedAllocator().allocate(Smem).peek()
         g = Grid(tid, bid, s0, s1, folds, health, fx.Int64(0), sm.word.ptr)
         prologue(g)
+        # past the resident widths the down weights issued during the stats, as
+        # the layer kernels do up to ``tiled.PRELOAD_ROWS``
+        pre = None
+        if fx.const_expr(not tiled.resident(rows)):
+            down_w = hc.down_weights(w_di)
+            early = tiled.Gemm(sm.stage.ptr, rows, tid, chunks=chunks)
+            pre = tiled.unit_preload(early, down_w, hc.down_plan(rows), g.bid)
         hc.stats(g, state, rrms, rows, EPS)
         gemm = tiled.Gemm(sm.stage.ptr, rows, tid, chunks=chunks)
         up = tiled.Gemm(sm.stage.ptr, rows, tid, k_total=LOWRANK, chunks=chunks)
@@ -383,12 +390,12 @@ def _hc_kernel(rows, codec="bf16", combine=True, cold=False):
             )
         else:
             grid_sync(g)
-            hc.mix_down(g, gemm, state, rrms, norm_w, w_di, part)
+            pre_up = hc.UpLoads(g, up, w_up, state, rrms, norm_w, rows)
+            hc.mix_down(g, gemm, state, rrms, norm_w, w_di, part, pre)
             grid_sync(g)
-            pre = hc.UpLoads(g, up, w_up, state, rrms, norm_w, rows)
             hc.mix_reduce(g, part, down, inj, rows, True)
             grid_sync(g)
-            hc.mix_up(g, up, sm.red.ptr, down, w_up, x_out, rows, pre)
+            hc.mix_up(g, up, sm.red.ptr, down, w_up, x_out, rows, pre_up)
         if fx.const_expr(combine):
             grid_sync(g)
             # y through a one-rank exchange (a 64-column group a CTA), then the
@@ -851,10 +858,17 @@ def _gdn_kernel(rows, out=True):
             out_w = tiled.issue_unit(bid, tid, weights, gdn.out_plan())
             source = tagged.Pairs(g, core, VALUE_DIM, gtag)
         else:
-            gdn.proj(g, gemm, w, b, rows, 0)
+            # each GEMM's first weights preloaded, out_proj's during the
+            # recurrence, as the layer kernels do up to ``tiled.PRELOAD_ROWS``
+            proj_w = tiled.unit_preload(
+                gemm, gdn.proj_weights(w), gdn.proj_plan(), g.bid
+            )
+            gdn.proj(g, gemm, w, b, rows, 0, proj_w)
             grid_sync(g)
-            gdn.recur(g, w, b, sm.red.ptr, rows, EPS)
             out_w = None
+            if fx.const_expr(out):
+                out_w = tiled.unit_preload(gemm, weights, gdn.out_plan(), g.bid)
+            gdn.recur(g, w, b, sm.red.ptr, rows, EPS)
             source = tiled.Source(core, VALUE_DIM)
             if fx.const_expr(out):
                 grid_sync(g)
@@ -1131,16 +1145,24 @@ def _moe_kernel(rows, codec="bf16"):
         g = Grid(tid, bid, s0, s1, folds, health, fx.Int64(0), sm.word.ptr)
         prologue(g)
         tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 9
+        gemm = tiled.Gemm(ph.gemm.peek().stage.ptr, rows, tid)
+        # past the resident widths the router's weights issued ahead, as the
+        # layer kernels do up to ``tiled.PRELOAD_ROWS``
+        pre = None
+        if fx.const_expr(not tiled.resident(rows)):
+            router_w = moe.router_weights(w_gate)
+            pre = tiled.unit_preload(gemm, router_w, moe.router_plan(), g.bid)
         moe.mlp(
             g,
             shape,
-            tiled.Gemm(ph.gemm.peek().stage.ptr, rows, tid),
+            gemm,
             ph.moe.peek(),
             x,
             moe.Weights(w_gate, w13, w13s, w2, w2s),
             moe.Bufs(part, route, x4, x4s, mpart, mpart2, flags),
             ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 2, tag, rows, codec),
             lambda name: grid_sync(g),
+            pre,
         )
 
     @flyc.jit

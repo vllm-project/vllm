@@ -144,8 +144,9 @@ def proj(g, gemm, w, b, rows: int, fold0: int, pending=None, tag=None):
     ``shuffled`` its layout), ``ba`` (bf16), ``conv`` ([CONV_DIM, 4] bf16);
     ``b``: ``x``, ``qkv``, ``z``, ``ba`` (partials), ``part``, ``st_idx``,
     ``conv_state`` (a slot [3, CONV_DIM] bf16, slots ``conv_stride`` elements
-    apart). Fold counters ``fold0 ..``. ``pending`` (resident widths): the
-    first unit's weights (``proj_issue``).
+    apart). Fold counters ``fold0 ..``. ``pending``: the first unit's weights,
+    at the resident widths ``proj_issue``'s, else the CTA's
+    ``tiled.unit_preload`` of ``proj_weights``.
 
     At the resident widths the [b | a] chunk ``c`` is multiplied by the unit
     of split ``c // per`` and group ``c % per``, whose stage holds it, before
@@ -163,7 +164,7 @@ def proj(g, gemm, w, b, rows: int, fold0: int, pending=None, tag=None):
     epilogue, after = tiled.fold(g, gemm, plan, b.part, fold0, finish)
     if not gemm.resident:
         tiled.gemm_units(
-            g.bid, BLOCKS, gemm, source, proj_weights(w), plan, epilogue, after
+            g.bid, BLOCKS, gemm, source, proj_weights(w), plan, epilogue, after, pending
         )
         ba_units(g, gemm, w, b, plan.units % BLOCKS)
         return
@@ -776,7 +777,8 @@ def out(g, gemm, weights, source, part, tile, xch, k: int, fold0: int, pending=N
     """``source @ weights.T`` (K = ``k``) to the exchange ``xch``: each
     64-column group's last arriving unit sums its six slices into the LDS
     ``tile`` and pushes the group's lines. ``pending``: the first unit's
-    weights (``tiled.issue_unit`` of ``weights`` and ``out_plan(k)``)."""
+    weights, at the resident widths ``tiled.issue_unit``'s of ``weights`` and
+    ``out_plan(k)``, else the CTA's ``tiled.unit_preload`` of them."""
     plan = out_plan(k)
 
     def finish(group, first, lane, acc):

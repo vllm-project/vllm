@@ -138,17 +138,24 @@ class NormedState(tiled.Source):
         return pack_bf16x8(out)
 
 
-def mix_down(g, gemm, state, rrms, norm_w, w_di, part):
-    """``[down | inject]`` partials of every split to ``part``."""
+def down_weights(w_di):
+    return tiled.Bf16Weights(w_di, DOWN_ROWS, HC_HIDDEN)
+
+
+def mix_down(g, gemm, state, rrms, norm_w, w_di, part, pending=None):
+    """``[down | inject]`` partials of every split to ``part``; ``pending``:
+    the CTA's ``tiled.unit_preload`` of ``down_weights`` (past
+    ``tiled.RESIDENT_MAX``)."""
     plan = down_plan(gemm.batch)
     tiled.gemm_units(
         g.bid,
         BLOCKS,
         gemm,
         NormedState(state, rrms, norm_w),
-        tiled.Bf16Weights(w_di, DOWN_ROWS, HC_HIDDEN),
+        down_weights(w_di),
         plan,
         tiled.partial_epilogue(gemm, plan, part),
+        pending=pending,
     )
 
 
@@ -350,10 +357,12 @@ def mix_reduce(g, part, down, inj, rows: int, inject: bool):
 class UpLoads(TraceInvariant):
     """The loads of the CTA's mix_up unit (a CTA has at most one) that do not
     depend on ``down``: the first chunks of its W_up rows (``Gemm.preload``)
-    and its epilogue's norm weight, state and rrms. Issued as mix_reduce
-    starts (``mix_up`` waits only for ``down``), so they land while the grid
-    waits for the reduce; a CTA with no unit issues no request. Not at the
-    resident widths, whose mix is one phase (``mix_resident``)."""
+    and its epilogue's norm weight, state and rrms (final before mix_down,
+    which reads them too). ``mix_up`` waits only for ``down``, so they are
+    issued early: up to ``tiled.PRELOAD_ROWS`` before mix_down, landing during
+    its GEMM, and above that as mix_reduce starts, landing while the grid waits
+    for the reduce. A CTA with no unit issues no request. Not at the resident
+    widths, whose mix is one phase (``mix_resident``)."""
 
     def __init__(self, g, gemm, w_up, state, rrms, norm_w, rows: int):
         live = g.bid < i32(UP_UNITS)

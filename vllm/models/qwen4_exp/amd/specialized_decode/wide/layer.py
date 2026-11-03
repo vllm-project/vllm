@@ -387,7 +387,25 @@ def build(key: LayerBuild):
             tag = ep * 128 + layer * 2 + kind + 1
             return ex_.Exchange(bases, own, rank, tp, slot, tag, S, key.allreduce)
 
-        def mix(tag, kind, norm, di, up, inj, pending=None, then=None):
+        # Past ``tiled.RESIDENT_MAX`` and up to ``tiled.PRELOAD_ROWS``, a GEMM
+        # phase's static weights are issued in an earlier phase, where the grid
+        # waits (``tiled.unit_preload``), and reach the GEMM as its
+        # ``pending``: mix_up's while mix_down runs (they land in its GEMM, not
+        # at the reduce's barrier), the GDN input projection's and the router's
+        # while mix_reduce runs, out_proj's while the recurrence runs, the MLP
+        # mix's W_di while the attention combine waits for the peer. Above it,
+        # mix_up's loads are issued as mix_reduce starts (``hc.UpLoads``).
+        early = tiled.RESIDENT_MAX < S <= tiled.PRELOAD_ROWS
+
+        def ahead(weights, plan):
+            return tiled.unit_preload(gemm, weights, plan, g.bid) if early else None
+
+        def mix(tag, kind, norm, di, up, inj, pending=None, then=None, nxt=None):
+            """``pending``: the down GEMM's first weights in flight, at the
+            resident widths ``hc.mix_issue``'s, else ``ahead``'s. The next
+            GEMM's are issued by ``then()`` inside the last barrier at the
+            resident widths, by ``ahead(*nxt)`` as mix_reduce starts at the
+            others, and returned."""
             if const_expr(tiled.resident(S)):
                 hc.mix_resident(
                     g,
@@ -407,25 +425,35 @@ def build(key: LayerBuild):
                     pending,
                 )
                 return end_phase(f"{tag}.mix_down+up", then)
-            hc.mix_down(g, gemm, state, scr.rrms, norm, di, scr.part)
+            if const_expr(early):
+                pre = hc.UpLoads(g, up_gemm, up, state, scr.rrms, norm, S)
+            hc.mix_down(g, gemm, state, scr.rrms, norm, di, scr.part, pending)
             end_phase(f"{tag}.mix_down")
-            pre = hc.UpLoads(g, up_gemm, up, state, scr.rrms, norm, S)
+            pre_next = None if nxt is None else ahead(*nxt)
+            if const_expr(not early):
+                pre = hc.UpLoads(g, up_gemm, up, state, scr.rrms, norm, S)
             hc.mix_reduce(g, scr.part, scr.down, inj, S, True)
             end_phase(f"{tag}.mix_reduce")
             hc.mix_up(g, up_gemm, aux_f32, scr.down, up, x, S, pre)
-            return end_phase(f"{tag}.mix_up", then)
+            end_phase(f"{tag}.mix_up")
+            return pre_next
 
         def back(weights, source, k, pending=None, name="out+allreduce+combine"):
             xch = exchange(ATTN)
             tile = ex_.GroupTile(gl.aux.ptr, S)
             gdn.out(g, gemm, weights, source, scr.part, tile, xch, k, 0, pending)
+            pre_down = ahead(hc.down_weights(m_di), hc.down_plan(S))
             hc.combine(g, xch, state, scr.inj_a, scr.rrms, S, key.hc_eps)
-            return end_phase(name, lambda: hc.mix_issue(g, m_di, m_up, S))
+            issued = end_phase(name, lambda: hc.mix_issue(g, m_di, m_up, S))
+            return issued if tiled.resident(S) else pre_down
 
         def mlp_half(pending):
             mw = moe.Weights(w_gate, w13, w13s, w2, w2s)
             pre = moe.prefetch(g, shape, mw)  # in flight through the mix
-            mix("mlp", MLP, m_norm, m_di, m_up, scr.inj_m, pending)
+            router_w = (moe.router_weights(w_gate), moe.router_plan())
+            routed = mix(
+                "mlp", MLP, m_norm, m_di, m_up, scr.inj_m, pending, nxt=router_w
+            )
             xch = exchange(MLP)
             moe.mlp(
                 g,
@@ -445,7 +473,7 @@ def build(key: LayerBuild):
                 ),
                 xch,
                 end_phase,
-                pre,
+                pre if moe.small(S) else routed,
             )
             hc.combine(g, xch, state, scr.inj_m, scr.rrms, S, key.hc_eps)
             if const_expr(key.trace):
@@ -453,8 +481,10 @@ def build(key: LayerBuild):
 
         down_w = None
         if const_expr(key.stats):
+            pre_attn = ahead(hc.down_weights(a_di), hc.down_plan(S))
             hc.stats(g, state, scr.rrms, S, key.hc_eps)
-            down_w = end_phase("stats", lambda: hc.mix_issue(g, a_di, a_up, S))
+            issued = end_phase("stats", lambda: hc.mix_issue(g, a_di, a_up, S))
+            down_w = issued if tiled.resident(S) else pre_attn
         if const_expr(key.kind == "qsa_front"):
             mix("attn", ATTN, a_norm, a_di, a_up, scr.inj_a, down_w)
             qsa_.proj(g, gemm, w_qkv, w_ix, x, qkv_out, ix_out, scr.part, S)
@@ -493,6 +523,7 @@ def build(key: LayerBuild):
                 scr.inj_a,
                 down_w,
                 lambda: gdn.proj_issue(g, w),
+                (gdn.proj_weights(w), gdn.proj_plan()),
             )
             out_w = tiled.Fp4Weights(
                 w_out, w_out_s, HIDDEN, VALUE_DIM, key.out_shuffled
@@ -510,8 +541,9 @@ def build(key: LayerBuild):
             else:
                 gdn.proj(g, gemm, w, b, S, 0, proj_w)
                 end_phase("gdn_proj+conv")
+                pending = ahead(out_w, gdn.out_plan())  # lands under the recurrence
                 gdn.recur(g, w, b, aux_f32, S, key.gdn_eps)
-                pending = end_phase("gdn_recur")
+                end_phase("gdn_recur")
                 source = tiled.Source(scr.core, VALUE_DIM)  # type: ignore[assignment]
                 name = "out+allreduce+combine"
             mlp_half(back(out_w, source, VALUE_DIM, pending, name))

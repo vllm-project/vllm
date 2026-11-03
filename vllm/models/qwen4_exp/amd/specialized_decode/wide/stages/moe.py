@@ -149,18 +149,24 @@ def lds_words(shape: Shape) -> LdsWords:
 # --------------------------------------------------------------------------
 
 
-def router(g, gemm, w_gate, x, part):
+def router_weights(w_gate):
+    return tiled.Bf16Weights(w_gate, E_ALL, HIDDEN)
+
+
+def router(g, gemm, w_gate, x, part, pending=None):
     """The router logits' K-slice partials to ``part``. ``w_gate``: the 513 x
-    HIDDEN bf16 gate with the shared expert's gate as its last row."""
+    HIDDEN bf16 gate with the shared expert's gate as its last row.
+    ``pending``: the CTA's ``tiled.unit_preload`` of ``router_weights``."""
     plan = router_plan()
     tiled.gemm_units(
         g.bid,
         BLOCKS,
         gemm,
         tiled.Source(x, HIDDEN),
-        tiled.Bf16Weights(w_gate, E_ALL, HIDDEN),
+        router_weights(w_gate),
         plan,
         tiled.partial_epilogue(gemm, plan, part),
+        pending=pending,
     )
 
 
@@ -899,8 +905,9 @@ def lds_struct(s: Shape):
 def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, pre=None):
     """The MoE of ``x`` ([rows, HIDDEN] bf16) into exchange ``xch``: every phase
     of ``phase_names``, ``end_phase(name)`` after each but the last. ``ml``:
-    the ``lds_struct`` view; ``pre``: ``prefetch``'s loads (issued here if
-    None)."""
+    the ``lds_struct`` view; ``pre``: the router's weights in flight, on the
+    small path ``prefetch``'s (issued here if None), else the CTA's
+    ``tiled.unit_preload`` of ``router_weights`` (or None)."""
     names = phase_names(s.rows)
     if const_expr(small(s.rows)):
         work = {k: ml.work.ptr + v for k, v in small_work(s).items() if k != "words"}
@@ -921,7 +928,7 @@ def mlp(g, s: Shape, gemm, ml, x, w: Weights, b: Bufs, xch, end_phase, pre=None)
         end_phase(names[1])
         small_down(g, s, lds, w, b, sc, xch)
         return
-    router(g, gemm, w.w_gate, x, b.part)
+    router(g, gemm, w.w_gate, x, b.part, pre)
     end_phase(names[0])
     quantize_rows(g, x, b.x4, b.x4s, s.rows)
     route(g, b.part, b.route, s.rows)
