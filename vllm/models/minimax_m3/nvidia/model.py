@@ -130,6 +130,10 @@ from vllm.models.minimax_m3.common.sparse_attention import (
     select_main_backend_and_impl_cls,
 )
 from vllm.models.minimax_m3.common.vision_tower import MiniMaxVLVisionModel
+from vllm.models.minimax_m3.nvidia.specialized_decode import (
+    captures_pure_decode,
+    specialized_decode_config,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -143,6 +147,7 @@ from vllm.v1.kv_cache_interface import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.kernels.linear.cute_dsl.gemm_rs_ar import GemmRsAr
+    from vllm.models.minimax_m3.nvidia.specialized_decode.moe import LowBatchFfn
 
 logger = init_logger(__name__)
 
@@ -560,6 +565,9 @@ class MiniMaxM3MoE(nn.Module):
         )
 
         self.shared_experts: MiniMaxM3MLP | None = None
+        # Set by MiniMaxM3Model under decode_backend=latency_specialized.
+        self.use_low_batch_ffn = False
+        self.low_batch_ffn: LowBatchFfn | None = None
         if self.use_mega_moe:
             self._init_mega_moe_experts(config, quant_config, prefix)
             return
@@ -695,8 +703,19 @@ class MiniMaxM3MoE(nn.Module):
             and self.experts.moe_config.should_defer_moe_finalize(num_tokens)
         )
 
+    def process_weights_after_loading(self) -> None:
+        if self.use_low_batch_ffn:
+            from vllm.models.minimax_m3.nvidia.specialized_decode.moe import (
+                build_low_batch_ffn,
+            )
+
+            self.low_batch_ffn = build_low_batch_ffn(self)
+
     def forward_unfinalized(self, hidden_states: torch.Tensor) -> MoEOutput:
         """``forward`` with the routed top-k reduction and all-reduce left open."""
+        ffn = self.low_batch_ffn
+        if ffn is not None and ffn.accepts(hidden_states) and captures_pure_decode():
+            return ffn.run(hidden_states)
         router_logits, _ = self.gate(hidden_states)
         # The runner's custom op returns tensors only, so run its body directly.
         shared_output, routed = _unpack(
@@ -1525,6 +1544,10 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.fuse_final_norm_allreduce = prev_defers
         if current_platform.is_cuda():
             self._init_fused_moe_finalize(vllm_config)
+        if specialized_decode_config(vllm_config):
+            for layer in self.layers[self.start_layer : self.end_layer]:
+                if layer.is_moe_layer:
+                    layer.block_sparse_moe.use_low_batch_ffn = True
 
     def _init_fused_moe_finalize(self, vllm_config: VllmConfig) -> None:
         """Let small batches leave a MoE's top-k finalize to the next layer's
