@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.quantization.utils.csf_scales import (
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     encode_csf_scales,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
