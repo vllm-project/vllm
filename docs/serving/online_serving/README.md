@@ -27,6 +27,20 @@ We currently support the following OpenAI APIs:
 
 - Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
 
+`/v1/messages` also accepts these vLLM-specific fields in the JSON request
+body (or via an SDK's `extra_body`):
+
+- `min_tokens` (default `0`): minimum number of output tokens before EOS or
+  stop-token IDs can be generated. Must be nonnegative and no greater than
+  the effective maximum output length.
+- `ignore_eos` (default `false`): continue generation when EOS is encountered.
+  Other stopping conditions, including `max_tokens`, still apply.
+
+For a one-token prefill request, a P/D proxy can send `max_tokens: 1` and
+`min_tokens: 1` to suppress first-token EOS. Apply these overrides only to the
+prefill request; preserve the client's stopping settings for decode. These
+fields do not themselves configure KV transfer or add P/D support to a backend.
+
 ## Cohere APIs
 
 - [Cohere Embed API](../../models/pooling_models/embed.md#cohere-embed-api) (`/v2/embed`)
