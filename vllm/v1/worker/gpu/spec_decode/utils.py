@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -55,18 +56,32 @@ def get_pp_safe_draft_load_config(load_config: LoadConfig) -> LoadConfig:
     return load_config
 
 
+@dataclass(slots=True)
+class CopyBarrier:
+    # Shared barrier state for one asynchronous copy.
+    copy_event: torch.cuda.Event | None
+
+
+@dataclass(slots=True)
+class DraftTokens:
+    ids: np.ndarray
+    copy_barrier: CopyBarrier
+
+
 class DraftTokensHandler:
-    def __init__(self, device: torch.device | None = None):
+    def __init__(self, max_concurrent_batches: int, device: torch.device | None = None):
         self.device = device
         self.copy_stream = new_d2h_stream(device)
-        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
-        self.copy_event = torch.cuda.Event(blocking=True)
-        self._copy_pending = False
+        # Blocking (sleep) events to avoid busy-polling the CUDA driver lock.
+        self._copy_events: list[torch.cuda.Event] = [
+            torch.cuda.Event(blocking=True) for _ in range(max_concurrent_batches)
+        ]
+        self._next_copy_event = 0
 
         # Latest drafts per live request: a row view into an async-copied
-        # pinned array (synced in get_draft_tokens), or just the draft width
-        # when the scheduler doesn't need the token ids.
-        self._draft_tokens_by_req: dict[str, np.ndarray | int] = {}
+        # pinned array and associated barrier, or just the draft width when
+        # the scheduler doesn't need the token ids.
+        self._draft_tokens_by_req: dict[str, DraftTokens | int] = {}
         # Requests whose drafts the scheduler will fetch for the latest step's
         # structured-output grammar bitmask; None means all requests.
         self._spec_decode_req_ids: Iterable[str] | None = None
@@ -93,6 +108,8 @@ class DraftTokensHandler:
 
         # For spec decoding + structured outputs, we must transfer the
         # draft tokens back to the scheduler for grammar validation.
+        copy_event = self._copy_events[self._next_copy_event]
+        self._next_copy_event = (self._next_copy_event + 1) % len(self._copy_events)
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
@@ -101,11 +118,16 @@ class DraftTokensHandler:
             # copy_stream; without record_stream, the caching allocator may reuse its
             # memory before the async copy executes.
             draft_tokens.record_stream(self.copy_stream)
-            self.copy_event.record()
-            self._copy_pending = True
+            copy_event.record()
 
+        copy_barrier = CopyBarrier(copy_event)
         for req_id, row in zip(input_batch.req_ids, draft_tokens_np):
-            self._draft_tokens_by_req[req_id] = row
+            draft_tokens = self._draft_tokens_by_req.get(req_id, None)
+            if isinstance(draft_tokens, DraftTokens):
+                draft_tokens.ids = row
+                draft_tokens.copy_barrier = copy_barrier
+            else:
+                self._draft_tokens_by_req[req_id] = DraftTokens(row, copy_barrier)
 
     def discard(self, req_id: str) -> None:
         self._draft_tokens_by_req.pop(req_id, None)
@@ -114,28 +136,34 @@ class DraftTokensHandler:
         """Return the latest drafts needed for the current step's grammar bitmask.
         Requests without retained drafts are omitted.
         """
-        if self._copy_pending:
-            self.copy_event.synchronize()
-            self._copy_pending = False
+        out_req_ids: list[str] = []
+        out_draft_tokens: list[list[int]] = []
+        request_ids = list(
+            self._spec_decode_req_ids
+            if self._spec_decode_req_ids is not None
+            else self._draft_tokens_by_req
+        )
+        for req_id in request_ids:
+            draft_tokens = self._draft_tokens_by_req.get(req_id, None)
+            if draft_tokens is None:
+                continue
 
-        drafts_by_req = self._draft_tokens_by_req
-        req_ids = self._spec_decode_req_ids
-        if req_ids is None:
-            out_req_ids = list(drafts_by_req)
-        else:
-            out_req_ids = [req_id for req_id in req_ids if req_id in drafts_by_req]
-        draft_token_ids: list[list[int]] = []
-        for req_id in out_req_ids:
-            draft_tokens = drafts_by_req[req_id]
+            draft_token_ids: list[int]
             if isinstance(draft_tokens, int):
-                # Construct placeholders from draft token width
-                draft_tokens = [-1] * draft_tokens
+                draft_token_ids = [-1] * draft_tokens
             else:
-                # Convert numpy view to list
-                draft_tokens = draft_tokens.tolist()
-            draft_token_ids.append(draft_tokens)
+                copy_barrier = draft_tokens.copy_barrier
+                copy_event = copy_barrier.copy_event
+                if copy_event is not None:
+                    # Clear the barrier for every row from this copy
+                    copy_event.synchronize()
+                    copy_barrier.copy_event = None
+                draft_token_ids = draft_tokens.ids.tolist()
 
-        return DraftTokenIds(out_req_ids, draft_token_ids)
+            out_req_ids.append(req_id)
+            out_draft_tokens.append(draft_token_ids)
+
+        return DraftTokenIds(out_req_ids, out_draft_tokens)
 
 
 def get_parallel_drafting_token_id(hf_config) -> int:
