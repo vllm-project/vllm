@@ -10,6 +10,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
     TransferJob,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
+    OffloadingConnector,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -151,6 +154,12 @@ def _load_metadata(job_id: int, sync: bool = False) -> OffloadingConnectorMetada
     )
 
 
+def _mixed_load_metadata() -> OffloadingConnectorMetadata:
+    metadata = _load_metadata(11, sync=True)
+    metadata.load_jobs[12] = _load_metadata(12).load_jobs[12]
+    return metadata
+
+
 def _empty_metadata() -> OffloadingConnectorMetadata:
     return OffloadingConnectorMetadata(load_jobs={}, store_jobs={})
 
@@ -273,8 +282,10 @@ def test_start_kv_transfers_non_writer_still_submits_load():
     )
 
     worker.start_kv_transfers(_load_metadata(10))
+    worker.submit_deferred_loads()
 
     assert worker.worker is not None
+    worker.get_finished(set())
     worker.worker.submit_load.assert_called_once()
     assert worker.build_connector_worker_meta() is None
 
@@ -290,18 +301,20 @@ def test_load_completion(sync: bool):
     worker.start_kv_transfers(_load_metadata(11, sync=sync))
 
     assert worker.worker is not None
-    worker.worker.submit_load.assert_called_once()
-    expedited = worker.worker.submit_load.call_args.kwargs.get("expedited", False)
-    assert expedited == sync
     if sync:
+        worker.worker.submit_load.assert_called_once()
+        assert worker.worker.submit_load.call_args.kwargs["expedited"]
         worker.worker.wait.assert_called_once_with({11})
     else:
+        worker.worker.submit_load.assert_not_called()
         worker.worker.wait.assert_not_called()
 
     worker.worker.get_finished.return_value = [
         TransferResult(job_id=11, success=True, transfer_size=64, transfer_time=0.5)
     ]
+    worker.submit_deferred_loads()
     assert worker.get_finished(set()) == (set(), set() if sync else {"req"})
+    worker.worker.submit_load.assert_called_once()
     meta = worker.build_connector_worker_meta()
     assert meta is not None
     assert meta.completed_jobs == {11: 1}
@@ -351,6 +364,7 @@ def test_failed_load_fails_its_request():
     """
     worker, _ = _make_worker(_kv_cache_config(1))
     worker.start_kv_transfers(_load_metadata(12))
+    worker.submit_deferred_loads()
     worker.worker.get_finished.return_value = _failed(12)
 
     _, finished_recving = worker.get_finished(set())
@@ -372,6 +386,113 @@ def test_failed_sync_load_raises():
 
     with pytest.raises(RuntimeError, match="sync load job 13 failed"):
         worker.get_finished(set())
+
+
+def test_mixed_loads_submit_async_after_sync():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    metadata = _mixed_load_metadata()
+
+    worker.start_kv_transfers(metadata)
+
+    assert worker.worker is not None
+    assert worker.worker.submit_load.call_count == 1
+    assert worker.worker.submit_load.call_args.args[0] == 11
+    assert worker.worker.submit_load.call_args.kwargs["expedited"] is True
+    worker.worker.wait.assert_called_once_with({11})
+
+    worker.worker.get_finished.return_value = []
+    worker.submit_deferred_loads()
+    worker.get_finished(set())
+
+    assert worker.worker.submit_load.call_count == 2
+    assert worker.worker.submit_load.call_args.args[0] == 12
+    assert worker.worker.submit_load.call_args.kwargs.get("expedited", False) is False
+    worker.worker.wait.assert_called_once_with({11})
+    worker.get_finished(set())
+    assert worker.worker.submit_load.call_count == 2
+
+
+def _connector_with_worker(worker):
+    connector = OffloadingConnector.__new__(OffloadingConnector)
+    connector.connector_worker = worker
+    return connector
+
+
+def test_get_finished_submits_pure_async_load_once():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    worker.worker.get_finished.return_value = []
+    connector = _connector_with_worker(worker)
+    metadata = _load_metadata(21)
+    connector.bind_connector_metadata(metadata)
+
+    # MRv2 reaches start_load_kv from post_forward after sampling. MRv1 calls
+    # start_load_kv after forward. In both cases get_finished submits the job.
+    connector.start_load_kv(None)
+    connector.get_finished(set())
+
+    assert worker.worker.submit_load.call_count == 1
+    assert worker.worker.submit_load.call_args.args[0] == 21
+    assert not worker.worker.submit_load.call_args.kwargs.get("expedited", False)
+    worker.worker.wait.assert_not_called()
+
+
+def test_get_finished_submits_only_deferred_mixed_loads():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    worker.worker.get_finished.return_value = []
+    connector = _connector_with_worker(worker)
+    connector.bind_connector_metadata(_mixed_load_metadata())
+
+    # pre_forward starts and waits for the sync load, while staging the async
+    # load. get_finished submits the staged load at each runner's existing hook.
+    connector.start_load_kv(None)
+    assert worker.worker.submit_load.call_count == 1
+    assert worker.worker.submit_load.call_args.args[0] == 11
+    worker.worker.wait.assert_called_once_with({11})
+
+    connector.get_finished(set())
+
+    assert worker.worker.submit_load.call_count == 2
+    assert worker.worker.submit_load.call_args.args[0] == 12
+    assert not worker.worker.submit_load.call_args.kwargs.get("expedited", False)
+    worker.worker.wait.assert_called_once_with({11})
+
+
+def test_no_forward_sync_load_is_not_submitted_twice():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    connector = _connector_with_worker(worker)
+    connector.bind_connector_metadata(_load_metadata(23, sync=True))
+
+    # A no-forward step can enter start_load_kv without scheduler kwargs.
+    connector.start_load_kv(None)
+    connector.get_finished(set())
+
+    worker.worker.submit_load.assert_called_once()
+    assert worker.worker.submit_load.call_args.kwargs["expedited"] is True
+    worker.worker.wait.assert_called_once_with({23})
+
+
+def test_get_finished_submits_deferred_async_load():
+    worker, _ = _make_worker(
+        KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    )
+    worker.worker.get_finished.return_value = []
+    connector = _connector_with_worker(worker)
+    connector.bind_connector_metadata(_load_metadata(22))
+
+    connector.start_load_kv(None)
+    worker.worker.submit_load.assert_not_called()
+    connector.get_finished(set())
+
+    worker.worker.submit_load.assert_called_once()
+    assert worker.worker.submit_load.call_args.args[0] == 22
 
 
 def test_offloading_connector_worker_accepts_plugin_spec_default_layout():
