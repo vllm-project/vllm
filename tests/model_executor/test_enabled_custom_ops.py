@@ -256,7 +256,7 @@ def test_topk_gating_enabled_by_cdna(
 
 
 def test_topk_sigmoid_dispatch():
-    topk_func = dispatch_topk_sigmoid_func(use_rocm_aiter)
+    topk_func = dispatch_topk_sigmoid_func()
     assert topk_func == vllm_topk_sigmoid
 
 
