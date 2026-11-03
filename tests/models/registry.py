@@ -919,8 +919,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "LGAI-EXAONE/EXAONE-4.5-33B",
     ),
     "FireRedAsrAedLForConditionalGeneration": _HfExamplesInfo(
-        # v1 conversion; v2 (8667 vocab) needs its own checkpoint conversion.
-        "Leebin/FireRedASR-AED-L-vllm",
+        "ppxstark/FireRedASR2-AED-vllm",
     ),
     "FireRedASR2ForConditionalGeneration": _HfExamplesInfo(
         "allendou/FireRedASR2-LLM-vllm",
