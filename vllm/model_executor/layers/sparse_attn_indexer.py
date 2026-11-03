@@ -661,13 +661,13 @@ def sparse_attn_indexer(
     # fill.
     if not skip_topk_buffer_clear:
         topk_indices_buffer[: hidden_states.shape[0]] = -1
+    prefill_metadata = attn_metadata_narrowed.prefill
     if has_prefill:
-        prefill_metadata = attn_metadata_narrowed.prefill
         assert prefill_metadata is not None
-        # Short prefills may not have produced any compressed KV tokens yet.
-        has_prefill = bool(prefill_metadata.chunks)
+    # Short prefills may not have produced any compressed KV tokens yet.
+    has_prefill_chunks = prefill_metadata is not None and bool(prefill_metadata.chunks)
 
-    if has_prefill:
+    if has_prefill and has_prefill_chunks:
         assert prefill_metadata is not None
         # Get the shared workspace buffers once, sized for this batch's largest
         # chunk rather than the profiled bound (total_seq_lens), so the scratch
