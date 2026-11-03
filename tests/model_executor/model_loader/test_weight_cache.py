@@ -10,6 +10,7 @@ identical outputs.
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,7 @@ import urllib.request
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+import psutil
 import pytest
 import regex as re
 
@@ -134,6 +136,53 @@ class WeightCacheDaemon:
             self._proc.kill()
             self._proc.wait()
         shutil.rmtree(self.socket_dir, ignore_errors=True)
+
+
+@pytest.mark.distributed(num_gpus=2)
+@pytest.mark.parametrize(
+    "after_ready,stop_sibling",
+    [(False, False), (True, False), (True, True)],
+    ids=["startup", "serving", "unresponsive-sibling"],
+)
+def test_preload_rank_failure_stops_launcher_and_siblings(after_ready, stop_sibling):
+    """A failed later rank must not leave preload waiting on an earlier rank."""
+    children: list[psutil.Process] = []
+    with WeightCacheDaemon(
+        "facebook/opt-125m",
+        tp_size=2,
+        extra_args=["--disable-flashinfer-autotune"],
+    ) as daemon:
+        try:
+            assert daemon._proc is not None
+            parent = psutil.Process(daemon._proc.pid)
+            deadline = time.monotonic() + 120
+            while len(children) != 2:
+                assert daemon._proc.poll() is None, "preload exited before spawning"
+                children = []
+                for child in parent.children():
+                    try:
+                        if "spawn_main" in " ".join(child.cmdline()):
+                            children.append(child)
+                    except psutil.NoSuchProcess:
+                        # Short-lived children can exit before cmdline is read.
+                        continue
+                assert time.monotonic() < deadline, "daemon ranks did not spawn"
+                time.sleep(0.1)
+            if after_ready:
+                daemon.wait_until_ready()
+            if stop_sibling:
+                # A stopped process cannot handle SIGTERM; cleanup must escalate.
+                children[0].send_signal(signal.SIGSTOP)
+            children[-1].send_signal(signal.SIGKILL)
+            assert daemon._proc.wait(timeout=30) == 128 + signal.SIGKILL
+            _, alive = psutil.wait_procs(children, timeout=10)
+            assert not alive, "preload left sibling ranks running"
+        finally:
+            # Also clean up on the unfixed launcher, which waits indefinitely.
+            for child in children:
+                if child.is_running():
+                    child.kill()
+            psutil.wait_procs(children, timeout=10)
 
 
 @dataclass
@@ -313,6 +362,10 @@ def test_ipc_cache_cold_start_and_warm_restart(
     run_cold_start_and_warm_restart(vllm_runner, case, tmp_path, capfd)
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(89)),
+    reason="Online FP8 CUTLASS weight cache requires SM89+",
+)
 @pytest.mark.parametrize("quantization", ["fp8_per_tensor", "fp8_per_channel"])
 def test_ipc_cache_online_fp8(vllm_runner, quantization, tmp_path, monkeypatch):
     """Online FP8 weights are shared without requantizing on warm restarts."""
@@ -321,6 +374,10 @@ def test_ipc_cache_online_fp8(vllm_runner, quantization, tmp_path, monkeypatch):
     )
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="Block FP8/MXFP8 online weight cache requires SM100+",
+)
 @pytest.mark.parametrize(
     "quantization,linear_backend",
     [("fp8_per_block", "cutlass"), ("mxfp8", "flashinfer_cutlass")],
@@ -408,6 +465,10 @@ NVFP4_CASE = ModelCase(
 )
 
 
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and current_platform.has_device_capability(100)),
+    reason="NVFP4 CUTLASS MoE requires SM100+",
+)
 def test_ipc_cache_nvfp4_cutlass(vllm_runner, tmp_path, monkeypatch):
     """Repeated IPC attachment must not fuse the shared MoE scales again."""
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "1")
