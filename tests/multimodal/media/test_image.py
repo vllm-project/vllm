@@ -540,6 +540,16 @@ def _noisy_rgb_image(width: int = 48, height: int = 32) -> Image.Image:
     return Image.fromarray(rng.integers(0, 256, (height, width, 3), dtype=np.uint8))
 
 
+def _jpeg_with_xmp_before_exif() -> bytes:
+    """A rotated JPEG whose EXIF APP1 segment follows an XMP APP1 segment."""
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    data = _encode(_noisy_rgb_image(), "JPEG", exif=exif.tobytes())
+    xmp = b"http://ns.adobe.com/xap/1.0/\x00<x:xmpmeta/>"
+    segment = b"\xff\xe1" + struct.pack(">H", len(xmp) + 2) + xmp
+    return data[:2] + segment + data[2:]
+
+
 def _to_hwc(media: Image.Image | torch.Tensor) -> np.ndarray:
     if isinstance(media, torch.Tensor):
         return media.permute(1, 2, 0).numpy()
@@ -589,6 +599,7 @@ def test_torchcodec_backend_matches_pil(fmt, mode, orientation):
             ),
             "RGB",
         ),
+        (_jpeg_with_xmp_before_exif(), "RGB"),
         (_encode(Image.new("RGB", (8, 8)), "JPEG"), None),
         (_encode(Image.new("RGB", (8, 8)), "JPEG"), "L"),
     ],
@@ -600,6 +611,7 @@ def test_torchcodec_backend_matches_pil(fmt, mode, orientation):
         "16bit_rgb",
         "gif",
         "animated_webp",
+        "jpeg_xmp_before_exif",
         "no_mode_conversion",
         "non_rgb_target",
     ],
