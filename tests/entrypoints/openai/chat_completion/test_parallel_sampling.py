@@ -22,7 +22,9 @@ def server():
         "0.3",
         "--enforce-eager",
     ]
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(
+        MODEL_NAME, args, env_dict={"VLLM_MAX_N_SEQUENCES": "16384"}
+    ) as remote_server:
         yield remote_server
 
 
@@ -33,38 +35,26 @@ async def client(server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("n_value", "error_match"),
-    [(9, "max_num_seqs"), (129, "128")],
-)
-async def test_chat_completions_reject_n_outside_supported_limits(
+async def test_chat_completions_reject_n_above_server_capacity(
     client: openai.AsyncOpenAI,
-    n_value: int,
-    error_match: str,
 ):
-    with pytest.raises(BadRequestError, match=error_match):
+    with pytest.raises(BadRequestError, match="max_num_seqs"):
         await client.chat.completions.create(
             model=MODEL_NAME,
             messages=[{"role": "user", "content": "Hello!"}],
             max_completion_tokens=1,
-            n=n_value,
+            n=9,
         )
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("n_value", "error_match"),
-    [(9, "max_num_seqs"), (129, "128")],
-)
-async def test_completions_reject_n_outside_supported_limits(
+async def test_completions_reject_n_above_server_capacity(
     client: openai.AsyncOpenAI,
-    n_value: int,
-    error_match: str,
 ):
-    with pytest.raises(BadRequestError, match=error_match):
+    with pytest.raises(BadRequestError, match="max_num_seqs"):
         await client.completions.create(
             model=MODEL_NAME,
             prompt="Hello!",
             max_tokens=1,
-            n=n_value,
+            n=9,
         )

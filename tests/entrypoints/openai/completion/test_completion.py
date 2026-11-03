@@ -46,10 +46,27 @@ async def client(server):
         yield async_client
 
 
-@pytest.mark.parametrize("n_value", [0, 129])
-def test_completion_request_n_parameter_outside_openai_limits(n_value: int):
+def test_completion_request_n_parameter_must_be_positive():
     with pytest.raises(ValidationError):
-        CompletionRequest(model="test-model", prompt="hello", n=n_value)
+        CompletionRequest(model="test-model", prompt="hello", n=0)
+
+
+def test_completion_request_n_above_128_uses_configured_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import vllm.envs as envs
+
+    monkeypatch.setenv("VLLM_MAX_N_SEQUENCES", "256")
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    request = CompletionRequest(model="test-model", prompt="hello", n=129)
+    sampling_params = request.to_sampling_params(
+        max_tokens=1,
+        default_sampling_params={},
+    )
+
+    assert sampling_params.n == 129
 
 
 def test_completion_request_null_n_uses_default():

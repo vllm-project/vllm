@@ -10,6 +10,7 @@ from typing import ClassVar, Generic, TypeVar
 from fastapi import Request
 from pydantic import ConfigDict
 
+import vllm.envs as envs
 from vllm import RequestOutput
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.protocol import (
@@ -184,10 +185,15 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         if n is None:
             return None
         max_num_seqs = self.engine_client.vllm_config.scheduler_config.max_num_seqs
-        if n > max_num_seqs:
+        max_sequences = min(envs.VLLM_MAX_N_SEQUENCES, max_num_seqs)
+        if n > max_sequences:
+            limit = (
+                f"VLLM_MAX_N_SEQUENCES ({envs.VLLM_MAX_N_SEQUENCES})"
+                if max_num_seqs > envs.VLLM_MAX_N_SEQUENCES
+                else f"the server's max_num_seqs ({max_num_seqs})"
+            )
             return self.create_error_response(
-                f"n must be at most the server's max_num_seqs "
-                f"({max_num_seqs}), got {n}.",
+                f"n must be at most {limit}, got {n}.",
                 param="n",
             )
         return None

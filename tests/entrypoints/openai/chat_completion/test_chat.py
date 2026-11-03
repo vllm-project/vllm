@@ -1075,14 +1075,13 @@ def test_chat_completion_request_n_parameter_various_values():
         )
 
 
-@pytest.mark.parametrize("n_value", [0, 129])
-def test_chat_completion_request_n_parameter_outside_openai_limits(n_value: int):
-    """The OpenAI Chat Completions n parameter is between 1 and 128."""
+def test_chat_completion_request_n_parameter_must_be_positive():
+    """The OpenAI Chat Completions n parameter must be positive."""
     with pytest.raises(ValidationError):
         ChatCompletionRequest(
             model="test-model",
             messages=[{"role": "user", "content": "Test"}],
-            n=n_value,
+            n=0,
             max_tokens=10,
         )
 
@@ -1149,12 +1148,47 @@ def test_chat_completion_request_n_parameter_custom_limit(
         )
 
 
-def test_chat_completion_request_n_parameter_massive_value():
-    """Reject values too large to be valid under the OpenAI request schema."""
-    with pytest.raises(ValidationError):
-        ChatCompletionRequest(
-            model="test-model",
-            messages=[{"role": "user", "content": "Test"}],
-            n=100_000_000,
+def test_chat_completion_request_n_above_128_uses_configured_limit(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import vllm.envs as envs
+
+    monkeypatch.setenv("VLLM_MAX_N_SEQUENCES", "256")
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        n=129,
+        max_tokens=1,
+    )
+    sampling_params = request.to_sampling_params(
+        max_tokens=1,
+        default_sampling_params={},
+    )
+
+    assert sampling_params.n == 129
+
+
+def test_chat_completion_request_n_above_configured_limit_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import vllm.envs as envs
+
+    monkeypatch.setenv("VLLM_MAX_N_SEQUENCES", "16384")
+    if hasattr(envs.__getattr__, "cache_clear"):
+        envs.__getattr__.cache_clear()
+
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Test"}],
+        n=100_000_000,
+        max_tokens=1,
+    )
+
+    with pytest.raises(VLLMValidationError, match="n must be at most"):
+        request.to_sampling_params(
             max_tokens=1,
+            default_sampling_params={},
         )
