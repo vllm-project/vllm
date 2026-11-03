@@ -13,6 +13,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 
+from .local_fastpath import LocalIpcMetadata
+
 logger = init_logger(__name__)
 
 TransferHandle = int
@@ -53,8 +55,9 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #  15: Add remote_registration_generation to kv_transfer_params
 #  16: Pair regions by the layers both sides hold: every peer advertises
 #      region_members and the cache group of each layer
+#  17: Add optional same-host CUDA IPC allocation metadata
 #
-NIXL_CONNECTOR_VERSION: int = 16
+NIXL_CONNECTOR_VERSION: int = 17
 
 
 @dataclass
@@ -85,6 +88,7 @@ class NixlAgentMetadata:
     layer_group_ids: dict[str, int] = field(default_factory=dict)
     # Packed member -> (byte offset in its region's block, bytes per page).
     packed_member_layouts: dict[str, tuple[int, int]] = field(default_factory=dict)
+    local_ipc: LocalIpcMetadata | None = None
 
 
 @dataclass
@@ -265,6 +269,9 @@ class ReqMeta:
     # True only when the scheduler parked the request in WAITING_FOR_REMOTE_KVS
     # and expects it in finished_recving; notify-only recvs must not be reported.
     awaiting_kvs: bool = False
+    # True when this request is admitted in the same step and loaded through
+    # the same-host CUDA IPC path instead of a NIXL transfer handle.
+    local_fastpath: bool = False
     # Worker-only, per-region physical pages to zero after a successful pull.
     # None selects group-based completion; empty lists mean no zeroing.
     region_blocks_to_zero: BlockIds | None = None
@@ -298,6 +305,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        local_fastpath: bool = False,
     ) -> ReqMeta:
         return ReqMeta(
             local_block_ids=local_block_ids,
@@ -309,6 +317,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             pp_size=kv_transfer_params.get("pp_size", 1),
             local_num_computed_blocks=local_num_computed_blocks,
             awaiting_kvs=awaiting_kvs,
+            local_fastpath=local_fastpath,
         )
 
     def add_new_req_to_save(
@@ -328,12 +337,14 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         kv_transfer_params: dict[str, Any],
         local_num_computed_blocks: tuple[int, ...] = (),
         awaiting_kvs: bool = False,
+        local_fastpath: bool = False,
     ):
         req = self._add_new_req(
             local_block_ids,
             kv_transfer_params,
             local_num_computed_blocks,
             awaiting_kvs,
+            local_fastpath,
         )
         req.remote = RemoteMeta(
             block_ids=kv_transfer_params["remote_block_ids"],

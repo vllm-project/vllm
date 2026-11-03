@@ -4748,6 +4748,79 @@ def test_scheduler_advertises_transfer_topology(
         scheduler.shutdown()
 
 
+def test_local_fastpath_is_selected_only_for_same_boot():
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
+        NixlPullConnectorScheduler,
+    )
+
+    config = create_vllm_config(
+        kv_role="kv_consumer",
+        kv_connector_extra_config={"enable_local_fastpath": True},
+    )
+    assert config.kv_transfer_config is not None
+    config.kv_transfer_config.kv_buffer_device = "cuda"
+    with patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler.get_boot_id",
+        return_value="boot",
+    ):
+        scheduler = NixlPullConnectorScheduler(
+            config, "decoder", make_kv_cache_config(block_size=16)
+        )
+    request = create_request(request_id=1, num_tokens=32, do_remote_prefill=True)
+    assert request.kv_transfer_params is not None
+    request.kv_transfer_params["nixl_local_fastpath"] = {
+        "version": 1,
+        "boot_id": scheduler.local_boot_id,
+    }
+    try:
+        tokens, load_async = scheduler.get_num_new_matched_tokens(request, 0)
+        assert tokens == 32
+        assert not load_async
+
+        request.kv_transfer_params["nixl_local_fastpath"]["boot_id"] = "remote"
+        tokens, load_async = scheduler.get_num_new_matched_tokens(request, 0)
+        assert tokens == 32
+        assert load_async
+    finally:
+        scheduler.shutdown()
+
+
+def test_stream_ordered_load_is_submitted_once_before_forward():
+    from vllm.v1.worker.gpu import kv_connector as runner_connector
+
+    backend = MagicMock(supports_stream_ordered_load=True)
+    active = runner_connector.ActiveKVConnector.__new__(
+        runner_connector.ActiveKVConnector
+    )
+    active._disabled = False
+    active._early_load_started = False
+    active._pending_load_kwargs = None
+    active.kv_connector = backend
+    active.vllm_config = SimpleNamespace()
+    output = SimpleNamespace(
+        kv_connector_metadata=NixlConnectorMetadata(),
+        has_sync_kv_loads=True,
+    )
+    with (
+        patch.object(
+            runner_connector, "is_forward_context_available", return_value=False
+        ),
+        patch.object(
+            runner_connector,
+            "set_forward_context",
+            return_value=contextlib.nullcontext(),
+        ),
+        patch.object(runner_connector, "get_forward_context", return_value=None),
+    ):
+        active.start_load_early(output)
+        active.pre_forward(output)
+
+    backend.handle_preemptions.assert_called_once()
+    backend.bind_connector_metadata.assert_called_once()
+    backend.start_load_kv_early.assert_called_once_with()
+    backend.start_load_kv.assert_called_once()
+
+
 @pytest.mark.parametrize(
     "mismatch_type,config_overrides,version_override,should_fail,enforce_handshake_compat",
     [

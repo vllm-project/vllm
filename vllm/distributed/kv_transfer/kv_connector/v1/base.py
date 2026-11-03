@@ -181,6 +181,14 @@ class KVConnectorWorkerMetadata(ABC):
 class KVConnectorBase_V1(ABC):
     """Base class for KV connectors."""
 
+    # The runner may admit a request before its load completes only when the
+    # connector inserts a device-side dependency before the first KV read.
+    supports_stream_ordered_load: bool = False
+
+    def start_load_kv_early(self) -> None:
+        """Submit a stream-ordered load before model input preparation."""
+        raise NotImplementedError("Connector has no stream-ordered load path")
+
     # Source label for this connector's external hits. Subclasses must set
     # HOST/DISK/P2P or override get_external_cache_hit_sources().
     _cache_hit_source = CacheHitSource.EXTERNAL_UNSPECIFIED

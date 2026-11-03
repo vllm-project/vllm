@@ -38,6 +38,9 @@ class KVConnector:
     ) -> None:
         pass
 
+    def start_load_early(self, scheduler_output: "SchedulerOutput") -> None:
+        pass
+
     def finish_forward(self) -> None:
         pass
 
@@ -71,6 +74,19 @@ class ActiveKVConnector(KVConnector):
 
         self._pending_load_kwargs: dict[str, Any] | None = None
         self._disabled = False
+        self._early_load_started = False
+
+    def start_load_early(self, scheduler_output: "SchedulerOutput") -> None:
+        if self._disabled or not self.kv_connector.supports_stream_ordered_load:
+            return
+        if not scheduler_output.has_sync_kv_loads:
+            return
+        metadata = scheduler_output.kv_connector_metadata
+        assert metadata is not None
+        self.kv_connector.handle_preemptions(metadata)
+        self.kv_connector.bind_connector_metadata(metadata)
+        self.kv_connector.start_load_kv_early()
+        self._early_load_started = True
 
     def pre_forward(
         self,
@@ -83,8 +99,10 @@ class ActiveKVConnector(KVConnector):
 
         kv_connector_metadata = scheduler_output.kv_connector_metadata
         assert kv_connector_metadata is not None
-        self.kv_connector.handle_preemptions(kv_connector_metadata)
-        self.kv_connector.bind_connector_metadata(kv_connector_metadata)
+        if not self._early_load_started:
+            self.kv_connector.handle_preemptions(kv_connector_metadata)
+            self.kv_connector.bind_connector_metadata(kv_connector_metadata)
+        self._early_load_started = False
         self._pending_load_kwargs = self._build_load_kwargs(
             scheduler_output, input_batch, attn_metadata
         )

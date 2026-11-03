@@ -24,6 +24,12 @@ import pytest
 import torch
 
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl import base_worker as bw
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl.local_fastpath import (
+    IpcAllocation,
+    coalesce_copy_spans,
+    expand_strided_descriptors,
+    translate_remote_addresses,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     NixlAgentMetadata,
 )
@@ -2327,3 +2333,43 @@ def test_real_model_layout_pull_copies_every_page(model, p_layout, d_layout):
     for t in storages.values():
         raw = torch.empty(0, dtype=torch.uint8).set_(t.untyped_storage())
         assert not raw.any(), "D bytes outside the request's pages changed"
+
+
+def test_local_fastpath_reuses_nixl_descriptor_geometry():
+    descriptors = np.array(
+        [
+            [1000, 16, 0, 32, 3],
+            [2000, 8, 0, 8, 2],
+        ],
+        dtype=np.int64,
+    )
+    addresses, lengths = expand_strided_descriptors(
+        descriptors, np.array([0, 2, 3, 4], dtype=np.int32)
+    )
+    assert addresses.tolist() == [1000, 1064, 2000, 2008]
+    assert lengths.tolist() == [16, 16, 8, 8]
+
+
+def test_local_fastpath_translates_and_coalesces_remote_pages():
+    allocation = IpcAllocation(
+        handle=bytes(range(64)),
+        size=4096,
+        exported_base=1000,
+        offset=128,
+        length=512,
+    )
+    sources = translate_remote_addresses(
+        np.array([1000, 1016, 1048], dtype=np.int64),
+        (allocation,),
+        (10_000,),
+    )
+    spans = coalesce_copy_spans(
+        sources,
+        np.array([20_000, 20_016, 20_048], dtype=np.int64),
+        np.array([16, 16, 8], dtype=np.int64),
+        np.array([16, 16, 8], dtype=np.int64),
+    )
+    assert [(span.src, span.dst, span.length) for span in spans] == [
+        (10_000, 20_000, 32),
+        (10_048, 20_048, 8),
+    ]
