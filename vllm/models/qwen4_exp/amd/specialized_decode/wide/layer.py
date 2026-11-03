@@ -11,7 +11,10 @@ QSA layer around vLLM's attention (``LayerBuild.kind``):
     qsa_back   o_proj (gated) -> TP exchange -> attn combine -> the MLP half
 
 Phases are separated by grid barriers; an exchange's readers wait on its line
-flags instead. A launch reads the multi-stream state, updates it in place
+flags instead. Up to ``tiled.RESIDENT_MAX`` rows a mix is one phase and so is
+GDN proj -> out_proj -> attn combine: their hand-offs are tagged pairs
+(``stages.tagged``), and each GEMM's first weights are issued inside the
+barrier before it. A launch reads the multi-stream state, updates it in place
 (``state``, [rows, HC * HIDDEN] bf16, materialized: the next launch, a PLE
 layer and the final mixer read it as is) and leaves ``rrms`` of every (row,
 stream) in its scratch for the next launch's mix; ``stats`` computes them
@@ -44,7 +47,6 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.plan import (
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
     BLOCKS,
-    CONV_DIM,
     HC,
     HIDDEN,
     LOWRANK,
@@ -55,7 +57,13 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
     VALUE_DIM,
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange as ex_
-from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import gdn, hc, moe, tiled
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import (
+    gdn,
+    hc,
+    moe,
+    tagged,
+    tiled,
+)
 
 KINDS = ("gdn", "qsa_front", "qsa_back")
 ATTN, MLP = 0, 1  # a layer's two exchanges
@@ -135,13 +143,19 @@ TRACE_BACK = 8  # where a QSA layer's second launch stamps in its layer's row
 def phase_names(key) -> list[str]:
     """The stamps of a traced build (``LayerBuild.trace``), in order: each
     marks the end of the named phase ("start": the kernel's start)."""
-    mix = lambda t: [f"{t}.mix_down", f"{t}.mix_reduce", f"{t}.mix_up"]  # noqa: E731
+    parts = ["mix_down", "mix_reduce", "mix_up"]
+    if tiled.resident(key.tokens):
+        parts = ["mix_down+up"]  # one phase (hc.mix_resident)
+    mix = lambda t: [f"{t}.{p}" for p in parts]  # noqa: E731
     mlp = mix("mlp") + moe.phase_names(key.tokens)
     out = ["start"] + (["stats"] if key.stats else [])
     if key.kind != "qsa_back":
         out += mix("attn")
     if key.kind == "gdn":
-        out += ["gdn_proj+conv", "gdn_recur", "out+allreduce+combine"] + mlp
+        gdn_ = ["gdn_proj+conv", "gdn_recur", "out+allreduce+combine"]
+        if tiled.resident(key.tokens):
+            gdn_ = ["gdn+out+allreduce+combine"]  # one phase (tagged hand-offs)
+        out += gdn_ + mlp
     if key.kind == "qsa_back":
         out += ["out+allreduce+combine"] + mlp
     return out
@@ -154,13 +168,26 @@ def phase_names(key) -> list[str]:
 
 def _part_words(rows: int) -> int:
     plans = [
-        hc.down_plan(),
+        hc.down_plan(rows),
         gdn.proj_plan(),
         gdn.out_plan(),
         gdn.out_plan(QSA_CORE),
         moe.router_plan(),
     ]
     return max(p.partial_words(rows) for p in plans)
+
+
+def _resident_chunks() -> int:
+    """K chunks of the longest GEMM unit, which a resident stage holds."""
+    plans = [
+        hc.down_plan(1),
+        gdn.proj_plan(),
+        gdn.ba_plan(),
+        gdn.out_plan(),
+        gdn.out_plan(QSA_CORE),
+        moe.router_plan(),
+    ]
+    return max([p.per for p in plans] + [hc.UP_CHUNKS])
 
 
 def scratch_layout(rows: int) -> dict[str, tuple[int, int]]:
@@ -174,16 +201,18 @@ def scratch_layout(rows: int) -> dict[str, tuple[int, int]]:
         "inj_a": rows * HC * 4,
         "inj_m": rows * HC * 4,
         "down": rows * LOWRANK * 2,
-        "qkv": rows * CONV_DIM * 2,
+        "qkv": gdn.handoff_words(rows)[0] * 4,
         "z": rows * VALUE_DIM * 2,
-        "ba": gdn.ba_plan().partial_words(rows) * 4,
-        "core": rows * VALUE_DIM * 2,
+        "ba": gdn.handoff_words(rows)[1] * 4,
+        "core": gdn.handoff_words(rows)[2] * 4,
         "part": _part_words(rows) * 4,
         "route": 2 * rows * SLOTS * 4,
         "x4": rows * HIDDEN // 8 * 4,
         "x4s": rows * HIDDEN // 32 * 4,
         "mpart": rows * SLOTS * HIDDEN * 4,
         "mpart2": rows * SLOTS * HIDDEN * 4,
+        "mixp": hc.mix_words(rows)[0] * 4,
+        "mixd": hc.mix_words(rows)[1] * 4,
     }
     out, off = {}, 0
     for name, n in sizes.items():
@@ -214,6 +243,8 @@ class Scratch(TraceInvariant):
     mpart: fx.Int64
     mpart2: fx.Int64
     split: fx.Int64
+    mixp: fx.Int64
+    mixd: fx.Int64
 
     def __init__(self, base, rows: int):
         for name, (off, _) in scratch_layout(rows).items():
@@ -235,10 +266,11 @@ def build(key: LayerBuild):
     shape = moe.Shape(S, key.rip)
     MoeLds = moe.lds_struct(shape)
     aux_words = max(hc.up_lds_words(S), ex_.GroupTile.words(S), gdn.recur_lds_words())
+    chunks = _resident_chunks()
 
     @fx.struct
     class GemmLds:
-        stage: fx.Array[fx.Int32, tiled.stage_words(S), 16]
+        stage: fx.Array[fx.Int32, tiled.stage_words(S, chunks), 16]
         aux: fx.Array[fx.Int32, aux_words, 16]
 
     @fx.union
@@ -308,8 +340,8 @@ def build(key: LayerBuild):
         prologue(g)
         scr = Scratch(scratch, S)
         aux_f32 = fx.recast_iter(fx.Float32, gl.aux.ptr)
-        gemm = tiled.Gemm(gl.stage.ptr, S, tid)
-        up_gemm = tiled.Gemm(gl.stage.ptr, S, tid, k_total=LOWRANK)
+        gemm = tiled.Gemm(gl.stage.ptr, S, tid, chunks=chunks)
+        up_gemm = tiled.Gemm(gl.stage.ptr, S, tid, k_total=LOWRANK, chunks=chunks)
         bases = [ld_ptr64(peers, r) for r in range(tp)]
         own = bases[0]
         for r in fx.range_constexpr(1, tp):
@@ -324,9 +356,12 @@ def build(key: LayerBuild):
                     st(trace, layer * TRACE_WORDS + first + len(names), memrealtime())
                 names.append(name)
 
-        def end_phase(name):
-            grid_sync(g)
+        def end_phase(name, issue=None):
+            """The phase's grid barrier; at resident widths ``issue()`` (the
+            next phase's first weights) runs inside it, its loads returned."""
+            out = grid_sync(g, issue if tiled.resident(S) else None)
             stamp(name)
+            return out
 
         stamp("start")
 
@@ -335,25 +370,44 @@ def build(key: LayerBuild):
             tag = ep * 128 + layer * 2 + kind + 1
             return ex_.Exchange(bases, own, rank, tp, slot, tag, S, key.allreduce)
 
-        def mix(tag, norm, di, up, inj):
+        def mix(tag, kind, norm, di, up, inj, pending=None, then=None):
+            if const_expr(tiled.resident(S)):
+                hc.mix_resident(
+                    g,
+                    gemm,
+                    up_gemm,
+                    aux_f32,
+                    state,
+                    scr.rrms,
+                    norm,
+                    di,
+                    up,
+                    x,
+                    inj,
+                    (scr.mixp, scr.mixd),
+                    ep * 128 + layer * 2 + kind + 1,
+                    S,
+                    pending,
+                )
+                return end_phase(f"{tag}.mix_down+up", then)
             hc.mix_down(g, gemm, state, scr.rrms, norm, di, scr.part)
             end_phase(f"{tag}.mix_down")
             hc.mix_reduce(g, scr.part, scr.down, inj, S, True)
             end_phase(f"{tag}.mix_reduce")
             hc.mix_up(g, up_gemm, aux_f32, scr.down, up, state, scr.rrms, norm, x, S)
-            end_phase(f"{tag}.mix_up")
+            return end_phase(f"{tag}.mix_up", then)
 
-        def back(weights, source, k):
+        def back(weights, source, k, pending=None, name="out+allreduce+combine"):
             xch = exchange(ATTN)
             tile = ex_.GroupTile(gl.aux.ptr, S)
-            gdn.out(g, gemm, weights, source, scr.part, tile, xch, k, 0)
+            gdn.out(g, gemm, weights, source, scr.part, tile, xch, k, 0, pending)
             hc.combine(g, xch, state, scr.inj_a, scr.rrms, S, key.hc_eps)
-            end_phase("out+allreduce+combine")
+            return end_phase(name, lambda: hc.mix_issue(g, m_di, m_up, S))
 
-        def mlp_half():
+        def mlp_half(pending):
             mw = moe.Weights(w_gate, w13, w13s, w2, w2s)
             pre = moe.prefetch(g, shape, mw)  # in flight through the mix
-            mix("mlp", m_norm, m_di, m_up, scr.inj_m)
+            mix("mlp", MLP, m_norm, m_di, m_up, scr.inj_m, pending)
             xch = exchange(MLP)
             moe.mlp(
                 g,
@@ -379,11 +433,12 @@ def build(key: LayerBuild):
             if const_expr(key.trace):
                 end_phase(moe.phase_names(S)[-1])
 
+        down_w = None
         if const_expr(key.stats):
             hc.stats(g, state, scr.rrms, S, key.hc_eps)
-            end_phase("stats")
-        if const_expr(key.kind != "qsa_back"):
-            mix("attn", a_norm, a_di, a_up, scr.inj_a)
+            down_w = end_phase("stats", lambda: hc.mix_issue(g, a_di, a_up, S))
+        if const_expr(key.kind == "qsa_front"):
+            mix("attn", ATTN, a_norm, a_di, a_up, scr.inj_a, down_w)
         if const_expr(key.kind == "gdn"):
             w = gdn.Bufs(
                 qkvz=w_qkvz,
@@ -408,22 +463,44 @@ def build(key: LayerBuild):
                 ssm=ssm,
                 ssm_stride=ssm_stride,
             )
-            gdn.proj(g, gemm, w, b, S, 0)
-            end_phase("gdn_proj+conv")
-            gdn.recur(g, w, b, aux_f32, S, key.gdn_eps)
-            end_phase("gdn_recur")
+            proj_w = mix(
+                "attn",
+                ATTN,
+                a_norm,
+                a_di,
+                a_up,
+                scr.inj_a,
+                down_w,
+                lambda: gdn.proj_issue(g, w),
+            )
             out_w = tiled.Fp4Weights(
                 w_out, w_out_s, HIDDEN, VALUE_DIM, key.out_shuffled
             )
-            back(out_w, tiled.Source(scr.core, VALUE_DIM), VALUE_DIM)
-            mlp_half()
+            if const_expr(tiled.resident(S)):
+                # one phase: the recurrence polls the projection's tagged
+                # outputs, out_proj the recurrence's (its weights issued
+                # before the recurrence, to land under it)
+                gtag = ep * 128 + layer * 2 + 1
+                gdn.proj(g, gemm, w, b, S, 0, proj_w, gtag)
+                pending = tiled.issue_unit(bid, tid, out_w, gdn.out_plan())
+                gdn.recur(g, w, b, aux_f32, S, key.gdn_eps, None, gtag)
+                source = tagged.Pairs(g, scr.core, VALUE_DIM, gtag)
+                name = "gdn+out+allreduce+combine"
+            else:
+                gdn.proj(g, gemm, w, b, S, 0, proj_w)
+                end_phase("gdn_proj+conv")
+                gdn.recur(g, w, b, aux_f32, S, key.gdn_eps)
+                pending = end_phase("gdn_recur")
+                source = tiled.Source(scr.core, VALUE_DIM)
+                name = "out+allreduce+combine"
+            mlp_half(back(out_w, source, VALUE_DIM, pending, name))
         if const_expr(key.kind == "qsa_back"):
-            back(
+            pending = back(
                 tiled.Bf16Weights(w_out, HIDDEN, QSA_CORE),
                 gdn.GatedCore(attn, gate, QSA_CORE),
                 QSA_CORE,
             )
-            mlp_half()
+            mlp_half(pending)
         if const_expr(key.trace):
             assert names == phase_names(key), (names, phase_names(key))
 

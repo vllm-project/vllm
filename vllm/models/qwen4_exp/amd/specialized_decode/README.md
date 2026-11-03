@@ -19,7 +19,10 @@ The kernels are built from an expert-major fused W4A4 MoE, batch-tiled
 MFMA GEMMs with split-K folded by the last arriver, a line-based in-kernel TP
 exchange and a striped grid barrier, in vLLM's execution model: one launch
 per layer on vLLM's buffers, weights and caches in place, no multi-step
-device loop.
+device loop. Up to 16 rows (`tiled.RESIDENT_MAX`) a GEMM unit stages its whole
+K slice once, and a mix, and the GDN projection through the attention combine,
+each run as one phase whose CTAs hand data over as tagged pairs
+(`wide/stages/tagged.py`) rather than through grid barriers.
 
 ## MoE schedule
 

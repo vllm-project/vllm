@@ -17,6 +17,9 @@ input state came from vLLM computes ``rrms`` first (``stats``). A mix is then
   bf16(sum_s sigmoid(gate_s) xn_s / HC)``: a unit is 16 columns of every
   stream, wave ``s`` stream ``s``, the streams summed in order through LDS.
 
+Up to ``tiled.RESIDENT_MAX`` rows the three are one phase (``mix_resident``):
+the down GEMM's K-wave units hand their sums to mix_up through tagged pairs.
+
 ``combine`` takes the block's output ``y`` (the TP ranks' partials, summed in
 rank order through the exchange) into the state: ``bf16(x + y inj_s)``.
 """
@@ -24,7 +27,7 @@ rank order through the exchange) into the state: ``bf16(x + y inj_s)``.
 from __future__ import annotations
 
 import flydsl.expr as fx
-from flydsl.expr import range_constexpr
+from flydsl.expr import const_expr, range_constexpr
 
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.common.ops import (
     CM_DEV,
@@ -50,18 +53,31 @@ from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
     HC_HIDDEN,
     HIDDEN,
     LOWRANK,
+    MAX_TOKENS,
     THREADS,
     WAVES,
 )
 from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange as ex_
-from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import tiled
+from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import tagged, tiled
 
 DOWN_SPLITS = 40  # K slices of the down GEMM: 6 row groups x 40 = 240 units
+DOWN_KW_SPLITS = 5  # resident widths: 21 K-wave row tiles x 5 = 105 units
+DOWN_KW_COLD = 10  # and when none of their weights were issued ahead: 210
 UP_COLS = 16  # columns of every stream a mix_up unit covers
 MIXED = LOWRANK + HC  # the down GEMM's rows that are used
+UP_CHUNKS = -(-LOWRANK // tiled.CHUNK)  # the up GEMM's K chunks
+UP_UNITS = HIDDEN // UP_COLS
+assert UP_UNITS < BLOCKS  # ``inject`` runs on a CTA without a mix_up unit
 
 
-def down_plan():
+def down_plan(rows: int = MAX_TOKENS, cold: bool = False):
+    """The down GEMM's split: at the resident widths five K slices of each
+    16-row tile, the four waves sharing a slice (``mix_resident``), or ten
+    when the weights load in the phase (``cold``: twice the CTAs share them);
+    else 40 slices of each 64-row group, summed by ``mix_reduce``."""
+    if tiled.resident(rows):
+        splits = DOWN_KW_COLD if cold else DOWN_KW_SPLITS
+        return tiled.SplitK(DOWN_ROWS, HC_HIDDEN, splits, kwaves=True)
     return tiled.SplitK(DOWN_ROWS, HC_HIDDEN, DOWN_SPLITS)
 
 
@@ -121,7 +137,7 @@ class NormedState(tiled.Source):
 
 def mix_down(g, gemm, state, rrms, norm_w, w_di, part):
     """``[down | inject]`` partials of every split to ``part``."""
-    plan = down_plan()
+    plan = down_plan(gemm.batch)
     tiled.gemm_units(
         g.bid,
         BLOCKS,
@@ -133,11 +149,163 @@ def mix_down(g, gemm, state, rrms, norm_w, w_di, part):
     )
 
 
+# --------------------------------------------------------------------------
+# the resident widths' mix: one phase, tagged hand-offs
+# --------------------------------------------------------------------------
+#
+# At the resident widths the down GEMM runs as K-wave units (``down_plan``)
+# and mix_up after it, on CTAs from ``_mix_ctas``; between them no grid
+# barrier. Every hand-off is a tagged pair (``tagged``, the tag the mix's): a
+# unit of split s > 0 publishes its partial sums, the unit of split 0 of the
+# same row tile (the tile's owner) polls them, adds them in split order and
+# publishes the tile's low-rank rows as (bf16 pair, tag) pairs (the injection
+# scales, read after the next grid barrier, as plain words), and the mix_up
+# units poll those as their activations.
+
+
+def mix_words(rows: int) -> tuple[int, int]:
+    """i32 words of the resident mix's tagged partials and tagged low-rank
+    rows (0, 0 at the other widths)."""
+    if not tiled.resident(rows):
+        return 0, 0
+    return 2 * down_plan(rows, cold=True).partial_words(rows), rows * LOWRANK
+
+
+def _mix_ctas(rows: int):
+    """The first CTA of the resident mix's down units and of its mix_up units.
+    CTAs ``0 .. rows`` take none: they finish a block's combine (a wave a
+    (row, stream)), the last to reach the barrier before a mix, where a CTA's
+    issued weights would hold it."""
+    return rows, BLOCKS - UP_UNITS
+
+
+def mix_issue(g, w_di, w_up, rows: int):
+    """The resident mix's first weights, in flight: the CTA's down unit's (its
+    wave's K share) and its mix_up unit's (a CTA without one loads another's
+    and drops them)."""
+    d0, _ = _mix_ctas(rows)
+    plan = down_plan(rows)
+    down = tiled.Bf16Weights(w_di, DOWN_ROWS, HC_HIDDEN)
+    d = fx.min(fx.max(g.bid - d0, i32(0)), i32(plan.units - 1))
+    return tiled.issue_unit(d, g.tid, down, plan), _up_issue(g, w_up, rows)
+
+
+def _up_issue(g, w_up, rows: int):
+    up = tiled.Bf16Weights(w_up, HC_HIDDEN, LOWRANK)
+    u = fx.max(g.bid - _mix_ctas(rows)[1], i32(0))
+    group = g.lane // i32(tiled.TILE)
+    return tiled.issue_chunks(up, [_up_row(g, u)], i32(0), UP_CHUNKS, group)
+
+
+@traced
+def mix_resident(
+    g,
+    gemm,
+    up_gemm,
+    red,
+    state,
+    rrms,
+    norm_w,
+    w_di,
+    w_up,
+    x_out,
+    inj,
+    bufs,
+    tag,
+    rows: int,
+    pending,
+):
+    """The mix of a resident width as one phase: the down units, then the
+    mix_up units (on CTAs ``_mix_ctas`` on).
+    ``bufs``: the tagged partials and low-rank rows (``mix_words``);
+    ``pending``: ``mix_issue``'s loads, or None (``down_plan``'s ``cold``)."""
+    plan = down_plan(rows, cold=pending is None)
+    d0, u0 = _mix_ctas(rows)
+    part, low = bufs
+    down_w, up_w = (None, None) if pending is None else pending
+    if (g.bid >= d0) & (g.bid < d0 + plan.units):
+        _down_unit(
+            g,
+            gemm,
+            NormedState(state, rrms, norm_w),
+            tiled.Bf16Weights(w_di, DOWN_ROWS, HC_HIDDEN),
+            plan,
+            part,
+            low,
+            inj,
+            tag,
+            rows,
+            g.bid - d0,
+            down_w,
+        )
+    if const_expr(pending is None):
+        up_w = _up_issue(g, w_up, rows)
+    if g.bid >= u0:
+        _up_unit(
+            g,
+            up_gemm,
+            red,
+            tagged.Pairs(g, low, LOWRANK, tag),
+            tiled.Bf16Weights(w_up, HC_HIDDEN, LOWRANK),
+            state,
+            rrms,
+            norm_w,
+            x_out,
+            rows,
+            g.bid - u0,
+            up_w,
+        )
+
+
+@traced
+def _down_unit(
+    g, gemm, source, weights, plan, part, low, inj, tag, rows, unit, pending
+):
+    """A K-wave down unit; then wave 0 publishes its sums (split > 0) or, as
+    the tile's owner (split 0), adds the other splits' and publishes the low-
+    rank rows (or the injection scales)."""
+    _, split, firsts, rws = tiled.unit_rows(plan, unit, g.tid)
+    acc = gemm.run_kwaves(source, weights, rws[0], split * plan.per, plan.per, pending)
+    if g.wave == 0:
+        row = firsts[0] + g.lane // 16 * 4
+        stride = i32(rows * plan.padded)  # a split's partials
+        for t in range_constexpr(gemm.tiles):
+            mine = i32(t * 16) + g.lane % 16
+            token = fx.min(mine, i32(rows - 1))
+            first = token * i32(plan.padded) + row  # split 0's pair index
+            own = [acc[t][e] for e in range(4)]
+            if split > 0:
+                if mine < rows:
+                    tagged.put(part, first + split * stride, own, tag)
+            else:
+                specs = [
+                    (part, first + i32(s) * stride, 4) for s in range(1, plan.splits)
+                ]
+                got = tagged.poll(g, specs, tag)
+                v = own
+                for s in range_constexpr(plan.splits - 1):
+                    v = [v[e] + got[s][e].bitcast(fx.Float32) for e in range(4)]
+                v = [bf16_round(x) / fx.Float32(HC) for x in v]
+                if mine < rows:
+                    if row < LOWRANK:
+                        words = [pack_bf16(silu(v[0]), silu(v[1]))]
+                        words += [pack_bf16(silu(v[2]), silu(v[3]))]
+                        tagged.put(low, (token * LOWRANK + row) // 2, words, tag)
+                    if row == LOWRANK:
+                        scale = [2.0 * sigmoid(x) for x in v]
+                        st(
+                            inj,
+                            token * HC,
+                            fx.Vector.from_elements(scale, fx.Float32),
+                            CM_DEV,
+                        )
+
+
 @traced
 def mix_reduce(g, part, down, inj, rows: int, inject: bool):
     """Sum the splits in order (bf16, the GEMM's output), then ``down =
     bf16(silu(v / HC))`` and, with ``inject``, ``inj = 2 sigmoid(v / HC)``."""
-    plan = down_plan()
+    plan = down_plan(rows)
     used = MIXED if inject else LOWRANK
     pairs = used // 2
     for idx in range(g.bid * THREADS + g.tid, rows * pairs, BLOCKS * THREADS):
@@ -174,68 +342,80 @@ def mix_up(g, gemm, red, down, w_up, state, rrms, norm_w, x_out, rows: int):
     order."""
     weights = tiled.Bf16Weights(w_up, HC_HIDDEN, LOWRANK)
     source = tiled.Source(down, LOWRANK)
-    chunks = -(-LOWRANK // tiled.CHUNK)
+    for unit in range(g.bid, UP_UNITS, BLOCKS):
+        _up_unit(
+            g, gemm, red, source, weights, state, rrms, norm_w, x_out, rows, unit, None
+        )
+
+
+def _up_row(g, unit):
+    """The lane's W_up row of ``unit``: stream ``wave``'s column ``16 unit +
+    lane % 16``."""
+    return g.wave * HIDDEN + unit * UP_COLS + g.lane % 16
+
+
+@traced
+def _up_unit(
+    g, gemm, red, source, weights, state, rrms, norm_w, x_out, rows, unit, pending
+):
     lane = g.lane
-    for unit in range(g.bid, HIDDEN // UP_COLS, BLOCKS):
-        c0 = unit * UP_COLS
-        rows_w = [g.wave * HIDDEN + c0 + lane % 16]
-        col = c0 + lane // 16 * 4
-        # the epilogue's state, norm weight and rrms loads go out before the
-        # GEMM, so their latency hides behind it
-        tks = [
-            fx.min(i32(t * 16) + lane % 16, i32(rows - 1)) for t in range(gemm.tiles)
+    c0 = unit * UP_COLS
+    rows_w = [_up_row(g, unit)]
+    col = c0 + lane // 16 * 4
+    # the epilogue's state, norm weight and rrms loads go out before the
+    # GEMM, so their latency hides behind it
+    tks = [fx.min(i32(t * 16) + lane % 16, i32(rows - 1)) for t in range(gemm.tiles)]
+    ww = ld(norm_w, (g.wave * HIDDEN + col) // 2, fx.Int32, 2)
+    xws = [
+        ld(
+            state,
+            (tk * HC_HIDDEN + g.wave * HIDDEN + col) // 2,
+            fx.Int32,
+            2,
+            cm=CM_DEV,
+        )
+        for tk in tks
+    ]
+    rs = [ld(rrms, tk * HC + g.wave, fx.Float32, cm=CM_DEV) for tk in tks]
+    acc = gemm.run(source, weights, rows_w, i32(0), UP_CHUNKS, pending)[0]
+    ws = [
+        fx.Int32(ww[0]) << 16,
+        fx.Int32(ww[0]) & i32(-65536),
+        fx.Int32(ww[1]) << 16,
+        fx.Int32(ww[1]) & i32(-65536),
+    ]
+    for t in range_constexpr(gemm.tiles):
+        tk, xw, r = tks[t], xws[t], rs[t]
+        xs = [
+            fx.Int32(xw[0]) << 16,
+            fx.Int32(xw[0]) & i32(-65536),
+            fx.Int32(xw[1]) << 16,
+            fx.Int32(xw[1]) & i32(-65536),
         ]
-        ww = ld(norm_w, (g.wave * HIDDEN + col) // 2, fx.Int32, 2)
-        xws = [
-            ld(
-                state,
-                (tk * HC_HIDDEN + g.wave * HIDDEN + col) // 2,
-                fx.Int32,
-                2,
-                cm=CM_DEV,
-            )
-            for tk in tks
-        ]
-        rs = [ld(rrms, tk * HC + g.wave, fx.Float32, cm=CM_DEV) for tk in tks]
-        acc = gemm.run(source, weights, rows_w, i32(0), chunks)[0]
-        ws = [
-            fx.Int32(ww[0]) << 16,
-            fx.Int32(ww[0]) & i32(-65536),
-            fx.Int32(ww[1]) << 16,
-            fx.Int32(ww[1]) & i32(-65536),
-        ]
-        for t in range_constexpr(gemm.tiles):
-            tk, xw, r = tks[t], xws[t], rs[t]
-            xs = [
-                fx.Int32(xw[0]) << 16,
-                fx.Int32(xw[0]) & i32(-65536),
-                fx.Int32(xw[1]) << 16,
-                fx.Int32(xw[1]) & i32(-65536),
-            ]
-            vals = []
-            for e in range_constexpr(4):
-                y = xs[e].bitcast(fx.Float32) * r
-                xn = bf16_round(y + y * ws[e].bitcast(fx.Float32))
-                vals.append(sigmoid(bf16_round(acc[t][e])) * xn)
-            lds_st(
-                red + (g.wave * rows + tk) * UP_COLS + lane // 16 * 4,
-                fx.Vector.from_elements(vals, fx.Float32),
-            )
-        fx.barrier()
-        for idx in range(g.tid, rows * (UP_COLS // 2), THREADS):
-            token, c = idx // (UP_COLS // 2), idx % (UP_COLS // 2) * 2
-            lo = fx.Float32(0.0)
-            hi = fx.Float32(0.0)
-            for s in range_constexpr(HC):
-                v = lds_ld(red + (s * rows + token) * UP_COLS + c, 2, fx.Float32)
-                lo, hi = lo + v[0], hi + v[1]
-            st(
-                x_out,
-                (token * HIDDEN + c0 + c) // 2,
-                pack_bf16(lo / fx.Float32(HC), hi / fx.Float32(HC)),
-                CM_DEV,
-            )
-        fx.barrier()
+        vals = []
+        for e in range_constexpr(4):
+            y = xs[e].bitcast(fx.Float32) * r
+            xn = bf16_round(y + y * ws[e].bitcast(fx.Float32))
+            vals.append(sigmoid(bf16_round(acc[t][e])) * xn)
+        lds_st(
+            red + (g.wave * rows + tk) * UP_COLS + lane // 16 * 4,
+            fx.Vector.from_elements(vals, fx.Float32),
+        )
+    fx.barrier()
+    for idx in range(g.tid, rows * (UP_COLS // 2), THREADS):
+        token, c = idx // (UP_COLS // 2), idx % (UP_COLS // 2) * 2
+        lo = fx.Float32(0.0)
+        hi = fx.Float32(0.0)
+        for s in range_constexpr(HC):
+            v = lds_ld(red + (s * rows + token) * UP_COLS + c, 2, fx.Float32)
+            lo, hi = lo + v[0], hi + v[1]
+        st(
+            x_out,
+            (token * HIDDEN + c0 + c) // 2,
+            pack_bf16(lo / fx.Float32(HC), hi / fx.Float32(HC)),
+            CM_DEV,
+        )
+    fx.barrier()
 
 
 @traced

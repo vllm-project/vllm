@@ -147,20 +147,30 @@ def _poll_stripes(g, target):
         give_up(g, SITE_GRID, seen, target)
 
 
-def grid_sync(g):
+def grid_sync(g, between=None):
     """Every CTA's stores so far visible to every CTA, then all CTAs past this
     point: drain, CTA barrier, one arrival on the CTA's stripe, wave 0 polls
-    all stripes for this barrier's count."""
+    all stripes for this barrier's count. ``between()``, when given, runs
+    after the arrival and before the wait (loads of data no CTA writes, such
+    as the next phase's weights); its result is returned. Wave 0's poll waits
+    for its loads (``vmcnt`` counts in issue order)."""
     g.barriers += 1
-    _grid_sync(g, fx.Int32(g.barriers * PER_STRIPE))
+    _arrive(g)
+    out = None if between is None else between()
+    _wait(g, fx.Int32(g.barriers * PER_STRIPE))
+    return out
 
 
 @traced
-def _grid_sync(g, target):
+def _arrive(g):
     drain_stores()
     fx.barrier()
     if g.tid == 0:
         atomic_add(g.sync + fx.Int64(g.stripe * (STRIPE_WORDS * 4)), 1)
+
+
+@traced
+def _wait(g, target):
     if uniform(g.wave) == 0:
         _poll_stripes(g, target)
     fx.barrier()

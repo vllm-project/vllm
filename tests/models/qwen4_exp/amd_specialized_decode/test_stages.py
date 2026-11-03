@@ -131,7 +131,7 @@ def _gemm_kernel(rows, n, k, splits, fmt, fold):
 
     @fx.struct
     class Smem:
-        stage: fx.Array[fx.Int32, tiled.stage_words(rows), 16]
+        stage: fx.Array[fx.Int32, tiled.stage_words(rows, plan.per), 16]
         word: fx.Array[fx.Int32, 4, 16]
 
     def weights(w, ws):
@@ -158,7 +158,7 @@ def _gemm_kernel(rows, n, k, splits, fmt, fold):
         sm = fx.SharedAllocator().allocate(Smem).peek()
         g = Grid(tid, bid, s0, s1, folds, health, fx.Int64(0), sm.word.ptr)
         prologue(g)
-        gemm = tiled.Gemm(sm.stage.ptr, rows, tid, k_total=k)
+        gemm = tiled.Gemm(sm.stage.ptr, rows, tid, k_total=k, chunks=plan.per)
         if fx.const_expr(not fold):
             tiled.gemm_units(
                 bid,
@@ -207,13 +207,7 @@ def _gemm_kernel(rows, n, k, splits, fmt, fold):
     return launch, plan
 
 
-@pytest.mark.parametrize("fmt", ["bf16", "fp4_triton", "fp4_asm"])
-@pytest.mark.parametrize("fold", [False, True])
-def test_tiled_gemm(harness, fmt, fold):
-    """``x @ W.T`` of the gated residual's down shape (split K, summed in order
-    or folded by the last arriver), bf16 or MXFP4 weights in either AITER
-    layout: f32 accumulation of exact bf16 products."""
-    rows, n, k, splits = ROWS, 352, 2560, 4
+def _check_gemm(harness, rows, n, k, splits, fmt, fold):
     gen = torch.Generator().manual_seed(0)
     x = torch.randn(rows, k, generator=gen).to(torch.bfloat16)
     if fmt == "bf16":
@@ -243,6 +237,30 @@ def test_tiled_gemm(harness, fmt, fold):
     assert rel(out[:, :n], x.double() @ wref.double().T) < 1e-5
 
 
+@pytest.mark.parametrize("fmt", ["bf16", "fp4_triton", "fp4_asm"])
+@pytest.mark.parametrize("fold", [False, True])
+def test_tiled_gemm(harness, fmt, fold):
+    """``x @ W.T`` of the gated residual's down shape (split K, summed in order
+    or folded by the last arriver), bf16 or MXFP4 weights in either AITER
+    layout: f32 accumulation of exact bf16 products."""
+    _check_gemm(harness, ROWS, 352, 2560, 4, fmt, fold)
+
+
+@pytest.mark.parametrize("rows", [1, 2, 4, 8, 16])
+@pytest.mark.parametrize(
+    "n, k, splits, fmt, fold",
+    [
+        (352, 2560, 2, "bf16", False),
+        (256, 2560, 4, "fp4_asm", True),
+        (192, 320, 1, "bf16", False),
+    ],
+)
+def test_tiled_gemm_resident(harness, rows, n, k, splits, fmt, fold):
+    """The resident stage of widths up to ``tiled.RESIDENT_MAX``: a unit's
+    whole K slice (10 chunks, 5 chunks, a ragged K of 320) staged once."""
+    _check_gemm(harness, rows, n, k, splits, fmt, fold)
+
+
 def test_fp4_shuffle_matches_aiter():
     """The shuffled layout the kernels read is AITER's ``shuffle_weight``."""
     from aiter.ops.shuffle import shuffle_weight
@@ -262,7 +280,7 @@ def test_fp4_shuffle_matches_aiter():
 EPS = 1e-6
 
 
-def _hc_kernel(rows, codec="bf16"):
+def _hc_kernel(rows, codec="bf16", combine=True, cold=False):
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr.typing import Int64
@@ -288,14 +306,19 @@ def _hc_kernel(rows, codec="bf16"):
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange as ex
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import hc, tiled
 
+    chunks = max(hc.down_plan(rows).per, hc.UP_CHUNKS)
+
     @fx.struct
     class Smem:
-        stage: fx.Array[fx.Int32, tiled.stage_words(rows), 16]
+        stage: fx.Array[fx.Int32, tiled.stage_words(rows, chunks), 16]
         red: fx.Array[fx.Float32, hc.up_lds_words(rows), 16]
         tile: fx.Array[fx.Int32, ex.GroupTile.words(rows), 16]
         word: fx.Array[fx.Int32, 4, 16]
 
-    @flyc.kernel(name=f"t_hc_{rows}_{codec}", known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(
+        name=f"t_hc_{rows}_{codec}_{int(combine)}_{int(cold)}",
+        known_block_size=[THREADS, 1, 1],
+    )
     def kern(
         state: Int64,
         norm_w: Int64,
@@ -320,29 +343,56 @@ def _hc_kernel(rows, codec="bf16"):
         g = Grid(tid, bid, s0, s1, folds, health, fx.Int64(0), sm.word.ptr)
         prologue(g)
         hc.stats(g, state, rrms, rows, EPS)
-        grid_sync(g)
-        hc.mix_down(
-            g, tiled.Gemm(sm.stage.ptr, rows, tid), state, rrms, norm_w, w_di, part
-        )
-        grid_sync(g)
-        hc.mix_reduce(g, part, down, inj, rows, True)
-        grid_sync(g)
-        up = tiled.Gemm(sm.stage.ptr, rows, tid, k_total=LOWRANK)
-        hc.mix_up(g, up, sm.red.ptr, down, w_up, state, rrms, norm_w, x_out, rows)
-        grid_sync(g)
-        # y through a one-rank exchange (a 64-column group a CTA), then the combine
-        tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 5
-        xch = ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 1, tag, rows, codec)
-        tile = ex.GroupTile(sm.tile.ptr, rows)
-        for grp in range(bid, ex.GROUPS, BLOCKS):
-            for idx in range(tid, rows * 8, THREADS):
-                token, piece = idx // 8, idx % 8
-                w = ld_i32x4(y, (token * HIDDEN + grp * 64 + piece * 8) // 2, CM_DEV)
-                lds_st(tile.ptr + token * ex.GroupTile.STRIDE + piece * 4, w)
-            fx.barrier()
-            ex.push_tile(g, xch, tile, grp)
-            fx.barrier()
-        hc.combine(g, xch, state, inj, rrms2, rows, EPS)
+        gemm = tiled.Gemm(sm.stage.ptr, rows, tid, chunks=chunks)
+        up = tiled.Gemm(sm.stage.ptr, rows, tid, k_total=LOWRANK, chunks=chunks)
+        if fx.const_expr(tiled.resident(rows)):
+            # one phase with tagged hand-offs, its weights issued inside the
+            # barrier before it (or, ``cold``, in it), as the layer kernels do
+            # (``part``, ``down``: the tagged partials and low-rank rows)
+            issue = None if cold else (lambda: hc.mix_issue(g, w_di, w_up, rows))
+            pending = grid_sync(g, issue)
+            tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 7
+            hc.mix_resident(
+                g,
+                gemm,
+                up,
+                sm.red.ptr,
+                state,
+                rrms,
+                norm_w,
+                w_di,
+                w_up,
+                x_out,
+                inj,
+                (part, down),
+                tag,
+                rows,
+                pending,
+            )
+        else:
+            grid_sync(g)
+            hc.mix_down(g, gemm, state, rrms, norm_w, w_di, part)
+            grid_sync(g)
+            hc.mix_reduce(g, part, down, inj, rows, True)
+            grid_sync(g)
+            hc.mix_up(g, up, sm.red.ptr, down, w_up, state, rrms, norm_w, x_out, rows)
+        if fx.const_expr(combine):
+            grid_sync(g)
+            # y through a one-rank exchange (a 64-column group a CTA), then the
+            # combine
+            tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 5
+            xch = ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 1, tag, rows, codec)
+            tile = ex.GroupTile(sm.tile.ptr, rows)
+            for grp in range(bid, ex.GROUPS, BLOCKS):
+                for idx in range(tid, rows * 8, THREADS):
+                    token, piece = idx // 8, idx % 8
+                    at = (token * HIDDEN + grp * 64 + piece * 8) // 2
+                    w = ld_i32x4(y, at, CM_DEV)
+                    lds_st(tile.ptr + token * ex.GroupTile.STRIDE + piece * 4, w)
+                fx.barrier()
+                ex.push_tile(g, xch, tile, grp)
+                fx.barrier()
+            hc.combine(g, xch, state, inj, rrms2, rows, EPS)
 
     @flyc.jit
     def launch(
@@ -393,6 +443,18 @@ def test_gated_residual(harness, rows, codec):
     """The mix's normalized gated mean and injection scales, the combine's new
     state and its rrms; with ``int4`` exchange lines the combine adds the
     codec's round trip of the block output."""
+    _check_gated_residual(harness, rows, codec, True)
+
+
+@pytest.mark.parametrize("cold", [False, True])
+@pytest.mark.parametrize("rows", [1, 2, 4, 8, 16])
+def test_gated_residual_resident(harness, rows, cold):
+    """The one-phase mix of the resident widths, its weights issued ahead or
+    (``cold``) in the phase (the combine at whole exchange lines)."""
+    _check_gated_residual(harness, rows, "bf16", rows % 8 == 0, cold)
+
+
+def _check_gated_residual(harness, rows, codec, combine, cold=False):
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
         DOWN_ROWS,
         HC,
@@ -419,10 +481,11 @@ def test_gated_residual(harness, rows, codec):
     }
     x_out = torch.zeros(rows, HIDDEN, dtype=torch.bfloat16, device="cuda")
     inj, rrms, rrms2 = (torch.zeros(rows, HC, device="cuda") for _ in range(3))
-    part = torch.zeros(hc.down_plan().partial_words(rows), device="cuda")
-    down = torch.zeros(rows, LOWRANK, dtype=torch.bfloat16, device="cuda")
+    words = max(hc.down_plan(rows).partial_words(rows), hc.mix_words(rows)[0])
+    part = torch.zeros(words, device="cuda")
+    down = torch.zeros(rows, 2 * LOWRANK, dtype=torch.bfloat16, device="cuda")
     harness.mbox_t.zero_()
-    _hc_kernel(rows, codec)(
+    _hc_kernel(rows, codec, combine, cold)(
         d["state"].data_ptr(),
         d["norm_w"].data_ptr(),
         d["w_di"].data_ptr(),
@@ -444,8 +507,9 @@ def test_gated_residual(harness, rows, codec):
     assert rel(rrms, rrms_r) < 1e-5
     assert rel(inj, inj_r) < 1e-3
     assert rel(x_out, mixed) < 1e-2
-    assert rel(d["state"], new) < 1e-2
-    assert rel(rrms2, rrms2_r) < 1e-3
+    if combine:
+        assert rel(d["state"], new) < 1e-2
+        assert rel(rrms2, rrms2_r) < 1e-3
 
 
 # --------------------------------------------------------------------------
@@ -453,7 +517,7 @@ def test_gated_residual(harness, rows, codec):
 # --------------------------------------------------------------------------
 
 
-def _gdn_kernel(rows):
+def _gdn_kernel(rows, out=True):
     import flydsl.compiler as flyc
     import flydsl.expr as fx
     from flydsl.expr.typing import Int64
@@ -475,16 +539,22 @@ def _gdn_kernel(rows):
         VALUE_DIM,
     )
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import exchange as ex
-    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import gdn, tiled
+    from vllm.models.qwen4_exp.amd.specialized_decode.wide.stages import (
+        gdn,
+        tagged,
+        tiled,
+    )
+
+    chunks = max(gdn.proj_plan().per, gdn.out_plan().per)
 
     @fx.struct
     class Smem:
-        stage: fx.Array[fx.Int32, tiled.stage_words(rows), 16]
+        stage: fx.Array[fx.Int32, tiled.stage_words(rows, chunks), 16]
         tile: fx.Array[fx.Int32, ex.GroupTile.words(rows), 16]
         red: fx.Array[fx.Float32, gdn.recur_lds_words(), 16]
         word: fx.Array[fx.Int32, 4, 16]
 
-    @flyc.kernel(name=f"t_gdn_{rows}", known_block_size=[THREADS, 1, 1])
+    @flyc.kernel(name=f"t_gdn_{rows}_{int(out)}", known_block_size=[THREADS, 1, 1])
     def kern(
         x: Int64,
         wq: Int64,
@@ -538,25 +608,41 @@ def _gdn_kernel(rows):
             conv_stride=fx.Int64(3 * CONV_DIM),
             ssm_stride=fx.Int64(NV * 128 * 128),
         )
-        gemm = tiled.Gemm(sm.stage.ptr, rows, tid)
-        gdn.proj(g, gemm, w, b, rows, 0)
-        grid_sync(g)
-        gdn.recur(g, w, b, sm.red.ptr, rows, EPS)
-        grid_sync(g)
-        tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 3
-        xch = ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 0, tag, rows)
+        # at the resident widths each GEMM's first weights are issued ahead,
+        # the out_proj's inside the barrier before it, and the recurrence
+        # polls the projection's tagged outputs, as the layer kernels do
+        pre = tiled.resident(rows)
+        gemm = tiled.Gemm(sm.stage.ptr, rows, tid, chunks=chunks)
         weights = tiled.Fp4Weights(wo, wo_scale, HIDDEN, VALUE_DIM, False)
-        gdn.out(
-            g,
-            gemm,
-            weights,
-            tiled.Source(core, VALUE_DIM),
-            part,
-            ex.GroupTile(sm.tile.ptr, rows),
-            xch,
-            VALUE_DIM,
-            200,
-        )
+        if fx.const_expr(pre):
+            gtag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 9
+            gdn.proj(g, gemm, w, b, rows, 0, gdn.proj_issue(g, w), gtag)
+            gdn.recur(g, w, b, sm.red.ptr, rows, EPS, None, gtag)
+            out_w = tiled.issue_unit(bid, tid, weights, gdn.out_plan())
+            source = tagged.Pairs(g, core, VALUE_DIM, gtag)
+        else:
+            gdn.proj(g, gemm, w, b, rows, 0)
+            grid_sync(g)
+            gdn.recur(g, w, b, sm.red.ptr, rows, EPS)
+            out_w = None
+            source = tiled.Source(core, VALUE_DIM)
+            if fx.const_expr(out):
+                grid_sync(g)
+        if fx.const_expr(out):
+            tag = fx.Int32(ld_i32x4(epoch, 0)[0]) * 128 + 3
+            xch = ex.Exchange([fx.Int64(mbox)], mbox, 0, 1, 0, tag, rows)
+            gdn.out(
+                g,
+                gemm,
+                weights,
+                source,
+                part,
+                ex.GroupTile(sm.tile.ptr, rows),
+                xch,
+                VALUE_DIM,
+                200,
+                out_w,
+            )
 
     @flyc.jit
     def launch(
@@ -621,6 +707,17 @@ def test_gated_delta_net(harness, rows):
     """Conv outputs and states, z, the recurrent states, the gated-norm core
     and out_proj through the exchange; two padding rows (slot 0) leave the
     states alone and give a zero core."""
+    _check_gated_delta_net(harness, rows, [3, rows - 1], True)
+
+
+@pytest.mark.parametrize("rows", [1, 2, 4, 8, 16])
+def test_gated_delta_net_resident(harness, rows):
+    """The gated delta net at the resident widths (out_proj through the
+    exchange at whole exchange lines); the last row of two or more pads."""
+    _check_gated_delta_net(harness, rows, [rows - 1] if rows > 1 else [], rows % 8 == 0)
+
+
+def _check_gated_delta_net(harness, rows, pads, out):
     from vllm.models.qwen4_exp.amd.specialized_decode.wide.layout import (
         BA,
         CONV_DIM,
@@ -642,8 +739,7 @@ def test_gated_delta_net(harness, rows):
     normw = (1 + torch.randn(128, generator=gen) * 0.1).to(torch.bfloat16)
     wo_data, wo_scale, wo = mxfp4(HIDDEN, VALUE_DIM, gen, 116, 121)
     st_idx = (torch.randperm(slots - 1, generator=gen)[:rows] + 1).to(torch.int32)
-    st_idx[3] = 0
-    st_idx[rows - 1] = 0
+    st_idx[pads] = 0
     conv_state = torch.randn(slots, 3, CONV_DIM, generator=gen).to(torch.bfloat16)
     ssm = torch.randn(slots, NV, 128, 128, generator=gen) * 0.05
     conv_r, z_r, cs_r, ssm_r, core_r, y_r = ref.gated_delta_net(
@@ -668,16 +764,17 @@ def test_gated_delta_net(harness, rows):
             ssm=ssm,
         ).items()
     }
-    qkv = torch.zeros(rows, CONV_DIM, dtype=torch.bfloat16, device="cuda")
+    qkv_words, ba_words, core_words = gdn.handoff_words(rows)
+    qkv = torch.zeros(qkv_words, dtype=torch.int32, device="cuda")
     z = torch.zeros(rows, VALUE_DIM, dtype=torch.bfloat16, device="cuda")
-    ba = torch.zeros(gdn.ba_plan().partial_words(rows), device="cuda")
-    core = torch.zeros(rows, VALUE_DIM, dtype=torch.bfloat16, device="cuda")
+    ba = torch.zeros(ba_words, device="cuda")
+    core = torch.zeros(core_words, dtype=torch.int32, device="cuda")
     part = torch.zeros(
         max(gdn.proj_plan().partial_words(rows), gdn.out_plan().partial_words(rows)),
         device="cuda",
     )
     harness.mbox_t.zero_()
-    _gdn_kernel(rows)(
+    _gdn_kernel(rows, out)(
         *[
             d[n].data_ptr()
             for n in (
@@ -708,13 +805,24 @@ def test_gated_delta_net(harness, rows):
     )
     torch.accelerator.synchronize()
     assert harness.health[0].item() == 0
+    if qkv_words == rows * QKVZ:  # tagged (bf16 pair, tag) pairs, z included
+        qkvz = qkv.view(rows, QKVZ // 2, 2)[:, :, 0].contiguous()
+        qkvz = qkvz.view(torch.bfloat16).view(rows, QKVZ)
+        qkv, z = qkvz[:, :CONV_DIM], qkvz[:, CONV_DIM:]
+    else:
+        qkv = qkv.view(torch.bfloat16).view(rows, CONV_DIM)
+    if core_words == rows * VALUE_DIM:  # tagged (bf16 pair, tag) pairs
+        core = core.view(rows, VALUE_DIM // 2, 2)[:, :, 0].contiguous()
+    core = core.view(torch.bfloat16).view(rows, VALUE_DIM)
     assert rel(qkv, conv_r) < 1e-2
     assert rel(z, z_r) < 1e-2
     assert rel(d["conv_state"], cs_r) < 1e-2
     assert rel(d["ssm"], ssm_r) < 1e-2
     assert rel(core, core_r) < 1e-2
-    assert core[3].abs().max().item() == 0 and core[rows - 1].abs().max().item() == 0
-    assert rel(harness.exchange_y(rows, 0), y_r) < 2e-2
+    for p in pads:
+        assert core[p].abs().max().item() == 0
+    if out:
+        assert rel(harness.exchange_y(rows, 0), y_r) < 2e-2
 
 
 # --------------------------------------------------------------------------
