@@ -628,8 +628,10 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
         ):
             logger.warning_once("SWA bounded replay with PCP requires prefix caching.")
             swa_bounded_replay = False
-        # Other ROCm archs are not validated for replay. The import is
-        # ROCm-only: it resolves the GPU arch and fails with no GPU visible.
+        # Replay relies on the AITER sparse-MLA and Triton gather paths
+        # clamping to replay_start, validated on CDNA3 and CDNA4 only. The
+        # import is ROCm-only: it resolves the GPU arch and fails with no GPU
+        # visible.
         if swa_bounded_replay and current_platform.is_rocm():
             from vllm.platforms.rocm import get_cdna_version
 

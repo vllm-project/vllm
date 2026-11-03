@@ -929,6 +929,8 @@ def _prefix_replay_attention_cls():
         (True, 4, True, True),
         (True, 3, True, True),
         (True, 2, True, False),
+        (True, 5, True, False),
+        (True, 0, True, False),
         (True, 4, False, False),
     ],
 )
