@@ -6,6 +6,7 @@ import torch
 from torch import nn
 
 from vllm.config import VllmConfig
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
     MEGA_MOE_MXFP8,
     DeepGemmMegaMoEExperts,
@@ -14,6 +15,8 @@ from vllm.model_executor.layers.fused_moe.deep_gemm_mega_moe import (
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     requant_block_fp8_to_ue8m0,
 )
+
+logger = init_logger(__name__)
 
 # (local expert id, shard id); the fused shared expert has expert id None.
 Shard = tuple[int | None, str]
@@ -206,6 +209,16 @@ class Glm5NextMegaMoEExperts(DeepGemmMegaMoEExperts):
         block_scale = torch.stack(
             [self._shard_rows(s, shard_id) for _, _, s in tensors]
         )
+        # Power-of-two block scales requantize exactly; any other is rounded.
+        if not torch.equal(block_scale, block_scale.log2().round().exp2()):
+            logger.warning_once(
+                "GLM-5.3-Flash on the deep_gemm_mega_moe backend: the checkpoint's "
+                "%dx%d block-FP8 MoE scales are not all powers of two, so "
+                "requantizing them to MXFP8 (UE8M0 scales per 1x32) changes the "
+                "expert weights. Use another moe_backend to run the block-FP8 "
+                "weights as they are.",
+                *self.weight_block_size,
+            )
         weight, sf = requant_block_fp8_to_ue8m0(raw, block_scale)
         for (dst, dst_scale, _), w, s in zip(tensors, weight, sf):
             self._load_weight(dst, w, shard_id, False)
