@@ -6,6 +6,7 @@ import json
 from abc import abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 from openai.types.responses import ToolChoiceCustom, ToolChoiceFunction
 from pydantic import TypeAdapter, ValidationError
@@ -211,6 +212,15 @@ class Parser:
         state = self._stream_state
         state.history_tool_call_cnt = count
         state.history_tool_call_cnt_initialized = True
+
+    def set_citation_sources(self, sources: Sequence[Any]) -> None:
+        """Install a JSON-safe citation source map before parsing.
+
+        Default is a no-op. Parsers that resolve grounding citations from
+        numeric addresses (e.g. Cohere) override this. Each entry must
+        expose ``bucket``, ``idx`` and ``source`` attributes.
+        """
+        return
 
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest

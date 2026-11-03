@@ -72,7 +72,10 @@ if _SDK_AVAILABLE:
     )
     from vllm.entrypoints.cohere.serving import CohereServingChatV2
     from vllm.entrypoints.scale_out.render.serving import ServingRender
-    from vllm.entrypoints.scale_out.token_in_token_out.protocol import GenerateRequest
+    from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+        CitationSourceEntry,
+        GenerateRequest,
+    )
 
     router = APIRouter()
     render_router = APIRouter()
@@ -190,8 +193,9 @@ if _SDK_AVAILABLE:
 
         try:
             chat_request = handler.to_chat_completion_request(request)
-            # Derender mode returns no citations: the position-to-source
-            # map can't go over JSON.
+            # Grounded citations travel on parse_context.citation_sources
+            # (JSON-safe). The tuple-keyed position map stays out of
+            # chat_template_kwargs via _engine_chat_template_kwargs.
             result = await render_handler.render_chat_request(
                 chat_request,
                 engine_chat_template_kwargs=handler._engine_chat_template_kwargs,
@@ -207,6 +211,18 @@ if _SDK_AVAILABLE:
             kwargs.chat_template_kwargs = handler._engine_chat_template_kwargs(
                 kwargs.chat_template_kwargs
             )
+
+        if result.parse_context is not None:
+            position_to_source = CohereServingChatV2._build_position_to_source(request)
+            if position_to_source:
+                result.parse_context.citation_sources = [
+                    CitationSourceEntry(
+                        bucket=bucket,
+                        idx=idx,
+                        source=source.model_dump(exclude_none=True),
+                    )
+                    for (bucket, idx), source in position_to_source.items()
+                ]
 
         return JSONResponse(content=result.model_dump())
 

@@ -170,3 +170,42 @@ class TestParserStreamingEndToEnd:
         # boundary and never emits a delta with both fields set.
         for d in deltas:
             assert not (d.reasoning is not None and d.content is not None)
+
+
+class TestSetCitationSources:
+    """JSON-safe derender entries rebuild the parser's position map."""
+
+    _MODEL_OUTPUT = (
+        "<|START_RESPONSE|>The capital is <co>Paris</co: 0:[1]>.<|END_RESPONSE|>"
+    )
+
+    def test_set_citation_sources_resolves_unary_parse(self, tokenizer, request_obj):
+        from vllm.entrypoints.scale_out.token_in_token_out.protocol import (
+            CitationSourceEntry,
+        )
+
+        parser = make_parser(tokenizer, "cohere_command3")
+        assert getattr(parser, "_position_to_source", "missing") is None
+
+        parser.set_citation_sources(
+            [
+                CitationSourceEntry(
+                    bucket=0,
+                    idx=1,
+                    source={
+                        "type": "document",
+                        "id": "doc-paris",
+                        "document": {"id": "doc-paris", "title": "France"},
+                    },
+                )
+            ]
+        )
+        reasoning, content, tool_calls = parser.parse(self._MODEL_OUTPUT, request_obj)
+        assert reasoning is None
+        assert content == "The capital is Paris."
+        assert tool_calls is None
+        citations = getattr(parser, "last_unary_citations", None)
+        assert citations is not None
+        (cite,) = citations
+        assert cite.text == "Paris"
+        assert cite.sources[0].id == "doc-paris"

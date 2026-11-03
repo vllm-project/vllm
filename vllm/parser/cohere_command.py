@@ -501,6 +501,13 @@ class CohereCommandParser(DelegatingParser):
             raw_map if isinstance(raw_map, Mapping) else None
         )
 
+    def set_citation_sources(self, sources: Sequence[Any]) -> None:
+        """Rebuild ``_position_to_source`` from JSON-safe derender entries."""
+        self._position_to_source = {
+            (entry.bucket, entry.idx): CitationSource.model_validate(entry.source)
+            for entry in sources
+        }
+
     def adjust_request(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
