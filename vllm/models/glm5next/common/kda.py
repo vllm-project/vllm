@@ -424,11 +424,12 @@ class Glm5NextLinearAttention(GatedDeltaNetAttention):
         )
         if out is None:
             out = workspace_out[:, : q.shape[1]]
-        # FlashKDA hardcodes dense q/k/v/g strides; beta may be row-strided.
+        # FlashKDA accepts row-strided q/k/v (contiguous H/D rows, aligned
+        # token stride), so the packed q|k|v views are passed without a copy.
         torch.ops._flashkda_C.fwd(
-            q.contiguous(),
-            k.contiguous(),
-            v.contiguous(),
+            q,
+            k,
+            v,
             g.contiguous(),
             beta,
             self.head_dim**-0.5,

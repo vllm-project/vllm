@@ -427,13 +427,15 @@ def stage_route(c, t):
             for p in range_constexpr(ROUTER_PARTS):
                 tot = tot + parts[p].bitcast(fx.Float32)
             logits.append(tot)
+        neg = fx.Float32(float("-inf"))
         vals, orig, idxs = [], [], []
         for i in range_constexpr(ept):
             e = lane + 64 * i
             sc = _score(logits[i])
             # aiter's NaN guards: a NaN score weighs 0 and never wins
             orig.append(fx.Float32(fx.isnan(sc).select(fx.Float32(0.0), sc)))
-            vals.append(fx.max(sc + ld_f32(a["bias"], e), fx.Float32(float("-inf"))))
+            val = fx.max(sc + ld_f32(a["bias"], e), neg)
+            vals.append(fx.isnan(val).select(neg, val))
             idxs.append(fx.Int32(e))
         for p, q in c["rs"].sort_net:
             sw = vals[p] < vals[q]
@@ -453,7 +455,7 @@ def stage_route(c, t):
                     at.select(orig[i], co),
                 )
             best = butterfly(cv, (32, 16, 8, 4, 2, 1), fx.max)
-            ball = ballot(cv == best)
+            ball = ballot((cv == best) & (cursor < ept))
             win = fx.Int32(
                 (ball == fx.Int64(0)).select(fx.Int32(0), fx.Int32(fmath.cttz(ball)))
             )
@@ -1067,9 +1069,16 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
     if tid < TILE:
         c["poll"]([(c["x8rdy"], token_of(fx.min(tid, live - 1)), 1)])
     gpu.barrier()
+    got, x8all = [], c["push_bases"] and not GFX942 and isinstance(live, int)
     for mb, width, dst in ((words_mb, X8_WORDS, xl), (codes_mb, HIDDEN // 32, xsl)):
         quads = width // 4
-        for i in range_constexpr(-(-TILE * quads // THREADS)):
+        for i in range_constexpr(-(-live * quads // THREADS) if x8all else 0):
+            q = fx.Uint32(fx.min(tid + THREADS * i, live * quads - 1))
+            row = fx.Int32(q // quads)
+            r, off = rsrc(c[mb].value), token_of(row) * width + fx.Int32(q % quads) * 4
+            x = fx.Vector(bo.buffer_load(r, off, dtype=T.i32, cache_modifier=CM_DEV))
+            got.append((tid + THREADS * i, row, x, dst, lds_row(width), quads))
+        for i in range_constexpr(0 if x8all else -(-TILE * quads // THREADS)):
             q = tid + THREADS * i
             row = q // quads
             if (q < TILE * quads) & (row < live):
@@ -1083,6 +1092,9 @@ def load_x8_rows(c, words_mb, codes_mb, xl, xsl, token_of, live):
                     )
                 )
                 fx.ptr_store(v, dst + (row * lds_row(width) + q % quads * 4))
+    for q, row, x, dst, stride, quads in got:
+        if q < live * quads:
+            fx.ptr_store(x, dst + (row * stride + fx.Int32(fx.Uint32(q) % quads) * 4))
     gpu.barrier()
 
 
@@ -1609,6 +1621,7 @@ def stage_down(c, tasks):
                                 avs[j * slots + i],
                                 us[i] < nu,
                             )
+    c = dict(c, peer_addr=c["push_bases"]().__getitem__) if c["push_bases"] else c
     gpu.barrier()
     for t0, nn in token_tiles(s):
         for j in range_constexpr(n):
@@ -2014,6 +2027,8 @@ def moe_context(s, rs, lds, mb, bases, layout, scratch, args, rank, sym):
         # x (``ffn_normed``) before this launch: plain loads, no readiness wait
         "x_cm": 0,
         "x_ready": False,
+        # TP4 K2: the push's peer bases, loaded late; also batches the X8 copies
+        "push_bases": None,
     }
     for name, off in stage_lds(s, rs)["offsets"].items():
         c[name] = lds.stage.ptr + off
