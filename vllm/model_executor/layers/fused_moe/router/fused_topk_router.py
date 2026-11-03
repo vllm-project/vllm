@@ -133,22 +133,20 @@ def dispatch_topk_sigmoid_func(
     topk_indices: torch.Tensor | None = None,
     gating_output: torch.Tensor | None = None,
 ) -> Callable[..., tuple[torch.Tensor, ...]]:
-    if use_rocm_aiter:
-        if (
-            rocm_aiter_ops.is_topk_gating_enabled()
-            and topk_weights is not None
-            and topk_indices is not None
-            and gating_output is not None
-            and _aiter_topk_gating_supported(
-                topk_weights,
-                topk_indices,
-                gating_output,
-                num_shared_experts=0,
-                shared_expert_scoring_func="",
-            )
-        ):
-            return rocm_aiter_ops.topk_sigmoid_gating
-        return rocm_aiter_ops.topk_sigmoid
+    if use_rocm_aiter and (
+        rocm_aiter_ops.is_topk_gating_enabled()
+        and topk_weights is not None
+        and topk_indices is not None
+        and gating_output is not None
+        and _aiter_topk_gating_supported(
+            topk_weights,
+            topk_indices,
+            gating_output,
+            num_shared_experts=0,
+            shared_expert_scoring_func="",
+        )
+    ):
+        return rocm_aiter_ops.topk_sigmoid_gating
     return vllm_topk_sigmoid
 
 

@@ -255,13 +255,32 @@ def test_topk_gating_enabled_by_cdna(
     assert bool(rocm_aiter_ops.is_topk_gating_enabled()) is expected
 
 
-@pytest.mark.parametrize(
-    "use_rocm_aiter", [True, False] if current_platform.is_rocm() else [False]
-)
-def test_topk_sigmoid_dispatch(use_rocm_aiter: bool):
+def test_topk_sigmoid_dispatch():
     topk_func = dispatch_topk_sigmoid_func(use_rocm_aiter)
+    assert topk_func == vllm_topk_sigmoid
 
-    if current_platform.is_rocm() and use_rocm_aiter:
-        assert topk_func == rocm_aiter_ops.topk_sigmoid
+
+@pytest.mark.parametrize(
+    "launch, expect_gating",
+    [
+        pytest.param({}, True, id="plain-sigmoid"),
+        pytest.param({"num_tokens": 4096}, True, id="max-tokens"),
+        pytest.param({"num_tokens": 4097}, False, id="too-many-tokens"),
+        pytest.param({"contiguous": False}, False, id="non-contiguous"),
+    ],
+)
+@pytest.mark.parametrize("gating_enabled", [True, False])
+def test_topk_sigmoid_dispatch_aiter_topk_gating(
+    monkeypatch: pytest.MonkeyPatch,
+    launch: dict,
+    expect_gating: bool,
+    gating_enabled: bool,
+):
+    monkeypatch.setattr(
+        rocm_aiter_ops, "is_topk_gating_enabled", lambda: gating_enabled
+    )
+    topk_func = dispatch_topk_sigmoid_func(True, **_topk_gating_launch(**launch))
+    if expect_gating and gating_enabled:
+        assert topk_func == rocm_aiter_ops.topk_sigmoid_gating
     else:
         assert topk_func == vllm_topk_sigmoid
