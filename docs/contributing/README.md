@@ -368,11 +368,11 @@ review process:
   failures. Before merging, merge or rebase onto the latest target branch and
   rerun CI without `--allow-stale` on the latest PR commit.
 - A PR targeting `main` that changes `docker/Dockerfile.rocm_base` or
-  `tools/vllm-rocm/therock_wheels.py` cannot pass `pre-commit` until its ROCm
-  base image is cached, so `main` and other PRs reuse it instead of rebuilding
-  it. Once Buildkite CI is green and a member of
-  `@vllm-project/vllm-ci-maintainers` approved the PR, comment `/amd-ci cache`,
-  then again once that build passes to re-run `pre-commit`.
+  `tools/vllm-rocm/therock_wheels.py` fails CI's `ROCm base image cache` job
+  until its ROCm base image is cached, so `main` and other PRs reuse it instead
+  of rebuilding it. Once the rest of CI is green, a maintainer with write access
+  comments `/amd-ci cache`, then again once that AMD CI build passes to retry
+  the job.
 - Retrying or cancelling builds does not check branch freshness.
 - Apart from that merge, these commands do not modify your branch or enforce
   merge requirements. Direct Buildkite launches are outside this workflow.

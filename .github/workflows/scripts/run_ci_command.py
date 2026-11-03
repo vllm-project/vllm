@@ -81,13 +81,14 @@ CANCELABLE_BUILD_STATES = ("scheduled", "running", "failing")
 # ensure-ci-base-amd: the old ROCm build chain, which ci-infra still renders
 # for branches that predate .buildkite/scripts/rocm/build.sh.
 SETUP_STEP_KEYS = {"ensure-ci-base-amd", "refresh-rocm-base-amd", "pre-commit"}
-# pre-commit.yml fails on a PR that changes these until main's ROCm base image for
-# it exists; `/amd-ci cache` builds it in AMD CI (ci-infra's ROCm stack pre-build).
+# CI fails a PR that changes these in its "ROCm base image cache" job until
+# main's stack image for it exists (ci-infra); `/amd-ci cache` builds that image
+# in AMD CI and then retries the job.
 ROCM_STACK_INPUTS = (
     "docker/Dockerfile.rocm_base",
     "tools/vllm-rocm/therock_wheels.py",
 )
-ROCM_CACHE_TEAM = ("vllm-project", "vllm-ci-maintainers")
+ROCM_CACHE_STEP_KEY = "rocm-base-image-cache"
 # Written by build.sh base mode: the stack images the PR's CI built.
 ROCM_STACK_IMAGE_KEYS = ("rocm-rocm-stack", "rocm-rocm-stack-wheels")
 
@@ -357,41 +358,6 @@ class GitHubClient:
                 return "none"
             raise
 
-    def is_team_member(self, org: str, team: str, username: str) -> bool:
-        org, team, username = (
-            urllib.parse.quote(part, safe="") for part in (org, team, username)
-        )
-        try:
-            response = self._request(f"/orgs/{org}/teams/{team}/memberships/{username}")
-        except ApiError as error:
-            if error.status != 404:
-                raise
-            try:  # 404 for a non-member, and for a team the token cannot see
-                self._request(f"/orgs/{org}/teams/{team}")
-            except ApiError as team_error:
-                if team_error.status == 404:
-                    raise RuntimeError(
-                        f"CI_MAINTAINERS_TOKEN cannot see {org}/{team}: it needs "
-                        "organization Members: read."
-                    ) from team_error
-                raise
-            return False
-        return response.get("state") == "active"
-
-    def rerun_failed_pre_commit(self, sha: str) -> bool:
-        sha = urllib.parse.quote(sha, safe="")
-        runs = self._request(
-            self._repo_path(f"/actions/workflows/pre-commit.yml/runs?head_sha={sha}")
-        )["workflow_runs"]
-        latest = max(runs, key=lambda run: run["created_at"], default=None)
-        if not latest or latest.get("conclusion") != "failure":
-            return False
-        self._request(
-            self._repo_path(f"/actions/runs/{latest['id']}/rerun-failed-jobs"),
-            method="POST",
-        )
-        return True
-
 
 class BuildkiteClient:
     def __init__(
@@ -459,9 +425,10 @@ class BuildkiteClient:
         branch: str | None = None,
         metadata: tuple[str, str] | None = None,
         states: Sequence[str] = (),
+        jobs: bool = False,
     ) -> list[dict[str, Any]]:
         query = [
-            ("exclude_jobs", "true"),
+            *([] if jobs else [("exclude_jobs", "true")]),
             ("exclude_pipeline", "true"),
             ("per_page", "100"),
         ]
@@ -492,6 +459,11 @@ class BuildkiteClient:
             method="PUT",
             path=f"/{number}/retry_failed_jobs",
         )
+
+    def retry_job(self, build_number: int, job_id: str) -> dict[str, Any]:
+        number = urllib.parse.quote(str(build_number), safe="")
+        job = urllib.parse.quote(job_id, safe="")
+        return self._request(method="PUT", path=f"/{number}/jobs/{job}/retry")
 
     def cancel_build(self, build_number: int) -> dict[str, Any]:
         number = urllib.parse.quote(str(build_number), safe="")
@@ -1256,35 +1228,40 @@ def rocm_cache_reminder(github: GitHubClient, pr: Mapping[str, Any]) -> str:
     except ApiError as error:  # never fail the run command over a reminder
         print(f"Could not check the ROCm stack inputs: {error}", file=sys.stderr)
         return ""
-    org, team = ROCM_CACHE_TEAM
     return (
-        "\n\nℹ️ This PR changes the ROCm base image, so `pre-commit` fails until it "
-        f"is cached. Once Buildkite CI is green and a member of @{org}/{team} "
-        f"approved the PR, comment `{COMMAND_CACHE_AMD}`, then again once that "
-        "build passes."
+        "\n\nℹ️ This PR changes the ROCm base image, so CI's `ROCm base image "
+        "cache` job fails until that image is cached. Once the rest of CI is green, "
+        f"a maintainer with write access comments `{COMMAND_CACHE_AMD}`, then again "
+        "once that AMD CI build passes to retry the job."
     )
 
 
-def rocm_stack_approved(
-    github: GitHubClient, team_github: GitHubClient, pr: Mapping[str, Any]
-) -> bool:
-    """A vllm-ci-maintainer's latest review approves the PR's current stack inputs."""
-    latest: dict[str, dict[str, Any]] = {}
-    for review in github.list_reviews(pr["number"]):
-        login = (review.get("user") or {}).get("login")
-        if login and review.get("state") in {
-            "APPROVED",
-            "CHANGES_REQUESTED",
-            "DISMISSED",
-        }:
-            latest[login] = review
-    head = [github.get_file_sha(p, pr["head"]["sha"]) for p in ROCM_STACK_INPUTS]
-    return any(
-        review["state"] == "APPROVED"
-        and team_github.is_team_member(*ROCM_CACHE_TEAM, login)
-        and [github.get_file_sha(p, review["commit_id"]) for p in ROCM_STACK_INPUTS]
-        == head
-        for login, review in latest.items()
+def retry_rocm_cache_job(ci_buildkite: BuildkiteClient, pr: Mapping[str, Any]) -> str:
+    builds = [
+        build
+        for build in ci_buildkite.list_builds(pr["head"]["sha"], jobs=True)
+        if is_build_for_pr(build, pr["number"])
+    ]
+    build = max(builds, key=lambda build: build.get("created_at", ""), default=None)
+    job = next(
+        (
+            job
+            for job in (build or {}).get("jobs") or []
+            if job.get("step_key") == ROCM_CACHE_STEP_KEY
+            and not job.get("retried")
+            and job.get("state") in {"failed", "timed_out", "expired"}
+        ),
+        None,
+    )
+    if not build or not job:
+        return (
+            "there is no failed `ROCm base image cache` job in CI for "
+            f"`{pr['head']['sha'][:12]}` to retry."
+        )
+    ci_buildkite.retry_job(build["number"], job["id"])
+    return (
+        "retried the `ROCm base image cache` job in "
+        f"[Buildkite CI #{build['number']}]({build['web_url']})."
     )
 
 
@@ -1292,23 +1269,16 @@ def handle_cache_amd(
     *,
     actor: str,
     buildkite: BuildkiteClient,
+    ci_buildkite: BuildkiteClient,
     github: GitHubClient,
     pr: Mapping[str, Any],
-    team_github: GitHubClient,
-    image_sources: Sequence[BuildkiteClient] = (),
 ) -> str:
     changes = rocm_stack_changes(github, pr)
     if not changes:
         return "This PR does not change the ROCm base image; nothing to cache."
     sha = pr["head"]["sha"]
-    if not rocm_stack_approved(github, team_github, pr):
-        org, team = ROCM_CACHE_TEAM
-        raise CiPreparationError(
-            f"`{COMMAND_CACHE_AMD}` needs an approval from a member of @{org}/{team} "
-            "that covers the PR's current ROCm stack inputs."
-        )
     # A cache build stays good while these files keep their blobs on the PR and on
-    # main; pre-commit.yml checks the image main needs either way.
+    # main; CI's job checks for the image main needs either way.
     inputs = ",".join(
         f"{p}={changes.get(p, 'none')}:{github.get_file_sha(p, 'main')}"
         for p in ROCM_STACK_INPUTS
@@ -1328,18 +1298,16 @@ def handle_cache_amd(
             "it passes."
         )
     if build and build.get("state") == "passed":
-        rerun = github.rerun_failed_pre_commit(sha)
         return (
             f"[Buildkite AMD CI #{build['number']}]({build['web_url']}) cached the "
-            "ROCm base image; "
-            + ("re-running `pre-commit`." if rerun else "`pre-commit` has not failed.")
+            f"ROCm base image; {retry_rocm_cache_job(ci_buildkite, pr)}"
         )
 
     # The PR's CI build of this commit that recorded its ROCm images: build.sh
     # copies those whose keys match instead of rebuilding them.
     sources = [
         candidate
-        for source in image_sources
+        for source in (buildkite, ci_buildkite)
         for candidate in source.list_builds(sha)
         if is_build_for_pr(candidate, pr["number"])
         and all(
@@ -1372,7 +1340,8 @@ def handle_cache_amd(
     return (
         f"Started [Buildkite AMD CI #{build['number']}]({build['web_url']}) to cache "
         f"the ROCm base image of `{sha[:12]}`, {origin}. Comment "
-        f"`{COMMAND_CACHE_AMD}` again once it passes to re-run `pre-commit`."
+        f"`{COMMAND_CACHE_AMD}` again once it passes to retry CI's "
+        "`ROCm base image cache` job."
     )
 
 
@@ -1404,8 +1373,7 @@ def run(
     buildkite: BuildkiteClient,
     trusted_users_value: str = "",
     branch_updater: GitHubClient | None = None,
-    team_github: GitHubClient | None = None,
-    image_sources: Sequence[BuildkiteClient] = (),
+    ci_buildkite: BuildkiteClient | None = None,
 ) -> None:
     command = parse_command(event["comment"]["body"])
     if not command or "pull_request" not in event["issue"]:
@@ -1472,6 +1440,18 @@ def run(
                 allow_repeat_run=is_trusted_permission(permission),
             )
             message += rocm_cache_reminder(github, pr)
+        elif command == COMMAND_CACHE_AMD:
+            if not is_trusted_permission(permission):
+                raise CiPreparationError(
+                    f"Only maintainers with write access can use `{command}`."
+                )
+            message = handle_cache_amd(
+                actor=actor,
+                buildkite=buildkite,
+                ci_buildkite=ci_buildkite or buildkite,
+                github=github,
+                pr=pr,
+            )
         elif command in RETRY_COMMANDS:
             message = handle_retry_failed(
                 actor=actor,
@@ -1486,17 +1466,6 @@ def run(
                 buildkite=buildkite,
                 command=command,
                 pr=pr,
-            )
-        elif command == COMMAND_CACHE_AMD:
-            if team_github is None:
-                raise RuntimeError("The CI_MAINTAINERS_TOKEN secret is not set.")
-            message = handle_cache_amd(
-                actor=actor,
-                buildkite=buildkite,
-                github=github,
-                pr=pr,
-                team_github=team_github,
-                image_sources=image_sources,
             )
         else:
             raise ValueError(f"Unsupported CI command: {command}")
@@ -1561,11 +1530,7 @@ def main() -> None:
     buildkite_token = os.environ.get("BUILDKITE_API_TOKEN", "")
     organization = os.environ.get("BUILDKITE_ORGANIZATION", "vllm")
     buildkite = BuildkiteClient(buildkite_token, organization, pipeline)
-    ci_buildkite = BuildkiteClient(
-        buildkite_token, organization, os.environ.get("BUILDKITE_PIPELINE", "ci")
-    )
     branch_update_token = os.environ.get("GH_BRANCH_UPDATE_TOKEN", "")
-    team_token = os.environ.get("CI_MAINTAINERS_TOKEN", "")
     run(
         event,
         github,
@@ -1574,10 +1539,9 @@ def main() -> None:
         GitHubClient(branch_update_token, os.environ["GITHUB_REPOSITORY"])
         if branch_update_token
         else None,
-        GitHubClient(team_token, os.environ["GITHUB_REPOSITORY"])
-        if team_token
-        else None,
-        (buildkite, ci_buildkite),
+        BuildkiteClient(
+            buildkite_token, organization, os.environ.get("BUILDKITE_PIPELINE", "ci")
+        ),
     )
 
 
