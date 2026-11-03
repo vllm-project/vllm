@@ -258,6 +258,11 @@ class EngineCore:
         self.aborts_queue = queue.Queue[list[str]]()
 
         self._idle_state_callbacks: list[Callable] = []
+        # Glue (B1): a keep pause that preserves KV completes without waiting
+        # for finished requests whose blocks a remote KV reader still holds.
+        self._pause_mode: PauseMode = "abort"
+        self._pause_clear_cache: bool = True
+        self._pending_keep_pause: Future[Any] | None = None
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -1042,6 +1047,7 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
+        self._pause_mode, self._pause_clear_cache = mode, clear_cache
         self._finish_pause(clear_cache)
 
         return None
@@ -1765,6 +1771,7 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
         waited = False
         while not self.has_work() and self.is_running():
+            self._maybe_finish_keep_pause()
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1803,6 +1810,7 @@ class EngineCoreProc(EngineCore):
             self.output_queue.put_nowait(output)
         # Post-step hook.
         self.post_step(model_executed)
+        self._maybe_finish_keep_pause()
 
         # If no model execution happened but there is still scheduler work
         # (e.g. WAITING_FOR_REMOTE_KVS or delayed KV connector frees), yield
@@ -2340,6 +2348,20 @@ class EngineCoreProc(EngineCore):
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
+        self._pause_mode, self._pause_clear_cache = mode, clear_cache
+
+        if self._keep_pause_preserves_kv():
+            # Glue (B1): KV exports a remote reader still holds outlive this
+            # pause, so do not wait for them. Completion is re-checked after
+            # every step, not only when the engine goes idle.
+            future = Future[Any]()
+            self._pending_keep_pause = future
+            self._begin_keep_pause()
+            self._maybe_finish_keep_pause()
+            if future.done():
+                future.result()  # re-raise a synchronous failure
+                return None
+            return future
 
         if self._pause_complete():
             self._finish_pause(clear_cache)
@@ -2363,6 +2385,11 @@ class EngineCoreProc(EngineCore):
         # After the checkpoint guard, so a refused resume keeps rejecting.
         super().resume_scheduler()
         self.reject_new_requests = False
+        if (future := self._pending_keep_pause) is not None:
+            self._pending_keep_pause = None
+            future.set_exception(
+                RuntimeError("Resumed before the keep pause completed.")
+            )
 
     def checkpoint_prepare(self, mode: PauseMode = "wait") -> str | None:
         """Drain with `mode`, then release the KV cache and what a process
@@ -2414,6 +2441,40 @@ class EngineCoreProc(EngineCore):
         and the caller should register an idle-state callback to finish it.
         """
         return not self.has_work()
+
+    # ---- Glue (B1): keep pause that preserves KV ----------------------------
+
+    def _keep_pause_preserves_kv(self) -> bool:
+        return self._pause_mode == "keep" and not self._pause_clear_cache
+
+    def _has_compute_work(self) -> bool:
+        """has_work() minus finished requests whose blocks are only retained
+        for a remote KV reader (delay-freed exports). A cache-preserving keep
+        pause keeps that KV regardless, so it need not wait for the reader."""
+        return (
+            self.engines_running
+            or bool(self.batch_queue)
+            or self.scheduler.has_unfinished_requests()
+            or bool(self.scheduler.finished_req_ids)
+        )
+
+    def _begin_keep_pause(self) -> None:
+        """Hook for engines that must agree on a pause before going idle."""
+
+    def _keep_pause_ready(self) -> bool:
+        return not self._has_compute_work()
+
+    def _maybe_finish_keep_pause(self) -> None:
+        future = self._pending_keep_pause
+        if future is None or not self._keep_pause_ready():
+            return
+        self._pending_keep_pause = None
+        try:
+            self._finish_pause(self._pause_clear_cache)
+        except Exception as e:
+            future.set_exception(e)
+        else:
+            future.set_result(None)
 
     def _send_finish_outputs_to_client(
         self,
@@ -2540,6 +2601,19 @@ class DPEngineCoreProc(EngineCoreProc):
         self.engines_running = True
 
         return False
+
+    def _begin_keep_pause(self) -> None:
+        # Same two-phase protocol as _pause_complete: step until every rank
+        # has pending_pause set, then stop together.
+        self.pending_pause = True
+        self.engines_running = True
+
+    def _keep_pause_ready(self) -> bool:
+        return (
+            not self.pending_pause
+            and self.ignore_start_dp_wave
+            and not self._has_compute_work()
+        )
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
