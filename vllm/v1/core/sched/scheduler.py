@@ -1045,6 +1045,70 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        def _preempt_lowest_priority_running(request: Request) -> bool:
+            """Preempt a lower-priority running request for request admission."""
+            nonlocal token_budget, input_budget, encoder_compute_budget
+
+            # On a throttled step the waiting loop's prefill gate would hold
+            # the request after its victim was preempted.
+            if (
+                self.policy != SchedulingPolicy.PRIORITY
+                or self._pause_state != PauseState.UNPAUSED
+                or defer_prefills
+            ):
+                return False
+
+            # Requests admitted from the waiting queues in this step are not
+            # victims; their admission state is not unwound here.
+            admitted_req_ids = {
+                req.request_id for req in scheduled_new_reqs + scheduled_resumed_reqs
+            }
+            preempted_req = max(
+                (r for r in self.running if r.request_id not in admitted_req_ids),
+                key=lambda r: (r.priority, r.arrival_time),
+                default=None,
+            )
+            # Lower numeric values indicate higher priority. Equal-priority
+            # waiting requests should not displace running requests.
+            if preempted_req is None or request.priority >= preempted_req.priority:
+                return False
+
+            self.running.remove(preempted_req)
+            if self.lora_config:
+                lora_request = preempted_req.lora_request
+                if lora_request and lora_request.lora_int_id > 0:
+                    lora_id = lora_request.lora_int_id
+                    if not any(
+                        req.lora_request and req.lora_request.lora_int_id == lora_id
+                        for req in self.running
+                    ):
+                        scheduled_loras.discard(lora_id)
+            if preempted_req in scheduled_running_reqs:
+                preempted_req_id = preempted_req.request_id
+                scheduled_running_reqs.remove(preempted_req)
+                restored = num_scheduled_tokens.pop(preempted_req_id)
+                token_budget += restored
+                input_budget += restored + draft_slots
+                req_to_new_blocks.pop(preempted_req_id)
+                scheduled_spec_decode_tokens.pop(preempted_req_id, None)
+                preempted_encoder_inputs = scheduled_encoder_inputs.pop(
+                    preempted_req_id, None
+                )
+                if preempted_encoder_inputs:
+                    num_embeds_to_restore = sum(
+                        preempted_req.get_num_encoder_embeds(i)
+                        for i in preempted_encoder_inputs
+                    )
+                    encoder_compute_budget += num_embeds_to_restore
+
+            self._preempt_request(
+                preempted_req,
+                scheduled_timestamp,
+                drop_stale_output=self.requires_kv_delivery,
+            )
+            preempted_reqs.append(preempted_req)
+            return True
+
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state != PauseState.PAUSED_ALL:
             step_skipped_waiting: deque[Request] = deque()
@@ -1069,7 +1133,10 @@ class Scheduler(SchedulerInterface):
                 # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
                 # in `running` but still hold a model-runner request slot.
                 num_running = len(self.running) + self.num_waiting_for_streaming_input
-                if num_running >= self.max_num_active_reqs:
+                if (
+                    self.policy != SchedulingPolicy.PRIORITY
+                    and num_running >= self.max_num_active_reqs
+                ):
                     break
 
                 request = request_queue.peek_request()
@@ -1099,6 +1166,12 @@ class Scheduler(SchedulerInterface):
                     # Scheduling would exceed max_loras, skip.
                     skip_request(request_queue)
                     continue
+
+                # If the running-request cap is the only blocker, a higher-priority
+                # waiting request can make room by preempting a running one.
+                at_capacity = num_running >= self.max_num_active_reqs
+                if at_capacity and not _preempt_lowest_priority_running(request):
+                    break
 
                 num_external_computed_tokens = 0
                 load_kv_async = False
