@@ -141,6 +141,20 @@ class XPUPlatform(Platform):
         pass
 
     @classmethod
+    def _get_flash_attn_path(cls, block_size: int | None) -> str:
+        # block_size is set only when the user passed --block-size. Reject
+        # sizes Flash Attention cannot run here rather than at KV cache setup.
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+
+        if not FlashAttentionBackend.supports_block_size(block_size):
+            raise ValueError(
+                f"Flash Attention on {cls.device_name} does not support "
+                f"block_size={block_size}. Supported: "
+                f"{FlashAttentionBackend.get_supported_kernel_block_sizes()}."
+            )
+        return AttentionBackendEnum.FLASH_ATTN.get_path()
+
+    @classmethod
     def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum",
@@ -204,7 +218,7 @@ class XPUPlatform(Platform):
                     "on XPU and may produce non-deterministic results "
                     "across batch sizes."
                 )
-                return AttentionBackendEnum.FLASH_ATTN.get_path()
+                return cls._get_flash_attn_path(attn_selector_config.block_size)
             logger.info_once(
                 "VLLM_BATCH_INVARIANT is enabled. Using Triton Attention "
                 "backend on XPU, which implements batch-invariant kernels."
@@ -223,7 +237,7 @@ class XPUPlatform(Platform):
                     "inputs will produce incorrect results; only use this for "
                     "text-only workloads."
                 )
-                return AttentionBackendEnum.FLASH_ATTN.get_path()
+                return cls._get_flash_attn_path(attn_selector_config.block_size)
             if (
                 selected_backend in (None, AttentionBackendEnum.TRITON_FLASH_ATTN)
                 and dtype != torch.float32
@@ -260,7 +274,7 @@ class XPUPlatform(Platform):
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
             logger.info_once("Using Flash Attention backend.")
-            return AttentionBackendEnum.FLASH_ATTN.get_path()
+            return cls._get_flash_attn_path(attn_selector_config.block_size)
         elif selected_backend:
             raise ValueError(
                 f"Invalid attention backend for {cls.device_name}, "
@@ -268,7 +282,7 @@ class XPUPlatform(Platform):
             )
 
         logger.info_once("Using Flash Attention backend.")
-        return AttentionBackendEnum.FLASH_ATTN.get_path()
+        return cls._get_flash_attn_path(attn_selector_config.block_size)
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
