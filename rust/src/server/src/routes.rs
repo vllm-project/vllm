@@ -172,6 +172,8 @@ fn build_router_with_options(
             "/v1/responses/{response_id}/cancel",
             post(openai::cancel_response),
         )
+        // TODO: implement generative scoring.
+        .route("/generative_scoring", post(not_supported))
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize));
