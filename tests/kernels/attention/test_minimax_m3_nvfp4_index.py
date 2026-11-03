@@ -502,3 +502,31 @@ def test_index_prefill_matches_reference(
             sl = seen[:, r0:r1]
             _assert_scores(got[sl], want[sl], (q_len, s))
         q_start += q_len
+
+
+@pytest.mark.parametrize(
+    ("num_decodes", "query_len", "scores_with_cp"),
+    [
+        (1, 8, False),  # DSpark 7, below CP_MIN_REQS: single-head scorer
+        (2, 8, False),
+        (3, 8, True),
+        (4, 8, True),
+        (16, 8, True),
+        (1, 4, True),  # DSpark 3 keeps CP at any batch size
+        (2, 1, False),  # not a CP row count
+        (129, 8, False),  # past the receive buffers (1024 rows)
+    ],
+)
+def test_decode_cp_gate(monkeypatch, num_decodes, query_len, scores_with_cp):
+    """DSpark 7 steps with fewer than ``CP_MIN_REQS`` requests score locally."""
+    from types import SimpleNamespace
+
+    from vllm.models.minimax_m3.amd import indexer_nvfp4
+    from vllm.models.minimax_m3.amd.ops.index_cp import host as index_cp
+
+    cp = SimpleNamespace(max_rows=1024)
+    monkeypatch.setattr(index_cp, "get", lambda: cp)
+    impl = object.__new__(indexer_nvfp4.MiniMaxM3IndexerRocmNvfp4Impl)
+    impl.num_index_heads = 1
+    expected = cp if scores_with_cp else None
+    assert impl._decode_cp(num_decodes, query_len) is expected

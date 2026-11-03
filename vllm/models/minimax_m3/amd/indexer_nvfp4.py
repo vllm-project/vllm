@@ -36,6 +36,14 @@ logger = init_logger(__name__)
 NUM_INDEX_HEADS = (1, 2, 4)
 # Decode CP: rows per request (DSpark 3); DSpark 7 splits each request in two.
 CP_QUERY_LEN = 4
+# DSpark 7 steps with fewer requests than this score locally. CP's two
+# cross-rank hops cost a fixed ~13 us a layer; the single-head scorer is faster
+# below it (MI355X, TP4, per layer, single-head vs CP: 1 request 6.4 vs 14.4 us
+# at 150K and 9.2 vs 14.5 us at 400K; 2 requests 9.0 vs 14.5 us and 13.2 vs
+# 14.6 us). At 3 requests it is 11.4 vs 14.7 us at 150K but 17.6 vs 15.4 us at
+# 400K, so the gate stops at 2 (the batch's context is not known when the CUDA
+# graph is captured). Not measured for DSpark 3, which keeps CP at any batch size.
+CP_MIN_REQS = 3
 
 
 def _cp_requests(
@@ -149,6 +157,7 @@ class MiniMaxM3IndexerRocmNvfp4Impl(MiniMaxM3IndexerImpl):
             cp is None
             # The push has no back-pressure; under DBO no all-reduce orders it.
             or dbo_enabled()
+            or (query_len == 2 * CP_QUERY_LEN and num_decodes < CP_MIN_REQS)
             or self.num_index_heads != 1
             or query_len not in (CP_QUERY_LEN, 2 * CP_QUERY_LEN)
             or num_decodes * query_len > cp.max_rows
