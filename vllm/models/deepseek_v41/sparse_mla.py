@@ -20,9 +20,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     max_decode_query_len,
 )
-from vllm.v1.attention.backends.mla.compressor_utils import (
-    get_compressed_slot_mapping,
-)
+from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
 from vllm.v1.attention.backends.mla.sparse_swa import (
     _LAYER_TYPE_C1A,
     _LAYER_TYPE_C2A,
