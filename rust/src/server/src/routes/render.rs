@@ -10,8 +10,10 @@ use axum::extract::DefaultBodyLimit;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::{get, post};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror_ext::AsReport as _;
+use validator::Validate;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_text::TextRequest;
 
@@ -22,13 +24,55 @@ use crate::render::RenderState;
 use crate::routes::inference::generate::{
     GenerateRequest, GenerateSamplingParams, validate_request_compat as validate_generate_request,
 };
-use crate::routes::openai::utils::types::{ListModelsResponse, ModelObject, StreamOptions};
+use crate::routes::openai::utils::types::{
+    ListModelsResponse, ModelObject, Normalizable, StreamOptions,
+};
 use crate::routes::openai::utils::validate_max_output_tokens;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
 use crate::routes::openai::{
     ChatCompletionRequest, CompletionRequest, lower_chat_request, lower_completion_request,
 };
 use crate::utils::{resolve_request_context, unix_timestamp};
+
+/// Render endpoint request: an OpenAI request plus options that only the render
+/// endpoints honor.
+#[derive(Deserialize, Validate)]
+struct RenderRequest<T: Validate> {
+    /// The OpenAI request to render.
+    #[serde(flatten)]
+    #[validate(nested)]
+    request: T,
+    /// Whether to return [`RenderResponse::token_offsets`].
+    return_token_offsets: Option<bool>,
+}
+
+/// Request body of `/v1/chat/completions/render`.
+type RenderChatCompletionRequest = RenderRequest<ChatCompletionRequest>;
+
+/// Request body of `/v1/completions/render`.
+type RenderCompletionRequest = RenderRequest<CompletionRequest>;
+
+impl<T: Validate + Normalizable> Normalizable for RenderRequest<T> {
+    fn normalize(&mut self) {
+        self.request.normalize();
+    }
+}
+
+/// Render endpoint response: a request that `/inference/v1/generate` accepts
+/// unchanged, plus render metadata that generation does not consume.
+#[serde_with::skip_serializing_none]
+#[derive(Serialize)]
+struct RenderResponse {
+    /// The rendered generate request.
+    #[serde(flatten)]
+    request: GenerateRequest,
+    /// Unicode character span `(start, end)` of each prompt token in the source
+    /// text, aligned with `token_ids`; chat spans refer to the templated prompt.
+    /// Special tokens without source text get `(0, 0)`. Unset unless requested,
+    /// and for pre-tokenized or multimodal prompts and tokenizers without
+    /// offsets.
+    token_offsets: Option<Vec<(usize, usize)>>,
+}
 
 pub(crate) fn build_router(state: Arc<RenderState>) -> Router {
     Router::new()
@@ -87,7 +131,7 @@ fn lower_render_request(
     stream: bool,
     stream_options: Option<StreamOptions>,
     return_token_ids: Option<bool>,
-) -> Result<GenerateRequest, ApiError> {
+) -> Result<RenderResponse, ApiError> {
     let prepared = state
         .text
         .prepare(text_request)
@@ -127,7 +171,10 @@ fn lower_render_request(
         other: Default::default(),
     };
     validate_generate_request(&request, &state.served_model_names)?;
-    Ok(request)
+    Ok(RenderResponse {
+        request,
+        token_offsets: text_request.prompt_token_offsets,
+    })
 }
 
 /// Move KV/EC transfer params out of `vllm_xargs`.
@@ -157,14 +204,16 @@ fn hoist_transfer_params(
 async fn render_chat(
     State(state): State<Arc<RenderState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<ChatCompletionRequest>,
-) -> Result<Json<GenerateRequest>, ApiError> {
+    ValidatedJson(render): ValidatedJson<RenderChatCompletionRequest>,
+) -> Result<Json<RenderResponse>, ApiError> {
+    let body = render.request;
     let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
-    let chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
+    let mut chat_request = lower_chat_request(body, &model_resolution(&state), request_context)?;
+    chat_request.return_token_offsets = render.return_token_offsets.unwrap_or(false);
     validate_max_output_tokens(
         "max_completion_tokens",
         chat_request.sampling_params.max_tokens,
@@ -189,15 +238,16 @@ async fn render_chat(
 async fn render_completion(
     State(state): State<Arc<RenderState>>,
     headers: HeaderMap,
-    ValidatedJson(body): ValidatedJson<CompletionRequest>,
-) -> Result<Json<Vec<GenerateRequest>>, ApiError> {
+    ValidatedJson(render): ValidatedJson<RenderCompletionRequest>,
+) -> Result<Json<Vec<RenderResponse>>, ApiError> {
+    let body = render.request;
     let model = response_model(&state, body.model.as_deref());
     let stream = body.stream;
     let stream_options = body.stream_options.clone();
     let return_token_ids = body.return_token_ids;
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let tokenizer = state.text.tokenizer();
-    let text_request = lower_completion_request(
+    let mut text_request = lower_completion_request(
         body,
         &model_resolution(&state),
         request_context,
@@ -208,6 +258,7 @@ async fn render_completion(
         text_request.sampling_params.max_tokens,
         state.text.max_model_len(),
     )?;
+    text_request.return_token_offsets = render.return_token_offsets.unwrap_or(false);
     Ok(Json(vec![lower_render_request(
         &state,
         text_request,

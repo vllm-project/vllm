@@ -28,7 +28,7 @@ use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputBackend;
 pub use vllm_llm::FinishReason;
 use vllm_llm::{GenerateOutputStream, Llm};
-use vllm_tokenizer::DynTokenizer;
+use vllm_tokenizer::{DynTokenizer, EncodedPrompt};
 
 pub mod backend;
 mod error;
@@ -98,23 +98,37 @@ impl TextRequestProcessor {
         self.max_model_len
     }
 
-    fn prepare_prompt_tokens(
-        &self,
-        prompt: Prompt,
-        add_special_tokens: bool,
-        prompt_truncation: Option<PromptTruncation>,
-    ) -> Result<Vec<u32>> {
-        let tokenizer = self.backend.tokenizer();
-        let mut prompt_token_ids = match prompt {
-            Prompt::Text(text) => tokenizer.encode(&text, add_special_tokens)?,
-            // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
-            // and infra workloads bypass chat rendering and tokenizer overhead entirely.
-            Prompt::TokenIds(token_ids) => token_ids,
-        };
-        if let Some(prompt_truncation) = prompt_truncation {
-            prompt_truncation.apply(&mut prompt_token_ids, self.max_model_len)?;
+    /// Tokenize and truncate the prompt in place, recording token offsets when
+    /// requested. Running it again on the result is a no-op.
+    fn prepare_prompt_tokens(&self, request: &mut TextRequest) -> Result<()> {
+        // Pre-tokenized prompts are the main completions-side escape hatch that lets benchmark
+        // and infra workloads bypass chat rendering and tokenizer overhead entirely.
+        if let Prompt::Text(text) = &request.prompt {
+            let tokenizer = self.backend.tokenizer();
+            let EncodedPrompt {
+                token_ids,
+                token_offsets,
+            } = if request.return_token_offsets && request.mm_features.is_none() {
+                tokenizer.encode_with_offsets(text, request.add_special_tokens)?
+            } else {
+                EncodedPrompt {
+                    token_ids: tokenizer.encode(text, request.add_special_tokens)?,
+                    token_offsets: None,
+                }
+            };
+            request.prompt = Prompt::TokenIds(token_ids);
+            request.prompt_token_offsets = token_offsets;
         }
-        Ok(prompt_token_ids)
+        let Prompt::TokenIds(token_ids) = &mut request.prompt else {
+            unreachable!("prompt was just replaced with token IDs");
+        };
+        if let Some(truncation) = request.prompt_truncation.take() {
+            truncation.apply(token_ids, self.max_model_len)?;
+            if let Some(offsets) = &mut request.prompt_token_offsets {
+                truncation.apply(offsets, self.max_model_len)?;
+            }
+        }
+        Ok(())
     }
 
     /// Tokenize and truncate the prompt in place, so that later preparation
@@ -125,12 +139,7 @@ impl TextRequestProcessor {
     /// and then hand the same request to [`TextLlm::generate`].
     pub fn tokenize_in_place<'r>(&self, request: &'r mut TextRequest) -> Result<&'r [u32]> {
         request.validate()?;
-        let prompt_token_ids = self.prepare_prompt_tokens(
-            take(&mut request.prompt),
-            request.add_special_tokens,
-            request.prompt_truncation.take(),
-        )?;
-        request.prompt = Prompt::TokenIds(prompt_token_ids);
+        self.prepare_prompt_tokens(request)?;
         match &request.prompt {
             Prompt::TokenIds(prompt_token_ids) => Ok(prompt_token_ids),
             Prompt::Text(_) => unreachable!("prompt was just replaced with token IDs"),
@@ -138,13 +147,13 @@ impl TextRequestProcessor {
     }
 
     /// Prepare one request's prompt tokens without generation-specific lowering.
-    pub fn tokenize(&self, request: TextRequest) -> Result<Vec<u32>> {
+    pub fn tokenize(&self, mut request: TextRequest) -> Result<Vec<u32>> {
         request.validate()?;
-        self.prepare_prompt_tokens(
-            request.prompt,
-            request.add_special_tokens,
-            request.prompt_truncation,
-        )
+        self.prepare_prompt_tokens(&mut request)?;
+        match request.prompt {
+            Prompt::TokenIds(prompt_token_ids) => Ok(prompt_token_ids),
+            Prompt::Text(_) => unreachable!("prompt was just replaced with token IDs"),
+        }
     }
 
     /// Tokenize and lower one request without submitting it to an engine.
@@ -155,11 +164,10 @@ impl TextRequestProcessor {
             request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
         }
 
-        let prompt_token_ids = self.prepare_prompt_tokens(
-            take(&mut request.prompt),
-            request.add_special_tokens,
-            request.prompt_truncation,
-        )?;
+        self.prepare_prompt_tokens(&mut request)?;
+        let Prompt::TokenIds(prompt_token_ids) = take(&mut request.prompt) else {
+            unreachable!("prompt was just replaced with token IDs");
+        };
         let tokenizer = self.backend.tokenizer();
         let sampling_hints = self.backend.sampling_hints()?;
         let sampling_limits = SamplingLimits {
@@ -366,6 +374,44 @@ mod tests {
                 (6..15).collect::<Vec<_>>()
             );
             assert_eq!(generate_request.sampling_params.max_tokens, 1);
+        }
+    }
+
+    #[test]
+    fn token_offsets_survive_truncation_and_repeated_preparation() {
+        let processor = TextRequestProcessor::new(Arc::new(TestTextBackend), 4);
+        for (side, expected_ids, expected_offsets) in [
+            (
+                TruncationSide::Left,
+                vec![3, 4, 5],
+                vec![(2, 3), (3, 4), (4, 5)],
+            ),
+            (
+                TruncationSide::Right,
+                vec![1, 2, 3],
+                vec![(0, 1), (1, 2), (2, 3)],
+            ),
+        ] {
+            let mut request = TextRequest {
+                prompt: Prompt::TokenIds(vec![1, 2, 3, 4, 5]),
+                prompt_token_offsets: Some((0..5).map(|i| (i, i + 1)).collect()),
+                prompt_truncation: Some(PromptTruncation {
+                    limit: PromptTruncationLimit::InputBudget,
+                    side,
+                }),
+                sampling_params: SamplingParams {
+                    max_tokens: Some(2),
+                    ..Default::default()
+                },
+                ..TextRequest::for_test()
+            };
+            processor.tokenize_in_place(&mut request).unwrap();
+            let prepared = processor.prepare(request).unwrap();
+            assert_eq!(prepared.generate_request.prompt_token_ids, expected_ids);
+            assert_eq!(
+                prepared.text_request.prompt_token_offsets,
+                Some(expected_offsets.clone())
+            );
         }
     }
 }

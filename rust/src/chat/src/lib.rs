@@ -251,6 +251,7 @@ impl ChatRequestProcessor {
         let text_request = TextRequest {
             request_id: request.request_id,
             prompt,
+            prompt_token_offsets: None,
             mm_features,
             sampling_params: request.sampling_params,
             decode_options: request.decode_options,
@@ -259,6 +260,7 @@ impl ChatRequestProcessor {
             priority: request.priority,
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
+            return_token_offsets: request.return_token_offsets,
             data_parallel_rank: request.data_parallel_rank,
             session_id: request.session_id,
             kv_hints: None,

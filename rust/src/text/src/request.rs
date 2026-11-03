@@ -209,6 +209,10 @@ pub struct TextRequest {
     pub request_id: String,
     /// Prompt text or prompt token IDs for this request.
     pub prompt: Prompt,
+    /// Source character spans aligned with the prepared prompt token IDs, kept
+    /// when an already-tokenized request is prepared again.
+    #[serde(skip)]
+    pub prompt_token_offsets: Option<Vec<(usize, usize)>>,
     /// Multimodal features prepared by a higher-level frontend. Raw text
     /// requests keep this empty; multimodal chat uses it with pre-tokenized
     /// prompt IDs.
@@ -233,6 +237,9 @@ pub struct TextRequest {
     pub prompt_truncation: Option<PromptTruncation>,
     /// Whether to add special tokens (e.g. BOS) during prompt tokenization.
     pub add_special_tokens: bool,
+    /// Whether to compute [`Self::prompt_token_offsets`] when tokenizing a text prompt.
+    #[serde(default)]
+    pub return_token_offsets: bool,
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
@@ -272,6 +279,7 @@ impl TextRequest {
         Self {
             request_id: "test-request".to_string(),
             prompt: Prompt::Text("test".to_string()),
+            prompt_token_offsets: None,
             mm_features: None,
             sampling_params: SamplingParams::default(),
             decode_options: TextDecodeOptions::default(),
@@ -280,6 +288,7 @@ impl TextRequest {
             cache_salt: None,
             prompt_truncation: None,
             add_special_tokens: false,
+            return_token_offsets: false,
             data_parallel_rank: None,
             session_id: None,
             kv_hints: None,

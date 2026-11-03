@@ -48,7 +48,7 @@ impl PromptTruncation {
         Ok(Self { limit, side })
     }
 
-    pub(crate) fn apply(self, prompt_token_ids: &mut Vec<u32>, max_model_len: u32) -> Result<()> {
+    pub(crate) fn apply<T>(self, prompt_token_ids: &mut Vec<T>, max_model_len: u32) -> Result<()> {
         let max_input_tokens = match self.limit {
             PromptTruncationLimit::InputBudget => max_model_len.saturating_sub(1),
             PromptTruncationLimit::Fixed(limit) => {

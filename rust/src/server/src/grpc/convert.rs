@@ -129,6 +129,7 @@ pub fn to_text_request(
     Ok(TextRequest {
         request_id,
         prompt,
+        prompt_token_offsets: None,
         mm_features: None,
         sampling_params,
         decode_options,
@@ -137,6 +138,7 @@ pub fn to_text_request(
         priority: req.priority,
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
+        return_token_offsets: false,
         data_parallel_rank: None,
         session_id,
         kv_hints,
