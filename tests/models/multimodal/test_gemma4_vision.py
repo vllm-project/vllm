@@ -100,5 +100,11 @@ def test_packed_tower_matches_transformers(
     pixel_values = torch.cat([pv[:n] for (pv, _), n in zip(images, num_patches)])
     actual = tower(pixel_values.cuda(), metadata).split([n // 9 for n in num_patches])
 
+    # Triton's fp32 dot runs in TF32 on NVIDIA GPUs.
+    tol = (
+        3e-2
+        if backend == AttentionBackendEnum.TRITON_ATTN and current_platform.is_cuda()
+        else 1e-3
+    )
     for got, want in zip(actual, expected):
-        torch.testing.assert_close(got, want, rtol=1e-3, atol=1e-3)
+        torch.testing.assert_close(got, want, rtol=tol, atol=tol)
