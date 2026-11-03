@@ -27,9 +27,11 @@ from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
     SupportsEncoderCudaGraph,
+    SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -41,7 +43,6 @@ from vllm.models.deepseek_v4.common.vision import (
     DeepseekV4ViT,
     run_dp_sharded_vision_tower,
 )
-from vllm.models.deepseek_v4.common.vl_model import stream_language_model_first
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -50,6 +51,7 @@ from ..common.mm_preprocess import (
     DeepseekV4VLDummyInputsBuilder,
     DeepseekV4VLMultiModalProcessor,
     DeepseekV4VLProcessingInfo,
+    num_image_tokens,
 )
 from ..common.vl_cudagraph import DeepseekV4VLEncoderCudaGraphMixin
 from ..decoder_replay_layers import DecoderReplayLayers
@@ -122,6 +124,7 @@ class DeepseekV41ForCausalLM(
     SupportsEncoderCudaGraph,
     SupportsPP,
     SupportsEagle3,
+    SupportsLoRA,
 ):
     """Multimodal entry point for DeepSeek-V4.1 checkpoints with a vision tower.
 
@@ -133,6 +136,15 @@ class DeepseekV41ForCausalLM(
 
     supports_encoder_tp_data = True
 
+    packed_modules_mapping = {
+        "gate_up_proj": ["w1", "w3"],
+        "fused_wqa_wkv": ["wq_a", "wkv"],
+        "fused_wkv_wgate": ["wkv", "wgate"],
+    }
+
+    # The MTP draft head is not LoRA-adapted.
+    lora_skip_prefixes = ["mtp."]
+
     # The MoE router needs raw token ids to detect image-span tokens
     # (all carrying image_token_id, see common/mm_preprocess.py) and apply
     # bias_vl.
@@ -140,7 +152,7 @@ class DeepseekV41ForCausalLM(
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
-        if modality == "image":
+        if modality.startswith("image"):
             return IMAGE_PLACEHOLDER
         raise ValueError(f"Unsupported modality: {modality!r}")
 
@@ -247,6 +259,13 @@ class DeepseekV41ForCausalLM(
         return tuple(embeds)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        image_embeds = kwargs.get("image_embeds")
+        if image_embeds is not None:
+            llm_grid = kwargs["llm_grid"]
+            assert isinstance(image_embeds, torch.Tensor)
+            assert isinstance(llm_grid, torch.Tensor)
+            sizes = [num_image_tokens(h, w) for h, w in llm_grid.tolist()]
+            return image_embeds.split(sizes)
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
             return []
@@ -315,19 +334,13 @@ class DeepseekV41ForCausalLM(
         return self.language_model.get_mtp_target_hidden_states()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # The child finalizes in load_weights, so its weights must reach it as
-        # one contiguous group.
-        mapped = stream_language_model_first(self.hf_to_vllm_mapper.apply(weights))
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(mapped)
-        # The child's load_weights already ran its post-load finalization.
-        self._weights_finalized = True
-        return loaded_params
+        return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
 
-    def process_weights_after_loading(self) -> None:
-        # Model-level post-load hook (called by the loader after any load
-        # format). Under DummyModelLoader the child's load_weights — and
-        # hence its finalize step — is bypassed, so run it here instead.
-        if getattr(self, "_weights_finalized", False):
-            return
-        self.language_model.process_weights_after_loading()
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefixes in the multimodal model."""
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            connector="aligner",
+            tower_model="vision.",
+        )

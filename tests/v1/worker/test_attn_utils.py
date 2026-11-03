@@ -26,6 +26,7 @@ from tests.v1.attention.utils import (
 from vllm.config.compilation import CompilationConfig, CUDAGraphMode
 from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport, MultipleOf
 from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+from vllm.v1.hisparse.backend import CUDAHiSparseBackend
 from vllm.v1.hisparse.binding import allocate_hisparse_kv_caches
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -421,61 +422,41 @@ def test_get_kv_sharing_fast_prefill_eligible_layers(monkeypatch: pytest.MonkeyP
     assert attn_utils.get_kv_sharing_fast_prefill_eligible_layers(vllm_config) == set()
 
 
-@pytest.mark.parametrize(
-    "num_tokens", [1, 2, 3, 4, 7, 8, 15, 16, 31, 32, 63, 64, 127, 128]
-)
-@pytest.mark.parametrize("num_active_loras", [1, 2, 4])
-def test_fast_prefill_dispatch_preserves_active_lora_count(
-    num_tokens: int, num_active_loras: int
-):
-    """Fast-prefill padding must match the main dispatch's LoRA variant."""
-
-    class FakeCudaGraphManager:
-        device = "cpu"
-
-        def __init__(self):
-            self.dispatch_calls = []
-
-        def dispatch(self, **kwargs):
-            self.dispatch_calls.append(kwargs)
-            # A captured no-LoRA graph is padded to 8 tokens, while the
-            # active-LoRA path stays eager at the unpadded token count.
-            if kwargs["num_active_loras"] == 0:
-                num_tokens = 8
-                mode = CUDAGraphMode.PIECEWISE
-            else:
-                num_tokens = kwargs["num_tokens"]
-                mode = CUDAGraphMode.NONE
-            return BatchExecutionDescriptor(
-                cg_mode=mode,
-                num_tokens=num_tokens,
-                num_reqs=kwargs["num_reqs"],
-                num_active_loras=kwargs["num_active_loras"],
-                num_ubatches=1,
-            )
-
-    manager = FakeCudaGraphManager()
-    helper = FastPrefillHelper(manager, max_num_tokens=max(32, num_tokens))
-    metadata = helper.prepare(
-        torch.arange(num_tokens, dtype=torch.int32),
-        num_reqs=1,
-        cu_num_logits_np=np.array([0, num_tokens], dtype=np.int32),
-        has_prefill=True,
-        batch_desc=BatchExecutionDescriptor(
-            cg_mode=CUDAGraphMode.NONE,
-            num_tokens=num_tokens,
-            num_reqs=1,
-            num_active_loras=num_active_loras,
-            num_ubatches=1,
-        ),
-        num_active_loras=num_active_loras,
+def test_fast_prefill_skips_lora_batches():
+    """LoRA batches fall back, and subsequent base batches still use fast prefill."""
+    manager = MagicMock(device="cpu")
+    manager.dispatch.return_value = BatchExecutionDescriptor(
+        cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=4, num_reqs=None
     )
+    helper = FastPrefillHelper(manager, max_num_tokens=8)
+    logits_indices = torch.tensor([3, 7], dtype=torch.int32)
+    for num_active_loras in (0, 1, 2, 0):
+        manager.dispatch.reset_mock()
+        metadata = helper.prepare(
+            logits_indices,
+            num_reqs=2,
+            cu_num_logits_np=np.array([0, 1, 2], dtype=np.int32),
+            has_prefill=True,
+            batch_desc=BatchExecutionDescriptor(
+                cg_mode=CUDAGraphMode.PIECEWISE,
+                num_tokens=8,
+                num_reqs=2,
+                num_active_loras=num_active_loras,
+            ),
+            num_active_loras=num_active_loras,
+        )
 
-    assert metadata is not None
-    assert metadata.num_logits_indices == num_tokens
-    assert metadata.logits_indices_padded.shape[0] == num_tokens
-    assert metadata.max_logits_per_req == num_tokens
-    assert manager.dispatch_calls[-1]["num_active_loras"] == num_active_loras
+        if num_active_loras:
+            assert metadata is None
+            manager.dispatch.assert_not_called()
+        else:
+            assert metadata is not None
+            assert metadata.num_logits_indices == 2
+            torch.testing.assert_close(
+                metadata.logits_indices_padded,
+                torch.tensor([3, 7, 7, 7], dtype=torch.int32),
+            )
+            assert metadata.max_logits_per_req == 1
 
 
 class _FakeSharedHostRegion:
@@ -502,7 +483,10 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
     pool = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
     backing = pool.allocate(8)
     runtime = SimpleNamespace(
-        _host_cache=backing, registered_host_pool=pinned, hot_backing=object()
+        _host_cache=backing,
+        registered_host_pool=pinned,
+        hot_backing=object(),
+        host_pool=pool,
     )
     forward_context = {
         "layer": SimpleNamespace(hisparse_cache=SimpleNamespace(runtime=runtime))
@@ -511,6 +495,7 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
     attn_utils_module.release_hisparse_profiling_cache(forward_context)
 
     assert not hasattr(runtime, "_host_cache")
+    assert runtime.host_pool is None
     reused = attn_utils_module.get_hisparse_host_pool(vllm_config, kv_cache_config)
     assert reused is pool
     assert reused.allocate(8) is backing
@@ -518,10 +503,21 @@ def test_profiling_cleanup_keeps_host_pool_for_real_kv_cache(monkeypatch):
     hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
 
 
-@pytest.mark.parametrize("failure_phase", ["allocation", "binding", "buffers"])
+@pytest.mark.parametrize("failure_phase", ["allocation", "views", "binding", "buffers"])
 @pytest.mark.parametrize("shared", [False, True])
 def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
     """Failed initialization must release shared or private registrations."""
+
+    class Backend(CUDAHiSparseBackend):
+        def prepare_kv_cache_views(self, *args):
+            if failure_phase == "views":
+                raise RuntimeError("initialization failed")
+
+    backend = Backend()
+    monkeypatch.setattr(attn_utils_module, "get_hisparse_backend", lambda: backend)
+    monkeypatch.setattr(
+        hisparse_runtime_module, "get_hisparse_backend", lambda: backend
+    )
     region = _FakeSharedHostRegion()
     registered = torch.empty(4096, dtype=torch.int8)
     cudart = MagicMock()
@@ -544,6 +540,7 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
         else:
             args[-1].registered = registered
             args[-1].backing = registered[:8]
+        args[-1].pinned = [registered]
         if failure_phase == "allocation":
             raise RuntimeError("initialization failed")
         return {}
@@ -571,10 +568,7 @@ def test_init_hisparse_rolls_back_host_pool(monkeypatch, failure_phase, shared):
             SimpleNamespace(),
         )
     assert region.cleanup_calls == int(shared)
-    if shared:
-        cudart.cudaHostUnregister.assert_not_called()
-    else:
-        cudart.cudaHostUnregister.assert_called_once_with(registered.data_ptr())
+    cudart.cudaHostUnregister.assert_called_once_with(registered.data_ptr())
     assert attn_utils_module.get_hisparse_host_pool(vllm_config, None) is not pools[0]
     hisparse_runtime_module.drop_hisparse_host_pool(vllm_config)
 

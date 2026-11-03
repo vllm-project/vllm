@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     convert_packed_uint4b8_to_signed_int4_inplace,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 
@@ -88,12 +89,10 @@ class CutlassW4A8LinearKernel(MPLinearKernel):
 
         w_s = getattr(layer, self.w_s_name)
         fp8_scales, chan_scales = convert_bf16_scales_to_fp8(self.quant_fp8, w_s.data)
-        w_s.data = fp8_scales
+        replace_parameter(layer, self.w_s_name, fp8_scales)
 
-        # register per-channel scales
-        layer.register_parameter(
-            "weight_chan_scale", torch.nn.Parameter(chan_scales, requires_grad=False)
-        )
+        # per-channel scales; a rerun refills the first one in place
+        replace_parameter(layer, "weight_chan_scale", chan_scales)
 
         # Encode/reorder weights and pack scales
         self._transform_param(layer, self.w_q_name, transform_w_q)
