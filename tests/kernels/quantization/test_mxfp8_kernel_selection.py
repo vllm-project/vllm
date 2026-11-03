@@ -9,15 +9,31 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import pytest
+import torch
 
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.config.kernel import KernelConfig
 from vllm.model_executor.kernels.linear import (
+    EmulationMxfp8LinearKernel,
     FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
+    FlashInferTrtllmMxfp8LinearKernel,
+    HummingMxfp8LinearKernel,
     MarlinMxfp8LinearKernel,
     Mxfp8LinearLayerConfig,
+    TorchMxFp8LinearKernel,
     init_mxfp8_linear_kernel,
 )
+from vllm.model_executor.layers.quantization.quark.schemes.quark_ocp_mx import (
+    QuarkOCP_MX,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kMxfp8Dynamic,
+    kMxfp8Static,
+)
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.platforms import PlatformEnum
+from vllm.platforms.interface import DeviceCapability
 
 pytestmark = pytest.mark.cpu_test
 
@@ -86,6 +102,10 @@ def _patch_cuda_platform(capability: int):
     with (
         patch("vllm.model_executor.kernels.linear.current_platform") as platform,
         patch(
+            "vllm.platforms.current_platform.get_device_capability",
+            return_value=DeviceCapability(capability // 10, capability % 10),
+        ),
+        patch(
             "vllm.model_executor.kernels.linear.mxfp8.flashinfer.current_platform."
             "is_device_capability_family",
             side_effect=lambda cap, device_id=0: cap // 10 == capability // 10,
@@ -133,3 +153,67 @@ def test_init_mxfp8_linear_kernel(capability, weight_shape, expected_kernel_cls)
 
     assert isinstance(kernel, expected_kernel_cls)
     assert kernel.config == Mxfp8LinearLayerConfig(weight_shape=weight_shape)
+
+
+@pytest.mark.parametrize("activation_key", [None, kMxfp8Dynamic])
+def test_quark_mxfp8_preserves_activation_precision(activation_key, dist_init):
+    """A weight-only Quark layer must not acquire FP8 activations on SM100."""
+    scheme = QuarkOCP_MX(kMxfp8Static, activation_key)
+    layer = torch.nn.Module()
+    with _patch_cuda_platform(100):
+        scheme.create_weights(
+            layer,
+            output_partition_sizes=[128],
+            input_size_per_partition=128,
+            params_dtype=torch.bfloat16,
+            weight_loader=default_weight_loader,
+        )
+    expected = (
+        MarlinMxfp8LinearKernel
+        if activation_key is None
+        else FlashInferCutedslMxfp8LinearKernel
+    )
+    assert isinstance(scheme.ocp_mx_linear, expected)
+
+
+@pytest.mark.parametrize("capability", [100, 103, 120, 121])
+def test_mxfp8_weight_only_skips_activation_quantization(capability):
+    with _patch_cuda_platform(capability):
+        kernel = init_mxfp8_linear_kernel(
+            weight_shape=(128, 128), activation_quant_key=None
+        )
+    assert isinstance(kernel, MarlinMxfp8LinearKernel)
+
+
+def test_mxfp8_weight_only_emulation_fallback(monkeypatch):
+    monkeypatch.setenv(
+        "VLLM_DISABLED_KERNELS",
+        "MarlinMxfp8LinearKernel,FlashInferCutedslMxfp8LinearKernel,"
+        "FlashInferCutlassMxfp8LinearKernel,B12xMxfp8LinearKernel",
+    )
+    with _patch_cuda_platform(100):
+        kernel = init_mxfp8_linear_kernel(
+            weight_shape=(128, 128), activation_quant_key=None
+        )
+    assert isinstance(kernel, EmulationMxfp8LinearKernel)
+
+
+@pytest.mark.parametrize(
+    ("backend", "kernel_cls"),
+    [
+        ("flashinfer_cutlass", FlashInferCutlassMxfp8LinearKernel),
+        ("flashinfer_cutedsl", FlashInferCutedslMxfp8LinearKernel),
+        ("flashinfer_trtllm", FlashInferTrtllmMxfp8LinearKernel),
+        ("humming", HummingMxfp8LinearKernel),
+        ("torch", TorchMxFp8LinearKernel),
+    ],
+)
+def test_mxfp8_weight_only_rejects_forced_w8a8_backend(backend, kernel_cls):
+    config = VllmConfig(kernel_config=KernelConfig(linear_backend=backend))
+    with (
+        set_current_vllm_config(config),
+        _patch_cuda_platform(100),
+        patch.object(kernel_cls, "is_supported", return_value=(True, None)),
+        pytest.raises(ValueError, match="quantization scheme"),
+    ):
+        init_mxfp8_linear_kernel(weight_shape=(128, 128), activation_quant_key=None)
