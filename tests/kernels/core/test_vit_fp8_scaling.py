@@ -4,6 +4,8 @@
 
 import contextlib
 import json
+import os
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -16,11 +18,6 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
-)
-
-pytestmark = pytest.mark.skipif(
-    not is_flashinfer_cudnn_fp8_prefill_attn_supported(),
-    reason="FlashInfer cuDNN FP8 prefill attention not supported",
 )
 
 LAYER_0 = "visual.blocks.0.attn.attn"
@@ -294,3 +291,71 @@ def test_dynamic_scales_auto_save(tmp_path) -> None:
 
     # Path is cleared after the one-shot save fires.
     assert _mod._fp8_scale_save_path is None
+
+
+def _save_scales_state(monkeypatch: pytest.MonkeyPatch, path: Path):
+    """Arm the module's scale auto-save for ``path`` (margin 2) and return the
+    module plus a list of the renames it makes; restored after the test."""
+    import vllm.model_executor.layers.attention.mm_encoder_attention as mod
+
+    monkeypatch.setattr(mod, "_fp8_scale_save_path", str(path))
+    monkeypatch.setattr(mod, "_fp8_scale_save_margin", 2.0)
+    monkeypatch.setattr(mod, "_fp8_saved_scale_refs", {})
+    renames: list[tuple[str, str, dict]] = []
+    replace = os.replace
+
+    def checked_replace(src, dst):
+        # The temporary file must already hold the complete JSON.
+        renames.append((str(src), str(dst), json.loads(Path(src).read_text())))
+        replace(src, dst)
+
+    monkeypatch.setattr(mod.os, "replace", checked_replace)
+    return mod, renames
+
+
+def test_scale_file_saved_atomically(tmp_path, monkeypatch) -> None:
+    """The first amax wrap publishes the scale file with one rename (readers,
+    e.g. other data-parallel encoder ranks, never see a partial file), leaves
+    no temporary file behind and disarms the one-shot save."""
+    monkeypatch.delenv("VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP", raising=False)
+    save_file = tmp_path / "scales.json"
+    save_file.write_text('{"torn": ')  # left by an interrupted writer
+    mod, renames = _save_scales_state(monkeypatch, save_file)
+    t = torch.tensor
+
+    mod._maybe_save_fp8_scales(LAYER_0, t(1.0), t(2.0), t(3.0), False)
+    assert renames == []
+    mod._maybe_save_fp8_scales(LAYER_1, t(4.0), t(5.0), t(6.0), True)
+
+    expected = {
+        LAYER_0: {"q": 2.0, "k": 4.0, "v": 6.0},
+        LAYER_1: {"q": 8.0, "k": 10.0, "v": 12.0},
+    }
+    assert len(renames) == 1
+    src, dst, content = renames[0]
+    assert dst == str(save_file) and src != dst
+    assert content == expected
+    assert json.loads(save_file.read_text()) == expected
+    assert [p.name for p in tmp_path.iterdir()] == ["scales.json"]
+    assert mod._fp8_scale_save_path is None
+    mod._maybe_save_fp8_scales(LAYER_0, t(9.0), t(9.0), t(9.0), True)
+    assert len(renames) == 1
+
+
+def test_scale_file_rewritten_every_wrap(tmp_path, monkeypatch) -> None:
+    """With VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP=1 every wrap rewrites
+    the file, which ends with the scales of the last amax window."""
+    monkeypatch.setenv("VLLM_MM_ENCODER_FP8_SCALE_SAVE_EVERY_WRAP", "1")
+    save_file = tmp_path / "scales.json"
+    mod, renames = _save_scales_state(monkeypatch, save_file)
+    t = torch.tensor
+
+    mod._maybe_save_fp8_scales(LAYER_0, t(1.0), t(1.0), t(1.0), True)
+    mod._maybe_save_fp8_scales(LAYER_0, t(3.0), t(4.0), t(5.0), True)
+
+    assert len(renames) == 2
+    assert json.loads(save_file.read_text()) == {
+        LAYER_0: {"q": 6.0, "k": 8.0, "v": 10.0}
+    }
+    assert [p.name for p in tmp_path.iterdir()] == ["scales.json"]
+    assert mod._fp8_scale_save_path == str(save_file)
