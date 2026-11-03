@@ -5,7 +5,7 @@ DSparkSpeculator._sample_sequential.
 
 Both paths run on the same Markov head (random, or the released draft's when
 MUSE_DSPARK_DRAFT names its directory), base logits and sampling state, for 1
-and 2 requests: probabilistic drafts (the recipe) at temperatures 0, 0.6 and
+to 16 requests: probabilistic drafts (the recipe) at temperatures 0, 0.6 and
 1.0 with fp32 and fp64 Gumbel noise, and greedy drafts. vLLM's loop runs
 Muse's output transform and its d2t scatter buffer as in the server. Its
 bias is the server's GEMV. The fused launch adds the bias's 512 products in
@@ -33,7 +33,8 @@ pytestmark = pytest.mark.skipif(
     not current_platform.is_rocm(), reason="the fused launch is for ROCm"
 )
 
-VOCAB, RANK, N_SPEC, MAX_REQS = 202048, 512, 7, 4
+VOCAB, RANK, N_SPEC, MAX_REQS = 202048, 512, 7, 16
+NUM_REQS = [1, 2, 3, 4, 5, 8, 16]
 DRAFT = os.environ.get("MUSE_DSPARK_DRAFT", "")
 
 
@@ -137,9 +138,9 @@ def _speculator(temp, seed, greedy=False, fp64=False, exact=False):
     s.sample_indices = torch.arange(MAX_REQS * N_SPEC, dtype=torch.int64, device=dev)
     # Request slots in another order than the rows, and positions past a
     # long context, as in the server.
-    slots = torch.tensor([2, 0, 3, 1], dtype=torch.int32, device=dev)
+    slots = torch.randperm(MAX_REQS, generator=g, device=dev).int()
     s.sample_idx_mapping = slots.repeat_interleave(N_SPEC)
-    ctx = torch.tensor([131072, 40000, 7, 99999], dtype=torch.int64, device=dev)
+    ctx = torch.randint(7, 1 << 18, (MAX_REQS,), generator=g, device=dev)
     steps = torch.arange(N_SPEC, device=dev)
     s.sample_pos = (ctx[:, None] + 1 + steps[None, :]).flatten()
     s.input_buffers = SimpleNamespace(
@@ -170,7 +171,7 @@ def _run_both(s, num_reqs):
 
 @pytest.mark.parametrize("fp64", [False, True])
 @pytest.mark.parametrize("temp", [0.0, 0.6, 1.0])
-@pytest.mark.parametrize("num_reqs", [1, 2])
+@pytest.mark.parametrize("num_reqs", NUM_REQS)
 def test_fused_markov_matches_vllm_loop(num_reqs, temp, fp64):
     from vllm.v1.worker.gpu.spec_decode.dspark.speculator import DSparkSpeculator
 
@@ -213,7 +214,7 @@ def test_fused_markov_matches_vllm_loop(num_reqs, temp, fp64):
 
 
 @pytest.mark.parametrize("greedy", [False, True])
-@pytest.mark.parametrize("num_reqs", [1, 2])
+@pytest.mark.parametrize("num_reqs", [1, 2, 4, 8])
 def test_fused_markov_bit_exact_with_exact_bias(num_reqs, greedy):
     # With a bias that does not depend on the order of its sum, the fused
     # launches give the same draft tokens and cache bits as vLLM's loop.
@@ -224,7 +225,7 @@ def test_fused_markov_bit_exact_with_exact_bias(num_reqs, greedy):
         assert torch.equal(ref_cache.view(torch.int16), got_cache.view(torch.int16))
 
 
-@pytest.mark.parametrize("num_reqs", [1, 2])
+@pytest.mark.parametrize("num_reqs", NUM_REQS)
 def test_fused_markov_greedy_drafts(num_reqs):
     s = _speculator(0.0, seed=20 + num_reqs, greedy=True)
     ref_tok, got_tok, _, _ = _run_both(s, num_reqs)
