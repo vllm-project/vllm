@@ -550,6 +550,8 @@ class FlashInferMLASparseSM90Builder(FlashInferMLASparseMetadataBuilder):
 
 
 class FlashInferMLASparseSM90Impl(SparseMLACommonImpl[FlashInferMLASparseSM90Metadata]):
+    uses_index_group: ClassVar[bool] = False
+
     def __init__(
         self,
         num_heads: int,

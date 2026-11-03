@@ -18,12 +18,16 @@ import torch
 from tests.v1.attention.utils import (
     BatchSpec,
     create_common_attn_metadata,
+    create_standard_kv_cache_spec,
     create_vllm_config,
     try_get_attention_backend,
 )
 from vllm import _custom_ops as ops
 from vllm.config.vllm import set_current_vllm_config
 from vllm.model_executor.layers.attention import mla_attention as mla_attention_module
+from vllm.model_executor.layers.attention import (
+    sparse_mla_attention as sparse_mla_attention_module,
+)
 from vllm.model_executor.layers.attention.mla_attention import (
     MLAAttention,
     MLACommonBaseImpl,
@@ -41,6 +45,9 @@ from vllm.v1.attention.backend import CommonAttentionMetadata, MLAAttentionImpl
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla import flashmla as flashmla_module
 from vllm.v1.attention.backends.mla import tokenspeed_mla as tokenspeed_mla_module
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseTRTLLMBackend,
+)
 from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackendEnum,
     get_mla_prefill_backend,
@@ -170,6 +177,71 @@ def test_glm5_flashinfer_masked_mha_routing(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize(
+    ("query_len", "seq_len", "has_context", "kv_cache_quantized", "expected"),
+    [
+        (8 * 1024, 8 * 1024, False, False, True),
+        (8 * 1024, 8 * 1024, False, True, True),
+        (8 * 1024, 16 * 1024, True, False, True),
+        # Quantized caches with cached context stay on sparse MQA.
+        (8 * 1024, 16 * 1024, True, True, False),
+    ],
+)
+def test_glm5_masked_mha_quantized_kv_routing(
+    query_len, seq_len, has_context, kv_cache_quantized, expected
+):
+    assert (
+        _use_masked_mha(
+            backend_name="FLASHMLA_SPARSE",
+            tensor_parallel_size=8,
+            qk_head_dim=256,
+            v_head_dim=256,
+            query_len=query_len,
+            seq_len=seq_len,
+            has_context=has_context,
+            kv_cache_quantized=kv_cache_quantized,
+        )
+        is expected
+    )
+
+
+@pytest.mark.parametrize(("tensor_parallel_size", "reserved"), [(1, False), (8, True)])
+def test_quantized_kv_opt_in_reserves_the_mask_only_where_masked_mha_routes(
+    monkeypatch, tensor_parallel_size, reserved
+):
+    # FlashInfer has no masked-MHA row for DeepSeek-V3.2 dims below TP8.
+    monkeypatch.setattr(
+        sparse_mla_attention_module.current_platform,
+        "is_device_capability_family",
+        lambda family: family == 100,
+    )
+    monkeypatch.setattr(
+        sparse_mla_attention_module, "get_flash_attn_version", lambda **kwargs: 4
+    )
+    vllm_config = create_vllm_config(
+        model_name="deepseek-ai/DeepSeek-V2-Lite",
+        max_model_len=4096,
+        hf_config_override={"index_topk": 2048},
+    )
+    vllm_config.parallel_config.tensor_parallel_size = tensor_parallel_size
+    vllm_config.model_config.model_arch_config.total_num_attention_heads = 128
+    vllm_config.cache_config.cache_dtype = "fp8"
+    vllm_config.attention_config.sparse_mla_masked_mha_quantized_kv = True
+    vllm_config.compilation_config.static_forward_context["layer"] = SimpleNamespace(
+        prefill_backend=None,
+        get_attn_backend=lambda: FlashInferMLASparseTRTLLMBackend,
+    )
+
+    builder = FlashInferMLASparseTRTLLMBackend.get_builder_cls()(
+        create_standard_kv_cache_spec(vllm_config),
+        ["layer"],
+        vllm_config,
+        torch.device("cpu"),
+    )
+
+    assert (builder.topk_mask_workspace is not None) is reserved
 
 
 @pytest.mark.parametrize("qk_rope_head_dim", [64, 0], ids=["rope", "nope"])

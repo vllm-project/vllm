@@ -1697,15 +1697,41 @@ def test_masked_mha_workspace_guards_long_routing_policy(
 
 
 @pytest.mark.parametrize(
-    ("model_dims", "kv_cache_dtype", "fa_version", "expected"),
+    ("model_dims", "kv_cache_dtype", "fa_version", "allow_quantized_kv", "expected"),
     [
-        pytest.param((128, 512, 128, 64, 128), "auto", 4, True, id="deepseek_v32"),
-        pytest.param((64, 512, 192, 64, 256), "auto", 4, True, id="glm5"),
-        pytest.param((64, 512, 256, 0, 256), "auto", 4, True, id="glm53_flash_nope"),
-        pytest.param((64, 512, 256, 0, 256), "fp8", 4, False, id="quantized_kv"),
-        pytest.param((64, 512, 256, 0, 256), "auto", 3, False, id="no_fa4"),
-        pytest.param((64, 512, 256, 64, 256), "auto", 4, False, id="rope_320"),
-        pytest.param((128, 512, 256, 0, 256), "auto", 4, False, id="wrong_heads"),
+        pytest.param(
+            (128, 512, 128, 64, 128), "auto", 4, False, True, id="deepseek_v32"
+        ),
+        pytest.param((64, 512, 192, 64, 256), "auto", 4, False, True, id="glm5"),
+        pytest.param(
+            (64, 512, 256, 0, 256), "auto", 4, False, True, id="glm53_flash_nope"
+        ),
+        pytest.param((64, 512, 256, 0, 256), "fp8", 4, False, False, id="quantized_kv"),
+        pytest.param((64, 512, 256, 0, 256), "auto", 3, False, False, id="no_fa4"),
+        pytest.param((64, 512, 256, 64, 256), "auto", 4, False, False, id="rope_320"),
+        pytest.param(
+            (128, 512, 256, 0, 256), "auto", 4, False, False, id="wrong_heads"
+        ),
+        *(
+            pytest.param(
+                (64, 512, 192, 64, 256), dtype, 4, True, True, id=f"{dtype}_opt_in"
+            )
+            for dtype in ("fp8", "fp8_ds_mla", "nvfp4_ds_mla")
+        ),
+        pytest.param(
+            (64, 512, 192, 64, 256), "auto", 4, True, True, id="unquantized_opt_in"
+        ),
+        pytest.param(
+            (128, 512, 256, 0, 256),
+            "nvfp4_ds_mla",
+            4,
+            True,
+            False,
+            id="opt_in_wrong_heads",
+        ),
+        pytest.param(
+            (64, 512, 192, 64, 256), "nvfp4_ds_mla", 3, True, False, id="opt_in_no_fa4"
+        ),
     ],
 )
 def test_is_masked_mha_available_model_dims(
@@ -1713,18 +1739,25 @@ def test_is_masked_mha_available_model_dims(
     model_dims: tuple[int, int, int, int, int],
     kv_cache_dtype,
     fa_version,
+    allow_quantized_kv,
     expected,
 ):
     """The allow-list gates masked MHA per exact model geometry: the DeepSeek-V3.2,
     GLM-5 and NoPE GLM-5.3-Flash layouts on an SM100-family GPU with FA4 and an
-    unquantized KV cache, nothing else."""
+    unquantized KV cache, nothing else; a quantized cache needs the opt-in, which
+    does not widen the geometry or kernel requirements."""
     import vllm.model_executor.layers.attention.sparse_mla_attention as mod
 
     monkeypatch.setattr(
         mod.current_platform, "is_device_capability_family", lambda family: True
     )
     monkeypatch.setattr(mod, "get_flash_attn_version", lambda **kwargs: fa_version)
-    assert _is_masked_mha_available(*model_dims, kv_cache_dtype) is expected
+    assert (
+        _is_masked_mha_available(
+            *model_dims, kv_cache_dtype, allow_quantized_kv=allow_quantized_kv
+        )
+        is expected
+    )
 
 
 def test_masked_mha_workspace_fits_accounts_for_batch_and_context():

@@ -711,6 +711,8 @@ class Dots3NotePaddedSparseBackend(FlashAttnMLASparseBackend):
 class Dots3NotePaddedSparseImpl(FlashAttnMLASparseImpl):
     """Read top-k KV directly from uniformly padded cache rows."""
 
+    uses_index_group: ClassVar[bool] = False
+
     def _logical_cache(self, kv_cache: torch.Tensor) -> torch.Tensor:
         assert kv_cache.shape[-1] >= self.head_size
         return kv_cache[..., : self.head_size]
