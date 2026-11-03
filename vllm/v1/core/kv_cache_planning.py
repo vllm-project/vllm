@@ -14,7 +14,10 @@ from vllm.logger import init_logger
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import format_gib
 from vllm.utils.torch_utils import get_dtype_size
-from vllm.v1.core.kv_cache_config_builder import KVCacheConfigBuilder
+from vllm.v1.core.kv_cache_config_builder import (
+    KVCacheConfigBuilder,
+    get_kv_cache_config_builder,
+)
 from vllm.v1.core.kv_cache_utils import (
     _kv_cache_device_name,
     update_kv_cache_capacity,
@@ -1510,8 +1513,6 @@ def get_kv_cache_configs(
         The generated KVCacheConfigs for each worker.
 
     """
-    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-
     builder = get_kv_cache_config_builder(vllm_config)
 
     # If original_max_model_len was -1, automatically
@@ -1630,8 +1631,6 @@ def get_global_kv_cache_groups(
     kv_cache_specs: list[dict[str, KVCacheSpec]],
 ) -> list[KVCacheGroupSpec]:
     """Group the layers of the whole model (all workers' specs merged)."""
-    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-
     builder = get_kv_cache_config_builder(vllm_config)
 
     # Merge the KV cache specs of all workers. Different PP stages may have
@@ -1746,8 +1745,6 @@ def shrink_kv_cache_configs(
     tensors' size follows (their strides and offsets keep describing the
     reservation). Raises if max_model_len no longer fits.
     """
-    from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-
     builder = get_kv_cache_config_builder(vllm_config)
     for kv_cache_config in kv_cache_configs:
         assert num_blocks <= kv_cache_config.num_blocks
@@ -1798,21 +1795,17 @@ def finalize_extensible_kv_cache(
     if vllm_config.model_config.original_max_model_len == -1:
         # The context length was fitted to the reserved capacity, before CUDA
         # graphs and warmup took their share; fit it again to the measured one.
-        from vllm.v1.core.kv_cache_config_builder import get_kv_cache_config_builder
-
         builder = get_kv_cache_config_builder(vllm_config)
         groups_per_worker = [config.kv_cache_groups for config in kv_cache_configs]
+        available_memory = [
+            (num_blocks - 1)
+            * _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
+            if groups
+            else 0
+            for groups in groups_per_worker
+        ]
         _auto_fit_max_model_len(
-            builder,
-            vllm_config,
-            groups_per_worker,
-            [
-                (num_blocks - 1)
-                * _pool_bytes_per_block_from_builder(builder, vllm_config, groups)
-                if groups
-                else 0
-                for groups in groups_per_worker
-            ],
+            builder, vllm_config, groups_per_worker, available_memory
         )
     shrink_kv_cache_configs(
         vllm_config, kv_cache_configs + [scheduler_kv_cache_config], num_blocks
