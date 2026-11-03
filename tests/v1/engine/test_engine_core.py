@@ -539,6 +539,7 @@ def test_encoder_instance_zero_kv_cache(
         trust_remote_code=True,
         dtype="float16",
         seed=42,
+        max_model_len=512,
     )
     scheduler_config = SchedulerConfig(
         max_num_seqs=10,
@@ -653,6 +654,7 @@ def _cadenced_dp_engine_core(
     """A bare DPEngineCoreProc whose all-reduce is scripted by `results`;
     returns the core and the step numbers at which the all-reduce ran."""
     core = object.__new__(DPEngineCoreProc)
+    core.enable_fault_tolerance = False
     core.dp_group = object()
     core.vllm_config = MagicMock(parallel_config=ParallelConfig())
     core.dp_sync_interval = dp_sync_interval
@@ -752,6 +754,7 @@ def _pausable_engine_core_proc() -> EngineCoreProc:
     """A bare EngineCoreProc holding just the state pause_scheduler touches."""
     core = object.__new__(EngineCoreProc)
     core.model_executor = MagicMock()
+    core.model_executor.vllm_config.cache_config.enable_extensible_kv_cache = False
     core.scheduler = MagicMock()
     core.scheduler.has_requests.return_value = False
     core.batch_queue = None

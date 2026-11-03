@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-use vllm_chat::ChatTokenUsage;
 use vllm_llm::TokenUsage;
 
 use super::types::Usage;
@@ -15,11 +14,21 @@ use super::types::Usage;
 pub(crate) struct ContinuousUsage {
     prompt_tokens: usize,
     output_tokens: usize,
-    /// Running reasoning-token count, following the decoder clock.
-    reasoning_tokens: usize,
+    /// Running reasoning-token count, following the decoder clock. `None`
+    /// when the route does not count reasoning tokens.
+    reasoning_tokens: Option<usize>,
 }
 
 impl ContinuousUsage {
+    /// Create a tracker; with `count_reasoning_tokens`, reasoning tokens are
+    /// counted from zero.
+    pub(crate) fn new(count_reasoning_tokens: bool) -> Self {
+        Self {
+            reasoning_tokens: count_reasoning_tokens.then_some(0),
+            ..Self::default()
+        }
+    }
+
     /// Record the prompt-token count reported when a stream starts.
     pub(crate) fn set_prompt_tokens(&mut self, prompt_tokens: usize) {
         self.prompt_tokens = prompt_tokens;
@@ -32,13 +41,17 @@ impl ContinuousUsage {
 
     /// Add the tokens attributed to one reasoning delta to the running count.
     pub(crate) fn add_reasoning_tokens(&mut self, token_count: usize) {
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(token_count);
+        if let Some(reasoning_tokens) = &mut self.reasoning_tokens {
+            *reasoning_tokens = reasoning_tokens.saturating_add(token_count);
+        }
     }
 
     /// Converge the running reasoning count onto the authoritative terminal
     /// value reported at stream end.
     pub(crate) fn set_reasoning_tokens(&mut self, reasoning_tokens: usize) {
-        self.reasoning_tokens = reasoning_tokens;
+        if let Some(count) = &mut self.reasoning_tokens {
+            *count = reasoning_tokens;
+        }
     }
 
     /// Replace the running counts with the final counts reported by generation.
@@ -49,14 +62,11 @@ impl ContinuousUsage {
 
     /// Build a streaming usage snapshot without prompt cache details.
     pub(crate) fn to_usage(&self) -> Usage {
-        let usage = ChatTokenUsage {
-            engine: TokenUsage {
-                prompt_token_count: self.prompt_tokens,
-                output_token_count: self.output_tokens,
-                prompt_cache_usage: Default::default(),
-            },
-            reasoning_tokens: self.reasoning_tokens,
+        let usage = TokenUsage {
+            prompt_token_count: self.prompt_tokens,
+            output_token_count: self.output_tokens,
+            prompt_cache_usage: Default::default(),
         };
-        Usage::from_token_usage(usage, false)
+        Usage::from_token_usage(usage, false, self.reasoning_tokens)
     }
 }
