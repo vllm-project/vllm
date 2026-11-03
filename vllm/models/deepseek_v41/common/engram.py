@@ -42,6 +42,8 @@ import sys
 import tempfile
 import weakref
 from contextlib import ExitStack
+from pathlib import Path
+from typing import Any
 
 import numpy as np
 import torch
@@ -1018,6 +1020,28 @@ def _allocate_huge_page_storage(num_bytes: int) -> torch.Tensor | None:
     return tensor
 
 
+def external_table_views(
+    full: torch.Tensor,
+    num_embeddings: int,
+    dim: int,
+    block_size: int,
+    vocab_start_idx: int,
+    part_num_embeddings: int,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Select this rank's rows from a shared weight-then-scale byte table."""
+    scale_width = dim // block_size
+    weight = full.narrow(0, vocab_start_idx * dim, part_num_embeddings * dim)
+    scales = full.narrow(
+        0,
+        num_embeddings * dim + vocab_start_idx * scale_width,
+        part_num_embeddings * scale_width,
+    )
+    return (
+        weight.view(torch.float8_e4m3fn).view(-1, dim),
+        scales.view(-1, scale_width),
+    )
+
+
 class ParallelEngramEmbedding(nn.Module):
     """Hash heads with FP8 rows and per-block E8M0 scales.
 
@@ -1038,13 +1062,31 @@ class ParallelEngramEmbedding(nn.Module):
         cpu_offload: bool = False,
         dp_shared_memory: bool = False,
         use_thp: bool = False,
+        shared_host_endpoint: str | None = None,
+        shared_host_token_file: str | None = None,
+        shared_host_generation: str | None = None,
+        layer_id: int | None = None,
     ) -> None:
         super().__init__()
         assert head_sizes and all(size > 0 for size in head_sizes)
         assert sum(head_sizes) <= num_embeddings
+        self.head_sizes = head_sizes
         self.cpu_offload = cpu_offload
         self.dp_shared_memory = dp_shared_memory
         self.use_thp = use_thp
+        self.shared_host_endpoint = shared_host_endpoint
+        self._external_mapping: Any = None
+        self._external_lease = None
+        if shared_host_endpoint:
+            if not (
+                shared_host_token_file
+                and shared_host_generation
+                and layer_id is not None
+            ):
+                raise ValueError("shared Engram attachment is incomplete")
+            self._external_token_file = Path(shared_host_token_file)
+            self._external_generation = shared_host_generation
+            self._external_layer_id = layer_id
         self.dp_size = get_engram_dp_size()
         if dp_shared_memory:
             if not cpu_offload:
@@ -1126,6 +1168,8 @@ class ParallelEngramEmbedding(nn.Module):
                     "engram_vocab_start": row_start,
                 },
             )
+            if self._external_mapping is not None:
+                set_weight_attrs(param, {"engram_external": True})
         if cpu_offload and not self.weight.is_meta:
             # Constant dummy values avoid randomizing huge CPU lookup tables.
             set_weight_attrs(self.weight, {"dummy_weight_value": 1.0})
@@ -1150,6 +1194,53 @@ class ParallelEngramEmbedding(nn.Module):
 
     def _allocate_weights(self) -> tuple[torch.Tensor, torch.Tensor]:
         scale_dim = self.dim // self.block_size
+        if self.shared_host_endpoint:
+            if torch.get_default_device().type != "meta":
+                from vllm.distributed.engram_share.vmm.owner import (
+                    attach_table,
+                    retain_attachment,
+                )
+
+                device = torch.accelerator.current_device_index()
+                connection, mapping, manifest = attach_table(
+                    self.shared_host_endpoint,
+                    self._external_token_file,
+                    self._external_layer_id,
+                    self.num_embeddings,
+                    self.dim,
+                    self.head_sizes,
+                    device,
+                    expected_generation=self._external_generation,
+                    checkpoint_dir=Path(
+                        get_current_vllm_config().model_config.model_weights
+                        or get_current_vllm_config().model_config.model
+                    ),
+                )
+                self._external_mapping = mapping
+                self._external_lease = manifest["lease"]
+                retain_attachment(connection, mapping, manifest["lease"])
+                logger.info(
+                    "Attached external Engram layer %d generation %s: "
+                    "%d rows, %.2f GiB owner backing, no local table allocation",
+                    self._external_layer_id,
+                    self._external_generation,
+                    self.num_embeddings,
+                    mapping.table.size_bytes / 2**30,
+                )
+            return (
+                torch.empty(
+                    self.part_num_embeddings,
+                    self.dim,
+                    dtype=torch.float8_e4m3fn,
+                    device="meta",
+                ),
+                torch.empty(
+                    self.part_num_embeddings,
+                    scale_dim,
+                    dtype=torch.uint8,
+                    device="meta",
+                ),
+            )
         if torch.get_default_device().type == "meta" or not (
             self.cpu_offload or self.peer_rows
         ):
@@ -1238,9 +1329,20 @@ class ParallelEngramEmbedding(nn.Module):
         """Whether the GPU maps this host table with pages too small for its TLB."""
         if self._shared_memory is not None:
             return not self._shared_memory.huge_pages
-        return self.cpu_offload and self._packed is None
+        return (
+            self.cpu_offload and self._packed is None and self._external_mapping is None
+        )
 
     def _storage(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if (external_mapping := getattr(self, "_external_mapping", None)) is not None:
+            return external_table_views(
+                external_mapping.cuda,
+                self.num_embeddings,
+                self.dim,
+                self.block_size,
+                self.vocab_start_idx,
+                self.part_num_embeddings,
+            )
         if self._shared_memory is not None:
             return self._shared_memory.get_views(self.weight, self.weight_scale_inv)
         if not self.cpu_offload:
@@ -1737,6 +1839,14 @@ class Engram(nn.Module):
             cpu_offload=engram_config.cpu_offload,
             dp_shared_memory=bool(engram_config.dp_shared_memory),
             use_thp=engram_config.use_thp,
+            shared_host_endpoint=engram_config.shared_host_endpoint,
+            shared_host_token_file=engram_config.shared_host_token_file,
+            shared_host_generation=engram_config.shared_host_generation,
+            layer_id=(
+                layout.layer_ids[layer_hash_index]
+                if engram_config.shared_host_endpoint
+                else None
+            ),
         )
 
     def _init_staging(self, max_tokens: int, head_dim: int) -> None:

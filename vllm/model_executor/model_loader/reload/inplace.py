@@ -52,6 +52,13 @@ def reload_weights(
             processed into kernel format (repacking, renaming, etc.)
 
     """
+    if (
+        vllm_config.engram_config is not None
+        and vllm_config.engram_config.shared_host_endpoint
+    ):
+        raise ValueError(
+            "Reloading weights requires a new external Engram owner generation."
+        )
     # TODO(@kylesayrs): generalize to all runners and loaders
     # argument validation
     if weights_iterator is None and not is_checkpoint_format:

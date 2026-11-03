@@ -331,6 +331,9 @@ class DeepseekV41ForCausalLM(
         loader = AutoWeightsLoader(self)
         return loader.load_weights(self.hf_to_vllm_mapper.apply(weights))
 
+    def is_unused_checkpoint_weight(self, name: str) -> bool:
+        return self.language_model.is_unused_checkpoint_weight(name)
+
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefixes in the multimodal model."""
         return MultiModelKeys.from_string_field(

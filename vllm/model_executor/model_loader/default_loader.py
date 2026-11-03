@@ -340,6 +340,7 @@ class DefaultModelLoader(BaseModelLoader):
                         self.load_config.use_tqdm_on_load,
                         self.load_config.safetensors_load_strategy,
                         local_expert_ids=self.local_expert_ids,
+                        is_unused_weight=source.is_unused_weight,
                         safetensors_prefetch_num_threads=(
                             self.load_config.safetensors_prefetch_num_threads
                         ),
