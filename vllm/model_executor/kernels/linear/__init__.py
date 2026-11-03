@@ -226,6 +226,7 @@ from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
     FlashInferFP8ScaledMMLinearKernel,
+    FlashInferMxfp8DeepGemmBlockScaledMMKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.humming import (
     HummingFP8ScaledMMLinearKernel,
@@ -334,6 +335,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type[LinearKernel]]] = {
         FlashInferCuteDslNvFp4LinearKernel,
         FlashInferCuteDslNvFp4W4A16LinearKernel,
         FlashInferCutedslMxfp8LinearKernel,
+        FlashInferMxfp8DeepGemmBlockScaledMMKernel,
     },
     "flashinfer_trtllm": {
         FlashInferTrtllmMxfp8LinearKernel,
@@ -522,6 +524,7 @@ _POSSIBLE_FP8_BLOCK_KERNELS: dict[
 ] = {
     PlatformEnum.CUDA: [
         FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        FlashInferMxfp8DeepGemmBlockScaledMMKernel,
         DeepGemmFp8BlockScaledMMKernel,
         CutlassFp8BlockScaledMMKernel,
         B12xFp8BlockScaledMMKernel,
@@ -1572,6 +1575,7 @@ __all__ = [
     "_KernelT",
     "DeepGemmFp8BlockScaledMMKernel",
     "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
+    "FlashInferMxfp8DeepGemmBlockScaledMMKernel",
     "B12xFp8BlockScaledMMKernel",
     "B12xTensorFP8ScaledMMLinearKernel",
 ]

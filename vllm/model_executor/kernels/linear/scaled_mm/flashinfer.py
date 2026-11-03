@@ -8,18 +8,29 @@ import torch
 
 import vllm.envs as envs
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    deepgemm_post_process_fp8_weight_block,
     per_token_group_quant_fp8,
+    per_token_group_quant_fp8_packed_for_deepgemm,
+)
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    mxfp8_e4m3_quantize,
+    swizzle_mxfp8_scale,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     kFp8StaticTensorSym,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
+from vllm.utils import flashinfer as vllm_flashinfer
+from vllm.utils.deep_gemm import DeepGemmQuantScaleFMT
 from vllm.utils.flashinfer import (
     flashinfer_fp8_blockscale_gemm,
     flashinfer_scaled_fp8_mm,
     has_flashinfer,
+    has_flashinfer_cutedsl,
     is_flashinfer_fp8_blockscale_gemm_supported,
     should_use_flashinfer_for_blockscale_fp8_gemm,
 )
@@ -195,6 +206,147 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
         return _dynamic_flashinfer_deepgemm_blockscale_gemm_op(
             A, B, Bs, group_size, use_deep_gemm_e8m0
         )
+
+
+class FlashInferMxfp8DeepGemmBlockScaledMMKernel(DeepGemmFp8BlockScaledMMKernel):
+    """Block-FP8 linear on SM107: FlashInfer's small-M MXFP8 CuTe-DSL GEMM for
+    up to ``MXFP8_MAX_M`` rows, DeepGEMM above.
+
+    The UE8M0 128x128 weight scales DeepGEMM uses are repeated to one scale per
+    32 values; both GEMMs read the same FP8 weight. Small-M activations are
+    quantized to MXFP8 (one UE8M0 scale per 32 values).
+    """
+
+    apply_input_quant: ClassVar[bool] = False
+
+    @classmethod
+    def is_supported(cls, compute_capability=None):
+        supported, reason = super().is_supported(compute_capability)
+        if not supported:
+            return supported, reason
+        if not current_platform.is_device_capability(107):
+            return False, "requires sm_107 (Rubin)."
+        if not has_flashinfer_cutedsl():
+            return False, "requires FlashInfer CuTe-DSL module."
+        if DeepGemmQuantScaleFMT.from_oracle() != DeepGemmQuantScaleFMT.UE8M0:
+            return False, "requires DeepGEMM UE8M0 scales."
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config):
+        can_implement, reason = super().can_implement(config)
+        if not can_implement:
+            return can_implement, reason
+        if config.weight_quant_key.scale.group_shape != GroupShape(128, 128):
+            return False, "Supports only 128x128 weight blocks."
+        if config.weight_shape[0] % 128 != 0:
+            return False, "mm_mxfp8 requires N divisible by 128."
+        return True, None
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        if getattr(layer, "is_bmm", False):
+            super().process_weights_after_loading(layer)
+            return
+        Fp8BlockScaledMMLinearKernel.process_weights_after_loading(self, layer)
+        params = self._get_layer_params(layer)
+        weight_scale = params.block_scale
+        dg_weight, dg_weight_scale = deepgemm_post_process_fp8_weight_block(
+            wq=params.weight,
+            ws=weight_scale,
+            quant_block_shape=tuple(layer.weight_block_size),
+            use_e8m0=self.use_deep_gemm_e8m0,
+        )
+        # Requantization above rewrote weight_scale in place to powers of two.
+        layer.weight_scale_mxfp8 = _block_scale_to_mxfp8(weight_scale, *dg_weight.shape)
+        replace_parameter(layer, params.WEIGHT, dg_weight)
+        replace_parameter(layer, params.block_scale_attr, dg_weight_scale)
+        layer.deep_gemm_warmup_provider = self
+
+    def apply_weights(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+        **kwargs,
+    ) -> torch.Tensor:
+        params = self._get_layer_params(layer)
+        output = torch.ops.vllm.flashinfer_mxfp8_deepgemm_blockscale_gemm(
+            x.view(-1, x.shape[-1]),
+            params.weight,
+            params.block_scale,
+            layer.weight_scale_mxfp8,
+        )
+        if bias is not None:
+            output = output + bias
+        return output.view(*x.shape[:-1], params.weight.shape[0])
+
+
+def _block_scale_to_mxfp8(scale: torch.Tensor, n: int, k: int) -> torch.Tensor:
+    """Power-of-two ``[N/128, K/128]`` block scales -> swizzled MXFP8 scales."""
+    if scale.dtype == torch.float32:
+        e8m0 = ((scale.view(torch.int32) >> 23) & 0xFF).to(torch.uint8)
+    else:
+        e8m0 = scale.view(torch.uint8)
+    per_32 = e8m0.repeat_interleave(128, dim=0)[:n].repeat_interleave(
+        128 // MXFP8_BLOCK_SIZE, dim=1
+    )[:, : k // MXFP8_BLOCK_SIZE]
+    return swizzle_mxfp8_scale(per_32.contiguous(), M=n, K=k)
+
+
+# Measured on Vera Rubin: up to 16 rows the MXFP8 path (quant + GEMM) beats DeepGEMM
+# on every Mistral Large 4 projection; from 24 rows it is slower.
+MXFP8_MAX_M = 16
+
+
+def _flashinfer_mxfp8_deepgemm_blockscale_gemm_impl(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    weight_scale_mxfp8: torch.Tensor,
+) -> torch.Tensor:
+    if input.shape[0] <= MXFP8_MAX_M:
+        input_mxfp8, input_scale = mxfp8_e4m3_quantize(
+            input, is_sf_swizzled_layout=True
+        )
+        return vllm_flashinfer.mm_mxfp8(
+            input_mxfp8,
+            weight.t(),
+            input_scale,
+            weight_scale_mxfp8,
+            out_dtype=torch.bfloat16,
+            backend="cute-dsl",
+        )
+    q_input, input_scale = per_token_group_quant_fp8_packed_for_deepgemm(
+        input, group_size=128, use_ue8m0=True
+    )
+    output = torch.empty(
+        (input.shape[0], weight.shape[0]), dtype=torch.bfloat16, device=input.device
+    )
+    fp8_gemm_nt(
+        (q_input, input_scale),
+        (weight, weight_scale),
+        output,
+        is_deep_gemm_e8m0_used=True,
+    )
+    return output
+
+
+def _flashinfer_mxfp8_deepgemm_blockscale_gemm_fake(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    weight_scale_mxfp8: torch.Tensor,
+) -> torch.Tensor:
+    return torch.empty(
+        input.shape[0], weight.shape[0], dtype=torch.bfloat16, device=input.device
+    )
+
+
+direct_register_custom_op(
+    "flashinfer_mxfp8_deepgemm_blockscale_gemm",
+    _flashinfer_mxfp8_deepgemm_blockscale_gemm_impl,
+    fake_impl=_flashinfer_mxfp8_deepgemm_blockscale_gemm_fake,
+)
 
 
 def _flashinfer_fp8_blockscale_gemm_impl(
