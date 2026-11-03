@@ -77,10 +77,11 @@ def record_metadata_for_reloading(model: torch.nn.Module):
     Stores parameter and buffer metadata as meta tensors for restoration.
     Must be called before `initialize_layerwise_reload`.
     """
+    # Keep the restore device of layers registered while the model was built:
+    # online quantization may stage them off the default device.
     for layer in model.modules():
         info = get_layerwise_info(layer)
         info.restore_metadata = capture_layer_to_meta(layer)
-        info.restore_device = torch.get_default_device()
 
 
 def max_layer_reload_bytes(model: torch.nn.Module) -> int:

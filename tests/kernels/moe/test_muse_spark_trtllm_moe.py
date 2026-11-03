@@ -411,8 +411,11 @@ def test_muse_spark_online_nvfp4_moe_numeric(cpu_offload, dist_init, workspace_i
         QuantizationConfigArgs(targets={"*moe.experts*": "nvfp4_per_token"})
     )
     ckpt = _bf16_checkpoint()
+    bf16_bytes = sum(w.nbytes for w in ckpt.values())
     if cpu_offload:
         set_offloader(UVAOffloader(cpu_offload_max_bytes=0))
+    torch.accelerator.reset_peak_memory_stats()
+    allocated = torch.accelerator.memory_allocated()
     try:
         router, routed, norm, vllm_config, runner = build_moe(
             MuseSpark1xRMSNorm,
@@ -425,6 +428,9 @@ def test_muse_spark_online_nvfp4_moe_numeric(cpu_offload, dist_init, workspace_i
     assert isinstance(method, Nvfp4OnlineMoEMethod)
     assert method.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
     assert routed.w13_weight.is_cuda and routed.w2_weight.is_cuda
+    if cpu_offload:
+        # Staged experts never hold the whole BF16 layer on the device.
+        assert torch.accelerator.max_memory_allocated() - allocated < bf16_bytes
 
     x, logits = _inputs(1)
     out = run_moe(runner, vllm_config, x, logits)

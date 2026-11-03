@@ -16,7 +16,10 @@ from vllm.config import (
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import FusedMoEFactory
 from vllm.model_executor.layers.quantization.modelopt import ModelOptNvFp4Config
-from vllm.model_executor.model_loader.reload import finalize_layerwise_processing
+from vllm.model_executor.model_loader.reload import (
+    finalize_layerwise_processing,
+    record_metadata_for_reloading,
+)
 from vllm.models.muse_spark.nvidia.muse_moe_runner import (
     MuseMoERunner,
     MusePostExpertFinalize,
@@ -82,6 +85,8 @@ def make_runner(
             runner_cls=MuseMoERunner,
             runner_args={"post_expert_norm": norm},
         )
+        # As the model loader does after building the model.
+        record_metadata_for_reloading(runner)
     routed = runner.routed_experts
     loaded = list(routed.load_weights(list(ckpt.items())))
     assert len(loaded) == len(ckpt)
