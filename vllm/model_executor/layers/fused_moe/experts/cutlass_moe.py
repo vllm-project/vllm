@@ -280,6 +280,13 @@ def run_cutlass_moe_fp8(
 
 
 class CutlassExpertsFp8Base(mk.FusedMoEExpertsModular):
+    kept_constants: tuple[str, ...] = (
+        "ab_strides1",
+        "ab_strides2",
+        "c_strides1",
+        "c_strides2",
+    )
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -717,7 +724,7 @@ class CutlassExpertsFp4(mk.FusedMoEExpertsModular):
         p = current_platform
         return p.is_cuda() and (
             p.is_device_capability_family(100)
-            or p.is_device_capability_family(110)
+            # SM110 excluded: grouped NVFP4 kernel is sm100-only
             or p.is_device_capability_family(120)
         )
 
@@ -1309,6 +1316,17 @@ def run_cutlass_moe_w4a8_fp8(
 
 
 class CutlassExpertsW4A8Fp8(mk.FusedMoEExpertsModular):
+    kept_constants: tuple[str, ...] = (
+        "a_strides1",
+        "a_strides2",
+        "b_strides1",
+        "b_strides2",
+        "c_strides1",
+        "c_strides2",
+        "s_strides1",
+        "s_strides2",
+    )
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,

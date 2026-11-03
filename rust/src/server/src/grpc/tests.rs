@@ -59,6 +59,7 @@ use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
 use super::control::kv_event_source;
 use super::convert::json_to_proto_struct;
+use super::health::{EngineHealth, HealthMonitor};
 use super::pb::control_client::ControlClient;
 use super::pb::inference_client::InferenceClient;
 use super::{ControlServer, ControlServiceImpl, InferenceServer, InferenceServiceImpl, pb};
@@ -353,7 +354,7 @@ async fn setup_grpc_service(
 ) -> (
     InferenceServer<InferenceServiceImpl>,
     ControlServer<ControlServiceImpl>,
-    tokio::sync::watch::Receiver<bool>,
+    EngineHealth,
     MockEngineTask,
 ) {
     setup_grpc_service_with_backend(
@@ -373,7 +374,7 @@ async fn setup_grpc_service_with_backend<F>(
 ) -> (
     InferenceServer<InferenceServiceImpl>,
     ControlServer<ControlServiceImpl>,
-    tokio::sync::watch::Receiver<bool>,
+    EngineHealth,
     MockEngineTask,
 )
 where
@@ -410,7 +411,7 @@ async fn setup_grpc_service_with_engine_script<F>(
 ) -> (
     InferenceServer<InferenceServiceImpl>,
     ControlServer<ControlServiceImpl>,
-    tokio::sync::watch::Receiver<bool>,
+    EngineHealth,
     MockEngineTask,
 )
 where
@@ -437,7 +438,7 @@ where
     )
     .await
     .expect("connect client");
-    let engine_health = client.subscribe_health();
+    let engine_health = EngineHealth::subscribe(&client);
 
     let chat = ChatLlm::from_shared_backend(Llm::new(client), backend);
     let state = Arc::new(AppState::new(vec!["test-model".to_string()], chat));
@@ -475,31 +476,33 @@ async fn grpc_test_server(
 async fn start_grpc_test_server(
     inference_service: InferenceServer<InferenceServiceImpl>,
     control_service: ControlServer<ControlServiceImpl>,
-    engine_health: tokio::sync::watch::Receiver<bool>,
+    engine_health: EngineHealth,
     shutdown: tokio_util::sync::CancellationToken,
 ) -> (Channel, tokio::task::JoinHandle<()>) {
     let (health_reporter, health_service) = health_reporter();
-    health_reporter.set_serving::<InferenceServer<InferenceServiceImpl>>().await;
-    health_reporter.set_serving::<ControlServer<ControlServiceImpl>>().await;
+    let health_monitor = HealthMonitor::register(health_reporter, engine_health).await;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind grpc listener");
     let addr = listener.local_addr().expect("local addr");
 
     let server_task = tokio::spawn(async move {
         let incoming = MaybeTlsListener::plain(Listener::Tcp(listener));
-        let server = TonicServer::builder()
-            .add_service(health_service)
-            .add_service(control_service)
-            .add_service(inference_service)
-            .serve_with_incoming_shutdown(incoming, shutdown.clone().cancelled_owned());
-        let health_monitor =
-            super::monitor_health(health_reporter, engine_health, shutdown.clone());
-        let server = async move {
-            let result = server.await;
-            shutdown.cancel();
-            result
-        };
-        let (server_result, ()) = tokio::join!(server, health_monitor);
+        let server_shutdown = shutdown.clone();
+        let server_result = health_monitor
+            .serve(shutdown, std::future::pending(), |stop| {
+                let server = TonicServer::builder()
+                    .add_service(health_service)
+                    .add_service(control_service)
+                    .add_service(inference_service)
+                    .serve_with_incoming_shutdown(incoming, stop);
+                async move {
+                    let result = server.await;
+                    server_shutdown.cancel();
+                    result
+                }
+            })
+            .await
+            .expect("grpc server is never forced to abort");
         server_result.expect("grpc server");
     });
 
@@ -2403,7 +2406,10 @@ async fn control_sleep_rejects_unknown_level() {
             ready,
             Arc::new(FakeTextBackend::default()),
             None,
-            |_, _| boxed_test_future(async move {}),
+            // With sleep mode, the client asks for readiness at connect.
+            |dealer, push| {
+                boxed_test_future(reply_utility_bool(dealer, push, "is_inference_ready", true))
+            },
         )
         .await;
     let (channel, server_task) = start_grpc_test_server(
@@ -2628,20 +2634,29 @@ fn kv_event_source_filters_and_exposes_zmq_publisher() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
 async fn grpc_health_transitions_to_not_serving_when_engine_becomes_unhealthy() {
-    let (inference_service, control_service, _connected_engine_health, _engine_task) =
+    let (inference_service, control_service, connected_engine_health, _engine_task) =
         setup_grpc_service(b"engine-grpc-health-failure", default_stream_output_specs()).await;
-    let (engine_health_tx, engine_health) = tokio::sync::watch::channel(true);
+    let (engine_health_tx, liveness) = tokio::sync::watch::channel(true);
     let (channel, server_task) = start_grpc_test_server(
         inference_service,
         control_service,
-        engine_health,
+        EngineHealth {
+            liveness,
+            ..connected_engine_health
+        },
         tokio_util::sync::CancellationToken::new(),
     )
     .await;
     let mut health_client = HealthClient::new(channel);
 
     let mut health_streams = Vec::new();
-    for service in ["vllm.Inference", "vllm.Control", ""] {
+    for service in [
+        "vllm.Inference",
+        "vllm.Control",
+        "",
+        "liveness",
+        "readiness",
+    ] {
         let service_label = if service.is_empty() {
             "overall"
         } else {
@@ -2769,6 +2784,17 @@ async fn grpc_shutdown_closes_health_watch_and_server() {
         HealthServingStatus::Serving as i32,
         "unexpected initial health status for vllm.Inference"
     );
+    let mut liveness = health_client
+        .watch(HealthCheckRequest {
+            service: "liveness".to_string(),
+        })
+        .await
+        .expect("start health watch for liveness")
+        .into_inner();
+    assert_eq!(
+        next_health_status(&mut liveness).await,
+        HealthServingStatus::Serving
+    );
 
     control_client
         .shutdown(pb::ShutdownRequest {})
@@ -2798,9 +2824,143 @@ async fn grpc_shutdown_closes_health_watch_and_server() {
         stream_end.is_none(),
         "vllm.Inference health watch remained open"
     );
+    let liveness_end = tokio::time::timeout(Duration::from_secs(2), liveness.message())
+        .await
+        .expect("timed out waiting for liveness health watch to close")
+        .expect("failed while closing liveness health watch");
+    assert!(
+        liveness_end.is_none(),
+        "orderly shutdown must not fail liveness: {liveness_end:?}"
+    );
 
     tokio::time::timeout(Duration::from_secs(2), server_task)
         .await
         .expect("timed out waiting for gRPC server shutdown")
         .expect("gRPC server task failed");
+}
+
+async fn next_health_status(
+    stream: &mut tonic::Streaming<tonic_health::pb::HealthCheckResponse>,
+) -> HealthServingStatus {
+    let response = tokio::time::timeout(Duration::from_secs(2), stream.message())
+        .await
+        .expect("timed out waiting for a health update")
+        .expect("failed to read health update")
+        .expect("health watch ended");
+    HealthServingStatus::try_from(response.status).expect("known health status")
+}
+
+/// Serve pause, resume, and readiness asks as an engine that is ready unless
+/// paused, in whatever order the client sends them.
+async fn serve_pausable_engine(dealer: &mut DealerSocket, push: &mut PushSocket) {
+    let mut paused = false;
+    loop {
+        let frames = recv_engine_message(dealer).await;
+        assert_eq!(frames[0].as_ref(), &[0x03]);
+        let payload = decode_value(&frames[1]).expect("decode utility payload");
+        let fields = payload.as_array().expect("utility payload array");
+        let call_id = fields[1].as_u64().expect("utility call id");
+        let result = match fields[2].as_str().expect("utility method") {
+            "is_inference_ready" => Value::Boolean(!paused),
+            "pause_generation" => {
+                paused = true;
+                Value::Nil
+            }
+            "resume_scheduler" => {
+                paused = false;
+                Value::Nil
+            }
+            method => panic!("unexpected utility call {method}"),
+        };
+        send_outputs(
+            push,
+            UtilityCallOutput {
+                output: UtilityOutput {
+                    call_id: call_id.into(),
+                    failure_message: None,
+                    result: Some(UtilityResultEnvelope::without_type_info(result)),
+                },
+                ..Default::default()
+            }
+            .into(),
+        )
+        .await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn grpc_pause_withdraws_readiness_but_not_liveness() {
+    let (inference_service, control_service, engine_health, _engine_task) =
+        setup_grpc_service_with_engine_script(
+            b"engine-grpc-pause-readiness",
+            default_ready_response(),
+            Arc::new(FakeTextBackend::default()),
+            None,
+            |dealer, push| boxed_test_future(serve_pausable_engine(dealer, push)),
+        )
+        .await;
+    let (channel, server_task) = start_grpc_test_server(
+        inference_service,
+        control_service,
+        engine_health,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let mut control_client = ControlClient::new(channel.clone());
+    let mut health_client = HealthClient::new(channel);
+    let mut readiness_streams = Vec::new();
+    for service in ["readiness", "vllm.Inference"] {
+        let mut stream = health_client
+            .watch(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .expect("start health watch")
+            .into_inner();
+        assert_eq!(
+            next_health_status(&mut stream).await,
+            HealthServingStatus::Serving
+        );
+        readiness_streams.push(stream);
+    }
+
+    control_client
+        .pause_generation(pb::PauseGenerationRequest::default())
+        .await
+        .expect("pause generation");
+    for stream in &mut readiness_streams {
+        assert_eq!(
+            next_health_status(stream).await,
+            HealthServingStatus::NotServing
+        );
+    }
+    for service in ["liveness", "vllm.Control", ""] {
+        let status = health_client
+            .check(HealthCheckRequest {
+                service: service.to_string(),
+            })
+            .await
+            .expect("check health")
+            .into_inner()
+            .status;
+        assert_eq!(
+            status,
+            HealthServingStatus::Serving as i32,
+            "a pause must not fail {service:?}"
+        );
+    }
+
+    control_client
+        .resume_generation(pb::ResumeGenerationRequest {})
+        .await
+        .expect("resume generation");
+    for stream in &mut readiness_streams {
+        assert_eq!(
+            next_health_status(stream).await,
+            HealthServingStatus::Serving
+        );
+    }
+
+    server_task.abort();
 }
