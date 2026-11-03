@@ -326,7 +326,7 @@ class Scheduler(SchedulerInterface):
                     vllm_max_batch_size=self.scheduler_config.max_num_seqs,
                     vllm_num_speculative_tokens=self.num_spec_tokens,
                 )
-            self.use_eagle = speculative_config.use_eagle()
+            self.use_eagle = speculative_config.uses_target_hidden_states
             self.use_eagle_block_drop = speculative_config.use_eagle_block_drop()
             if (
                 speculative_config.needs_eagle_block_drop()
@@ -2389,6 +2389,7 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             ec_transfer_params = None
             prefill_stats = None
+            watermarking = None
             status_before_stop = request.status
 
             # Check for stop and update request status.
@@ -2449,6 +2450,15 @@ class Scheduler(SchedulerInterface):
                     prefill_stats.finalize(
                         self.kv_cache_manager.estimate_cached_tokens(request)
                     )
+                    params = request.sampling_params
+                    if params is not None and self.vllm_config.watermark_config:
+                        # Report the flag after enforcement; the sampler skips
+                        # greedy and trace replay rows.
+                        watermarking = bool(
+                            params.watermarking
+                            and params.temperature != 0
+                            and params.trace_decode_token_ids is None
+                        )
 
             # Extract sample logprobs before stop handling can replace the
             # sampling parameters for a streaming continuation.
@@ -2524,6 +2534,7 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        watermarking=watermarking,
                     )
                 )
             else:
