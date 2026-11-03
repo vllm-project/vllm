@@ -332,6 +332,12 @@ Supported models:
 
     Recommended flags: `--tool-call-parser granite4`
 
+* `ibm-granite/granite-4.2-8b` and other Granite 4.2 models
+
+    Recommended flags: `--tool-call-parser granite_toolcall_parser`
+
+    Granite 4.2 emits tool calls in an XML format (`<tool_call><function=...><parameter=...>`). The chat template from Hugging Face can be used directly. Parallel function calls are supported.
+
 * `ibm-granite/granite-3.0-8b-instruct`
 
     Recommended flags: `--tool-call-parser granite --chat-template examples/tool_chat_template_granite.jinja`
