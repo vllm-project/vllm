@@ -622,6 +622,9 @@ def _warmup_kernels(
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)
     worker_execute_model(cleanup_output)
+    if model_runner.speculator is not None:
+        # Reset state for drafters that learn across requests.
+        model_runner.speculator.reset_state()
     model_runner.kv_connector.set_disabled(False)
     if model_runner.kv_block_zeroer is not None:
         model_runner.kv_block_zeroer.zero_block_ids([0])

@@ -128,6 +128,21 @@ class BaseSpeculator(ABC):
         """Prepare draft-side watermarking before `propose`. No-op by default."""
         return
 
+    def add_request(self, req_index: int) -> None:
+        """A new request was assigned request-state slot `req_index`, e.g. to
+        reset per-slot state. No-op by default."""
+        return
+
+    def on_requests_finished(self, finished_req_ids: set[str]) -> None:
+        """Requests finished (not preempted), before their request-state slots
+        are freed so their token history is still readable. No-op by default."""
+        return
+
+    def reset_state(self) -> None:
+        """Forget anything learned across requests, called after the warmup
+        requests have finished. No-op by default."""
+        return
+
 
 class DraftModelSpeculator(BaseSpeculator):
     # Draft prefill runs on the target's batch, so it can reuse the target

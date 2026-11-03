@@ -672,7 +672,9 @@ def test_finish_requests_frees_slots_in_sorted_order():
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
     removed: list[str] = []
-    fake_runner = SimpleNamespace(_remove_request=removed.append, pooling_runner=None)
+    fake_runner = SimpleNamespace(
+        _remove_request=removed.append, pooling_runner=None, speculator=None
+    )
     scheduler_output = SimpleNamespace(
         finished_req_ids={"req-b", "req-c", "req-a"},
         preempted_req_ids={"req-e", "req-d"},
