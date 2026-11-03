@@ -48,6 +48,7 @@ from vllm.model_executor.layers.mamba.ops.ssd_combined import (
 )
 from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     commit_replayssm_ring_trackers,
+    plan_replayssm_decode,
     reset_replayssm_ring_trackers,
     selective_state_update,
     selective_state_update_replayssm_flashinfer,
@@ -761,10 +762,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
             ssm_state = self.kv_cache[1]
             if self.use_replayssm:
                 x_cache, dt_cache, B_cache = self.kv_cache[2:5]
-                if self.mamba_config.backend == MambaBackendEnum.FLASHINFER:
-                    ring_start = self._replayssm_ring_start
-                    prev_num_accepted = self._replayssm_prev_num_accepted
-                    prev_query_len = self._replayssm_prev_query_len
+                ring_start = self._replayssm_ring_start
+                prev_num_accepted = self._replayssm_prev_num_accepted
+                prev_query_len = self._replayssm_prev_query_len
             else:
                 x_cache = dt_cache = B_cache = None
             has_initial_states_p = attn_metadata.has_initial_states_p
@@ -1060,6 +1060,21 @@ class MambaMixer2(MambaBase, PluggableLayer):
                         enable_pdl=False,
                     )
                 else:
+                    assert ring_start is not None
+                    assert attn_metadata.write_pos_d is not None
+                    assert attn_metadata.is_flush_d is not None
+                    if self._commits_replayssm_trackers:
+                        # Plan this step once per cache group: every layer of
+                        # the group reads the same write_pos/is_flush rows.
+                        plan_replayssm_decode(
+                            ring_start,
+                            state_indices_tensor_d,
+                            attn_metadata.write_pos_d,
+                            attn_metadata.is_flush_d,
+                            buffer_len=self.replayssm_buffer_len,
+                            seq_lens=attn_metadata.replayssm_seq_lens_d,
+                            align_block_size=attn_metadata.replayssm_align_block_size,
+                        )
                     selective_state_update_replayssm_output_only(
                         ssm_state,
                         hidden_states_d,
@@ -1169,19 +1184,17 @@ def share_replayssm_ring_trackers(
 
     Layers backed by one KV-cache group use the same physical block indices and
     can therefore share cursors. Different KV-cache groups may assign different
-    block indices to the same request and must keep separate cursor tensors. For
-    speculative decode, the first local layer commits the preceding acceptance;
-    for standard decode, the final local layer advances after all layers consume
-    the previous values.
+    block indices to the same request and must keep separate cursor tensors.
+    FlashInfer: for speculative decode, the first local layer commits the
+    preceding acceptance; for standard decode, the final local layer advances
+    after all layers consume the previous values. Triton: the first local layer
+    plans the step and advances the cursors. Prefill resets them in the final
+    local layer.
     """
     replayssm_mixers: dict[str, MambaMixer2] = {}
     for layer_name in ordered_layer_names:
         layer = forward_context[layer_name]
-        if (
-            isinstance(layer, MambaMixer2)
-            and layer.use_replayssm
-            and layer.mamba_config.backend == MambaBackendEnum.FLASHINFER
-        ):
+        if isinstance(layer, MambaMixer2) and layer.use_replayssm:
             replayssm_mixers[layer_name] = layer
 
     layer_to_group: dict[str, int] = {}
@@ -1211,9 +1224,39 @@ def share_replayssm_ring_trackers(
                     "ReplaySSM layers in one cache group must share cache capacity"
                 )
 
-        ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
-        prev_num_accepted = torch.zeros_like(ring_start)
-        prev_query_len = torch.zeros_like(ring_start)
+        # Keep the trackers a previous bind created when they still cover the cache,
+        # as prefix views: CUDA graphs captured since then hold their addresses,
+        # and the kernels want the tracker length to match the cache. An extensible
+        # KV cache rebinds after capture with the same or fewer blocks.
+        trackers = (
+            first_mixer._replayssm_ring_start,
+            first_mixer._replayssm_prev_num_accepted,
+            first_mixer._replayssm_prev_query_len,
+        )
+        if (
+            trackers[0].numel() >= num_blocks
+            and trackers[0].device == device
+            and all(t.shape == trackers[0].shape for t in trackers)
+            and all(
+                mixer_tracker is tracker
+                for mixer in (replayssm_mixers[n] for n in group_layer_names)
+                for mixer_tracker, tracker in zip(
+                    (
+                        mixer._replayssm_ring_start,
+                        mixer._replayssm_prev_num_accepted,
+                        mixer._replayssm_prev_query_len,
+                    ),
+                    trackers,
+                )
+            )
+        ):
+            ring_start, prev_num_accepted, prev_query_len = (
+                t[:num_blocks] for t in trackers
+            )
+        else:
+            ring_start = torch.zeros(num_blocks, dtype=torch.int32, device=device)
+            prev_num_accepted = torch.zeros_like(ring_start)
+            prev_query_len = torch.zeros_like(ring_start)
         for layer_name in group_layer_names:
             mixer = replayssm_mixers[layer_name]
             mixer._replayssm_ring_start = ring_start
