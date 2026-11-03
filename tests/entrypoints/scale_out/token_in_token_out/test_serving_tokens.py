@@ -658,6 +658,65 @@ async def test_render_then_generate_forwards_reasoning_ended(
     assert isinstance(output["count"], int)
 
 
+async def _usage(client, path: str, body: dict) -> dict:
+    if not body.get("stream"):
+        resp = await client.post(path, json=body)
+        resp.raise_for_status()
+        return resp.json()["usage"]
+    usage = None
+    async with client.stream("POST", path, json=body) as resp:
+        resp.raise_for_status()
+        async for line in resp.aiter_lines():
+            if line.startswith("data: ") and line != "data: [DONE]":
+                usage = json.loads(line[len("data: ") :]).get("usage") or usage
+    assert usage is not None
+    return usage
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(
+    envs.VLLM_USE_RUST_FRONTEND,
+    reason="output_mode is not supported by the Rust frontend",
+)
+@pytest.mark.parametrize(
+    "server", [["--reasoning-parser", "deepseek_v3"]], indirect=True
+)
+@pytest.mark.parametrize(
+    ("stream", "include_reasoning"), [(False, True), (True, False)]
+)
+async def test_derender_mode_usage_reports_reasoning_tokens(
+    client, messages, stream, include_reasoning
+):
+    """Derender usage reports `reasoning_tokens` summed over the choices, as
+    `/v1/chat/completions` does, even when the reasoning is hidden."""
+    chat = {
+        "model": MODEL_NAME,
+        "messages": messages,
+        "max_tokens": 32,
+        "temperature": 0.0,
+        "n": 2,
+        "include_reasoning": include_reasoning,
+        "chat_template_kwargs": {"enable_thinking": True},
+    }
+    if stream:
+        chat |= {"stream": True, "stream_options": {"include_usage": True}}
+    render = await client.post("/v1/chat/completions/render", json=chat)
+    render.raise_for_status()
+    generate_request = {**render.json(), "output_mode": "derender"}
+    if stream:
+        generate_request |= {"stream": True, "stream_options": {"include_usage": True}}
+
+    expected = (await _usage(client, "/v1/chat/completions", chat))[
+        "completion_tokens_details"
+    ]
+    got = (await _usage(client, GEN_ENDPOINT, generate_request))[
+        "completion_tokens_details"
+    ]
+
+    assert expected["reasoning_tokens"] > 0
+    assert got == expected
+
+
 def _chat_prompt_token_ids(tokenizer, messages) -> list[int]:
     return tokenizer.apply_chat_template(
         messages,

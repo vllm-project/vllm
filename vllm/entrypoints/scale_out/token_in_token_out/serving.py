@@ -37,6 +37,7 @@ from vllm.entrypoints.openai.chat_completion.stream_processor import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.protocol import (
+    CompletionTokenUsageInfo,
     ErrorResponse,
     PromptTokenUsageInfo,
     UsageInfo,
@@ -542,6 +543,7 @@ class ServingTokens(GenerateBaseServing):
             num_generated_tokens += len(output.token_ids)
 
         derender_choices: list[GenerateDerenderChoice] = []
+        completion_tokens_details: CompletionTokenUsageInfo | None = None
         if derender_mode:
             history_tool_call_cnt = (
                 request.parse_context.history_tool_call_cnt
@@ -549,7 +551,10 @@ class ServingTokens(GenerateBaseServing):
                 else 0
             )
             try:
-                parsed = await self.online_derenderer.derender_text_choices(
+                (
+                    parsed,
+                    completion_tokens_details,
+                ) = await self.online_derenderer.derender_text_choices(
                     final_res.outputs,
                     derender_request,
                     history_tool_call_cnt,
@@ -582,6 +587,7 @@ class ServingTokens(GenerateBaseServing):
             created_time,
             num_generated_tokens,
             request_metadata,
+            completion_tokens_details,
         )
         response: (
             GenerateTokensResponse | GenerateTextResponse | GenerateDerenderResponse
@@ -625,6 +631,7 @@ class ServingTokens(GenerateBaseServing):
         created_time: int,
         num_generated_tokens: int,
         request_metadata: RequestResponseMetadata,
+        completion_tokens_details: CompletionTokenUsageInfo | None = None,
     ) -> dict[str, Any]:
         """Build the fields shared by every non-streaming response level."""
         assert final_res.prompt_token_ids is not None
@@ -636,6 +643,7 @@ class ServingTokens(GenerateBaseServing):
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
+            completion_tokens_details=completion_tokens_details,
         )
         if (
             self.enable_prompt_tokens_details
@@ -689,6 +697,7 @@ class ServingTokens(GenerateBaseServing):
         sampling_params: SamplingParams = request.sampling_params
         # With n > 1, the first output may not include every choice yet.
         num_generated_tokens = [0] * sampling_params.n
+        output_token_ids: list[list[int]] = [[] for _ in range(sampling_params.n)]
         last_res: RequestOutput | None = None
         derender_mode = request.output_mode == "derender"
         assert derender_mode == (processors is not None)
@@ -744,6 +753,7 @@ class ServingTokens(GenerateBaseServing):
                         if finish_reason_sent[i]:
                             continue
                         processor = processors[i]
+                        output_token_ids[i].extend(delta_token_ids)
                         delta, finish_reason = processor.step(
                             output.text,
                             as_list(delta_token_ids),
@@ -845,6 +855,13 @@ class ServingTokens(GenerateBaseServing):
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 total_tokens=num_prompt_tokens + total_completion_tokens,
+                completion_tokens_details=(
+                    self.online_derenderer.stream_completion_tokens_details(
+                        processors, output_token_ids
+                    )
+                    if processors is not None
+                    else None
+                ),
             )
 
             if self.enable_prompt_tokens_details and num_cached_tokens is not None:
