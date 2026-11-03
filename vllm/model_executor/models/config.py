@@ -1058,6 +1058,11 @@ def _default_rocm_aiter_fa_gluon(vllm_config: "VllmConfig") -> None:
         vllm_config.cache_config.cache_dtype,
     ):
         attention_config.backend = AttentionBackendEnum.ROCM_AITER_FA_GLUON
+        logger.info_once(
+            "Defaulting full-attention layers to ROCM_AITER_FA_GLUON (gfx950, "
+            "shuffle KV-cache layout, head size 256, GQA group 6); pass "
+            "--attention-backend ROCM_AITER_FA to opt out."
+        )
 
 
 class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
