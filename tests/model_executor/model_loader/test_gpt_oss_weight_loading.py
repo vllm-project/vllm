@@ -125,6 +125,175 @@ def test_streamed_gate_up_bias_tp_slice() -> None:
     assert torch.equal(experts.w13_bias[0], loaded_weight[4:])
 
 
+def _model_with_experts(monkeypatch, tp_rank: int, params: dict, weight_dtype=None):
+    """A GptOssModel holding only routed experts with ``params`` (name ->
+    shape), on TP rank ``tp_rank`` of 2, whose loaders can be driven."""
+    from vllm.model_executor.models import gpt_oss
+
+    group = SimpleNamespace(world_size=1, rank_in_group=0)
+    for name in ("get_dp_group", "get_ep_group", "get_pcp_group"):
+        monkeypatch.setattr(gpt_oss, name, lambda: group)
+    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_world_size", lambda: 2)
+    monkeypatch.setattr(gpt_oss, "get_tensor_model_parallel_rank", lambda: tp_rank)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.fused_moe.config.get_tensor_model_parallel_rank",
+        lambda: tp_rank,
+    )
+    monkeypatch.setattr(gpt_oss, "is_pp_missing_parameter", lambda *args: False)
+
+    (first, first_shape), *rest = params.items()
+    experts = _TestExperts(first, first_shape, tp_rank=tp_rank)
+    for name, shape in rest:
+        param = torch.nn.Parameter(torch.zeros(shape), requires_grad=False)
+        param.weight_loader = experts.weight_loader
+        experts.register_parameter(name, param)
+
+    model = GptOssModel.__new__(GptOssModel)
+    torch.nn.Module.__init__(model)
+    model.config = SimpleNamespace(num_local_experts=2, intermediate_size=4)
+    model.parallel_config = SimpleNamespace(enable_expert_parallel=False)
+    model.get_expert_mapping = lambda: []  # type: ignore[method-assign]
+    layer = torch.nn.Module()
+    layer.mlp = torch.nn.Module()
+    layer.mlp.experts = torch.nn.Module()
+    layer.mlp.experts.routed_experts = experts
+    layer.mlp.experts._quant_method = SimpleNamespace(weight_dtype=weight_dtype)
+    model.layers = torch.nn.ModuleList([layer])
+    return model, experts
+
+
+def _reload(model: torch.nn.Module, load, checkpoint: dict) -> None:
+    from vllm.model_executor.model_loader.reload.layerwise import (
+        finalize_layerwise_reload,
+        initialize_layerwise_reload,
+        record_metadata_for_reloading,
+    )
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    load(checkpoint)
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=torch.float32))
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_fused_bf16_experts_reload(monkeypatch, tp_rank: int) -> None:
+    """Fused (BF16) expert tensors are written through the params' loader, so
+    a layerwise reload updates them in place, and the down bias zeroed on TP
+    ranks != 0 leaves the caller's tensor (a trainer's IPC buffer) untouched."""
+    model, experts = _model_with_experts(
+        monkeypatch,
+        tp_rank,
+        {
+            "w13_weight": (2, 4, 3),
+            "w2_weight": (2, 3, 2),
+            "w13_bias": (2, 4),
+            "w2_bias": (2, 3),
+        },
+    )
+    prefix = "layers.0.mlp.experts."
+
+    def checkpoint(offset: float) -> dict[str, torch.Tensor]:
+        shapes = {
+            "w13_weight": (2, 3, 8),
+            "w2_weight": (2, 4, 3),
+            "w13_bias": (2, 8),
+            "w2_bias": (2, 3),
+        }
+        return {
+            name: torch.arange(torch.Size(shape).numel(), dtype=torch.float32)
+            .reshape(shape)
+            .add(offset)
+            for name, shape in shapes.items()
+        }
+
+    def load(ckpt: dict[str, torch.Tensor]) -> None:
+        weights = [(prefix + name, t) for name, t in ckpt.items()]
+        model._load_weights_other(2, 0, weights, [])
+
+    def expected(ckpt: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        i = slice(2 * tp_rank, 2 * tp_rank + 2)  # this rank's intermediate rows
+        i2 = slice(4 * tp_rank, 4 * tp_rank + 4)  # gate/up interleaved
+        return {
+            "w13_weight": ckpt["w13_weight"][:, :, i2].permute(0, 2, 1),
+            "w2_weight": ckpt["w2_weight"][:, i, :].permute(0, 2, 1),
+            "w13_bias": ckpt["w13_bias"][:, i2],
+            "w2_bias": ckpt["w2_bias"] * (tp_rank == 0),
+        }
+
+    for offset, update in ((0, False), (100, True)):
+        ckpt = checkpoint(offset)
+        if update:
+            _reload(model, load, ckpt)
+        else:
+            load(ckpt)
+            kernel = dict(experts.named_parameters())
+        for name, t in ckpt.items():
+            assert torch.equal(t, checkpoint(offset)[name]), f"{name} was modified"
+        for name, value in expected(ckpt).items():
+            assert getattr(experts, name) is kernel[name]
+            assert torch.equal(kernel[name], value), name
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_quark_per_expert_reload(monkeypatch, tp_rank: int) -> None:
+    """Quark per-expert tensors (FP8 weights, input scales, biases into padded
+    params) are written through the params' loader, so a layerwise reload
+    updates them in place."""
+    model, experts = _model_with_experts(
+        monkeypatch,
+        tp_rank,
+        {
+            "w13_weight": (2, 4, 3),
+            "w2_weight": (2, 3, 2),
+            "w13_input_scale": (2,),
+            "w2_bias": (2, 5),  # padded past the checkpoint's 3
+        },
+        weight_dtype="fp8",
+    )
+
+    def checkpoint(offset: float) -> list[tuple[str, torch.Tensor]]:
+        weights = []
+        for e in range(2):
+            prefix = f"layers.0.mlp.experts.{e}."
+            base = offset + 10 * e
+            weights += [
+                (prefix + "w13_weight", torch.arange(24.0).reshape(8, 3) + base),
+                (prefix + "w2_weight", torch.arange(12.0).reshape(3, 4) + base),
+                (prefix + "w13_input_scale", torch.tensor(base + 0.5)),
+                (prefix + "w2_bias", torch.arange(3.0) + base),
+            ]
+        return weights
+
+    def load(weights: list[tuple[str, torch.Tensor]]) -> None:
+        model._load_weights_quark(2, 0, weights, [])
+
+    def check(offset: float) -> None:
+        for e in range(2):
+            base = offset + 10 * e
+            w13 = torch.arange(24.0).reshape(8, 3) + base
+            w2 = torch.arange(12.0).reshape(3, 4) + base
+            i = slice(2 * tp_rank, 2 * tp_rank + 2)
+            i2 = slice(4 * tp_rank, 4 * tp_rank + 4)
+            assert torch.equal(experts.w13_weight[e], w13[i2])
+            assert torch.equal(experts.w2_weight[e], w2[:, i])
+            assert experts.w13_input_scale[e] == base + 0.5
+            bias = (torch.arange(3.0) + base) * (tp_rank == 0)
+            assert torch.equal(experts.w2_bias[e, :3], bias)
+
+    for offset, update in ((0, False), (100, True)):
+        ckpt = checkpoint(offset)
+        if update:
+            _reload(model, load, ckpt)
+        else:
+            load(ckpt)
+            kernel = dict(experts.named_parameters())
+        for (name, t), (_, sent) in zip(ckpt, checkpoint(offset)):
+            assert torch.equal(t, sent), f"{name} was modified"
+        check(offset)
+        for name, param in kernel.items():
+            assert getattr(experts, name) is param
+
+
 @pytest.mark.parametrize("case", ["mxfp4", "nvfp4"])
 def test_streamed_quantized_expert_layout(case: str) -> None:
     if case == "mxfp4":

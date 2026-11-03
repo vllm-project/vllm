@@ -3,6 +3,7 @@
 import gc
 import importlib.machinery
 import inspect
+import shutil
 import sys
 import types
 from importlib import import_module
@@ -431,6 +432,57 @@ def test_attention_first_load_processes_weights(default_vllm_config, layer_cls):
 
     assert layer.post_load_called
     assert torch.equal(layer.weight, loaded_weight)
+
+
+class _KVScaleAttentionLayer(_ReloadableAttentionLayer):
+    """An attention layer with FP8 KV-cache scales, created as at model init."""
+
+    def __init__(self):
+        from vllm.model_executor.layers.attention.attention import (
+            set_default_quant_scales,
+        )
+        from vllm.model_executor.layers.quantization.kv_cache import (
+            BaseKVCacheMethod,
+        )
+
+        super().__init__()
+        self.kv_cache_dtype = "fp8"
+        set_default_quant_scales(self, register_buffer=True)
+        self.quant_method = BaseKVCacheMethod(None)
+        self.quant_method.create_weights(self)
+
+    def process_weights_after_loading(self) -> None:
+        pass
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+def test_kv_scale_reload_uses_model_dtype(dtype):
+    """KV-cache scales take the model dtype at model init; a reload recreates
+    them under it too, so an fp32 checkpoint scale is rounded as on a fresh
+    load."""
+    from vllm.utils.torch_utils import set_default_torch_dtype
+
+    scales = {"k_scale": torch.tensor(0.1234567), "v_scale": torch.tensor(0.7654321)}
+
+    def load(layer):
+        for name, scale in scales.items():
+            param = getattr(layer, name)
+            param.weight_loader(param, scale)
+
+    with set_default_torch_dtype(dtype):
+        layer = _KVScaleAttentionLayer()
+    model = torch.nn.Sequential(layer)
+    load(layer)
+    layer.quant_method.process_weights_after_loading(layer)
+    fresh = (layer._k_scale_float, layer._v_scale_float)
+    assert fresh != (0.1234567, 0.7654321)  # rounded to the model dtype
+
+    record_metadata_for_reloading(model)
+    initialize_layerwise_reload(model)
+    load(layer)
+    finalize_layerwise_reload(model, SimpleNamespace(dtype=dtype))
+    assert layer.k_scale.dtype == dtype
+    assert (layer._k_scale_float, layer._v_scale_float) == fresh
 
 
 def test_reload_lifecycle():
@@ -1486,6 +1538,72 @@ def test_kv_scale_reload(vllm_runner):
         )[0]
 
     assert reloaded_perp < 10
+
+
+def _attention_scales(worker) -> dict[str, tuple]:
+    """Host-side q/k/v scales of every attention layer and the FlashInfer
+    bmm scales derived from them."""
+    from vllm.model_executor.layers.attention import Attention
+    from vllm.v1.attention.backends.flashinfer import FlashInferImpl
+
+    scales = {}
+    for name, module in worker.get_model().named_modules():
+        if isinstance(module, Attention):
+            assert isinstance(impl := module.impl, FlashInferImpl)
+            scales[name] = (
+                module._q_scale_float,
+                module._k_scale_float,
+                module._v_scale_float,
+                impl.bmm1_scale,
+                impl.bmm2_scale,
+            )
+    return scales
+
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="FlashInfer is CUDA-only")
+def test_flashinfer_kv_scale_reload_matches_fresh_load(
+    vllm_runner, monkeypatch, tmp_path
+):
+    """Reloading a checkpoint with new KV-cache scales leaves the same scales,
+    and FlashInfer bmm scales, as a fresh load of that checkpoint."""
+    if _fp8_reload_unsupported():
+        pytest.skip(reason="Requires FP8 support")
+    from safetensors.torch import load_file, save_file
+
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+    model = "nm-testing/Llama-3.2-1B-Instruct-FP8-KV"
+    for file in Path(hf_api().snapshot_download(model)).iterdir():
+        if file.suffix != ".safetensors":
+            shutil.copy(file, tmp_path / file.name)
+            continue
+        tensors = load_file(file)
+        for name, tensor in tensors.items():
+            if name.endswith(("k_scale", "v_scale")):
+                tensors[name] = tensor * 2
+        save_file(tensors, tmp_path / file.name, metadata={"format": "pt"})
+
+    kwargs = dict(
+        kv_cache_dtype="fp8",
+        attention_config={"backend": "FLASHINFER"},
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        max_model_len=64,
+        max_num_seqs=1,
+    )
+    prompts = ["The capital of France is"]
+    with vllm_runner(model_name=str(tmp_path), **kwargs) as llm:
+        llm.generate_greedy(prompts, max_tokens=2)
+        fresh = llm.collective_rpc(_attention_scales)
+
+    with vllm_runner(model_name=model, **kwargs) as llm:
+        llm.generate_greedy(prompts, max_tokens=2)
+        before = llm.collective_rpc(_attention_scales)
+        llm.collective_rpc("reload_weights", kwargs={"weights_path": str(tmp_path)})
+        llm.generate_greedy(prompts, max_tokens=2)
+        reloaded = llm.collective_rpc(_attention_scales)
+
+    assert before != fresh
+    assert reloaded == fresh
 
 
 @pytest.mark.parametrize(
