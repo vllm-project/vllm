@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from array import array
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import cached_property
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 from vllm.multimodal.utils import strip_covered_mm_data
@@ -54,6 +55,16 @@ class NewRequestData:
     prefill_token_ids: list[int] | None = None
     # DeepSeek-V4.1 only: SWA bounded replay; see Request.replay_start.
     replay_start: int = 0
+    # v2 model runner: workers receive block_ids as int32 arrays.
+    pack_block_ids: bool = False
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        if self.pack_block_ids:
+            # One int32 buffer per KV cache group instead of one Python int per
+            # block; the v2 block tables stage buffers without unpacking them.
+            state["block_ids"] = tuple(array("i", ids) for ids in self.block_ids)
+        return state
 
     @classmethod
     def from_request(
@@ -62,6 +73,7 @@ class NewRequestData:
         block_ids: tuple[list[int], ...],
         prefill_token_ids: list[int] | None = None,
         uses_mrope: bool = False,
+        pack_block_ids: bool = False,
     ) -> "NewRequestData":
         return cls(
             req_id=request.request_id,
@@ -80,6 +92,7 @@ class NewRequestData:
             prompt_is_token_ids=request.prompt_is_token_ids,
             prefill_token_ids=prefill_token_ids,
             replay_start=request.replay_start,
+            pack_block_ids=pack_block_ids,
         )
 
     @property

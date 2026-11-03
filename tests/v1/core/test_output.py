@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from array import array
+
+import pytest
 import torch
 
 from vllm.multimodal.inputs import (
@@ -33,6 +36,28 @@ def test_repr_with_none() -> None:
 
     assert "prompt_embeds_shape=None" in repr(new_requests_data)
     assert "prompt_embeds_shape=None" in new_requests_data.anon_repr()
+
+
+@pytest.mark.parametrize("pack_block_ids", [False, True])
+def test_getstate_packs_block_ids(pack_block_ids: bool) -> None:
+    """The v2 runner's workers receive block ids as int32 arrays, while the
+    scheduler (and its KV connectors) keep the lists."""
+    data = NewRequestData(
+        req_id="test_req",
+        prompt_token_ids=None,
+        mm_features=[],
+        sampling_params=None,
+        pooling_params=None,
+        block_ids=([1, 2, 3], []),
+        num_computed_tokens=0,
+        lora_request=None,
+        pack_block_ids=pack_block_ids,
+    )
+    block_ids = data.__getstate__()["block_ids"]
+
+    assert data.block_ids == ([1, 2, 3], [])
+    assert [list(ids) for ids in block_ids] == [[1, 2, 3], []]
+    assert all(isinstance(ids, array) == pack_block_ids for ids in block_ids)
 
 
 def test_repr_with_multi_element_tensor() -> None:
