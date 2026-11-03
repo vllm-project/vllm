@@ -13,6 +13,7 @@ from pydantic import (
     Tag,
     field_serializer,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -383,6 +384,16 @@ class GenerateRequest(BaseModel):
         instance = handler(data)
         instance._sampling_params_provided_keys = provided
         return instance
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        # `SamplingParams` omits fields equal to their defaults, so a resolved
+        # `max_tokens=16` would be dropped and read back as not provided.
+        data = handler(self)
+        sp = data.get("sampling_params")
+        if isinstance(sp, dict) and self.is_sampling_param_provided("max_tokens"):
+            sp.setdefault("max_tokens", self.sampling_params.max_tokens)
+        return data
 
     @model_validator(mode="before")
     @classmethod
