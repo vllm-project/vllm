@@ -109,10 +109,10 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size > 1:
+        self.pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
+        if self.pcp_size > 1:
             # Captured kernels must keep the same metadata addresses on replay.
-            max_tokens = self.token_to_req_indices.numel() * pcp_size
+            max_tokens = self.token_to_req_indices.numel() * self.pcp_size
             self.pcp_token_to_req_indices = torch.empty(
                 max_tokens, dtype=torch.int32, device=self.device
             )
@@ -130,36 +130,6 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         token_to_req_indices = common_attn_metadata.token_to_req_indices(
             self.token_to_req_indices
         )
-        cm = common_attn_metadata
-        pcp_size = self.vllm_config.parallel_config.prefill_context_parallel_size
-        if pcp_size > 1:
-            group = get_pcp_group()
-            local_tokens = cm.slot_mapping.numel() // pcp_size
-            max_reqs = 2 * self.vllm_config.scheduler_config.max_num_seqs
-            table = cm.block_table_tensor.new_zeros(
-                (max_reqs, cm.block_table_tensor.shape[1])
-            )
-            table[: cm.num_reqs] = cm.block_table_tensor[: cm.num_reqs]
-            req_indices = token_to_req_indices.new_zeros(local_tokens)
-            req_indices[: cm.num_actual_tokens] = token_to_req_indices
-            req_indices += group.rank_in_group * max_reqs
-            assert cm.positions is not None
-            gathered_table = group.all_gather(table, dim=0)
-            if self.pcp_block_table is None:
-                self.pcp_block_table = torch.empty_like(gathered_table)
-            self.pcp_block_table.copy_(gathered_table).clamp_(min=0)
-            num_tokens = local_tokens * pcp_size
-            pcp_req_indices = self.pcp_token_to_req_indices[:num_tokens]
-            pcp_positions = self.pcp_positions[:num_tokens]
-            pcp_req_indices.copy_(group.all_gather(req_indices, dim=0))
-            pcp_positions.copy_(group.all_gather(cm.positions, dim=0))
-            return CompressorMetadata(
-                block_table=self.pcp_block_table,
-                slot_mapping=cm.slot_mapping,
-                block_size=self.block_size,
-                token_to_req_indices=pcp_req_indices,
-                cache_positions=pcp_positions,
-            )
         num_decode_tokens = None
         if _prefer_two_stage_compressor():
             _, _, num_decode_tokens, _ = split_decodes_and_prefills(
@@ -169,7 +139,7 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
             self.vllm_config.scheduler_config.async_scheduling
             and self.vllm_config.speculative_config is not None
         )
-        return CompressorMetadata(
+        metadata = CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
             block_size=self.block_size,
@@ -181,6 +151,42 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
                 else None
             ),
         )
+        if self.pcp_size > 1:
+            self._gather_pcp_metadata(metadata, common_attn_metadata)
+        return metadata
+
+    def _gather_pcp_metadata(
+        self, metadata: CompressorMetadata, cm: CommonAttentionMetadata
+    ) -> None:
+        """Expand local metadata to match rank-major gathered compressor states."""
+        group = get_pcp_group()
+        local_tokens = metadata.slot_mapping.numel() // self.pcp_size
+        max_reqs = 2 * self.vllm_config.scheduler_config.max_num_seqs
+        table = metadata.block_table.new_zeros(
+            (max_reqs, metadata.block_table.shape[1])
+        )
+        table[: cm.num_reqs] = metadata.block_table[: cm.num_reqs]
+        assert metadata.token_to_req_indices is not None
+        req_indices = metadata.token_to_req_indices.new_zeros(local_tokens)
+        req_indices[: cm.num_actual_tokens] = metadata.token_to_req_indices
+        req_indices += group.rank_in_group * max_reqs
+        assert cm.positions is not None
+        gathered_table = group.all_gather(table, dim=0)
+        if self.pcp_block_table is None:
+            self.pcp_block_table = torch.empty_like(gathered_table)
+        self.pcp_block_table.copy_(gathered_table).clamp_(min=0)
+        num_tokens = local_tokens * self.pcp_size
+        pcp_req_indices = self.pcp_token_to_req_indices[:num_tokens]
+        pcp_positions = self.pcp_positions[:num_tokens]
+        pcp_req_indices.copy_(group.all_gather(req_indices, dim=0))
+        pcp_positions.copy_(group.all_gather(cm.positions, dim=0))
+        metadata.block_table = self.pcp_block_table
+        metadata.token_to_req_indices = pcp_req_indices
+        metadata.cache_positions = pcp_positions
+        # Local decode prefixes and C128 boundaries do not describe the
+        # rank-major gathered states. Keep the generic compression path.
+        metadata.num_decode_tokens = None
+        metadata.c128_boundary = None
 
 
 class CompressorStateCache(torch.nn.Module, AttentionLayerBase):

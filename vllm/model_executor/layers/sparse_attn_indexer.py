@@ -662,8 +662,6 @@ def sparse_attn_indexer(
     if not skip_topk_buffer_clear:
         topk_indices_buffer[: hidden_states.shape[0]] = -1
     prefill_metadata = attn_metadata_narrowed.prefill
-    if has_prefill:
-        assert prefill_metadata is not None
     # Short prefills may not have produced any compressed KV tokens yet.
     has_prefill_chunks = prefill_metadata is not None and bool(prefill_metadata.chunks)
 
