@@ -28,7 +28,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import (
-    get_compressed_slot_mapping_with_pcp,
+    get_compressed_slot_mapping,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -202,12 +202,20 @@ class DeepseekV4SparseMLAMetadataBuilder(
 
         slot_mapping = cm.slot_mapping
         if self.compress_ratio > 1:
-            slot_mapping = get_compressed_slot_mapping_with_pcp(
-                cm,
+            slot_mapping = get_compressed_slot_mapping(
+                cm.num_actual_tokens,
+                cm.slot_mapping,
+                cm.query_start_loc,
+                cm.seq_lens,
+                cm.block_table_tensor.clamp_(min=0),
                 int(self.kv_cache_spec.num_states),
                 self.compress_ratio,
-                self.compressed_slot_mapping_buffer,
-                self.pcp_compressed_slot_mapping_buffer if self.pcp_size > 1 else None,
+                out=self.compressed_slot_mapping_buffer,
+                pcp_buffer=(
+                    self.pcp_compressed_slot_mapping_buffer
+                    if self.pcp_size > 1
+                    else None
+                ),
             )
 
         c128a_fields: dict[str, torch.Tensor | None] = {}

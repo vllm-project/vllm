@@ -16,37 +16,8 @@ from vllm.model_executor.warmup.jit_warmup_triton_helper import (
 from vllm.transformers_utils.deepseek_v4_utils import get_compress_ratios
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import CommonAttentionMetadata
 
 _DSPARK_SWA_INDEX_ALIGNMENT = 64
-
-
-def get_compressed_slot_mapping_with_pcp(
-    metadata: CommonAttentionMetadata,
-    block_size: int,
-    compress_ratio: int,
-    local_buffer: torch.Tensor,
-    pcp_buffer: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Build compressed slots in caller-owned storage, including padded PCP rows."""
-    local_slots = metadata.slot_mapping
-    if pcp_buffer is not None:
-        group = get_pcp_group()
-        local_slots = local_slots.chunk(group.world_size)[group.rank_in_group]
-    slots = get_compressed_slot_mapping(
-        metadata.num_actual_tokens,
-        local_slots,
-        metadata.query_start_loc,
-        metadata.seq_lens,
-        metadata.block_table_tensor.clamp_(min=0),
-        block_size,
-        compress_ratio,
-        out=local_buffer,
-    )
-    if pcp_buffer is not None:
-        slots = pcp_buffer[: metadata.slot_mapping.numel()]
-        slots.copy_(group.all_gather(local_buffer[: local_slots.numel()], dim=0))
-    return slots
 
 
 def get_dspark_swa_index_width(
@@ -224,6 +195,7 @@ def get_compressed_slot_mapping(
     out: torch.Tensor | None = None,
     dcp_world_size: int = 1,
     cp_interleave: int = 1,
+    pcp_buffer: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Slot mapping for writing the compressed states of ``num_tokens`` tokens.
 
@@ -232,18 +204,29 @@ def get_compressed_slot_mapping(
     token whose own ``slot_mapping`` entry is PAD maps to PAD too: SWA bounded
     replay recomputes tokens whose KV is cached already, and their compressed
     states must not be rewritten either.
+
+    With ``pcp_buffer``, ``slot_mapping`` contains all ranks' padded slots.
+    Compute this rank's segment in ``out`` and gather into ``pcp_buffer`` to
+    preserve its address for CUDA graph replay. Padding remains PAD.
     """
+    total_num_tokens = slot_mapping.numel()
+    if pcp_buffer is not None:
+        group = get_pcp_group()
+        slot_mapping = slot_mapping.chunk(group.world_size)[group.rank_in_group]
     if out is not None:
         # Guard: for padded / invalid sequences.
         # Negative positions produce bogus block indices that lead to illegal memory
         # accesses inside the block_table load.
         # NOTE: Fill -1 to the whole tensor, not just the first `num_tokens`.
         out.fill_(-1)
-        compressed_slot_mapping = out[:num_tokens]
     else:
-        compressed_slot_mapping = torch.full(
-            (num_tokens,), -1, dtype=torch.int64, device=query_start_loc.device
+        out = torch.full(
+            (slot_mapping.numel() if pcp_buffer is not None else num_tokens,),
+            -1,
+            dtype=torch.int64,
+            device=query_start_loc.device,
         )
+    compressed_slot_mapping = out[:num_tokens]
 
     _COMPRESSED_SLOT_MAPPING_KERNEL(
         compressed_slot_mapping,
@@ -256,6 +239,11 @@ def get_compressed_slot_mapping(
         dcp_world_size,
         cp_interleave,
     )
+    if pcp_buffer is not None:
+        compressed_slot_mapping = pcp_buffer[:total_num_tokens]
+        compressed_slot_mapping.copy_(
+            group.all_gather(out[: slot_mapping.numel()], dim=0)
+        )
     return compressed_slot_mapping
 
 

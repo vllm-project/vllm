@@ -1501,19 +1501,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         compressed_slot_mapping = slot_mapping
         if self.compress_ratio > 1:
-            padded_num_tokens = num_tokens
-            local_slot_mapping = slot_mapping
-            if self.use_pcp:
-                # The gathered layout holds each rank's local tokens, padded, in
-                # rank order, so this rank's segment lines up with query_start_loc.
-                padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
-                local_slot_mapping = slot_mapping[
-                    self.pcp_rank * padded_num_tokens : (self.pcp_rank + 1)
-                    * padded_num_tokens
-                ]
             compressed_slot_mapping = get_compressed_slot_mapping(
                 num_tokens,
-                local_slot_mapping,
+                slot_mapping,
                 query_start_loc,
                 seq_lens,
                 block_table,
@@ -1522,17 +1512,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 out=self.compressed_slot_mapping_buffer,
                 dcp_world_size=self.dcp_world_size,
                 cp_interleave=self.cp_kv_cache_interleave_size,
+                pcp_buffer=(
+                    self.pcp_compressed_slot_mapping_buffer
+                    if self.pcp_world_size > 1
+                    else None
+                ),
             )
-            if self.pcp_world_size > 1:
-                compressed_slot_mapping = self.pcp_compressed_slot_mapping_buffer[
-                    : padded_num_tokens * self.pcp_world_size
-                ]
-                compressed_slot_mapping.copy_(
-                    get_pcp_group().all_gather(
-                        self.compressed_slot_mapping_buffer[:padded_num_tokens],
-                        dim=0,
-                    )
-                )
 
         # PCP decode sharding keeps a zero-token placeholder on ranks that own
         # no request in a step so collectives retain a uniform rank shape. Do

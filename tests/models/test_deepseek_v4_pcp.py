@@ -214,7 +214,7 @@ def _check_compressed_slots(rank, world_size, port):
     )
     from vllm.v1.attention.backend import CommonAttentionMetadata
     from vllm.v1.attention.backends.mla.compressor_utils import (
-        get_compressed_slot_mapping_with_pcp,
+        get_compressed_slot_mapping,
     )
 
     torch.accelerator.set_device_index(rank)
@@ -238,8 +238,16 @@ def _check_compressed_slots(rank, world_size, port):
         gathered = torch.empty(4 * world_size, dtype=torch.int64, device="cuda")
 
         def build():
-            return get_compressed_slot_mapping_with_pcp(
-                metadata, 32, 2, local_buffer, gathered if world_size > 1 else None
+            return get_compressed_slot_mapping(
+                metadata.num_actual_tokens,
+                metadata.slot_mapping,
+                metadata.query_start_loc,
+                metadata.seq_lens,
+                metadata.block_table_tensor.clamp_(min=0),
+                32,
+                2,
+                out=local_buffer,
+                pcp_buffer=gathered if world_size > 1 else None,
             )
 
         slots = build()
