@@ -6,9 +6,9 @@ After the DSpark backbone produces the base logits of its ``N`` draft
 positions, the draft tokens are drawn one position at a time: the bias
 ``markov_head @ markov_embed[previous token]`` (``[V, r]`` by ``[r]``; 66 MB of
 BF16 for DeepSeek-V4.1) is added to the position's logits and the token is
-sampled from the result. The fused path (``fused_sample.py``) runs a replicated
-bias GEMM and one sampling kernel per position, so every tensor-parallel rank
-streams the whole head ``N`` times.
+sampled from the result. The speculator's loop runs a replicated bias GEMM and
+its sampling kernels per position, so every tensor-parallel rank streams the
+whole head ``N`` times.
 
 Here one cooperative kernel per rank (``sharded_markov_cute.py``, CuTe DSL)
 runs the whole chain. Rank ``k`` of ``world`` owns rows
@@ -17,22 +17,23 @@ for the launch, so the head is read once; the ranks agree on each position's
 winner by exchanging one 64-bit ``(score, index)`` key per rank, request row
 and position through a mailbox in symmetric memory. A call samples up to 8
 request rows (4 with 8 ranks), the columns of the tensor-core MMA. Padding rows
-(negative request-state index) are inert, as in the fused path.
+(negative request-state index) are inert, as in the speculator's loop.
 
 Per call::
 
-    Triton noise kernel   gumbel[i, v] of this rank's vocabulary shard (the
-          |               fused path's hash), drawn on a side stream while the
-          v               draft LM head runs
+    Triton noise kernel   gumbel[i, v] of this rank's vocabulary shard
+          |               (``gumbel_sample``'s hash), drawn on a side
+          v               stream while the draft LM head runs
     chain kernel, step i  logit = cache_round(base + bf16(head . embed[p]))
                           local cache and every peer's staging <- logit
                           key = max over the shard of (logit / T + gumbel, index)
                           mailbox exchange -> winner p = draft_tokens[i]
     chain kernel, tail    cache <- the peers' shards from the local staging
 
-The draws reproduce the fused path (same noise, rounding, temperature division
-and ``torch.argmax`` tie-breaking) except for the bias reduction order before
-its BF16 rounding, so a bias element can differ from cuBLAS's in its last bit.
+The draws reproduce the speculator's ``gumbel_sample`` loop (same noise,
+rounding, temperature division and ``torch.argmax`` tie-breaking) except for
+the bias reduction order before its BF16 rounding, so a bias element can differ
+from cuBLAS's in its last bit.
 
 The exchange is a cross-rank spin wait inside the draft step (and its FULL
 CUDA graph): every rank must launch the kernel the same number of times.

@@ -33,8 +33,8 @@ draft LM head's output before its all-gather): ``base_column`` is the column of
 this rank's first vocabulary entry in them, ``rank * V/world`` or 0.
 
 Rows whose request-state index is negative (CUDA-graph padding) are inert, as
-in the fused path: their tokens are drawn greedily and their logits are not
-cached.
+in the speculator's loop: their tokens are drawn greedily and their logits are
+not cached.
 
 The draft-logits cache must hold the full vocabulary on every rank. Each rank
 writes its shard into its own cache and into a staging buffer of every peer;

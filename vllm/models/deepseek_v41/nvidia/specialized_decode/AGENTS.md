@@ -66,11 +66,9 @@ forward runs the stock layers, which the executor does not modify.
 The DSpark draft model registers when it is built, and the model state builds
 its executor (`runtime/draft.py`) right after the target's, on the same fused
 kernel, mailbox and mHC side stream; the draft model's forward asks it for a
-step the same way. The model state also offers Model Runner V2 the DSpark
-post-forward CUDA graphs (`vllm/v1/worker/gpu/post_forward_cudagraph.py`).
-No capture size is required: a draft step without a FULL graph of at most 8
-rows takes no low-batch GEMM, and the model state logs once when the capture
-sizes leave no one-request draft graph.
+step the same way. No capture size is required: a draft step without a FULL
+graph of at most 8 rows takes no low-batch GEMM, and the model state logs once
+when the capture sizes leave no one-request draft graph.
 
 | Package | Contents |
 | --- | --- |
@@ -89,9 +87,6 @@ sizes leave no one-request draft graph.
 | Every MoE finalize deferred to the next boundary's fused kernel, in a residual-only variant before an Engram layer and after the last layer | all executor steps |
 | The fused kernel also writes the attention input as MXFP8, which `fused_wqa_wkv` reads instead of quantizing again | all executor steps |
 | DSpark draft layers through the same steps, finalizing their MoE in the layer; the last layer's output in the fused kernel's residual-only variant | all draft executor steps |
-| DSpark Markov sampling in one kernel per draft position after the bias GEMM (`vllm/v1/worker/gpu/spec_decode/dspark/fused_sample.py`) | probabilistic drafting without draft top-k, watermarking or adaptive verification |
-| The whole Markov chain in one cooperative kernel per rank, the Markov head sharded by vocabulary over the TP ranks (`sharded_markov.py` beside it) | batches of up to 8 request rows |
-| Sampling, the request-state update and the draft input preparation in a post-forward CUDA graph, the draft context projection beside them on a side stream | uniform decode steps without logprobs, grammar or logits processing |
 | Aux hidden-state means on the mHC side stream | up to 48 rows |
 | Routed experts on CuTe DSL routing, `tcgen05` GEMM and finalize kernels (`moe/routed_expert_gemm.py`) | 1-8 rows |
 | `fused_wqa_wkv`, `wq_b` and `wo_b` on FlashInfer's low-latency CuTe DSL MXFP8 GEMM with pinned tactics | 1-8 rows |
@@ -114,7 +109,5 @@ The executor issues cross-rank collectives, so a rank that diverged would hang
 rather than fall back. Every per-step gate reads only host state that all TP
 ranks share (row and request counts, graph mode, the attention metadata's host
 fields); nothing is read back from the GPU. The LM head and logits gather run
-outside the target's CUDA graph (Model Runner V2 computes logits eagerly),
-gated by row count and by the custom all-gather. On uniform decode steps with
-DSpark, they, the sampling and the draft input preparation are captured in a
-post-forward CUDA graph of their own.
+outside the CUDA graph (Model Runner V2 computes logits eagerly), gated by row
+count and by the custom all-gather.

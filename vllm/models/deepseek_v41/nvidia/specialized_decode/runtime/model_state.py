@@ -11,8 +11,7 @@
 - CUDA graphs of the attention metadata builds of FULL decode steps
   (``metadata_graphs``), recorded with the inner CUDA graphs and replayed in
   place of the eager build;
-- no replay-start upload for decode steps whose starts are known to be zero;
-- the DSpark post-forward CUDA graphs (``post_forward_cudagraphs``).
+- no replay-start upload for decode steps whose starts are known to be zero.
 """
 
 from dataclasses import replace
@@ -64,10 +63,6 @@ def padded_decode_batch(
 
 
 class DeepseekV41SpecializedDecodeModelState(DeepseekV41ModelState):
-    # Model Runner V2 captures the DSpark post-forward region (sampling,
-    # postprocess_sampled and the draft input preparation) into CUDA graphs.
-    post_forward_cudagraphs = True
-
     def __init__(
         self,
         vllm_config: VllmConfig,

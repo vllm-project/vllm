@@ -16,8 +16,7 @@ requests decode together once the last prefill is done, finish one by one
 and leave the last on its own: FULL decode graphs of 12 down to 1 requests
 (6 rows each), above 48 rows (inline mHC), padded, row-sharded (12
 requests) and low-batch (one request). The draft samples probabilistically
-(the requests at temperature 0), so the fused and vocabulary-sharded Markov
-samplers run, and the specialized-decode run replays its post-forward CUDA graphs.
+(the requests at temperature 0).
 
 Every decoder layer's residual streams and FFN input and the model's output
 are kept for every decode token and every 16th prefill position, and the two
@@ -286,7 +285,6 @@ class StepRecorder:
         draft_decode = draft.specialized_decode
         model_state = self.model_runner.model_state
         graphs = getattr(model_state, "graphs", None)
-        speculator = self.model_runner.speculator
         return {
             # Prefill steps run the layers from here on a subset of the rows.
             "decoder_replay_start": core.decoder_replay_start,
@@ -311,11 +309,6 @@ class StepRecorder:
                 plan.moe.gemm is not None for plan in getattr(draft_decode, "plans", ())
             ],
             "draft_logits": type(draft.logits_processor).__name__,
-            "markov_samplers": [
-                speculator._fused_sampler is not None,
-                speculator._sharded_sampler is not None,
-            ],
-            "post_forward_graphs": self.model_runner.post_forward_graphs is not None,
         }
 
     def record_steps(self, prompt_lens: list[int]) -> None:
@@ -333,42 +326,17 @@ class StepRecorder:
             return run_fullgraph(desc)
 
         runner.cudagraph_manager.run_fullgraph = run_and_flag
-        self._post_forward = "eager"
-        graphs = runner.post_forward_graphs
-        if graphs is not None:
-            run_region = graphs._run
-
-            def run_region_and_flag(key, fn, stream):
-                self._post_forward = "replay" if key in graphs.graphs else "graph"
-                return run_region(key, fn, stream)
-
-            graphs._run = run_region_and_flag
-        self._recorded = False
         execute_model = runner.execute_model
-        sample_tokens = runner.sample_tokens
 
         def execute_and_record(*args, **kwargs):
             self._full = False
-            self._recorded = False
             output = execute_model(*args, **kwargs)
             state = runner.execute_model_state
             if not kwargs.get("dummy_run") and state is not None:
                 self._record(state.input_batch)
-                self._recorded = True
-            return output
-
-        def sample_and_flag(*args, **kwargs):
-            # The engine samples, and so runs the post-forward region, in a
-            # call of its own after execute_model.
-            self._post_forward = "eager"
-            output = sample_tokens(*args, **kwargs)
-            if self._recorded:
-                self._steps[-1]["post_forward"] = self._post_forward
-                self._recorded = False
             return output
 
         runner.execute_model = execute_and_record
-        runner.sample_tokens = sample_and_flag
 
     def _record(self, batch) -> None:
         torch.accelerator.synchronize()
@@ -381,9 +349,6 @@ class StepRecorder:
             "padded_rows": padded,
             "requests": batch.num_reqs,
             "full": self._full,
-            # How the region from sampling to the draft inputs ran; set once
-            # the step has sampled.
-            "post_forward": None,
             "has_prefill": batch.has_prefill,
         }
         kept = []
@@ -541,7 +506,7 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
 
     # The executors run the target and DSpark draft models over their stock
     # layers, with every MoE layer on the low-batch GEMMs (the target's
-    # deferring), and the draft samples on the fused and sharded samplers.
+    # deferring).
     for rank in paths_on:
         assert rank["decode"] == "SpecializedDecode", rank
         assert rank["executor_sublayers"] > 0, "no step ran the executor"
@@ -554,8 +519,6 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["draft_logits"] == "SpecializedDecodeLogitsProcessor", rank
         assert rank["metadata_graphs"] > 0, rank
         assert rank["fused_mhc_max_rows"] == FUSED_MHC_MAX_ROWS, rank
-        assert rank["markov_samplers"] == [True, True], rank
-        assert rank["post_forward_graphs"], rank
     for rank in paths_off:
         assert rank["decode"] == "NoneType", rank
         assert rank["executor_sublayers"] == 0, rank
@@ -565,8 +528,6 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
         assert rank["logits"] == ["LogitsProcessor"], rank
         assert rank["draft_logits"] == "LogitsProcessor", rank
         assert rank["metadata_graphs"] == 0, rank
-        assert rank["markov_samplers"] == [False, False], rank
-        assert not rank["post_forward_graphs"], rank
     stock = ("attention", "ffn", "stock_fused_mhc_max_rows", "draft_attention")
     for key in stock:
         assert paths_on[0][key] == paths_off[0][key], key
@@ -583,9 +544,6 @@ def test_specialized_decode_matches_the_model(vllm_runner, tmp_path):
     assert any(5 <= s["requests"] <= 8 for s in full), "no 48-row FULL step"
     assert any(s["padded_rows"] > s["rows"] for s in full), "no padded FULL step"
     assert any(s["rows"] > 48 for s in full), "no FULL step above 48 rows"
-    assert all(s["post_forward"] is not None for s in got_steps), "a step not sampled"
-    assert any(s["post_forward"] == "replay" for s in full), "no post-forward replay"
-    assert all(s["post_forward"] == "eager" for s in want_steps)
 
     def merged(steps):
         rows: dict = {}

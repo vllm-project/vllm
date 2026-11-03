@@ -1,11 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Single-GPU kernels of the DeepSeek-V4.1 specialized decode
-(``vllm/models/deepseek_v41/nvidia/specialized_decode``) and of the DSpark draft
-sampling it enables (``vllm/v1/worker/gpu/spec_decode/dspark``), each against
-the stock path it replaces, eagerly and replayed from a CUDA graph where the
-decode captures it. Needs one SM100-family GPU; about 5 minutes, mostly kernel
-compilation.
+(``vllm/models/deepseek_v41/nvidia/specialized_decode``), each against the stock path
+it replaces, eagerly and replayed from a CUDA graph where the decode captures
+it. Needs one SM100-family GPU; about 5 minutes, mostly kernel compilation.
 
 Run: pytest -v tests/models/deepseek_v41/nvidia/specialized_decode/test_kernels.py
 """
@@ -70,15 +68,12 @@ from vllm.models.deepseek_v41.nvidia.specialized_decode.moe.routed_expert_gemm i
 from vllm.models.deepseek_v41.nvidia.specialized_decode.runtime.metadata_graphs import (
     AttnMetadataCudaGraphs,
 )
-from vllm.platforms import current_platform
-from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
-from vllm.v1.worker.gpu.spec_decode.dspark.fused_sample import (
-    DSparkFusedMarkovSampler,
-)
-from vllm.v1.worker.gpu.spec_decode.dspark.sharded_markov import (
+from vllm.models.deepseek_v41.nvidia.specialized_decode.sampling.sharded_markov import (  # noqa: E501
     RANK_DIM,
     make_sharded_sampler,
 )
+from vllm.platforms import current_platform
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 pytestmark = pytest.mark.skipif(
     not (
@@ -1228,45 +1223,6 @@ def _markov_eager(case, cache, tokens):
             logits_cache_col=torch.tensor(i, dtype=torch.int32, device=DEVICE),
         )
         tokens[: case.rows, i] = prev
-
-
-@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_fused_markov_sampling_matches_eager(dtype):
-    """The fused loop draws the eager loop's tokens and caches its logits
-    bitwise, eagerly and replayed from a CUDA graph (twice: each launch
-    leaves its arrival counters zeroed for the next)."""
-    case = _markov_case(dtype)
-    want_cache, want_tokens = _markov_outputs(case)
-    _markov_eager(case, want_cache, want_tokens)
-    sampler = DSparkFusedMarkovSampler(
-        case.max_reqs, MARKOV_VOCAB, case.embed, use_fp64=False
-    )
-    cache, tokens = _markov_outputs(case)
-
-    def run():
-        embed = sampler.embed_anchor(case.input_ids, MARKOV_QUERY, case.rows)
-        for i in range(MARKOV_STEPS):
-            sampler.sample_step(
-                case.base,
-                embed @ case.head.t(),
-                i,
-                case.idx_mapping,
-                case.sample_pos,
-                case.temperature,
-                case.seeds,
-                cache,
-                tokens,
-            )
-
-    graph, _ = _capture(run)
-    for replay in range(3):
-        if replay:
-            cache.zero_()
-            tokens.zero_()
-            graph.replay()
-            torch.accelerator.synchronize()
-        assert torch.equal(tokens, want_tokens), replay
-        assert torch.equal(cache, want_cache), replay
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])

@@ -357,35 +357,6 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             context_states, context_positions, context_slot_mappings
         )
 
-    def context_kv_shape(self) -> tuple[int, int]:
-        """(num_layers, head_dim) of ``project_context_kv``'s output rows."""
-        layers = self.model.layers
-        return len(layers), layers[0].attn.head_dim
-
-    def project_context_kv(self, main_x: torch.Tensor, out: torch.Tensor) -> None:
-        """The part of ``precompute_and_store_context_kv`` that reads only
-        ``main_x``: layer i's normalized context KV, into ``out[i]``."""
-        for i, layer in enumerate(self.model.layers):
-            attn = layer.attn
-            qr_kv, _ = attn.fused_wqa_wkv(main_x)
-            out[i].copy_(attn.kv_norm(qr_kv[..., attn.q_lora_rank :]))
-
-    def store_projected_context_kv(
-        self,
-        context_kv: torch.Tensor,
-        context_positions: torch.Tensor,
-        context_slot_mappings: list[torch.Tensor | None] | None = None,
-    ) -> None:
-        """The rest: insert ``project_context_kv``'s output at each layer's
-        context slots."""
-        if context_slot_mappings is None:
-            return
-        for layer, kv, slot_mapping in zip(
-            self.model.layers, context_kv, context_slot_mappings
-        ):
-            if slot_mapping is not None:
-                _insert_context_kv(layer.attn, kv, context_positions, slot_mapping)
-
     def forward(
         self,
         input_ids: torch.Tensor,
