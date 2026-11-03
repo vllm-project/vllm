@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     GET_META_MSG,
+    HeartbeatInfo,
     NixlAgentMetadata,
     NixlConnectorMetadata,
     NixlHandshakePayload,
@@ -687,6 +688,16 @@ class NixlBaseConnectorWorker:
         )
         # NOTE (NickLucche): For now we use a hardcoded value for a simpler interface.
         self._lease_extension = kv_lease_duration * 2 // 3
+        # Glue (B2): keep renewing P's leases while this (D) engine is paused.
+        # The scheduler only packages heartbeats inside a step, so the worker
+        # caches the last set and a thread re-sends it every interval.
+        self._hb_interval = max(1.0, kv_lease_duration / 6)
+        self._hb_cache: dict[EngineId, HeartbeatInfo] = {}
+        self._hb_lock = threading.Lock()
+        self._hb_last_sent = 0.0
+        self._hb_stop = threading.Event()
+        self._hb_thread: threading.Thread | None = None
+        self._notif_lock = threading.Lock()
 
         self._bidirectional_kv_xfer_enabled: bool = (
             vllm_config.kv_transfer_config.get_from_extra_config(
@@ -3274,6 +3285,7 @@ class NixlBaseConnectorWorker:
             # clean up metadata for completed requests
             meta = self._recving_metadata.pop(req_id, None)
             assert meta is not None, f"{req_id} not found in recving_metadata list"
+            self._hb_forget(meta)
 
             # Skip KV sync and post-processing for failed requests
             if req_id in failed_recv_reqs:
@@ -3547,7 +3559,64 @@ class NixlBaseConnectorWorker:
 
     def _send_heartbeats(self, metadata: NixlConnectorMetadata) -> None:
         """Send heartbeats to remote engines, extending the lease on KV blocks."""
-        for engine_id, hb_info in metadata.heartbeat_by_engine.items():
+        if not metadata.heartbeat_by_engine:
+            return
+        with self._hb_lock:
+            self._hb_cache = {
+                eid: HeartbeatInfo(
+                    set(hb.req_ids), hb.host, hb.port, hb.tp_size, hb.dcp_size, hb.pp_size
+                )
+                for eid, hb in metadata.heartbeat_by_engine.items()
+            }
+            self._hb_last_sent = time.perf_counter()
+        self._send_heartbeats_now(metadata.heartbeat_by_engine)
+        self._start_heartbeat_thread()
+
+    def _start_heartbeat_thread(self) -> None:
+        if self._hb_thread is not None:
+            return
+        self._hb_thread = threading.Thread(
+            target=self._heartbeat_loop, name="nixl-lease-heartbeat", daemon=True
+        )
+        self._hb_thread.start()
+
+    def _heartbeat_loop(self) -> None:
+        """Re-send the cached heartbeats while the engine is not stepping."""
+        while not self._hb_stop.wait(self._hb_interval / 2):
+            with self._hb_lock:
+                if (
+                    not self._hb_cache
+                    or time.perf_counter() - self._hb_last_sent < self._hb_interval
+                ):
+                    continue
+                snapshot = {
+                    eid: HeartbeatInfo(
+                        set(hb.req_ids), hb.host, hb.port, hb.tp_size, hb.dcp_size, hb.pp_size
+                    )
+                    for eid, hb in self._hb_cache.items()
+                }
+                self._hb_last_sent = time.perf_counter()
+            try:
+                self._send_heartbeats_now(snapshot)
+            except Exception:
+                logger.debug("Background heartbeat failed", exc_info=True)
+
+    def _hb_forget(self, meta: ReqMeta | None) -> None:
+        """Stop heartbeating for a request whose read finished (or failed)."""
+        if meta is None or meta.remote is None:
+            return
+        with self._hb_lock:
+            hb = self._hb_cache.get(meta.remote.engine_id)
+            if hb is None:
+                return
+            hb.req_ids.discard(meta.remote.request_id)
+            if not hb.req_ids:
+                del self._hb_cache[meta.remote.engine_id]
+
+    def _send_heartbeats_now(
+        self, heartbeat_by_engine: dict[EngineId, HeartbeatInfo]
+    ) -> None:
+        for engine_id, hb_info in heartbeat_by_engine.items():
             # Proactive handshake (this request may still be in waiting queue) so
             # the **next** heartbeat for this remote can go through.
             if (
@@ -3571,7 +3640,8 @@ class NixlBaseConnectorWorker:
             hb_msg = ("HB:" + ",".join(hb_info.req_ids)).encode()
             for agent_name in self._remote_agents[engine_id].values():
                 try:
-                    self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
+                    with self._notif_lock:
+                        self.nixl_wrapper.send_notif(agent_name, notif_msg=hb_msg)
                 except Exception:
                     logger.debug(
                         "Failed to send heartbeat to engine %s",
@@ -4143,6 +4213,8 @@ class NixlBaseConnectorWorker:
 
     def shutdown(self) -> None:
         """Shutdown the connector worker."""
+        if hasattr(self, "_hb_stop"):
+            self._hb_stop.set()
         if not hasattr(self, "_handshake_initiation_executor"):
             # error happens during init, no need to shutdown
             return

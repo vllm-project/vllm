@@ -1457,6 +1457,13 @@ class MooncakeConnectorWorker:
         # from now (as NixlConnector does). Unset keeps the fixed
         # VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT.
         self._kv_lease_duration = _get_kv_lease_duration(kv_transfer_config)
+        # Glue (B2): keep renewing P's leases while this (D) engine is paused.
+        # The scheduler only packages renewals inside a step; the worker caches
+        # the last set and a periodic coroutine re-sends it.
+        self._lease_cache: dict[EngineId, LeaseHeartbeat] = {}
+        self._lease_cache_lock = threading.Lock()
+        self._lease_last_sent = 0.0
+        self._lease_renewal_started = False
         # Expired transfers in expiry order, so a late pull fails at once
         # instead of waiting for a prefill that already happened.
         self._expired_transfer_ids: OrderedDict[TransferId, float] = OrderedDict()
@@ -2760,6 +2767,7 @@ class MooncakeConnectorWorker:
             pull_meta.pull_tasks_count -= 1
         if pull_meta.pull_tasks_count == 0 and any(pull_meta.local_block_ids):
             self.finished_recving_reqs.add(pull_meta.d_req_id)
+            self._forget_lease(pull_meta)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Drain the blocks whose remote KV load failed since the last call."""
@@ -3016,6 +3024,53 @@ class MooncakeConnectorWorker:
         for remote_engine_id, heartbeat in lease_heartbeats.items():
             asyncio.create_task(self._send_lease_heartbeat(remote_engine_id, heartbeat))
 
+    def _cache_lease_heartbeats(
+        self, lease_heartbeats: dict[EngineId, LeaseHeartbeat]
+    ) -> None:
+        with self._lease_cache_lock:
+            self._lease_cache = {
+                eid: LeaseHeartbeat(hb.remote_bootstrap_addr, list(hb.transfer_ids))
+                for eid, hb in lease_heartbeats.items()
+            }
+            self._lease_last_sent = time.perf_counter()
+        if not self._lease_renewal_started and self._kv_lease_duration is not None:
+            self._lease_renewal_started = True
+            asyncio.run_coroutine_threadsafe(
+                self._lease_renewal_loop(), self.receiver_loop
+            )
+
+    def _forget_lease(self, pull_meta: PullReqMeta) -> None:
+        with self._lease_cache_lock:
+            hb = self._lease_cache.get(pull_meta.remote_engine_id)
+            if hb is None:
+                return
+            if pull_meta.transfer_id in hb.transfer_ids:
+                hb.transfer_ids.remove(pull_meta.transfer_id)
+            if not hb.transfer_ids:
+                del self._lease_cache[pull_meta.remote_engine_id]
+
+    async def _lease_renewal_loop(self) -> None:
+        """Re-send cached renewals while the engine is not stepping."""
+        assert self._kv_lease_duration is not None
+        interval = self._kv_lease_duration / 6
+        while True:
+            await asyncio.sleep(interval / 2)
+            with self._lease_cache_lock:
+                if (
+                    not self._lease_cache
+                    or time.perf_counter() - self._lease_last_sent < interval
+                ):
+                    continue
+                snapshot = {
+                    eid: LeaseHeartbeat(hb.remote_bootstrap_addr, list(hb.transfer_ids))
+                    for eid, hb in self._lease_cache.items()
+                }
+                self._lease_last_sent = time.perf_counter()
+            try:
+                await self._send_lease_heartbeats(snapshot)
+            except Exception:
+                logger.debug("Background lease renewal failed", exc_info=True)
+
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
             asyncio.run_coroutine_threadsafe(
@@ -3023,6 +3078,7 @@ class MooncakeConnectorWorker:
             )
 
         if not self.is_kv_producer and metadata.lease_heartbeats:
+            self._cache_lease_heartbeats(metadata.lease_heartbeats)
             asyncio.run_coroutine_threadsafe(
                 self._send_lease_heartbeats(metadata.lease_heartbeats),
                 self.receiver_loop,
