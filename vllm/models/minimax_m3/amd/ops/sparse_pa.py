@@ -632,11 +632,6 @@ def _run_gluon_decode(
     )
 
 
-# Rows of the warmup's small call: several context partitions per row, and no
-# specialization on == 1.
-_WARMUP_FEW_ROWS = 3
-
-
 @torch.no_grad()
 def minimax_m3_sparse_attn_aiter_warmup(
     k_cache: torch.Tensor,
@@ -655,27 +650,39 @@ def minimax_m3_sparse_attn_aiter_warmup(
     but the startup forwards do not, and return the row counts it called.
 
     Two properties of a call select the variant:
-    - ``ONE_SHOT`` (one context partition per row) holds once a call has at
-      least as many rows (tokens x KV heads) as the GPU runs programs at once.
-      Decode batches usually stay below that, and a prefill short enough for
-      the dense MSA path never reaches the sparse attend.
+    - The context partition count per row (``get_recommended_splits``), a
+      constexpr: 8 for the smallest calls, falling as rows (tokens x KV heads)
+      grow, down to ``ONE_SHOT`` (1) once a call has as many rows as the GPU
+      runs programs at once. Startup forwards reach only some of these values,
+      and a prefill short enough for the dense MSA path never reaches the
+      sparse attend, so serving would JIT-build the rest.
     - The alignment of the context lengths. A prefill's rows follow the decode
       rows in the table buffers the indexer fills, so when the decode token
       count times KV heads is not a multiple of 4 the pointer is not 16-byte
       aligned, and Triton specializes on that.
     Each variant takes seconds to compile, a TTFT spike on the request that
     meets it. This calls the attend on the layer's own cache and table buffers
-    (their contents are rewritten before every use) at both row counts and
-    both alignments.
+    (their contents are rewritten before every use) at each of these row
+    counts and both alignments.
     """
     from aiter.ops.triton.gluon.pa_decode_gluon import get_recommended_splits
 
     kvh = num_kv_heads
     max_rows = sparse_ctx_buffer.shape[0] // kvh - 1
-    many = _WARMUP_FEW_ROWS
-    while get_recommended_splits(many * kvh, 1) > 1 and many < max_rows:
-        many *= 2
-    row_counts = tuple(n for n in (_WARMUP_FEW_ROWS, many) if n <= max_rows)
+    # The context partition count is a constexpr of the kernel, so each value
+    # serving can reach (up to 8 for small decode batches, down to 1 =
+    # ONE_SHOT) is its own variant: warm the smallest row count for each.
+    # A call with a single row is skipped, as before: Triton specializes
+    # integer arguments equal to 1.
+    row_counts_by_splits: dict[int, int] = {}
+    for n in range(1, max_rows + 1):
+        if n * kvh == 1:
+            continue
+        splits = get_recommended_splits(n * kvh, 1)
+        row_counts_by_splits.setdefault(splits, n)
+        if splits == 1:
+            break
+    row_counts = tuple(sorted(row_counts_by_splits.values()))
     for n in row_counts:
         q = torch.zeros(
             n, num_heads, head_size, dtype=dtype, device=sparse_ctx_buffer.device
