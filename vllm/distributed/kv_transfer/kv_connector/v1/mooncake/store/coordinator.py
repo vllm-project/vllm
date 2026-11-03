@@ -168,31 +168,30 @@ class MooncakeStoreCoordinator:
 
     def _verify_and_split_kv_cache_groups(self) -> None:
         """Group compatible specs using their registered cache managers."""
+        eagle_group_ids = KVCacheSpecRegistry.get_eagle_cache_peek_group_ids(
+            self.kv_cache_groups, self.use_eagle
+        )
         attention_groups: list[StoreSpecGroup] = []
         for i, g in enumerate(self.kv_cache_groups):
             if not g.kv_cache_spec.prefix_cacheable:
                 continue
             spec = _coverage_spec(g.kv_cache_spec)
-            manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+            manager_cls = KVCacheSpecRegistry.get_manager_class(spec, g.role)
             assert manager_cls is not None, (
                 f"No manager registered for KVCacheSpec {spec}"
             )
             for idx, group in enumerate(attention_groups):
-                if group.spec == spec:
-                    assert manager_cls is group.manager_cls
+                if group.spec == spec and manager_cls is group.manager_cls:
                     group.group_ids.append(i)
-                    if g.is_eagle_group and not group.use_eagle:
+                    if i in eagle_group_ids and not group.use_eagle:
                         attention_groups[idx] = group._replace(use_eagle=True)
                     break
             else:
                 attention_groups.append(
-                    StoreSpecGroup(spec, [i], manager_cls, g.is_eagle_group)
+                    StoreSpecGroup(spec, [i], manager_cls, i in eagle_group_ids)
                 )
         # Full attention first (matches upstream convergence ordering).
         attention_groups.sort(key=lambda g: not isinstance(g.spec, FullAttentionSpec))
-        # Conservatively flag all groups when use_eagle is set but none is flagged.
-        if self.use_eagle and not any(g.use_eagle for g in attention_groups):
-            attention_groups = [g._replace(use_eagle=True) for g in attention_groups]
         self.attention_groups = attention_groups
         # Apply the merged spec group's Eagle setting to each member's masks.
         self.eagle_group_ids = {
@@ -206,7 +205,7 @@ class MooncakeStoreCoordinator:
                 and group.manager_cls.supports_fine_grained_hash_lookup,
             )
             for group in attention_groups
-            if group.use_eagle and not isinstance(group.spec, MambaSpec)
+            if group.use_eagle and group.manager_cls.supports_eagle_cache_peek
             for gid in group.group_ids
         }
 
@@ -333,7 +332,7 @@ class MooncakeStoreCoordinator:
             if exclude_mamba and isinstance(spec, MambaSpec):
                 masks.append([False] * (end_block - start_block))
                 continue
-            manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
+            manager_cls = KVCacheSpecRegistry.get_manager_class(spec, g.role)
             assert manager_cls is not None
             use_eagle = g_idx in self.eagle_group_ids
             mask = manager_cls.reachable_block_mask(
@@ -411,10 +410,9 @@ class MooncakeStoreCoordinator:
                     apply_eagle and group_eagle and idx not in eagle_verified
                 )
                 _max_length = curr_hit_length
-                # No eagle peek margin for a recurrent (Mamba) group: its finder
-                # never drops a block, so a widened bound would match past the
-                # attention-verified hit and resume from speculative state (#43559).
-                if drop_eagle_block and not isinstance(spec, MambaSpec):
+                # Only managers that can drop back to the verified boundary
+                # may receive the extra EAGLE proof margin.
+                if drop_eagle_block and manager_cls.supports_eagle_cache_peek:
                     eagle_margin = eagle_proof_margin(
                         spec.block_size,
                         self.hash_block_size,

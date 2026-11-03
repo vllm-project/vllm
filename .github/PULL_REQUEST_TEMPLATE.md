@@ -21,8 +21,6 @@
 <details>
 <summary> Pull Request Checklist </summary>
 
-- [ ] I used vLLM's `/pr-checklist` skill. (Mandatory for agents, optional for humans).
-- [ ] AI assistance was used during the creation of this PR.
 
 - [ ] **Design Fit:** Minimizes impact on core components, reuses existing functionality, and justifies added complexity.
 - [ ] **Testing and Validation:** Validates the change and ensures any added tests are meaningful and reliable, with CI coverage or documented CI resource constraints and validation performed outside CI.
