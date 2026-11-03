@@ -12,6 +12,7 @@ import pytest
 import torch
 
 import vllm.v1.kv_offload.cpu.region_mirror as region_mirror
+from vllm.distributed import nixl_utils
 from vllm.v1.kv_offload.base import (
     BlockIDsLoadStoreSpec,
     CanonicalKVCacheRef,
@@ -48,7 +49,8 @@ def _wait_for(predicate, timeout: float = 10.0) -> None:
 @pytest.fixture
 def nixl_mirror():
     """A head region and a remote worker's GPU blocks joined by NIXL."""
-    pytest.importorskip("nixl")
+    if nixl_utils.NixlWrapper is None:  # nixl, or nixl_rocm on ROCm
+        pytest.skip("needs NIXL")
     if not torch.cuda.is_available():
         pytest.skip("needs a GPU")
     tag = uuid.uuid4().hex[:8]
@@ -195,6 +197,20 @@ def test_strided_views_register_their_whole_storage():
     assert region_mirror._storage_ranges(caches) == [
         (blocks.data_ptr(), blocks.nbytes, 0)
     ]
+
+
+@pytest.mark.parametrize(
+    "sleep_mode, params",
+    [(False, {}), (True, {"engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc"})],
+)
+def test_sleep_mode_agents_do_not_cache_vram_registrations(
+    monkeypatch, sleep_mode, params
+):
+    agent = MagicMock()
+    monkeypatch.setattr(nixl_utils, "NixlWrapper", MagicMock(return_value=agent))
+    monkeypatch.setattr(nixl_utils, "nixl_agent_config", MagicMock())
+    assert region_mirror._new_agent("a", sleep_mode=sleep_mode) is agent
+    agent.create_backend.assert_called_once_with("UCX", params)
 
 
 class _FakeClient:

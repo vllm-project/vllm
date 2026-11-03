@@ -325,4 +325,5 @@ def build_offloading_config(
         replicated_layout=replicated_layout,
         canonical_layout=canonical_layout,
         kv_cache_layout=vllm_config.cache_config.kv_cache_layout,
+        sleep_mode=vllm_config.model_config.enable_sleep_mode,
     )

@@ -122,7 +122,7 @@ def _is_remote_disconnect(error: Exception) -> bool:
     )
 
 
-def _new_agent(name: str):
+def _new_agent(name: str, *, sleep_mode: bool = False):
     from vllm.distributed.nixl_utils import NixlWrapper, nixl_agent_config
 
     if NixlWrapper is None:
@@ -131,7 +131,10 @@ def _new_agent(name: str):
             "several nodes; install the nixl package."
         )
     agent = NixlWrapper(name, nixl_agent_config(backends=[]))
-    agent.create_backend("UCX", {})
+    # As in the NIXL connector: with sleep mode, UCX must not cache VRAM
+    # registrations, or slept pages stay pinned; UCX_* env vars win.
+    params = {"engine_config": "RCACHE_ENABLE=n,TLS=^cuda_ipc"} if sleep_mode else {}
+    agent.create_backend("UCX", params)
     return agent
 
 
@@ -175,11 +178,12 @@ class RegionMirrorClient:
         name: str,
         *,
         timeout_s: float = _TRANSFER_TIMEOUT_S,
+        sleep_mode: bool = False,
     ):
         self._timeout_s = timeout_s
         self._stopped = threading.Event()
         self._stop_reason = "is shutting down"
-        self._agent = _new_agent(name)
+        self._agent = _new_agent(name, sleep_mode=sleep_mode)
         self._head = self._agent.add_remote_agent(head_metadata)
         self._device = gpu_ranges[0][2]
         self._gpu_ranges = gpu_ranges
@@ -651,6 +655,7 @@ def attach_region_mirror(
     engine_id: str,
     *,
     timeout_s: float = _TRANSFER_TIMEOUT_S,
+    sleep_mode: bool = False,
 ) -> OffloadingWorker:
     """Connect this worker to the head region through the mirror.
 
@@ -667,6 +672,8 @@ def attach_region_mirror(
         topology: This worker's placement.
         engine_id: Names the NIXL agents of this engine.
         timeout_s: Wait for one transfer before the mirror counts it stuck.
+        sleep_mode: The engine remaps GPU memory in sleep mode, so the
+            client's UCX backend must not cache its VRAM registrations.
 
     """
     name = f"kv-offload-mirror-{engine_id}-{topology.rank}"
@@ -715,6 +722,7 @@ def attach_region_mirror(
                     head_metadata,
                     name,
                     timeout_s=timeout_s,
+                    sleep_mode=sleep_mode,
                 )
                 metadata = client.metadata
             except Exception as e:

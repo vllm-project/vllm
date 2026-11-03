@@ -799,17 +799,32 @@ def _span_nodes_on_rank(rank: int, init_method: str, results) -> None:
     """Run ``_workers_span_nodes`` on one rank of a TP=2, PP=2 engine whose
     ranks 0-2 share a node and rank 3 sits on another.
 
-    The groups are Gloo groups of vLLM's rank layout, built by hand:
-    ``initialize_model_parallel`` would open a device communicator per group,
-    which needs a GPU per rank.
+    The groups are vLLM ``GroupCoordinator``s on Gloo without device
+    communicators, so no GPU is needed. Node placement is simulated where
+    ``in_the_same_node_as`` probes it: a shared memory segment created on one
+    node cannot be opened from the other.
     """
+    import uuid
     from datetime import timedelta
-    from types import SimpleNamespace
+    from multiprocessing import shared_memory
 
     import torch.distributed as dist
 
     import vllm.distributed.parallel_state as parallel_state
     from vllm.v1.kv_offload.tiering.spec import _workers_span_nodes
+
+    node = "b" if rank == 3 else "a"
+    open_shm = shared_memory.SharedMemory
+
+    def node_shared_memory(name=None, create=False, size=0):
+        if create:
+            name = f"node{node}_{uuid.uuid4().hex[:16]}"
+            return open_shm(name=name, create=True, size=size)
+        if not name.startswith(f"node{node}_"):
+            raise FileNotFoundError(name)  # created on the other node
+        return open_shm(name=name)
+
+    shared_memory.SharedMemory = node_shared_memory  # type: ignore[misc]
 
     dist.init_process_group(
         "gloo",
@@ -818,19 +833,20 @@ def _span_nodes_on_rank(rank: int, init_method: str, results) -> None:
         world_size=4,
         timeout=timedelta(seconds=60),
     )
-    node = {0: "a", 1: "a", 2: "a", 3: "b"}
-    # Every rank creates every group, in the same order.
-    tp = [dist.new_group(ranks) for ranks in ([0, 1], [2, 3])][rank // 2]
-    pp = [dist.new_group(ranks) for ranks in ([0, 2], [1, 3])][rank % 2]
-    parallel_state.get_tp_group = lambda: SimpleNamespace(world_size=2, cpu_group=tp)
-    parallel_state.get_pp_group = lambda: SimpleNamespace(world_size=2, cpu_group=pp)
-    parallel_state.get_pcp_group = lambda: SimpleNamespace(world_size=1)
 
-    def same_node_as(group, source_rank):
-        ranks = dist.get_process_group_ranks(group)
-        return [node[r] == node[ranks[source_rank]] for r in ranks]
+    def coordinator(group_ranks: list[list[int]], name: str):
+        return parallel_state.GroupCoordinator(
+            group_ranks=group_ranks,
+            local_rank=0,
+            torch_distributed_backend="gloo",
+            use_device_communicator=False,
+            group_name=name,
+        )
 
-    parallel_state.in_the_same_node_as = same_node_as
+    # vLLM's rank layout for TP=2, PP=2: TP is the innermost axis.
+    parallel_state._TP = coordinator([[0, 1], [2, 3]], "tp")
+    parallel_state._PP = coordinator([[0, 2], [1, 3]], "pp")
+    parallel_state._PCP = coordinator([[0], [1], [2], [3]], "pcp")
     results.put((rank, _workers_span_nodes()))
     dist.destroy_process_group()
 
