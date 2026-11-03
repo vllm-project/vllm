@@ -299,7 +299,7 @@ def test_grouped_topk_single_group_weights_ignore_batch_size(renormalize: bool):
 
     results = [
         _run_single_group_topk(
-            logits.expand(num_tokens, -1),
+            logits.repeat(num_tokens, 1),
             bias,
             8,
             scoring_func="sigmoid",
