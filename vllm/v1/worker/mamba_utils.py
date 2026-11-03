@@ -718,15 +718,16 @@ def _get_mamba_gpu_state_copy_funcs(
     if isinstance(layer, MambaBase) and layer.use_replayssm_trackers:
         if (
             spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
-            or len(spec.shapes) != 5
-            or len(spec.dtypes) != 5
+            or len(spec.shapes) != 6
+            or len(spec.dtypes) != 6
             or state_copy_funcs != (get_conv_copy_spec, get_temporal_copy_spec)
         ):
             raise ValueError(
                 "ReplaySSM trackers require two canonical Mamba2 "
-                "states and three ring states"
+                "states, three ring states and the ring trackers"
             )
-        state_copy_funcs += (get_temporal_copy_spec,) * 3
+        # The rings and their trackers move together between block columns.
+        state_copy_funcs += (get_temporal_copy_spec,) * 4
     return state_copy_funcs
 
 
@@ -959,7 +960,7 @@ class MambaSpecDecodeGPUContext:
                 if uses_replayssm_trackers:
                     if len(kv_caches) != len(state_copy_funcs):
                         raise ValueError(
-                            "ReplaySSM trackers require five bound Mamba2 states"
+                            "ReplaySSM trackers require six bound Mamba2 states"
                         )
                     mixers.append(attention)
                 if len(kv_caches) < len(state_copy_funcs):

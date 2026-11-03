@@ -79,6 +79,8 @@ def _replayssm_spec_kernel(
     dim,
     dstate,
     nheads_ngroups_ratio,
+    stride_ring_start,
+    stride_prev_num_accepted,
     stride_state_batch,
     stride_state_head,
     stride_state_dim,
@@ -129,8 +131,10 @@ def _replayssm_spec_kernel(
         return
     bos = tl.load(cu_seqlens_ptr + pid_b).to(tl.int64)
     seqlen = tl.load(cu_seqlens_ptr + pid_b + 1).to(tl.int64) - bos
-    ring_start = tl.load(ring_start_ptr + slot)
-    num_replay = tl.load(prev_num_accepted_ptr + slot)
+    # The trackers may be page-strided views (the in-page ring trackers); `slot`
+    # is int64, so the offsets are too.
+    ring_start = tl.load(ring_start_ptr + slot * stride_ring_start)
+    num_replay = tl.load(prev_num_accepted_ptr + slot * stride_prev_num_accepted)
 
     group = pid_h // nheads_ngroups_ratio
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
@@ -271,8 +275,10 @@ def selective_state_update_replayssm_spec(
         x_cache: (cache, nheads, ring_len, dim) ring of x.
         B_cache: (cache, ngroups, ring_len, dstate) ring of B.
         dt_cache: (cache, nheads, ring_len) fp32 ring of processed dt.
-        ring_start: (cache,) int32 oldest live ring row.
-        prev_num_accepted_tokens: (cache,) int32 ring entries to replay.
+        ring_start: (cache,) int32 oldest live ring row; may be a strided view
+            (the in-page ring trackers).
+        prev_num_accepted_tokens: (cache,) int32 ring entries to replay; may be
+            a strided view like `ring_start`.
         x: (total_tokens, nheads, dim) packed tokens.
         dt: (total_tokens, nheads, dim) with stride(-1) == 0.
         A: (nheads, dim, dstate) with stride(-1) == stride(-2) == 0.
@@ -308,6 +314,7 @@ def selective_state_update_replayssm_spec(
     assert dt_bias is None or dt_bias.stride(-1) == 0
     assert state_batch_indices.dim() == 1
     assert state_batch_indices.shape[0] >= batch
+    assert ring_start.dim() == 1 and prev_num_accepted_tokens.dim() == 1
     if batch == 0:
         return out
 
@@ -337,6 +344,8 @@ def selective_state_update_replayssm_spec(
             dim,
             dstate,
             nheads // ngroups,
+            ring_start.stride(0),
+            prev_num_accepted_tokens.stride(0),
             *state.stride(),
             x_cache.stride(0),
             x_cache.stride(1),
