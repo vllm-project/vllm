@@ -102,6 +102,7 @@ class HYV4DecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         topk_indices_buffer: torch.Tensor | None = None,
+        enable_eplb: bool = False,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
@@ -139,8 +140,14 @@ class HYV4DecoderLayer(nn.Module):
             )
             self.block_type = "feedforward"
         else:
+            # EPLB only for the target model's layers: the MTP draft reuses this
+            # class but is not registered with EPLB, so its router must not
+            # expect the EPLB views.
             self.mlp = HYV4MoEFused(
-                config=config, quant_config=quant_config, prefix=f"{prefix}.mlp"
+                config=config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.mlp",
+                enable_eplb=enable_eplb,
             )
             self.block_type = "moe"
         self.post_attention_layernorm = RMSNorm(config.hidden_size, config.rms_norm_eps)
@@ -257,6 +264,7 @@ class HYV4Model(nn.Module):
                 quant_config=quant_config,
                 prefix=prefix,
                 topk_indices_buffer=self.topk_indices_buffer,
+                enable_eplb=parallel_config.enable_eplb,
             ),
             prefix=f"{prefix}.layers",
         )
