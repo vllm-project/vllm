@@ -519,7 +519,10 @@ def extend_kv_cache(
             if cache.device == runner.device
         ]
     runner.kv_connector = get_kv_connector(
-        runner.vllm_config, runner.kv_caches_by_layer
+        runner.vllm_config,
+        runner.kv_cache_config,
+        runner.kv_caches_by_layer,
+        runner.output_copy_stream,
     )
 
 
