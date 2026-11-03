@@ -582,6 +582,20 @@ class SamplingParams(
             self.stop = []
         elif isinstance(self.stop, str):
             self.stop = [self.stop]
+        elif isinstance(self.stop, (list, tuple)):
+            self.stop = list(self.stop)
+        else:
+            raise VLLMValidationError(
+                "stop must be a string or a list of strings, "
+                f"got {type(self.stop).__name__}."
+            )
+
+        # The stop strings are measured below, so a non-string here used to fail
+        # with a bare TypeError from len() and a tuple broke a later assertion.
+        if not all(isinstance(stop, str) for stop in self.stop):
+            raise VLLMValidationError(
+                f"stop must contain only strings, got {self.stop!r}."
+            )
 
         if self.stop_token_ids is None:
             self.stop_token_ids = []
@@ -590,8 +604,19 @@ class SamplingParams(
 
         if self.bad_words is None:
             self.bad_words = []
+        elif isinstance(self.bad_words, str):
+            # A bare string was iterated character by character by dict.fromkeys,
+            # so bad_words="foo" became ["f", "o"] and banned nothing useful.
+            self.bad_words = [self.bad_words]
         else:
             self.bad_words = list(dict.fromkeys(self.bad_words))
+
+        # A non-string survived until update_from_tokenizer, where it broke with
+        # AttributeError on lstrip() far from the request that caused it.
+        if not all(isinstance(word, str) for word in self.bad_words):
+            raise VLLMValidationError(
+                f"bad_words must contain only strings, got {self.bad_words!r}."
+            )
 
         if self.logprobs is True:
             self.logprobs = 1
