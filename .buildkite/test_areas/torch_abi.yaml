@@ -18,7 +18,7 @@ steps:
       label: ":amd: (MI300) Torch Stable ABI Audit"
       dind: false
       device: mi300_1
-      timeout_in_minutes: 35
+      timeout_in_minutes: 10
       depends_on:
       - image-build-amd
       no_gpu: true

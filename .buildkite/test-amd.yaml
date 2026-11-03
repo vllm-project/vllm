@@ -141,7 +141,7 @@ steps:
   - pytest -v -s tools/test_kernel_symbol_map.py
 
 - label: ":amd: (MI300) Torch Stable ABI Audit" # TBD
-  timeout_in_minutes: 35
+  timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   dind: false
   agent_pool: mi300_1
