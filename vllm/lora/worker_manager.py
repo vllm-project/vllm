@@ -42,7 +42,9 @@ class _RenamedAdapterMapper(WeightsMapper):
         is_target: Callable[[str], bool],
     ):
         super().__init__()
-        self.mapper, self.renames, self.is_target = mapper, renames, is_target
+        self.mapper = mapper
+        self.fallback = renames | mapper if mapper else renames
+        self.is_target = is_target
 
     def map_name(self, key: str) -> str | None:
         name = self.mapper.map_name(key) if self.mapper else key
