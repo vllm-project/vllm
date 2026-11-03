@@ -237,7 +237,11 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.aiter_supports_strided_state = bool(
                 getattr(aiter_kda, "supports_unaligned_state_stride", False)
             )
-        use_hip_decode = not self.use_aiter_decode and is_fused_kda_decode_supported(
+        # Without the strided-state flag AITER cannot read the packed DSA
+        # cache's recurrent states; the HIP kernel honours the slot stride.
+        use_hip_decode = (
+            not self.use_aiter_decode or not self.aiter_supports_strided_state
+        ) and is_fused_kda_decode_supported(
             self.local_num_heads,
             self.head_dim,
             self.conv_size,
@@ -459,6 +463,13 @@ class KimiK3DeltaAttention(GatedDeltaNetAttention):
             self.aiter_supports_strided_state
             or recurrent_state.stride(0) % recurrent_state.shape[-1] == 0
         )
+        if self.use_aiter_decode and not use_aiter_decode:
+            logger.info_once(
+                "KDA recurrent state is strided and AITER lacks "
+                "supports_unaligned_state_stride: fused AITER decode skipped "
+                "(HIP fused decode %s).",
+                "on" if self.decode_norm_weight is not None else "off",
+            )
 
         if (
             use_aiter_decode
