@@ -347,6 +347,22 @@ def _has_pattern_and_length_bounds(schema: dict[str, Any]) -> bool:
     )
 
 
+def _xgrammar_enforces_integer_multiple_of(schema: dict[str, Any]) -> bool:
+    """Return whether xgrammar (pinned 0.2.8) enforces integer multipleOf.
+
+    It only does so for integer values in [1, 1024] without any
+    minimum/maximum bound; otherwise it ignores multipleOf with a warning."""
+    multiple_of = schema.get("multipleOf")
+    if isinstance(multiple_of, bool) or not isinstance(multiple_of, int | float):
+        return False
+    if not (1 <= multiple_of <= 1024 and float(multiple_of).is_integer()):
+        return False
+    return not any(
+        key in schema
+        for key in ("minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum")
+    )
+
+
 # FIXME(arpera): The approach used here needs to be redesigned because of
 # existing bugs: https://github.com/vllm-project/vllm/issues/57550
 def _schema_types(schema: dict[str, Any]) -> set[str]:
@@ -368,14 +384,21 @@ def has_xgrammar_unsupported_json_features(schema: dict[str, Any]) -> bool:
 
         schema_types = _schema_types(obj)
 
-        # integer/number + multipleOf is unsupported by xgrammar
+        # number + multipleOf is unsupported by xgrammar
         # This is known behavior and xgrammar emits warning in logs:
-        #   [21:18:08] /project/cpp/json_schema_converter.cc:1053:
         #   Warning: multipleOf is not supported for type:number; ignoring multipleOf
         # This warning was added in PR
         # https://github.com/mlc-ai/xgrammar/pull/670
         # So, no need to track progress on this
-        if (schema_types & {"integer", "number"}) and ("multipleOf" in obj):
+        # integer + multipleOf is only enforced within the limits checked in
+        # _xgrammar_enforces_integer_multiple_of; otherwise it is ignored too
+        if "multipleOf" in obj and (
+            "number" in schema_types
+            or (
+                "integer" in schema_types
+                and not _xgrammar_enforces_integer_multiple_of(obj)
+            )
+        ):
             return True
 
         # array + some constraints is unsupported by xgrammar
