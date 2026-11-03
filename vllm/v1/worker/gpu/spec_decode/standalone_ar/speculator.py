@@ -90,6 +90,9 @@ class StandaloneARSpeculator(AutoRegressiveSpeculator):
             device=self.device,
         )
 
+    def _prefill_capture_slot_mappings(self) -> torch.Tensor:
+        return self.expanded_slot_mappings
+
     def load_draft_model(
         self,
         target_model: nn.Module,

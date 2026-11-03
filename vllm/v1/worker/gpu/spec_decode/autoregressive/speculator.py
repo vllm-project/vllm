@@ -40,7 +40,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             self.vllm_config,
             self.device,
             cudagraph_mode,
-            self.num_speculative_steps + 1,
+            self.num_speculative_steps + 1 + self.num_extra_query_per_req,
+            varlen_decode=self.enable_adaptive_verification,
         )
 
         # PIECEWISE cudagraphs are not supported for draft decodes.
@@ -95,6 +96,9 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     ) -> tuple[InputBuffers, list[list[AttentionGroup]]]:
         return self.input_buffers, self.attn_groups
 
+    def _prefill_capture_slot_mappings(self) -> torch.Tensor | None:
+        return None
+
     def _configure_decode_metadata_update(self) -> None:
         if self.num_speculative_steps == 1:
             self.supports_decode_metadata_update = False
@@ -134,6 +138,7 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
             attn_groups,
             self.kv_cache_config,
             progress_bar_desc="Capturing prefill CUDA graphs",
+            slot_mappings_buffer=self._prefill_capture_slot_mappings(),
         )
         self.on_prefill_end(self.max_num_reqs)
 
