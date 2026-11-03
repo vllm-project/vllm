@@ -880,9 +880,10 @@ class MambaSpecDecodeGPUContext:
             spec: copy_funcs[spec.mamba_type] for spec in mamba_groups
         }
         for spec in mamba_groups:
-            if spec.use_flashinfer_replayssm:
+            if spec.num_extra_temporal_states:
                 if (
                     spec.mamba_type != MambaAttentionBackendEnum.MAMBA2
+                    or spec.num_extra_temporal_states != 3
                     or len(spec.shapes) != 5
                     or len(spec.dtypes) != 5
                     or copy_funcs_by_spec[spec]
@@ -892,7 +893,9 @@ class MambaSpecDecodeGPUContext:
                         "FlashInfer ReplaySSM requires two canonical Mamba2 "
                         "states and three ring states"
                     )
-                copy_funcs_by_spec[spec] += (get_temporal_copy_spec,) * 3
+                copy_funcs_by_spec[spec] += (
+                    get_temporal_copy_spec,
+                ) * spec.num_extra_temporal_states
 
         # Count physical state tensors across all Mamba groups. Different
         # groups may expose different state specs.
@@ -1053,12 +1056,14 @@ class MambaSpecDecodeGPUContext:
                 )
                 has_baseline_layer |= not is_flashinfer_replayssm
                 if is_flashinfer_replayssm:
-                    if not mamba_spec.use_flashinfer_replayssm or len(kv_caches) != 5:
+                    if mamba_spec.num_extra_temporal_states != 3 or len(kv_caches) != 5:
                         raise ValueError(
                             "FlashInfer ReplaySSM requires five bound Mamba2 states"
                         )
                     mixers.append(attention)
-                    state_copy_funcs += (get_temporal_copy_spec,) * 3
+                    state_copy_funcs += (
+                        get_temporal_copy_spec,
+                    ) * mamba_spec.num_extra_temporal_states
                 if len(kv_caches) < len(state_copy_funcs):
                     raise ValueError(
                         f"Expected at least {len(state_copy_funcs)} Mamba state "

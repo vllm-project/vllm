@@ -547,7 +547,7 @@ def test_replayssm_precopy_moves_packed_state_and_trackers(
             torch.bfloat16,
         ),
         mamba_cache_mode="align",
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
         state_alignment=16,
         block_stride_alignment=16,
     )
@@ -1061,7 +1061,7 @@ def test_replayssm_resumed_prefill_resets_history_before_decode(num_spec, cache_
         shapes=tuple(tensor.shape[1:] for tensor in mixer.kv_cache),
         dtypes=tuple(tensor.dtype for tensor in mixer.kv_cache),
         mamba_cache_mode=cache_mode,
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
     )
     replay = ReplaySSMModelContext.create(
         [([mixer], spec, torch.tensor([[1]], dtype=torch.int32, device=device))],

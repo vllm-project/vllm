@@ -81,7 +81,7 @@ class MambaBase(AttentionLayerBase):
         return MambaSpec(
             shapes=tuple(self.get_state_shape()),
             dtypes=self.get_state_dtype(),
-            use_flashinfer_replayssm=self.use_flashinfer_replayssm,
+            num_extra_temporal_states=3 if self.use_flashinfer_replayssm else 0,
             state_alignment=self.state_alignment,
             block_stride_alignment=self.state_alignment,
             block_size=mamba_block_size,

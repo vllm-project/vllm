@@ -212,7 +212,7 @@ def _make_mamba_spec(
         block_size=BLOCK_SIZE,
         shapes=(*base_shapes, *replayssm_shapes),
         dtypes=(torch.float32,) * 5,
-        use_flashinfer_replayssm=flashinfer,
+        num_extra_temporal_states=3 if flashinfer else 0,
         mamba_cache_mode=mamba_cache_mode,
     )
 

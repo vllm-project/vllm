@@ -156,7 +156,7 @@ def test_replayssm_autotune_slots_restore_state_and_trackers(use_v2, layout):
         shapes=((2,), (2,), (2, 11), (2, 11), (2, 11)),
         dtypes=(torch.float32,) * 5,
         page_size_padded=384,
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
     )
     config = SimpleNamespace(
         cache_config=CacheConfig(),

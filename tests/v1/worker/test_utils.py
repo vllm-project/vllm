@@ -1388,7 +1388,7 @@ def test_bind_and_copy_replayssm_cache_by_group(monkeypatch, layout):
         shapes=mixers[0].get_state_shape(),
         dtypes=mixers[0].get_state_dtype(),
         page_size_padded=128,
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
         state_alignment=16,
         block_stride_alignment=16,
     )
@@ -1465,7 +1465,7 @@ def test_rebind_kv_cache_keeps_replayssm_trackers():
         shapes=mixers[0].get_state_shape(),
         dtypes=mixers[0].get_state_dtype(),
         page_size_padded=128,
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
         state_alignment=16,
     )
     config = KVCacheConfig(

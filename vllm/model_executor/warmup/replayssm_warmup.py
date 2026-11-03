@@ -147,7 +147,7 @@ def replayssm_lifecycle_warmup(runner: "GPUModelRunner") -> None:
     grouped = []
     for group_id, group in enumerate(runner.kv_cache_config.kv_cache_groups):
         spec = group.kv_cache_spec
-        if not isinstance(spec, MambaSpec) or not spec.use_flashinfer_replayssm:
+        if not isinstance(spec, MambaSpec) or not spec.num_extra_temporal_states:
             continue
         mixers = [
             config.compilation_config.static_forward_context[name]

@@ -132,7 +132,7 @@ def test_replayssm_materializes_only_accepted_boundary_with_compacted_rows(
             torch.float32,
             torch.bfloat16,
         ),
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
         mamba_cache_mode="align",
         state_alignment=16,
         block_stride_alignment=16,
@@ -336,7 +336,7 @@ def test_replayssm_skips_canonical_self_copy_but_resets_prefill_trackers(post_st
         shapes=tuple(tensor.shape[1:] for tensor in mixer.kv_cache),
         dtypes=tuple(tensor.dtype for tensor in mixer.kv_cache),
         mamba_cache_mode="align",
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
     )
     table = _cuda_ints(
         [
@@ -581,7 +581,7 @@ def test_replayssm_postprocess_commits_staged_transition(post_step):
         shapes=tuple(tensor.shape[1:] for tensor in cache),
         dtypes=tuple(tensor.dtype for tensor in cache),
         mamba_cache_mode="none",
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
     )
     # Neighboring request rows provide valid canary IDs, making erroneous
     # column reads deterministically corrupt another slot rather than crash.

@@ -164,7 +164,7 @@ def test_replayssm_low_head_packed_alignment(layout):
             torch.float32,
             torch.bfloat16,
         ),
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
         state_alignment=16,
         block_stride_alignment=16,
     )
@@ -237,12 +237,17 @@ def test_replayssm_grouping_checks_ring_layout_not_only_page_size():
         block_size=2,
         shapes=((8,), (12,), (4,), (4,), (4,)),
         dtypes=(torch.float32,) * 5,
-        use_flashinfer_replayssm=True,
+        num_extra_temporal_states=3,
     )
     other = replace(spec, shapes=(*spec.shapes[:2], (1, 4), *spec.shapes[3:]))
     assert other.page_size_bytes == spec.page_size_bytes
     assert spec.is_uniform_with_collection({"first": spec, "second": spec})
     assert not spec.is_uniform_with_collection({"first": spec, "second": other})
+    canonical = replace(spec, num_extra_temporal_states=0)
+    assert not spec.is_uniform_with_collection({"canonical": canonical})
+    assert canonical.is_uniform_with_collection(
+        {"other": replace(other, num_extra_temporal_states=0)}
+    )
 
 
 MAIN_KV_PAGE_BYTES = 2_048
