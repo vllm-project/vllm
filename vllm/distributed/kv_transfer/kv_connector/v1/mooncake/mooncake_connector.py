@@ -1896,6 +1896,7 @@ class MooncakeConnectorWorker:
                 else MooncakeXferResponseStatus.FINISH
             )
             ready_reqs: list[tuple[ReqId, SendBlockMeta]] = []
+            gone_reqs: list[ReqId] = []
             for task in done:
                 d_req_id, send_meta = task.result()
                 del pending_reqs[d_req_id]
@@ -1909,10 +1910,13 @@ class MooncakeConnectorWorker:
                         )
                     ready_reqs.append((d_req_id, send_meta))
                 else:
-                    # Otherwise (expired, very unlikely), just forget it.
+                    # Glue (B3): aborted or expired before sending. Answer D
+                    # with an error instead of leaving its pull unanswered.
                     logger.warning(
-                        "Request %s expired before sending on P side.", d_req_id
+                        "Request %s was aborted or expired before sending on P side.",
+                        d_req_id,
                     )
+                    gone_reqs.append(d_req_id)
 
             (
                 src_ptrs,
@@ -1926,6 +1930,10 @@ class MooncakeConnectorWorker:
                 local_regions,
                 remote_regions,
             )
+            if gone_reqs:
+                err_reqs = list(err_reqs) + gone_reqs
+                gone_msg = "KV freed on P side before the pull (request aborted)."
+                err_msg = gone_msg if err_msg is None else f"{err_msg}; {gone_msg}"
             err_req_set = set(err_reqs)
             ok_ready_reqs = [
                 (d_req_id, send_meta)
@@ -3014,9 +3022,14 @@ class MooncakeConnectorWorker:
                         ready=asyncio.Event(),
                     )
         for transfer_id in metadata.reqs_not_processed:
-            send_meta = self.reqs_need_send.pop(transfer_id)
-            if send_meta:
+            # Glue (B3): the request was aborted before its KV was exported.
+            # A pull already waiting must be answered, and a later pull must
+            # fail fast; neither may create a fresh entry that waits forever.
+            self._expired_transfer_ids[transfer_id] = time.perf_counter()
+            send_meta = self.reqs_need_send.pop(transfer_id, None)
+            if send_meta is not None:
                 assert not send_meta.ready.is_set()
+                send_meta.ready.set()  # waiters find it gone and report an error
 
     async def _send_lease_heartbeats(
         self, lease_heartbeats: dict[EngineId, LeaseHeartbeat]

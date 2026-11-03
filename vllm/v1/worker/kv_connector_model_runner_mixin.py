@@ -94,7 +94,12 @@ class KVConnectorModelRunnerMixin:
             transfer_results = kv_connector.get_transfer_results(
                 scheduler_output.finished_req_ids
             )
-            output.finished_sending = transfer_results.finished_sending
+            # Glue (B3): a finished request reported in both sets in the same
+            # step is freed by the scheduler's recv branch; reporting the send
+            # too would free it twice and assert (#46240).
+            output.finished_sending = (
+                transfer_results.finished_sending - transfer_results.finished_recving
+            )
             output.finished_recving = transfer_results.finished_recving
             output.failed_recving = transfer_results.failed_recving
             output.invalid_block_ids = kv_connector.get_block_ids_with_load_errors()
