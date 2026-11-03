@@ -324,6 +324,7 @@ def test_mlp_prequant_handoff():
 
     mlp = object.__new__(MiniMaxM3MLP)
     torch.nn.Module.__init__(mlp)
+    mlp.fuse_act_quant_mxfp8 = False
     seen = []
 
     def _gate_up(x):
@@ -398,6 +399,68 @@ def test_swiglu_oai_quantize_mxfp8_uses_e4m3_range_for_scale():
 
     assert torch.equal(got_s, ref_s)
     assert torch.equal(got_q, ref_q)
+
+
+@pytest.mark.parametrize("m", [1, 8, 32, 128, 192])
+@pytest.mark.parametrize("inter", [768, 3072])
+@pytest.mark.parametrize("block_m", [8, 16, 64])
+@torch.inference_mode()
+def test_swiglu_oai_quantize_mxfp8_vs_unfused(m, inter, block_m):
+    """Fused swiglu + quant against swiglu -> bf16 -> quant. It skips the bf16
+    rounding of the activation, so a few E4M3 codes (and, rarely, a block scale)
+    differ; against the fp32 activation it is at least as accurate."""
+    torch.manual_seed(m + inter)
+    gate_up = (torch.randn(m, 2 * inter, device=DEVICE) * 8).to(torch.bfloat16)
+    alpha, beta, limit = 1.702, 1.0, 7.0
+
+    got_q, got_s = swiglu_oai_quantize_mxfp8(
+        gate_up, alpha, beta, limit, block_m=block_m
+    )
+    act_bf16 = swiglu_oai_split(gate_up, alpha, beta, limit)
+    ref_q, ref_s = mxfp8_e4m3_quantize(act_bf16)
+    assert got_q.shape == ref_q.shape and got_s.shape == ref_s.shape
+
+    assert (got_s != ref_s).float().mean().item() < 1e-3
+    assert (got_q.view(torch.uint8) != ref_q.view(torch.uint8)).float().mean() < 0.05
+
+    act_f32 = _ref_swiglu(gate_up.float(), alpha, beta, limit).float()
+    got_err = _relerr(dequant_mxfp8_to_bf16(got_q, got_s), act_f32)
+    ref_err = _relerr(dequant_mxfp8_to_bf16(ref_q, ref_s), act_f32)
+    assert got_err <= ref_err * 1.001 + 1e-6
+
+
+@requires_gfx950
+@pytest.mark.parametrize("m", [1, 8, 16, 17, 32, 128])
+@pytest.mark.parametrize("n,k", [(6144, 768), (6144, 3072)])  # shared expert, dense
+@torch.inference_mode()
+def test_mlp_down_proj_on_swiglu_quant(dist_init, m, n, k):
+    """down_proj on the fused swiglu + quant output stays within MXFP8 quant
+    noise of the unfused swiglu -> linear, and the fused-quant GEMM keeps its
+    own path where it already quantizes in-kernel (M <= 16, K <= 1024)."""
+    from vllm.model_executor.layers.fusion.quant_activation import (
+        QuantizedActivation,
+    )
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        kMxfp8Dynamic,
+    )
+
+    layer, scheme = _quark_mxfp8_linear(n, k)
+    assert _can_fuse_input_norm_mxfp8(layer)
+    scheme.process_weights_after_loading(layer)
+    mlp = object.__new__(MiniMaxM3MLP)
+    torch.nn.Module.__init__(mlp)
+    mlp.down_proj = layer
+    in_gemm = mlp._down_proj_quantizes_in_gemm(m)
+    assert in_gemm == (m <= 16 and k <= 1024)
+
+    gate_up = (torch.randn(m, 2 * k, device=DEVICE) * 4).to(torch.bfloat16)
+    act = swiglu_oai_split(gate_up, 1.702, 1.0, 7.0)
+    act_q, act_s = swiglu_oai_quantize_mxfp8(gate_up, 1.702, 1.0, 7.0, block_m=16)
+    qa = QuantizedActivation(act_q, act_s, act.dtype, act.shape, kMxfp8Dynamic)
+    got = scheme.apply_weights(layer, qa)
+    ref = scheme.apply_weights(layer, act)
+    assert got.shape == ref.shape == (m, n)
+    assert _relerr(got, ref) < 3e-2
 
 
 # --------------------------------------------------------------------------- #

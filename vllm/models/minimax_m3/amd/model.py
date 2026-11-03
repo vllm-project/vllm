@@ -37,7 +37,9 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    _FUSED_QUANT_MAX_M,
     RocmDotScaledMxfp8LinearKernel,
+    _select_fused_quant_cfg,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention.attention import set_default_quant_scales
@@ -115,6 +117,7 @@ from vllm.models.minimax_m3.amd.ops import (
     gemma_fused_add_rmsnorm,
     gemma_fused_add_rmsnorm_mxfp8,
     gemma_rmsnorm,
+    swiglu_oai_quantize_mxfp8,
     swiglu_oai_split,
 )
 from vllm.models.minimax_m3.amd.ops.sparse_pa import (
@@ -295,6 +298,11 @@ class MiniMAXGemmaRMSNorm(nn.Module):
         return gemma_fused_add_rmsnorm(x, residual, self.weight, self.variance_epsilon)
 
 
+# Rows per program of the fused swiglu + MXFP8 quant: at decode-sized M (8-192)
+# 16 is ~0.1 us faster than the MoE path's 64 on MI355X.
+_SWIGLU_QUANT_BLOCK_M = 16
+
+
 class MiniMaxM3MLP(nn.Module):
     """Dense SwiGLU-OAI MLP (used by the leading dense layers)."""
 
@@ -335,6 +343,10 @@ class MiniMaxM3MLP(nn.Module):
         self.swiglu_alpha = config.swiglu_alpha
         self.swiglu_beta = config.swiglu_beta
         self.swiglu_limit = config.swiglu_limit
+        # Set by the decoder layer: whether down_proj takes MXFP8 input, so the
+        # swiglu kernel can quantize its output (no bf16 round trip, one launch
+        # fewer than swiglu + the linear's own quant).
+        self.fuse_act_quant_mxfp8 = False
         # (source tensor, its MXFP8 quantization) handed over by the decoder
         # layer's post-attention norm; consumed by the next forward.
         self._prequant: tuple[torch.Tensor, QuantizedActivation] | None = None
@@ -347,6 +359,15 @@ class MiniMaxM3MLP(nn.Module):
         """
         self._prequant = (src, qa)
 
+    def _down_proj_quantizes_in_gemm(self, num_tokens: int) -> bool:
+        """Whether down_proj's kernel quantizes its input inside the GEMM at
+        this token count; that is already a single launch, so keep it."""
+        n, k = self.down_proj.weight.shape
+        return (
+            0 < num_tokens <= _FUSED_QUANT_MAX_M
+            and _select_fused_quant_cfg(num_tokens, n, k) is not None
+        )
+
     def forward(self, x: torch.Tensor | QuantizedActivation) -> torch.Tensor:
         pre, self._prequant = self._prequant, None
         if (
@@ -357,12 +378,30 @@ class MiniMaxM3MLP(nn.Module):
         ):
             x = pre[1]
         gate_up, _ = self.gate_up_proj(x)
-        x = swiglu_oai_split(
-            gate_up,
-            alpha=self.swiglu_alpha,
-            beta=self.swiglu_beta,
-            limit=self.swiglu_limit,
-        )
+        if self.fuse_act_quant_mxfp8 and not self._down_proj_quantizes_in_gemm(
+            gate_up.shape[0]
+        ):
+            act_q, act_scale = swiglu_oai_quantize_mxfp8(
+                gate_up,
+                alpha=self.swiglu_alpha,
+                beta=self.swiglu_beta,
+                limit=self.swiglu_limit,
+                block_m=_SWIGLU_QUANT_BLOCK_M,
+            )
+            x = QuantizedActivation(
+                act_q,
+                act_scale,
+                gate_up.dtype,
+                torch.Size((gate_up.shape[0], act_q.shape[1])),
+                kMxfp8Dynamic,
+            )
+        else:
+            x = swiglu_oai_split(
+                gate_up,
+                alpha=self.swiglu_alpha,
+                beta=self.swiglu_beta,
+                limit=self.swiglu_limit,
+            )
         x, _ = self.down_proj(x)
         return x
 
@@ -1596,6 +1635,8 @@ class MiniMaxM3DecoderLayer(nn.Module):
         self.fuse_post_norm_mxfp8 = ffn_mlp is not None and _can_fuse_input_norm_mxfp8(
             ffn_mlp.gate_up_proj
         )
+        if ffn_mlp is not None:
+            ffn_mlp.fuse_act_quant_mxfp8 = _can_fuse_input_norm_mxfp8(ffn_mlp.down_proj)
         if self.fuse_post_norm_mxfp8:
             logger.info_once(
                 "Fusing post_attention_layernorm with the FFN gate_up_proj's "
