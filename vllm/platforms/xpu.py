@@ -152,6 +152,7 @@ class XPUPlatform(Platform):
                 f"block_size={block_size}. Supported: "
                 f"{FlashAttentionBackend.get_supported_kernel_block_sizes()}."
             )
+        logger.info_once("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     @classmethod
@@ -273,7 +274,6 @@ class XPUPlatform(Platform):
             )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif selected_backend == AttentionBackendEnum.FLASH_ATTN:
-            logger.info_once("Using Flash Attention backend.")
             return cls._get_flash_attn_path(attn_selector_config.block_size)
         elif selected_backend:
             raise ValueError(
@@ -281,7 +281,6 @@ class XPUPlatform(Platform):
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
 
-        logger.info_once("Using Flash Attention backend.")
         return cls._get_flash_attn_path(attn_selector_config.block_size)
 
     @classmethod
