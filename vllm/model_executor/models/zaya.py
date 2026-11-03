@@ -594,13 +594,17 @@ class ZayaForCausalLM(nn.Module, HasInnerState, IsHybrid):
             loaded.add(name)
 
         for name, weight in weights:
-            experts = name.rsplit(".", 1)[0] + ".routed_experts"
-            if name.endswith(".mlp.experts.gate_up_proj"):
+            # Experts are stacked: `experts.{gate_up,down}_proj[.<quant param>]`
+            prefix, is_expert, suffix = name.partition(".mlp.experts.")
+            proj, _, param_name = suffix.partition(".")
+            experts = f"{prefix}.mlp.experts.routed_experts"
+            param_name = param_name or "weight"
+            if is_expert and proj == "gate_up_proj":
                 gate, up = weight.chunk(2, dim=1)
-                load_expert(f"{experts}.w13_weight", gate, "w1")
-                load_expert(f"{experts}.w13_weight", up, "w3")
-            elif name.endswith(".mlp.experts.down_proj"):
-                load_expert(f"{experts}.w2_weight", weight, "w2")
+                load_expert(f"{experts}.w13_{param_name}", gate, "w1")
+                load_expert(f"{experts}.w13_{param_name}", up, "w3")
+            elif is_expert and proj == "down_proj":
+                load_expert(f"{experts}.w2_{param_name}", weight, "w2")
             elif name != "lm_head.weight" or not self.config.tie_word_embeddings:
                 param = params[name]
                 loader = getattr(param, "weight_loader", default_weight_loader)
