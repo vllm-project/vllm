@@ -1525,6 +1525,7 @@ def test_models_fse_init(
         quantization_config=None,
         runner_type="generate",
         is_moe=True,
+        is_hybrid=False,
         use_mla=False,
         logits_processors=None,
         rswa_window=None,
