@@ -84,7 +84,11 @@ from vllm.models.deepseek_v4.nvidia.model import (
     prepare_mega_gate_routing_metadata,
 )
 from vllm.models.deepseek_v41.attention import DeepseekV4Attention
-from vllm.models.deepseek_v41.decoder_replay_layers import DecoderReplayLayers
+from vllm.models.deepseek_v41.decoder_replay_layers import (
+    DecoderReplayLayers,
+    exact_replay_rows,
+    exact_replay_stages,
+)
 from vllm.models.deepseek_v41.nvidia.flash_mla_mega_attn import (
     DeepseekV4MegaAttnAttention,
 )
@@ -376,6 +380,7 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hc_post_alpha = 2.0
         if vllm_config.kernel_config.enable_jit_warmup and current_platform.is_cuda():
             from vllm.model_executor.kernels.mhc.tilelang_kernels import (
+                _MHC_FUSED_TILELANG_KERNEL,
                 mhc_fused_post_pre_splits,
             )
             from vllm.model_executor.kernels.mhc.warmup import MHC_PRE_NORM_KERNEL
@@ -437,6 +442,10 @@ class DeepseekV4DecoderLayer(nn.Module):
                         hc_mult=self.hc_mult,
                         **variant,
                     )
+            # The fused post + pre-norm GEMM, at every M under batch invariance.
+            _MHC_FUSED_TILELANG_KERNEL.register_warmup(
+                vllm_config, hidden_size=self.hidden_size, hc_mult=self.hc_mult
+            )
         mix_hc = (2 + self.hc_mult) * self.hc_mult
         hc_dim = self.hc_mult * self.hidden_size
         self.hc_attn_fn = nn.Parameter(
@@ -864,6 +873,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # (decoder_replay_layers.py).
         self.decoder_replay_layers: DecoderReplayLayers | None = None
         self.decoder_replay_start = self.end_layer
+        self.decoder_replay_stages: list[range] = []
         cut = max(config.kv_source_layer_ids)
         if (
             cut < self.end_layer - 1
@@ -874,14 +884,36 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             # The last KV source writes every row's KV, then replays.
             self.decoder_replay_start = cut
             # The attention metadata keys the replay layers read.
-            metadata_prefixes = set()
-            for layer in islice(self.layers, cut, self.end_layer):
-                attn = typing.cast(DeepseekV4DecoderLayer, layer).attn
-                metadata_prefixes.add(attn.swa_cache_layer.prefix)
-                if attn.compressed_cache_prefix is not None:
-                    metadata_prefixes.add(attn.compressed_cache_prefix)
-                if attn.indexer is not None:
-                    metadata_prefixes.add(attn.indexer.k_cache.prefix)
+            metadata_prefixes = self._attn_metadata_prefixes(range(cut, self.end_layer))
+            # Batch invariance keeps enough rows that the last window's
+            # outputs and KV match the full forward at every replay layer.
+            kept_rows = (
+                exact_replay_rows(config.sliding_window, self.end_layer - cut - 1)
+                if envs.VLLM_BATCH_INVARIANT
+                else config.sliding_window
+            )
+            # Exact replay in stages: each stage runs only the trailing rows its
+            # layers need, fewer the higher it sits. Stage boundaries carry the
+            # layer state as rows, so a MoE finalize deferred into the next
+            # layer's mHC all-reduce rules them out.
+            stage_rows = stage_prefixes = None
+            layers_per_stage = envs.VLLM_BI_REPLAY_STAGE_LAYERS
+            if envs.VLLM_BATCH_INVARIANT and layers_per_stage > 0:
+                if self.fuse_mhc_all_reduce:
+                    logger.warning_once(
+                        "VLLM_BI_REPLAY_STAGE_LAYERS is ignored: the MoE finalize "
+                        "is deferred into the next layer's mHC all-reduce."
+                    )
+                else:
+                    stages = exact_replay_stages(
+                        config.sliding_window, cut, self.end_layer, layers_per_stage
+                    )
+                    self.decoder_replay_stages = [range(a, b) for a, b, _ in stages]
+                    stage_rows = [rows for *_, rows in stages]
+                    stage_prefixes = [
+                        self._attn_metadata_prefixes(r)
+                        for r in self.decoder_replay_stages
+                    ]
             self.decoder_replay_layers = DecoderReplayLayers(
                 config.sliding_window,
                 self._run_replay_layers,
@@ -889,7 +921,21 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 metadata_prefixes,
                 self.layers[cut].attn.swa_cache_layer.prefix,
                 lambda: any(i < cut for i in self.aux_hidden_state_layers),
+                kept_rows=kept_rows,
+                stage_rows=stage_rows,
+                run_stage=self._run_replay_stage if stage_rows else None,
+                stage_metadata_prefixes=stage_prefixes,
+                select_shared_rows=(
+                    self._select_shared_replay_rows if stage_rows else None
+                ),
             )
+            if stage_rows:
+                logger.info_once(
+                    "Exact SWA replay in %d stages of layers %s keeping %s rows.",
+                    len(stage_rows),
+                    str([(r.start, r.stop - 1) for r in self.decoder_replay_stages]),
+                    str(stage_rows),
+                )
             logger.info_once(
                 "Decoder SWA bounded replay: in eager prefill steps, layer %d "
                 "writes its KV for every token, and the rest of it and layers "
@@ -897,7 +943,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 cut,
                 cut + 1,
                 self.end_layer - 1,
-                config.sliding_window,
+                kept_rows,
             )
 
         # The n-gram hash needs a slot-keyed rolling store of compressed ids
@@ -1296,6 +1342,73 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                 if layer_id in aux_hidden_by_layer
             ),
         )
+
+    def _select_shared_replay_rows(self, select: torch.Tensor) -> None:
+        """Line the indexer top-k and candidate blocks a later layer reads up
+        with the next stage's rows."""
+        for buffer in (self.topk_indices_buffer, self.candidate_block_buffer):
+            if buffer is not None:
+                buffer[: select.shape[0]] = buffer.index_select(0, select)
+
+    def _run_replay_stage(
+        self,
+        stage: int,
+        hidden_states: torch.Tensor | MoEOutput,
+        positions: torch.Tensor,
+        input_ids: torch.Tensor | None,
+        pre_mix: torch.Tensor,
+        post_mix: torch.Tensor,
+        res_mix: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        """Replay stage ``stage`` on the given rows: the last stage returns what
+        ``_run_replay_layers`` does, the others their output and mixes and
+        residual for the next stage; both then the aux hidden states they
+        capture, in layer order."""
+        aux_layers = list(self.aux_hidden_state_layers)
+        assert aux_layers == sorted(aux_layers), "stages return aux in layer order"
+        layer_ids = self.decoder_replay_stages[stage]
+        aux_hidden_by_layer: dict[int, torch.Tensor] = {}
+        hidden_states, residual, post_mix, res_mix, pre_mix = self._run_layers(
+            layer_ids,
+            hidden_states,
+            positions,
+            input_ids,
+            pre_mix,
+            post_mix,
+            res_mix,
+            residual,
+            aux_hidden_by_layer,
+        )
+        if layer_ids.stop == self.end_layer:
+            hidden_states = self._collapse(
+                hidden_states,
+                residual,
+                post_mix,
+                res_mix,
+                aux_hidden_by_layer,
+                positions.shape[0],
+            )
+            carried: tuple[torch.Tensor, ...] = (hidden_states, pre_mix)
+        else:
+            assert isinstance(hidden_states, torch.Tensor)
+            carried = (hidden_states, pre_mix, post_mix, res_mix, residual)
+        return (
+            *carried,
+            *(aux_hidden_by_layer[i] for i in aux_layers if i in aux_hidden_by_layer),
+        )
+
+    def _attn_metadata_prefixes(self, layer_ids: range) -> set[str]:
+        """The attention metadata keys layers ``layer_ids`` read."""
+        prefixes = set()
+        for layer in islice(self.layers, layer_ids.start, layer_ids.stop):
+            attn = typing.cast(DeepseekV4DecoderLayer, layer).attn
+            prefixes.add(attn.swa_cache_layer.prefix)
+            if attn.compressed_cache_prefix is not None:
+                prefixes.add(attn.compressed_cache_prefix)
+            if attn.indexer is not None:
+                prefixes.add(attn.indexer.k_cache.prefix)
+        return prefixes
 
     def _decoder_replay_supported(self, vllm_config: VllmConfig, cut: int) -> bool:
         """Whether this rank may replay from layer ``cut`` on; warns when not."""
