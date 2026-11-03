@@ -46,6 +46,16 @@ You can monitor the number of preemption requests through Prometheus metrics exp
 
 In vLLM V1, the default preemption mode is `RECOMPUTE` rather than `SWAP`, as recomputation has lower overhead in the V1 architecture.
 
+### Preemption for Higher-Priority Requests
+
+With `--scheduling-policy priority`, a lower `priority` value is handled first, and a waiting request does not preempt running requests by default: a high-priority request that finds the KV cache full waits until lower-priority requests finish, or until one of them is preempted because a running request cannot grow.
+
+`--max-priority-preemptions-per-step N` lets the highest-priority waiting request preempt up to `N` running requests of a strictly lower priority in a step when the KV cache lacks room for its whole sequence, the prompt and any output so far. It is off by default (`0`) and requires `--scheduling-policy priority`. Requests are preempted in the scheduler's usual order, the lowest priority and then the latest arrival, and only as many as make room: the count credits the request's prefix cache hits and allows for the blocks running requests take until the preempted ones' blocks are freed. If `N` preemptions would not make room, none is made. A preempted request recomputes its KV unless prefix caching or a KV offloading connector keeps it, so a small `N`, such as 2, bounds what one step can cost. In a step that schedules a higher-priority prefill, a lower-priority request that holds no KV blocks, preempted or new, is admitted only if its whole sequence fits beside the blocks in-flight prefills still need; a KV load in flight keeps nothing out, and room is made for it again when it is done, if needed. With the option on, vLLM exports the Prometheus counter `vllm:num_priority_preemptions`, which counts these preemptions; `vllm:num_preemptions` counts them too.
+
+```bash
+vllm serve <model> --scheduling-policy priority --max-priority-preemptions-per-step 2
+```
+
 ## Chunked Prefill
 
 Chunked prefill allows vLLM to process large prefills in smaller chunks and batch them together with decode requests. This feature helps improve both throughput and latency by better balancing compute-bound (prefill) and memory-bound (decode) operations.

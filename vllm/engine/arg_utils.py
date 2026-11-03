@@ -722,6 +722,9 @@ class EngineArgs:
     )
 
     watermark: float = SchedulerConfig.watermark
+    max_priority_preemptions_per_step: int = (
+        SchedulerConfig.max_priority_preemptions_per_step
+    )
 
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
@@ -1818,6 +1821,10 @@ class EngineArgs:
         )
         scheduler_group.add_argument("--watermark", **scheduler_kwargs["watermark"])
         scheduler_group.add_argument(
+            "--max-priority-preemptions-per-step",
+            **scheduler_kwargs["max_priority_preemptions_per_step"],
+        )
+        scheduler_group.add_argument(
             "--prefill-schedule-interval",
             **scheduler_kwargs["prefill_schedule_interval"],
         )
@@ -2705,6 +2712,7 @@ class EngineArgs:
             ),
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
+            max_priority_preemptions_per_step=self.max_priority_preemptions_per_step,
             prefill_schedule_interval=self.prefill_schedule_interval,
             cache_aware_admission_window=self.cache_aware_admission_window,
             cache_aware_admission_threshold=self.cache_aware_admission_threshold,
