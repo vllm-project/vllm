@@ -469,15 +469,16 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
     simulates spatial merge by averaging groups of m^2 patches.
     """
 
-    def __init__(self):
+    def __init__(self, modalities: list[str] | None = None):
         super().__init__()
+        self.modalities = ["image"] if modalities is None else modalities
         self.proj = torch.nn.Linear(_FLAT, _HIDDEN)
         self.spatial_merge_size = _SPATIAL_MERGE
         self.out_hidden_size = _HIDDEN
 
     def get_encoder_cudagraph_config(self) -> EncoderCudaGraphConfig:
         return EncoderCudaGraphConfig(
-            modalities=["image"],
+            modalities=self.modalities,
             buffer_keys=["dummy_buf"],
             out_hidden_size=_HIDDEN,
         )
@@ -601,6 +602,54 @@ class SimpleMockViTModel(torch.nn.Module, SupportsEncoderCudaGraph):
         out = self.proj(pixel_values)
         n_out = out.shape[0] // m2
         return out[: n_out * m2].view(n_out, m2, _HIDDEN).mean(dim=1)
+
+
+@pytest.fixture
+def encoder_manager_config(tmp_path):
+    from transformers import Qwen3VLConfig
+
+    from vllm.config import CompilationConfig, DeviceConfig, ModelConfig, VllmConfig
+
+    Qwen3VLConfig(architectures=["Qwen3VLForConditionalGeneration"]).save_pretrained(
+        tmp_path
+    )
+    return VllmConfig(
+        model_config=ModelConfig(
+            model=str(tmp_path), max_model_len=128, enforce_eager=True
+        ),
+        device_config=DeviceConfig("cpu"),
+        compilation_config=CompilationConfig(
+            encoder_cudagraph_token_budgets=_BUDGETS,
+            encoder_cudagraph_max_vision_items_per_batch=_MAX_BATCH,
+        ),
+    )
+
+
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("modalities,expected_graphs", [([], 0), (["image"], 2)])
+def test_graph_count_respects_modalities(
+    encoder_manager_config, modalities, expected_graphs
+):
+    manager = EncoderCudaGraphManager(
+        encoder_manager_config,
+        torch.device("cpu"),
+        torch.float32,
+        SimpleMockViTModel(modalities=modalities),
+    )
+    assert manager.get_num_graphs_to_capture() == expected_graphs
+
+
+@pytest.mark.skip_global_cleanup
+def test_empty_modalities_leave_capture_inactive(encoder_manager_config):
+    manager = EncoderCudaGraphManager(
+        encoder_manager_config,
+        torch.device("cpu"),
+        torch.float32,
+        SimpleMockViTModel(modalities=[]),
+    )
+    manager.capture(graph_pool=(0, 0))
+    assert not manager.is_captured()
+    assert manager.budget_graphs == {}
 
 
 def _make_manager_for_gpu(
