@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """The fused vocab-parallel logits gather equals a last-dim all-gather, the
-vocab slice and the dtype cast, bitwise, and LogitsProcessor uses it only
-where it reproduces the unfused path. The model runner asks it for FP32 only
-for a model that opts in with SupportsFP32LogitsGather, and only when the
-sampler or rejection sampler wants FP32 logits for the step."""
+vocab slice and the dtype cast, bitwise. LogitsProcessor uses it only when the
+forward context carries a gather dtype, which the model runner sets only for a
+model that opts in with SupportsFP32LogitsGather: FP32 when the step's
+consumer (the sampler, or the rejection sampler on a step with drafts) wants
+FP32 logits, else the head's dtype."""
 
+import dataclasses
+from contextlib import AbstractContextManager, nullcontext
 from types import SimpleNamespace
 
 import numpy as np
@@ -14,12 +17,18 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn as nn
 
-from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.config import (
+    ParallelConfig,
+    SpeculativeConfig,
+    VllmConfig,
+    set_current_vllm_config,
+)
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.models.interfaces import (
     SupportsFP32LogitsGather,
@@ -81,8 +90,8 @@ def _worker(local_rank: int, world_size: int, port: int):
                 logits, world_size * shard_size + 1, torch.float32
             )
 
-        _check_logits_processor(world_size, device)
-        _check_model_opt_in(world_size, device)
+        _check_logits_processor(config, world_size, device)
+        _check_model_opt_in(config, world_size, device)
 
 
 class UnfusedLogitsProcessor(LogitsProcessor):
@@ -108,20 +117,11 @@ class OptedInModel(PassthroughModel, SupportsFP32LogitsGather):
     pass
 
 
-class SoftCapModel(PassthroughModel):
-    """Post-processes the processor's output, as HunYuan-V4 does."""
-
-    def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        return torch.tanh(super().compute_logits(hidden_states) / 30.0) * 30.0
-
-
-class OptedInSoftCapModel(SoftCapModel, SupportsFP32LogitsGather):
-    pass
-
-
 def _make_lm_head(world_size: int, device: torch.device):
     from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead
 
+    # The vocab is padded, so the unfused gather returns a non-contiguous
+    # slice and the fused one a contiguous tensor: that tells them apart.
     vocab_size, hidden_size = 1000 * world_size - 37, 64
     with torch.device(device):
         lm_head = ParallelLMHead(vocab_size, hidden_size, params_dtype=torch.bfloat16)
@@ -132,22 +132,36 @@ def _make_lm_head(world_size: int, device: torch.device):
     return vocab_size, lm_head, hidden_states
 
 
-def _check_logits_processor(world_size: int, device: torch.device):
+_NO_CONTEXT = object()
+
+
+def _gather_context(config: VllmConfig, dtype) -> AbstractContextManager:
+    if dtype is _NO_CONTEXT:
+        return nullcontext()
+    return set_forward_context(None, config, logits_gather_dtype=dtype)
+
+
+def _check_logits_processor(config: VllmConfig, world_size: int, device: torch.device):
+    """The forward context's gather dtype is honoured; without one (or with
+    None) the processor takes the unfused path, in the head's dtype."""
     vocab_size, lm_head, hidden_states = _make_lm_head(world_size, device)
     for scale, soft_cap in ((1.0, None), (0.5, None), (1.0, 30.0)):
-        for gather_out_dtype in (None, torch.float32):
+        for requested in (_NO_CONTEXT, None, torch.bfloat16, torch.float32):
             processors = [
                 cls(vocab_size, scale=scale, soft_cap=soft_cap)
                 for cls in (LogitsProcessor, UnfusedLogitsProcessor)
             ]
-            for processor in processors:
-                processor.gather_out_dtype = gather_out_dtype
-            fused, unfused = (p(lm_head, hidden_states) for p in processors)
+            with _gather_context(config, requested):
+                out, unfused = (p(lm_head, hidden_states) for p in processors)
             assert unfused.dtype == torch.bfloat16
             # FP32 only where nothing runs on the logits after the gather.
-            upcast = gather_out_dtype is not None and scale == 1.0 and not soft_cap
-            assert fused.dtype == (torch.float32 if upcast else torch.bfloat16)
-            assert torch.equal(fused, unfused.to(fused.dtype))
+            upcast = requested == torch.float32 and scale == 1.0 and not soft_cap
+            assert out.dtype == (torch.float32 if upcast else torch.bfloat16)
+            assert torch.equal(out, unfused.to(out.dtype))
+            if soft_cap is None:
+                fused = requested is not _NO_CONTEXT and requested is not None
+                assert out.is_contiguous() == fused
+                assert not unfused.is_contiguous()
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
@@ -161,78 +175,81 @@ def test_vocab_parallel_logits_gather(world_size):
         cleanup_dist_env_and_memory()
 
 
-def _check_model_opt_in(world_size: int, device: torch.device):
-    """The runner's target logits: FP32 only for a model that opts in and only
-    when the logits' consumer (the rejection sampler on a step with drafts,
-    the sampler otherwise) wants FP32; bitwise equal to main (head-dtype
-    gather, then the sampler's FP32 copy where it makes one) in every case."""
-    from vllm.v1.worker.gpu.model_runner import (
-        GPUModelRunner,
-        fp32_gather_logits_processors,
-    )
+def _check_model_opt_in(config: VllmConfig, world_size: int, device: torch.device):
+    """The runner's target logits: as on main for a model that does not opt
+    in; for one that does, the fused gather, in FP32 exactly when the step's
+    consumer wants FP32 (which may then process them in place)."""
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+    from vllm.v1.worker.gpu.sample.sampler import Sampler
+    from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+    from vllm.v1.worker.gpu.states import RequestState
+
+    class Bf16VerifyRejectionSampler(RejectionSampler):
+        # A verify path that reads head-dtype logits directly.
+        def wants_fp32_logits(self, idx_mapping_np: np.ndarray) -> bool:
+            return False
 
     vocab_size, lm_head, hidden_states = _make_lm_head(world_size, device)
-    for model_cls in (PassthroughModel, SoftCapModel):
-        # main: no FP32 request reaches the gather.
-        main = model_cls(lm_head, UnfusedLogitsProcessor(vocab_size)).compute_logits(
-            hidden_states
-        )
-        assert main.dtype == torch.bfloat16
-        opted_in_cls = {
-            PassthroughModel: OptedInModel,
-            SoftCapModel: OptedInSoftCapModel,
-        }[model_cls]
-        for cls in (model_cls, opted_in_cls):
-            model = cls(lm_head, LogitsProcessor(vocab_size))
-            processors = fp32_gather_logits_processors(model)
-            opted_in = cls is opted_in_cls
-            assert processors == ([model.logits_processor] if opted_in else [])
-            # Which consumer is asked: the sampler without drafts, the
-            # rejection sampler with them. Each says whether it wants FP32
-            # (a verify path that reads bf16 logits directly says no).
-            for num_draft_tokens, sampler_wants, rejection_wants in (
-                (0, True, False),
-                (0, False, True),
-                (7, False, True),
-                (7, True, False),
-            ):
-                consumer_wants = rejection_wants if num_draft_tokens else sampler_wants
-                runner = SimpleNamespace(
-                    sampler=SimpleNamespace(
-                        wants_fp32_logits=lambda _, w=sampler_wants: w
-                    ),
-                    rejection_sampler=SimpleNamespace(
-                        wants_fp32_logits=lambda _, w=rejection_wants: w
-                    ),
-                    fp32_logits_processors=processors,
-                    vocab_size=vocab_size,
-                    model_state=SimpleNamespace(
-                        compute_sample_logits=model.compute_logits
-                    ),
-                )
-                input_batch = SimpleNamespace(
-                    idx_mapping_np=np.zeros(1, dtype=np.int32),
+    main = PassthroughModel(lm_head, UnfusedLogitsProcessor(vocab_size))
+    main_logits = main.compute_logits(hidden_states)
+
+    req_states = RequestState(
+        max_num_reqs=2,
+        max_model_len=64,
+        max_num_batched_tokens=16,
+        num_speculative_steps=1,
+        vocab_size=vocab_size,
+        device=device,
+    )
+    sampler = Sampler(
+        vllm_config=config,
+        max_num_reqs=2,
+        vocab_size=vocab_size,
+        device=device,
+        req_states=req_states,
+        logprobs_mode="raw_logprobs",
+    )
+    # Request 0 is greedy (no processing, no FP32 copy); request 1 is not.
+    sampler.add_request(0, SamplingParams(temperature=0.0))
+    sampler.add_request(1, SamplingParams(temperature=2.0))
+    sampler.apply_staged_writes()
+    spec_config = SpeculativeConfig(method="ngram", num_speculative_tokens=1)
+    batch = InputBatch.make_dummy(1, 1, InputBuffers(2, 2, device))
+
+    for model_cls in (PassthroughModel, OptedInModel):
+        model = model_cls(lm_head, LogitsProcessor(vocab_size))
+        opted_in = model_cls is OptedInModel
+        for rejection_cls in (RejectionSampler, Bf16VerifyRejectionSampler):
+            # A real runner needs a model config and weights; _compute_logits
+            # reads only these attributes.
+            runner = GPUModelRunner.__new__(GPUModelRunner)
+            runner.vllm_config = config
+            runner.vocab_size = vocab_size
+            runner.sampler = sampler
+            runner.rejection_sampler = rejection_cls(sampler, spec_config, device)
+            runner.fused_logits_gather = supports_fp32_logits_gather(model)
+            runner.model_state = SimpleNamespace(
+                compute_sample_logits=model.compute_logits
+            )
+            for req_idx, num_draft_tokens in ((0, 0), (1, 0), (1, 1)):
+                input_batch = dataclasses.replace(
+                    batch,
+                    idx_mapping_np=np.array([req_idx]),
                     num_draft_tokens=num_draft_tokens,
                 )
-                logits = GPUModelRunner._compute_logits(
-                    runner,  # type: ignore[arg-type]
-                    hidden_states,
-                    input_batch,  # type: ignore[arg-type]
+                logits, writable = runner._compute_logits(hidden_states, input_batch)
+                consumer_wants = req_idx == 1 and not (
+                    num_draft_tokens and rejection_cls is Bf16VerifyRejectionSampler
                 )
-                assert model.logits_processor.gather_out_dtype is None
                 fp32 = opted_in and consumer_wants
+                assert writable == fp32
                 assert logits.dtype == (torch.float32 if fp32 else torch.bfloat16)
-                if not fp32:
-                    # Head dtype: the same tensor as main, for the consumer
-                    # to copy or read as on main.
-                    assert torch.equal(logits, main)
-                elif model_cls is PassthroughModel:
-                    # FP32: exactly the sampler's FP32 copy of main's logits.
-                    assert torch.equal(logits, main.float())
-                else:
-                    # Why post-processing models must not opt in: the soft
-                    # cap then runs on FP32 logits and differs from main.
-                    assert not torch.equal(logits, main.float())
+                # Bitwise main's logits (or the sampler's FP32 copy of them).
+                assert torch.equal(logits, main_logits.to(logits.dtype))
+                # Fused only for the model that opts in.
+                assert logits.is_contiguous() == opted_in
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="needs CUDA")
