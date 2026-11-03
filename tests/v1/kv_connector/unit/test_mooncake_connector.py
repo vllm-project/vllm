@@ -55,7 +55,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
     WIRE_VERSION,
     TransferEngineKind,
 )

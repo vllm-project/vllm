@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
     MemoryRegion,
     RangeRequest,
     TransferBackend,

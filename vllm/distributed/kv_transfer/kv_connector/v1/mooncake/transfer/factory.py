@@ -4,7 +4,7 @@ import os
 from collections.abc import Callable, Mapping
 from typing import Any
 
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.engine import (
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.transfer.backend import (
     TransferBackend,
     TransferEngineKind,
 )
