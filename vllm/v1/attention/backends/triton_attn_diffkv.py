@@ -15,7 +15,6 @@ from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.utils.math_utils import next_power_of_2
-from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import AttentionLayer, AttentionType
 from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionBackend,
@@ -29,7 +28,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
 )
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -70,10 +69,15 @@ class TritonAttentionDiffKVBackend(TritonAttentionBackend):
     # V head dim — set per layer via ``set_head_size_v`` before instantiation.
     head_size_v: int = 128
 
-    # No FP8 / int8 KV cache for the DiffKV path yet; require fp16/bf16/fp32.
+    @classmethod
+    def supports_head_size_v(cls, head_size: int, head_size_v: int) -> bool:
+        return True
+
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
         "bfloat16",
+        "fp8",
+        "fp8_e4m3",
     ]
 
     @classmethod
@@ -110,15 +114,14 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if (
+            is_quantized_kv_cache(self.kv_cache_dtype)
+            and self.kv_cache_dtype
+            not in TritonAttentionDiffKVBackend.supported_kv_cache_dtypes
+        ):
             raise NotImplementedError(
-                "TritonAttentionDiffKVBackend does not yet support quantized "
+                "TritonAttentionDiffKVBackend supports only fp8/fp8_e4m3 quantized "
                 f"KV cache (got kv_cache_dtype={self.kv_cache_dtype!r})."
-            )
-        if self._is_per_token_head_quant:
-            raise NotImplementedError(
-                "TritonAttentionDiffKVBackend does not support per-token-head "
-                "quantization."
             )
         if self.chunk_lookback > -1:
             raise NotImplementedError(
@@ -181,16 +184,15 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         if attn_metadata is None:
             return output.fill_(0)
 
-        assert attn_metadata.use_cascade is False, (
-            "Cascade attention not supported for TritonAttentionDiffKVImpl"
-        )
-
         num_actual_tokens = attn_metadata.num_actual_tokens
         head_size_qk = self.head_size
         head_size_v = TritonAttentionDiffKVBackend.head_size_v
 
         # Triton DiffKV kernels consume (B, N, H, D) cache views.
         kv_cache = kv_cache.transpose(1, 2)
+        quantized = is_quantized_kv_cache(self.kv_cache_dtype)
+        if quantized:
+            kv_cache = kv_cache.view(self.fp8_dtype)
         key_cache = kv_cache[..., :head_size_qk]
         value_cache = kv_cache[..., head_size_qk : head_size_qk + head_size_v]
 
@@ -202,6 +204,11 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
             cu_seqlens_q=attn_metadata.query_start_loc,
             seqused_k=attn_metadata.seq_lens,
             softmax_scale=self.scale,
+            q_descale=(
+                layer._q_scale if quantized and query.dtype == self.fp8_dtype else None
+            ),
+            k_descale=layer._k_scale if quantized else None,
+            v_descale=layer._v_scale if quantized else None,
             causal=True,
             alibi_slopes=self.alibi_slopes,
             use_alibi_sqrt=self.use_alibi_sqrt,

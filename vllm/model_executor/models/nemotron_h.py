@@ -23,6 +23,7 @@ from itertools import islice
 
 import torch
 from torch import nn
+from transformers import NemotronHConfig
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -73,7 +74,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
-    SupportsMambaPrefixCaching,
     SupportsPP,
     SupportsQuant,
     SupportsReplaySSM,
@@ -87,7 +87,6 @@ from vllm.model_executor.models.utils import (
     sequence_parallel_chunk,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.configs.nemotron_h import NemotronHConfig
 
 
 class NemotronHMLP(nn.Module):
@@ -235,7 +234,7 @@ class NemotronHMoE(nn.Module):
             intermediate_size=config.moe_intermediate_size,
             renormalize=config.norm_topk_prob,
             quant_config=quant_config,
-            ckpt_names=("up_proj", "down_proj", ""),
+            ckpt_names=("up_proj", "down_proj", None),
             use_grouped_topk=True,
             num_expert_group=config.n_group,
             topk_group=config.topk_group,
@@ -585,6 +584,8 @@ class NemotronHModel(nn.Module, EagleModelMixin):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         self.has_moe = "E" in config.hybrid_override_pattern
@@ -707,7 +708,7 @@ class NemotronHModel(nn.Module, EagleModelMixin):
                 self,
                 ckpt_gate_proj_name="up_proj",
                 ckpt_down_proj_name="down_proj",
-                ckpt_up_proj_name="",
+                ckpt_up_proj_name=None,
                 num_experts=self._get_max_n_routed_experts(),
                 num_redundant_experts=getattr(self, "num_redundant_experts", 0),
             )
@@ -725,7 +726,6 @@ class NemotronHForCausalLM(
     IsHybrid,
     SupportsQuant,
     MixtureOfExperts,
-    SupportsMambaPrefixCaching,
     SupportsReplaySSM,
 ):
     # Relevant only if self.has_moe is True

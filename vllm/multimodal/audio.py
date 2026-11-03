@@ -146,7 +146,7 @@ def normalize_audio(
 
     # No reduction needed if already at target
     if num_channels == spec.target_channels:
-        return audio
+        return audio[0] if num_channels == 1 else audio
 
     # Cannot expand channels
     if num_channels < spec.target_channels:

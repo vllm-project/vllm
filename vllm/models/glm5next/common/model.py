@@ -8,6 +8,7 @@ import torch
 from torch import nn
 from transformers import Glm5NextTextConfig
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import (
     get_ep_group,
@@ -22,6 +23,9 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEFactory,
     GateLinear,
     fused_moe_make_expert_params_mapping,
+)
+from vllm.model_executor.layers.fused_moe.utils import (
+    resolve_layer_fused_shared_expert,
 )
 from vllm.model_executor.layers.fusion.mm_input_norm import build_mm_input_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -62,14 +66,18 @@ from vllm.model_executor.models.glm4_1v import (
     Glm4vForConditionalGeneration,
 )
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle3,
     SupportsPP,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    extract_layer_index,
+    get_fused_shared_expert_layers,
     init_vllm_registered_model,
     is_pp_missing_parameter,
     make_layers,
@@ -84,6 +92,7 @@ from vllm.models.common.ops.sequence_parallel import (
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 
 from .attention import Glm5NextMLAAttention
 from .kda import Glm5NextLinearAttention
@@ -94,6 +103,16 @@ from .multimodal import (
 )
 
 logger = init_logger(__name__)
+
+
+def get_sparse_topk_buffer_width(config: Glm5NextTextConfig) -> int:
+    """Reserve the incomplete pool tail and align sparse MLA tiles."""
+    topk = config.index_topk
+    assert topk is not None
+    kpool = config.index_kpool
+    assert kpool is not None
+    return round_up(topk + kpool - 1, 128)
+
 
 _MHC_TAU = 0.05
 """mHC routing temperature. A GLM-5.3-Flash trained value that neither the
@@ -258,7 +277,12 @@ class Glm5NextMoE(nn.Module):
         )
 
         swiglu_limit = config.swiglu_limit
-        if config.n_shared_experts is None:
+        self.is_fused_shared_expert_enabled = False
+        if config.n_shared_experts is not None:
+            self.is_fused_shared_expert_enabled = resolve_layer_fused_shared_expert(
+                quant_config, prefix
+            ) and _fused_shared_experts_tuned(parallel_config)
+        if config.n_shared_experts is None or self.is_fused_shared_expert_enabled:
             self.shared_experts = None
         else:
             intermediate_size = config.moe_intermediate_size * config.n_shared_experts
@@ -294,7 +318,11 @@ class Glm5NextMoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            n_shared_experts=None,
+            n_shared_experts=config.n_shared_experts
+            if self.is_fused_shared_expert_enabled
+            else None,
+            fuse_shared_experts=self.is_fused_shared_expert_enabled,
+            shared_expert_prefix=f"{prefix}.shared_experts",
             router_logits_dtype=self.gate.out_dtype,
             swiglu_limit=swiglu_limit,
         )
@@ -672,7 +700,7 @@ class Glm5NextDecoderLayer(nn.Module):
         )
 
 
-class Glm5NextModel(nn.Module):
+class Glm5NextModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -685,20 +713,9 @@ class Glm5NextModel(nn.Module):
 
         self.is_v32 = config.index_topk is not None
         if self.is_v32:
-            topk_tokens = config.index_topk
-            assert topk_tokens is not None
-            # Reserve room for the incomplete pool tail.
-            kpool = config.index_kpool
-            assert kpool is not None
-            buffer_width = topk_tokens + (kpool - 1 if kpool > 1 else 0)
-            # Sparse MLA tiles top-k in 128 columns; padded slots remain masked.
-            sparse_topk_block_n = 128
-            buffer_width = (
-                (buffer_width + sparse_topk_block_n - 1) // sparse_topk_block_n
-            ) * sparse_topk_block_n
             topk_indices_buffer = torch.empty(
                 vllm_config.scheduler_config.max_num_batched_tokens,
-                buffer_width,
+                get_sparse_topk_buffer_width(config),
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -730,9 +747,15 @@ class Glm5NextModel(nn.Module):
             get_layer,
             prefix=f"{prefix}.layers",
         )
+        self._aux_post_op = MHCPostOp()
         # The active slice is fixed after construction; cache it so forward
         # doesn't rebuild the slice (a fresh list) every step.
         self._active_layers = self.layers[self.start_layer : self.end_layer]
+        self.fused_shared_expert_layers = get_fused_shared_expert_layers(
+            self,
+            Glm5NextMoE,
+            enable_eplb=vllm_config.parallel_config.enable_eplb,
+        )
 
         if get_pp_group().is_last_rank:
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
@@ -750,6 +773,26 @@ class Glm5NextModel(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def _aux_hidden_state(
+        self,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+        post: torch.Tensor | None,
+        comb: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """Completed residual stream entering a layer, as one hidden vector.
+
+        mHC layers defer their final ``hc_post`` into the next layer's fused
+        pre-op, so ``hidden_states`` holds the raw layer output while the
+        widened stream is completed here and contracted back to
+        ``hidden_size``. Non-mHC layers already return the summed stream.
+        """
+        if post is None:
+            return hidden_states
+        assert residual is not None and comb is not None
+        completed = self._aux_post_op(hidden_states, residual, post, comb)
+        return hc_contract(completed, self.config.hc_mult)
 
     def forward(
         self,
@@ -780,7 +823,15 @@ class Glm5NextModel(nn.Module):
         if self.is_sequence_parallel:
             hidden_states = sp_shard(hidden_states)
 
-        for layer in self._active_layers:
+        aux_hidden_states: list[torch.Tensor] = []
+        for idx, layer in enumerate(self._active_layers, start=self.start_layer):
+            if idx in self.aux_hidden_state_layers:
+                aux_hidden_state = self._aux_hidden_state(
+                    hidden_states, residual, post, comb
+                )
+                if self.is_sequence_parallel:
+                    aux_hidden_state = sp_all_gather(aux_hidden_state)[:full_num_tokens]
+                aux_hidden_states.append(aux_hidden_state)
             hidden_states, residual, post, comb = layer(
                 positions, hidden_states, residual, post, comb
             )
@@ -795,10 +846,18 @@ class Glm5NextModel(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
+        if self.end_layer in self.aux_hidden_state_layers:
+            final_aux = self._aux_hidden_state(hidden_states, residual, post, comb)
+            if self.is_sequence_parallel:
+                final_aux = sp_all_gather(final_aux)[:full_num_tokens]
+            aux_hidden_states.append(final_aux)
+
         if self.is_sequence_parallel:
             hidden_states = sp_all_gather(hidden_states)[:full_num_tokens]
 
         hidden_states = self.norm(hidden_states)
+        if aux_hidden_states:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -819,6 +878,10 @@ class Glm5NextModel(nn.Module):
             (".in_proj_qkvbfg_a", ".b_proj", 3),
             (".in_proj_qkvbfg_a", ".f_a_proj", 4),
             (".in_proj_qkvbfg_a", ".g_a_proj", 5),
+            # KDA: fuse the q, k, v short convs into one conv1d
+            (".conv1d", ".q_conv1d", 0),
+            (".conv1d", ".k_conv1d", 1),
+            (".conv1d", ".v_conv1d", 2),
         ]
         if _is_moe(self.config):
             # Params for weights, fp8 weight scales, fp8 activation scales
@@ -834,12 +897,17 @@ class Glm5NextModel(nn.Module):
                 ),
                 0,
             )
+            num_fused_shared = _num_fused_shared_experts(
+                self.config.n_shared_experts,
+                bool(self.fused_shared_expert_layers),
+            )
             expert_params_mapping = fused_moe_make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
                 ckpt_down_proj_name="down_proj",
                 ckpt_up_proj_name="up_proj",
-                num_experts=self.config.n_routed_experts,
+                # NOTE: global despite per-layer FSE; non-fused layers skip the extras.
+                num_experts=self.config.n_routed_experts + num_fused_shared,
                 num_redundant_experts=num_redundant_experts,
             )
         else:
@@ -868,6 +936,13 @@ class Glm5NextModel(nn.Module):
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
                 continue
+            # Only parse the layer index when FSE is enabled.
+            if (
+                "mlp.shared_experts." in name
+                and bool(rocm_aiter_ops.is_fusion_moe_shared_experts_enabled())
+                and extract_layer_index(name) in self.fused_shared_expert_layers
+            ):
+                name = _fused_shared_expert_name(name, self.config.n_routed_experts)
 
             # Handle FP8 indexer WK: dequantize to BF16 for fusion with
             # weights_proj into wk_weights_proj.
@@ -985,7 +1060,7 @@ class Glm5NextModel(nn.Module):
 
 
 class Glm5NextForCausalLM(
-    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid
+    nn.Module, HasInnerState, SupportsPP, MixtureOfExperts, IsHybrid, SupportsEagle3
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -1032,7 +1107,9 @@ class Glm5NextForCausalLM(
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.kda_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
@@ -1081,7 +1158,11 @@ class Glm5NextForCausalLM(
     dummy_inputs=Glm4vDummyInputsBuilder,
 )
 class Glm5NextForConditionalGeneration(
-    Glm4vForConditionalGeneration, HasInnerState, IsHybrid, MixtureOfExperts
+    Glm4vForConditionalGeneration,
+    HasInnerState,
+    IsHybrid,
+    MixtureOfExperts,
+    SupportsEagle3,
 ):
     # The text model (KDA + dense-MLA + MoE) is a hybrid mamba model. The
     # multimodal wrapper must declare the same interfaces so vLLM treats it as
@@ -1226,6 +1307,65 @@ def get_spec_layer_idx_from_weight_name(
             ) or weight_name.startswith(f"layers.{layer_idx + i}."):
                 return layer_idx + i
     return None
+
+
+def _fused_shared_experts_tuned(parallel_config: ParallelConfig) -> bool:
+    """AITER has fused-MoE configs tuned for the fused shared-expert shape
+    (one more expert and one more top-k slot than the routed MoE) only on
+    gfx950, with every expert on each rank and its weights split by TP4 or
+    TP8. Data, prefill context and expert parallelism change that split, so
+    any other GPU or parallel layout would run untuned fallback kernels."""
+    from vllm.platforms.rocm import on_gfx950
+
+    reasons: list[str] = []
+    if not on_gfx950():
+        reasons.append("the GPU is not gfx950")
+    if parallel_config.tensor_parallel_size not in (4, 8):
+        reasons.append(
+            f"tensor_parallel_size is {parallel_config.tensor_parallel_size}"
+        )
+    if parallel_config.data_parallel_size != 1:
+        reasons.append(f"data_parallel_size is {parallel_config.data_parallel_size}")
+    if parallel_config.prefill_context_parallel_size != 1:
+        reasons.append(
+            "prefill_context_parallel_size is "
+            f"{parallel_config.prefill_context_parallel_size}"
+        )
+    if parallel_config.enable_expert_parallel:
+        reasons.append("expert parallelism is enabled")
+
+    if not reasons:
+        return True
+    logger.warning_once(
+        "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is ignored for GLM-5.3-Flash: "
+        "%s. AITER has tuned configs for its fused shared-expert MoE only on "
+        "gfx950 at TP4 and TP8, without data, prefill context or expert "
+        "parallelism. Running the shared experts as a separate MLP.",
+        "; ".join(reasons),
+    )
+    return False
+
+
+def _num_fused_shared_experts(n_shared_experts: int | None, enabled: bool) -> int:
+    """Expert slots the fused MoE appends for the shared expert; must match the
+    ``num_fused_shared_experts`` that ``FusedMoE`` allocates."""
+    if not enabled or n_shared_experts is None:
+        return 0
+    if n_shared_experts > 1:
+        raise NotImplementedError(
+            "Fused shared-expert loading supports only 1 shared expert per "
+            f"layer, but config.n_shared_experts is {n_shared_experts}. Set "
+            "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0 to run the shared "
+            "experts as a separate MLP."
+        )
+    return n_shared_experts
+
+
+def _fused_shared_expert_name(name: str, n_routed_experts: int) -> str:
+    """Point a checkpoint ``mlp.shared_experts.*`` tensor at the fused MoE's
+    shared-expert slot, which follows the routed experts; other names are
+    returned unchanged."""
+    return name.replace("mlp.shared_experts.", f"mlp.experts.{n_routed_experts}.", 1)
 
 
 def _try_load_fp8_indexer_wk(name, tensor, buf, params_dict, loaded_params):

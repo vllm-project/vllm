@@ -5,6 +5,7 @@ import importlib
 import inspect
 import json
 import os
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import AbstractContextManager, contextmanager, nullcontext, suppress
@@ -17,7 +18,13 @@ from typing_extensions import override
 
 import vllm.version
 from vllm.config import ProfilerConfig
-from vllm.config.profiler import ProfilerKind, TorchProfilerActivity, _is_uri_path
+from vllm.config.profiler import (
+    ProfilerKind,
+    TorchProfilerActivity,
+    _is_uri_path,
+    validate_profile_iteration_bounds,
+)
+from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -28,20 +35,25 @@ _TRITON_PROTON_3_7_VERSION = Version("3.7.0")
 
 class WorkerProfiler(ABC):
     def __init__(self, profiler_config: ProfilerConfig) -> None:
-        self._delay_iters = profiler_config.delay_iterations
+        self._default_delay_iters = profiler_config.delay_iterations
+        self._delay_iters = self._default_delay_iters
         if self._delay_iters > 0:
             logger.info_once(
                 "GPU profiling will start "
                 f"{self._delay_iters} steps after start_profile."
             )
 
-        self._max_iters = profiler_config.max_iterations
+        self._default_max_iters = profiler_config.max_iterations
+        self._max_iters = self._default_max_iters
         if self._max_iters > 0:
             logger.info_once(
                 "GPU profiling will stop "
                 f"after {self._max_iters} worker steps, "
                 "or when stop_profile is received."
             )
+
+        # Serializes start()/stop(), which AsyncLLM may call from different threads.
+        self._lifecycle_lock = threading.Lock()
 
         # Track when the profiler gets triggered by start_profile
         self._active_iteration_count = 0
@@ -88,17 +100,32 @@ class WorkerProfiler(ABC):
             logger.warning("Failed to stop profiler: %s", e)
         self._running = False  # Always mark as not running, assume stop worked
 
-    def start(self) -> None:
+    def start(
+        self,
+        *,
+        delay_iterations: int | None = None,
+        max_iterations: int | None = None,
+    ) -> None:
         """Attempt to start the profiler, accounting for delayed starts."""
-        if self._active:
-            logger.debug(
-                "start_profile received when profiler is already active. "
-                "Ignoring request."
+        with self._lifecycle_lock:
+            if self._active:
+                logger.debug(
+                    "start_profile received when profiler is already active. "
+                    "Ignoring request."
+                )
+                return
+            validate_profile_iteration_bounds(delay_iterations, max_iterations)
+            self._delay_iters = (
+                self._default_delay_iters
+                if delay_iterations is None
+                else delay_iterations
             )
-            return
-        self._active = True
-        if self._delay_iters == 0:
-            self._call_start()
+            self._max_iters = (
+                self._default_max_iters if max_iterations is None else max_iterations
+            )
+            self._active = True
+            if self._delay_iters == 0:
+                self._call_start()
 
     def step(self) -> None:
         """Update the profiler state at each worker step,
@@ -148,17 +175,19 @@ class WorkerProfiler(ABC):
 
     def stop(self) -> None:
         """Attempt to stop the profiler, accounting for overlapped calls."""
-        if not self._active:
-            logger.debug(
-                "stop_profile received when profiler is not active. Ignoring request."
-            )
-            return
-        self._active = False
-        self._active_iteration_count = 0
-        self._profiling_for_iters = 0
+        with self._lifecycle_lock:
+            if not self._active:
+                logger.debug(
+                    "stop_profile received when profiler is not active. "
+                    "Ignoring request."
+                )
+                return
+            self._active = False
+            self._active_iteration_count = 0
+            self._profiling_for_iters = 0
 
-        if self._running:
-            self._call_stop()
+            if self._running:
+                self._call_stop()
 
     def shutdown(self) -> None:
         """Ensure profiler is stopped when shutting down."""
@@ -174,6 +203,14 @@ class WorkerProfiler(ABC):
     def capture_cuda_graphs(self) -> AbstractContextManager[None]:
         """Observe graph creation for backends that attribute replay activity."""
         return nullcontext()
+
+    def set_output_name(self, worker_name: str) -> None:
+        """Set the output name for the next profiling session."""
+        return None
+
+    def set_profiler_kwargs(self, profiler_kwargs: dict | None) -> None:
+        """Set profiler keyword argument overrides for the next profiling session."""
+        return None
 
     def annotate_context_manager(self, name: str):
         """Return a context manager to annotate profiler traces."""
@@ -196,12 +233,17 @@ class TorchProfilerWrapper(WorkerProfiler):
         local_rank: int,
         activities: Sequence[TorchProfilerActivity],
         on_trace_ready: Callable[[torch.profiler.profile], None] | None = None,
+        profiler_kwargs: dict | None = None,
     ) -> None:
         super().__init__(profiler_config)
 
         self.local_rank = local_rank
         self.profiler_config = profiler_config
         torch_profiler_trace_dir = profiler_config.torch_profiler_dir
+        self._torch_profiler_trace_dir = torch_profiler_trace_dir
+        self._torch_profiler_use_gzip = profiler_config.torch_profiler_use_gzip
+        self._worker_name = worker_name
+        self._custom_trace_handler = on_trace_ready is not None
         if local_rank in (None, 0):
             logger.info_once(
                 "Torch profiling enabled. Traces will be saved to: %s",
@@ -252,7 +294,7 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.active_iterations,
                 )
 
-        self._profiler_kwargs = dict(
+        self._base_profiler_kwargs = dict(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
             schedule=profiler_schedule,
             record_shapes=profiler_config.torch_profiler_record_shapes,
@@ -261,6 +303,9 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
         )
+        self._profiler_kwargs = dict(self._base_profiler_kwargs)
+        if profiler_kwargs:
+            self._profiler_kwargs.update(profiler_kwargs)
         self.profiler: torch.profiler.profile
 
         # Track if we're using a schedule (need to call step())
@@ -275,6 +320,33 @@ class TorchProfilerWrapper(WorkerProfiler):
         )
         self._warmup_steps_remaining = self._initial_warmup_steps_remaining
         self._version_metadata_added = False
+
+    @override
+    def set_output_name(self, worker_name: str) -> None:
+        if self._active:
+            return
+        self._worker_name = worker_name
+        if self._custom_trace_handler:
+            return
+        self._profiler_kwargs["on_trace_ready"] = (
+            torch.profiler.tensorboard_trace_handler(
+                self._torch_profiler_trace_dir,
+                worker_name=worker_name,
+                use_gzip=self._torch_profiler_use_gzip,
+            )
+        )
+
+    @override
+    def set_profiler_kwargs(self, profiler_kwargs: dict | None) -> None:
+        if self._active:
+            return
+        on_trace_ready = self._profiler_kwargs["on_trace_ready"]
+        self._profiler_kwargs = {
+            **self._base_profiler_kwargs,
+            "on_trace_ready": on_trace_ready,
+        }
+        if profiler_kwargs:
+            self._profiler_kwargs.update(profiler_kwargs)
 
     def _build_profiler_table(
         self,
@@ -293,13 +365,15 @@ class TorchProfilerWrapper(WorkerProfiler):
             row_limit=row_limit,
         )
 
-    def _write_profiler_table(self, rank: int, table: str) -> None:
+    def _write_profiler_table(self, table: str) -> None:
         profiler_dir = self.profiler_config.torch_profiler_dir
 
         # Skip file write for URI paths (gs://, s3://, etc.)
         # as standard file I/O doesn't work with URI schemes
         if not _is_uri_path(profiler_dir):
-            profiler_out_file = f"{profiler_dir}/profiler_out_{rank}.txt"
+            profiler_out_file = os.path.join(
+                profiler_dir, f"{self._worker_name}.profiler_out.txt"
+            )
             with open(profiler_out_file, "w") as f:
                 print(table, file=f)
 
@@ -344,7 +418,7 @@ class TorchProfilerWrapper(WorkerProfiler):
         rank = self.local_rank
         if self.dump_device_time_total:
             table = self._build_profiler_table(sort_key="self_device_time_total")
-            self._write_profiler_table(rank, table)
+            self._write_profiler_table(table)
 
             # only print profiler results on rank 0
             if rank == 0:
@@ -354,7 +428,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             table = self._build_profiler_table(
                 sort_key="self_cpu_time_total", row_limit=50
             )
-            self._write_profiler_table(rank, table)
+            self._write_profiler_table(table)
 
             # only print profiler results on rank 0
             if rank == 0:
@@ -494,6 +568,7 @@ class ProtonProfilerWrapper(WorkerProfiler):
     def has_cuda_graph_session(self) -> bool:
         return self._graph_session
 
+    @override
     def set_output_name(self, worker_name: str) -> None:
         """Set the next run's output name after startup graph capture."""
         if self._active:
@@ -641,6 +716,14 @@ _SUPPORTED_PROFILER_KINDS: dict[str, frozenset[ProfilerKind]] = {
 }
 
 
+def get_default_torch_profiler_activities() -> list[torch.profiler.ProfilerActivity]:
+    """Default torch profiler activities for the current platform."""
+    return [
+        TorchProfilerActivityMap[activity]
+        for activity in _DEFAULT_TORCH_PROFILER_ACTIVITIES[current_platform.device_type]
+    ]
+
+
 def validate_worker_profiler_config(profiler_config: ProfilerConfig) -> None:
     """Validate profiler selections against the worker's capabilities."""
     profiler_type = profiler_config.profiler
@@ -677,6 +760,7 @@ def create_worker_profiler(
     *,
     worker_name: str,
     local_rank: int,
+    profiler_kwargs: dict | None = None,
 ) -> WorkerProfiler:
     """Create a profiler using a validated config and platform defaults."""
     profiler_type = profiler_config.profiler
@@ -691,6 +775,7 @@ def create_worker_profiler(
             worker_name=worker_name,
             local_rank=local_rank,
             activities=default_activities if configured is None else tuple(configured),
+            profiler_kwargs=profiler_kwargs,
         )
     if profiler_type == "cuda":
         logger.debug("Starting CUDA profiler")
@@ -699,6 +784,29 @@ def create_worker_profiler(
     assert profiler_type == "proton", f"Unknown profiler type: {profiler_type}"
     logger.debug("Starting Proton profiler with trace name: %s", worker_name)
     return ProtonProfilerWrapper(profiler_config, worker_name=worker_name)
+
+
+def create_frontend_profiler(
+    profiler_config: ProfilerConfig, *, worker_name: str
+) -> TorchProfilerWrapper:
+    """Create the CPU-only frontend profiler, which runs for the whole session
+    rather than following engine iterations."""
+    logger.info(
+        "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",
+        profiler_config.torch_profiler_dir,
+    )
+    return TorchProfilerWrapper(
+        replace(
+            profiler_config,
+            delay_iterations=0,
+            max_iterations=0,
+            wait_iterations=0,
+            warmup_iterations=0,
+        ),
+        worker_name=worker_name,
+        local_rank=0,
+        activities=["CPU"],
+    )
 
 
 def create_graph_capture_profiler(
